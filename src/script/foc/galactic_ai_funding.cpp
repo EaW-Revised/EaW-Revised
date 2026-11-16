@@ -401,13 +401,24 @@ core::Result<void> GalacticFunding::notify(const sim::galactic::GalacticSession:
         };
     });
 }
+void GalacticFunding::isolate(sim::galactic::PlayerId player, core::Diagnostic error) {
+    isolated_faults_.push_back({player, std::move(error)});
+    if (const auto observer = fault_observer_.lock()) observer->isolated_fault(player, isolated_faults_.back().error);
+}
 core::Result<void> GalacticFunding::notify_impl(const sim::galactic::GalacticSession::CreditNotification& input) {
     const auto* value = find_ledger(input.player);
     if (!value) return core::Result<void>::success(); // GFC-A09 initialized-manager gate
     if (input.kind == sim::galactic::GalacticSession::CreditNotification::Kind::windfall)
         return commit(input.player, funding::windfall(*value, input.amount)); // WGA-200: retained totals remain writable
-    if (value->tactical.switched) return invalid<void>("parent fiscal service during a tactical credit switch");
-    return commit(input.player, funding::fiscal(*value, input.credits, input.amount, input.seconds));
+    if (value->tactical.switched) {
+        isolate(input.player, invalid<void>("parent fiscal service during a tactical credit switch").error()); // as a ledger refusal below
+        return core::Result<void>::success();
+    }
+    auto next = funding::fiscal(*value, input.credits, input.amount, input.seconds);
+    // A ledger refusal of one AI player's fiscal cycle never ends the galactic session (owner rule: a failure of one AI
+    // player is that player's): the player keeps its previous ledger for this cycle and the refusal is recorded.
+    if (!next) { isolate(input.player, next.error()); return core::Result<void>::success(); }
+    return commit(input.player, std::move(next));
 }
 core::Result<bool> GalacticFunding::feasible(sim::galactic::PlayerId player, const funding::GoalRequest& request, bool activation) const {
     const auto* value = find_ledger(player);

@@ -73,6 +73,8 @@ int play(const Options& options, std::istream& in, std::ostream& out, Log& log) 
     match_options.short_invitation = true;
     match_options.require_short_code = true; // the guest joins by the code alone: a service without room codes fails the host at once
     match_options.turn_only = options.turn_only;
+    match_options.service.turn_provider = options.turn_provider == "own" ? net::GnsTurnProvider::own
+        : options.turn_provider == "cloudflare" ? net::GnsTurnProvider::cloudflare : net::GnsTurnProvider::automatic;
     match_options.hash_exchange_every = target_ticks;
     match_options.turn_credentials_observer = [&log](const net::GnsTurnCredentials& credentials) {
         log.add_secret(credentials.uri);

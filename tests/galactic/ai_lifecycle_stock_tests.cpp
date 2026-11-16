@@ -228,6 +228,36 @@ void mounted_properties_equation() {
     expect(!a::include_mounted_ai_files(unknown).empty() && !unknown.xml.contains(path),
         "an unknown properties name still skips the file with a diagnostic");
 }
+// CGS-26: the real start path (Manager::create) accepts a selected level its player type authors no adjustment for: a partial table
+// and a type with no adjustments at all both start, and the player keeps the level it was selected at.
+void sparse_difficulty_levels() {
+    auto partial = fixture();
+    partial.players = {{2, "ORDINARY", "HARD", 1, 1}}; // the fixture's type authors the stock levels it names, not necessarily this one
+    auto& player = partial.xml.at("data/xml/ai/players/fixture.xml");
+    const auto block = player.find("<Difficulty_Adjustments>");
+    if (block != std::string::npos) player.erase(block, player.find("</Difficulty_Adjustments>", block) + std::string("</Difficulty_Adjustments>").size() - block);
+    const auto created = a::Manager::create(partial, {std::make_shared<Queries>(), {}, {}, std::make_shared<Services>(), {}, {}, {}});
+    expect(static_cast<bool>(created), "a selected player type with no adjustment for its level starts: "
+        + (created ? std::string() : created.error().message));
+    auto levelled = fixture();
+    levelled.players = {{2, "ORDINARY", "HARD", 1, 1}};
+    const auto other = a::Manager::create(levelled, {std::make_shared<Queries>(), {}, {}, std::make_shared<Services>(), {}, {}, {}});
+    expect(static_cast<bool>(other), "a selected level the type's partial table lacks starts: "
+        + (other ? std::string() : other.error().message));
+    // #6898 review: the level lookup is explicit. An empty level reads the Normal entry; a level the type does not author (or an
+    // unknown name) and a missing type play the dummy adjustment, every multiplier 1 (CGS-26).
+    const auto data = must(a::load_data(fixture()));
+    const auto* type = &data.players.at("ORDINARY");
+    const auto normal = ai::resolve_difficulty(data, type, "NORMAL");
+    const auto dummy = ai::Difficulty{};
+    expect(normal.galactic_contrast_multiplier != dummy.galactic_contrast_multiplier, "the fixture's Normal entry differs from the dummy adjustment");
+    expect(ai::resolve_difficulty(data, type, "").galactic_contrast_multiplier == normal.galactic_contrast_multiplier, "an empty level reads the Normal entry");
+    expect(ai::resolve_difficulty(data, type, "normal").galactic_contrast_multiplier == normal.galactic_contrast_multiplier, "a level is read in any case");
+    expect(ai::resolve_difficulty(data, type, "NOT_A_LEVEL").galactic_contrast_multiplier == dummy.galactic_contrast_multiplier
+        && ai::resolve_difficulty(data, type, "HARD").galactic_contrast_multiplier == dummy.galactic_contrast_multiplier
+        && ai::resolve_difficulty(data, nullptr, "NORMAL").galactic_contrast_multiplier == dummy.galactic_contrast_multiplier,
+        "an unknown or unauthored level and a missing type play the dummy adjustment");
+}
 void mounted_template_files() {
     auto setup = fixture();
     const auto original_paths = setup.xml_paths;
@@ -943,8 +973,56 @@ void installed_loading() {
 }
 } // namespace
 
+// #6917 (the control-switch story reward): one player's AI type is replaced by a fresh instance between windows.
+void player_type_replacement() {
+    auto setup = fixture();
+    setup.xml.emplace("data/xml/ai/players/other.xml", R"(<AIPlayerType><Name>Other</Name><Templates><Galactic>Default</Galactic></Templates><Difficulty_Adjustments><Normal>Normal</Normal></Difficulty_Adjustments></AIPlayerType>)");
+    setup.xml_paths.push_back("data/xml/ai/players/other.xml");
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        Rig owner(setup); owner.step(0, 0);
+        expect(owner.manager->player_type(2) == "ORDINARY" && owner.manager->player_type(99).empty(), "the manager names each player's current AI type");
+        expect(owner.manager->knows_player_type("other") && owner.manager->knows_player_type("ORDINARY") && !owner.manager->knows_player_type("Missing"),
+            "a type is known in any case, an undefined one is not");
+        const auto before = owner.manager->lifecycle();
+        expect(!owner.manager->replace_player_type(2, "Missing") && !owner.manager->replace_player_type(99, "Other") && owner.manager->lifecycle() == before,
+            "an unknown type or player refuses and changes nothing");
+        {
+            auto phase = must(owner.manager->begin_phase());
+            expect(!owner.manager->replace_player_type(2, "Other"), "a replacement is forbidden inside a speculative phase");
+            must(phase->commit());
+        }
+        expect(before.players.front().initialized, "the first service initialized the old instance");
+        must(owner.manager->replace_player_type(2, "Other"));
+        const auto replaced = owner.manager->lifecycle().players.front();
+        expect(owner.manager->player_type(2) == "OTHER" && !replaced.initialized && replaced.selected.difficulty == before.players.front().selected.difficulty
+            && replaced.selected.enemy == before.players.front().selected.enemy && replaced.selected.human == before.players.front().selected.human
+            && std::all_of(replaced.deadlines.begin(), replaced.deadlines.end(), [](const auto deadline) { return deadline == 0; })
+            && replaced.activation_order.empty() && replaced.active_templates.size() == 1 && replaced.template_cursor == 0,
+            "the replacement is a fresh uninitialized instance of the new type at the same level");
+        const auto fresh = owner.manager->lifecycle();
+        must(owner.manager->replace_player_type(2, "OTHER"));
+        expect(owner.manager->lifecycle() == fresh, "naming the current type again leaves a fresh row as it is");
+        // A copy restored from the saved state continues exactly like the live manager.
+        const auto saved = must(owner.manager->capture());
+        Rig loaded(setup); must(loaded.manager->restore(must(a::decode_native_state(must(a::encode_native_state(saved))))));
+        expect(loaded.manager->player_type(2) == "OTHER" && loaded.manager->lifecycle() == owner.manager->lifecycle()
+            && must(loaded.manager->state_hash()) == must(owner.manager->state_hash()), "the replaced type is part of the saved lifecycle");
+        owner.services->initialization.clear(); loaded.services->initialization.clear();
+        for (std::uint64_t tick = 1; tick <= 6; ++tick) {
+            owner.step(tick, tick); loaded.step(tick, tick);
+            expect(owner.manager->lifecycle() == loaded.manager->lifecycle(), "a restored replacement serves the same deadlines as the live one");
+        }
+        expect(owner.services->initialization == std::vector<std::string>{"policy", "ledger"} && loaded.services->initialization == owner.services->initialization
+            && owner.manager->lifecycle().players.front().initialized, "the next service initializes the new instance once");
+        must(owner.scripts.service(executor)); must(loaded.scripts.service(executor));
+        const auto digest = must(owner.manager->state_hash()) + must(owner.scripts.state_hash());
+        if (reference.empty()) reference = digest; else expect(digest == reference, "a type replacement equals on 1/2/4/8 workers");
+    }
+}
 int main(int argc, char** argv) {
-    try { if (argc > 1 && std::string_view(argv[1]) == "--bounded") bounded_diagnostics(argc > 2 ? static_cast<std::size_t>(std::stoul(argv[2])) : 1); else if (argc > 1 && std::string_view(argv[1]) == "--state") contributor_state(); else if (argc > 1) installed_loading(); else { mounted_equation_files(); mounted_space_equation_and_unresolved_entries(); mounted_properties_equation(); mounted_template_files(); mounted_validation_work(); category_width(); cadence(); virtual_window(); phase_rollback(); native_retirement_state(); configured_cadence(); templates(); template_failure_consumers(); restore(); reversal_funding(); equal_funding_write(); worker_equality(); } }
+    try { if (argc > 1 && std::string_view(argv[1]) == "--bounded") bounded_diagnostics(argc > 2 ? static_cast<std::size_t>(std::stoul(argv[2])) : 1); else if (argc > 1 && std::string_view(argv[1]) == "--state") contributor_state(); else if (argc > 1) installed_loading(); else { mounted_equation_files(); mounted_space_equation_and_unresolved_entries(); mounted_properties_equation(); mounted_template_files(); sparse_difficulty_levels(); mounted_validation_work(); category_width(); cadence(); virtual_window(); phase_rollback(); native_retirement_state(); configured_cadence(); templates(); template_failure_consumers(); restore(); reversal_funding(); equal_funding_write(); worker_equality(); player_type_replacement(); } }
     catch (const std::exception& error) { ++failures; std::cerr << error.what() << '\n'; }
     return failures ? 1 : 0;
 }

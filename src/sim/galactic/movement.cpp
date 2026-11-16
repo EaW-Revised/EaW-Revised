@@ -1,6 +1,7 @@
 #include "eawr/sim/galactic/raid.hpp"
 #include "eawr/sim/galactic/movement.hpp"
 #include "session_impl.hpp"
+#include "fleet_contents.hpp"
 #include "encoding.hpp"
 #include "eawr/sim/galactic/corruption_model.hpp"
 #include "native_movement_admission.hpp"
@@ -25,8 +26,7 @@ core::Result<void> GalacticSession::apply_battle_credits(const std::span<const s
     }
     impl_->economy->players = std::move(players);
     impl_->dirty[static_cast<std::size_t>(StateSection::players)] = true;
-    const auto events = impl_->snapshot->events();
-    impl_->snapshot = impl_->make_snapshot(std::vector<GalacticEvent>(events.begin(), events.end()));
+    impl_->refresh_snapshot();
     return core::Result<void>::success();
 }
 namespace {
@@ -402,8 +402,8 @@ bool GalacticSession::Impl::raid_qualified(FleetId id, PlanetId destination) con
 }
 
 void GalacticSession::Impl::execute_movement(const GameCommand& command, std::uint64_t tick,
-    std::vector<GalacticEvent>& events, bool pending_local_conflict, std::optional<PlayerId> returning_player) {
-    session_detail::execute_native_movement(*this, command, tick, events, pending_local_conflict, returning_player);
+    std::vector<GalacticEvent>& events, bool pending_local_conflict, std::optional<PlayerId> returning_player, bool single_hop_raid) {
+    session_detail::execute_native_movement(*this, command, tick, events, pending_local_conflict, returning_player, single_hop_raid);
     // WGUI-122: only the accepted departure assigns its final enroute identity
     // with notify=true. Shadow admissions have no external feedback side effects;
     // their eventual ordered native commit enters this same owner.
@@ -416,6 +416,20 @@ void GalacticSession::Impl::execute_movement(const GameCommand& command, std::ui
 core::Result<void> GalacticSession::apply_retreat_return(PlayerId player, PlanetId source,
     PlanetId destination, bool surface, std::span<const FleetId> orbital_fleets, std::span<const EntityId> confirmed_destroyed) {
     auto& impl = *impl_;
+    std::vector<GalacticEvent> events(impl.snapshot->events().begin(), impl.snapshot->events().end());
+    if (auto departed = impl.retreat_departure(player, source, destination, surface, orbital_fleets, confirmed_destroyed, events); !departed)
+        return departed;
+    impl.invalidate_observer_projection();
+    impl.snapshot = impl.make_snapshot(std::move(events));
+    return impl.deliver_actor_changes();
+}
+
+// The departure itself, shared with the corruption revolt (WGCH-17): validates the retreat, moves the surface forces
+// into a new fleet when `surface`, then sends each fleet along the two-endpoint path. The caller publishes.
+core::Result<void> GalacticSession::Impl::retreat_departure(PlayerId player, PlanetId source,
+    PlanetId destination, bool surface, std::span<const FleetId> orbital_fleets, std::span<const EntityId> confirmed_destroyed,
+    std::vector<GalacticEvent>& events) {
+    auto& impl = *this;
     const auto invalid_return = [](std::string message) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, std::move(message)));
     };
@@ -438,7 +452,6 @@ core::Result<void> GalacticSession::apply_retreat_return(PlayerId player, Planet
         return force.owner == player && !std::binary_search(confirmed_destroyed.begin(), confirmed_destroyed.end(), force.id);
     };
     std::vector<FleetId> departing(orbital_fleets.begin(), orbital_fleets.end());
-    std::vector<GalacticEvent> events(impl.snapshot->events().begin(), impl.snapshot->events().end());
     if (surface) {
         if (!impl.control) return invalid_return("surface retreat needs control presence");
         auto planet = std::find_if(impl.control->planets.begin(), impl.control->planets.end(), [&](const auto& row) { return row.planet == source; });
@@ -470,9 +483,7 @@ core::Result<void> GalacticSession::apply_retreat_return(PlayerId player, Planet
         GameCommand command; command.payload = MoveFleet{id, {source, destination}, {}};
         impl.execute_movement(command, impl.completed_tick, events, false, player);
     }
-    impl.invalidate_observer_projection();
-    impl.snapshot = impl.make_snapshot(std::move(events));
-    return impl.deliver_actor_changes();
+    return core::Result<void>::success();
 }
 
 void GalacticSession::set_movement_access_provider(MovementAccessProvider provider) {
@@ -481,6 +492,9 @@ void GalacticSession::set_movement_access_provider(MovementAccessProvider provid
 }
 void GalacticSession::set_native_movement_listener(NativeMovementListener listener) {
     impl_->native_movement_listener = std::move(listener);
+}
+void GalacticSession::set_fleet_story_handler(FleetStoryHandler handler) {
+    impl_->fleet_story_handler = std::move(handler);
 }
 void GalacticSession::Impl::link_movement_orbit(FleetId id, PlanetId destination,
     std::uint64_t tick, std::vector<GalacticEvent>& events) {
@@ -626,6 +640,28 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
         events.push_back({tick, kind, t.producer, id, t.sequence, p, GalacticRejectReason::none});
         if (native_movement_listener) native_movement_listener(events.back());
     };
+    // WST-31: arrivals and bounces are collected during the serial commit and delivered after it, sorted, so the story
+    // sees them in the same order on every worker count and never while the world is half-updated.
+    std::vector<FleetStoryNotice> story;
+    std::map<EntityId, std::vector<EntityId>> contents; // container -> immediate children, built on the first announcement
+    bool contents_ready = false;
+    const auto announce = [&](const FleetStoryNotice::Kind kind, const FleetId id, const session_detail::FleetData& f,
+        const PlanetId destination, const bool stealth) {
+        if (!fleet_story_handler) return;
+        FleetStoryNotice row;
+        row.kind = kind; row.owner = f.owner; row.fleet = id; row.planet = destination;
+        row.direct_members = f.members.size(); row.stealth = stealth;
+        // Everything inside the members: walk the immediate-container links down from the member ids. The container index
+        // is built once per tick, on the first announcement, and only when a story is listening (the handler is installed
+        // only for plots that hold arrival events), so the serial commit pays one pass over the census per tick, not one per arrival.
+        if (!contents_ready) {
+            for (const auto& [actor_id, actor] : actor_records)
+                if (actor.container != actor_id) contents[actor.container].push_back(actor_id);
+            contents_ready = true;
+        }
+        row.types = session_detail::contained_types(f.members, contents, actor_records, id, row.cyclic);
+        story.push_back(std::move(row));
+    };
     // Ordered serial commit: a conflicting arrival can finish other staged fleets. Those
     // outputs are then discarded, so stale motion cannot resurrect an already linked fleet.
     try {
@@ -643,6 +679,12 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
             if (!a.accessible) {
                 if (final) {
                     notify(id, t, GalacticEventKind::movement_bounced, destination);
+                    if (fleet_story_handler) { // WST-31: the same fleet-wide combat-skip predicate as an arrival
+                        const auto actors = actor_inputs();
+                        const auto skip = actors.empty() ? skips_combat(inputs, f.members)
+                            : checked(fleet_combat_skip(Fleet{id, f.owner, f.orbit, f.members}, actors, &inputs));
+                        announce(FleetStoryNotice::Kind::bounced, id, f, destination, skip);
+                    }
                     t.path = {destination, t.path.at(t.hop)}; t.hop = 0; t.destination_slot.reset(); t.destination_actor = 0;
                     if (f.raid_destination) { f.raid_destination.reset(); dirty[static_cast<std::size_t>(StateSection::fleets)] = true; }
                 } else ++t.hop;
@@ -667,6 +709,7 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
                 f.motion.land_on_arrival = false; // WGM-34: raid dispatch owns this landing.
                 const auto completed = t;
                 link_movement_orbit(id, destination, tick, events);
+                announce(FleetStoryNotice::Kind::arrived, id, f, destination, live_skip);
                 std::vector<EntityId> selected;
                 for (const auto& member : f.members) {
                     const auto trait = std::lower_bound(setup.fleet_control->types.begin(), setup.fleet_control->types.end(), member.type,
@@ -701,6 +744,7 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
                 f.motion.land_on_arrival = false; // GGS-06 / WGM-34: conflict consumes the request.
                 const auto transit = t;
                 link_movement_orbit(id, destination, tick, events);
+                announce(FleetStoryNotice::Kind::arrived, id, f, destination, live_skip);
                 gather_movement_orbit(id, destination, tick, events);
                 notify(id, transit, GalacticEventKind::movement_conflict, destination);
                 dirty[static_cast<std::size_t>(StateSection::fleets)] = true;
@@ -711,6 +755,7 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
             const auto requested = t.destination_slot;
             const auto completed = t;
             link_movement_orbit(id, destination, tick, events); dirty[static_cast<std::size_t>(StateSection::fleets)] = true;
+            announce(FleetStoryNotice::Kind::arrived, id, f, destination, live_skip); // before any slot merge empties the fleet
             if (requested) f.orbit_slot = *requested;
             // WGM-35: explicit slot zero is a notification seam, never an auto-merge.
             if (requested && *requested != 0) {
@@ -755,6 +800,10 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
             dirty[static_cast<std::size_t>(StateSection::fleet_control)] = true;
         }
     } catch (const InvalidMovement& error) { return core::Result<void>::failure(error.diagnostic); }
+    std::stable_sort(story.begin(), story.end(), [](const FleetStoryNotice& a, const FleetStoryNotice& b) {
+        return std::pair{a.fleet, a.kind} < std::pair{b.fleet, b.kind}; });
+    for (const auto& row : story)
+        if (auto told = fleet_story_handler(row); !told) return told;
     return core::Result<void>::success();
 }
 } // namespace eawr::sim::galactic

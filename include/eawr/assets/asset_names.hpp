@@ -43,6 +43,26 @@ template <typename Exists>
     return exists(candidate) ? candidate : std::string{};
 }
 
+// ANR-02 (docs/behaviour/asset-name-resolution.md): a model name is tried as supplied, then as its leaf cut at the
+// first dot plus `.alo`. An authored name with no extension, with `.alo` or with any other extension therefore
+// resolves to `<stem>.alo` when that file exists under `root`. A name that already carries the `data/` prefix is
+// rooted by itself; the caller passes an empty root for it (the VFS wrappers do). Returns the path found, or {}.
+template <typename Exists>
+[[nodiscard]] std::string resolve_model_name(const std::string_view root, const std::string_view name, Exists&& exists) {
+    const std::string folded = normalized_asset_name(name);
+    if (folded.empty()) return {};
+    const std::string literal = std::string(root) + folded;
+    if (exists(literal)) return literal;
+    const auto slash = folded.find_last_of('/');
+    const std::size_t leaf = slash == std::string::npos ? 0 : slash + 1;
+    const auto dot = folded.find('.', leaf);
+    const std::size_t stem_size = dot == std::string::npos ? folded.size() : dot;
+    if (stem_size == leaf) return {}; // the leaf starts with a dot: no stem to retry
+    const std::string candidate = std::string(root) + folded.substr(0, stem_size) + ".alo";
+    if (candidate != literal && exists(candidate)) return candidate;
+    return {};
+}
+
 // Only an extensionless leaf gains the model suffix; authored extensions stay intact.
 [[nodiscard]] inline std::string normalized_model_name(const std::string_view name) {
     std::string result = normalized_asset_name(name);

@@ -62,6 +62,9 @@ struct PlanetIncomeForecast {
         friend bool operator==(const Modifier&, const Modifier&) = default;
     };
     std::optional<std::vector<Modifier>> modifiers;
+    // WGSI-11 / WGEP-12: the credits the view player's own siphon takes from this planet per income calculation (the
+    // planet's income before the siphon times the siphon fraction); absent without an active siphon of the view player.
+    std::optional<math::Fixed> siphoned;
     friend bool operator==(const PlanetIncomeForecast&, const PlanetIncomeForecast&) = default;
 };
 struct EconomyForecast {

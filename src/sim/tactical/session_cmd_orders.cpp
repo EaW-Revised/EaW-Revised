@@ -42,6 +42,17 @@
 
 namespace eawr::sim::tactical {
 
+void session_detail::Tick::replace_order(LiveUnit& live, const CommandPayload& payload, const std::uint64_t tick) {
+    // MV-41: an arrival turn belongs to its move. In particular OR-05 may retain
+    // an ordinary attack turn, but must not retain a replaced move's final heading.
+    if (live.state.order.kind == OrderKind::move && live.state.order.final_yaw
+        && live.motion && live.motion->kind == MotionKind::turn) {
+        live.motion = MotionState{};
+        live.speed = {};
+    }
+    live.state.order = order_for(payload, tick);
+}
+
 core::Result<void> session_detail::Tick::CommandOrders::apply(
     const PlayerCommand& command, const std::vector<EntityId>& selected_units,
     const EntityId unit_id, LiveUnit& live, const EntityId approach,
@@ -69,7 +80,8 @@ core::Result<void> session_detail::Tick::CommandOrders::apply(
             if (!live.waypoints) { live.waypoints.emplace(); live.waypoints->coordinator = command.key; }
             auto& route = *live.waypoints;
             if (route.points.size() >= table.rules.max_waypoints) return true;
-            const MovePayload leg{move->destination, move->through_hazards};
+            MovePayload leg{move->destination, move->through_hazards};
+            leg.final_yaw = move->final_yaw; // MV-40: each queued leg keeps its own final facing
             if (!route.points.empty() && route.points.back().move == leg) return true;
             bool closed = false;
             // The newest entry is an exact duplicate gate, not a loop-close candidate.
@@ -122,7 +134,9 @@ core::Result<void> session_detail::Tick::CommandOrders::apply(
     }
     // WSQ-59 (#741): a move given to one craft of a squadron changes nothing on the
     // craft (its order, targets and flight stay); only the cancellations below apply.
-    if (!member_move && !queued_wait) live.state.order = order_for(command.payload, command_tick);
+    if (!member_move && !queued_wait) {
+        replace_order(live, command.payload, command_tick);
+    }
     // WAB-40, AB-65: accepted move, attack and guard orders also cancel the
     // parent shot when addressed to a member. Ability/internal orders stay separate.
     const bool explicitly_addressed = std::find(selected_units.begin(), selected_units.end(), unit_id) != selected_units.end();
@@ -308,6 +322,7 @@ Order session_detail::Tick::order_for(const CommandPayload& payload, const std::
     if (const auto* move = std::get_if<MovePayload>(&payload)) {
         order.destination = move->destination;
         order.through_hazards = move->through_hazards;
+        order.final_yaw = move->final_yaw;
     } else if (const auto* face = std::get_if<FacePayload>(&payload)) {
         order.destination = face->target;
     } else if (const auto* attack = std::get_if<AttackPayload>(&payload)) {

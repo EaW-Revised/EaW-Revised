@@ -880,6 +880,7 @@ int installed() {
     const sim::math::Vec3 midpoint{Fixed::from_raw(a.x.raw() / 2 + b.x.raw() / 2),
         Fixed::from_raw(a.y.raw() / 2 + b.y.raw() / 2), {}};
     initial.units = pair;
+    initial.free_garrisons.clear(); // the witness keeps two companies only; the start's free garrison names companies that are gone
     auto session = take(TacticalSession::create(initial, content));
     const auto count = session.land_movement()->members().size();
     for (const auto& unit : pair) must(session.submit({{0, unit.owner, 1}, {unit.entity_id}, MovePayload{midpoint}}));
@@ -983,6 +984,7 @@ int installed_walker() {
     auto content = built.content;
     content.land.static_objects.clear(); content.land.occupations.clear(); content.land.initial_pad_children.clear();
     initial.units = {walker_unit, witness_unit};
+    initial.free_garrisons.clear(); // two companies only: the start's free garrison names companies that are gone
     // The session wants the units in ascending entity ID order.
     std::sort(initial.units.begin(), initial.units.end(), [](const auto& a, const auto& b) { return a.entity_id < b.entity_id; });
     const sim::math::Vec3 target{Fixed::from_raw(walker_unit.position.x.raw() / 2 + witness_unit.position.x.raw() / 2),

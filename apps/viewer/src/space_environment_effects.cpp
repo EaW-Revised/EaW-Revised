@@ -1,4 +1,6 @@
 #include "space_environment_internal.hpp"
+#include "viewer_load_notes.hpp"
+#include "eawr/assets/asset_degrade.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "render_profile_viewport.hpp"
 #include "shutdown_trace.hpp"
@@ -54,14 +56,20 @@ std::optional<int> EnvironmentView::advance_effects(const std::uint32_t tick) {
 
 bool EnvironmentView::bind_idle(const scene::Placement& placement, const assets::Model& model, const vfs::Vfs& filesystem, Placed& placed) {
             if (!placement.idle_animation.empty()) {
-                auto clip = assets::load_animation(filesystem, placement.idle_animation);
-                if (!clip) return fail("environment idle clip: " + core::format_diagnostic(clip.error()));
-                auto player = animation::Player::create(model, &clip.value());
-                if (!player) return fail("environment idle binding: " + core::format_diagnostic(player.error()));
+                // ASD-01: a clip the loader refuses, or one that does not bind to the model, leaves the object in its bind
+                // pose with one load note per file; it never fails the environment (and with it the battle) start.
+                const auto publish_degraded = [&] {
+                    if (!degraded_clips_.empty()) publish_viewer_load_notes(degraded_clips_.drain(), {}, true);
+                };
+                const auto clip = degraded_clips_.load(filesystem, placement.idle_animation);
+                std::optional<animation::Player> player;
+                if (clip) player = degraded_clips_.bind(filesystem, model, *clip, placement.idle_animation);
+                publish_degraded();
+                if (!player) return true;
                 EnvironmentIdle idle;
                 idle.object = placement.object_id;
                 idle.clip_path = placement.idle_animation;
-                idle.player = std::make_shared<const animation::Player>(std::move(player.value()));
+                idle.player = std::make_shared<const animation::Player>(std::move(*player));
                 idle.playback.start_frame = placement_start_frame(placement, idle.player->playable_frames());
                 if (auto object = options_.catalog->resolve(placement.object_id)) {
                     idle.playback.playback = declared_idle(scene::idle_tags(object.value(), assets::MapKind::space)).playback;

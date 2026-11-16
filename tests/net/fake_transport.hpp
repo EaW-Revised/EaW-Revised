@@ -3,6 +3,7 @@
 #include "eawr/net/transport.hpp"
 #include <algorithm>
 #include <functional>
+#include <optional>
 
 namespace eawr::testing {
 
@@ -41,6 +42,8 @@ public:
     std::vector<std::vector<Entry>> inbox;
     std::vector<std::vector<std::uint64_t>> frontier;
     std::vector<bool> open;
+    // A peer whose edge reports `connecting` (still deliverable) instead of `open`.
+    std::optional<net::PeerIndex> connecting_peer;
     std::function<FakeDelivery(net::PeerIndex, net::PeerIndex, std::span<const std::uint8_t>)> fault;
     std::function<void(net::PeerIndex, net::PeerIndex, std::span<const std::uint8_t>)> before_send;
     std::function<bool(net::PeerIndex, net::PeerIndex, std::span<const std::uint8_t>)> fail_send;
@@ -108,6 +111,7 @@ public:
         return received;
     }
     net::LinkState link(net::PeerIndex peer) const override {
+        if (network_->connecting_peer == peer && network_->open[peer]) return net::LinkState::connecting;
         return network_->open[peer] ? net::LinkState::open : net::LinkState::closed;
     }
     net::PeerIndex self() const override { return self_; }

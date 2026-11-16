@@ -391,6 +391,32 @@ void empty_raid_masks() {
         expect(absent->constant(tag) && absent->constant(tag)->text.empty(), "CGS-15 absent raid mask keeps the zero default");
 }
 
+// CGS-25: the required raid faction is a null reference when omitted or blank (retail keeps an empty name either way), so the
+// loader publishes it as an empty constant and neither case is reported as a missing required tag.
+void blank_raid_faction() {
+    TempTree tree;
+    write_tree(tree.root, campaigns_xml);
+    for (const auto value : {std::string_view{}, std::string_view{" 	 "}}) {
+        write(tree.root / "XML" / "GameConstants.xml", "<GameConstants><Raid_Force_Required_Faction>" + std::string(value)
+            + "</Raid_Force_Required_Faction><Raid_Force_Max_Heros>1</Raid_Force_Max_Heros>"
+              "<Raid_Force_Max_Limited_Objects>1</Raid_Force_Max_Limited_Objects></GameConstants>");
+        const auto loaded = load_tree(tree.root);
+        if (!loaded) continue;
+        const auto* faction = loaded->constant("Raid_Force_Required_Faction");
+        expect(faction != nullptr && faction->text.empty(), "CGS-25 a blank required raid faction is published as an empty constant");
+        expect(!has_issue(*loaded, IssueKind::missing_required, "GameConstants", "Raid_Force_Required_Faction"),
+            "a blank required raid faction is not missing");
+    }
+    write(tree.root / "XML" / "GameConstants.xml", "<GameConstants><Raid_Force_Max_Heros>1</Raid_Force_Max_Heros></GameConstants>");
+    const auto omitted = load_tree(tree.root);
+    if (omitted) {
+        const auto* faction = omitted->constant("Raid_Force_Required_Faction");
+        expect(faction != nullptr && faction->text.empty(), "CGS-25 an omitted required raid faction is the same empty constant");
+        expect(omitted->constant("Raid_Force_Max_Heros") != nullptr && omitted->constant("Raid_Force_Max_Limited_Objects") == nullptr,
+            "an omitted cap stays absent (the policy is then incomplete)");
+    }
+}
+
 void campaign_contracts(const galactic::GalacticData& data) {
     expect(data.campaigns.size() == 2 && data.campaigns[0].name == "Test_Campaign"
         && data.campaigns[1].name == "Second_Campaign", "campaigns load in authored order");
@@ -804,6 +830,7 @@ int main() {
     synthetic_contracts();
     movement_float_parsing();
     empty_raid_masks();
+    blank_raid_faction();
     retail_numeric_contracts();
     art_contracts();
     foc_contracts();

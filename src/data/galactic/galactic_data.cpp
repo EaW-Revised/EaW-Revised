@@ -415,6 +415,7 @@ std::array<std::uint8_t, 32> content_identity(const GalacticData& data) {
         out.text(planet.force_alignment); out.fixed(planet.force_strength);
         out.text(planet.political_faction);
         out.flag(planet.planet_retains_residual_influence);
+        out.flag(planet.planet_is_destroyable_by_tsw);
         out.fixed(planet.planet_credit_value);
         out.fixed(planet.planet_destroyed_credit_value);
         out.whole(planet.max_space_base);

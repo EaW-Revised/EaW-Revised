@@ -97,6 +97,8 @@ void MapMode::State::write_report_population(std::ostream& output) const {
             << ", \"resolved\": " << scene->resolved_count()
             << ", \"drawable\": " << scene->drawable_count()
             << ", \"drawn\": " << unit_bounds.size()
+            << ", \"removed_at_start\": " << removed_land_placements
+            << ", \"session_owned\": " << session_owned_land_placements
             << ", \"unresolved\": " << (scene->placements.size() - scene->resolved_count())
             << ", \"scene_assets\": " << scene->assets.size()
             << ", \"unresolved_by_cause\": {";

@@ -10,6 +10,7 @@
 #include "eawr/units/unit_tables_presentation.hpp"
 
 #include "eawr/assets/assets.hpp"
+#include "eawr/core/ascii.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/data/xml_fwd.hpp"
 #include "eawr/sim/math/geometry.hpp"
@@ -25,10 +26,12 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 // Typed, deterministic unit tables for the pinned M2 fleet (P2-02, #65;
@@ -113,6 +116,35 @@ struct UnitType final {
     bool initial_state_visible_under_fow{};
     std::optional<std::uint32_t> neutral_fog_animation_index; // FW-30: presentation only
     bool shielded{}; // SHIELDED in its Behavior or SpaceBehavior list (#74)
+    // WLAB-08 (#3238): a land type with DISABLE_FORCE_ABILITIES and an authored Disable_Force_Abilities_Range. Land tables only.
+    std::optional<Fixed> force_disable_range;
+    // WLAB-16 (#3239): the locomotor names of a land type with Uses_Multiple_Locomotors. Land tables only; both names stay empty
+    // when the type does not use several. A jet-pack carrier names a secondary locomotor beside its walking one.
+    bool uses_multiple_locomotors{};
+    std::string primary_locomotor_name, secondary_locomotor_name;
+    // WLAB-16 (#7084): the flight tags of a land type that uses several locomotors: the jet-pack speed and lift (authored in the
+    // same units as Max_Speed), the height held above the ground, and the turn rate while flying (read, no consumer yet: the
+    // flight faces its line). Present only when Alternate_Max_Speed is positive. Land tables only.
+    struct LandJump {
+        Fixed alternate_max_speed{}, max_lift{}, hover_offset{};
+        std::optional<Fixed> alternate_rate_of_turn;
+        bool operator==(const LandJump&) const = default;
+    };
+    std::optional<LandJump> land_jump;
+    // WLAB-19, WLAB-71 (#3239): a land type's object weapon names `projectile_type_count` projectile types (0 when it has none);
+    // the second one is `alternate_projectile` (the first is the weapon's own). Land tables only.
+    std::uint32_t projectile_type_count{};
+    std::string alternate_projectile;
+    std::uint32_t alternate_projectile_index{no_index};
+    // WLAB-71: the nested Permanent_Weapon_Swap_Ability, decoded on its own for land (the other nested handlers are G3's).
+    struct PermanentWeaponSwap {
+        std::string name;
+        std::uint32_t weapon_index{};
+        bool initially_enabled{true};
+        bool automatic{}; // Ground_Automatic: the only style the service reads
+        bool operator==(const PermanentWeaponSwap&) const = default;
+    };
+    std::optional<PermanentWeaponSwap> permanent_weapon_swap;
     std::optional<Fixed> passive_missile_shield_radius;
     std::optional<Fixed> ranged_target_z_adjust;
     bool powered{};  // POWERED in its Behavior or SpaceBehavior list: it has an energy pool (#361)
@@ -332,6 +364,40 @@ struct HardpointHealthDefault final {
     bool operator==(const HardpointHealthDefault&) const = default;
 };
 
+// Case-insensitive (ASCII, like core::iequals) hash and equality for name-keyed lookup tables.
+struct NameHash final {
+    using is_transparent = void;
+    [[nodiscard]] std::size_t operator()(const std::string_view name) const noexcept {
+        std::size_t hash = 1469598103934665603ULL;
+        for (const char value : name) hash = (hash ^ core::ascii_lower(static_cast<unsigned char>(value))) * 1099511628211ULL;
+        return hash;
+    }
+};
+struct NameEqual final {
+    using is_transparent = void;
+    [[nodiscard]] bool operator()(const std::string_view left, const std::string_view right) const noexcept {
+        if (left.size() != right.size()) return false;
+        for (std::size_t index = 0; index < left.size(); ++index) {
+            if (core::ascii_lower(static_cast<unsigned char>(left[index])) != core::ascii_lower(static_cast<unsigned char>(right[index])))
+                return false;
+        }
+        return true;
+    }
+};
+using NameIndexMap = std::unordered_map<std::string, std::uint32_t, NameHash, NameEqual>;
+
+// Lookup accelerator for UnitTables::find: case-folded id -> position of the FIRST unit of that name. Built by the loader
+// for the table it returns; it is derived data, so it never takes part in equality or identity. `built_for` is the unit
+// count it was built from: a table whose units were appended to or removed from afterwards simply falls back to the linear
+// scan. The map is immutable and shared between copies of a table (a copy costs a pointer, not ~1 MB of nodes).
+// Contract: a same-size edit of `units` (a rename, swap or reorder) is invisible to the count, so whoever makes one calls
+// UnitTables::rebuild_unit_name_index() afterwards; debug builds assert on a find() hit that disagrees with the scan.
+struct UnitNameIndex final {
+    std::shared_ptr<const NameIndexMap> first;
+    std::size_t built_for{};
+    bool operator==(const UnitNameIndex&) const noexcept { return true; }
+};
+
 struct UnitTables final {
     sim::tactical::BattleDomain domain{sim::tactical::BattleDomain::space}; // BF-2: which variant of the domain tags was read
     bool campaign_scene{}; // opt-in identity for GC-only scene metadata
@@ -356,8 +422,12 @@ struct UnitTables final {
     std::vector<Unresolved> notes;
     std::vector<HardpointHealthDefault> hardpoint_health_defaults;
     std::vector<InputFile> inputs; // XML and ALO files read, sorted by path
+    UnitNameIndex unit_names; // derived from `units` by the loader; see UnitNameIndex
 
+    // The first unit (in table order) whose id matches case-insensitively, duplicates included.
     [[nodiscard]] const UnitType* find(std::string_view id) const noexcept;
+    // Rebuild `unit_names` from the current `units` (the loader does it; call it after editing `units` by hand).
+    void rebuild_unit_name_index();
     bool operator==(const UnitTables&) const = default;
 };
 
@@ -500,6 +570,11 @@ enum class ContentErrors : std::uint8_t { strict, skip_object };
     bool (*allowed)(std::string_view unit, std::string_view ability) = nullptr,
     bool default_autofire = true, ContentErrors policy = ContentErrors::strict,
     std::vector<core::Diagnostic>* skipped = nullptr, core::LoadNoteBuffer* load_notes = nullptr);
+// WLAB-01, WLAB-03, WLAB-09 (#3238): the ability table of a land table: one profile per land body or company that authors
+// a kind of the 75-name vocabulary, timers by WLAB-09, a company's profile its own rows plus its container's. A row whose
+// kind needs data the land build does not bind yet is dropped alone with a warning in `skipped` (the kind fails closed).
+[[nodiscard]] core::Result<sim::tactical::AbilityTable> land_ability_table(const UnitTables& tables,
+    ContentErrors policy = ContentErrors::strict, std::vector<core::Diagnostic>* skipped = nullptr);
 // Whether a type runs the PowerToShields object script (`Lua_Script`), whose DEFEND rule the
 // ability table's stand-in carries (AB-41).
 [[nodiscard]] bool runs_defend_script(const UnitType& type) noexcept;

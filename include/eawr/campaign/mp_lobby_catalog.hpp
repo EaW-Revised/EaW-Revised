@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/campaign/setup_plan.hpp"
 #include "eawr/data/galactic/galactic_data.hpp"
 #include "eawr/sim/galactic/mp_lobby_catalog.hpp"
 
@@ -36,6 +37,13 @@ using LobbyAiLevels = std::function<std::array<std::string, 3>(std::string_view 
 [[nodiscard]] std::vector<sim::galactic::MpLobbyCampaign> list_all_lobby_campaigns(
     const data::galactic::GalacticData& data, const LobbyAiLevels& ai_levels = {});
 
+// The difficulty adjustment name a single-player start runs at for the staging dialog's level ("easy", "normal" or
+// "hard", any case; empty or anything else reads Normal). It is the entry the campaign's own AI player types map the
+// level to (the same pick the lobby offers); a campaign that states none for the level, or no such campaign, falls back
+// to the level's stock name (CGS-26). Any campaign entry works, listed or not.
+[[nodiscard]] std::string solo_difficulty_entry(const data::galactic::GalacticData& data, std::string_view campaign,
+    std::string_view level, const LobbyAiLevels& ai_levels = {});
+
 // One campaign of the list by authored name (case-insensitive), or nullptr.
 [[nodiscard]] const sim::galactic::MpLobbyCampaign* find_mp_lobby_campaign(
     const std::vector<sim::galactic::MpLobbyCampaign>& campaigns, std::string_view name) noexcept;
@@ -44,6 +52,16 @@ using LobbyAiLevels = std::function<std::array<std::string, 3>(std::string_view 
 // row can host. The host opens its room on this row; the catalog order (multiplayer rows first) decides which.
 [[nodiscard]] const sim::galactic::MpLobbyCampaign* first_hostable_lobby_campaign(
     const std::vector<sim::galactic::MpLobbyCampaign>& campaigns) noexcept;
+
+// The rules a campaign entry runs under when nothing overrides them: a multiplayer entry uses multiplayer rules, a
+// single-player entry the authored single-player rules (every peer derives the same value from the agreed campaign).
+[[nodiscard]] CampaignRulesFlavour campaign_rules_flavour(const data::galactic::Campaign& campaign) noexcept;
+
+// The faction a start with one local human (no lobby to choose) seats that player on. A single-player entry names it
+// (Starting_Active_Player); a multiplayer entry authors none, so it is the first faction the entry's lobby row lets a
+// player hold (the row's playable flag, in the data's faction order). Empty when the entry has no such faction.
+[[nodiscard]] std::string local_start_faction(const data::galactic::GalacticData& data,
+    const data::galactic::Campaign& campaign);
 
 // The caption of a campaign's row in the lobby list: the localized title, and for a co-op row (single-player rules)
 // the faction the players take, as "FACTION - Title", since one set is listed once per starting faction (the list cuts a

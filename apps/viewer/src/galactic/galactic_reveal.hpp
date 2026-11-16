@@ -25,8 +25,13 @@ namespace eawr::viewer::galactic {
 //
 // Single-human only: the reveal would show one seat everything the other humans
 // hide, so a multi-human (coop or LAN) campaign refuses it.
-[[nodiscard]] inline const char* reveal_refusal(bool reveal, std::size_t human_seats) noexcept {
-    return reveal && human_seats > 1 ? "--eawr-galactic-reveal is single-player only; refused in a multiplayer campaign" : nullptr;
+// `no_fog` names the launcher's "Fog of war: off" (--eawr-no-fog) in the refusal, which also stops a LAN campaign
+// with a single human seat: a lobby match is multiplayer whatever its seat count.
+[[nodiscard]] inline const char* reveal_refusal(bool reveal, std::size_t human_seats, bool no_fog = false, bool lan = false) noexcept {
+    if (!reveal || (human_seats <= 1 && !(no_fog && lan))) return nullptr;
+    return no_fog ? "Fog of war: off (--eawr-no-fog) is single-player only; it is refused in a multiplayer campaign. "
+                    "Turn it off in the launch options and start again."
+                  : "--eawr-galactic-reveal is single-player only; refused in a multiplayer campaign";
 }
 
 [[nodiscard]] inline std::shared_ptr<const sim::galactic::GalacticSnapshot> reveal_snapshot(

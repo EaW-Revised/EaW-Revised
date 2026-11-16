@@ -91,7 +91,8 @@ LiveSessionView::~LiveSessionView() {
 void LiveSessionView::attach_debris(DebrisProps& debris) {
     if (!tables_ || !content_) return;
     // The session's units are the first placed ships.
-    debris.prepare(*tables_, content_->combat, placed_ships_, ship_of_entity_.size());
+    debris.prepare(*tables_, content_->combat, placed_ships_, ship_of_entity_.size(),
+                   tsw_setup());
     debris_ = &debris;
 }
 

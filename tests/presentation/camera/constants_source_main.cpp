@@ -244,7 +244,7 @@ int main() {
         expect(value.constants.distance_default == 40.0F, "selected definition values load");
         expect(value.constants.yaw_per_mouse_unit == 0.0F && !value.constants.use_splines,
                "absent optional values stay inert");
-        expect(value.provenance.size() == 36, "provenance covers every consumed field");
+        expect(value.provenance.size() == 38, "provenance covers every consumed field");
         expect(value.provenance[0].tag == "Distance_Min"
                && value.provenance[0].status == camera::FieldStatus::supplied,
                "required field provenance order and status");
@@ -256,8 +256,8 @@ int main() {
                && value.provenance[25].status == camera::FieldStatus::absent
                && value.constants.location_follows_terrain == 0.0F,
                "terrain-following fields are optional and stay inert when absent");
-        expect(value.provenance[29].tag == "Tactical_Min_Scroll_Speed"
-               && value.provenance[29].source_sha256 == "global-sha",
+        expect(value.provenance[31].tag == "Tactical_Min_Scroll_Speed"
+               && value.provenance[31].source_sha256 == "global-sha",
                "global provenance retains caller digest");
         for (const auto& item : value.provenance) {
             expect(item.file.find(":") == std::string::npos && !item.file.empty()

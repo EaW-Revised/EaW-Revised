@@ -313,15 +313,19 @@ void test_scroll_ramp() {
     expect(c.advance({{1.0F, 0.0F, false}, 0.0F, 0.0F, 0.2F}).has_value(),
            "scroll acceleration step accepted");
     const float speed = 10.0F;
-    const float rise = 1.0F - std::exp(-1.0F);
-    const float first = speed * (0.2F - 0.2F * rise);
-    close(c.frame().target[0], first, "scroll accelerates with the authored factor");
+    // CAMIN-REL-1 at the 60 Hz reference: factor 0.2 reaches full speed in five
+    // frames, so the lag is 4 + 3 + 2 + 1 = 10 fifths = 2 frames; factor 2 brakes
+    // for 1 / (2 - 1) = 1 frame of the release speed.
+    const float ramp_time = 2.0F / 60.0F;
+    const float brake_time = 1.0F / 60.0F;
+    const float rise = 1.0F - std::exp(-0.2F / ramp_time);
+    const float first = speed * (0.2F - ramp_time * rise);
+    close(c.frame().target[0], first, "scroll accelerates at the per-frame factor");
     expect(c.advance({{}, 0.0F, 0.0F, 0.4F}).has_value(),
            "scroll release step accepted");
-    const float brake_time = 0.2F / 2.0F;
-    close(c.frame().target[0], first + speed * rise * brake_time
+    close(c.frame().target[0], first + speed * (1.0F - std::exp(-0.2F / ramp_time)) * brake_time
           * (1.0F - std::exp(-0.4F / brake_time)),
-          "scroll braking factor shortens the acceleration time");
+          "scroll release coasts the per-frame braking time");
     expect(c.frame().target[0] > first, "release does not stop immediately");
     for (const int fps : {30, 144}) {
         auto stepped = camera::BoundedTacticalController::create(values, bounds(),
@@ -354,6 +358,54 @@ void test_scroll_ramp() {
            "FoC pan later idle step accepted");
     expect(foc.frame().target[0] - after_release < 0.02F,
            "FoC release does not coast for seconds");
+}
+
+// CAMIN-REL-1: the original steps ramp and release once per rendered frame;
+// the remake matches its travel at a 60 Hz reference and stays frame-rate
+// independent. Stock FoC (0.08 / 1.5) ramps with a 0.096 s lag and coasts
+// 0.033 s; Remake 5.0 (0.65 / 1.15) ramps with a 0.006 s lag and coasts 0.111 s.
+void test_scroll_release_law() {
+    const camera::SourceTargetBounds wide{-1000.0F, 1000.0F, -1000.0F, 1000.0F,
+        "maps/wide-camera-bounds.json", "synthetic-map", "authored target rectangle"};
+    constexpr double speed = 10.0;
+    struct Data { float acceleration; float deceleration; };
+    for (const Data data : {Data{0.08F, 1.5F}, Data{0.65F, 1.15F}}) {
+        // Per-frame law at 60 Hz: speed in units per frame is speed / 60.
+        double lag_frames = 0.0;
+        for (int k = 1; k * data.acceleration < 1.0F; ++k) lag_frames += 1.0 - k * data.acceleration;
+        double coast_frames = 0.0;
+        for (double v = 1.0, i = 0; i < 4000; ++i) { v /= data.deceleration; coast_frames += v; }
+        auto values = constants();
+        values.scroll_acceleration_factor = data.acceleration;
+        values.scroll_deceleration_factor = data.deceleration;
+        for (const int fps : {30, 60, 144}) {
+            auto c = camera::BoundedTacticalController::create(values, wide,
+                {0.0F, 0.0F, 0.0F}, 0.0F, 0.0F, 1280, 720).value();
+            const float seconds = 1.0F / static_cast<float>(fps);
+            for (int frame = 0; frame < fps * 2; ++frame) {
+                expect(c.advance({{1.0F, 0.0F, false}, 0.0F, 0.0F, seconds}).has_value(),
+                       "scroll hold frame accepted");
+            }
+            const float held = c.frame().target[0];
+            close(held, static_cast<float>(speed * (2.0 - lag_frames / 60.0)), "ramp lag matches the per-frame law",
+                  0.02F);
+            for (int frame = 0; frame < fps * 2; ++frame) {
+                expect(c.advance({{}, 0.0F, 0.0F, seconds}).has_value(),
+                       "scroll release frame accepted");
+            }
+            close(c.frame().target[0] - held, static_cast<float>(speed * coast_frames / 60.0),
+                  "release coast matches the per-frame law at 30, 60 and 144 fps", 0.02F);
+        }
+    }
+    auto instant = constants();
+    instant.scroll_acceleration_factor = 1.0F;
+    instant.scroll_deceleration_factor = 1.0F;
+    auto c = camera::BoundedTacticalController::create(instant, bounds(),
+        {0.0F, 0.0F, 0.0F}, 0.0F, 0.0F, 1280, 720).value();
+    expect(c.advance({{1.0F, 0.0F, false}, 0.0F, 0.0F, 0.1F}).has_value(), "instant hold accepted");
+    const float held = c.frame().target[0];
+    expect(c.advance({{}, 0.0F, 0.0F, 1.0F}).has_value() && c.frame().target[0] == held,
+           "a factor of 1 or less brakes at once");
 }
 
 void test_boundary_diagonal_frame_rate() {
@@ -1013,6 +1065,7 @@ int main() {
     test_target_height();
     test_zoom_inertia_and_pitch();
     test_scroll_ramp();
+    test_scroll_release_law();
     test_boundary_diagonal_frame_rate();
     test_concurrent_zoom_pan_frame_rate();
     test_flat_distance_spline_idle_pitch();

@@ -18,6 +18,7 @@
 #include "eawr/presentation/audio/announcements.hpp"
 #include "eawr/presentation/audio/health_warning.hpp"
 #include "eawr/presentation/renderer.hpp"
+#include "eawr/presentation/space/tsw.hpp"
 #include "eawr/presentation/ui/retreat_presentation.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/units/unit_tables.hpp"
@@ -82,8 +83,10 @@ public:
     // sound events. Never fails the view: what does not resolve is reported.
     // With `queue` the sample loading becomes load steps (one batch of files each, then the closing step), run in
     // order between menu frames; the registry reads still run here. Without it everything runs here at once.
+    // `tsw` (TSW-15): the battle's super weapon setup, when it has one; its sounds, speech and music are prepared only then.
     void prepare(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, std::string_view local_faction,
-                 std::set<sim::tactical::TypeId> first_types, const EnqueueLoadStep* queue = nullptr);
+                 std::set<sim::tactical::TypeId> first_types, const EnqueueLoadStep* queue = nullptr,
+                 const sim::tactical::TswSetup* tsw = nullptr);
     // One presentation frame: the events of the ticks the frame reached, the gestures the player
     // made, the camera it renders and the frame's duration in seconds.
     void frame(const LiveSessionView& live, std::vector<BattleInput::Acknowledgement> acknowledgements,
@@ -128,6 +131,8 @@ public:
         return {digests_[0].value(), digests_[1].value(), digests_[2].value()};
     }
     void set_admission(const audio::Admission& admission) { options_.admission = admission; }
+    // BCAM-23: local camera focus is presentation state, independent of logical admission.
+    void set_cinematic_focus(sim::EntityId source) { cinematic_focus_wanted_ = source; }
     void set_attached_silent(sim::EntityId source, bool silent) {
         if (silent) silent_sources_.insert(source);
         else silent_sources_.erase(source);
@@ -165,7 +170,8 @@ private:
     // MAT-18: SFX, queued speech and music share this admission policy. The front end owns
     // its own audio, so the battle can refuse every category without muting shared buses.
     [[nodiscard]] bool admits_battle_audio() const noexcept { return !options_.attract_silent; }
-    void present_outcome_cues(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle, const bool recovery_quiet);
+    void present_outcome_cues(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle, const bool recovery_quiet,
+                              const bool held_for_begin);
     void update_listener(const LiveSessionView& live, const FixedCamera& camera);
     void remember_visible_units(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle);
     void present_reached_audio(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle, const sim::tactical::PlayerId local);
@@ -174,6 +180,9 @@ private:
     void prepare_event_registry();
     template <typename Event>
     void prepare_music_and_faction_cues(const std::string_view local_faction, Event& event);
+    template <typename Event>
+    void prepare_tsw_cues(const units::UnitTables& tables, const sim::tactical::TswSetup& tsw,
+                          std::string_view local_faction, Event& event);
     void prepare_speech_registry();
     template <typename Event>
     void prepare_unit_cues(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, const std::set<sim::tactical::TypeId>& first_types, const std::map<sim::tactical::TypeId, const audio::SfxEvent*>& spotted, const audio::SfxEvent* generic_spotted, Event& event, bool& binding_unit, bool& first_type);
@@ -193,6 +202,7 @@ private:
         const audio::SfxEvent* blast_activate{};
         const audio::SfxEvent* retreat_start{};  // SFXEvent_Retreat_Start (WR-44, RP-02)
         const audio::SfxEvent* retreat_cancel{}; // SFXEvent_Retreat_Cancel (RP-03)
+        const audio::SfxEvent* retreat_jump{};   // SFXEvent_Retreat_Engines_Jump (FC-R05)
         const audio::SfxEvent* death{};
         const audio::SfxEvent* spin_death{};
         const audio::SfxEvent* asteroid_damage{};
@@ -200,6 +210,8 @@ private:
         const audio::SfxEvent* ambient_moving{};
         const audio::SfxEvent* engine_idle{};
         const audio::SfxEvent* engine_moving{};
+        const audio::SfxEvent* cinematic_focus{};
+        bool cinematic_focus_invalid{};
         const audio::SfxEvent* fleet_move{};
         int ambient_min_delay{150};
         int ambient_max_delay{300};
@@ -332,6 +344,7 @@ private:
         bool engine_loop{};
         bool hidden{};
         const audio::SfxEvent* event{};
+        double distance_floor{};  // PA-01: linear floor of the distance law, 0 = none
     };
     std::map<audio::EventQueue::Handle, EventState> event_states_;
     std::set<sim::EntityId> silent_sources_;
@@ -371,6 +384,8 @@ private:
     void cue_music(const audio::MusicDirector::Cue& cue);
     // RP-01..RP-04: the faction cues of the space retreat, from the retreat state each snapshot publishes.
     void retreat_cues(const sim::tactical::TacticalSnapshot& snapshot, const LiveSessionView& live);
+    // FC-R05: the jump sound of each ship that starts its accelerated flight (type cue, else its owner faction's).
+    void retreat_jumps(const LiveSessionView& live);
     [[nodiscard]] const ui::RetreatFactionPresentation& retreat_faction(const std::string& faction);
     [[nodiscard]] const TypeSounds* retreat_roster_type(const sim::tactical::TacticalSnapshot& snapshot,
         const sim::tactical::RetreatState& state, bool first_with_start_cue) const;
@@ -382,6 +397,11 @@ private:
     void update_voices(const audio::Vec3& listener, const LiveSessionView& live);
     void update_pause(bool paused, double delta);
     void update_music(double delta);
+    void cinematic_focus(const LiveSessionView& live);
+    sim::EntityId cinematic_focus_wanted_{};
+    sim::EntityId cinematic_focus_source_{};
+    std::optional<audio::EventQueue::Handle> cinematic_focus_handle_;
+    std::map<sim::tactical::TypeId, const audio::SfxEvent*> gain_control_, lose_control_;
     void engine_loops(const sim::tactical::TacticalSnapshot& snapshot, std::span<const sim::EntityId> visible);
     void stop_engine_loop(sim::EntityId source, const audio::SfxEvent* event);
     struct EngineState final {
@@ -443,6 +463,7 @@ private:
     std::map<std::string, SpeechEvent> speech_events_;
     // SH-03: regular SFX events, resolved from layer XML and preloaded normally.
     std::array<const audio::SfxEvent*, 2> selection_events_{};
+    const audio::SfxEvent* gift_event_{};
     audio::SpeechQueue<SpeechEvent> speech_queue_;
     audio::SpeechStream speech_stream_;
     godot::AudioStreamPlayer* speech_player_{};
@@ -454,6 +475,13 @@ private:
     std::uint64_t speech_failed_{};
     std::uint64_t speech_overflow_{};
     std::uint64_t attract_refused_{};
+    // BLD-17: frames the battle's own sounds were held behind the loading screen's Begin, and whether ambient or music
+    // ever began while it still waited (a gate regression; the report carries both).
+    std::uint64_t begin_held_frames_{};
+    bool began_while_waiting_{};
+    std::uint64_t held_latest_tick_{};    // the newest tick the session had completed while the sounds were held
+    bool hold_released_{};                // the first frame past the hold has run
+    std::uint64_t held_ticks_skipped_{};  // ticks reached during the hold and not replayed at release
     std::uint64_t attract_3d_refused_{};
     std::uint64_t attract_events_refused_{};
     std::uint64_t attract_2d_deaths_refused_{};
@@ -481,6 +509,7 @@ private:
     Options options_;
     audio::SfxRegistry registry_;
     audio::Space3D space_;
+    audio::ProjectAudioRules project_audio_;  // PA-01: project-side deviations (project-audio.xml)
     std::optional<double> health_low_threshold_, health_critical_threshold_;
     bool spatial_audio_available_{};
     std::uint64_t spatial_starts_{};
@@ -566,6 +595,7 @@ private:
         bool paused{};
         double paused_position{};
         audio::EventQueue::Handle event_handle{};
+        double distance_floor{};  // PA-01
     };
     double clock_{};  // seconds of frames presented
     bool paused_{};
@@ -645,6 +675,25 @@ private:
     std::size_t productions_delivered_{};
     bool population_full_{};
     std::map<std::string, const audio::SfxEvent*> arrival_sounds_;
+    // HCB-47: TSW_SFXEvent_GUI_Bttton_Press by object type, played when the switch's request is accepted.
+    std::map<sim::tactical::TypeId, const audio::SfxEvent*> tsw_press_events_;
+    // TSW-15: the super weapon's sounds by object type (the power-up voice and sound, the activation music), the
+    // local faction's six speech lines in both phrasings (the own phrase for a super weapon whose owner is not an
+    // enemy of the local player, the enemy phrase otherwise), its super weapon battle music, and each target prop
+    // type's death sound.
+    struct TswCues final {
+        const audio::SfxEvent* voice{};
+        const audio::SfxEvent* power_up{};
+        const audio::SfxEvent* fire{}; // the object's own SFXEvent_Fire (the stock object has no weapon, so no fire map entry)
+        const audio::MusicEvent* activation{};
+    };
+    std::map<sim::tactical::TypeId, TswCues> tsw_cues_;
+    std::array<const SpeechEvent*, 2 * space::tsw_speech_count> tsw_speech_{}; // [(own ? 0 : 1) * 6 + line]
+    const audio::MusicEvent* tsw_battle_music_{};
+    std::vector<sim::tactical::TypeId> tsw_target_types_; // by the setup's 1-based target index minus one
+    std::map<sim::tactical::TypeId, const audio::SfxEvent*> tsw_target_death_;
+    // The super weapon events of one reached tick; true when the event was one.
+    bool present_tsw_event(const LiveSessionView& live, const platform::LiveTickEvents& record, const sim::tactical::Event& event);
     bool released_{};
     // Report.
     std::uint64_t frames_{};

@@ -17,6 +17,9 @@ std::string AbilityFields::operator()(const std::string_view tag) const {
 }
 
 void Loader::load_unit_abilities(Object& object, UnitType& unit) {
+    // WLAB-01 (#3238): a land object keeps the authored rows of the whole vocabulary; the projectile and object requests of
+    // the space kinds (barrage target, override and spawned projectiles) belong to the later land groups, not to this load.
+    const bool land = input_.domain == sim::tactical::BattleDomain::land;
     if (const auto* data = object.single("Unit_Abilities_Data")) {
         for (const auto& node : data->children) {
             if (!iequals(node.name, "Unit_Ability")) continue;
@@ -26,7 +29,8 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
                 if (!iequals(child.name, "Type")) return false;
                 const auto kind = trim(child.raw_text);
                 return iequals(kind, "CONCENTRATE_FIRE") || iequals(kind, "WEAKEN_ENEMY")
-                    || iequals(kind, "MISSILE_SHIELD") || iequals(kind, "SENSOR_JAMMING") || iequals(kind, "LURE");
+                    || iequals(kind, "MISSILE_SHIELD") || iequals(kind, "SENSOR_JAMMING") || iequals(kind, "LURE")
+                    || iequals(kind, "JET_PACK"); // WLAB-16: the farthest point a jump may name
             });
             for (const auto& child : node.children) {
                 const auto value = trim(child.raw_text);
@@ -52,6 +56,13 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
                     data::tag_trace::used(child);
                     ability.targeting_max_attack_distance = number(value);
                     if (!ability.targeting_max_attack_distance) report_.missing(unit.id, child.name, value, "not a decimal");
+                } else if (iequals(child.name, "Damage_Percent_When_Activated")) {
+                    data::tag_trace::used(child);
+                    ability.damage_percent_when_activated = number(value);
+                    if (!ability.damage_percent_when_activated || ability.damage_percent_when_activated->raw() < 0) {
+                        ability.damage_percent_when_activated.reset();
+                        report_.missing(unit.id, child.name, value, "not a non-negative decimal");
+                    }
                 } else if (iequals(child.name, "GUI_Activated_Ability_Name")) {
                     data::tag_trace::used(child);
                     ability.gui_activated_ability_name = value;
@@ -119,13 +130,13 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
                 } else if (iequals(child.name, "Projectile_Types_Override")) {
                     data::tag_trace::used(child);
                     ability.projectile_override = value;
-                    want_projectile(value);
+                    if (!land) want_projectile(value);
                 } else if ((ability.type == "HARMONIC_BOMB" || ability.type == "WEAKEN_ENEMY" || ability.type == "SELF_DESTRUCT"
                     || ability.type == "FOW_REVEAL_PING")
                     && iequals(child.name, "Spawned_Object_Type")) {
                     data::tag_trace::used(child);
                     ability.spawned_object = value;
-                    want_projectile(value);
+                    if (!land) want_projectile(value);
                 } else if (ability.type == "HARMONIC_BOMB" && iequals(child.name, "Bomb_Countdown_Seconds")) {
                     data::tag_trace::used(child);
                     ability.bomb_countdown_seconds = number(value);
@@ -176,12 +187,12 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
                 }
             }
             if (ability.type.empty()) report_.missing(unit.id, "Unit_Ability", {}, "ability has no Type");
-            if (iequals(ability.type, "BARRAGE")) enqueue("Dummy_Barrage_Target", UnitKind::ship);
+            if (!land && iequals(ability.type, "BARRAGE")) enqueue("Dummy_Barrage_Target", UnitKind::ship);
             unit.abilities.push_back(std::move(ability));
         }
     }
     unit.ability_team_dispatch = has_behavior(object, "TEAM");
-    if (std::any_of(unit.abilities.begin(), unit.abilities.end(), [](const Ability& ability) {
+    if (!land && std::any_of(unit.abilities.begin(), unit.abilities.end(), [](const Ability& ability) {
             return ability.type == "REPLENISH_WINGMEN";
         })) {
         // WHE-70: a TEAM's declaration supplies its display button, not a local refill.
@@ -381,6 +392,41 @@ void Loader::load_land_income_abilities(Object& object, UnitType& unit) {
                 }
             }
             load_bonus_abilities(object, unit, name, AbilityFields{node});
+        }
+    }
+}
+
+// WLAB-71 (#3239): the one nested handler of a land object that G2 decodes on its own (the rest of the nested decode is
+// G3's, WLAB-11). Weapon_Index is the projectile index the weapon is held at; Initially_Enabled defaults to Yes (the stock
+// value; the unauthored default was not read, a reading); only an automatic style is serviced (the walk gives Ground_Automatic).
+// A value that cannot be a row is reported and the type keeps none. A second block of the kind is reported and ignored.
+void Loader::load_land_weapon_swap(Object& object, UnitType& unit) {
+    for (const auto* abilities : object.list("Abilities", report_)) {
+        for (const auto& node : abilities->children) {
+            if (!iequals(node.name, "Permanent_Weapon_Swap_Ability")) continue;
+            const AbilityFields child_text{node};
+            UnitType::PermanentWeaponSwap swap;
+            for (const auto& attribute : node.attributes) {
+                if (iequals(attribute.name, "Name")) {
+                    data::tag_trace::used_attribute(node, attribute.name);
+                    swap.name = attribute.value;
+                }
+            }
+            if (unit.permanent_weapon_swap) {
+                report_.note(unit.id, node.name, swap.name, "a second Permanent_Weapon_Swap_Ability is ignored (WLAB-71)");
+                continue;
+            }
+            const auto index_text = child_text("Weapon_Index");
+            const auto index = number(index_text);
+            if (!index || index->raw() < 0 || index->raw() % Fixed::scale != 0 || index->raw() / Fixed::scale > 1) {
+                report_.missing(unit.id, "Weapon_Index", index_text, "expected the projectile index 0 or 1 (WLAB-71); the type has no permanent swap");
+                continue;
+            }
+            swap.weapon_index = static_cast<std::uint32_t>(index->raw() / Fixed::scale);
+            swap.initially_enabled = boolean(child_text("Initially_Enabled")).value_or(true);
+            swap.automatic = sim::tactical::automatic_ability_style(
+                sim::tactical::special_activation_style(child_text("Activation_Style")), input_.domain, true);
+            unit.permanent_weapon_swap = std::move(swap);
         }
     }
 }

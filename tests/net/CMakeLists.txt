@@ -35,7 +35,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/monitor_bench.enabled")
     set_tests_properties(net_desync_monitor_benchmark PROPERTIES LABELS "benchmark;batch-only" RUN_SERIAL TRUE TIMEOUT 28800)
 endif()
 add_executable(net_setup_tests setup_tests.cpp)
-target_link_libraries(net_setup_tests PRIVATE eawr::net eawr::platform)
+target_link_libraries(net_setup_tests PRIVATE eawr::net eawr::platform eawr::skirmish)
 eawr_target_project_warnings(net_setup_tests)
 add_test(NAME net_setup_contracts COMMAND net_setup_tests "${PROJECT_BINARY_DIR}/setup-artifacts")
 add_executable(net_setup_tcp_tests setup_tcp_tests.cpp)
@@ -102,6 +102,11 @@ target_link_libraries(net_gns_link_stats_tests PRIVATE eawr::net)
 eawr_target_project_warnings(net_gns_link_stats_tests)
 add_test(NAME net_gns_link_stats_contracts COMMAND net_gns_link_stats_tests)
 
+add_executable(net_gns_route_health_tests gns_route_health_tests.cpp)
+target_link_libraries(net_gns_route_health_tests PRIVATE eawr::net)
+eawr_target_project_warnings(net_gns_route_health_tests)
+add_test(NAME net_gns_route_health_contracts COMMAND net_gns_route_health_tests)
+
 add_executable(net_gns_frame_codec_tests gns_frame_codec_tests.cpp)
 target_link_libraries(net_gns_frame_codec_tests PRIVATE eawr::net)
 eawr_target_project_warnings(net_gns_frame_codec_tests)
@@ -130,6 +135,10 @@ set_tests_properties(net_gns_turn_silent PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 
 add_test(NAME net_gns_turn_nonce COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/gns_turn_processes.py" "$<TARGET_FILE:net_gns_introduced_tests>" nonce)
 set_tests_properties(net_gns_turn_nonce PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
+
+# The fake TURN server's loss knob (relay-switch tests): pure Python, no GNS.
+add_test(NAME net_gns_turn_loss_rig COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/gns_turn_loss_check.py")
+set_tests_properties(net_gns_turn_loss_rig PROPERTIES TIMEOUT 60)
 
 # N-peer room mesh (N2): member processes meshed through a loopback room broker. The nine-member case skips (77)
 # unless EAWR_GNS_MESH_NINE=1; it runs once per slice at its final head, not per PR.
@@ -166,6 +175,13 @@ add_executable(net_gns_signalling_tests gns_signalling_tests.cpp)
 target_link_libraries(net_gns_signalling_tests PRIVATE eawr::net Threads::Threads)
 eawr_target_project_warnings(net_gns_signalling_tests)
 add_test(NAME net_gns_signalling_contracts COMMAND net_gns_signalling_tests)
+
+# The TURN server lists GNS gets from the issued credentials (provider fallback): no GNS, no service.
+add_executable(net_gns_turn_lists_tests gns_turn_lists_tests.cpp)
+target_include_directories(net_gns_turn_lists_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/net")
+target_link_libraries(net_gns_turn_lists_tests PRIVATE eawr::net)
+eawr_target_project_warnings(net_gns_turn_lists_tests)
+add_test(NAME net_gns_turn_lists_contracts COMMAND net_gns_turn_lists_tests)
 
 add_executable(net_gns_transport_tests gns_transport_tests.cpp)
 target_link_libraries(net_gns_transport_tests PRIVATE eawr::net)
@@ -298,7 +314,7 @@ target_link_libraries(net_lan_credentials_tests PRIVATE eawr::net eawr::platform
 eawr_target_project_warnings(net_lan_credentials_tests)
 add_test(NAME net_lan_credentials_contracts COMMAND net_lan_credentials_tests)
 add_executable(net_lobby_session_tests lobby_session_tests.cpp)
-target_link_libraries(net_lobby_session_tests PRIVATE eawr::net eawr::platform eawr::skirmish)
+target_link_libraries(net_lobby_session_tests PRIVATE eawr::net eawr::platform eawr::skirmish eawr::mods)
 eawr_target_project_warnings(net_lobby_session_tests)
 add_test(NAME net_lobby_session_contracts COMMAND net_lobby_session_tests)
 
@@ -313,6 +329,10 @@ target_link_libraries(net_galactic_live_driver_tests PRIVATE eawr::platform_net_
 eawr_target_project_warnings(net_galactic_live_driver_tests)
 add_test(NAME net_galactic_live_driver_contracts COMMAND net_galactic_live_driver_tests)
 add_test(NAME net_galactic_live_raid_contracts COMMAND net_galactic_live_driver_tests --raid)
+add_test(NAME net_galactic_netdiag_contracts COMMAND net_galactic_live_driver_tests --netdiag)
+add_test(NAME net_galactic_adaptive_contracts COMMAND net_galactic_live_driver_tests --adaptive)
+set_tests_properties(net_galactic_adaptive_contracts PROPERTIES TIMEOUT 300)
+set_tests_properties(net_galactic_netdiag_contracts PROPERTIES TIMEOUT 120)
 add_test(NAME net_galactic_mp_arbitration_contracts COMMAND net_galactic_live_driver_tests --arbitration)
 add_test(NAME net_galactic_mp_coop_battle_contracts COMMAND net_galactic_live_driver_tests --coop)
 set_tests_properties(net_galactic_mp_arbitration_contracts PROPERTIES TIMEOUT 180)
@@ -331,6 +351,16 @@ eawr_target_project_warnings(net_galactic_ability_travel_tests)
 add_test(NAME net_galactic_ability_travel_contracts COMMAND net_galactic_ability_travel_tests)
 set_tests_properties(net_galactic_ability_travel_contracts PROPERTIES TIMEOUT 120)
 
+# GPD-22: a land-tray drop (launch, land, marker in one boundary) applies identically on every lockstep peer.
+add_executable(net_galactic_tray_landing_tests galactic_tray_landing_tests.cpp
+    "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/galaxy_view.cpp"
+    "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/galaxy_snapshot_stub.cpp")
+target_link_libraries(net_galactic_tray_landing_tests PRIVATE eawr::net_galactic eawr::platform eawr::sim_galactic eawr::ui_model)
+target_include_directories(net_galactic_tray_landing_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
+eawr_target_project_warnings(net_galactic_tray_landing_tests)
+add_test(NAME net_galactic_tray_landing_contracts COMMAND net_galactic_tray_landing_tests)
+set_tests_properties(net_galactic_tray_landing_contracts PROPERTIES TIMEOUT 120)
+
 # These cases require the optional networking provider. The standard Windows
 # preset skips them; they run only where the provider is built.
 set_property(TEST
@@ -340,5 +370,12 @@ set_property(TEST
     net_gns_transport_contracts net_gns_turn_refusal_contracts
     net_gns_setup_contracts net_gns_lockstep_contracts net_gns_desync_contracts
     APPEND PROPERTY LABELS optional-gns)
+
+# STUN list derivation for online games: header-only, no GNS needed.
+add_executable(net_gns_stun_list_tests gns_stun_list_tests.cpp)
+target_include_directories(net_gns_stun_list_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/net")
+target_link_libraries(net_gns_stun_list_tests PRIVATE eawr::net)
+eawr_target_project_warnings(net_gns_stun_list_tests)
+add_test(NAME net_gns_stun_list_contracts COMMAND net_gns_stun_list_tests)
 
 eawr_label_tests()

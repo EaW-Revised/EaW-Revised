@@ -1044,6 +1044,137 @@ void test_sale_victory() {
     expect(!value.outcome(), "WBF-35 selling a non-starbase cannot decide the starbase-only condition");
 }
 
+// WIS-01..03 (legacy #6266): an event-styled income stream pays nothing until its trigger, then the whole
+// frame-accurate stream of an ordinary one; an ordinary stream (no event style) is unchanged.
+void test_event_income_streams() {
+    eawr::sim::InlineExecutor executor;
+    const auto rate = m::divide(q(200), q(300)).value();
+    t::IncomeProfile profile{10, rate, {}};
+    profile.base_value = q(200); profile.interval_seconds = q(10);
+    // The gates every style shares, and Special_Attack's null-target rule (the stream's handler refuses a target).
+    for (const auto style : {t::IncomeEventStyle::special_attack, t::IncomeEventStyle::take_damage,
+                             t::IncomeEventStyle::user_input}) {
+        auto event = profile; event.event_style = style;
+        for (const auto trigger : {t::IncomeEventStyle::special_attack, t::IncomeEventStyle::take_damage,
+                                   t::IncomeEventStyle::user_input}) {
+            expect(t::income_event_admits(event, trigger, false) == (trigger == style),
+                "WIS-01 only the stream's own trigger starts it");
+            expect(!t::income_event_admits(event, trigger, true),
+                "WIS-02/03 the income handler refuses a request that carries a target object, whatever the style");
+        }
+        expect(!t::income_event_admits(event, t::IncomeEventStyle::none, false)
+            && !t::income_event_admits(profile, style, false), "WIS-01 none and plain streams never start");
+    }
+    auto content = rules();
+    auto stream = profile; stream.event_style = t::IncomeEventStyle::take_damage;
+    content.income = {stream};
+    auto start = setup();
+    auto value = session(start, content);
+    steps(value, 40, executor);
+    expect(value.ledgers()[0].credits == q(1000) && value.ledgers()[1].credits == q(1000)
+        && value.ledgers()[2].credits == q(1000), "WIS-01 an untriggered Take_Damage stream pays nothing");
+    // WIS-02: a hit that leaves the unit alive starts its stream, once; the enemy's twin stays inert.
+    expect(value.submit({{value.completed_tick(), 1, 0}, {1}, t::DamagePayload{q(10), t::attack_hull}}).has_value(),
+        "non-lethal damage delivers");
+    steps(value, value.completed_tick() + 2, executor);
+    const auto first = value.ledgers()[0].credits;
+    expect(first.raw() >= q(1000).raw() + rate.raw() && value.ledgers()[1].credits == q(1000),
+        "WIS-02 damage starts the stream of the unit that took it, not its enemy's");
+    expect(value.submit({{value.completed_tick(), 1, 1}, {1}, t::DamagePayload{q(10), t::attack_hull}}).has_value(),
+        "a second hit delivers");
+    const auto before = value.ledgers()[0].credits;
+    steps(value, value.completed_tick() + 10, executor);
+    expect(value.ledgers()[0].credits.raw() - before.raw() <= 11 * rate.raw()
+        && value.ledgers()[0].credits.raw() - before.raw() >= 9 * rate.raw(),
+        "WIS-02 a second hit starts no second stream");
+    // The earner list carries the state: a checkpoint taken after the trigger resumes identically.
+    auto saved = value.save_checkpoint_state();
+    expect(static_cast<bool>(saved), "WIS-04 the triggered stream saves");
+    if (saved) {
+        auto fresh = session(start, content);
+        expect(static_cast<bool>(fresh.load_checkpoint_state(saved.value())), "WIS-04 the triggered stream loads");
+        steps(value, value.completed_tick() + 20, executor);
+        steps(fresh, value.completed_tick(), executor);
+        expect(fresh.state_sha256() == value.state_sha256() && fresh.ledgers()[0].credits == value.ledgers()[0].credits,
+            "WIS-04 a restored session keeps paying the triggered stream");
+    }
+    // A lethal hit never starts a stream (the retail damage routine's live branch only).
+    auto lethal = session(start, content);
+    expect(lethal.submit({{0, 1, 0}, {1}, t::DamagePayload{q(1000), t::attack_hull}}).has_value(), "lethal hit delivers");
+    steps(lethal, 20, executor);
+    expect(lethal.ledgers()[0].credits == q(1000), "WIS-02 a destroyed unit starts no stream");
+    // The worker count does not matter.
+    std::string reference_hash;
+    for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        auto run = session(start, content);
+        expect(run.submit({{5, 1, 0}, {1}, t::DamagePayload{q(10), t::attack_hull}}).has_value(), "hash-run damage delivers");
+        steps(run, 60, pool);
+        const auto hash = run.state_sha256();
+        if (workers == 1) reference_hash = hash;
+        else expect(hash == reference_hash, "WIS-01 event stream hashes agree on 1/2/4/8 workers");
+    }
+}
+// WIS-02: the income handler admits only a request with no target object, and a projectile hit passes the projectile
+// as the damage source. A shot that wounds the unit (alive, hull down) starts no Take_Damage stream; in the same
+// fixture a scripted hit (no source) does, which proves the stream is wired and the unit keeps its owner.
+std::optional<t::TacticalSession> take_damage_fixture(const bool shooter_attacks) {
+    auto start = setup();
+    start.units[0].position = at(10);
+    start.units[1].type_id = 50; start.units[1].position = at(200);
+    start.units[1].rotation = {Fixed{}, Fixed{}, q(1), Fixed{}};
+    start.units[2].position = at(5000);
+    auto content = rules();
+    t::IncomeProfile stream{10, m::divide(q(200), q(300)).value(), {}};
+    stream.base_value = q(200); stream.interval_seconds = q(10);
+    stream.event_style = t::IncomeEventStyle::take_damage;
+    content.income = {stream};
+    auto health = durability();
+    health.profiles[0].max_hull = q(100);
+    t::DurabilityProfile shooter_health; shooter_health.type_id = 50; shooter_health.max_hull = q(100);
+    health.profiles.push_back(shooter_health);
+    t::DamageRules damage;
+    damage.shield_recharge_frames = 10000;
+    damage.diminishing = {{q(0), q(1)}, {q(1), q(1)}};
+    health.damage = damage;
+    t::WeaponProfile gun;
+    gun.range = q(1000); gun.pulse_count = 1; gun.cone_width = gun.cone_height = q(180);
+    t::CombatTable combat;
+    t::CombatProfile target; target.type_id = 10; target.category_bits = 1;
+    target.max_attack_distance = q(1000); target.weapons.push_back(gun);
+    target.collision = t::CollisionBox{at(-5, -5, -5), at(5, 5, 5)};
+    t::CombatProfile shooter = target; shooter.type_id = 50;
+    shooter.priority_set = 0;
+    shooter.weapons[0].shot = t::ShotProfile{q(75), t::no_type_index, q(100), q(1000), false, true, {}};
+    combat.profiles = {target, shooter};
+    combat.priority_sets = {{{{10, std::nullopt}}, q(1)}};
+    const std::vector<t::SensorProfile> sensors{{10, q(2000)}, {50, q(2000)}};
+    auto made = t::TacticalSession::create(start, sensors, health, {}, {}, combat, {}, {}, content);
+    expect(static_cast<bool>(made), "WIS-02 projectile fixture creates");
+    if (!made) { std::cerr << made.error().message << '\n'; return std::nullopt; }
+    auto value = std::move(made).value();
+    if (shooter_attacks) {
+        expect(value.submit({{8, 2, 0}, {2}, t::AttackPayload{1}}).has_value(), "WIS-02 the shooter attack submits");
+        expect(value.submit({{9, 2, 1}, {2}, t::StopPayload{}}).has_value(), "WIS-02 the shooter stops after one shot");
+    }
+    return value;
+}
+void test_sourced_hit_starts_no_stream() {
+    eawr::sim::InlineExecutor executor;
+    auto shot = take_damage_fixture(true);
+    if (!shot) return;
+    steps(*shot, 80, executor);
+    const auto wounded = shot->durability_state(1);
+    expect(wounded && wounded->hull.raw() > 0 && wounded->hull < q(100),
+        "WIS-02 the shot wounded the unit and left it alive");
+    expect(shot->ledgers()[0].credits == q(1000), "WIS-02 a projectile hit starts no Take_Damage stream");
+    auto scripted = take_damage_fixture(false);
+    if (!scripted) return;
+    expect(scripted->submit({{8, 1, 0}, {1}, t::DamagePayload{q(1), t::attack_hull}}).has_value(),
+        "WIS-02 a scripted hit submits");
+    steps(*scripted, 30, executor);
+    expect(scripted->ledgers()[0].credits > q(1000), "WIS-02 a hit with no source starts the stream (control)");
+}
 void test_mine_income() {
     eawr::sim::InlineExecutor executor;
     for (const auto amount : {200, 205}) {
@@ -1585,6 +1716,8 @@ int main() {
     test_captured_producer();
     test_construction();
     test_mine_income();
+    test_event_income_streams();
+    test_sourced_hit_starts_no_stream();
     test_modifier_reduction();
     test_modifier_service();
     test_modifier_determinism();

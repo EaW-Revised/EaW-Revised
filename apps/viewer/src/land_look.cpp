@@ -2,9 +2,11 @@
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/core/text.hpp"
 #include "land_look_shaders.hpp"
+#include "sky_additive.hpp"
 
 #include "eawr/presentation/camera/constants_source.hpp"
 #include "eawr/presentation/camera/controller.hpp"
+#include "eawr/presentation/space/environment_scene.hpp"
 #include "eawr/sim/replay.hpp"
 
 #include <algorithm>
@@ -321,6 +323,42 @@ std::optional<assets::Vec3f> toward_sun(const assets::EnvironmentDescriptor& env
                          -std::cos(*heading) * std::cos(*elevation), std::sin(*elevation)};
 }
 
+namespace {
+
+// The land dome form of the shared MeshAdditive sky program (sky_additive.hpp):
+// the same fragment and vertex-colour arithmetic, placed like the Skydome.fx
+// dome (the vertex stage keeps only the direction at eawr_sky.x of the far
+// distance) and drawn only where no opaque geometry is (the dome shader's scene
+// depth test). Empty when the program text does not have the expected shape.
+[[nodiscard]] std::string additive_dome_program(std::string program) {
+    const auto replace_once = [&](const std::string_view from, const std::string& to) {
+        const std::size_t at = program.find(from);
+        if (at == std::string::npos || program.find(from, at + 1) != std::string::npos) return false;
+        program.replace(at, from.size(), to);
+        return true;
+    };
+    const bool shaped =
+        replace_once("render_mode unshaded, fog_disabled, cull_disabled, depth_draw_never, blend_add;",
+                     "render_mode unshaded, fog_disabled, cull_disabled, depth_draw_never, blend_add, "
+                     "skip_vertex_transform;")
+        && replace_once("uniform vec4 eawr_sky_light_scale;\n",
+                        "uniform vec4 eawr_sky_light_scale;\n"
+                        "uniform sampler2D eawr_scene_depth : hint_depth_texture, filter_nearest;\n"
+                        "uniform vec4 eawr_sky = vec4(0.9, 1.0, 0.0, 0.0);\n")
+        && replace_once("void vertex() {\n",
+                        "void vertex() {\n"
+                        "    vec4 far_a = INV_PROJECTION_MATRIX * vec4(0.0, 0.0, 1.0, 1.0);\n"
+                        "    vec4 far_b = INV_PROJECTION_MATRIX * vec4(0.0, 0.0, 0.0, 1.0);\n"
+                        "    float far_distance = max(abs(far_a.z / far_a.w), abs(far_b.z / far_b.w));\n"
+                        "    VERTEX = mat3(VIEW_MATRIX) * (normalize(VERTEX) * far_distance * eawr_sky.x);\n")
+        && replace_once("void fragment() {\n",
+                        "void fragment() {\n"
+                        "    if (texture(eawr_scene_depth, SCREEN_UV).r > 0.00001) discard;\n");
+    return shaped ? program : std::string{};
+}
+
+} // namespace
+
 core::Result<SkyComposition> compose_sky(
     GodotRenderer& renderer, const assets::Model& model, const TextureLookup& lookup,
     const SkyInputs& inputs, sim::AssetId& next_asset, sim::EntityId& next_entity,
@@ -331,6 +369,33 @@ core::Result<SkyComposition> compose_sky(
     // vertex stage keeps only the direction.
     constexpr float far_out = 100000.0F;
     std::map<std::string, std::string> cloud_names;
+    bool no_cloud_registered = false;
+    // The space route's own classification of each surface: a MeshGloss-family
+    // surface (the star-tile skies) is admitted by it with its authored values.
+    const std::vector<space::SceneSurface> classified = space::scene_surfaces(model);
+    const auto gloss_material = [&](const std::size_t mesh, const std::size_t submesh)
+        -> const space::MeshGlossMaterial* {
+        for (const space::SceneSurface& surface : classified) {
+            if (surface.mesh_index == mesh && surface.submesh_index == submesh
+                && surface.route == space::SceneRoute::meshgloss && surface.meshgloss) {
+                return &*surface.meshgloss;
+            }
+        }
+        return nullptr;
+    };
+    // A non-billboard MeshAdditive-family surface (MeshAdditive.fx/.fxo, 2x, VColor) the space
+    // route admits with its authored values: the shared additive sky policy draws it.
+    const auto additive_surface = [&](const std::size_t mesh, const std::size_t submesh)
+        -> const space::SceneSurface* {
+        for (const space::SceneSurface& surface : classified) {
+            if (surface.mesh_index == mesh && surface.submesh_index == submesh
+                && sky_additive::is_additive_sky_route(surface.route) && surface.meshadditive
+                && surface.problem.empty() && surface.billboard == 0) {
+                return &surface;
+            }
+        }
+        return nullptr;
+    };
     for (std::size_t mesh_index = 0; mesh_index < model.meshes.size(); ++mesh_index) {
         const assets::Mesh& mesh = model.meshes[mesh_index];
         for (std::size_t submesh_index = 0; submesh_index < mesh.submeshes.size(); ++submesh_index) {
@@ -363,7 +428,10 @@ core::Result<SkyComposition> compose_sky(
             std::vector<MaterialBinding> bindings{{"eawr_diffuse", std::string{"asset"}}};
             std::string program;
             RenderPass pass = RenderPass::opaque;
-            if (ieq(submesh.shader, "Skydome.fx") && !sun_bone) {
+            bool additive_priority = false;
+            const space::MeshGlossMaterial* gloss = sun_bone ? nullptr : gloss_material(mesh_index, submesh_index);
+            const space::SceneSurface* additive = sun_bone ? nullptr : additive_surface(mesh_index, submesh_index);
+            if ((ieq(submesh.shader, "Skydome.fx") || gloss != nullptr || additive != nullptr) && !sun_bone) {
                 const assets::Vec3f centre = rigid_point(*placed, {0.0F, 0.0F, 0.0F});
                 for (const assets::Vertex& vertex : submesh.vertices) {
                     assets::Vertex baked = vertex;
@@ -393,36 +461,86 @@ core::Result<SkyComposition> compose_sky(
                         surface.indices.push_back(static_cast<std::uint16_t>(surface.indices[index + 1] + count));
                     }
                 }
-                if (const auto name = texture_parameter(submesh, "BaseTexture")) {
-                    if (auto texture = lookup(*name)) own = std::move(*texture);
-                }
-                float cloud_scale = 1.0F;
-                if (const auto* scale = parameter(submesh, "CloudScale")) {
-                    if (const auto* value = std::get_if<float>(&scale->value); value && std::isfinite(*value)) {
-                        cloud_scale = *value;
+                if (additive != nullptr) {
+                    // The space route's additive policy (sky_additive.hpp): the authored Color and
+                    // UVScrollRate with the declared TIME and LIGHT_SCALE inputs, ONE/ONE rgb, no depth
+                    // write. It draws after the opaque domes (render priority above theirs).
+                    const auto name = texture_parameter(submesh, "BaseTexture");
+                    std::optional<assets::Texture> texture;
+                    if (name) texture = lookup(*name);
+                    if (!texture) {
+                        skip("MeshAdditive BaseTexture " + name.value_or(std::string{"(none)"}) + " did not resolve");
+                        continue;
                     }
-                }
-                float has_cloud = 0.0F;
-                if (const auto name = texture_parameter(submesh, "CloudTexture")) {
-                    auto found = cloud_names.find(*name);
-                    if (found == cloud_names.end()) {
-                        if (auto texture = lookup(*name)) {
-                            const std::string key = "sky-cloud-" + std::to_string(cloud_names.size());
-                            if (auto registered = renderer.register_shared_texture(key, *texture); !registered) {
-                                return Result::failure(registered.error());
-                            }
-                            found = cloud_names.emplace(*name, key).first;
+                    own = std::move(*texture);
+                    program = additive_dome_program(sky_additive::additive_sky_program(additive->route));
+                    if (program.empty()) {
+                        skip("MeshAdditive sky program has no land dome form");
+                        continue;
+                    }
+                    bindings = sky_additive::meshadditive_bindings(*additive->meshadditive,
+                                                                   space::meshadditive_default_inputs());
+                    bindings.push_back({"eawr_sky", assets::Vec4f{inputs.dome_fraction, 1.0F, 0.0F, 0.0F}});
+                    pass = RenderPass::transparent;
+                    additive_priority = true;
+                    ++result.dome_surfaces;
+                } else {
+                    if (const auto name = texture_parameter(submesh, "BaseTexture")) {
+                        if (auto texture = lookup(*name)) own = std::move(*texture);
+                    }
+                    float cloud_scale = 1.0F;
+                    if (const auto* scale = parameter(submesh, "CloudScale")) {
+                        if (const auto* value = std::get_if<float>(&scale->value); value && std::isfinite(*value)) {
+                            cloud_scale = *value;
                         }
                     }
-                    if (found != cloud_names.end()) {
-                        bindings.push_back({"eawr_clouds", "shared:" + found->second});
-                        has_cloud = 1.0F;
+                    float has_cloud = 0.0F;
+                    if (const auto name = texture_parameter(submesh, "CloudTexture")) {
+                        auto found = cloud_names.find(*name);
+                        if (found == cloud_names.end()) {
+                            if (auto texture = lookup(*name)) {
+                                const std::string key = "sky-cloud-" + std::to_string(cloud_names.size());
+                                if (auto registered = renderer.register_shared_texture(key, *texture); !registered) {
+                                    return Result::failure(registered.error());
+                                }
+                                found = cloud_names.emplace(*name, key).first;
+                            }
+                        }
+                        if (found != cloud_names.end()) {
+                            bindings.push_back({"eawr_clouds", "shared:" + found->second});
+                            has_cloud = 1.0F;
+                        }
                     }
+                    if (has_cloud == 0.0F) {
+                        // The shader declares the cloud sampler whether or not the
+                        // sky has a cloud layer (a star tile has none); an unbound
+                        // sampler is refused, so it gets a one-texel placeholder
+                        // that eawr_sky.w keeps out of the mix.
+                        if (!no_cloud_registered) {
+                            assets::Texture none = flat_texture(0, 0, 0);
+                            none.mips.front().bytes[3] = std::byte{0};
+                            if (auto registered = renderer.register_shared_texture("sky-cloud-none", none); !registered) {
+                                return Result::failure(registered.error());
+                            }
+                            no_cloud_registered = true;
+                        }
+                        bindings.push_back({"eawr_clouds", std::string{"shared:sky-cloud-none"}});
+                    }
+                    bindings.push_back({"eawr_sky", assets::Vec4f{inputs.dome_fraction, cloud_scale, 0.0F, has_cloud}});
+                    // Skydome.fx draws its base texture as stored. A MeshGloss-family
+                    // dome (the star tiles) is tinted by the space route's unlit
+                    // policy, 2 * Emissive.rgb on the linear texel; the w flag turns
+                    // that on.
+                    assets::Vec4f tint{1.0F, 1.0F, 1.0F, 0.0F};
+                    if (gloss != nullptr) {
+                        const assets::Vec3f gain = space::unlit_meshgloss_gain(*gloss);
+                        tint = {gain.x, gain.y, gain.z, 1.0F};
+                    }
+                    bindings.push_back({"eawr_sky_tint", tint});
+                    program = std::string(dome_shader);
+                    pass = RenderPass::transparent;
+                    ++result.dome_surfaces;
                 }
-                bindings.push_back({"eawr_sky", assets::Vec4f{inputs.dome_fraction, cloud_scale, 0.0F, has_cloud}});
-                program = std::string(dome_shader);
-                pass = RenderPass::transparent;
-                ++result.dome_surfaces;
             } else if (ieq(submesh.shader, "MeshAdditive.fx") && sun_bone) {
                 if (!inputs.toward_sun) {
                     skip("no environment light 0 direction for the sun");
@@ -482,7 +600,14 @@ core::Result<SkyComposition> compose_sky(
                 pass = RenderPass::transparent;
                 ++result.sun_surfaces;
             } else {
-                skip(sun_bone ? "mode-7 bone without a MeshAdditive surface" : "shader has no sky adapter");
+                std::string why = sun_bone ? "mode-7 bone without a MeshAdditive surface" : "shader has no sky adapter";
+                for (const space::SceneSurface& surface : classified) {
+                    if (surface.mesh_index == mesh_index && surface.submesh_index == submesh_index
+                        && surface.route == space::SceneRoute::meshgloss && !surface.problem.empty()) {
+                        why = "MeshGloss-family surface refused: " + surface.problem;
+                    }
+                }
+                skip(why);
                 continue;
             }
             out.submeshes.push_back(std::move(surface));
@@ -501,6 +626,12 @@ core::Result<SkyComposition> compose_sky(
             }
             // A dome that encloses the scene must not shadow it.
             renderer.set_casts_shadows(next_asset, false);
+            if (additive_priority) {
+                // Additive layers add onto the sky behind them: after the opaque domes (default priority 0).
+                if (auto ordered = renderer.set_material_priority(next_asset, 1); !ordered) {
+                    return Result::failure(ordered.error());
+                }
+            }
             instances.push_back({next_entity++, next_asset++, identity()});
         }
     }

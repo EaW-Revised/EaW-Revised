@@ -33,15 +33,16 @@ std::vector<gc::FleetDisplayType> traits() {
 gc::GalacticSnapshot snapshot(gc::PlanetKnowledge knowledge, bool discovered = true,
     gc::FleetId enemy = 2, gc::PlayerId allegiance = 2,
     std::shared_ptr<const std::vector<gc::CensusObject>> actors = {}, std::vector<gc::Fleet> fleets = {},
-    std::optional<gc::FleetControlSetup> fleet_control = {}) {
+    std::optional<gc::FleetControlSetup> fleet_control = {}, std::shared_ptr<const gc::MovementSetup> movement = {},
+    std::vector<gc::ObserverLandedTransport> landed = {}) {
     auto rows = std::make_shared<std::vector<gc::ObservedPlanet>>();
     gc::ObservedPlanet row; row.player = 1; row.planet = 10; row.discovered = discovered; row.knowledge = knowledge;
     rows->push_back(row);
     row.player = 2; row.discovered = true; row.knowledge.fleet_contents = true; rows->push_back(row);
-    auto current = observer(); current.planets.front().allegiance = allegiance;
+    auto current = observer(); current.planets.front().allegiance = allegiance; current.planets.front().landed_transports = std::move(landed);
     return gc::GalacticSnapshot(0, {}, {{1,1,0}, {2,2,0}, {3,3,0}}, {{10,{},2}}, {},
         fleets.empty() ? std::vector<gc::Fleet>{{1,1,10,{{11,100}}}, {enemy,2,10,{{21,100},{22,200},{23,100},{24,400}}},
-         {3,2,10,{{31,300}}}, {4,3,10,{{41,200}}}} : std::move(fleets), {}, {}, std::move(fleet_control), {}, {}, {}, {}, {}, {}, {}, {},
+         {3,2,10,{{31,300}}}, {4,3,10,{{41,200}}}} : std::move(fleets), {}, {}, std::move(fleet_control), std::move(movement), {}, {}, {}, {}, {}, {}, {},
         std::move(current), {}, {}, {}, rows, {}, {}, {}, {}, {}, {}, 0, {}, std::move(actors));
 }
 gc::FleetIntelligence project(const gc::GalacticSnapshot& s, gc::PlayerId local,
@@ -104,6 +105,127 @@ void overview_image_masking() {
         "presence-only enemy never gets an overview image");
     expect(source.canonical_bytes() == bytes && source.sha256() == hash,
         "overview projection changes no canonical bytes or state hash");
+}
+// #6745: the hero-first marker counts a named hero carried inside another ship, ranks foreign fleets the same way and
+// never counts a carried generic hero (the original's helper asks each ship whether it holds a NAMED hero).
+void overview_hero() {
+    gc::PlanetKnowledge k; k.fleet_presence = k.fleet_count = true;
+    const std::array<gc::FleetDisplayVisibility, 1> sight{{{10, true}}};
+    // Rank 5 for the named hero 200, rank 1 for the generic hero 300 (traits(): 300 is not a named hero).
+    const auto rank = [](gc::TypeId type) -> std::optional<std::int64_t> {
+        if (type == 200) return 5;
+        if (type == 300) return 1;
+        return std::nullopt;
+    };
+    const auto health = [](gc::TypeId type) -> std::optional<std::uint32_t> {
+        if (type == 100) return 10;
+        return std::nullopt;
+    };
+    const auto run = [&](std::vector<gc::Fleet> fleets, std::vector<gc::MovementContents> contents, bool with_rank) {
+        auto movement = std::make_shared<gc::MovementSetup>();
+        movement->contents = std::move(contents);
+        const auto source = snapshot(k, true, 2, 2, {}, std::move(fleets), {}, movement);
+        return gc::observed_fleets(source, 1, traits(), 8, sight, health, {}, with_rank ? std::function(rank)
+            : std::function<std::optional<std::int64_t>(gc::TypeId)>{});
+    };
+    const auto enemy = [](const gc::FleetIntelligence& result) -> const gc::ObservedFleet* {
+        for (const auto& card : result.cards) if (card.owner == 2) return &card;
+        return nullptr;
+    };
+    const std::vector<gc::Fleet> plain{{1, 1, 10, {{11, 100}}}, {2, 2, 10, {{21, 100}, {22, 100}}}};
+    // A named hero carried in a ship of the foreign fleet wins its overview image.
+    const auto carried = run(plain, {{22, {{50, 200}}}}, true);
+    expect(enemy(carried) && enemy(carried)->overview_hero_type == 200, "a carried named hero is the foreign fleet's hero image");
+    expect(enemy(carried)->overview_type == 100, "the health-ranked overview image is unchanged beside it");
+    // A carried generic hero is not counted, even with the lower rank.
+    const auto generic = run(plain, {{22, {{51, 300}}}}, true);
+    expect(enemy(generic) && !enemy(generic)->overview_hero_type, "a carried generic hero never wins the hero image");
+    // The same generic hero flying on its own is counted, and the lowest rank wins against the carried named hero.
+    const std::vector<gc::Fleet> own{{1, 1, 10, {{11, 100}}}, {2, 2, 10, {{21, 100}, {22, 100}, {23, 300}}}};
+    const auto lowest = run(own, {{22, {{50, 200}}}}, true);
+    expect(enemy(lowest) && enemy(lowest)->overview_hero_type == 300, "the lowest category ranking wins among direct and carried heroes");
+    // Equal ranks keep the first member (strict less-than).
+    const auto equal_rank = [&](gc::TypeId) { return std::optional<std::int64_t>{1}; };
+    const std::vector<gc::Fleet> twin{{1, 1, 10, {{11, 100}}}, {2, 2, 10, {{21, 200}, {22, 300}, {23, 100}}}};
+    auto movement = std::make_shared<gc::MovementSetup>();
+    const auto tie = gc::observed_fleets(snapshot(k, true, 2, 2, {}, twin, {}, movement), 1, traits(), 8, sight, health, {},
+        [&](gc::TypeId type) { return type == 200 || type == 300 ? equal_rank(type) : std::nullopt; });
+    expect(enemy(tie) && enemy(tie)->overview_hero_type == 200, "a tie keeps the first hero");
+    // Without a rank function nothing is published.
+    const auto none = run(plain, {{22, {{50, 200}}}}, false);
+    expect(enemy(none) && !enemy(none)->overview_hero_type, "no hero rank supplied: no hero image published");
+    // A named hero flying on its own is the hero image (foreign card).
+    const std::vector<gc::Fleet> solo{{1, 1, 10, {{11, 100}}}, {2, 2, 10, {{21, 100}, {22, 200}}}};
+    const auto flying = run(solo, {}, true);
+    expect(enemy(flying) && enemy(flying)->overview_hero_type == 200, "a named hero flying alone is the hero image");
+    // The same two rules hold on the local player's own card.
+    const auto own_card = [](const gc::FleetIntelligence& result) -> const gc::ObservedFleet* {
+        for (const auto& card : result.cards) if (card.owner == 1) return &card;
+        return nullptr;
+    };
+    const std::vector<gc::Fleet> mine_solo{{1, 1, 10, {{11, 100}, {12, 200}}}, {2, 2, 10, {{21, 100}}}};
+    const auto mine_flying = run(mine_solo, {}, true);
+    expect(own_card(mine_flying) && own_card(mine_flying)->overview_hero_type == 200, "own fleet: a named hero flying alone is the hero image");
+    const std::vector<gc::Fleet> mine_carried{{1, 1, 10, {{11, 100}, {12, 100}}}, {2, 2, 10, {{21, 100}}}};
+    const auto mine_carrying = run(mine_carried, {{12, {{52, 200}}}}, true);
+    expect(own_card(mine_carrying) && own_card(mine_carrying)->overview_hero_type == 200, "own fleet: a carried named hero is the hero image");
+    const auto mine_generic = run(mine_carried, {{12, {{53, 300}}}}, true);
+    expect(own_card(mine_generic) && !own_card(mine_generic)->overview_hero_type, "own fleet: a carried generic hero never counts");
+    // A named-hero ship counts as itself; what it carries is not examined (a carried generic hero ranks lower here).
+    const auto carrier_hero = run(solo, {{22, {{54, 300}}}}, true);
+    expect(enemy(carrier_hero) && enemy(carrier_hero)->overview_hero_type == 200, "a named hero carrying a generic hero counts as itself");
+}
+// #4375 / WGSI-1..4: which named heroes the planet's overview icons see.
+void planet_heroes() {
+    const std::array<gc::FleetDisplayVisibility, 1> sight{{{10, true}}};
+    const auto heroes = [&](const gc::PlanetKnowledge& k, std::vector<gc::Fleet> fleets, std::vector<gc::MovementContents> contents = {},
+                            std::vector<gc::ObserverLandedTransport> landed = {},
+                            std::shared_ptr<const std::vector<gc::CensusObject>> actors = {}) {
+        auto movement = std::make_shared<gc::MovementSetup>();
+        movement->contents = std::move(contents);
+        return gc::observed_planet_heroes(snapshot(k, true, 2, 2, std::move(actors), std::move(fleets), {}, movement, std::move(landed)),
+            1, traits(), sight);
+    };
+    gc::PlanetKnowledge k; k.fleet_presence = k.fleet_count = k.fleet_contents = true;
+    // An allied hero carried inside one of the local player's ships sets the ally flag and its owner.
+    const auto mine = heroes(k, {{1, 1, 10, {{11, 100}}}, {2, 2, 10, {{21, 100}}}}, {{11, {{50, 200}}}});
+    expect(mine.size() == 1 && mine[0].ally && !mine[0].foreign && mine[0].owners == std::vector<gc::PlayerId>{1},
+        "an allied carried named hero sets the ally flag and its owner");
+    // The hover tooltip lists the hero itself (WGSI-8/9, legacy #7177).
+    expect(mine[0].heroes == std::vector<gc::ObservedPlanetHero>{{1, 200, true}}, "the tooltip lists the allied carried hero");
+    // A stealth hero of a foreign fleet is hidden without major-stealth knowledge, and sets nothing.
+    const std::vector<gc::Fleet> foreign{{1, 1, 10, {{11, 100}}}, {2, 2, 10, {{21, 100}, {22, 200}}}};
+    expect(heroes(k, foreign).empty(), "a stealth foreign hero without major-stealth knowledge sets nothing");
+    k.major_stealth = true;
+    const auto seen = heroes(k, foreign);
+    expect(seen.size() == 1 && !seen[0].ally && seen[0].foreign && seen[0].owners == std::vector<gc::PlayerId>{2},
+        "a visible foreign named hero sets the foreign flag and its owner");
+    expect(seen[0].heroes == std::vector<gc::ObservedPlanetHero>{{2, 200, false}}, "the tooltip lists the visible foreign hero");
+    // A generic hero never counts.
+    expect(heroes(k, {{1, 1, 10, {{11, 100}}}, {2, 2, 10, {{21, 300}}}}).empty(), "a generic hero sets nothing");
+    // No knowledge of the foreign fleet's contents: the hero stays unseen.
+    gc::PlanetKnowledge blind; blind.fleet_presence = true;
+    expect(heroes(blind, foreign).empty(), "an unknown foreign hero sets nothing");
+    // Landed forces: the owner is set whatever the hero's own visibility, but only under ground knowledge.
+    auto records = std::make_shared<std::vector<gc::CensusObject>>();
+    gc::CensusObject company; company.id = 61; company.original_type = 200; company.current_type = 200;
+    company.combat_role = gc::ActorCombatRole::ordinary; records->push_back(company);
+    const std::vector<gc::ObserverLandedTransport> landed{{61, 2, false, false}};
+    gc::PlanetKnowledge ground; ground.ground_contents = true;
+    const auto quirk = heroes(ground, {{1, 1, 10, {{11, 100}}}}, {}, landed, records);
+    expect(quirk.size() == 1 && !quirk[0].ally && !quirk[0].foreign && quirk[0].owners == std::vector<gc::PlayerId>{2},
+        "a landed stealth hero marks its owner under ground contents but is not itself seen");
+    expect(quirk[0].heroes.empty(), "a landed hero that only marks its owner is not listed in the tooltip");
+    gc::PlanetKnowledge none;
+    expect(heroes(none, {{1, 1, 10, {{11, 100}}}}, {}, landed, records).empty(), "no ground knowledge: landed heroes are not scanned");
+    ground.major_stealth = true;
+    const auto landed_seen = heroes(ground, {{1, 1, 10, {{11, 100}}}}, {}, landed, records);
+    expect(landed_seen.size() == 1 && landed_seen[0].foreign, "major-stealth knowledge admits the landed foreign hero");
+    expect(landed_seen[0].heroes == std::vector<gc::ObservedPlanetHero>{{2, 200, false}}, "the admitted landed hero is listed");
+    // Two heroes on one planet are both listed, in the order found (orbiting fleets before landed forces).
+    const auto both = heroes(ground, {{1, 1, 10, {{11, 100}}}}, {{11, {{50, 200}}}}, landed, records);
+    expect(both.size() == 1 && both[0].heroes.size() == 2 && both[0].heroes[0] == gc::ObservedPlanetHero{1, 200, true}
+        && both[0].heroes[1] == gc::ObservedPlanetHero{2, 200, false}, "an orbiting allied and a landed foreign hero are both listed");
 }
 void live_actor_masking() {
     gc::PlanetKnowledge k; k.fleet_presence = k.fleet_count = k.fleet_contents = true;
@@ -379,7 +501,7 @@ void scale_digest() {
     expect(!result.cards.empty(), "the scale projection publishes cards");
 }
 int case_galactic_fleet_intelligence_tests() {
-    try { masking(); overview_image_masking(); live_actor_masking(); strongest_and_capacity(); slot_merge(); company_true_type(); worker_parity(); delayed_sight(); gui_index_projection(); duplicate_rows_keep_first(); scale_digest(); }
+    try { masking(); overview_image_masking(); overview_hero(); planet_heroes(); live_actor_masking(); strongest_and_capacity(); slot_merge(); company_true_type(); worker_parity(); delayed_sight(); gui_index_projection(); duplicate_rows_keep_first(); scale_digest(); }
     catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

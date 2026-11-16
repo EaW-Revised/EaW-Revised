@@ -7,10 +7,12 @@
 #include "capture_viewport.hpp"
 #include "fog_mode.hpp"
 #include "space_fog_units.hpp"
+#include "sky_additive.hpp"
 #include "space_populate.hpp"
 #include "idle_clips.hpp"
 
 #include "eawr/core/diagnostic.hpp"
+#include "eawr/presentation/animation/degraded_clips.hpp"
 #include "eawr/presentation/camera/constants_source.hpp"
 #include "eawr/presentation/camera/overview.hpp"
 #include "eawr/presentation/godot/renderer.hpp"
@@ -41,6 +43,10 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <memory>
+#include <set>
+#include <span>
 #include <deque>
 #include <fstream>
 #include <iomanip>
@@ -82,8 +88,7 @@ inline constexpr std::size_t lifecycle_cycles = 3;
 
 [[nodiscard]] std::vector<MaterialBinding> meshgloss_bindings(
     const space::MeshGlossMaterial& material, const space::SkyLightPolicy& policy);
-[[nodiscard]] std::vector<MaterialBinding> meshadditive_bindings(
-    const space::MeshAdditiveMaterial& material, const space::MeshAdditiveInputs& inputs);
+using sky_additive::meshadditive_bindings;
 struct AdditiveControl;
 [[nodiscard]] space::SkyLightPolicy light_probe_policy();
 [[nodiscard]] AdditiveControl parse_additive_control(std::string_view control);
@@ -97,6 +102,8 @@ struct AdditiveControl;
 [[nodiscard]] std::optional<std::string> probe_reference(
     const vfs::Vfs& filesystem, std::string_view root,
     std::string_view name, std::span<const std::string_view> suffixes);
+[[nodiscard]] std::optional<std::string> probe_texture(
+    const vfs::Vfs& filesystem, std::string_view root, std::string_view name);
 [[nodiscard]] std::optional<space::Rgb8Image> rgb_of(const std::vector<std::byte>& png);
 [[nodiscard]] std::string write_file(const std::filesystem::path& path, std::span<const std::byte> bytes);
 [[nodiscard]] tactical::TacticalFrame tactical_frame(const FixedCamera& source);
@@ -180,46 +187,9 @@ void fragment() {
 }
 )GODOT";
 
-// Clean-room modern_spatial adapter for eawr-space-sky-meshadditive-t0-v1: the
-// MeshAdditive t0/t0_p0 arithmetic of docs/behaviour/meshadditive-sun-billboard.md
-// A-02..A-10 for a non-billboard surface, fed with the surface's authored Color
-// and UVScrollRate and the declared TIME and LIGHT_SCALE inputs under names no
-// engine clock or scene light writes (Godot's TIME is not read). Declared
-// state policy space-sky-meshadditive-state-v1: ONE/ONE additive rgb
-// (blend_add with fragment alpha kept at 1), no depth write, the engine depth
-// test, fog disabled, the sky preview's cull_disabled. Texels are sampled
-// without sRGB decode and the product is written as a stored value (the
-// stored-value output of docs/rendering.md; the Compatibility fallback
-// compensates its ALBEDO round trip), so the arithmetic and the blend act on
-// stored values.
-constexpr std::string_view meshadditive_sky_shader = R"GODOT(
-shader_type spatial;
-render_mode unshaded, fog_disabled, cull_disabled, depth_draw_never, blend_add;
-uniform sampler2D BaseTexture : filter_linear_mipmap, repeat_enable;
-uniform vec4 Color;
-uniform vec4 UVScrollRate;
-uniform float eawr_sky_time;
-uniform vec4 eawr_sky_light_scale;
-varying vec2 eawr_scrolled_uv;
-varying vec3 eawr_vertex_color;
-
-void vertex() {
-    // Unwrapped; the sampler's repeat addressing wraps it per sample.
-    eawr_scrolled_uv = UV + eawr_sky_time * UVScrollRate.xy;
-    eawr_vertex_color = clamp(Color.rgb * eawr_sky_light_scale.rgb * eawr_sky_light_scale.a, 0.0, 1.0);
-}
-
-// ALBEDO under the stored-value output (docs/rendering.md, colour policy);
-// the Compatibility fallback compiles compatibility_albedo_writer instead.
-vec3 eawr_stored_albedo(vec3 stored_rgb) {
-    return stored_rgb;
-}
-
-void fragment() {
-    vec3 stored_rgb = eawr_vertex_color * texture(BaseTexture, eawr_scrolled_uv).rgb;
-    ALBEDO = eawr_stored_albedo(stored_rgb);
-}
-)GODOT";
+// The MeshAdditive adapter (shader text, program choice, bindings) is shared with
+// the land sky: sky_additive.hpp.
+using sky_additive::meshadditive_sky_shader;
 
 // Skydome.fx on a space sky object (Sky_Bespin_00 is the stock one): the sky's
 // BaseTexture drawn unlit from inside the dome. The authored cloud layer
@@ -261,7 +231,6 @@ struct AdditiveControl final {
 constexpr sim::AssetId occluder_asset = 1000;
 constexpr sim::EntityId occluder_entity = 1000;
 
-constexpr std::array<std::string_view, 2> texture_suffixes{".tga", ".dds"};
 constexpr std::array<std::string_view, 1> model_suffixes{".alo"};
 
 // Declared duration of the terminal probe step: a test constant, not an
@@ -342,6 +311,9 @@ public:
         movie_fov_ = fov;
         if (locked_view_) locked_frame_.vertical_fov_degrees = fov.value_or(locked_default_fov_);
     }
+    // FS-R09: the cinematic camera's own clip distances (the Unlocked definition's), applied while the movie camera
+    // owns the view; cleared with it.
+    void movie_clip(std::optional<std::pair<float, float>> clip) noexcept { movie_clip_ = clip; }
     [[nodiscard]] bool battlecam_key(const viewer::camera_input::RawEvent& event) const noexcept {
         return bridge_ && bridge_->cinematic_key(event, viewer::camera_input::Action::battlecam);
     }
@@ -424,6 +396,11 @@ private:
         for (const sim::AssetId asset : assets_) static_cast<void>(renderer_->release(asset));
         assets_.clear();
     }
+    // The snapshot of instances_ without the hidden instances.
+    [[nodiscard]] std::shared_ptr<const sim::RenderSnapshot> make_snapshot() const;
+    // TSW-15: stops drawing the listed environment records; true when one that was shown is now hidden. A record the
+    // environment view does not draw (an ordinary scene prop) is ignored here.
+    bool hide_records(std::span<const std::uint32_t> records);
     [[nodiscard]] bool initialize_idle();
     [[nodiscard]] bool bind_idle(const scene::Placement& placement, const assets::Model& model,
                                  const vfs::Vfs& filesystem, Placed& placed);
@@ -454,6 +431,7 @@ private:
     std::array<float, 3> movie_target_{};
     std::array<float, 3> movie_eye_{};
     std::optional<float> movie_fov_;
+    std::optional<std::pair<float, float>> movie_clip_;
     std::string overview_status_{"unavailable"};
     std::chrono::steady_clock::time_point overview_clock_{std::chrono::steady_clock::now()};
     std::string camera_source_{"default"};
@@ -475,6 +453,10 @@ private:
     std::vector<EnvironmentIdle> environment_idle_;
     std::vector<sim::RenderInstance> instances_;
     std::vector<std::pair<std::size_t, space::Affine>> sky_instances_;
+    // TSW-15: the instances of each environment-drawn map record, and the ones a destroyed record no longer shows.
+    // An instance is dropped from the submitted snapshot, never from instances_ (the sky indices stay valid).
+    std::map<std::uint32_t, std::vector<std::size_t>> record_instances_;
+    std::set<std::size_t> hidden_instances_;
     // Planet and Nebula surfaces: their eawr_effect_time follows the effect
     // clock (#185), set when its tick changes.
     std::vector<sim::AssetId> effect_clock_assets_;
@@ -484,6 +466,20 @@ private:
     std::size_t populate_first_{};
     // Mid-run captures of a live population: file name and PNG SHA-256.
     std::vector<std::pair<std::string, std::string>> live_captures_;
+    // --eawr-space-sweep (evidence only, #6972): turn rate, frame count, rows kept, and per captured frame the
+    // requested yaw and the steady-clock time it was read back.
+    struct Sweep final {
+        double degrees_per_frame{};
+        std::uint32_t frames{};
+        std::uint32_t row0{};
+        std::uint32_t row1{};
+        FixedCamera base{};
+        std::vector<std::pair<double, double>> samples;
+        std::chrono::steady_clock::time_point start{};
+    };
+    static constexpr std::uint32_t sweep_hold_frames = 6;
+    std::optional<Sweep> sweep_;
+    [[nodiscard]] bool parse_sweep();
     double clock_seconds_{};
     std::optional<SpacePopulateResult> populate_result_;
     bool effects_released_{};
@@ -503,6 +499,8 @@ private:
     std::string catalog_failure_;
     std::string status_{"failed"};
     std::string failure_;
+    // ASD-01: clips already reported as degraded, so a clip shared by many placements writes one load note.
+    animation::DegradedClips degraded_clips_;
 };
 
 } // namespace space_environment_detail

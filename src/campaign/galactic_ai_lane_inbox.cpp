@@ -3,6 +3,7 @@
 #include "eawr/script/foc/galactic_ai_state.hpp"
 
 #include <algorithm>
+#include <tuple>
 #include <iterator>
 #include <limits>
 #include <string>
@@ -17,9 +18,9 @@ using Change = gc::GalacticSession::NativeActorChange;
 
 // A block written after the saved outbox; the tag tells it from trailing garbage.
 constexpr std::string_view block_tag = "eawr-gcai-lane-inbox";
-constexpr std::uint64_t block_version = 2; // v2 (#6378): actor changes carry the AI-usage writes
+constexpr std::uint64_t block_version = 4; // v2 (#6378): actor changes carry the AI-usage writes; v3 (#6917): control-switch entries; v4 (async step 2b): refusal consequences
 constexpr std::uint64_t max_entries = std::uint64_t{1} << 20;
-enum class Kind : std::uint64_t { production_outcome = 1, movement_event = 2, actor_changes = 3, battle = 4, credit = 5, bill = 6 };
+enum class Kind : std::uint64_t { production_outcome = 1, movement_event = 2, actor_changes = 3, battle = 4, credit = 5, bill = 6, type_switch = 7, refusal = 8 };
 
 template<class T> core::Result<T> fail(std::string message) {
     core::Diagnostic error; error.code = "EAWR-GCAI-ASYNC-0002";
@@ -157,7 +158,7 @@ GalacticAiRecordedBill decode_bill(Reader& in) {
 } // namespace
 
 void GalacticAiLaneInbox::encode(std::vector<std::uint8_t>& bytes) const {
-    if (entries_.empty()) return;
+    if (entries_.empty() && applied_types_.empty()) return;
     put(bytes, block_tag.size()); bytes.insert(bytes.end(), block_tag.begin(), block_tag.end());
     put(bytes, block_version); put(bytes, entries_.size());
     for (const auto& entry : entries_) {
@@ -169,6 +170,16 @@ void GalacticAiLaneInbox::encode(std::vector<std::uint8_t>& bytes) const {
         }
         if (const auto* bill = std::get_if<GalacticAiRecordedBill>(&entry)) {
             put(bytes, static_cast<std::uint64_t>(Kind::bill)); encode_bill(bytes, *bill); continue;
+        }
+        if (const auto* refusal = std::get_if<ga::refusal::Consequence>(&entry)) {
+            put(bytes, static_cast<std::uint64_t>(Kind::refusal)); put(bytes, static_cast<std::uint64_t>(refusal->kind));
+            put(bytes, refusal->player); put(bytes, refusal->id);
+            put(bytes, refusal->requests.size()); for (const auto request : refusal->requests) put(bytes, request);
+            continue;
+        }
+        if (const auto* change = std::get_if<GalacticAiTypeSwitch>(&entry)) {
+            put(bytes, static_cast<std::uint64_t>(Kind::type_switch)); put(bytes, change->player);
+            put(bytes, change->type.size()); bytes.insert(bytes.end(), change->type.begin(), change->type.end()); continue;
         }
         const auto& delivery = std::get<ga::NativeActions::Delivery>(entry);
         if (const auto* outcome = std::get_if<gc::GalacticSession::NativeProductionOutcome>(&delivery)) {
@@ -191,16 +202,21 @@ void GalacticAiLaneInbox::encode(std::vector<std::uint8_t>& bytes) const {
             for (const auto& [actor, facts] : changes.facts) ga::encode_freestore_facts(bytes, actor, facts);
         }
     }
+    put(bytes, applied_types_.size());
+    for (const auto& [player, type] : applied_types_) {
+        put(bytes, player); put(bytes, type.size()); bytes.insert(bytes.end(), type.begin(), type.end());
+    }
 }
 
 core::Result<std::size_t> GalacticAiLaneInbox::restore_prefix(std::span<const std::uint8_t> bytes) {
     std::vector<Entry> staged;
+    std::map<gc::PlayerId, std::string> applied;
     std::size_t used{};
     {
         Reader probe{bytes};
         const bool ours = probe.word() == block_tag.size() && !probe.bad && bytes.size() - probe.at >= block_tag.size()
             && std::equal(block_tag.begin(), block_tag.end(), bytes.begin() + static_cast<std::ptrdiff_t>(probe.at));
-        if (!ours) { entries_.clear(); ++generation_; return core::Result<std::size_t>::success(0); }
+        if (!ours) { entries_.clear(); applied_types_.clear(); ++generation_; return core::Result<std::size_t>::success(0); }
     }
     {
         Reader in{bytes};
@@ -208,7 +224,7 @@ core::Result<std::size_t> GalacticAiLaneInbox::restore_prefix(std::span<const st
         in.at += block_tag.size();
         if (in.word() != block_version) return fail<std::size_t>("unsupported version");
         const auto count = in.word();
-        if (in.bad || !count || count > max_entries) return fail<std::size_t>("entry count is invalid");
+        if (in.bad || count > max_entries) return fail<std::size_t>("entry count is invalid");
         for (std::uint64_t i = 0; i < count && !in.bad; ++i) {
             const auto kind = in.word();
             if (kind == static_cast<std::uint64_t>(Kind::battle)) {
@@ -219,6 +235,24 @@ core::Result<std::size_t> GalacticAiLaneInbox::restore_prefix(std::span<const st
                 staged.emplace_back(decode_credit(in));
             } else if (kind == static_cast<std::uint64_t>(Kind::bill)) {
                 staged.emplace_back(decode_bill(in));
+            } else if (kind == static_cast<std::uint64_t>(Kind::refusal)) {
+                ga::refusal::Consequence refusal;
+                const auto refusal_kind = in.word();
+                if (refusal_kind > static_cast<std::uint64_t>(ga::refusal::Consequence::Kind::purchase)) in.bad = true;
+                refusal.kind = static_cast<ga::refusal::Consequence::Kind>(refusal_kind);
+                refusal.player = in.narrow<gc::PlayerId>(in.word()); refusal.id = in.word();
+                const auto requests = in.count(8);
+                for (std::uint64_t row = 0; row < requests && !in.bad; ++row) refusal.requests.push_back(in.word());
+                if ((refusal.kind == ga::refusal::Consequence::Kind::movement) != !refusal.requests.empty()) in.bad = true;
+                staged.emplace_back(std::move(refusal));
+            } else if (kind == static_cast<std::uint64_t>(Kind::type_switch)) {
+                GalacticAiTypeSwitch change;
+                change.player = in.narrow<gc::PlayerId>(in.word());
+                const auto size = in.count(1);
+                if (!change.player || in.bad) return fail<std::size_t>("control-switch entry is invalid");
+                change.type.assign(reinterpret_cast<const char*>(bytes.data()) + in.at, static_cast<std::size_t>(size));
+                in.at += static_cast<std::size_t>(size);
+                staged.emplace_back(std::move(change));
             } else if (kind == static_cast<std::uint64_t>(Kind::production_outcome)) {
                 gc::GalacticSession::NativeProductionOutcome outcome;
                 outcome.player = in.narrow<gc::PlayerId>(in.word()); outcome.build = in.word(); outcome.object = in.word();
@@ -258,10 +292,20 @@ core::Result<std::size_t> GalacticAiLaneInbox::restore_prefix(std::span<const st
                 staged.emplace_back(ga::NativeActions::Delivery{std::move(changes)});
             } else return fail<std::size_t>("unknown entry kind");
         }
-        if (in.bad) return fail<std::size_t>("entry framing is invalid");
+        const auto types = in.count(16);
+        gc::PlayerId previous{};
+        for (std::uint64_t i = 0; i < types && !in.bad; ++i) {
+            const auto player = in.narrow<gc::PlayerId>(in.word());
+            const auto size = in.count(1);
+            if (!player || player <= previous || in.bad) return fail<std::size_t>("control-switch record is invalid");
+            previous = player;
+            applied.insert_or_assign(player, std::string(reinterpret_cast<const char*>(bytes.data()) + in.at, static_cast<std::size_t>(size)));
+            in.at += static_cast<std::size_t>(size);
+        }
+        if (in.bad || (staged.empty() && applied.empty())) return fail<std::size_t>("entry framing is invalid");
         used = in.at;
     }
-    entries_ = std::move(staged); ++generation_;
+    entries_ = std::move(staged); applied_types_ = std::move(applied); ++generation_;
     return core::Result<std::size_t>::success(used);
 }
 core::Result<void> GalacticAiLaneInbox::restore(std::span<const std::uint8_t> bytes) {
@@ -283,6 +327,9 @@ constexpr std::string_view view_tag = "eawr-gcai-billing-view";
 constexpr std::uint64_t view_version = 4; // v2 (W1 S4): AI digests; v3 (W1 S6): story-plot commands, diagnostics, load notes; v4 (W1 S5): AI global writes
 constexpr std::string_view globals_tag = "eawr-gcai-story-globals";
 constexpr std::uint64_t globals_version = 1;
+constexpr std::string_view stage_losses_tag = "eawr-gcai-stage-losses";
+constexpr std::uint64_t stage_losses_version = 1; // v1 (#6337): actors lost by the async stage that the world has not applied yet
+constexpr std::uint64_t max_stage_losses = std::uint64_t{1} << 20;
 void put_scalar(std::vector<std::uint8_t>& bytes, const GalacticStoryGlobals::Scalar& scalar) {
     const auto text = [&](std::string_view value) { put(bytes, value.size()); bytes.insert(bytes.end(), value.begin(), value.end()); };
     if (const auto* number = std::get_if<script::numeric::LuaNumber>(&scalar)) { put(bytes, 0); put(bytes, number->repr); }
@@ -471,18 +518,29 @@ std::optional<core::Result<ga::BillDecision>> GalacticAiBillingView::bill(const 
 }
 core::Result<void> GalacticAiBillingView::credit(const Credit& notice) {
     LogEntry entry{next_sequence_, notice};
-    if (auto applied = replay(entry, ledgers_, rows_); !applied) return applied;
+    std::optional<core::Diagnostic> fault;
+    if (auto applied = replay(entry, ledgers_, rows_, &fault); !applied) return applied;
+    if (fault) if (const auto observer = fault_observer_.lock()) observer->isolated_fault(notice.player, *fault);
     log_.push_back(std::move(entry)); ++next_sequence_; ++generation_;
     return core::Result<void>::success();
 }
-core::Result<void> GalacticAiBillingView::replay(const LogEntry& entry, Ledgers& budgets, Rows& billing_rows) {
+core::Result<void> GalacticAiBillingView::replay(const LogEntry& entry, Ledgers& budgets, Rows& billing_rows,
+    std::optional<core::Diagnostic>* fault) {
     if (const auto* income = std::get_if<Credit>(&entry.entry)) {
         const auto found = budgets.find(income->player);
         if (found == budgets.end()) return core::Result<void>::success(); // not initialized yet: the AI ignores it too
         auto next = income->kind == Credit::Kind::windfall ? gc::funding::windfall(found->second, income->amount)
             : found->second.tactical.switched ? view_fail<gc::funding::Ledger>("parent fiscal service during a tactical credit switch")
             : gc::funding::fiscal(found->second, income->credits, income->amount, income->seconds);
-        if (!next) return core::Result<void>::failure(next.error());
+        if (!next) {
+            // CGS-19: a refused fiscal cycle of one AI player is that player's, never the session's. The entry stays logged and
+            // is skipped again by every replay, so a rebuilt view reaches the same ledger.
+            if (income->kind != Credit::Kind::windfall) {
+                if (fault) *fault = next.error();
+                return core::Result<void>::success();
+            }
+            return core::Result<void>::failure(next.error());
+        }
         found->second = std::move(next).value();
         return core::Result<void>::success();
     }
@@ -611,6 +669,7 @@ core::Result<std::size_t> GalacticAiBillingView::restore_prefix(std::span<const 
         used = in.at;
     }
     staged.generation_ = generation_ + 1;
+    staged.fault_observer_ = fault_observer_; // wiring, not state: a load keeps reporting refused cycles
     *this = std::move(staged);
     return core::Result<std::size_t>::success(used);
 }
@@ -716,6 +775,104 @@ core::Result<std::size_t> GalacticStoryGlobals::restore_prefix(std::span<const s
     }
     if (in.bad) return fail_globals("framing is invalid");
     active_ = true; values_ = std::move(staged); ++generation_;
+    return core::Result<std::size_t>::success(in.at);
+}
+
+void GalacticAiStageLosses::record(sim::EntityId actor, Source source) {
+    const auto at = losses_.find(actor);
+    if (at != losses_.end() && at->second == source) return;
+    journal_.emplace_back(actor, at != losses_.end() ? std::optional<Source>(at->second) : std::nullopt);
+    losses_[actor] = source; ++generation_;
+    while (losses_.size() > capacity_) {
+        auto oldest = losses_.begin();
+        for (auto at = losses_.begin(); at != losses_.end(); ++at) {
+            const auto key = std::tuple{at->second.snapshot_tick, at->second.virtual_tick, at->first};
+            if (key < std::tuple{oldest->second.snapshot_tick, oldest->second.virtual_tick, oldest->first}) oldest = at;
+        }
+        journal_.emplace_back(oldest->first, std::optional<Source>(oldest->second)); // an abandoned attempt gives the entry back
+        losses_.erase(oldest);
+    }
+}
+void GalacticAiStageLosses::abandon_batch() {
+    if (journal_.empty()) return;
+    for (auto at = journal_.rbegin(); at != journal_.rend(); ++at) {
+        if (at->second) losses_[at->first] = *at->second; else losses_.erase(at->first);
+    }
+    journal_.clear(); ++generation_;
+}
+std::vector<GalacticAiStageLosses::Change> GalacticAiStageLosses::rewrite(std::map<sim::EntityId, Source>& losses,
+    std::span<const Change> changes, const Pending& pending) {
+    std::vector<Change> out;
+    out.reserve(changes.size());
+    for (const auto& change : changes) {
+        const auto at = losses.find(change.actor);
+        if (at == losses.end()) { out.push_back(change); continue; }
+        if (change.kind == Change::Kind::lost) { losses.erase(at); out.push_back(change); continue; }
+        // A world birth of the same identity: the world makes the actor itself, the AI freestore lacks it, so the birth applies as sent.
+        if (change.kind == Change::Kind::created) { losses.erase(at); out.push_back(change); continue; }
+        // An AI-usage write alone changes no world row and reads no facts: the AI applies it to what it holds, if it holds the actor.
+        const bool usage_only = change.kind == Change::Kind::changed && (change.prevent_ai_usage || change.prefer_ground)
+            && !change.source && !change.dead && !change.deleting && !change.death_clone;
+        if (change.kind != Change::Kind::changed || usage_only) { out.push_back(change); continue; }
+        if (pending(at->second)) continue; // the loss lands later; its `lost` follows
+        auto born = change; born.kind = Change::Kind::created; // refused loss: the world kept the actor
+        born.prevent_ai_usage.reset(); born.prefer_ground.reset();
+        out.push_back(born);
+        if (change.prevent_ai_usage || change.prefer_ground) { // the AI-usage writes of the change apply to the reborn actor
+            Change usage; usage.kind = Change::Kind::changed; usage.actor = change.actor;
+            usage.prevent_ai_usage = change.prevent_ai_usage; usage.prefer_ground = change.prefer_ground;
+            out.push_back(usage);
+        }
+        losses.erase(at);
+    }
+    return out;
+}
+std::vector<GalacticAiStageLosses::Change> GalacticAiStageLosses::reconcile(std::span<const Change> changes, const Pending& pending) {
+    if (losses_.empty()) return {changes.begin(), changes.end()};
+    const auto before = losses_.size();
+    auto out = rewrite(losses_, changes, pending);
+    if (losses_.size() != before) ++generation_;
+    return out;
+}
+std::vector<GalacticAiStageLosses::Change> GalacticAiStageLosses::reconciled(std::span<const Change> changes, const Pending& pending) const {
+    if (losses_.empty()) return {changes.begin(), changes.end()};
+    auto copy = losses_;
+    return rewrite(copy, changes, pending);
+}
+void GalacticAiStageLosses::encode(std::vector<std::uint8_t>& bytes) const {
+    if (losses_.empty()) return;
+    put(bytes, stage_losses_tag.size()); bytes.insert(bytes.end(), stage_losses_tag.begin(), stage_losses_tag.end());
+    put(bytes, stage_losses_version);
+    put(bytes, losses_.size());
+    for (const auto& [actor, source] : losses_) { put(bytes, actor); put(bytes, source.snapshot_tick); put(bytes, source.virtual_tick); }
+}
+core::Result<std::size_t> GalacticAiStageLosses::restore_prefix(std::span<const std::uint8_t> bytes) {
+    const auto fail_losses = [](std::string message) {
+        core::Diagnostic error; error.code = "EAWR-GCAI-ASYNC-0005";
+        error.message = "galactic AI stage losses: " + std::move(message);
+        return core::Result<std::size_t>::failure(std::move(error));
+    };
+    bool ours{};
+    if (!bytes.empty()) {
+        Reader probe{bytes};
+        ours = probe.word() == stage_losses_tag.size() && !probe.bad && bytes.size() - probe.at >= stage_losses_tag.size()
+            && std::equal(stage_losses_tag.begin(), stage_losses_tag.end(), bytes.begin() + static_cast<std::ptrdiff_t>(probe.at));
+    }
+    if (!ours) { losses_.clear(); ++generation_; return core::Result<std::size_t>::success(0); }
+    Reader in{bytes};
+    in.word(); in.at += stage_losses_tag.size();
+    if (in.word() != stage_losses_version) return fail_losses("unsupported version");
+    std::map<sim::EntityId, Source> staged;
+    const auto count = in.count(24);
+    if (count == 0 || count > max_stage_losses) in.bad = true;
+    for (std::uint64_t i = 0; i < count && !in.bad; ++i) {
+        const auto actor = in.word();
+        Source source; source.snapshot_tick = in.word(); source.virtual_tick = in.narrow<std::uint32_t>(in.word());
+        if (!actor || source.virtual_tick == 0 || (!staged.empty() && actor <= staged.rbegin()->first)) in.bad = true;
+        staged.emplace_hint(staged.end(), actor, source);
+    }
+    if (in.bad) return fail_losses("framing is invalid");
+    losses_ = std::move(staged); ++generation_;
     return core::Result<std::size_t>::success(in.at);
 }
 } // namespace eawr::campaign

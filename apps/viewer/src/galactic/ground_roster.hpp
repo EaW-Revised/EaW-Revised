@@ -1,4 +1,5 @@
 #pragma once
+#include "land_tray_hud.hpp"
 #include "eawr/sim/galactic/observer.hpp"
 #include "eawr/sim/galactic/fleet_intelligence.hpp"
 #include "map_input.hpp"
@@ -161,39 +162,5 @@ inline GroundRoster ground_roster(const sim::galactic::GalacticSnapshot& snapsho
         }
     }
     return result;
-}
-// GPD-14: group locally controlled orbiting transports by disclosed type.
-inline constexpr std::size_t land_tray_slots = 20;
-[[nodiscard]] inline std::string land_tray_slot_name(const std::size_t slot) {
-    return std::string("land_fleet_") + (slot < 10 ? "0" : "") + std::to_string(slot);
-}
-inline constexpr bool land_tray_takes_pointer = false;
-[[nodiscard]] inline bool land_tray_enabled(bool owner, const std::optional<std::size_t>& count,
-    const std::optional<std::int64_t>& capacity) {
-    return owner && count && capacity && *capacity >= 0 && *count < static_cast<std::size_t>(*capacity);
-}
-struct LandTrayEntry {
-    sim::galactic::TypeId type{};
-    std::size_t count{};
-    bool enabled{};
-};
-[[nodiscard]] inline std::vector<LandTrayEntry> land_tray_entries(
-    const std::vector<sim::galactic::ObservedFleet>& cards, ObjectId planet, bool enabled) {
-    std::vector<LandTrayEntry> entries;
-    for (const auto& card : cards) {
-        if (!card.local || card.planet != planet || !card.orbit_slot || *card.orbit_slot > 2) continue;
-        for (const auto& group : card.groups) {
-            if (!group.transport || !group.type || !group.count) continue;
-            auto found = std::find_if(entries.begin(), entries.end(),
-                [&](const auto& entry) { return entry.type == *group.type; });
-            if (found != entries.end()) found->count += group.count;
-            else entries.push_back({*group.type, group.count, enabled});
-        }
-    }
-    if (entries.size() > land_tray_slots) entries.resize(land_tray_slots);
-    return entries;
-}
-[[nodiscard]] inline const LandTrayEntry* land_tray_entry(const std::vector<LandTrayEntry>& entries, std::size_t slot) {
-    return slot < entries.size() && slot < land_tray_slots ? &entries[slot] : nullptr;
 }
 } // namespace eawr::viewer::galactic

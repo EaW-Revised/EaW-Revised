@@ -1,4 +1,5 @@
 #include "gns_transport_signalling.hpp"
+#include "gns_link_stats.hpp"
 #include "gns_log_redact.hpp"
 
 #include <algorithm>
@@ -86,9 +87,28 @@ void gns_log_flush() {
 }
 
 #if EAWR_HAS_GNS
+std::string gns_recent_turn_servers() {
+    auto& log = gns_log();
+    const std::lock_guard lock(log.mutex);
+    const auto now = Clock::now();
+    std::string result;
+    for (auto it = log.turn_servers.begin(); it != log.turn_servers.end();) {
+        if (now - it->second > std::chrono::minutes(7)) { it = log.turn_servers.erase(it); continue; }
+        result += (result.empty() ? "" : ",") + it->first;
+        ++it;
+    }
+    return result;
+}
+
 void gns_spew(ESteamNetworkingSocketsDebugOutputType type, const char* text) {
     if (!text) return;
     const std::string_view line{text};
+    if (const auto server = turn_server_from_spew(line); !server.empty()) {
+        auto& log = gns_log();
+        const std::lock_guard lock(log.mutex);
+        if (log.turn_servers.size() >= 16 && !log.turn_servers.contains(server)) log.turn_servers.clear();
+        log.turn_servers[server] = Clock::now();
+    }
     if (type > k_ESteamNetworkingSocketsDebugOutputType_Warning && line.find("TURN") == std::string_view::npos
         && line.find("ICE") == std::string_view::npos) return;
     gns_log_push(gns_log().seat.load(), -1, line, type <= k_ESteamNetworkingSocketsDebugOutputType_Warning);
@@ -145,8 +165,11 @@ std::string_view turn_invalid_check(const GnsTurnCredentials& turn) {
     if (turn.username.empty()) return "user_empty";
     if (turn.password.empty()) return "cred_empty";
     if (!turn_uri_list(turn.uri)) return "uri_list";
-    if (turn.username.find(',') != std::string::npos) return "user_comma";
-    if (turn.password.find(',') != std::string::npos) return "cred_comma";
+    // The service may issue several providers: GNS takes one user and password per listed server.
+    const auto servers = split_commas(turn.uri).size();
+    std::vector<std::string> values;
+    if (!per_server_values(turn.username, servers, values)) return "user_list";
+    if (!per_server_values(turn.password, servers, values)) return "cred_list";
     if (turn.lifetime.count() <= 0) return "lifetime_nonpositive";
     return {};
 }

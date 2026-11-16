@@ -193,6 +193,7 @@ struct LifecycleRig final {
     std::vector<audio::EventQueue::Sample> starts;
     std::vector<audio::EventQueue::Chain> chains;
     bool missing{};
+    std::string only_present_sample;
     bool assets_ready{true};
     std::vector<audio::EventQueue::Sample> ready_checks;
     std::uint64_t stops{};
@@ -202,8 +203,9 @@ struct LifecycleRig final {
                 starts.push_back(cue);
                 auto start = voices.allocate(cue.request.voice, {}, cue.values);
                 if (start.result == Result::playing) {
-                    playing[start.voice] = !missing;
-                    if (missing) {
+                    const bool absent = missing || (!only_present_sample.empty() && cue.values.sample != only_present_sample);
+                    playing[start.voice] = !absent;
+                    if (absent) {
                         voices.finished(start.voice);
                         start.result = Result::no_samples;
                     }
@@ -223,6 +225,47 @@ struct LifecycleRig final {
     void pump(const int count) { for (int i = 0; i < count; ++i) step(); }
     void finish() { playing.fill(false); }
 };
+
+void gift_sample_variants() {
+    // SND-05/08: the same event queue serves selection and gift advisor samples.
+    for (const auto* voice : {"voice_a", "voice_b", "voice_c"}) {
+        LifecycleRig rig;
+        std::vector<std::string> problems;
+        rig.registry.add(voice, std::vector<audio::Field>{{"Is_2D", "Yes"}, {"Is_HUD_VO", "Yes"},
+            {"Localize", "Yes"}, {"Play_Sequentially", "Yes"}, {"Samples", "take1.wav take2.wav take3.wav take4.wav"}}, problems);
+        const auto* cue = rig.registry.find(voice);
+        expect(cue && problems.empty(), "four-take advisor XML parses");
+        if (!cue) continue;
+        expect(cue->probability == 100 && cue->play_count == 1, "ordinary advisor defaults never randomly suppress a take");
+        for (std::size_t index = 0; index < 8; ++index) {
+            const auto handle = rig.queue.admit({{cue, std::nullopt}}, rig.random).handle;
+            rig.pump(3);
+            expect(handle && rig.starts.size() == index + 1 && rig.voices.playing_count() == 1,
+                "each of four advisor takes starts without silence");
+            expect(rig.starts.back().values.sample == cue->samples[index % 4], "all four takes cycle in authored order");
+            rig.finish(); rig.pump(5);
+            expect(handle && !rig.queue.active(*handle), "one take finishes before the next advisor request");
+        }
+        // An incomplete install keeps one file; missing variants retire silently.
+        rig.only_present_sample = cue->samples.front();
+        for (std::size_t index = 0; index < 4; ++index) {
+            const auto handle = rig.queue.admit({{cue, std::nullopt}}, rig.random).handle;
+            rig.pump(3);
+            expect(rig.voices.playing_count() == (index == 0 ? 1U : 0U), "only the installed take sounds");
+            rig.finish(); rig.pump(5);
+            expect(handle && !rig.queue.active(*handle), "missing take retires without hanging the event");
+        }
+        auto single = *cue; single.samples.resize(1);
+        rig.only_present_sample.clear();
+        for (int index = 0; index < 3; ++index) {
+            const auto handle = rig.queue.admit({{&single, std::nullopt}}, rig.random).handle;
+            rig.pump(3);
+            expect(handle && rig.voices.playing_count() == 1 && rig.starts.back().values.sample == single.samples.front(),
+                "one-take advisor events remain playable");
+            rig.finish(); rig.pump(5);
+        }
+    }
+}
 
 void deferred_sample_readiness() {
     LifecycleRig rig;
@@ -732,6 +775,47 @@ void stream_selection_cache_and_diagnostics() {
         "empty maps have no phantom totals");
 }
 
+void project_distance_floor() {
+    // PA-01 / #5603: a stock 3D preset (saturation distance 1000) in stock space (1.5, 2.0): the law gives
+    // 0.652 at 1900 u, 0.176 at 5000 u and 0.091 at 9000 u; a -9 dB floor (0.3548) only bites past
+    // about 3000 u, where the law crosses it.
+    const audio::Space3D space{1.5, 2.0, 60.0};
+    std::vector<std::string> problems;
+    const std::vector<audio::Field> fields{{"Distance_Gain_Floor_Db", "-9"},
+        {"Distance_Gain_Floor_Event", "Unit_Ship_Hyperspace_Enter"},
+        {"Distance_Gain_Floor_Event", "Unit_Ship_Hyperspace_Exit"}};
+    const auto rules = audio::project_audio_rules(fields, problems);
+    const double floor = std::pow(10.0, -9.0 / 20.0);
+    expect(problems.empty() && near(rules.distance_gain_floor, floor), "floor parsed from decibels");
+    expect(near(rules.floor_for("unit_ship_hyperspace_enter"), floor)
+        && near(rules.floor_for("Unit_Ship_Hyperspace_Exit"), floor), "events the data marks carry the floor, any case");
+    expect(rules.floor_for("Unit_Some_Other_Event") == 0.0, "an event the data does not mark has no floor");
+    // The data alone decides which events carry it: another list moves the floor with no code change.
+    const auto moved = audio::project_audio_rules(std::vector<audio::Field>{{"Distance_Gain_Floor_Db", "-9"},
+        {"Distance_Gain_Floor_Event", "Mod_Own_Arrival_Event"}}, problems);
+    expect(near(moved.floor_for("Mod_Own_Arrival_Event"), floor) && moved.floor_for("Unit_Ship_Hyperspace_Enter") == 0.0
+        && problems.empty(), "a different data list marks a different event and unmarks the stock ones");
+    const double near_law = audio::falloff_gain(1900.0, 1000.0, space);
+    expect(near(audio::falloff_gain(1900.0, 1000.0, space, floor), near_law) && near_law > floor,
+        "1900 u: the law is above the floor and unchanged");
+    expect(audio::falloff_gain(5000.0, 1000.0, space) < floor
+        && near(audio::falloff_gain(5000.0, 1000.0, space, floor), floor), "5000 u: the floor holds the gain");
+    expect(audio::falloff_gain(9000.0, 1000.0, space) < 0.1
+        && near(audio::falloff_gain(9000.0, 1000.0, space, floor), floor), "9000 u: the floor holds the gain");
+    expect(near(audio::falloff_gain(9000.0, 1000.0, space, 0.0), audio::falloff_gain(9000.0, 1000.0, space)),
+        "no floor is the plain law");
+    // Stated rule (PA-01): BA-11's silence past the maximum distance does not apply to a marked cue.
+    expect(near(audio::falloff_gain(space.max_distance + 1.0, 1000.0, space), 0.0)
+        && near(audio::falloff_gain(space.max_distance + 1.0, 1000.0, space, floor), floor)
+        && near(audio::falloff_gain(20000.0, 1000.0, space, floor), floor),
+        "past the maximum distance the unmarked law is silent and the marked cue keeps the floor");
+    problems.clear();
+    const auto bad = audio::project_audio_rules(std::vector<audio::Field>{{"Distance_Gain_Floor_Db", "3"},
+        {"Distance_Gain_Floor_Event", "Unit_Ship_Hyperspace_Enter"}}, problems);
+    expect(problems.size() == 1 && bad.distance_gain_floor == 0.0 && bad.floor_for("Unit_Ship_Hyperspace_Enter") == 0.0,
+        "a floor above 0 dB is refused and leaves no floor");
+}
+
 void falloff_and_listener() {
     const audio::Space3D space{1.5, 2.0, 60.0};
     // Minimum distance 300 * 1.5 = 450: full volume inside, then min / (min + 2 (d - min)).
@@ -1034,7 +1118,7 @@ void music() {
     // 348 quiet ticks since the attack at i = 100; 102 more reach the 450 of peace.
     for (int i = 0; i < 110; ++i) cue = director.tick(false, random);
     expect(director.mode() == audio::MusicDirector::Mode::ambient, "peace returns to ambient");
-    cue = director.track_ended();
+    cue = director.track_ended(random);
     expect(cue && cue->file == "Imperial_Attack_1.MP3", "ambient continues with its next file");
     cue = director.tick(true, random);
     expect(cue && cue->file == "B.MP3", "battle resumes where it stopped");
@@ -1061,6 +1145,61 @@ void music() {
     expect(cue && cue->file == "Lose.MP3" && cue->mode == audio::MusicDirector::Mode::defeat, "other winner selects lose");
     expect(!director.result(true, nullptr) && director.mode() == audio::MusicDirector::Mode::defeat,
            "blank selection preserves prior music mode");
+
+    // BA-46: the super weapon's activation music, then the faction's super weapon battle music for good.
+    {
+        const auto activation = audio::parse_music_event("Activate", std::vector<Field>{{"Files", "Alderaan.MP3"}, {"Loop", " No "}});
+        const auto deathstar = audio::parse_music_event("DeathStar",
+            std::vector<Field>{{"Files", "Yavin.MP3, Trap.MP3"}, {"Loop", "Yes"}});
+        audio::Random sw_random(5);
+        audio::MusicDirector sw({&ambient}, {&battle}, 450);
+        static_cast<void>(sw.begin(sw_random));
+        expect(!sw.superweapon(nullptr, &deathstar) && sw.mode() == audio::MusicDirector::Mode::ambient,
+               "a missing activation event leaves the music alone");
+        auto started = sw.superweapon(&activation, &deathstar);
+        expect(started && started->file == "Alderaan.MP3" && started->mode == audio::MusicDirector::Mode::superweapon
+                   && sw.mode() == audio::MusicDirector::Mode::superweapon,
+               "the activation event starts the super weapon mode");
+        expect(!sw.superweapon(&activation, &deathstar), "a second activation does not restart");
+        expect(!sw.tick(true, sw_random), "a shot does not leave the super weapon mode");
+        for (int i = 0; i < 600; ++i) expect(!sw.tick(false, sw_random), "the quiet count does not end the super weapon mode");
+        auto next = sw.track_ended(sw_random);
+        expect(next && next->file == "Yavin.MP3" && sw.mode() == audio::MusicDirector::Mode::superweapon,
+               "the activation track's end starts the super weapon battle music");
+        next = sw.track_ended(sw_random);
+        expect(next && next->file == "Trap.MP3", "a looping battle event loops through its files");
+        expect(sw.result(true, &victory) && sw.mode() == audio::MusicDirector::Mode::victory, "a result still ends the mode");
+        expect(!sw.superweapon(&activation, &deathstar), "no super weapon music after the result");
+        // BA-46 exit: a super weapon battle track that does not loop is followed by the battle playlist, never silence.
+        const auto once = audio::parse_music_event("DeathStarOnce", std::vector<Field>{{"Files", "Once.MP3"}, {"Loop", "No"}});
+        audio::MusicDirector playlist({&ambient}, {&battle}, 450);
+        static_cast<void>(playlist.begin(sw_random));
+        static_cast<void>(playlist.superweapon(&activation, &once));
+        next = playlist.track_ended(sw_random);
+        expect(next && next->file == "Once.MP3", "the activation track is followed by the battle track");
+        for (int i = 0; i < 3; ++i) {
+            next = playlist.track_ended(sw_random);
+            expect(next && next->event == &battle && playlist.mode() == audio::MusicDirector::Mode::superweapon,
+                   "the battle track's end continues with the battle playlist, in the super weapon mode");
+        }
+        expect(!playlist.tick(true, sw_random) && !playlist.tick(false, sw_random), "the playlist does not release the mode");
+        // The same through a looping playlist event: it keeps looping its own files.
+        next = playlist.track_ended(sw_random);
+        expect(next && next->event == &battle, "a looping playlist event goes on");
+        // No battle event for the faction: straight to the playlist; no playlist either: the battle track repeats.
+        audio::MusicDirector no_event({&ambient}, {&battle}, 450);
+        static_cast<void>(no_event.superweapon(&activation, nullptr));
+        next = no_event.track_ended(sw_random);
+        expect(next && next->event == &battle, "no battle event: the playlist takes over after the activation track");
+        audio::MusicDirector no_list({&ambient}, {}, 450);
+        static_cast<void>(no_list.superweapon(&activation, &once));
+        static_cast<void>(no_list.track_ended(sw_random));
+        next = no_list.track_ended(sw_random);
+        expect(next && next->file == "Once.MP3", "no playlist: the battle track repeats instead of silence");
+        audio::MusicDirector nothing({&ambient}, {}, 450);
+        static_cast<void>(nothing.superweapon(&activation, nullptr));
+        expect(!nothing.track_ended(sw_random), "nothing to play at all: silent");
+    }
 
     audio::MusicFade fade;
     fade.begin(2.0);
@@ -1286,12 +1425,14 @@ int main() {
     health_warnings();
     hardpoint_loss();
     event_lifecycle();
+    gift_sample_variants();
     deferred_sample_readiness();
     stolen_event_completion();
     wave_files();
     sample_paths();
     stream_selection_cache_and_diagnostics();
     falloff_and_listener();
+    project_distance_floor();
     voice_rules();
     two_dimensional_pool();
     category_admission_and_gain();

@@ -53,8 +53,9 @@ Frame-rate limit and vsync stay under **Video**. See [player settings](../ui/ui-
 Owner request (legacy EAWR-5131) (2026-10-28) authorizes this convenience deviation, with no performance claim.
 Options > Performance enables it (default off); Options > Controls binds both actions independently.
 The defaults are physical Ctrl+Q (all own units) and Q (own units on screen). E, Shift+E,
-Shift+Q and Ctrl+E are reserved by the existing command/ability map. The editor offers Q,
-Ctrl+Q, Ctrl+U and Ctrl+Y, the verified free tactical chords, and rejects duplicate assignments.
+Shift+Q and Ctrl+E are reserved by the existing command/ability map. The Controls rows are press-to-bind
+(legacy EAWR-5131): any letter, alone or with Ctrl, that no command, camera-preset or ability chord holds, refusing
+duplicates; the dispatcher matches exactly that shape.
 The development land free camera owns its chords while active (space-map cameras reject free-flight bindings); these optional selection hotkeys are suspended until it exits. Modifiers match exactly; bindings and the toggle are local player preferences.
 
 Both land and space use the same live-snapshot collection, independent of render-node and fog

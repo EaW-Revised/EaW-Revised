@@ -312,6 +312,9 @@ int run(std::vector<fs::path> args) {
     const auto saved_notes = eawr::platform::write_load_notes(user, header, snapshot);
     if (saved_notes.failure)
         eawr::loadcheck::add(diagnostics, "EAWR-LOAD-0002", saved_notes.failure->message, Severity::warning);
+    // A per-session copy that could not be written (or a file a publish left behind) is a warning too.
+    for (const auto& leftover : saved_notes.leftovers)
+        eawr::loadcheck::add(diagnostics, "EAWR-LOAD-0002", leftover.message, Severity::warning);
     for (const auto& note : snapshot)
         std::cerr << eawr::core::format_diagnostic(eawr::core::load_note_diagnostic(note)) << '\n';
     const auto report = "{\"scope\":\"space-skirmish\",\"stage\":" + json_quote(stage) + ",\"ok\":" + (ok ? "true" : "false")

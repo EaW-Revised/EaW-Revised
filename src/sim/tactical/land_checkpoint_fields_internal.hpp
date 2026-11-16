@@ -11,9 +11,13 @@ template <> struct Fields<session_detail::LandCombatState> {
     template <class A, class T> static void apply(A& a, T& v) { a(v.targets); }
 };
 
+template <> struct Fields<session_detail::LandAbilityMotion> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.locomotor, v.deploy, v.jump_phase, v.jump_point, v.projectile, v.jump_frames, v.jump_speed, v.jump_position); }
+};
+
 template <> struct Fields<session_detail::LandLanding> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.sequence, v.owner, v.company, v.position, v.yaw, v.created_frame, v.finalize_frame, v.pool_token, v.seat.value);
+        a(v.sequence, v.owner, v.company, v.position, v.yaw, v.created_frame, v.finalize_frame, v.pool_token, v.seat.value, v.garrison);
     }
 };
 
@@ -120,7 +124,7 @@ template <> struct Fields<LandContact> {
         a(v.first, v.second, v.primary, v.route_actor, v.recorded_member, v.kind, v.state, v.search, v.route,
             v.score, v.terrain_target, v.first_speed_limit, v.second_speed_limit, v.deadlock_remaining,
             v.search_passes, v.first_progress, v.second_progress, v.charged_nodes, v.first_stopped,
-            v.second_stopped, v.search_succeeded, v.installed, v.motion_observed, v.escape_retry_pending,
+            v.second_stopped, v.search_succeeded, v.installed, v.motion_observed, v.retry_failed,
             v.retry_remaining);
     }
 };

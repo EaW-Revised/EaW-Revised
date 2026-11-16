@@ -332,6 +332,15 @@ private:
 DrainWorkers& drain_workers();
 void finish_io(std::unique_ptr<TerminalIo> io);
 // Gate advancement without bypassing the core receive path while presentation holds.
+// Which input-delay mode a lobby game runs. Online (relayed) skirmish: the host proposes the delay from measured RTT (MP-05)
+// with a bounded hold on slow votes. TCP LAN keeps the fixed offered delay. A galactic room never gets it here: the campaign
+// session builds its own options (GalacticLanMatch), where adaptive timing stays off while recovery frontiers refuse it.
+inline void configure_input_timing(net::SessionOptions& options, const bool online, const net::LobbyGameMode mode) {
+    if (!online || mode == net::LobbyGameMode::galactic) return;
+    options.non_lan = true;
+    options.adaptive_timing = net::AdaptiveTiming{.host = 0, .broadband = true, .rtt_ms = {}, .hold_on_expiry = true, .max_deferrals = 4};
+}
+
 class GatedMonitor final : public net::SessionMonitor {
 public:
     net::DesyncMonitor* monitor{};
@@ -356,6 +365,11 @@ public:
     core::Result<void> record(std::uint64_t tick, std::string_view hash, std::span<const std::uint8_t> state,
         std::span<const std::uint8_t> input, bool end = false) override { return monitor->record(tick, hash, state, input, end); }
     core::Result<void> receive(const net::Received& frame) override { return monitor->receive(frame); }
+    // An adaptive session reports every agreed delay change. Before the concrete monitor is bound the change is not
+    // kept here: the session re-reports its current delay on every later advance, so the monitor learns it then.
+    core::Result<void> on_input_delay(std::uint64_t delay, std::uint64_t retained) override {
+        return monitor ? monitor->on_input_delay(delay, retained) : core::Result<void>::success();
+    }
     core::Result<void> on_departure(net::PeerIndex peer, std::uint64_t tick) override { return monitor->on_departure(peer, tick); }
     bool ready_for_resync() const override { return monitor->ready_for_resync(); }
     core::Result<void> on_resync(std::uint64_t tick, std::string_view hash) override { return monitor->on_resync(tick, hash); }
@@ -655,6 +669,8 @@ public:
     void lobby_leave() override;
     std::optional<LanLobbyState> lobby_state() const override;
     void accept_mod_review() override;
+    bool refresh_host_mod_description(std::vector<std::uint8_t> description) override;
+    void expect_host_mod_refresh(bool expected) override;
     void configure_galactic(std::shared_ptr<GalacticLobbyBackend> backend) override;
     bool set_galactic_game(net::GalacticLobbyOptions options) override;
     bool lobby_galactic_game(const net::GalacticLobbyOptions& options) override;
@@ -699,6 +715,7 @@ private:
     // GCMP-07: the Galactic Conquest mode of the room (the host's first options; the Start seam once the room froze).
     std::shared_ptr<GalacticLobbyBackend> galactic_;
     std::optional<net::GalacticLobbyOptions> galactic_host_game_;
+    std::atomic<bool> host_mod_refresh_owed_{false}; // #6468: Start waits while the host's mod list refresh is owed
     std::optional<GalacticLobbyStart> galactic_start_;
     std::optional<std::uint64_t> galactic_flush_started_;
     std::uint64_t galactic_selection_epoch_{};
@@ -829,6 +846,7 @@ private:
     std::optional<net::DiagnosticBundle> diagnostic_bundle_;
     bool diagnostic_saved_{};
     std::uint64_t input_delay_{3}, monitor_delay_{3};
+    std::uint64_t logged_delay_{}, logged_deferrals_{};
     net::SetupRecoveryPolicy recovery_policy_{false, true};
     std::shared_ptr<net::LanReconnectCredentials> credential_state_{std::make_shared<net::LanReconnectCredentials>()};
     LanCredentialProvider credentials_;

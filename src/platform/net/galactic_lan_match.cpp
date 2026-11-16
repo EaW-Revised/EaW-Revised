@@ -6,6 +6,7 @@
 #include "eawr/net/galactic_adapter.hpp"
 #include "eawr/net/lobby_session.hpp"
 #include "galactic_acceptance.hpp"
+#include "lan_diagnostics.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -106,7 +107,7 @@ void prepare_galactic_recovery_base(GalacticLanOptions& options, campaign::GameS
 class GalacticLanMatch::State {
 public:
     State(net::MessageTransport& transport, GalacticLanOptions options)
-        : transport_(transport), options_(std::move(options)) {}
+        : transport_(transport), options_(std::move(options)) { diagnostics_.sink = options_.diagnostic_sink; }
 
     State(net::MessageTransport&, GalacticLanOptions options, std::shared_ptr<net::LobbyResult> result,
         net::DesyncMonitor& monitor, std::function<void(bool)> cadence, std::shared_ptr<void> lifetime)
@@ -119,6 +120,7 @@ public:
             return net::encode_galactic_input(key, galactic::SeatLeave{});
         });
         if (!adapter_) failed_ = make_diagnostic(net::session_errors::options, "The campaign lobby adapter is not galactic.");
+        diagnostics_.sink = options_.diagnostic_sink;
     }
 
     ~State() {
@@ -232,8 +234,10 @@ public:
                 return core::Result<void>::success();
             };
             callbacks.refused = [this, game](core::Diagnostic error) {
-                if (transport_.self() == 0 && active_save_)
-                    agreed_save_ = platform::AgreedGameSave{*active_save_, game->completed_tick(), {}, std::move(error)};
+                if (transport_.self() == 0 && active_save_) {
+                    const bool busy = error.code == net::session_errors::capture_busy;
+                    publish_failed_save(platform::AgreedGameSave{*active_save_, game->completed_tick(), {}, std::move(error), busy});
+                }
                 captured_save_.clear(); active_save_.reset();
             };
             session_->enable_checkpoint_barrier(std::move(callbacks));
@@ -282,6 +286,7 @@ public:
         // connection: repair must not turn a conclusive close into a new grace.
         if (options_.repair_recovery_links && !recovery_split_) static_cast<void>(options_.repair_recovery_links());
         if (!pumped) return end_with_failure(pumped.error());
+        observe_network(context.advance_allowed, now);
         std::optional<campaign::GameTick> tick;
         if (pumped.value().completed) {
             tick = adapter_->take_tick();
@@ -290,8 +295,8 @@ public:
             for (const auto& event : tick->save_events) {
                 if (event.kind != galactic::GalacticEventKind::save_requested) continue;
                 if (session_->checkpoint_pending()) active_save_ = event;
-                else if (transport_.self() == 0) agreed_save_ = platform::AgreedGameSave{event, context.game.completed_tick(), {},
-                    make_diagnostic(net::session_errors::admission, "Save failed: a roster or timing agreement overlaps capture.")};
+                else if (transport_.self() == 0) publish_failed_save(platform::AgreedGameSave{event, context.game.completed_tick(), {},
+                    make_diagnostic(net::session_errors::capture_busy, "Save failed: a roster or timing agreement overlaps capture."), true});
             }
             if (acceptance_) acceptance_->observe(context.game, *tick,
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
@@ -349,7 +354,19 @@ public:
         const std::lock_guard lock(mutex_);
         return view_.phase != GalacticLanPhase::ended && transport_.self() == 0 && !options_.seats.empty() && seat == options_.seats.front().seat;
     }
-    [[nodiscard]] std::optional<platform::AgreedGameSave> take_agreed_save() { return std::exchange(agreed_save_, {}); }
+    [[nodiscard]] std::optional<platform::AgreedGameSave> take_agreed_save() {
+        // A busy refusal is retried once the transition that caused it has settled, not on every tick of a long one.
+        if (!held_retries_.empty() && !agreed_save_ && !session_->transition_pending()) {
+            agreed_save_ = std::move(held_retries_.front()); held_retries_.pop_front();
+        }
+        return std::exchange(agreed_save_, {});
+    }
+    void publish_failed_save(platform::AgreedGameSave failed) {
+        // One save is in flight at a time (the live session admits a request only when none is requested or captured), so
+        // this holds at most one; a queue keeps a second one from ever replacing the first, whatever admits it.
+        if (failed.retry) held_retries_.push_back(std::move(failed));
+        else agreed_save_ = std::move(failed);
+    }
     [[nodiscard]] std::span<const sim::SeatId> clock_refusals() const noexcept {
         return adapter_ ? adapter_->clock_refusals() : std::span<const sim::SeatId>{};
     }
@@ -489,12 +506,15 @@ private:
             if (retained.append(row.tick, row.inputs, row.state) != Refusal::none) return refuse(Refusal::limit);
         auto owned_adapter = std::unique_ptr<net::GalacticSessionAdapter>(static_cast<net::GalacticSessionAdapter*>(request.candidate.owner.release()));
         owned_adapter->bind_executor(context.executor);
+        // The rebuilt core runs at the delay in force at the frontier: with adaptive timing that is the last agreed change,
+        // not the offered default (the frontier is refused while a change is pending).
+        const std::uint64_t frontier_delay = package.session_frontier->input_delay;
         net::DesyncOptions monitor_options; monitor_options.initial_tick = package.frontier.completed_tick;
-        monitor_options.input_delay = options_.input_delay; monitor_options.exchange_every = options_.exchange_every;
+        monitor_options.input_delay = frontier_delay; monitor_options.exchange_every = options_.exchange_every;
         auto monitor = std::make_unique<net::DesyncMonitor>(transport_, monitor_options);
         auto gate = std::make_unique<CadenceGate>(); gate->monitor = monitor.get();
         net::SessionOptions config = session_->recovery_options();
-        config.initial_tick = package.frontier.completed_tick; config.input_delay = options_.input_delay;
+        config.initial_tick = package.frontier.completed_tick; config.input_delay = frontier_delay;
         config.producer_sequences = owned_adapter->game().producer_sequences();
         config.final_tick_count = options_.final_tick_count; config.completeness_timeout_ms = options_.completeness_timeout_ms;
         config.unconfirmed_departure = net::UnconfirmedDeparture::continue_alone;
@@ -590,6 +610,10 @@ private:
         session_options.final_tick_count = options_.final_tick_count;
         session_options.completeness_timeout_ms = options_.completeness_timeout_ms;
         session_options.unconfirmed_departure = net::UnconfirmedDeparture::continue_alone; // D5 configured fallback; D8 no rejoin
+        if (options_.adaptive_timing) {
+            session_options.non_lan = true;
+            session_options.adaptive_timing = net::AdaptiveTiming{.host = 0, .broadband = true, .rtt_ms = options_.adaptive_rtt_ms, .hold_on_expiry = true};
+        }
         auto created = net::LockstepSession::create(*adapter_, transport_, options_.seats, session_options, &gate_);
         if (!created) return core::Result<void>::failure(created.error());
         owned_session_.emplace(std::move(created).value());
@@ -637,6 +661,50 @@ private:
             recovery_listening_ = true; return Tick::success(std::nullopt);
         }
         return Tick::failure(std::move(error));
+    }
+
+    // Network diagnostics only: log lines and the view's overlay data. Nothing here reaches the simulation, a hash, a
+    // save or the wire. Runs on the simulation thread once per poll, like the skirmish driver's equivalent.
+    void observe_network(bool due, std::uint64_t now) {
+        diagnostics_.seat = transport_.self();
+        diagnostics_.tick = adapter_->completed_tick();
+        // Say once which input-delay mode this match runs, then every agreed change: proposals should be rare (a stable
+        // link proposes once, to leave the offered delay), so the count is part of the line.
+        if (const auto delay = session_->input_delay(); delay != logged_delay_) {
+            diagnostics_.emit(logged_delay_ == 0 ? "timing-mode" : "input-delay-change",
+                session_->adaptive_timing_enabled() ? "adaptive" : "fixed", transport_.self(),
+                "delay=" + std::to_string(delay) + " changes=" + std::to_string(logged_delay_ == 0 ? 0 : ++delay_changes_) + " galactic=true");
+            logged_delay_ = delay;
+        }
+        // The core reports its completeness wait only while the cadence gate is open; the monitor's wait (hash
+        // exchange) is live regardless.
+        const auto& completeness = session_->waiting_for();
+        const bool core_waiting = due && completeness && !completeness->peers.empty();
+        const std::vector<net::PeerIndex> missing = core_waiting ? completeness->peers : monitor_->waiting_for_peers();
+        const bool waiting = !missing.empty();
+        diagnostics_.stall(waiting, now, missing);
+        diagnostics_.ledger.observe(now, waiting, waiting ? missing.front() : net::PeerIndex{});
+        diagnostics_.links(transport_, [](net::PeerIndex) { return "transport"; });
+        // The ledger scan is bounded but the driver polls far more often than the overlay redraws.
+        if (net_view_at_ && now >= *net_view_at_ && now - *net_view_at_ < 100) return;
+        net_view_at_ = now;
+        std::vector<presentation::ui::NetPeerLink> peers;
+        for (net::PeerIndex peer = 0; peer < transport_.peer_count(); ++peer) {
+            if (peer == transport_.self()) continue;
+            const auto stats = transport_.link_stats(peer);
+            constexpr double per_ms = 1.0 / 1000.0;
+            const auto route = options_.link_route ? options_.link_route(peer) : presentation::ui::NetRouteInfo{};
+            diagnostics_.route(peer, route, stats ? stats->loss_pct : 0.0);
+            peers.push_back(stats
+                ? presentation::ui::NetPeerLink{peer, true, static_cast<double>(stats->smoothed_rtt.count()) * per_ms,
+                                                static_cast<double>(stats->jitter.count()) * per_ms, stats->loss_pct, route.route, route.lossy}
+                : presentation::ui::NetPeerLink{peer, false, 0.0, 0.0, 0.0, route.route, route.lossy});
+        }
+        auto stall = diagnostics_.ledger.snapshot(now);
+        const std::lock_guard lock(mutex_);
+        view_.net_seat = transport_.self();
+        view_.net_peers = std::move(peers);
+        view_.net_stall = stall;
     }
 
     void refresh(const net::PumpResult& pumped, bool due, std::uint64_t now) {
@@ -737,8 +805,12 @@ private:
     std::optional<galactic::GalacticEvent> active_save_;
     std::vector<std::uint8_t> captured_save_;
     std::optional<platform::AgreedGameSave> agreed_save_;
+    std::deque<platform::AgreedGameSave> held_retries_;
     mutable std::mutex mutex_;
     GalacticLanView view_;
+    LanDiagnostics diagnostics_; // simulation thread only
+    std::optional<std::uint64_t> net_view_at_;
+    std::uint64_t logged_delay_{}, delay_changes_{};
     std::atomic<std::uint64_t> pause_notice_revision_{};
     std::atomic<std::uint64_t> clock_events_{}; // #5355: see GalacticLanMatch::clock_events()
     std::shared_ptr<const galactic::GalacticSnapshot> clock_snapshot_;

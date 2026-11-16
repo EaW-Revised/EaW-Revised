@@ -3,6 +3,7 @@
 #include "eawr/core/text.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
+#include "eawr/script/authoritative/manifest_pins.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/sim/world.hpp"
 
@@ -235,30 +236,20 @@ core::Result<std::optional<CampaignScoringOutcome>> evaluate_campaign_scoring(
     if (module.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos)
         return Result::failure(error("Game_Scoring_Script_Name is not a module name"));
 
+    // ML-31/ML-38: every module of every directory the scheduler searches is pinned, not only the named one.
     lua::ModuleManifest manifest;
-    auto libraries = source.files->enumerate("data/scripts/library/", ".lua");
-    if (!libraries) return Result::failure(libraries.error());
-    std::vector<std::string> paths;
-    for (const auto& library : libraries.value()) paths.push_back(library.canonical_path);
-    const auto module_path = "data/scripts/miscellaneous/" + module + ".lua";
-    paths.push_back(module_path);
-    for (const auto& path : paths) {
-        const auto bytes = source.files->open(path);
-        if (!bytes) {
-            if (path == module_path) return Result::success(Absent{}); // named module is not authored
-            return Result::failure(bytes.error());
-        }
-        std::string text(bytes.value().size(), '\0');
-        std::transform(bytes.value().begin(), bytes.value().end(), text.begin(), [](std::byte value) { return static_cast<char>(value); });
-        if (auto added = manifest.add(path, std::move(text)); !added) return Result::failure(added.error());
-    }
+    const auto directories = lua::scoring_script_directories();
+    if (auto pinned = lua::pin_script_directories(*source.files, directories, manifest); !pinned)
+        return Result::failure(pinned.error());
+    if (manifest.find("data/scripts/miscellaneous/" + module + ".lua") == nullptr)
+        return Result::success(Absent{}); // named module is not authored
     // Own adapter only; every scoring equation remains in the mounted module. The control query
     // is the campaign (non-tactical) one: the galactic tables, WGP-97.
     const std::string adapter = "require(\"" + module + "\")\nEAWR_Result_Value = 0\n"
         "function EAWR_Query_Result(player, control)\n"
         "  EAWR_Result_Value = Get_Game_Stat_For_Control_ID(player, control, false)\nend\n";
     if (auto added = manifest.add("eawr/campaign_scoring_adapter.lua", adapter); !added) return Result::failure(added.error());
-    auto created = lua::ScriptScheduler::create({.script_directories = {"data/scripts/library/", "data/scripts/miscellaneous/"}}, std::move(manifest));
+    auto created = lua::ScriptScheduler::create({.script_directories = lua::scoring_script_directories()}, std::move(manifest));
     if (!created) return Result::failure(created.error());
 
     Host host;

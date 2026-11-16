@@ -25,7 +25,7 @@ inline constexpr sim::galactic::TypeId live_hack_required_type = 1002;
 }
 [[nodiscard]] inline bool weapon_action_live_fixture(std::string_view name) {
     return weapon_action_entry_fixture(name) || name == "hack-live" || name == "destruction-live" || name == "destruction-live-contested"
-        || name == "destruction-live-effects"
+        || name.starts_with("destruction-live-effects")
         || name == "sabotage-live" || name == "neutralization-live";
 }
 [[nodiscard]] inline sim::galactic::AbilityKind weapon_action_live_kind(std::string_view name) {
@@ -56,7 +56,7 @@ inline void configure_weapon_action_live_fixture(sim::galactic::GalacticSetup& s
     if (destruction || sabotage || (entry && neutralize)) {
         const gc::PlayerId enemy = local == 1 ? 2 : 1;
         for (auto& planet : setup.planets) if (planet.id == live_hack_planet) planet.owner = enemy;
-        if (name == "destruction-live" || name == "destruction-live-effects")
+        if (name == "destruction-live" || name.starts_with("destruction-live-effects"))
             std::erase_if(setup.fleets, [local](const auto& fleet) { return fleet.owner != local; });
     }
     constexpr gc::TypeId planet_type = 3000;
@@ -140,7 +140,7 @@ inline void configure_weapon_action_live_fixture(sim::galactic::GalacticSetup& s
     } else if (destruction) {
         profile.destruction = gc::DestructionAbilityProfile{"SYNTHETIC_PLANET_RUIN", true};
         // Explicit stock-metadata integration fixture; the runtime still resolves authored fields.
-        if (name == "destruction-live-effects") {
+        if (name.starts_with("destruction-live-effects")) {
             names[profile.type] = "Death_Star";
             profile.destruction->name = "Death_Star_Planet_Destruction";
         }

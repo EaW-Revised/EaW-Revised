@@ -39,9 +39,44 @@ def git(*args, env=None, data=None):
                           env=env, check=True).stdout.decode().strip()
 
 
-def kit_commit(base, label, pin, extras):
+LAND_OPTION = 'option(EAWR_ENABLE_LAND_SKIRMISH '
+LAND_FILES = ('CMakeLists.txt', 'apps/viewer/CMakeLists.txt')
+LAND_NOTE = ('# Owner kit overlay: land skirmish ON for this configure. A normal variable shadows the cache, so a reused build\n'
+             '# tree that cached OFF cannot override it and nothing stays cached for the next job on that host.\n')
+
+
+def land_overlay(base, skip=()):
+    """The kit's land-skirmish-ON overlay: for the root and the viewer CMakeLists.txt of `base`, one normal variable set right
+    after the option line (changing the option default would not reach a persistent build tree whose cache holds OFF)."""
+    files = {}
+    for name in LAND_FILES:
+        if name in skip:
+            continue
+        lines = git('show', f'{base}:{name}').split('\n')
+        found = [i for i, line in enumerate(lines) if line.startswith(LAND_OPTION)]
+        if len(found) != 1:
+            raise ValueError(f'{name} at {base[:12]} has no single land skirmish option line; pass --no-land-skirmish for this base')
+        lines[found[0] + 1:found[0] + 1] = LAND_NOTE.splitlines() + ['set(EAWR_ENABLE_LAND_SKIRMISH ON)']
+        files[name] = ('\n'.join(lines) + '\n').encode()
+    return files
+
+
+def check_land_built(receipt):
+    """An owner kit asked for land skirmish ON must have it in the build: the host receipt counts the compile define in the root
+    and the viewer build trees. Anything else fails the cut (a partial --extra, an overlay that missed the configured tree)."""
+    if kit_manifest.land_skirmish_built(receipt):
+        return
+    counted = receipt.get('land_skirmish') if isinstance(receipt, dict) else None
+    raise ValueError(f'land skirmish is not in the build: the host counted {counted!r} EAWR_LAND_SKIRMISH=1 defines in the root and '
+                     'viewer build rules, both must be above 0 (a replaced --extra CMakeLists.txt without the ON line? a host script '
+                     'older than the receipt field needs --extra tools/release/host_package.py; --no-land-skirmish for an OFF kit)')
+
+
+def kit_commit(base, label, pin, extras, land=False):
     files = {'tools/release/kit-label.txt': (label + '\n').encode(),
              'config/launcher-pin.json': pin.read_bytes()}
+    if land:
+        files.update(land_overlay(base, skip={destination for _, destination in extras}))
     for source, destination in extras:
         path = PurePosixPath(destination)
         if path.is_absolute() or '..' in path.parts or not path.parts or '\\' in destination or ':' in destination:
@@ -259,7 +294,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sha')
     parser.add_argument('--release-tag', metavar='vX.Y.Z',
-                        help='cut the release package: the signed annotated tag must point at --sha (default: the tag\'s commit), '
+                        help='cut the release package: the annotated tag (signing optional) must point at --sha (default: the tag\'s commit), '
                              'the label is the release version, and --layer is the reviewed Revised layer')
     parser.add_argument('--layer', type=Path, help='release only: the reviewed Revised layer directory')
     parser.add_argument('--label', help='the full kit label; it must start with the release version (config/release-version.json)')
@@ -271,8 +306,11 @@ def main(argv=None):
     parser.add_argument('--extra', action='append', default=[], metavar='FILE=REPO_PATH')
     parser.add_argument('--host', action='append', help='pool host or any; repeat to restrict candidates')
     parser.add_argument('--cross-host', help='use this Linux cross-build host instead of the Windows pool')
-    parser.add_argument('--wine', help='Wine executable relative to the cross host base')
-    parser.add_argument('--wine-lib-dir', help='optional Wine library directory relative to the cross host base')
+    parser.add_argument('--linux-godot', help='the pinned official Linux Godot 4.7.2 editor on the cross host, relative to its base '
+                        '(tools/release/godot_linux_import.py fetch provisions it); it writes the project metadata, no Wine')
+    parser.add_argument('--no-land-skirmish', action='store_true',
+                        help='owner kits are built with land skirmish ON (EAWR_ENABLE_LAND_SKIRMISH) until it ships on by default; '
+                             "this leaves it at the base commit's default (OFF)")
     parser.add_argument('--allow-dirty-tooling', action='store_true',
                         help='cut with uncommitted changes in the orchestrating scripts; the manifest records it')
     parser.add_argument('--work', type=Path, required=True)
@@ -280,10 +318,10 @@ def main(argv=None):
     scratch = tempfile.TemporaryDirectory(prefix='eawr-release-')  # holds the tagged commit's pin and manifest of a release cut
     try:
         args.work = args.work.resolve()
-        if args.cross_host and (args.host or not args.wine):
-            raise ValueError('--cross-host needs --wine and cannot be combined with --host')
-        if not args.cross_host and (args.wine or args.wine_lib_dir):
-            raise ValueError('--wine and --wine-lib-dir require --cross-host')
+        if args.cross_host and (args.host or not args.linux_godot):
+            raise ValueError('--cross-host needs --linux-godot and cannot be combined with --host')
+        if not args.cross_host and args.linux_godot:
+            raise ValueError('--linux-godot requires --cross-host')
         if not args.changes.is_file():
             raise FileNotFoundError(f'changes file missing: {args.changes}')
         release = None
@@ -330,7 +368,9 @@ def main(argv=None):
         meta_path = args.work / 'cut.json'
         if meta_path.exists():
             raise ValueError(f'cut already exists: {meta_path}')
-        commit = kit_commit(base, args.label, args.pin, extras)
+        land = not release and not args.no_land_skirmish
+        land_paths = [name for name in LAND_FILES if name not in {destination for _, destination in extras}] if land else []
+        commit = kit_commit(base, args.label, args.pin, extras, land=land)
         config = {'version': package_version(args.label, commit, version, bool(release)),
                   'allow_missing_revised_layer': True,
                   'local_inputs': {'engine_dir': str(args.engine_dir.resolve()),
@@ -344,9 +384,7 @@ def main(argv=None):
             config.update(public=True, allow_missing_revised_layer=False)
             config['local_inputs']['revised_layer'] = str(archive.resolve())
         if args.cross_host:
-            config['wine'] = args.wine
-            if args.wine_lib_dir:
-                config['wine_lib_dir'] = args.wine_lib_dir
+            config['linux_godot'] = args.linux_godot
         operator = kit_manifest.orchestrator(ROOT)
         if not operator['clean'] and not args.allow_dirty_tooling:
             raise ValueError('the orchestrating scripts in this checkout have uncommitted changes (commit them, or pass '
@@ -355,7 +393,7 @@ def main(argv=None):
                  'hosts': [args.cross_host] if args.cross_host else (args.host or ['any'])}
         plan = kit_manifest.build_plan(
             ROOT, base=base, kit=commit, label=args.label, kit_version=config['version'],
-            overlay=['tools/release/kit-label.txt', 'config/launcher-pin.json', *[p for _, p in extras]],
+            overlay=['tools/release/kit-label.txt', 'config/launcher-pin.json', *[p for _, p in extras], *land_paths],
             launcher_pin=pin, engine=engine_identity(base),
             changes_sha256=kit_manifest.sha256_file(args.changes), route=route, operator=operator)
         if release:
@@ -401,6 +439,8 @@ def main(argv=None):
             else:
                 assets = None
                 target, digest, receipt = extract_cross_player(build / 'package.tar.gz', args.work / 'fetched')
+            if land:
+                check_land_built(receipt)
             record_host(manifest, manifest_path, summary.get('hostName') or args.cross_host, 'package.tar.gz', target, digest,
                         receipt, attested=bool(summary.get('hostName')), assets=assets)
             meta.update(ok=True, player_zip=str(target.resolve()), player_sha256=digest, host=summary.get('hostName') or args.cross_host)
@@ -431,8 +471,11 @@ def main(argv=None):
             downloaded[remote] = local
         target = downloaded[players[0][0]]
         digest = players[0][2]
+        receipt = parse_receipt(build / 'release-package.log')
+        if land:
+            check_land_built(receipt)
         record_host(manifest, manifest_path, hosts[0].name, 'release-package.log', target, digest,
-                    parse_receipt(build / 'release-package.log'), assets=list(downloaded.values()) if release else None)
+                    receipt, assets=list(downloaded.values()) if release else None)
         meta.update(ok=True, player_zip=str(target.resolve()), player_sha256=digest, host=hosts[0].name)
         meta_path.write_text(json.dumps(meta, indent=2), encoding='utf-8')
         print(f'Cut {commit} on {hosts[0].name}; run finish_kit.py --work {args.work}')

@@ -100,7 +100,10 @@ def verify_report(report):
     if steady.get("history_tail_unchanged") is not True or steady.get("sentinel_retained") is not True:
         failures.append("steady missing-asset wait flooded the diagnostic history")
     live = report.get("shutdown_live", {})
-    if not (live.get("instances", 0) >= 5 and live.get("skeletons", 0) >= 1 and live.get("red_references") == 2):
+    # A single-bone rigid piece draws without an engine skeleton (counted as skeleton_free), so the skinned instances hold
+    # either kind of skeleton holder.
+    holders = live.get("skeletons", 0) + live.get("skeleton_free", 0)
+    if not (live.get("instances", 0) >= 5 and holders >= 1 and live.get("red_references") == 2):
         failures.append("shutdown did not happen with live shared and skinned instances")
     return failures
 
@@ -259,7 +262,9 @@ class GodotResourceChurnProbe(unittest.TestCase):
                 shutil.copy2(report_path, target / ("%s.json" % name))
             for capture in report_path.parent.glob(report_path.name + ".*.png"):
                 shutil.copy2(capture, target / capture.name)
-        self.assertIsNotNone(HARNESS.engine_banner(completed.stdout, HARNESS.PINNED_GODOT_IDENTITY), output)
+        # The rig runs the pinned patched engine (an official build is accepted too), so any accepted identity's banner counts.
+        self.assertTrue(any(HARNESS.engine_banner(completed.stdout, identity) is not None
+                            for identity in HARNESS.export_package.ACCEPTED_GODOT_IDENTITIES), output)
         report = json.loads(report_path.read_text(encoding="utf-8"))
         return completed, output, report
 

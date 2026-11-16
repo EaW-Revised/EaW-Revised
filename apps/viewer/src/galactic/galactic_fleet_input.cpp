@@ -348,6 +348,8 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
     if (fleet_organize && fleet_organize->is_visible_in_tree()) {
         for (const auto& [name, control] : fleet_buttons) {
             if (!name.ends_with("_0000") || !control->is_visible_in_tree() || !control->get_global_rect().has_point(point)) continue;
+            // A disabled frame (another owner's panel, tutorial lock) is no drop target (#4029 follow-up).
+            if (control->is_disabled()) return false;
             const auto panel = static_cast<std::size_t>(name[1] - '1');
             if (source->orbit != selected_planet || galactic_view::fleet_panel_for_slot(fleet_panels.mode, source->orbit_slot) != panel
                 || dragged_members.size() != 1) return false;
@@ -394,7 +396,9 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
             if (name == "b_underground") return false; // Ability/raid provider seam, #2263/#1156.
             // GHUD-S68: the structure slots bind a click only (no receive logic): a drop there is rejected.
             if (name.starts_with("Planet_structure_")) return false;
-            const bool accepted = request_ground_land(submit, id);
+            // #7178: a dragged unit cell lands that unit only; a whole card or stack icon keeps the fleet landing.
+            const bool accepted = dragged_members.empty() ? request_ground_land(submit, id)
+                : request_ground_land_members(submit, dragged_members);
             if (accepted && submit) {
                 ++fleet_drag_orders; last_fleet_drag_kind = galactic_view::DropKind::land;
                 last_fleet_drag_source = id; last_fleet_drag_target = 0; last_fleet_drag_destination = selected_planet;
@@ -538,7 +542,10 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
                     if (dragged_stack.size() > 1 && !pause_allows(presentation::GalacticPausedAction::fleet_management)) return false;
                     const auto* roster = command_roster(key.first);
                     if (!roster || !roster->accessible || !roster->allied
-                        || !galactic_view::fleet_can_land(*published_snapshot, galaxy->local.player, id, dragged_stack)) return false;
+                        || (dragged_members.empty()
+                            ? !galactic_view::fleet_can_land(*published_snapshot, galaxy->local.player, id, dragged_stack)
+                            : !galactic_view::dragged_units_landing(*published_snapshot, galaxy->local.player, key.first, dragged_members)))
+                        return false;
                     intent = galactic_view::DropIntent{galactic_view::DropKind::land, id, 0, key.first, {}, {}, {}, {}};
                     break;
                 }
@@ -583,6 +590,15 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
         }
     }
     if (!intent) return false;
+    if (intent->kind == galactic_view::DropKind::land && !dragged_members.empty()) {
+        // #7178: the dragged unit cell lands that unit only.
+        const bool accepted = request_ground_land_members(submit, dragged_members);
+        if (accepted && submit) {
+            ++fleet_drag_orders; last_fleet_drag_kind = galactic_view::DropKind::land;
+            last_fleet_drag_source = id; last_fleet_drag_target = intent->target; last_fleet_drag_destination = intent->planet;
+        }
+        return accepted;
+    }
     if (intent->kind == galactic_view::DropKind::land
         && !galactic_view::fleet_can_land(*published_snapshot, galaxy->local.player, id, dragged_stack)) return false;
     if (!pause_allows(intent->kind == galactic_view::DropKind::move ? presentation::GalacticPausedAction::fleet_move

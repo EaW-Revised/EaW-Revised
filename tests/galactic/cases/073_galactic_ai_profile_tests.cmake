@@ -102,3 +102,13 @@ set_tests_properties(galactic_ai_tick_profile_raw_steady PROPERTIES LABELS "game
 # Remake co-op and solo checkpoint capacity.
 eawr_add_game_data_test(NAME galactic_remake_save_probe COMMAND galactic_ai_campaign_tests --remake-save-probe 3000)
 set_tests_properties(galactic_remake_save_probe PROPERTIES LABELS "game-data" TIMEOUT 14400 RUN_SERIAL TRUE SKIP_RETURN_CODE 77 ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
+
+# #6345: the orbit census of the installed Remake Web Way Imperial campaign at Coruscant (dummy orbital units).
+eawr_add_game_data_test(NAME galactic_orbit_census_remake COMMAND galactic_ai_campaign_tests --orbit-census 900 GC_Standard_Web_Way_Imperial Coruscant_WW)
+set_tests_properties(galactic_orbit_census_remake PROPERTIES LABELS "game-data;mod-data" TIMEOUT 3600 RUN_SERIAL TRUE SKIP_RETURN_CODE 77 ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
+# #6473: the Remake's live object scripts leave the same world on 1, 2, 4 and 8 workers (batch only: four runs of the layered campaign).
+eawr_add_game_data_test(NAME galactic_orbit_workers_remake COMMAND galactic_ai_campaign_tests --orbit-workers 600 GC_Standard_Web_Way_Imperial Coruscant_WW)
+set_tests_properties(galactic_orbit_workers_remake PROPERTIES LABELS "game-data;mod-data;batch-only" TIMEOUT 7200 RUN_SERIAL TRUE SKIP_RETURN_CODE 77 ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
+# #6473: which stock object scripts run in a stock galactic game (census; prints the attached and live instances).
+eawr_add_game_data_test(NAME galactic_object_script_census_stock COMMAND galactic_ai_campaign_tests --object-script-census 900 Sandbox_Equal_Footing_Underworld)
+set_tests_properties(galactic_object_script_census_stock PROPERTIES LABELS "game-data;benchmark;batch-only" TIMEOUT 3600 RUN_SERIAL TRUE ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")

@@ -1,5 +1,6 @@
 #include "eawr/scene/texture_prefetch.hpp"
 #include "eawr/assets/texture_chain.hpp"
+#include "eawr/assets/texture_digest.hpp"
 #include "eawr/vfs/vfs.hpp"
 
 #include "eawr/core/load_profile.hpp"
@@ -98,7 +99,12 @@ void TexturePrefetch::offer(const std::string_view logical_path, const std::uint
         std::lock_guard lock(mutex_);
         if (stopping_) return;
         const auto [found, inserted] = entries_.try_emplace(key);
-        if (!inserted) return;
+        if (!inserted) {
+            // A taken path starts over for its next consumer. A decode still running for the old request simply
+            // finishes into the fresh entry (the same path and processing: the same texture).
+            if (!options_.reoffer_taken || found->second.state != State::taken) return;
+            found->second = Entry{};
+        }
         found->second.path = std::string(logical_path);
         found->second.processing = processing;
         found->second.step = step;
@@ -215,6 +221,8 @@ void TexturePrefetch::reader() {
                 if (!assets::extend_mip_chain(*texture, chain_kind(processing))) chain_bytes = 0;
                 chain_ms = static_cast<std::uint64_t>(since_ms(chain_started));
             }
+            // The renderer's identity digest of the final pixels, taken here so the loader thread reads it instead of hashing.
+            if (texture) texture->content_digest = assets::compute_texture_digest(*texture);
         } catch (const std::exception&) {
             texture.reset(); // the loader will meet the same failure on its own request and report it
         } catch (...) {
@@ -234,7 +242,7 @@ void TexturePrefetch::reader() {
                 stats_.chain_ms += chain_ms;
             }
             if (!texture) ++stats_.failed;
-            if (entry.state == State::taken || stopping_ || !texture) {
+            if (entry.state == State::taken || stopping_ || !texture || entry.held) {
                 // Already asked for or skipped, shutting down, or nothing to hold.
                 charged_ -= std::min(charged_, cost);
                 released = std::move(texture);
@@ -286,6 +294,13 @@ std::size_t TexturePrefetch::held_count() const {
     std::lock_guard lock(mutex_);
     std::size_t count = 0;
     for (const auto& [key, entry] : entries_) count += entry.held ? 1U : 0U;
+    return count;
+}
+
+std::size_t TexturePrefetch::pending_count() const {
+    std::lock_guard lock(mutex_);
+    std::size_t count = 0;
+    for (const auto& [key, entry] : entries_) count += entry.state == State::queued || entry.state == State::decoding ? 1U : 0U;
     return count;
 }
 

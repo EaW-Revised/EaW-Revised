@@ -15,7 +15,7 @@ bool valid(const AutoResolveOutcomeApplication& a) {
         || (a.result.winner != a.invader && a.result.winner != a.defender)
         || (a.result.retreat_player && (*a.result.retreat_player == a.result.winner
             || (*a.result.retreat_player != a.invader && *a.result.retreat_player != a.defender)))
-        || !a.result.reserved_health.empty() || !a.result.credits.empty() || a.result.corruption_success
+        || !a.result.reserved_health.empty() || !a.result.credits.empty() || a.result.corruption_success || a.result.planet_destroyed
         || !std::is_sorted(a.destroyed.begin(), a.destroyed.end())
         || std::adjacent_find(a.destroyed.begin(), a.destroyed.end()) != a.destroyed.end()
         || (!a.destroyed.empty() && a.destroyed.front() == 0)

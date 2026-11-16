@@ -123,6 +123,10 @@ void test_selection_layer_config() {
 <Default_Faction_SFXEvent>Rebel, RebelCue</Default_Faction_SFXEvent>
 <Advisor_SFXEvent>RHD_Choose_Reinforcements, RebelCue</Advisor_SFXEvent>
 <Advisor_SFXEvent>EHD_Choose_Reinforcements, EmpireCue</Advisor_SFXEvent>
+</Selection_Action><Selection_Action Name="GIFT_UNITS">
+<Default_Faction_SFXEvent>Empire, EmpireGift</Default_Faction_SFXEvent>
+<Advisor_SFXEvent>RHD_Choose_Reinforcements, RebelGift</Advisor_SFXEvent>
+<Advisor_SFXEvent>custom_voice, CustomGift</Advisor_SFXEvent>
 </Selection_Action></Selection_Controls>)xml";
     }
     const auto stock = root / "stock";
@@ -162,6 +166,13 @@ void test_selection_layer_config() {
             expect(ui::selection_advisor_event(action, "Empire", none) == "EmpireCue",
                 "unmapped advisor falls back to faction default");
             const std::vector<std::string> custom_advisor{"custom_voice", "RHD_Choose_Reinforcements"};
+            expect(ui::selection_advisor_event(config.gift, "Empire", rebel_advisor) == "RebelGift",
+                "gift uses the same advisor mapping as bulk selection");
+            expect(ui::selection_advisor_event(config.gift, "Empire", custom_advisor) == "CustomGift",
+                "mod advisor maps to its authored gift cue");
+            expect(ui::selection_advisor_event(config.gift, "Empire", none) == "EmpireGift",
+                "gift retains the authored faction fallback");
+            expect(config.gift.default_key.empty(), "gift mapping adds no selection keyboard binding");
             expect(ui::selection_advisor_event(action, "Empire", custom_advisor) == "EmpireCue",
                 "an unmapped primary advisor does not borrow a later unrelated voice");
             expect(ui::selection_advisor_event(action, "Unknown", none).empty(), "unknown faction stays silent");
@@ -293,16 +304,46 @@ void test_selection_hotkeys() {
     expect(!ui::selection_action(settings, 'Q', true, false, false)
         && !ui::selection_action(settings, 'Q', false, false, true)
         && !ui::selection_action(settings, 'Q', false, false, false, true), "exact modifiers protect existing keys");
-    for (const auto chord : ui::selection_key_choices) {
-        const bool ctrl = chord.starts_with("Ctrl+");
-        expect(!ui::ability_hotkey(chord.back(), {false, ctrl, false}), "offered chords do not shadow abilities");
+    // #5131: any letter, bare or with Ctrl, may be captured unless another command already owns it.
+    for (char letter = 'A'; letter <= 'Z'; ++letter) {
+        for (const bool ctrl : {false, true}) {
+            const auto chord = ui::selection_chord_for(letter, ctrl);
+            expect(chord == (ctrl ? "Ctrl+" : "") + std::string(1, letter), "chord text of a physical letter");
+            // Every chord the ability map holds is refused.
+            if (ui::ability_hotkey(letter, {false, ctrl, false})) expect(!ui::selection_chord_usable(chord), "ability chords reserved");
+            if (!ui::selection_chord_usable(chord)) continue;
+            expect(!ui::ability_hotkey(letter, {false, ctrl, false}), "usable chords do not shadow abilities");
+            expect(ctrl || std::string_view("FGMERTBKCIPWASDUXVH").find(letter) == std::string_view::npos,
+                "usable bare chords do not shadow commands or the camera preset");
+        }
     }
+    expect(ui::selection_chord_for('1', false).empty() && ui::selection_chord_for('q', false).empty(), "only A-Z is a chord");
+    expect(!ui::selection_chord_usable("Ctrl+A") && !ui::selection_chord_usable("G") && !ui::selection_chord_usable("Ctrl+D")
+        && !ui::selection_chord_usable("Shift+Q") && !ui::selection_chord_usable("1") && !ui::selection_chord_usable("")
+        && !ui::selection_chord_usable("Ctrl+") && !ui::selection_chord_usable("Ctrl+Ctrl+Q"), "reserved and malformed chords");
+    expect(ui::selection_chord_usable("Q") && ui::selection_chord_usable("Ctrl+Q") && ui::selection_chord_usable("J")
+        && ui::selection_chord_usable("Ctrl+W"), "free chords beyond the old list");
+    expect(ui::selection_chord_status(settings, 0, "Ctrl+A") == ui::SelectionChordStatus::reserved
+        && ui::selection_chord_status(settings, 0, "Q") == ui::SelectionChordStatus::duplicate
+        && ui::selection_chord_status(settings, 0, "Shift+Q") == ui::SelectionChordStatus::malformed
+        && ui::selection_chord_status(settings, 0, "Ctrl+W") == ui::SelectionChordStatus::ok, "capture status");
     expect(!ui::set_selection_key(settings, 0, "E") && !ui::set_selection_key(settings, 0, "Ctrl+E")
         && !ui::set_selection_key(settings, 0, "Shift+Q"), "reserved chords rejected");
     expect(!ui::set_selection_key(settings, 0, "Q"), "duplicate binding rejected");
     expect(ui::selection_key(settings, 0) == "Ctrl+Q", "failed edit preserves binding");
     expect(ui::set_selection_key(settings, 0, "Ctrl+Y"), "all binding editable");
     expect(ui::set_selection_key(settings, 1, "Ctrl+U"), "screen binding editable");
+    {
+        // A chord the old four-item list did not offer survives the settings file too.
+        auto captured = settings;
+        expect(ui::set_selection_key(captured, 0, "Ctrl+W") && ui::set_selection_key(captured, 1, "J"), "free letters bind");
+        captured = ui::parse_settings(ui::serialize_settings(captured)).settings;
+        expect(ui::selection_key(captured, 0) == "Ctrl+W" && ui::selection_key(captured, 1) == "J"
+            && ui::selection_action(captured, 'W', false, true, false) == 0
+            && ui::selection_action(captured, 'J', false, false, false) == 1, "captured chords round-trip and fire");
+        captured.keys["SELECT_OWN_ALL"] = "G"; // a hand-edited reserved chord falls back to the default
+        expect(ui::selection_key(captured, 0) == captured.selection_config.actions[0].default_key, "reserved stored chord ignored");
+    }
     settings = ui::parse_settings(ui::serialize_settings(settings)).settings;
     expect(settings.selection_hotkeys && ui::selection_action(settings, 'Y', false, true, false) == 0
         && ui::selection_action(settings, 'U', false, true, false) == 1
@@ -359,7 +400,7 @@ void test_online_settings() {
     expect(ui::validate_online_settings(network, true)->code == "EAWR-NET-1745", "Online requires a configured service");
     network.online_host = "service.example"; network.online_pin = std::string(64, 'a');
     expect(!ui::validate_online_settings(network, true), "explicit service pin validates");
-    ui::PlayerSettings stored; stored.network = network; stored.network.online_relay_only = true;
+    ui::PlayerSettings stored; stored.network = network; stored.network.online_relay_only = true; stored.network.online_turn_provider = "own";
     expect(ui::parse_settings(ui::serialize_settings(stored)).settings == stored, "service and relay-only choice round trip");
     network.online_host = "https://secret.example:123";
     auto error = ui::validate_online_settings(network, true);
@@ -393,16 +434,48 @@ void test_online_settings() {
 }
 
 void test_fit_radar_settings() {
-    expect(!ui::PlayerSettings{}.gameplay.fit_radar_to_galaxy, "radar fit defaults off");
-    expect(!ui::parse_settings("eawr-settings 1\n").settings.gameplay.fit_radar_to_galaxy,
-           "absent radar setting keeps retail extents");
+    // DEV-9: the radar fits the galaxy by default (the original's fixed frame is the opt-out).
+    expect(ui::PlayerSettings{}.gameplay.fit_radar_to_galaxy, "radar fit defaults on");
+    expect(ui::parse_settings("eawr-settings 1\n").settings.gameplay.fit_radar_to_galaxy,
+           "an absent radar setting is the default (on)");
     for (const bool enabled : {false, true}) {
         ui::PlayerSettings value;
         value.gameplay.fit_radar_to_galaxy = enabled;
-        expect(ui::parse_settings(ui::serialize_settings(value)).settings == value, "radar fit round trips");
+        const auto text = ui::serialize_settings(value);
+        expect(ui::parse_settings(text).settings == value, "radar fit round trips");
+        expect(ui::parse_settings(text).settings.gameplay.fit_radar_to_galaxy == enabled,
+               "a stored radar value, off included, wins in a file this build wrote");
     }
-    expect(!ui::parse_settings("eawr-settings 1\ngameplay.fit_radar_to_galaxy=invalid\n").settings.gameplay.fit_radar_to_galaxy,
-           "invalid radar setting keeps retail extents");
+    // A fresh profile and a file without the stamp (written before the default turned on, when every save stored the old default).
+    expect(ui::parse_settings("eawr-settings 1\ngameplay.fit_radar_to_galaxy=1\n").settings.gameplay.fit_radar_to_galaxy,
+           "a stored on stays on");
+    const auto legacy = ui::parse_settings("eawr-settings 1\ngameplay.fit_radar_to_galaxy=0\n");
+    expect(legacy.settings.gameplay.fit_radar_to_galaxy, "an old file's stored off is reset once to the new default");
+    expect(!legacy.notes.empty(), "the reset says so");
+    // The stamp makes an explicit off stick; the next save of the legacy profile writes it.
+    expect(!ui::parse_settings("eawr-settings 1\ngameplay.fit_radar_to_galaxy=0\nmigrate.fit_radar_default_on=1\n")
+                .settings.gameplay.fit_radar_to_galaxy, "an explicit off in a stamped file wins");
+    expect(ui::serialize_settings(legacy.settings).find("migrate.fit_radar_default_on=1") != std::string::npos,
+           "saving writes the stamp");
+    expect(ui::parse_settings("eawr-settings 1\ngameplay.fit_radar_to_galaxy=invalid\n").settings.gameplay.fit_radar_to_galaxy,
+           "an invalid radar setting keeps the default (on)");
+}
+
+void test_space_pauses_settings() {
+    expect(!ui::PlayerSettings{}.gameplay.space_pauses_galactic, "Space starts the galactic tour by default (DEV-13)");
+    expect(!ui::parse_settings("eawr-settings 1\n").settings.gameplay.space_pauses_galactic,
+           "an absent setting keeps the original's Space");
+    for (const bool enabled : {false, true}) {
+        ui::PlayerSettings value;
+        value.gameplay.space_pauses_galactic = enabled;
+        expect(ui::parse_settings(ui::serialize_settings(value)).settings == value, "Space-pauses round trips");
+        expect(ui::parse_settings(ui::serialize_settings(value)).settings.gameplay.space_pauses_galactic == enabled,
+               "Space-pauses keeps its value");
+    }
+    expect(!ui::parse_settings("eawr-settings 1\ngameplay.space_pauses_galactic=invalid\n").settings.gameplay.space_pauses_galactic,
+           "an invalid setting keeps the original's Space");
+    expect(ui::parse_settings("eawr-settings 1\ngameplay.space_pauses_galactic=1\n").settings.gameplay.space_pauses_galactic,
+           "the stored value is read");
 }
 
 void test_animated_loading_background_settings() {
@@ -682,6 +755,53 @@ void test_round_trip() {
            "the defaults round-trip");
 }
 
+void test_aa_levels_and_migration() {
+    for (const auto level : {ui::RenderProfileSetting::automatic, ui::RenderProfileSetting::retail,
+            ui::RenderProfileSetting::low, ui::RenderProfileSetting::medium, ui::RenderProfileSetting::high}) {
+        for (int ss = 0; ss < 3; ++ss) {
+            ui::PlayerSettings settings;
+            settings.video.render_profile = level;
+            settings.video.supersampling = ss;
+            expect(ui::parse_settings(ui::serialize_settings(settings)).settings.video == settings.video,
+                "all AA levels and independent supersampling steps persist together");
+        }
+    }
+    for (const std::string_view old : {"high", "max", "enhanced"}) {
+        const auto text = "eawr-settings 1\nvideo.render_profile=" + std::string(old) + "\n";
+        const auto migrated = ui::parse_settings(text).settings;
+        expect(migrated.video.render_profile == (old == "max" ? ui::RenderProfileSetting::high : ui::RenderProfileSetting::medium)
+            && migrated.video.supersampling == 2, "legacy AA migrates to its new AA level plus SS2");
+        expect(ui::parse_settings(ui::serialize_settings(migrated)).settings.video == migrated.video,
+            "migrated AA and supersampling survive the next save");
+        for (const auto& explicit_ss : {text + "video.supersampling=1\n",
+                std::string("eawr-settings 1\nvideo.supersampling=1\nvideo.render_profile=") + std::string(old) + "\n"}) {
+            expect(ui::parse_settings(explicit_ss).settings.video.supersampling == 1,
+                "explicit supersampling wins over migration in either line order");
+        }
+    }
+    const auto retail = ui::parse_settings("eawr-settings 1\nvideo.render_profile=retail\n").settings.video;
+    expect(retail.render_profile == ui::RenderProfileSetting::medium && retail.supersampling == 0,
+        "legacy retail migrates to Medium with supersampling Off");
+    const auto off = ui::parse_settings("eawr-settings 1\nvideo.render_profile=off\n").settings.video;
+    expect(off.render_profile == ui::RenderProfileSetting::retail && off.supersampling == 0,
+        "explicit Off remains Off with native resolution");
+    for (const int value : {5, 6, 255}) {
+        ui::PlayerSettings above_high;
+        above_high.video.render_profile = static_cast<ui::RenderProfileSetting>(value);
+        ui::clamp_settings(above_high);
+        expect(above_high.video.render_profile == ui::RenderProfileSetting::high
+            && above_high.video.supersampling == 2, "removed levels clamp to High plus SS2");
+    }
+    for (const auto text : {"eawr-settings 1\nvideo.supersampling=-1\n",
+            "eawr-settings 1\nvideo.supersampling=99\n"}) {
+        const auto ss = ui::parse_settings(text).settings.video.supersampling;
+        expect(ss >= 0 && ss <= 2, "supersampling is clamped to supported steps");
+    }
+    const auto absent = ui::parse_settings("eawr-settings 1\n").settings.video;
+    expect(absent.render_profile == ui::RenderProfileSetting::automatic && absent.supersampling == 0,
+        "absent AA follows the Medium player default with supersampling Off");
+}
+
 void test_garbage() {
     // ST-S1: nothing a file holds can fail the load; a bad file is the defaults.
     for (const std::string_view text : {std::string_view{}, std::string_view{"\n\n"}, std::string_view{"hello"},
@@ -869,6 +989,82 @@ void test_resolution_choices() {
     expect(ui::resolution_choices({0, 0}, {}).empty(), "no screen and no extras is an empty list");
 }
 
+void test_window_placement() {
+    // The window starts centred on the screen it is on, never pinned to a corner, whole frame inside the usable area.
+    const ui::FrameInsets frame{8, 31, 8, 8};  // a typical title bar and borders
+    const ui::ScreenArea primary{0, 0, 1920, 1040};  // 1080p minus the taskbar
+    const ui::ScreenArea beside{1920, 0, 2560, 1400};
+    const ui::ScreenArea left_of{-1600, 120, 1600, 860};  // a monitor left of the primary: negative origin
+    const ui::ScreenArea screens[] = {primary, beside, left_of};
+
+    const std::vector<std::string> requested{"--eawr-launcher-screen", "2"};
+    const auto selected = ui::startup_window_screen(requested, 0, 3);
+    expect(selected == 2, "startup screen: launcher monitor wins over the game's current screen");
+    const auto on_launcher = ui::place_window({1000, 600}, frame, screens, selected, std::nullopt);
+    expect(on_launcher.x < 0 && on_launcher.x + on_launcher.width <= 0,
+           "startup screen: game is placed on the launcher's negative-origin monitor");
+    expect(ui::startup_window_screen({}, 1, 3) == 1, "startup screen: absent hint keeps the current screen");
+    for (const std::string_view value : {"-1", "3", "9999999999999999", "1.5", "bad", ""}) {
+        const std::vector<std::string> invalid{"--eawr-launcher-screen", std::string(value)};
+        const auto fallback = ui::startup_window_screen(invalid, 1, 3);
+        expect(fallback == 1, "startup screen: invalid or disconnected hint keeps the current screen");
+        const auto visible = ui::place_window({1280, 720}, frame, screens, fallback, std::nullopt);
+        expect(visible.x >= 1920, "startup screen: fallback placement stays on the current monitor");
+    }
+    const std::vector<std::string> missing{"--eawr-launcher-screen"};
+    expect(ui::startup_window_screen(missing, 1, 3) == 1, "startup screen: missing value keeps current screen");
+    expect(ui::startup_window_screen(requested, 0, 0) == 0, "startup screen: no displays remains safe");
+
+    ui::WindowPlacement place = ui::place_window({1280, 720}, frame, screens, 0, std::nullopt);
+    expect(place.width == 1280 && place.height == 720, "window placement: the size follows the window setting");
+    expect(place.x == (1920 - (1280 + 16)) / 2 + 8 && place.y == (1040 - (720 + 39)) / 2 + 31,
+           "window placement: centred on the screen, frame included");
+    expect(place.x > 0 && place.y > 0, "window placement: not pinned to the screen's top-left corner");
+
+    place = ui::place_window({1280, 720}, frame, screens, 1, std::nullopt);
+    expect(place.x >= 1920 + 8 && place.x + 1280 + 8 <= 1920 + 2560, "window placement: the second monitor's window sits on it");
+    expect(place.x == 1920 + (2560 - 1296) / 2 + 8 && place.y == (1400 - 759) / 2 + 31, "window placement: centred there");
+
+    place = ui::place_window({1000, 600}, frame, screens, 2, std::nullopt);
+    expect(place.x == -1600 + (1600 - 1016) / 2 + 8 && place.y == 120 + (860 - 639) / 2 + 31,
+           "window placement: a monitor with a negative origin centres on its own coordinates");
+
+    // Bigger than the usable area: shrunk so the frame fits, then filling it exactly.
+    place = ui::place_window({3000, 2000}, frame, screens, 0, std::nullopt);
+    expect(place.width == 1920 - 16 && place.height == 1040 - 39, "window placement: shrunk to the usable area minus the frame");
+    expect(place.x == 8 && place.y == 31, "window placement: and placed at the corner that frame leaves");
+    place = ui::place_window({1920, 1040}, frame, screens, 0, std::nullopt);
+    expect(place.x >= 8 && place.x + place.width + 8 <= 1920 && place.y >= 31 && place.y + place.height + 8 <= 1040,
+           "window placement: a window as big as the screen still has its frame on it");
+
+    // A 4K screen at 150% reports physical pixels: the same rule, nothing to scale.
+    const ui::ScreenArea uhd[] = {{0, 0, 3840, 2100}};
+    place = ui::place_window({1920, 1080}, {12, 45, 12, 12}, uhd, 0, std::nullopt);
+    expect(place.x == (3840 - 1944) / 2 + 12 && place.y == (2100 - 1137) / 2 + 45, "window placement: high-DPI screens centre in physical pixels");
+
+    // No saved settings: the default window size (800x600) is also centred.
+    place = ui::place_window({ui::VideoSettings{}.window_width, ui::VideoSettings{}.window_height}, frame, screens, 0, std::nullopt);
+    expect(place.width == 800 && place.height == 600 && place.x == (1920 - 816) / 2 + 8 && place.y == (1040 - 639) / 2 + 31,
+           "window placement: first start without saved settings is centred too");
+
+    // A screen index past the list uses the last screen; no screens at all leaves the size alone.
+    place = ui::place_window({1280, 720}, frame, screens, 9, std::nullopt);
+    expect(place.x < 0 && place.x + 1280 <= 0, "window placement: an index past the list uses the last screen");
+    place = ui::place_window({1280, 720}, frame, {}, 0, std::nullopt);
+    expect(place.width == 1280 && place.height == 720 && place.x == 0 && place.y == 0, "window placement: no screens: size kept, origin");
+    const ui::ScreenArea empty[] = {{0, 0, 0, 0}};
+    place = ui::place_window({1280, 720}, frame, empty, 0, std::nullopt);
+    expect(place.width == 1280 && place.height == 720, "window placement: an empty area is ignored");
+
+    // keep: a window that grew (a new size from the options page) only moves as far as it has to.
+    place = ui::place_window({1280, 720}, frame, screens, 0, std::make_pair(100, 200));
+    expect(place.x == 100 && place.y == 200, "window placement: a window already fully visible does not move");
+    place = ui::place_window({1280, 720}, frame, screens, 0, std::make_pair(1200, 900));
+    expect(place.x == 1920 - 8 - 1280 && place.y == 1040 - 8 - 720, "window placement: a window hanging off the bottom right is pulled in");
+    place = ui::place_window({1280, 720}, frame, screens, 0, std::make_pair(-300, -50));
+    expect(place.x == 8 && place.y == 31, "window placement: a window above or left of the area is pulled in, frame visible");
+}
+
 void test_session_values() {
     // The start-up apply and a battle read the saved record through one mapping: each volume
     // slider reaches its own bus and the tactical speed reaches the speed step.
@@ -907,6 +1103,7 @@ int main() {
     test_performance_thread_settings();
     test_render_thread_settings();
     test_fit_radar_settings();
+    test_space_pauses_settings();
     test_animated_loading_background_settings();
     test_reinforcement_area_settings();
     test_defaults();
@@ -925,11 +1122,13 @@ int main() {
     test_camera_keys();
     test_frame_pacing();
     test_round_trip();
+    test_aa_levels_and_migration();
     test_garbage();
     test_clamping();
     test_option_status();
     test_particle_detail_setting();
     test_resolution_choices();
+    test_window_placement();
     test_session_values();
     if (test::ui::failures() != 0) {
         std::cerr << test::ui::failures() << " settings check(s) failed\n";

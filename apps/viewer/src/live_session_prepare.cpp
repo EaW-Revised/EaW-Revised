@@ -1,9 +1,12 @@
 #include "viewer_load_notes.hpp"
+#include "eawr/assets/asset_degrade.hpp"
+#include "eawr/presentation/animation/degraded_clips.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
+#include "laser_clip.hpp"
 #include "perf_trace.hpp"
 #include "skirmish_save_hints.hpp"
 #include "eawr/checkpoint/checkpoint.hpp"
@@ -131,7 +134,7 @@ bool LiveSessionView::prepare_head(const vfs::Vfs& filesystem, const std::string
     }
     const bool demo = options_.fixture == "attract";
     if (options_.fixture != "skirmish" && !demo
-        && (options_.skirmish.map || options_.skirmish.slots || options_.skirmish.seed)) {
+        && (options_.skirmish.map || options_.skirmish.slots || options_.skirmish.seed || options_.skirmish_credits)) {
         failure = "--eawr-skirmish-* options require --eawr-live-session skirmish";
         return false;
     }
@@ -195,6 +198,7 @@ bool LiveSessionView::prepare_tail(const vfs::Vfs& filesystem, const data::Catal
     // on and UNDEPLOY when it switches off. Retail draws among several variants; the X-wing has one.
     const auto exists = [&](const std::string& path) { return static_cast<bool>(filesystem.stat(path)); };
     // FW-30: capture-point copies use neutral IDLE art, independent of their live owner.
+    animation::DegradedClips degraded; // ASD-01
     for (const auto& type : tables_->units) {
         if (!type.capture_point || !type.last_state_visible_under_fow) continue;
         if (!neutral_fog_colour_) { failure = "fog capture-point copy: neutral faction colour is unavailable"; return false; }
@@ -203,13 +207,24 @@ bool LiveSessionView::prepare_tail(const vfs::Vfs& filesystem, const data::Catal
             object ? tag_text(object.value(), "Space_Model_Anim_Override_Name") : std::string{});
         const auto index = animation::death_clip_variant(clips.size(), type.neutral_fog_animation_index, 0);
         if (!index) continue; // No matching native clip: preserve the copied pose.
+        // ASD-01: an unreadable or non-binding neutral clip keeps the copied pose (as a type without a clip does) and
+        // costs one load note per file; it never fails the battle start.
         auto model = scene::VfsAssetCache(filesystem).shared_model(type.model_path);
-        auto clip = assets::load_animation(filesystem, clips[*index]);
-        if (!model || !clip) { failure = "fog capture-point copy: neutral animation asset is unreadable"; return false; }
-        auto player = animation::Player::create(*model.value(), &clip.value());
-        if (!player) { failure = core::format_diagnostic(player.error()); return false; }
-        auto pose = player.value().sample({});
-        if (!pose) { failure = core::format_diagnostic(pose.error()); return false; }
+        if (!model) {
+            degraded.add(assets::asset_degraded_note(filesystem, type.model_path, assets::DegradedAsset::model,
+                                                     assets::DegradedStage::load, model.error()));
+            continue;
+        }
+        const auto clip = degraded.load(filesystem, clips[*index]);
+        if (!clip) continue;
+        auto player = degraded.bind(filesystem, *model.value(), *clip, clips[*index]);
+        if (!player) continue;
+        auto pose = player->sample({});
+        if (!pose) {
+            degraded.add(assets::asset_degraded_note(filesystem, clips[*index], assets::DegradedAsset::animation,
+                                                     assets::DegradedStage::bind, pose.error()));
+            continue;
+        }
         for (auto& bone : pose.value().bones) {
             if (bone.visible) continue;
             for (auto* matrix : {&bone.skin_asset, &bone.model_asset}) {
@@ -218,6 +233,7 @@ bool LiveSessionView::prepare_tail(const vfs::Vfs& filesystem, const data::Catal
         }
         neutral_fog_poses_.emplace(battle::type_id(type.id), std::move(pose.value().bones));
     }
+    if (!degraded.empty()) publish_viewer_load_notes(degraded.drain(), {}, true);
     const auto prepare_sfoil_clips = [&] {
         for (BattleScene::PlacedUnit& ship : placed_ships_) {
             const auto type = std::find_if(tables_->units.begin(), tables_->units.end(),
@@ -239,6 +255,22 @@ bool LiveSessionView::prepare_tail(const vfs::Vfs& filesystem, const data::Catal
         }
     };
     prepare_sfoil_clips();
+    // #6554 (WSPL-08): a type with SUPER_LASER plays the attack clip its handler selects.
+    for (BattleScene::PlacedUnit& ship : placed_ships_) {
+        if (!ship.clip.empty() || ship.live_entity == 0 || ship.death_clone) continue;
+        const auto type = std::find_if(tables_->units.begin(), tables_->units.end(),
+                                       [&](const units::UnitType& entry) { return entry.id == ship.object_id; });
+        if (type == tables_->units.end()) continue;
+        const auto object = catalog.resolve(ship.object_id, data::Category::game_object);
+        if (!object) continue;
+        ship.clip = laser_clip::attack_clip_path(*type, space_model_path(object.value()), exists);
+        // TSW-15: the tactical super weapon plays the model's attack clip index 0 (unverified: no tag names it).
+        if (ship.clip.empty() && type->tactical_super_weapon) {
+            const auto path = units::attack_clip_path(space_model_path(object.value()), 0);
+            if (!path.empty() && exists(path)) ship.clip = path;
+        }
+        ship.clip_over_idle = !ship.clip.empty();
+    }
     prepare_clips(filesystem, catalog);
     prepare_launch_slots(filesystem, catalog, std::move(selected_arrivals));
     // HCB-12: one reusable authored model per issuer, never a selectable unit.
@@ -285,6 +317,7 @@ bool LiveSessionView::prepare_tail(const vfs::Vfs& filesystem, const data::Catal
     sim::EntityId last_start_unit = 0;
     for (const auto& [entity, ship] : ship_of_entity_) last_start_unit = std::max(last_start_unit, entity);
     for (const ScheduledOrder& order : options_.orders) {
+        if (order.purchase != ScheduledOrder::Purchase::none) continue; // names a player and a type, not units
         const auto late = [&](const sim::EntityId id) {
             return ship_of_entity_.contains(id) || (options_.late_orders && id > last_start_unit);
         };
@@ -557,6 +590,7 @@ bool LiveSessionView::start(std::string& failure) {
         order_input_ = std::make_unique<ui::OrderInput>(input_sink_ ? *input_sink_ : *scheduler_);
     }
     session_options.scripts = ai_scripts_;
+    for (const auto& call : options_.debug_letterbox) session_options.debug_letterbox.push_back({call.tick, call.in, call.seconds});
     if (options_.save_tick) {
         session_options.save_at = *options_.save_tick;
         // The simulation thread writes the file between two ticks; finish() reads the outcome after stop().
@@ -654,6 +688,15 @@ bool LiveSessionView::start(std::string& failure) {
     // so the same scene arguments give the later orders only, as the saving run held them.
     for (const ScheduledOrder& order : options_.orders) {
         if (loading && order.tick < loaded_tick_) continue;
+        if (order.purchase != ScheduledOrder::Purchase::none) {
+            // #5097 measurement hook: the player buys or calls in a type through the commands the HUD issues.
+            const auto type = battle::type_id(order.type_name);
+            platform::LiveOrder purchase{static_cast<tactical::PlayerId>(order.unit), {}, tactical::BuyPayload{type, false}, order.tick};
+            if (order.purchase == ScheduledOrder::Purchase::reinforce)
+                purchase.payload = tactical::ReinforcePayload{type, order.point, 0, std::nullopt};
+            if (!session_->try_submit(std::move(purchase))) return false;
+            continue;
+        }
         const auto owner = owner_of_entity_.find(order.unit);
         platform::LiveOrder live_order{owner != owner_of_entity_.end() ? owner->second : player_, {order.unit},
                                        tactical::StopPayload{}, order.tick};

@@ -36,3 +36,15 @@ To regenerate deliberately:
 The optimized path must match the ordered list and each chosen map's fixture and
 full start inputs. The synthetic tests also exercise 1/2/4/8 workers, forced thread
 launch failure, ordered worker exceptions and the caller-thread map profile.
+
+## Deliberate updates after the capture
+
+The third column (complete StartInputs values) includes the script manifest digest, which binds the Lua sandbox
+policy identity. When that identity changes, the input hashes of every row that reads inputs move with it, while the
+map and fixture columns stay as captured.
+
+- 2026-11-14, sandbox policy v3 to v4 (legacy EAWR-6803): the third column of the populated synthetic team row and of all 24
+  installed rows was replaced by the current output. The map and fixture columns of all 25 rows are unchanged. For
+  the synthetic row the cause was checked: the same inputs with the manifest digest of the v3 identity hash to the
+  value captured before this update. The installed rows were taken from the test's own mismatch output (their
+  manifests also hold the installed scripts, so the v3 value cannot be recomputed without the old build).

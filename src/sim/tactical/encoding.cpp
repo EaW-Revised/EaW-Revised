@@ -2,6 +2,7 @@
 
 #include "../replay_internal.hpp"
 #include "eawr/sim/tactical/durability.hpp"
+#include "eawr/sim/tactical/land_abilities.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -16,6 +17,7 @@ std::string_view to_string(const OrderKind kind) noexcept {
     case OrderKind::script_invulnerable: return "script_invulnerable";
     case OrderKind::land_garrison: return "land_garrison";
     case OrderKind::land_unload: return "land_unload";
+    case OrderKind::tactical_superweapon: return "tactical_superweapon";
     case OrderKind::gift: return "gift";
     case OrderKind::none:
         return "none";
@@ -95,6 +97,15 @@ std::string_view to_string(const EventKind kind) noexcept {
     case EventKind::special_weapon_fired: return "special_weapon_fired";
     case EventKind::special_weapon_ready: return "special_weapon_ready";
     case EventKind::manual_target_timeout: return "manual_target_timeout";
+    case EventKind::tsw_approach_started: return "tsw_approach_started";
+    case EventKind::tsw_speech_threshold: return "tsw_speech_threshold";
+    case EventKind::tsw_in_range: return "tsw_in_range";
+    case EventKind::tsw_power_up_started: return "tsw_power_up_started";
+    case EventKind::tsw_attack_started: return "tsw_attack_started";
+    case EventKind::tsw_target_destroyed: return "tsw_target_destroyed";
+    case EventKind::planet_obliterated: return "planet_obliterated";
+    case EventKind::tsw_debris_created: return "tsw_debris_created";
+    case EventKind::tsw_sequence_complete: return "tsw_sequence_complete";
     }
     return "unknown";
 }
@@ -196,6 +207,7 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     case opcode_land_unload:
         return 16;
     case opcode_gift: // ADR-020: recipient seat and reserved word
+    case opcode_tactical_superweapon: // TSW-10: stage and admission
     case opcode_script_invulnerable: // TL-03: enabled flag and zero reserved word
     case 9:  // #530 buy: type
     case opcode_retreat: // action and reserved word
@@ -216,6 +228,8 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
         return 40;
     case opcode_reinforce_facing: // WR-X01: type, position, purchase token, explicit yaw
         return 48;
+    case opcode_move_facing: // MV-40: destination, final yaw, flags (hazard, queued), zero reserved word
+        return 40;
     case opcode_cancel_entry: // PU-17: queue, reserved zero, entry identity
         return 16;
     default:
@@ -224,6 +238,7 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
 }
 
 std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
+    if (std::holds_alternative<TacticalSuperweaponPayload>(command.payload)) return opcode_tactical_superweapon;
     if (std::holds_alternative<LandGarrisonPayload>(command.payload)) return opcode_land_garrison;
     if (std::holds_alternative<LandUnloadPayload>(command.payload)) return opcode_land_unload;
     if (std::holds_alternative<BattleControlPayload>(command.payload)) return opcode_battle_control;
@@ -240,6 +255,8 @@ std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
         cancel != nullptr && cancel->entry_id != 0) return opcode_cancel_entry;
     if (std::holds_alternative<RepairHardpointPayload>(command.payload)) return opcode_repair_hardpoint;
     if (std::holds_alternative<RevealAllPayload>(command.payload)) return opcode_reveal_all;
+    if (const auto* move = std::get_if<MovePayload>(&command.payload);
+        move != nullptr && move->final_yaw) return opcode_move_facing;
     if (const auto* move = std::get_if<MovePayload>(&command.payload);
         move != nullptr && move->through_hazards) return opcode_hazard_move;
     if (const auto* reinforce = std::get_if<ReinforcePayload>(&command.payload);
@@ -294,7 +311,8 @@ std::size_t command_body_size(const PlayerCommand& command) noexcept {
         + unit_list_header_size + 8U * command.units.size()
         + (command.origin != CommandOrigin::ordinary ? 16U : 0U)
         + (std::get_if<MovePayload>(&command.payload) != nullptr
-            && std::get<MovePayload>(command.payload).append ? 8U : 0U);
+            && std::get<MovePayload>(command.payload).append
+            && !std::get<MovePayload>(command.payload).final_yaw ? 8U : 0U);
 }
 
 void append_player(std::vector<std::uint8_t>& bytes, const Player& player) {
@@ -338,7 +356,10 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
     bytes.push_back(command_opcode(command));
     bytes.push_back(0);
     sim::detail::append_u16(bytes, 0);
-    if (const auto* garrison = std::get_if<LandGarrisonPayload>(&command.payload)) {
+    if (const auto* tsw = std::get_if<TacticalSuperweaponPayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(tsw->stage));
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(tsw->admission));
+    } else if (const auto* garrison = std::get_if<LandGarrisonPayload>(&command.payload)) {
         sim::detail::append_u64(bytes, garrison->host);
         sim::detail::append_u32(bytes, garrison->bone);
         sim::detail::append_u32(bytes, 0);
@@ -389,6 +410,12 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
         sim::detail::append_i64(bytes, move->destination.x.raw());
         sim::detail::append_i64(bytes, move->destination.y.raw());
         sim::detail::append_i64(bytes, move->destination.z.raw());
+        if (move->final_yaw) {
+            // MV-40: opcode 38 carries the hazard and queued bits in its own flag word, never the HCB-57 tail.
+            sim::detail::append_i64(bytes, move->final_yaw->raw());
+            sim::detail::append_u32(bytes, (move->through_hazards ? 1U : 0U) | (move->append ? 2U : 0U));
+            sim::detail::append_u32(bytes, 0);
+        }
     } else if (const auto* attack = std::get_if<AttackPayload>(&command.payload)) {
         sim::detail::append_u64(bytes, attack->target);
         if (attack->hardpoint != attack_hull) {
@@ -454,7 +481,7 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
     for (const auto unit : command.units) {
         sim::detail::append_u64(bytes, unit);
     }
-    if (const auto* move = std::get_if<MovePayload>(&command.payload); move != nullptr && move->append) {
+    if (const auto* move = std::get_if<MovePayload>(&command.payload); move != nullptr && move->append && !move->final_yaw) {
         sim::detail::append_u32(bytes, 1); // HCB-57 tail version
         sim::detail::append_u32(bytes, 1); // append; no other flags in version 1
     }
@@ -493,7 +520,8 @@ core::Result<void> validate_command_shape(
     const PlayerCommand& command,
     const std::vector<Player>& players,
     const std::string_view context,
-    const std::string_view logical_path) {
+    const std::string_view logical_path,
+    const bool land_domain) {
     const auto issuer = std::find_if(players.begin(), players.end(),
         [&command](const Player& player) { return player.player_id == command.key.player_id; });
     if (issuer == players.end()) {
@@ -508,6 +536,11 @@ core::Result<void> validate_command_shape(
         return core::Result<void>::failure(diagnostic(diagnostic_codes::resource_limit,
             std::string(context) + ": unit list exceeds the per-command limit", logical_path));
     }
+    if (const auto* tsw = std::get_if<TacticalSuperweaponPayload>(&command.payload);
+        tsw && (command.units.size() != 1 || (tsw->stage != TswStage::start_approach && tsw->stage != TswStage::start_power_up)
+            || (tsw->admission != TswAdmission::player && tsw->admission != TswAdmission::ai_object)))
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": the super weapon switch requires one unit, a known stage and a known admission", logical_path));
     if (const auto* garrison = std::get_if<LandGarrisonPayload>(&command.payload);
         garrison && garrison->host == invalid_entity_id)
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
@@ -604,6 +637,16 @@ core::Result<void> validate_command_shape(
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": reinforcement facing must be in [0, 360) degrees", logical_path));
     }
+    if (const auto* move = std::get_if<MovePayload>(&command.payload); move != nullptr && move->final_yaw) {
+        if (move->final_yaw->raw() < 0 || move->final_yaw->raw() >= 360 * math::Fixed::scale) {
+            return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+                std::string(context) + ": move final facing must be in [0, 360) degrees", logical_path));
+        }
+        if (land_domain) {
+            return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+                std::string(context) + ": land move does not support a final facing", logical_path));
+        }
+    }
     if (const auto* damage = std::get_if<DamagePayload>(&command.payload);
         damage != nullptr && damage->amount.raw() < 0) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
@@ -622,37 +665,59 @@ core::Result<void> validate_command_shape(
     if (const auto* ability = std::get_if<AbilityPayload>(&command.payload)) {
         const auto kind = static_cast<std::uint8_t>(ability->ability);
         const auto action = static_cast<std::uint8_t>(ability->action);
+        // A space battle names only the 32 space kinds: the land-only values are as unknown there as they were before the
+        // land vocabulary existed.
         if (kind == 0 || to_string(ability->ability) == "NONE" || action == 0
+            || (!land_domain && kind > static_cast<std::uint8_t>(AbilityKind::lucky_shot))
             || action > static_cast<std::uint8_t>(AbilityAction::autofire_off)) {
             return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
                 std::string(context) + ": unknown ability or ability action", logical_path));
         }
-        // AB-61, WHE-26/27, WLS-01: targeted activation always carries an object.
-        const bool aims = (ability->ability == AbilityKind::ion_cannon_shot
-            || ability->ability == AbilityKind::concentrate_fire || ability->ability == AbilityKind::energy_weapon
-            || ability->ability == AbilityKind::tractor_beam || ability->ability == AbilityKind::leech_shields
-            || ability->ability == AbilityKind::super_laser || ability->ability == AbilityKind::lucky_shot)
-            && ability->action == AbilityAction::activate;
-        if (aims != (ability->target != invalid_entity_id)
-            || (ability->target == invalid_entity_id && ability->target_hardpoint != 0xffffffffU)) {
-            return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
-                std::string(context) + ": an ability target is required exactly when a targeted ability switches on",
-                logical_path));
-        }
-        // WHE-61, WAB-70: WEAKEN_ENEMY and BUZZ_DROIDS switch on at a point.
-        const bool positioned = (ability->ability == AbilityKind::weaken_enemy || ability->ability == AbilityKind::buzz_droids
-            || ability->ability == AbilityKind::fow_reveal_ping
-            || ability->ability == AbilityKind::corrupt_systems)
-            && ability->action == AbilityAction::activate;
-        if (positioned != ability->position.has_value())
-            return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
-                std::string(context) + ": a position is required exactly for area-status and buzz-droid activation", logical_path));
-        if (ability->position) {
-            constexpr auto limit = std::int64_t{1} << 42; // existing Q24 command coordinate bound
-            for (const auto value : {ability->position->x, ability->position->y, ability->position->z})
-                if (value.raw() < -limit || value.raw() > limit)
-                    return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
-                        std::string(context) + ": ability position outside the command coordinate bound", logical_path));
+        // WLAB-77: a land-only kind (the appended vocabulary) switches on at an object or at a point, exactly when the
+        // command bar asks for a target first (AB-09), never with both; the space kinds below keep their own rules.
+        if (kind > static_cast<std::uint8_t>(AbilityKind::lucky_shot)) {
+            const bool aimed = ability_kind_flags(ability->ability).targeted && ability->action == AbilityAction::activate;
+            const bool at_object = ability->target != invalid_entity_id;
+            if (aimed != (at_object || ability->position.has_value()) || (at_object && ability->position.has_value())
+                || (!at_object && ability->target_hardpoint != 0xffffffffU)) {
+                return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+                    std::string(context) + ": a land ability carries an object or a point exactly when it is targeted", logical_path));
+            }
+            if (ability->position) {
+                constexpr auto limit = std::int64_t{1} << 42; // the same Q24 command coordinate bound
+                for (const auto value : {ability->position->x, ability->position->y, ability->position->z})
+                    if (value.raw() < -limit || value.raw() > limit)
+                        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+                            std::string(context) + ": ability position outside the command coordinate bound", logical_path));
+            }
+        } else {
+            // AB-61, WHE-26/27, WLS-01: targeted activation always carries an object.
+            const bool aims = (ability->ability == AbilityKind::ion_cannon_shot
+                || ability->ability == AbilityKind::concentrate_fire || ability->ability == AbilityKind::energy_weapon
+                || ability->ability == AbilityKind::tractor_beam || ability->ability == AbilityKind::leech_shields
+                || ability->ability == AbilityKind::super_laser || ability->ability == AbilityKind::lucky_shot)
+                && ability->action == AbilityAction::activate;
+            if (aims != (ability->target != invalid_entity_id)
+                || (ability->target == invalid_entity_id && ability->target_hardpoint != 0xffffffffU)) {
+                return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+                    std::string(context) + ": an ability target is required exactly when a targeted ability switches on",
+                    logical_path));
+            }
+            // WHE-61, WAB-70: WEAKEN_ENEMY and BUZZ_DROIDS switch on at a point.
+            const bool positioned = (ability->ability == AbilityKind::weaken_enemy || ability->ability == AbilityKind::buzz_droids
+                || ability->ability == AbilityKind::fow_reveal_ping
+                || ability->ability == AbilityKind::corrupt_systems)
+                && ability->action == AbilityAction::activate;
+            if (positioned != ability->position.has_value())
+                return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+                    std::string(context) + ": a position is required exactly for area-status and buzz-droid activation", logical_path));
+            if (ability->position) {
+                constexpr auto limit = std::int64_t{1} << 42; // existing Q24 command coordinate bound
+                for (const auto value : {ability->position->x, ability->position->y, ability->position->z})
+                    if (value.raw() < -limit || value.raw() > limit)
+                        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+                            std::string(context) + ": ability position outside the command coordinate bound", logical_path));
+            }
         }
     }
     if (const auto* area = std::get_if<AreaAbilityPayload>(&command.payload);

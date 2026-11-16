@@ -324,7 +324,8 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
 
 ## Launched-craft flag
 
-- WU-37 (hangar-launched craft flags). A hangar-launched squadron's icon carries a small white flag. The hangar spawner
+- WU-37 (hangar-launched craft flags). A hangar-launched squadron's icon, and the unit bracket of every marked ally unit (WU-39a),
+  carries a small white flag. The hangar spawner
   marks every craft it creates, and the team object that holds them, as a "garrison unit"; the
   remake's M2 skirmish starting forces are not marked: escort-object starts are not modelled.
   The debug build's starting-force path marks fleet escort objects, rather than every starting
@@ -365,6 +366,21 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
   1280 x 720: flag centre 14 px right and 15 px below the frame's centre, seen size 7 x 11 px
   (reference: 15 right, 16 below; 7.5 x 11.7). The remake draws the texture's centre 15 reference
   pixels right and 15 below the frame's centre (Y down on screen).
+- WU-39a (unit-bracket flag; debug build, bracket build, update and layout) (legacy EAWR-6931). The unit bracket
+  (the health-bar group of a selected unit, the hovered unit, a unit under 10 % health, or one whose grab bar
+  is in its selected state) has its own copy of the same `st_garrison_icon` component. On every update, for
+  an ally of the local player in space and land mode, the icon is set when the unit carries the garrison mark
+  (WU-37) and cleared otherwise; an enemy's is always cleared. It is therefore drawn for a single marked ship
+  (a hangar-listed corvette or frigate, also while it arrives by hyperspace and after) and for a hovered marked
+  craft; a purchased reinforcement and a starting-force ship are unmarked and show none. A team object in
+  space has no bracket (its icon is the grab bar, WU-38). The flag is the texture's native 12 x 14 pixels times
+  the unit type's `GUI_Bounds_Scale` (default 1), at the bracket point's row, its centre shifted right by half
+  the scaled health-bar width plus half the flag's width: flush to the bar's right end. Fog, a point behind
+  the camera or off screen hides it with the rest of the bracket. The remake draws it with the same
+  candidate list as the bars; it does not yet draw it for a bracket whose bars are all hidden (debug-build
+  layout code shows the icon whenever the bracket exists; deviation, unverified in a capture). The faction's
+  garrison selection-ring material for marked units is not drawn yet (tag
+  `Space_Mode_Garrison_Selection_Blob_Material_Name`, `todo`) (legacy EAWR-3776).
 - WU-40. The flag is unrelated to the command bar's garrison respawn counter, which reuses the same
   component name in land mode (debug build: a separate grab bar shown at the top left of the screen).
 
@@ -480,3 +496,4 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
 - `GUI_Bounds_Scale` default 1 (WU-18) is inferred from the M2 ships, which do not set it.
 - The dogfight grid's origin, anchor, service order and jump (WU-27); its rows' direction (WU-26).
 - Whether a script-spawned craft is marked as a garrison unit (WU-37); the overlay offset's Y direction is taken from the retail still (WU-39).
+- The bracket flag's exact pixel offset and size (WU-39a): derived from the debug build's layout code, not yet seen in a retail capture; whether it shows while every bar of the bracket is hidden.

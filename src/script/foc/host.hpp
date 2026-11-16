@@ -22,6 +22,7 @@
 #include <bit>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -134,6 +135,21 @@ struct Host {
     // The goal system engine (#449); null when only the freestore runs. The bindings only read it.
     const ai::Engine* engine{};
     std::map<tactical::PlayerId, math::Fixed> credit_changes; // current barrier's ordered wallet changes
+    // TSW-07: the super weapon objects one script instance already asked to fire in its current tick, so a second call in
+    // that tick answers false. Keyed by instance and written only by that instance's own calls; the lock covers the map.
+    struct TswStaged {
+        std::uint64_t tick{};
+        std::set<sim::EntityId> units;
+    };
+    mutable std::mutex tsw_staged_lock;
+    mutable std::map<std::uint64_t, TswStaged> tsw_staged;
+    // True the first time `instance` asks for `unit` in `tick`, false when it already did.
+    [[nodiscard]] bool stage_tsw_once(std::uint64_t instance, std::uint64_t tick, sim::EntityId unit) const {
+        const std::scoped_lock lock(tsw_staged_lock);
+        auto& entry = tsw_staged[instance];
+        if (entry.tick != tick) entry = TswStaged{tick, {}};
+        return entry.units.insert(unit).second;
+    }
     void clear_barrier_state() {
         credit_changes.clear();
     }
@@ -268,6 +284,13 @@ inline void issue_special_fire(BindingContext& context, const ViewUnit& source, 
     context.issue_command(std::string(verb_special_fire), {
         number(LuaNumber(static_cast<std::int64_t>(player))), handle(handle_game_object, source.id),
         handle(handle_game_object, target.id), number(LuaNumber(static_cast<std::int64_t>(admission)))});
+}
+
+// TSW-07: the script call's request for the shared switch command, issuer = the object's owner, AI admission.
+inline void issue_tsw_request(BindingContext& context, const ViewUnit& unit, tactical::TswStage stage) {
+    context.issue_command(std::string(verb_tactical_superweapon), {
+        number(LuaNumber(static_cast<std::int64_t>(unit.owner))), handle(handle_game_object, unit.id),
+        number(LuaNumber(static_cast<std::int64_t>(stage)))});
 }
 
 // FH-41: movement takes a point; attack-move and guard may retain an object.

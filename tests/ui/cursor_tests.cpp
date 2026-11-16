@@ -1,3 +1,4 @@
+#include "eawr/assets/asset_name_resolver.hpp"
 #include "eawr/data/ui/cursors.hpp"
 #include "eawr/presentation/ui/cursors.hpp"
 #include "ui_test_support.hpp"
@@ -7,8 +8,10 @@
 #include <cstdlib>
 #include <limits>
 #include <new>
+#include <string>
 #include <string_view>
 #include <tuple>
+#include <vector>
 
 namespace {
 std::atomic<std::size_t> allocations{};
@@ -190,6 +193,38 @@ void steady_history() {
     steady(); // The full diagnostic history must not bring the frame allocation back.
     expect(history.samples().front().id == long_id, "samples own their retained IDs");
 }
+// Wrong-extension fixture (#6771): a pointer authored as .jpg finds the shipped .dds frames; a pointer whose first
+// frame is absent is one EAWR-ASSET-NAME-0001 line.
+void wrong_extension() {
+    assets::reset_name_misses();
+    // The mounted tree is fixed at mount time, so the wrong-extension fixture has its own.
+    test::ui::TempTree wrong_tree("cursors-wrong-extension");
+    test::ui::write_text(wrong_tree.root / "xml/mousepointerfiles.xml", "<MousePointerFiles><File>MousePointers.xml</File></MousePointerFiles>");
+    test::ui::write_text(wrong_tree.root / "xml/mousepointers.xml",
+        "<MousePointers><MousePointer Name='POINTER_WRONG'><Base_Texture>wrong_00.jpg</Base_Texture></MousePointer>"
+        "<MousePointer Name='POINTER_GONE'><Base_Texture>gone.jpg</Base_Texture></MousePointer></MousePointers>");
+    for (const auto name : {"wrong_00.dds", "wrong_01.dds", "wrong_02.dds"})
+        test::ui::write_text(wrong_tree.root / "art/textures" / name, "synthetic frame; metadata lookup only");
+    const std::array wrong_mounts{vfs::MountSpec{"synthetic", wrong_tree.root, "data", {}}};
+    auto wrong_filesystem = vfs::Vfs::mount(wrong_mounts);
+    expect(static_cast<bool>(wrong_filesystem), "wrong-extension cursor VFS");
+    if (!wrong_filesystem) return;
+    const auto wrong = data::ui::load_cursors(wrong_filesystem.value());
+    if (!wrong) std::cerr << core::format_diagnostic(wrong.error()) << '\n';
+    expect(static_cast<bool>(wrong), "wrong-extension cursor catalog parses");
+    if (wrong) {
+        expect(wrong.value().at("POINTER_WRONG").frames
+                   == std::vector<std::string>{"data/art/textures/wrong_00.dds", "data/art/textures/wrong_01.dds",
+                                               "data/art/textures/wrong_02.dds"},
+               "a .jpg-named numbered pointer finds its .dds frames and stops at the first gap");
+        expect(wrong.value().at("POINTER_GONE").frames.empty(), "a pointer with no art has no frames");
+    }
+    const auto lines = assets::name_miss_lines();
+    expect(lines.size() == 1U && lines.front().starts_with("EAWR-ASSET-NAME-0001 texture 'gone.jpg' not found")
+               && lines.front().find("cursor texture") != std::string::npos,
+           "one missed pointer is one EAWR-ASSET-NAME-0001 line and the sequence end adds none");
+    assets::reset_name_misses();
+}
 void loader() {
     test::ui::TempTree tree("cursors");
     test::ui::write_text(tree.root / "xml/mousepointerfiles.xml", "<MousePointerFiles><File>MousePointers.xml</File></MousePointerFiles>");
@@ -210,6 +245,7 @@ void loader() {
     expect(attack.hot_x == 16 && attack.hot_y == 15 && attack.frame_delay == 10, "authored hotspot and timing");
     expect(attack.frames.size() == 2, "numbered sequence stops at first gap, TGA resolves DDS");
     expect(loaded.value().at("POINTER_NORMAL").frames.size() == 1, "unnumbered art loads once");
+    expect(assets::name_miss_lines().empty(), "the gap that ends a numbered sequence is not a missing name");
     test::ui::write_text(tree.root / "xml/mousepointers.xml",
         "<MousePointers><MousePointer Name='broken'><Base_Texture>static.tga</Base_Texture><Hot_X>-1</Hot_X></MousePointer></MousePointers>");
     expect(!data::ui::load_cursors(filesystem.value()), "negative hotspot is rejected");
@@ -227,6 +263,6 @@ void loader() {
 }
 }
 int main() {
-    states(); tactical_cursor_selection_unchanged(); animation(); steady_history(); loader();
+    states(); tactical_cursor_selection_unchanged(); animation(); steady_history(); loader(); wrong_extension();
     return eawr::test::ui::failures() ? 1 : 0;
 }

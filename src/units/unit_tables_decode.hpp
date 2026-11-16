@@ -8,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <unordered_set>
 #include <utility>
 
 namespace eawr::units::unit_tables_detail {
@@ -55,6 +56,14 @@ struct AbilityFields final {
     const data::XmlNode& node;
     std::string operator()(std::string_view tag) const;
 };
+
+// Names the loaded unit rows point at, case-folded, for the per-projectile "who uses this" question (death payload,
+// retreat payload, spawned object, fired projectile). One pass over the units instead of one walk per projectile.
+struct ProjectileUse final {
+    using Names = std::unordered_set<std::string, NameHash, NameEqual>;
+    Names death, retreat, spawned, fired;
+};
+[[nodiscard]] ProjectileUse build_projectile_use(const UnitTables& tables);
 
 class Loader final {
 public:
@@ -119,6 +128,7 @@ private:
     void load_bonus_abilities(Object& object, UnitType& unit, const std::string& name, const AbilityFields& child_text);
     void load_nested_abilities(Object& object, UnitType& unit);
     void load_land_income_abilities(Object& object, UnitType& unit);
+    void load_land_weapon_swap(Object& object, UnitType& unit); // WLAB-71 (#3239)
 
     // #530 (docs/behaviour/space-purchasing.md PU-10 to PU-21, PU-31): what a station builds for
     // each faction, and what a type costs, takes and counts in a skirmish.
@@ -137,6 +147,7 @@ private:
 
     // L2a (#1450): a land company object into tables_.land_companies; land loads only.
     void load_land_company(Object& object);
+    void load_land_company_production(Object& object, Production& production);
     LandCompanyMember land_member(Object& object);
     LandGarrisonData land_garrison(Object& object);
     LandLocomotionData land_locomotion(Object& object);
@@ -167,6 +178,8 @@ private:
     SpaceFootprint read_footprint(Object& object, const Frames* model);
 
     void load_projectile(const std::string& id);
+    // Built once before the first projectile (the unit rows are final by then).
+    [[nodiscard]] const ProjectileUse& projectile_use();
 
     // Resolve cross-table references to indices once every table is loaded.
     void link();
@@ -185,6 +198,7 @@ private:
     std::vector<std::string> obstacle_ids_;
     std::set<std::string> wanted_projectiles_;
     std::vector<std::string> priority_ids_;
+    std::optional<ProjectileUse> projectile_use_;
 };
 
 } // namespace eawr::units::unit_tables_detail

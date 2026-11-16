@@ -77,6 +77,21 @@ class GalacticInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "differs from the committed manifest"):
             generate(root, manifest, {"entries": []})
 
+    def test_ai_raid_and_corruption_adapters_are_partial_not_missing(self):
+        root, manifest = self.fixture({"data/scripts/ai/galacticmode/raid.lua":
+            'force.Is_Raid_Capable()\nforce.Raid(target)\nWaitForStarbase(planet, 2)\nplanet.Is_Corrupted()\nRaid()\nplanet.WaitForStarbase()'})
+        registrations = {"entries": [
+            {"exposed_name": name, "call_kind": "member"}
+            for name in ("Is_Raid_Capable", "Raid", "Is_Corrupted")
+        ] + [{"exposed_name": "WaitForStarbase", "call_kind": "global"}]}
+        rows = {(row["symbol"], row["call_kind"]): row for row in generate(root, manifest, registrations)["rows"]}
+        for symbol, kind in (("Is_Raid_Capable", "member"), ("Raid", "member"),
+                             ("WaitForStarbase", "global"), ("Is_Corrupted", "member")):
+            self.assertEqual(rows[symbol, kind]["status"], "partial")
+            self.assertTrue(rows[symbol, kind]["target"].startswith("src/script/foc/"))
+        self.assertEqual(rows["Raid", "global"]["status"], "unresolved")
+        self.assertEqual(rows["WaitForStarbase", "member"]["status"], "unresolved")
+
     def test_unsynchronized_random_is_forbidden_not_an_adapter_gap(self):
         root, manifest = self.fixture({"data/scripts/story/a.lua": 'GameRandom.Free_Random(1, 2)'})
         registrations = {"entries": [{"exposed_name": "Free_Random", "call_kind": "member"}]}

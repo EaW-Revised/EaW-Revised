@@ -280,6 +280,7 @@ struct SquadronFrame {
     DogfightFlight dogfight{DogfightFlight::none}; // #457, FD-01 to FD-03
     CombatCell cell{};
     math::Vec3 hold{};
+    std::optional<GuardChase> guard{}; // FM-20: the squadron guards a live unit
     bool moving{};
     std::optional<LaneFlight> lane{}; // FO-10, FO-11 (#599)
     // FT-02, FO-05, FO-06: whether the squadron scans this frame, and from where (the point it

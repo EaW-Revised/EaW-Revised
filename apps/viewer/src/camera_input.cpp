@@ -47,6 +47,7 @@ void Adapter::clear_pending() noexcept {
     orbit_pitch_units_ = 0.0F;
     translate_x_ = 0.0F;
     translate_y_ = 0.0F;
+    translate_events_.clear();
     pan_motion_x_ = 0.0F;
     pan_motion_y_ = 0.0F;
     grab_travel_x_ = 0.0F;
@@ -352,9 +353,11 @@ core::Result<void> Adapter::handle(const RawEvent& event) {
                 routed = true;
             } else if (binding.action == Action::translate_x && rotating) {
                 translate_x_ += binding.scale * relative;
+                translate_events_.push_back({rotate_units_, binding.scale * relative, 0.0F});
                 routed = true;
             } else if (binding.action == Action::translate_y && rotating) {
                 translate_y_ += binding.scale * relative;
+                translate_events_.push_back({rotate_units_, 0.0F, binding.scale * relative});
                 routed = true;
             } else if (binding.action == Action::pan_motion_x && panning) {
                 pan_motion_x_ += binding.scale * relative;
@@ -424,6 +427,23 @@ core::Result<StepIntent> Adapter::take_step(const camera::Constants& constants) 
     intent.orbit_pitch_units = orbit_pitch_units_ * per_height;
     intent.translate_x = translate_x_ * per_width;
     intent.translate_y = translate_y_ * per_height;
+    // Turn each translate event back by the yaw its step had already turned
+    // by when it arrived (same sign as the pose step's screen-to-world map).
+    // The turn is taken as unclamped: with a narrow authored yaw range the
+    // camera turns less than the pending units say, so later events in the same
+    // step are rotated by a little more than the camera really turned. Both
+    // committed tables use a full-turn range, where this is exact.
+    constexpr float degrees_to_radians = 3.14159265358979323846F / 180.0F;
+    for (const TranslateEvent& event : translate_events_) {
+        const float turned = constants.yaw_per_mouse_unit * event.rotate_before * per_width
+            * degrees_to_radians;
+        const float cosine = std::cos(turned);
+        const float sine = std::sin(turned);
+        const float x = event.x * per_width;
+        const float y = event.y * per_height;
+        intent.translate_at_start_x += cosine * x - sine * y;
+        intent.translate_at_start_y += sine * x + cosine * y;
+    }
     intent.reset_requests = reset_requests_;
     intent.view_reset_requests = view_reset_requests_;
     intent.free_toggle_requests = free_toggle_requests_;

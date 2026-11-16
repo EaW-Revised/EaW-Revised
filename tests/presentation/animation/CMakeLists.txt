@@ -18,6 +18,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     )
     add_executable(animation_land_locomotion_clips_tests land_locomotion_clips_tests.cpp
         "${EAWR_ROOT}/src/presentation/animation/land_locomotion_clips.cpp")
+    target_include_directories(animation_land_locomotion_clips_tests PRIVATE "${EAWR_ROOT}/include")
     target_include_directories(animation_idle_playback_tests PRIVATE "${EAWR_ROOT}/include")
     if(MSVC)
         target_compile_options(animation_idle_playback_tests PRIVATE /W4 /WX /permissive-)

@@ -14,8 +14,10 @@ except ImportError:
 
 @unittest.skipUnless(support.RUNTIME and support.GAME_ROOT, "requires GPU viewer and installed FoC")
 class GalacticFleetStackPopupRuntime(unittest.TestCase):
-    def hover(self, fixture, badge):
-        """Hovers the named overview stack icon past the encyclopedia delay; returns the report."""
+    def hover(self, fixture, badge, campaign=None, paused="yes"):
+        """Hovers the named overview stack icon past the encyclopedia delay; returns the report. A campaign name runs
+        that real campaign as it starts (its overview already shows the planet) instead of a synthetic fixture."""
+        navigate = "true" if campaign is None else "false"
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-stack-popup-"))
         report = directory / "report.json"
         driver = directory / "input.gd"
@@ -42,8 +44,8 @@ func _process(delta):
     frame += 1
     # GHUDL-16: the fixture's planet starts left of the overview frame; native
     # previous/next navigation centres it before the icon is pointed at.
-    if frame == 10: key(KEY_PAGEUP)
-    if frame == 12: key(KEY_PAGEDOWN)
+    if frame == 10 and ''' + navigate + ''': key(KEY_PAGEUP)
+    if frame == 12 and ''' + navigate + ''': key(KEY_PAGEDOWN)
     if frame >= 70 and frame <= 230 and frame % 20 == 10:
         var target = root.find_child(''' + json.dumps(badge) + ''', true, false)
         assert(target != null and target.is_visible_in_tree())
@@ -61,8 +63,9 @@ func _process(delta):
 ''', encoding="utf-8")
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
-            "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", fixture,
-            "--eawr-game-root", support.GAME_ROOT, "--eawr-galactic-paused", "yes",
+            *(("--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", fixture) if campaign is None
+              else ("--eawr-galactic", campaign, "--eawr-galactic-dismiss-story", "yes")),
+            "--eawr-game-root", support.GAME_ROOT, "--eawr-galactic-paused", paused,
             "--eawr-report", str(report)], cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertTrue(report.is_file(), result.stdout + result.stderr)
@@ -165,6 +168,40 @@ func _process(delta):
         data = self.hover("fleet-presence-plain", "fleet_presence_101_1")
         self.assertFalse([row for row in data["fleet_hud"]["presence"] if row["planet"] == 101 and row["icon"] == 0],
                          self.hover_facts(data))
+
+    def test_real_campaign_hero_medal_and_stack_icons_open_the_popup(self):
+        # Legacy #7177: the stock Imperial start has fleets and landed heroes at Coruscant. Every stack icon of the
+        # planet, the fleet icons and the ground one that carries the heroes, opens the popup when hovered.
+        for paused, badge in (("yes", "fleet_presence_15_0"), ("yes", "ground_presence_15"),
+                              ("no", "fleet_presence_15_0"), ("no", "ground_presence_15")):
+            with self.subTest(badge=badge, paused=paused):
+                data = self.hover(None, badge, campaign="Sandbox_Equal_Footing_Empire", paused=paused)
+                popup = data["fleet_hud"]["stack_popup"]
+                shown = popup["popup"]["tooltip"]
+                self.assertIsNotNone(shown, {"key": popup["key"], "admitted": popup.get("admitted"),
+                                             "pointer": popup.get("pointer")})
+                self.assertTrue(shown["cells"], shown)
+
+    def test_hero_status_icon_hover_lists_the_planets_heroes(self):
+        # Legacy #7177 / WGSI-8/9: hovering the hero medal under a planet's name lists its named heroes as icons. The stock
+        # Imperial start has Veers, Tarkin and the Emperor landed on Coruscant (the Empire side icon, kind 9, planet 15).
+        for paused in ("yes", "no"):
+            with self.subTest(paused=paused):
+                data = self.hover(None, "planet_status_15_9", campaign="Sandbox_Equal_Footing_Empire", paused=paused)
+                tip = data["hero_tooltip"]
+                self.assertTrue(tip["visible"], tip)
+                self.assertEqual((tip["planet"], tip["kind"]), (15, 9), tip)
+                types = sorted(cell["type"] for cell in tip["cells"])
+                for hero in (647, 690, 457):
+                    self.assertIn(hero, types, tip)
+                for cell in tip["cells"]:
+                    x, y, width, height = cell["rect"]
+                    self.assertGreater(width, 0, cell)
+                    self.assertGreater(height, 0, cell)
+                    self.assertGreaterEqual(x, 0, cell)
+                    self.assertGreaterEqual(y, 0, cell)
+                    self.assertLessEqual(x + width, 1280, cell)
+                    self.assertLessEqual(y + height, 720, cell)
 
 
 if __name__ == "__main__":

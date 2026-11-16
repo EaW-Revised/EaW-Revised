@@ -106,8 +106,10 @@ int run(std::uint64_t frames) {
     unsigned opened_uninvolved{}, party_choices{};
     for (std::uint64_t tick = 1; tick <= frames; ++tick) {
         live->advance_to(tick);
-        if (!live->wait_for(tick, std::chrono::minutes(30))) throw std::runtime_error("live campaign frame timed out");
-        if (const auto error = live->failure()) throw std::runtime_error(eawr::core::format_diagnostic(*error));
+        const bool reached = live->wait_for(tick, std::chrono::minutes(30));
+        // The wait also returns early when the session failed or ended: name that cause, not a timeout (#6677).
+        if (const auto error = live->failure()) throw std::runtime_error("tick " + std::to_string(tick) + ": " + eawr::core::format_diagnostic(*error));
+        if (!reached) throw std::runtime_error("live campaign frame " + std::to_string(tick) + " was not reached (timed out, or the session ended without a failure)");
         const auto frame = live->frame(human);
         const auto* admission = frame.pending_conflict ? &frame.pending_conflict->conflict : frame.conflict.get();
         const auto dialog = view::live_battle_dialog_view(frame, human, local, acknowledged, names, frame.tactical_available);

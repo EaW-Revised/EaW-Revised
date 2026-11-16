@@ -73,10 +73,14 @@ void build_command_buttons(HudState& state, const vfs::Vfs& filesystem, EawrTact
         state.beacon_button = control;
         setup.time_buttons.push_back({control, quad(look, icon), look.rect});
     }
-    if (state.shell.movie_camera) {
+    // HCB-11c: the bands belong to the cinematic camera, not to its HUD button. A shell or catalogue
+    // without b_camera_t still gets them when the camera is entered by its key.
+    {
         auto height = model::movie_letterbox_height(filesystem);
         if (height) state.movie_height = height.value();
         else state.diagnostics.push_back(height.error());
+    }
+    if (state.shell.movie_camera) {
         const auto& look = *state.shell.movie_camera;
         auto* control = memnew(EawrHudButton);
         control->set_name("b_camera_t");
@@ -198,6 +202,85 @@ void build_command_buttons(HudState& state, const vfs::Vfs& filesystem, EawrTact
         dial->set_material(additive);
         state.retreat_dial = dial;
         setup.time_buttons.push_back({control, quad(button, icon), button.rect});
+    }
+    // HCB-46/63: the ordinary switch panel, with an independent card-slot version
+    // when the planet-destruction lever is present. Neither depends on selection.
+    if (state.shell.superlaser_switch) {
+        auto look = state.shell.superlaser_switch->button;
+        look.rect.y += 8.0F; // HCB-63: ordinary panel translation in shell units
+        look.origin.y += 8.0F;
+        std::string origin;
+        state.sl_base = button_texture(look.name, look.normal, origin);
+        state.sl_ready = look.alternates.empty() ? state.sl_base : button_texture(look.name, look.alternates.front(), origin);
+        auto* control = memnew(EawrHudButton);
+        control->set_name("sl_switch");
+        layered_button(control, look, state.sl_base);
+        control->set_visible(false);
+        control->set_action([&state] { if (state.sl_handler) state.sl_handler(); });
+        state.sl_button = control;
+        setup.time_buttons.push_back({control, quad(look, state.sl_base), look.rect});
+        if (!state.shell.card_slots.empty()) {
+            auto card = state.shell.card_slots.front().card;
+            card.rect.x -= 5.0F; // HCB-63: alternate panel translation
+            card.origin.x -= 5.0F;
+            auto* alternate = memnew(EawrHudButton);
+            alternate->set_name("sl_switch_card");
+            const auto icon = button_texture("SUPER_LASER", std::string(model::ability_icon(model::ability_index("SUPER_LASER"))), origin);
+            layered_button(alternate, card, icon);
+            alternate->set_visible(false);
+            alternate->set_z_index(1);
+            alternate->set_action([&state] { if (state.sl_handler) state.sl_handler(); });
+            state.sl_card = alternate;
+            setup.time_buttons.push_back({alternate, quad(card, icon), card.rect});
+            auto* dial = memnew(EawrSpecialWeaponDial);
+            dial->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            alternate->add_child(dial);
+            dial->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+            dial->texture = button_texture(card.name, state.shell.card_slots.front().marks.build, origin);
+            state.sl_dial = dial;
+        }
+    }
+    if (state.shell.superlaser_recharge) {
+        const auto& look = *state.shell.superlaser_recharge;
+        std::string origin;
+        auto* bar = memnew(EawrSuperlaserBar);
+        bar->set_name("sl_switch_recharge");
+        bar->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        bar->set_visible(false);
+        for (const auto& texture : look.back) bar->backs.push_back(button_texture(look.name, texture, origin));
+        for (const auto& texture : look.overlay) bar->overlays.push_back(button_texture(look.name, texture, origin));
+        bar->max_level = look.max_level;
+        bar->smooth = look.smooth;
+        const auto texture = !bar->backs.empty() ? bar->backs.back()
+            : !bar->overlays.empty() ? bar->overlays.back() : Ref<Texture2D>();
+        bar->reference_size = texture.is_valid() ? texture->get_size() : Vector2();
+        const Vector2 size = bar->reference_size * look.scale;
+        const data::ui::ReferenceRect rect{look.origin.x + look.offset.x - size.x / 2.0F,
+            look.origin.y + look.offset.y + 8.0F - size.y / 2.0F, size.x, size.y};
+        setup.time_buttons.push_back({bar, rect, {}});
+        state.sl_bar = bar;
+    }
+    // HCB-47: the Death Star switch. Hidden until a super weapon object exists; its icons are the base art and the five
+    // click-animation alternates, swapped by the presenter's view; the tooltip keys follow the view's state.
+    if (state.shell.deathstar_switch) {
+        const auto& look = *state.shell.deathstar_switch;
+        const auto& button = look.button;
+        auto* control = memnew(EawrHudButton);
+        control->set_name("deathstar_switch");
+        std::string origin;
+        state.ds_icons.clear();
+        state.ds_icons.push_back(button_texture(button.name, button.normal, origin));
+        for (const auto& alternate : button.alternates) state.ds_icons.push_back(button_texture(button.name, alternate, origin));
+        layered_button(control, button, state.ds_icons.front());
+        control->set_special_disabled(true);
+        control->set_visible(false);
+        control->set_action([&state] { if (state.ds_handler) state.ds_handler(); });
+        for (std::size_t index = 0; index < state.ds_tooltips.size() && index < state.shell.deathstar_tooltips.size(); ++index)
+            state.ds_tooltips[index] = state.shell.deathstar_tooltips[index];
+        state.ds_button = control;
+        const auto art = quad(button, state.ds_icons.front());
+        // The whole lever panel takes the pointer: the mesh slot and the art together, plus the rim (HCB-47).
+        setup.time_buttons.push_back({control, art, model::superweapon_switch_hit(button.rect, art)});
     }
 
 }
@@ -604,6 +687,87 @@ void build_battle_overlay(HudState& state, const vfs::Vfs& filesystem, const dat
         [&state] { if (state.time_handlers.quit) state.time_handlers.quit(); });
 }
 
+// HCB-47: the countdown readout. DS_Countdown_Timer carries the dial art, the font and a text offset, and the shell has a
+// bone of that name (no mesh) that places it: the dial art keeps its texel size around the bone like a button's art, the
+// text is left-justified at the bone plus the component's Text_Offset, at the font's point size on the HUD's reference
+// height (the same sizing as the other shell readouts). Both follow the shell placement on every resize. A shell without
+// the bone puts the dial at the top centre of the viewport (unverified; the readout is hidden unless a Death Star exists).
+template <typename HudState, typename ButtonTexture>
+void build_deathstar_readout(HudState& state, CanvasLayer* layer, const ButtonTexture& button_texture) {
+    if (!state.shell.deathstar_countdown) return;
+    const auto look = *state.shell.deathstar_countdown;
+    const bool anchored = state.shell.deathstar_countdown_anchored;
+    std::string origin;
+    Ref<Texture2D> dial_art;
+    if (!look.icon.empty()) dial_art = button_texture(look.text.name, look.icon, origin);
+    if (!state.fonts) state.fonts = std::make_shared<FontProvider>(std::move(state.options.font_cache));
+    const auto face = state.fonts->resolve({look.text.face, look.text.point_size}, state.options.language);
+    const Vector2 dial_size = dial_art.is_valid() ? dial_art->get_size() : Vector2(0.0F, 0.0F);
+    // The readout spans the viewport, so its children are placed in viewport pixels.
+    auto* readout = memnew(Control);
+    readout->set_name("ds_countdown");
+    readout->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+    layer->add_child(readout);
+    readout->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+    readout->set_visible(false);
+    TextureRect* dial = nullptr;
+    if (dial_art.is_valid()) {
+        dial = memnew(TextureRect);
+        dial->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        dial->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+        dial->set_stretch_mode(TextureRect::STRETCH_SCALE);
+        dial->set_texture(dial_art);
+        readout->add_child(dial);
+    }
+    auto* label = memnew(EawrHudText);
+    label->set_name("ds_countdown_text");
+    readout->add_child(label);
+    label->set_colour(colour(look.text.colour));
+    state.ds_readout = readout;
+    state.ds_label = label;
+    state.ds_dial = dial;
+    state.hud->set_layout_hook([&state, look, face, dial_size, anchored](const model::ShellPlacement& placement,
+                                                                         const model::ReferenceSpace& space) {
+        const float scale = static_cast<float>(placement.scale);
+        // The bone, or the top centre of the viewport, in viewport pixels.
+        Vector2 centre;
+        if (anchored) {
+            const auto point = model::shell_point_to_screen(look.origin.x, look.origin.y, placement);
+            centre = Vector2(static_cast<float>(point.x), static_cast<float>(point.y));
+        } else {
+            centre = Vector2(state.hud->get_size().x * 0.5F, dial_size.y * scale * 0.5F);
+        }
+        if (state.ds_dial != nullptr) {
+            const Vector2 size = dial_size * scale;
+            const Vector2 icon_centre = centre + Vector2(look.icon_offset.x, -look.icon_offset.y) * scale;
+            state.ds_dial_rect = Rect2(icon_centre - size * 0.5F, size);
+            state.ds_dial->set_position(state.ds_dial_rect.position);
+            state.ds_dial->set_size(state.ds_dial_rect.size);
+        }
+        // The same sizing and text band as the other shell readouts: the point size on the reference height, a 120 x 16
+        // shell-unit band whose left edge is the bone plus the offset and whose middle is the bone's height.
+        const int pixels = model::font_pixels({look.text.point_size, false, 1.0}, model::font_screen_height(space)).glyph_height;
+        const Vector2 band(120.0F * scale, 16.0F * scale);
+        const Vector2 anchor_point = centre + Vector2(look.text_offset.x, -look.text_offset.y) * scale;
+        state.ds_text_rect = Rect2(Vector2(look.right_justified ? anchor_point.x - band.x : anchor_point.x, anchor_point.y - band.y * 0.5F), band);
+        state.ds_pixels = pixels;
+        auto* label = state.ds_label;
+        const Color keep = label->colour();
+        // HCB-47 / GHUD-S66: this is a command-bar text button too. Keep the authored face and
+        // point size, with the shared bold request, full hinting and integer advances.
+        // HCB-47: the pinned font rasterizer's outline units are quarter pixels;
+        // four units make the one-device-pixel black border seen in the reference.
+        constexpr float outline_units_per_pixel = 4.0F;
+        label->set_style(look, state.fonts->command_font(face, pixels), [fonts = state.fonts, face](const std::int32_t height) {
+            return model::gdi_text_cell(fonts->cache(), face, height);
+        }, pixels, scale, outline_units_per_pixel / std::max(scale, 0.01F));
+        label->set_colour(keep);
+        label->set_horizontal_alignment(look.right_justified ? HORIZONTAL_ALIGNMENT_RIGHT : HORIZONTAL_ALIGNMENT_LEFT);
+        label->set_position(state.ds_text_rect.position);
+        label->set_size(state.ds_text_rect.size);
+    });
+}
+
 } // namespace
 
 bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects,
@@ -698,6 +862,12 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
         const Vector2 point(static_cast<float>(x), static_cast<float>(y));
         if (state.gift_button && state.gift_button->is_visible_in_tree() && state.gift_button->get_rect().has_point(point)) return true;
         if (state.gift_scroll && state.gift_scroll->is_visible_in_tree() && state.gift_scroll->get_rect().has_point(point)) return true;
+        for (auto* button : {state.sl_button, state.sl_card})
+            if (button && button->is_visible_in_tree()
+                && Rect2(button->get_global_position() + button->hit_rect().position, button->hit_rect().size).has_point(point)) return true;
+        if (state.ds_button && state.ds_button->is_visible_in_tree()
+            && Rect2(state.ds_button->get_global_position() + state.ds_button->hit_rect().position, state.ds_button->hit_rect().size).has_point(point))
+            return true;
         return hud->hit(x, y);
     });
     state.mask->add_child(state.hud);
@@ -732,6 +902,7 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
     build_production_panel(state, filesystem, catalog, hud, text_database);
     build_minimap(state, filesystem, catalog, hud);
     build_battle_overlay(state, filesystem, catalog, hud, layer, text_database);
+    build_deathstar_readout(state, layer, button_texture);
     if (state.options.probe) state.hud->set_probe([&state] { state.run_probe(); });
     return true;
 }
@@ -740,6 +911,7 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
 void register_tactical_hud_classes() {
     GDREGISTER_CLASS(EawrTacticalHud);
     GDREGISTER_CLASS(EawrHudButton);
+    GDREGISTER_CLASS(EawrSuperlaserBar);
     GDREGISTER_CLASS(EawrSpecialWeaponDial);
     GDREGISTER_CLASS(EawrUnitCards);
     GDREGISTER_CLASS(EawrHeroTray);

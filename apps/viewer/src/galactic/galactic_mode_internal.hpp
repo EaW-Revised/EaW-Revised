@@ -20,10 +20,15 @@
 #include "galaxy_view.hpp"
 #include "corruption_particles.hpp"
 #include "scene_content.hpp"
+#include "scene_refresh.hpp"
+#include "eawr/presentation/ui/settings.hpp"
 #include "route_lines.hpp"
 #include "planet_hud.hpp"
+#include "planet_info_card.hpp"
 #include "command_control_state.hpp"
 #include "command_press.hpp"
+#include "story_hud_state.hpp"
+#include "advisor_hints.hpp"
 #include "hud_retained.hpp"
 #include "fleet_stacks.hpp"
 #include "fleet_panels.hpp"
@@ -45,6 +50,8 @@
 #include "eawr/data/ui/command_bar.hpp"
 #include "ui/font_provider.hpp"
 #include "ui/perf_overlay_view.hpp"
+#include "eawr/presentation/ui/net_perf.hpp"
+#include "eawr/presentation/ui/perf_stats.hpp"
 #include "ui/hud_icon_text.hpp"
 #include "ui/tactical_hud.hpp"
 #include "ui/unit_cards_view.hpp"
@@ -58,7 +65,10 @@
 #include "campaign_score_dialog.hpp"
 #include "live_battle_dialog_view.hpp"
 #include "reference_pages_widget.hpp"
+#include "galactic_tour.hpp"
+#include "pause_banner_widget.hpp"
 #include "story_summary_widget.hpp"
+#include "story_text_widget.hpp"
 #include "galactic_save.hpp"
 
 #include "eawr/assets/assets.hpp"
@@ -100,6 +110,7 @@
 
 namespace pugi { class xml_document; }
 namespace eawr::data::ui { struct TextDatabase; }
+namespace eawr::presentation::godot_backend { class GalaxyAssetAhead; }
 namespace eawr::sim::galactic { struct GalacticClock; }
 
 namespace eawr::presentation::godot_backend {
@@ -203,7 +214,10 @@ private:
 } // namespace galactic_detail
 
 struct GalacticMode::State final {
-    explicit State(Options value) : options(std::move(value)) {}
+    explicit State(Options value) : options(std::move(value)) {
+        income_layer_visible = (options.map_filters & 1U) != 0; base_levels_visible = (options.map_filters & 2U) != 0;
+        bonus_layer_visible = (options.map_filters & 4U) != 0;
+    }
     ~State();
 
     [[nodiscard]] bool fixture_enabled(GalacticHudFixture::Feature feature) const {
@@ -213,7 +227,7 @@ struct GalacticMode::State final {
     std::string status{"running"};
     std::string failure;
     std::string profile;
-    std::string difficulty{"Normal_Default"}; // SK-42/WGEP-16 preview default; a restored save names its own
+    std::string difficulty{"Normal_Default"}; // the preview and direct-start default; a solo start sets the staging level's entry, a restored save names its own
     std::optional<platform::LiveSaveCampaign> restore_campaign; // #3035: identity of options.restore_save
     [[nodiscard]] bool resolve_restore_save();
     std::vector<std::string> layers;
@@ -293,6 +307,8 @@ struct GalacticMode::State final {
     godot::Control* hud{};
     godot::Control* world_overlays{};
     std::unique_ptr<ReferencePages> reference_pages;
+    std::unique_ptr<StoryTextWidget> story_text; // #236 PR B: objectives and SCREEN_TEXT lines
+    std::unique_ptr<PauseBannerWidget> pause_banner; // the "Game Paused" banner with its Resume Game button (#6759)
     std::unique_ptr<StorySummaryWidget> story_summary; // WST-58: the summary of the intro holocron goal
     EawrTacticalHud* command_bar{};
     std::optional<assets::MegaTextureAtlas> command_atlas;
@@ -420,6 +436,21 @@ struct GalacticMode::State final {
     godot::Vector2 production_hover_position;
     std::uint64_t production_hover_since{}, production_tooltip_delay{};
     void service_production_tooltip();
+    // #7177 / WGSI-8: the hero status icons' pointer tooltip, a grid of unit-frame cells holding the listed heroes' pictures.
+    godot::Control* hero_tooltip{};
+    godot::TextureRect* hero_tooltip_back{};
+    godot::TextureRect* hero_tooltip_frame{};
+    struct HeroTooltipCell final {
+        godot::TextureRect* frame{};
+        godot::TextureRect* icon{};
+        sim::galactic::TypeId type{};
+    };
+    std::array<HeroTooltipCell, galactic_view::tooltip_slot_capacity> hero_tooltip_cells{};
+    std::uint64_t hero_hover_key{}, hero_hover_since{};
+    godot::Vector2 hero_hover_position;
+    galactic_view::ObjectId hero_hover_planet{};
+    galactic_view::PlanetStatusIcon hero_hover_kind{};
+    void service_hero_tooltip();
     std::optional<std::size_t> current_pip;
     bool clock_controls_enabled{};
     bool fast_forward_controls_enabled{}; // TM-04: off with several humans, also in a LAN match
@@ -448,7 +479,8 @@ struct GalacticMode::State final {
     void service_encyclopedia();
     [[nodiscard]] sim::galactic::TypeId focused_planet_hover_type() const;
     bool encyclopedia_existing_object{};
-    bool encyclopedia_ability{};
+    bool encyclopedia_ability{}, encyclopedia_weather{}; // the special popup is the weather one
+
     [[nodiscard]] bool encyclopedia_admitted() const;
     DestructionHudState destruction_hud;
     [[nodiscard]] bool build_destruction_hud();
@@ -504,6 +536,12 @@ struct GalacticMode::State final {
     std::map<std::string, std::string> choice_pad;
     std::map<galactic_view::ObjectId, godot::TextureRect*> production_icons;
     std::map<galactic_view::ObjectId, godot::TextureRect*> corruption_info_icons;
+    // #4375: hero, smuggler, bounty and smuggled icons of the status row, one slot per (planet, kind).
+    std::map<std::pair<galactic_view::ObjectId, std::uint8_t>, godot::TextureRect*> status_effect_icons;
+    // #2987 / WGFI-1: the weather icon of each planet, drawn with the same filter bit as the bonus icon.
+    std::map<galactic_view::ObjectId, godot::TextureRect*> planet_weather_icons;
+    // #2987 / WGFI-3: the corruption transition text of each planet (`g_corruption_text`).
+    std::map<galactic_view::ObjectId, godot::Label*> planet_corruption_labels;
     std::map<galactic_view::ObjectId, godot::TextureRect*> planet_bonus_icons; // Filtered bonus icon per planet (GHUDL-18).
     std::map<galactic_view::ObjectId, godot::Vector2> hud_planet_anchors; // Projected planet points of the last label pass.
     std::vector<std::string> corruption_planet_icons; // GameConstants, by corruption type then the information icon.
@@ -514,9 +552,11 @@ struct GalacticMode::State final {
     // Same lookup for a probe whose miss is an expected, handled fallback (no unresolved-texture warning).
     [[nodiscard]] godot::Ref<godot::Texture2D> command_texture_optional(std::string_view name);
     [[nodiscard]] godot::Ref<godot::Texture2D> command_texture_lookup(std::string_view name, bool warn_if_missing);
+    // An icon component's art: only an entry of the command-bar mega texture, empty otherwise (#6756).
+    [[nodiscard]] godot::Ref<godot::Texture2D> command_atlas_texture(std::string_view name);
     void configure_command_bar_text(const presentation::ui::ShellPlacement& placement, EawrHudText& label,
         const data::ui::CommandBarComponent& component, const data::ui::ShellAnchor& anchor,
-        bool second_text = false);
+        bool second_text = false, bool scale_text = false);
     bool configure_command_bar_constants(const pugi::xml_document& document);
     bool configure_command_bar_encyclopedia();
     void build_command_bar_tooltip();
@@ -573,6 +613,8 @@ struct GalacticMode::State final {
     void update_ground_hud();
     void ground_pointer(int kind, godot::Vector2 point, bool control, bool twice);
     bool request_ground_land(bool submit, galactic_view::ObjectId fleet = 0);
+    // #7178: land exactly the dragged unit cell's members (LandUnits), not the rest of their fleet.
+    bool request_ground_land_members(bool submit, std::span<const sim::galactic::FleetMemberRef> members);
     const galactic_view::GroundRoster* command_roster(galactic_view::ObjectId planet) const;
     // #4316: the focused planet's roster, built when first asked for; the end of ground_hud.rosters when absent.
     std::map<galactic_view::ObjectId, galactic_view::GroundRoster>::const_iterator ground_roster_find(galactic_view::ObjectId planet) const;
@@ -647,6 +689,13 @@ struct GalacticMode::State final {
     // WGUI-06/28: live current sight comes from the displayed publication;
     // synthetic fixtures may supply explicit predicate overrides.
     std::vector<sim::galactic::FleetDisplayVisibility> fleet_visibility;
+    // WGUI-31/32/110..112: the local observer's range/path reveal of travelling fleets for the shown publication, from
+    // the authored Hyperspace_Fleet_Reveal_Range of local-owned objects and planets and Bribery_Fleet_Reveal_Range.
+    std::vector<galactic_view::TransitVisibility> transit_visibility;
+    std::optional<std::map<sim::galactic::TypeId, double>> reveal_type_ranges;
+    std::map<sim::galactic::PlanetId, double> reveal_planet_ranges;
+    std::optional<double> bribery_reveal_range;
+    void refresh_transit_visibility(const sim::galactic::GalacticSnapshot& shown);
     galactic_view::ObjectId selected_fleet{}, selected_fleet_member{};
     galactic_view::ObjectId fleet_view_planet{}, fleet_view_selection{}, fleet_view_member{};
     std::optional<std::uint32_t> fleet_diorama_alternate; // GHUD-S52: the organize shell's shown panel index
@@ -732,6 +781,8 @@ struct GalacticMode::State final {
     std::map<std::string, EawrHudText*> advanced_map_labels;
     std::map<std::string, std::string> advanced_map_captions; // Static caption text by component name.
     godot::TextureRect* advanced_map_allegiance{};
+    // #5628 / GPD-44: the opened map's day-progress bar, the command bar's ten fiscal pips repeated after the day text.
+    std::array<godot::TextureRect*, 10> advanced_map_pips{};
     godot::TextureRect* advanced_map_weather{}; // The `weather` bone: the selected planet's weather icon and its hover text.
     EawrHudButton* advanced_open_button{};
     // GHUD-R45 / H030: the PLANET INFO button of the focused view and its full-screen dialog.
@@ -747,11 +798,38 @@ struct GalacticMode::State final {
     void open_planet_info();
     void close_planet_info();
     void update_planet_info(const presentation::ui::ShellPlacement& placement);
+    // GPI-01..09: the persistent card above the button (planet_info_card.cpp), under the organization shell.
+    godot::Control* planet_info_card{};
+    std::optional<galactic_view::PlanetInfoCardContent> planet_info_card_shown;
+    // The card's opaque frame image, built once per source image name: the card is rebuilt whenever a publication
+    // changes, and the conversion reads the image back from the texture.
+    std::string planet_card_frame_name;
+    godot::Ref<godot::Texture2D> planet_card_frame_art;
+    std::shared_ptr<const sim::galactic::GalacticSnapshot> planet_info_card_snapshot;
+    galactic_view::ObjectId planet_info_card_planet{};
+    presentation::ui::ShellPlacement planet_info_card_placement{};
+    std::uint32_t planet_info_card_height{};
+    void update_planet_info_card(const presentation::ui::ShellPlacement& placement);
+    void clear_planet_info_card();
     // GPD-14: the advanced map orbiting ground-unit tray, read-only.
     std::array<EawrHudButton*, 20> land_fleet_buttons{};
     std::array<std::optional<sim::galactic::TypeId>, 20> land_fleet_shown{}; // nullopt = no icon set yet
     std::array<godot::TextureRect*, 20> land_fleet_hover{};          // non-blocking hover art
     std::array<godot::Label*, 20> land_fleet_counts{};
+    void build_land_tray();   // land_tray_hud.cpp
+    // GPD-22: what the tray shows this frame (slot -> unit), the slot held by the pointer, and what drops did.
+    std::vector<galactic_view::LandTrayEntry> land_tray_shown;
+    std::optional<std::size_t> tray_drag;
+    bool tray_moving{};
+    // The free pads lit as drop targets in the last advanced-map pass (GPD-35/36/39), build and unit pads.
+    std::size_t detail_pads_lit_builds{}, detail_pads_lit_units{};
+    std::uint64_t tray_drops{}, tray_refusals{};
+    galactic_view::TrayDropResult tray_last_refusal{galactic_view::TrayDropResult::ok};
+    bool tray_hit(godot::Vector2 point) const;
+    bool tray_pointer(int kind, godot::Vector2 point, const std::optional<std::pair<bool, std::size_t>>& target);
+    void tray_cancel();
+    void tray_drop(std::size_t slot, std::size_t pad_index);
+    void write_land_tray_report(std::ostream& output) const;
     void update_advanced_land_tray(const presentation::ui::ShellPlacement& placement);
     // GPD-06: per-map cache starts its work only when the screen opens.
     std::shared_ptr<const data::Catalog> marker_catalog;
@@ -762,6 +840,18 @@ struct GalacticMode::State final {
     std::array<EawrHudButton*, 80> detail_build_pads{};
     std::array<EawrHudButton*, 10> detail_unit_pads{};
     std::array<godot::TextureRect*, 80> detail_shield_rings{};
+    // GPD-02: the planet's land-map picture behind the pads (`map_window`). The file is read and decoded off-thread (like
+    // the marker table), the picture is cached per name (a null entry is a miss), and the name and picture are resolved
+    // once per selected planet, so the per-frame update only compares and shows.
+    struct PreviewLoadResult { std::string name; std::optional<assets::Texture> texture; };
+    godot::TextureRect* advanced_map_preview{};
+    std::map<std::string, godot::Ref<godot::Texture2D>> advanced_map_preview_cache;
+    std::future<PreviewLoadResult> advanced_map_preview_load;
+    galactic_view::ObjectId advanced_map_preview_planet{};
+    std::string advanced_map_preview_name;
+    godot::Ref<godot::Texture2D> advanced_map_preview_ref;
+    bool advanced_map_preview_settled{}; // true once the selected planet's picture is known (shown or missing)
+    std::uint64_t advanced_map_preview_copy_us{}; // main-thread pixel copy of the last picture, microseconds (report)
     galactic_view::PlanetDetailLayout detail_layout;
     std::shared_ptr<const sim::galactic::GalacticSnapshot> detail_layout_publication;
     galactic_view::ObjectId detail_layout_planet{};
@@ -801,6 +891,8 @@ struct GalacticMode::State final {
     galactic_view::ObjectId pending_battle_planet{}, radar_pending_planet{};
     godot::Vector2 radar_viewport;
     std::uint64_t radar_positions{}, hud_zoom_requests{}, radar_rebuilds{};
+    // #4440: planet zoom flights already answered with the zoom cue (see apply_camera).
+    std::uint64_t cued_zoom_flights{};
     std::optional<galactic_view::Vec3> last_radar_position;
     std::map<galactic_view::ObjectId, godot::Label*> planet_labels;
     struct PlanetLevels final {
@@ -842,6 +934,8 @@ struct GalacticMode::State final {
     std::uint64_t hud_offer_index_builds{};
     void update_planet_levels(galactic_view::ObjectId id, godot::Vector2 anchor, float scale, float alpha);
     void update_planet_bonus_icon(galactic_view::ObjectId id, const std::string& icon, godot::Vector2 anchor, float scale, float alpha);
+    void update_planet_weather_icon(galactic_view::ObjectId id, const std::string& icon, godot::Vector2 anchor, float scale, float alpha);
+    void update_planet_corruption_text(galactic_view::ObjectId id, godot::Vector2 anchor, float scale, float alpha);
     void update_planet_status_icons(galactic_view::ObjectId id, godot::Vector2 anchor, float scale, float alpha);
     std::optional<data::ui::CommandBarComponent> planet_name_style;
     std::unique_ptr<FontProvider> hud_fonts;
@@ -849,6 +943,9 @@ struct GalacticMode::State final {
     std::map<galactic_view::ObjectId, galactic_view::PlanetHudFacts> hud_facts;
     std::map<galactic_view::ObjectId, galactic_view::ObjectNameComponent> object_names;
     galactic_view::PlanetHudView selected_hud;
+    // The domain panel the player last chose (the space or the ground tab). UI state only: kept across a cleared selection
+    // and across planets that have no ground panel, which show the space panel without changing it (#6937).
+    bool space_tab_choice{};
     double animation_time{};
     bool paused{};
     std::uint64_t animation_updates{};
@@ -892,6 +989,9 @@ struct GalacticMode::State final {
     std::optional<presentation::camera::Constants> edge_scroll_constants;
     std::string constants_sha256;
     std::optional<galactic_view::CameraLighting> applied_light;
+    std::optional<FixedCamera> cached_camera;
+    std::optional<presentation::ui::VideoSettings> cached_video;
+    std::uint64_t cached_profile_generation{};
     galactic_view::ObjectId selected_planet{};
     galactic_view::MapInput map_input;
     std::uint64_t selection_invalidations{}, tutorial_notifications{};
@@ -915,8 +1015,17 @@ struct GalacticMode::State final {
     galactic_view::OrbitCamera overview;
     FixedCamera camera;
     std::shared_ptr<const vfs::Vfs> filesystem;
+    // Decode-ahead of the galaxy upload's models and textures (after `filesystem`: its threads end before the mount goes).
+    // Lifetime invariant: it holds a raw pointer into `filesystem`, so `filesystem` must not be re-mounted (reassigned) while the
+    // read-ahead is alive; today mount() runs before build_view creates it and finish() runs before the upload returns.
+    std::shared_ptr<GalaxyAssetAhead> asset_ahead;
     std::unique_ptr<BattleCursor> mouse_cursor;
     std::shared_ptr<const data::Catalog> audio_catalog;
+    // One shader cache per campaign session: the galaxy layers, the capture renderer and every battle the session
+    // starts (space and land, through MapMode::Options::shaders) build their programs through it, so one program
+    // text is one Godot shader. Declared before the renderers, which hold it too; cached programs own their RID
+    // and are freed when the last of the cache and the resources using them lets go.
+    std::shared_ptr<GodotShaderCache> shaders = std::make_shared<GodotShaderCache>();
     std::unique_ptr<GodotRenderer> renderer;
     struct Layer final {
         godot::SubViewport* viewport{};
@@ -926,12 +1035,20 @@ struct GalacticMode::State final {
         std::unique_ptr<GodotRenderer> renderer;
         std::vector<sim::RenderInstance> instances;
         std::size_t submitted_instances{};
+        std::unordered_map<sim::EntityId, bool> applied_visibility;
     };
     std::array<Layer, 4> scenes;
+    galactic_view::SceneRefresh scene_refresh;
+    bool scene_refresh_connected{};
+    static void refresh_scenes_thunk(std::int64_t address);
+    void refresh_scenes();
+    void disconnect_scene_refresh();
     std::unique_ptr<GodotRenderer> capture_renderer;
     std::vector<galactic_detail::ModelUpload> models;
     // Per planet: index into `models`, or none for a placeholder.
     std::map<galactic_view::ObjectId, std::optional<std::size_t>> planet_models;
+    // Retain the requested identity even for a refused upload, until the object's authored choice changes.
+    std::map<galactic_view::ObjectId, std::pair<std::size_t, std::string>> planet_model_requests;
     std::vector<sim::RenderInstance> instances;
     std::map<sim::EntityId, galactic_view::ObjectId> instance_planets;
     // Presentation identities survive focus/upgrade topology changes. Renderer
@@ -944,6 +1061,15 @@ struct GalacticMode::State final {
     // under an ID no planet or fleet uses.
     static constexpr galactic_view::ObjectId selection_cursor_id = std::numeric_limits<galactic_view::ObjectId>::max();
     static constexpr galactic_view::ObjectId orbit_station_id = selection_cursor_id - 1;
+    // WGP-16: the preload entry of the fleet override models (every model an authored type can swap the fleet marker for).
+    static constexpr galactic_view::ObjectId fleet_override_id = orbit_station_id - 1;
+    // The preload entries of the planets' destroyed-state models: one per distinct (layer, path), numbered downwards from here.
+    static constexpr galactic_view::ObjectId destroyed_model_id_base = fleet_override_id - 1;
+    static constexpr std::size_t destroyed_model_id_span = 4096;
+    // The distinct destroyed-state models of the given (planet, model path) rows, with the layer each is drawn on, in first-seen order.
+    [[nodiscard]] std::vector<std::pair<std::size_t, std::string>> destroyed_models_of(
+        std::span<const std::pair<galactic_view::ObjectId, std::string>> planets) const;
+    std::vector<std::pair<std::size_t, std::string>> destroyed_preloads; // as above, for the scene being uploaded
     // The engine names this model in code, not in XML; a mod replaces the file (debug build EGP-17).
     static constexpr std::string_view selection_cursor_model = "data/art/models/w_planet_select_neutral.alo";
     struct SelectionCursor {
@@ -994,8 +1120,23 @@ struct GalacticMode::State final {
     std::shared_ptr<const sim::tactical::TacticalSnapshot> retreat_snapshot;
     bool retreat_dialog_open{};
     bool retreat_completion_sent{};
+    bool retreat_playback_started{}; // the playing report was sent for this retreat
+    std::optional<std::uint32_t> proof_cinematic_frame; // eye-check proof: the last cinematic frame captured
+    void capture_retreat_cinematic_frame(std::uint32_t frame);
     [[nodiscard]] bool build_retreat_controls();
     void service_retreat_controls();
+    // SK-ARR-01..SK-ARR-14: the arrival cinematic of this battle's first 150 ticks; `arrival_cinematic_done` once it
+    // has played or been refused.
+    bool arrival_cinematic_done{};
+    bool arrival_gate_checked{}; // SK-ARR-01: the fresh-battle gate has decided for this battle
+    bool arrival_counted{};
+    std::uint32_t arrival_cinematic_starts{}; // report: arrivals that began, over the run
+    std::uint32_t arrival_dropped_events{};   // report: input events the arrival dropped
+    std::uint32_t arrival_focus_losses{};     // report: battle-camera unfocus calls while an arrival played (must stay 0)
+    std::vector<std::pair<std::uint64_t, bool>> arrival_gate_log; // report: (ready tick, admitted) per battle
+    void service_arrival_cinematic();
+    std::optional<std::uint32_t> proof_arrival_frame; // eye-check proof: the last arrival frame captured
+    void capture_arrival_cinematic_frame(std::uint32_t frame);
     void request_retreat(sim::tactical::RetreatAction action);
     std::function<bool(std::uint64_t, galactic_view::BattleChoice)> battle_choice_sink;
     std::function<std::string(std::string_view)> battle_text;
@@ -1018,22 +1159,71 @@ struct GalacticMode::State final {
     bool leave_requested{};
     std::string score_failure;
     bool score_consumed{};
+    // LOAD_CAMPAIGN (WST-95): the switch a plot asked for, resolved against the campaign data, for the host to act on.
+    // The session never restarts itself; the host stops this mode and starts the target through the setup screen's path.
+    std::optional<campaign::CampaignSwitchTarget> campaign_switch;
+    std::uint64_t switch_handled_tick{}; // the tick of the last request this mode resolved (a request is resolved once)
 
     [[nodiscard]] bool build_campaign_score();
     void service_campaign_score();
+    void service_campaign_switch();
     [[nodiscard]] bool score_dialog_open() const;
 
     std::uint64_t audio_event_cursor{};
     std::uint64_t audio_event_gaps{};
-    std::deque<godot::String> approach_text;
+    // WGUI-66: the advisor text queue. Urgent lines go to the front and cut the removal delay; ordinary lines append.
+    struct AdvisorLine {
+        godot::String text;
+        std::array<std::uint8_t, 4> colour{0, 193, 91, 255}; // the hint colour unless the producer supplies one
+        bool urgent{};
+        std::string sound; // WGUI-66/WGP-127: an explicit SFX event wins over the faction message/urgent cue
+    };
+    std::deque<AdvisorLine> approach_text;
+    // WGUI-71/104, GFC-28: the local player's hint producer (galactic, land, space entries; only the galactic one is
+    // serviced here). `hint_interval` is absent when Advisor_Hint_Interval is missing or invalid: then no hint is queued.
+    galactic_view::HintEntries advisor_hints;
+    std::optional<std::uint64_t> hint_interval;
+    std::vector<std::string> galactic_hint_keys;
+    std::string hint_sound;
+    bool hint_clock_seen{}, hint_data_resolved{};
+    void service_advisor_hints();
+    // WGUI-87/106, WGP-122: the process-lifetime advisor archive the Droid Log page shows.
+    std::vector<galactic_view::ArchiveEntry> advisor_archive;
+    std::optional<galactic_view::Rgba> droid_date_colour, droid_separator_colour;
+    std::uint64_t advisor_archive_revision{};
+    // GREF-19: the Droid Log's ability legend lists, from GameConstants in authored order.
+    std::vector<std::string> ability_legend_icons, ability_legend_text_ids;
+    std::vector<int> ability_legend_rgb;
     godot::Label* approach_label{};
+    // #7196: the advisor popup's authored back (the shell's help back: backdrop and faction frame) behind every advisor line.
+    godot::TextureRect* approach_back{};
+    godot::TextureRect* approach_frame{};
+    float approach_back_width_units{}; // the authored width of that back, in shell units (0: not authored, no back)
+    float approach_back_alpha{1.0F};   // its authored colour alpha
+    // `--eawr-galactic-test-advisor` (test only): posts one enemy-approach line and one control-changed line once the HUD is up,
+    // so a GPU test can read where the advisor popup draws them.
+    bool test_advisor{}, test_advisor_posted{};
     double advisor_character_seconds{}, approach_delay{};
     std::uint8_t approach_alpha{};
     void enqueue_approach(sim::galactic::PlanetId);
+    [[nodiscard]] std::string planet_notice_name(sim::galactic::PlanetId) const;
+    [[nodiscard]] std::string faction_display_name(std::optional<sim::galactic::PlayerId> owner) const;
+    // WGM-76 / WGUI-66: a planet's political control changed hands. `bonus` is the capture bonus paid to the local player.
+    void enqueue_owner_change(sim::galactic::PlanetId planet, std::optional<sim::galactic::PlayerId> old_owner,
+        std::optional<sim::galactic::PlayerId> new_owner, std::optional<std::int64_t> bonus);
     void service_approach(double delta);
+    // WAR-64 / WGUI-120: each newly published auto-resolve outcome queues its hero-loss and result lines once, keyed by
+    // conflict id. The outcome present when the mode first looks, or first looks after a load, is taken as announced.
+    galactic_view::AdvisedOutcome advised_outcome;
+    void service_battle_advisor();
     // WGEP-96: build identities whose recorded builder is the local player, from the
     // displayed queues and the local seat's start events; completion events carry no builder.
     std::set<sim::EntityId> local_builds;
+    // WGEP-95: each queue front's last sampled remaining seconds by build id, and the pass that last saw it (an entry no
+    // longer seen in a pass is dropped, so the per-frame sweep builds no container of its own).
+    struct CountdownSample { float remaining{}; std::uint64_t seen{}; };
+    std::map<sim::EntityId, CountdownSample> countdown_remaining;
+    std::uint64_t countdown_pass{};
     std::string queued_underway; // the purchase hook's type, voiced once audio exists
     std::shared_ptr<MapMode> tactical;
     godot::Node3D* tactical_host{};
@@ -1086,6 +1276,9 @@ struct GalacticMode::State final {
     void request_pause(bool value);
     // WST-37: raises a clicked HUD component to this seat's story plots as STORY_CLICK_GUI.
     void submit_gui_click(const std::string& component);
+    // #5922: a press of a command-bar control with an action of its own (production card, queue slot, help button) reaches the
+    // plots that listen for it, like the generic press path does. No control name is excluded.
+    void raise_story_click(const std::string& component);
     // One press of a command-bar control by a human or a FORCE_CLICK_GUI reward (#5857); press state of the controls
     // a mod authors is kept in authored_controls (command_control_state.hpp), and forced requests are drained per frame.
     void press_command_control(const std::string& name);
@@ -1094,6 +1287,38 @@ struct GalacticMode::State final {
     galactic_view::ControlStates authored_controls;
     std::uint64_t forced_click_cursor{};
     galactic_view::CommandPresses command_presses; // the press path, and the (control, reason) pairs already warned about
+    // #236: the local HUD state a story plot drives (flash, control lock, scroll lock); presentation only.
+    void service_story_hud();
+    galactic_view::StoryHudState story_hud;
+    std::uint64_t story_hud_cursor{}, story_hud_ticks{};
+    std::set<std::string> story_hud_reported;
+    // #6291: the player's cinematic camera on the galaxy map, the galactic tour (galactic_tour_service.cpp). It reuses the
+    // letterbox bands and the GUI hiding below through story_hud.set_tour; presentation only, never saved or replayed.
+    std::optional<galactic_view::GalacticTour> tour;
+    double tour_seconds{};
+    std::uint64_t tours_started{}, tour_restarts{};
+    // GCT-01: whether the tour may start now (the map is showing, no battle or loading screen).
+    [[nodiscard]] bool tour_allowed() const;
+    // Every galaxy modal open (the retreat, save, score and battle windows, the story and reference windows, the hero, market,
+    // weapon and corruption menus, an action menu): the one set the tour start and the pointer confinement both ask.
+    [[nodiscard]] galactic_view::GalaxyModals galaxy_modals() const;
+    [[nodiscard]] bool galaxy_modal_open() const { return galaxy_modals().any(); }
+    // GCT-02/03: starts a tour, or a new one while one plays (the battle camera key again); false when there is nothing to visit.
+    bool start_tour();
+    // GCT-08: ends it (the bands slide out, the GUI returns); a no-op when none plays.
+    void end_tour();
+    // GCT-06: one frame of game time; a finished tour starts the next.
+    void advance_tour(double delta);
+    // GCT-09: the camera the tour is at, as the map's orbit camera.
+    [[nodiscard]] galactic_view::OrbitCamera tour_camera() const;
+    // GCT-08: the pointer moved far enough, or any other mouse event, ends the tour; true when the event was the tour's.
+    bool tour_input(const godot::Ref<godot::InputEvent>& event);
+    [[nodiscard]] std::string tour_report_json() const;
+    // legacy #6634: the cinematic bands of a story script's Letter_Box_In / Letter_Box_Out (story_letterbox.cpp).
+    void service_story_letterbox();
+    godot::Control* story_bands{};
+    std::optional<float> story_band_height;
+    bool story_band_height_failed{};
     [[nodiscard]] bool prepare_handoff();
     // True while the loading or tactical scene owns the frame.
     [[nodiscard]] bool process_handoff(double delta);
@@ -1135,6 +1360,8 @@ struct GalacticMode::State final {
     [[nodiscard]] bool mount();
     [[nodiscard]] bool load_camera_constants();
     [[nodiscard]] bool upload_models();
+    // Creates the read-ahead for the galaxy upload from the scene content; it starts when the preparation says so (or at the upload).
+    void prepare_asset_ahead(const galactic_view::GalaxySnapshotStub& scene);
     [[nodiscard]] std::vector<galactic_view::PlanetView> render_objects(bool preload_fleets = false) const;
     [[nodiscard]] bool build_scenes();
     [[nodiscard]] bool build_hud();
@@ -1179,8 +1406,17 @@ struct GalacticMode::State final {
     bool perf_requested{};
     EawrPerfOverlay* perf{};
     std::uint64_t perf_last_tick{};
+    std::chrono::steady_clock::time_point perf_degradation_at{}; // #6846: the overlay's degradation line is refreshed once a second
     void set_perf_overlay(bool shown);
     void sync_perf_overlay();
+    // Co-op campaign network diagnostics: the F3 overlay's network section and the 5 s "EAWR net summary" log line.
+    // The line is logged whether or not the overlay is open (the log is the evidence after the fact). This one overlay
+    // also covers the retained child battle, so the tactical child needs no second source.
+    presentation::ui::PerfStats net_stats;
+    std::uint64_t net_last_tick{};
+    double net_log_clock{};
+    std::optional<presentation::ui::NetPerfReport> net_report;
+    void sync_net_perf(double delta);
     [[nodiscard]] std::string perf_report_json() const;
     [[nodiscard]] galactic_view::OrbitCamera& seat_camera();
     [[nodiscard]] galactic_view::PlanetCamera& seat_flight();

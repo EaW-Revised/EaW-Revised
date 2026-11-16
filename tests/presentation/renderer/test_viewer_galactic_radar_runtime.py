@@ -154,6 +154,8 @@ func _process(delta):
         data = self.native_run([[1.0, point, 1, True], [1.05, point, 1, False],
             [2.0, point, 1, True], [2.05, point, 1, False]])
         self.assertEqual(data["radar_hud"]["zoom_requests"], 2)
+        # #4440: the zoom button's inward and outward flights each play the authored zoom cue once (retail: both directions).
+        self.assertEqual(data["galactic_audio"]["sounds"].get("GUI_Zoom", 0), 2, data["galactic_audio"])
         self.assertEqual(data["flights"][0]["state"], "overview")
         self.assertEqual(data["map_input"]["selection_invalidations"], initial["map_input"]["selection_invalidations"])
 
@@ -198,15 +200,27 @@ func _process(delta):
                 self.assertEqual(data["radar_hud"]["positions"], 1, "dim glyph retains background positioning")
 
     def test_native_advanced_radar_retains_overlay_then_zoom_closes_it(self):
-        initial, _ = self.capture(focused=True)
+        # GPD-12/38: opening requires ownership or ground intelligence on an
+        # accessible surface. Ground contents supplies the actual control and
+        # observer publications; HUD-only intelligence does not create a surface.
+        initial, _ = self.capture(focused=True, fixture="ground-contents")
+        selected = next(row for row in initial["hud"]["intelligence"] if row["planet"] == 101)
+        self.assertEqual(selected["owner"], 1)
+        self.assertTrue(initial["ground_hud"]["widgets"], "fixture must publish an accessible surface")
         normal = self.control(initial, "radar_galactic")
         advanced = self.control(initial, "radar_galactic_adv_map", .25, .75)
         zoom = self.control(initial, "b_zoom_adv_map")
         # A focused wheel-in opens the advanced map; click positions it and the
         # authored outward button closes only the overlay, retaining focus.
-        data = self.native_run([[1.0, normal, 4, True], [1.05, normal, 4, False],
-            [1.4, advanced, 1, True], [1.45, advanced, 1, False],
-            [1.8, zoom, 1, True], [1.85, zoom, 1, False]], focused=True)
+        position = [[1.0, normal, 4, True], [1.05, normal, 4, False],
+            [1.4, advanced, 1, True], [1.45, advanced, 1, False]]
+        opened = self.native_run(position, focused=True, fixture="ground-contents")
+        self.assertEqual(opened["radar_hud"]["positions"], 1)
+        self.assertEqual(opened["radar_hud"]["zoom_requests"], 1)
+        self.assertTrue(opened["radar_hud"]["advanced"], "radar positioning must retain the overlay")
+        self.assertEqual(opened["flights"][0]["state"], "focused")
+        data = self.native_run(position + [[1.8, zoom, 1, True], [1.85, zoom, 1, False]],
+                               focused=True, fixture="ground-contents")
         self.assertEqual(data["radar_hud"]["positions"], 1)
         self.assertEqual(data["radar_hud"]["zoom_requests"], 2)
         self.assertFalse(data["radar_hud"]["advanced"])

@@ -62,6 +62,34 @@ Output: the card in each slot, the column borders, and on a click the new select
 - L-7 (CARD-1, CARD-8). A card's portrait is its type's `Icon_Name`, or `i_button_temporary.tga`
   without one, drawn as the button's base quad: texture size times `Scale`, centred on the slot's
   bone. The card colour is white (a flagship's garrisoned units are tinted, not in M2).
+  Team-container icon (legacy EAWR-6621): project decision; a type that authors no `Icon_Name` of its own (absent or blank) shows the
+  `Icon_Name` of the team container its `Create_Team_Type` names, before the temporary fallback; the world icon above
+  a squadron reads the same helper (`object_icon_name`). Unverified against the debug build: no capture of a squadron
+  with an empty tag exists, the order (own tag first) is an assumption, and the mod developer reports the
+  icon showing in the original game. The team-container fallback adds no stock changes beyond the scalar corrections
+  below (a stock-data audit in `hud_shell_tests`).
+  Scalar icon selection follows ML-23/24/28: the last nonempty, non-`TBD` occurrence wins, including repeated tags
+  in one definition and inherited values. The shared reader uses `EffectiveObject::single_text`; raw catalog
+  provenance may retain a final placeholder. This applies before the team-container fallback and also supplies
+  galactic fleet/production portraits and encyclopedia icons (legacy EAWR-7373). The rule comes from the debug-build
+  tag-dispatch evidence in [mod loading](walks/mod-loading.md), with no `Icon_Name` exception.
+  The reference-page catalog uses the same scalar accessor, so its summary publication also retains those portraits.
+
+  The installed-data audit pins these seven stock portrait corrections. In every row, **after** is what the original
+  game shows by ML-23/24: a repeated empty tag leaves the earlier icon in place. The four variants of `Han_Solo`
+  inherit that retained icon. This is a debug-build rule applied to the stock XML, not a separate visual capture of
+  each type. The audit also compares every stock icon against an independent scan of raw definition chains.
+
+  | Stock type | Before | After (original-game rule) |
+  |---|---|---|
+  | `Han_Solo` | empty | `i_button_han_solo.tga` |
+  | `Mara_Jade_Team` | empty | `i_button_mara_jade.tga` |
+  | `Y_Wing_Squadron_Container` | empty | `i_button_y_wing.tga` |
+  | `EM6_Prison_Wookies` | empty | `i_button_han_solo.tga` |
+  | `MOV_Mothma` | empty | `i_button_han_solo.tga` |
+  | `MOV_R2D3` | empty | `i_button_han_solo.tga` |
+  | `UMP_HanSolo` | empty | `i_button_han_solo.tga` |
+
 - L-8 (CARD-1). A collapsed stack shows `x<count>` as the button's second text (bone plus
   `Text_Offset2`, EmpireAtWar-Medium 6 pt, outlined) and hides both bars.
 - L-9 (CARD-1, CARD-3). Any other card shows its health bar at level `ceil(health x Max_Bar_Level)`

@@ -150,8 +150,7 @@ core::Result<void> GalacticSession::set_story_ai_usage(EntityId actor, std::opti
     if (prefer_ground) at->second.story_prefer_ground = prefer_ground;
     impl.published_actor_records.reset();
     impl.dirty[static_cast<std::size_t>(StateSection::census)] = true;
-    const auto events = impl.snapshot->events();
-    impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    impl.refresh_snapshot();
     return core::Result<void>::success();
 }
 core::Result<void> GalacticSession::change_actor_current_type(EntityId actor, TypeId type) {
@@ -182,8 +181,7 @@ core::Result<void> GalacticSession::change_actor_current_type(EntityId actor, Ty
     }
     impl.record_actor(row, NativeActorChange::Kind::changed);
     impl.refresh_containing_fleet_combat_skip(actor);
-    const auto events = impl.snapshot->events();
-    impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    impl.refresh_snapshot();
     return impl.deliver_actor_changes();
 }
 core::Result<void> GalacticSession::apply_actor_stealth(EntityId owner, EntityId target, math::Fixed chance, bool apply) {
@@ -205,8 +203,7 @@ core::Result<void> GalacticSession::apply_actor_stealth(EntityId owner, EntityId
     }
     impl.record_actor(row, NativeActorChange::Kind::changed);
     impl.refresh_containing_fleet_combat_skip(owner);
-    const auto events = impl.snapshot->events();
-    impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    impl.refresh_snapshot();
     return impl.deliver_actor_changes();
 }
 void GalacticSession::Impl::refresh_containing_fleet_combat_skip(EntityId actor) {
@@ -239,26 +236,57 @@ core::Result<void> GalacticSession::set_actor_garrison(EntityId id, bool value) 
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "actor_garrison_write_unqualified"));
     auto row = at->second; row.garrison = value;
     impl.record_actor(row, NativeActorChange::Kind::changed);
-    const auto events = impl.snapshot->events();
-    impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    impl.refresh_snapshot();
     return impl.deliver_actor_changes();
 }
 core::Result<void> GalacticSession::restore_actor_representations(std::span<const std::uint8_t> bytes) {
-    const auto refuse = [] { return core::Result<void>::failure(detail::diagnostic(
-        diagnostic_codes::invalid_setup, "current_representation_restore_unqualified")); };
+    // Every refusal names its reason after the stable prefix, so a test can tell which check refused.
+    const auto refuse = [](std::string_view reason) { return core::Result<void>::failure(detail::diagnostic(
+        diagnostic_codes::invalid_setup, "current_representation_restore_unqualified: " + std::string(reason))); };
     auto& impl = *impl_;
-    if (impl.failed || !impl.setup.census || bytes.size() < 4 || !impl.pending_actor_changes.empty()) return refuse();
+    if (impl.failed || !impl.setup.census || !impl.pending_actor_changes.empty()) return refuse("owner is not ready");
+    if (bytes.size() < 4) return refuse("section is truncated");
     std::uint32_t size{};
     for (unsigned i = 0; i < 4; ++i) size |= std::uint32_t{bytes[i]} << (i * 8);
-    if (size > bytes.size() - 4 || bytes.size() - 4 - size < 4) return refuse();
+    if (size > bytes.size() - 4 || bytes.size() - 4 - size < 4) return refuse("section is truncated");
     const auto totals = bytes.subspan(4 + size);
     std::uint32_t count{};
     for (unsigned i = 0; i < 4; ++i) count |= std::uint32_t{totals[i]} << (i * 8);
-    if (count > galactic_max_players || totals.size() != 4 + std::size_t{count} * 29) return refuse();
-    for (std::uint32_t i = 0; i < count; ++i) if (totals[4 + std::size_t{i} * 29 + 28] > 1) return refuse();
+    constexpr std::size_t total_width = 29, usage_width = 10;
+    if (count > galactic_max_players || totals.size() < 4 + std::size_t{count} * total_width)
+        return refuse("population totals are malformed");
+    for (std::uint32_t i = 0; i < count; ++i) if (totals[4 + std::size_t{i} * total_width + 28] > 1)
+        return refuse("population totals are malformed");
+    // The world-owned story AI-usage facts follow the totals (u32 count, then id, prevent, prefer per row, ascending id).
+    // The journal replay has already rebuilt them on this owner, so the saved facts must equal the live ones.
+    const auto usage = totals.subspan(4 + std::size_t{count} * total_width);
+    if (usage.size() < 4) return refuse("story AI-usage tail is missing (a census section from before the tail)");
+    std::uint32_t usage_count{};
+    for (unsigned i = 0; i < 4; ++i) usage_count |= std::uint32_t{usage[i]} << (i * 8);
+    if (usage_count > galactic_max_objects || usage.size() != 4 + std::size_t{usage_count} * usage_width)
+        return refuse("story AI-usage tail is malformed");
+    const auto fact = [](std::uint8_t code) { return code == 0 ? std::optional<bool>{} : std::optional<bool>(code == 2); };
+    auto live_usage = impl.actor_records.begin();
+    const auto next_live = [&] {
+        while (live_usage != impl.actor_records.end()
+            && !live_usage->second.story_prevent_ai_usage && !live_usage->second.story_prefer_ground) ++live_usage;
+    };
+    next_live();
+    for (std::uint32_t i = 0; i < usage_count; ++i) {
+        const auto row = usage.subspan(4 + std::size_t{i} * usage_width, usage_width);
+        std::uint64_t id{};
+        for (unsigned b = 0; b < 8; ++b) id |= std::uint64_t{row[b]} << (b * 8);
+        if (row[8] > 2 || row[9] > 2 || (!row[8] && !row[9])) return refuse("story AI-usage tail is malformed");
+        if (live_usage == impl.actor_records.end() || live_usage->first != id
+            || live_usage->second.story_prevent_ai_usage != fact(row[8]) || live_usage->second.story_prefer_ground != fact(row[9]))
+            return refuse("story AI-usage facts differ from the live records");
+        ++live_usage; next_live();
+    }
+    if (live_usage != impl.actor_records.end()) return refuse("story AI-usage facts differ from the live records");
     auto census = detail::decode_census(bytes.subspan(4, size));
-    if (!census || census->types != impl.setup.census->types || census->players != impl.setup.census->players
-        || census->objects.size() != impl.actor_records.size()) return refuse();
+    if (!census) return refuse("saved census is malformed");
+    if (census->types != impl.setup.census->types || census->players != impl.setup.census->players
+        || census->objects.size() != impl.actor_records.size()) return refuse("saved census differs from the owner's");
     auto existing = impl.actor_records.begin();
     for (const auto& row : census->objects) {
         const auto& before = existing->second;
@@ -270,20 +298,22 @@ core::Result<void> GalacticSession::restore_actor_representations(std::span<cons
             || (impl.ability_host && row.current_type != before.current_type) // live bindings must have replayed before script hashes
             || (!row.current_type && before.current_type)
             || (row.current_type && std::none_of(census->types.begin(), census->types.end(),
-                [&](const auto& type) { return type.type == row.current_type; }))) return refuse();
+                [&](const auto& type) { return type.type == row.current_type; }))) return refuse("saved actor row differs from the owner's");
         ++existing;
     }
     // All references validate before mutation; restoration never dispatches births.
-    for (const auto& row : census->objects) {
-        impl.actor_records.at(row.id) = row;
+    for (auto& row : census->objects) {
+        // The census rows carry no story facts; the validated tail says the live ones stand.
+        auto& record = impl.actor_records.at(row.id);
+        row.story_prevent_ai_usage = record.story_prevent_ai_usage; row.story_prefer_ground = record.story_prefer_ground;
+        record = row;
         impl.refresh_control_actor(row);
     }
     impl.published_actor_records.reset();
     impl.invalidate_observer_projection();
     impl.dirty[static_cast<std::size_t>(StateSection::census)] = true;
     for (const auto& [id, handle] : impl.fleets) { (void)handle; impl.refresh_fleet_combat_skip(id); }
-    const auto events = impl.snapshot->events();
-    impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    impl.refresh_snapshot();
     return core::Result<void>::success();
 }
 namespace session_detail {
@@ -475,6 +505,8 @@ core::Result<std::vector<EntityId>> GalacticSession::create_native_force(const N
         return Result::failure(applied.error());
     std::sort(movement->contents.begin(), movement->contents.end(), [](const auto& a, const auto& b) { return a.container < b.container; });
     impl.movement_inputs = std::move(movement);
+    // Immediate on purpose (#6933): while a native commit is open this publishes a view over the commit's staged publication
+    // (the identity the shadows compare), which a deferred rebuild from the events could not reproduce.
     const auto old = impl.snapshot->events();
     impl.snapshot = impl.publish_native_snapshot({old.begin(), old.end()});
     if (auto delivered = impl.deliver_actor_changes(); !delivered) return Result::failure(delivered.error());
@@ -1013,7 +1045,7 @@ core::Result<void> GalacticSession::deliver_native_shadow_changes(const NativeAc
 core::Result<void> GalacticSession::publish_native_batch(const NativeActionShadow& shadow, bool actors_prepared, bool deliver_intents) {
     auto* state = native_barrier(); const auto* previous = native_shadow();
     if (!state || !previous || !shadow.data_->immediate_batch || !shadow.data_->continuation
-        || shadow.data_->owner != impl_.get() || shadow.data_->base != impl_->snapshot
+        || shadow.data_->owner != impl_.get() || shadow.data_->base != impl_->snapshot.current()
         || shadow.data_->parent != previous->data_ || shadow.data_->first_id != previous->next_entity_id()
         || shadow.data_->player != previous->player() || shadow.data_->tail != state->tail || shadow.data_->prelude != state->prelude)
         return invalid<void>("immediate native batch is stale or belongs to another barrier");
@@ -1156,7 +1188,7 @@ core::Result<std::vector<EntityId>> GalacticSession::stage_native_force(
 core::Result<void> GalacticSession::stage_native_effect(
     NativeActionShadow& shadow, NativeEffectKind kind, std::vector<std::uint8_t> payload, NativeEffectPhase phase) {
     auto* state = native_barrier();
-    if (!state || impl_->failed || impl_->native_replaying || kind < NativeEffectKind::fleet || kind > NativeEffectKind::story_ai_usage
+    if (!state || impl_->failed || impl_->native_replaying || kind < NativeEffectKind::fleet || kind > NativeEffectKind::object_despawn
         || phase > NativeEffectPhase::world_service || payload.size() > galactic_replay_max_payload
         || impl_->native_dropped + impl_->native_effects.size() + state->journal_entries + impl_->executed_dropped + impl_->executed.size() + impl_->pending.size() >= galactic_max_commands
         || state->journal_entries >= std::numeric_limits<std::uint64_t>::max() - impl_->native_sequence) {
@@ -1199,6 +1231,18 @@ core::Result<void> GalacticSession::stage_native_retire_invasion(NativeActionSha
     shadow.data_->record_request(NativeActionShadow::Data::InvasionRequest{true, 0, 0, {}, false, {}, number});
     std::vector<std::uint8_t> bytes; for (const auto word : std::array<std::uint64_t, 3>{1, 3, number}) detail::put_u64(bytes, word);
     if (auto saved = append_native_effect(NativeEffectKind::invasion, std::move(bytes)); !saved) return saved;
+    return advance_native_segment();
+}
+core::Result<void> GalacticSession::retire_native_unadmitted_invasion(std::uint64_t number) {
+    auto* shadow = native_shadow();
+    if (impl_->failed || !shadow || !number || native_shadow_invasion(*shadow, number))
+        return invalid<void>("an unadmitted invasion release requires a native action phase without the invasion's row");
+    // No row changes and no native effect: nothing here exists to release. The ordered intent is what the lane's slice carries;
+    // its world-side release (readmit_native_invasion_release) frees an admitted invasion or keeps a refused one as a refusal.
+    const auto published = shadow->snapshot();
+    shadow->detach();
+    shadow->data_->publication = published;
+    shadow->data_->record_request(NativeActionShadow::Data::InvasionRequest{true, 0, 0, {}, false, {}, number});
     return advance_native_segment();
 }
 core::Result<GalacticSession::NativeTransportLandingGate> GalacticSession::native_shadow_landing_available(
@@ -1270,7 +1314,7 @@ core::Result<void> GalacticSession::refresh_lane(const GalacticSession& live) {
         || impl_->native_barrier_active.load(std::memory_order_acquire) || live.impl_->native_barrier_active.load(std::memory_order_acquire))
         return invalid<void>("a lane refresh requires two idle sessions");
     const auto& src = *live.impl_; auto& dst = *impl_;
-    dst.snapshot = src.snapshot; dst.completed_tick = src.completed_tick; dst.clock = src.clock;
+    dst.snapshot = src.snapshot.current(); dst.completed_tick = src.completed_tick; dst.clock = src.clock;
     dst.next_id = src.next_id; dst.next_native_invasion = src.next_native_invasion;
     dst.native_invasions_enabled = src.native_invasions_enabled; dst.native_invasions = src.native_invasions;
     dst.native_invasion_transport_count = src.native_invasion_transport_count;
@@ -1753,7 +1797,7 @@ core::Result<void> GalacticSession::commit_native_actions(std::span<const Native
     const NativeActionShadow::Data* previous{};
     for (const auto& shadow : shadows) {
         const auto& data = *shadow.data_;
-        if (impl_->failed || data.owner != impl_.get() || data.base != impl_->snapshot || data.first_id != next_id
+        if (impl_->failed || data.owner != impl_.get() || data.base != impl_->snapshot.current() || data.first_id != next_id
             || data.parent.get() != previous || (previous && (data.player < previous->player
                 || (data.player == previous->player && !data.continuation) || (previous->tail && !data.tail)
                 || (!previous->prelude && data.prelude))) || (data.prelude && data.tail))
@@ -1786,7 +1830,7 @@ core::Result<void> GalacticSession::commit_native_actions(std::span<const Native
             }
         } restore{*impl_, impl_->native_actor_changes_handler, impl_->native_live_ability_actor_changes, impl_->native_movement_listener,
             impl_->credit_notification_handler, impl_->native_production_handler, impl_->native_production_outcome_handler, impl_->native_applying,
-            native_effects_prepared ? impl_->snapshot : nullptr};
+            native_effects_prepared ? impl_->snapshot.current() : nullptr};
         if (actor_changes_prepared) {
             impl_->native_live_ability_actor_changes = &restore.actors;
             impl_->native_actor_changes_handler = {};
@@ -1891,7 +1935,7 @@ core::Result<void> GalacticSession::commit_native_actions(std::span<const Native
         }
         impl_->native_commit_publication.reset();
         if (native_effects_prepared && impl_->native_commit_publications) {
-            const auto published = impl_->snapshot;
+            const std::shared_ptr<const GalacticSnapshot> published = impl_->snapshot;
             bool unpublished_counts{};
             {
                 struct RestoreCounts {
@@ -1929,6 +1973,218 @@ core::Result<void> GalacticSession::commit_native_actions(std::span<const Native
         }
         restore.committed = true;
         return core::Result<void>::success();
+    }
+    // World object scripts use an ordered first-class removal transaction. The
+    // ordinary PR5 path below remains unchanged for batches without removals.
+    // A removal batch is the only shape that carries ordered script steps; several shadows with removals are
+    // refused outright (diagnostic, never an abort) instead of silently taking the ordinary path.
+    if (shadows.size() > 1 && std::any_of(shadows.begin(), shadows.end(),
+            [](const auto& shadow) { return !shadow.data_->script_removed.empty(); }))
+        return invalid<void>("script removals require a single ordered shadow");
+    if (shadows.size() == 1 && !shadows.front().data_->script_removed.empty()) {
+        const auto& data = *shadows.front().data_;
+        using Step = NativeActionShadow::Data::ScriptStep;
+        // Every failure that can touch the world is refused in this validation pass, before the first mutation: the
+        // journal limits, the removal family, the cash arithmetic, and the one result apply_native_force reads from
+        // constructed state (each placed fleet's combat-skip facts, predicted over the batch's own earlier births and
+        // removals). The apply loop below therefore has no world-mutation failure left. remove_actors' own sortedness,
+        // duplicate and id guards cannot fire: the family is a sorted set of live ids. The only error that can still
+        // come back after the commit is the ordinary Lua handler delivery error of deliver_actor_changes(), exactly as on
+        // the non-removal path. The guard below only restores the batch-owned rows should a later change add a failure
+        // that this pass does not know about.
+        if (impl_->failed || impl_->native_replaying)
+            return invalid<void>("script batch requires a live ordered owner");
+        std::size_t journal_steps = 0;
+        std::optional<NativeEffectPhase> last_phase;
+        std::uint64_t last_frontier = impl_->completed_tick;
+        bool have_last = false;
+        if (!impl_->native_effects.empty()) {
+            have_last = true; last_frontier = impl_->native_effects.back().frontier;
+            last_phase = impl_->native_effects.back().phase;
+        }
+        if (have_last && (impl_->completed_tick < last_frontier
+                || (impl_->completed_tick == last_frontier && NativeEffectPhase::barrier < *last_phase)))
+            return invalid<void>("script batch journal phase would rewind");
+        for (const auto& step : data.script_steps) {
+            if (step.kind == Step::Kind::journal) {
+                if (step.effect < NativeEffectKind::fleet || step.effect > NativeEffectKind::object_despawn
+                    || step.payload.size() > galactic_replay_max_payload)
+                    return invalid<void>("script batch journal entry is out of range");
+                ++journal_steps;
+            } else if (step.kind == Step::Kind::despawn) {
+                ++journal_steps;
+            }
+        }
+        const auto journal_used = impl_->native_dropped + impl_->native_effects.size() + impl_->executed_dropped
+            + impl_->executed.size() + impl_->pending.size();
+        if (journal_used > impl_->journal_bound || impl_->journal_bound - journal_used < journal_steps
+            || impl_->native_sequence > std::numeric_limits<std::uint64_t>::max() - journal_steps)
+            return invalid<void>("script batch exceeds the galactic command journal");
+        struct ScriptRestore {
+            Impl& owner;
+            std::shared_ptr<const GalacticSnapshot> snapshot;
+            std::optional<PlayerEconomySetup> economy;
+            std::shared_ptr<const MovementSetup> movement;
+            std::optional<VictoryState> victory;
+            decltype(Impl::dirty) dirty;
+            std::size_t journal_size;
+            std::uint64_t sequence;
+            bool committed{};
+            ~ScriptRestore() {
+                if (committed) return;
+                owner.snapshot = std::move(snapshot); owner.economy = std::move(economy);
+                owner.movement_inputs = std::move(movement); owner.victory = std::move(victory);
+                owner.dirty = dirty;
+                if (owner.native_effects.size() > journal_size) owner.native_effects.resize(journal_size);
+                owner.native_sequence = sequence;
+            }
+        } script_restore{*impl_, impl_->snapshot, impl_->economy, impl_->movement_inputs, impl_->victory, impl_->dirty,
+            impl_->native_effects.size(), impl_->native_sequence};
+        const session_detail::NativeActorChangeCheckpoint script_pending(impl_->pending_actor_changes, true);
+        struct PendingRestore {
+            const session_detail::NativeActorChangeCheckpoint& pending; const bool& committed;
+            ~PendingRestore() { if (!committed) pending.restore(); }
+        } pending_restore{script_pending, script_restore.committed};
+        std::set<EntityId> live;
+        std::map<EntityId, EntityId> parents;
+        std::map<PlayerId, math::Fixed> balances;
+        // Overlay over the live actor rows and payload tables for the combat-skip prediction: the births of earlier
+        // force steps (with the type facts record_actor fills in) and the families of earlier removal steps.
+        std::map<EntityId, CensusObject> born_actors;
+        std::map<EntityId, const MovementContents*> born_contents;
+        std::set<EntityId> removed_actors;
+        const auto predicted_actor = [&](EntityId id) -> const CensusObject* {
+            if (removed_actors.contains(id)) return nullptr;
+            if (const auto born = born_actors.find(id); born != born_actors.end()) return &born->second;
+            const auto at = impl_->actor_records.find(id);
+            return at == impl_->actor_records.end() ? nullptr : &at->second;
+        };
+        const auto predicted_contents = [&](EntityId id) -> const MovementContents* {
+            if (removed_actors.contains(id)) return nullptr;
+            if (const auto born = born_contents.find(id); born != born_contents.end()) return born->second;
+            const auto& rows = impl_->movement_inputs->contents;
+            const auto at = std::lower_bound(rows.begin(), rows.end(), id, [](const auto& row, auto key) { return row.container < key; });
+            return at != rows.end() && at->container == id ? &*at : nullptr;
+        };
+        // The exact call apply_native_force makes after it constructed the force, over only the rows it reads.
+        const auto predict_fleet_skips = [&](const NativeForcePlacement& placement) -> core::Result<void> {
+            if (!impl_->production || !impl_->production->fleet_blockers) return core::Result<void>::success();
+            for (const auto& fleet : placement.fleets) {
+                std::vector<CensusObject> records;
+                MovementSetup payload;
+                std::set<EntityId> visited;
+                std::vector<EntityId> pending{fleet.id};
+                for (const auto& member : fleet.members) pending.push_back(member.id);
+                while (!pending.empty()) {
+                    const auto id = pending.back(); pending.pop_back();
+                    if (!visited.insert(id).second) continue;
+                    if (const auto* actor = predicted_actor(id)) records.push_back(*actor);
+                    if (const auto* row = predicted_contents(id)) {
+                        auto copy = *row;
+                        std::erase_if(copy.children, [&](const auto& child) { return removed_actors.contains(child.id); });
+                        for (const auto& child : copy.children) pending.push_back(child.id);
+                        payload.contents.push_back(std::move(copy));
+                    }
+                }
+                std::sort(records.begin(), records.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+                std::sort(payload.contents.begin(), payload.contents.end(), [](const auto& a, const auto& b) { return a.container < b.container; });
+                if (auto skip = fleet_combat_skip(fleet, records, &payload); !skip) return core::Result<void>::failure(skip.error());
+            }
+            return core::Result<void>::success();
+        };
+        if (impl_->economy) for (const auto& account : impl_->economy->players) balances.emplace(account.player, account.credits);
+        for (const auto& actor : impl_->snapshot->actor_records()) { live.insert(actor.id); parents.emplace(actor.id, actor.container); }
+        for (const auto& step : data.script_steps) {
+            if (step.kind == Step::Kind::force) {
+                if (step.force >= data.forces.size()) return invalid<void>("script batch force index is invalid");
+                if (!impl_->movement_inputs) return invalid<void>("script batch creation requires movement state");
+                const auto& placement = data.forces[step.force]->placement;
+                for (const auto& actor : placement.originals) {
+                    live.insert(actor.id); parents.emplace(actor.id, actor.container);
+                }
+                // The births land before the skip is read, so the overlay takes them first.
+                for (const auto& actor : placement.originals) {
+                    auto row = actor;
+                    if (row.combat_role == ActorCombatRole::unavailable && impl_->production && impl_->production->nested_creation) {
+                        const auto& types = impl_->production->nested_creation->types;
+                        const auto fact = std::lower_bound(types.begin(), types.end(), row.current_type,
+                            [](const auto& value, auto key) { return value.type < key; });
+                        if (fact != types.end() && fact->type == row.current_type && fact->combat_role != ActorCombatRole::unavailable) {
+                            row.combat_role = fact->combat_role; row.abilities = fact->abilities; row.garrison = false;
+                        }
+                    }
+                    removed_actors.erase(row.id);
+                    born_actors.insert_or_assign(row.id, std::move(row));
+                }
+                for (const auto& row : placement.contents) born_contents.insert_or_assign(row.container, &row);
+                if (auto predicted = predict_fleet_skips(placement); !predicted) return predicted;
+            } else if (step.kind == Step::Kind::cash) {
+                const auto account = balances.find(step.player);
+                if (account == balances.end()) return invalid<void>("script batch account disappeared");
+                auto balance = math::add(account->second, step.actual);
+                if (!balance) return core::Result<void>::failure(balance.error());
+                account->second = balance.value();
+            } else if (step.kind == Step::Kind::despawn && !live.erase(step.actor)) {
+                return invalid<void>("script batch removal is not live at publication");
+            } else if (step.kind == Step::Kind::despawn) {
+                std::set<EntityId> family{step.actor};
+                bool changed = true;
+                while (changed) {
+                    changed = false;
+                    for (const auto& [child, parent] : parents)
+                        if (parent != child && family.contains(parent)) changed |= family.insert(child).second;
+                }
+                if (family.size() > galactic_max_objects) return invalid<void>("script batch removal family is too large");
+                for (const auto id : family) {
+                    if (impl_->planets.contains(id) || impl_->routes.contains(id))
+                        return invalid<void>("script batch removal reaches a planet or route");
+                    live.erase(id);
+                    removed_actors.insert(id);
+                }
+            }
+        }
+        const auto replay_from = impl_->pending_actor_changes.size();
+        auto movement = impl_->movement_inputs ? std::make_shared<MovementSetup>(*impl_->movement_inputs) : nullptr;
+        for (const auto& step : data.script_steps) {
+            if (step.kind == Step::Kind::force) {
+                const auto& force = *data.forces[step.force];
+                if (!movement) return invalid<void>("script batch creation requires movement state");
+                if (auto applied = impl_->apply_native_force(force.request, force.placement, *movement); !applied) return applied;
+                std::sort(movement->contents.begin(), movement->contents.end(), [](const auto& a, const auto& b) { return a.container < b.container; });
+                impl_->movement_inputs = movement;
+            } else if (step.kind == Step::Kind::cash) {
+                auto& accounts = impl_->economy->players;
+                const auto at = std::lower_bound(accounts.begin(), accounts.end(), step.player, [](const auto& row, auto key) { return row.player < key; });
+                if (at == accounts.end() || at->player != step.player) return invalid<void>("script batch account disappeared");
+                auto balance = math::add(at->credits, step.actual);
+                if (!balance) return core::Result<void>::failure(balance.error());
+                at->credits = balance.value(); impl_->dirty[static_cast<std::size_t>(StateSection::players)] = true;
+            } else if (step.kind == Step::Kind::journal) {
+                if (auto saved = append_native_effect(step.effect, step.payload); !saved) return saved;
+            } else {
+                std::vector<std::uint8_t> payload; detail::put_u64(payload, step.actor);
+                if (auto saved = append_native_effect(NativeEffectKind::object_despawn, std::move(payload)); !saved) return saved;
+                const auto family = script_removal_family(step.actor);
+                if (auto removed = remove_actors(family, {}, false, false); !removed) return removed;
+                // A removal may replace the world's movement publication.
+                movement = impl_->movement_inputs ? std::make_shared<MovementSetup>(*impl_->movement_inputs) : nullptr;
+            }
+            impl_->refresh_snapshot();
+        }
+        if (!data.accounts.empty() && data.victory) {
+            impl_->victory = *data.victory; impl_->dirty[static_cast<std::size_t>(StateSection::victory)] = true;
+        }
+        std::vector<GalacticEvent> events(impl_->snapshot->events().begin(), impl_->snapshot->events().end());
+        events.insert(events.end(), data.events.begin(), data.events.end());
+        impl_->snapshot = impl_->make_snapshot(std::move(events));
+        if (!actor_changes_prepared && impl_->native_actor_changes_handler) {
+            std::vector<NativeActorChange> surviving;
+            for (const auto& change : data.actor_changes)
+                if (!shadows.front().script_removed(change.actor)) surviving.push_back(change);
+            keep_staged_ai_usage(impl_->pending_actor_changes, replay_from, surviving);
+        }
+        script_restore.committed = true;
+        return actor_changes_prepared ? core::Result<void>::success() : impl_->deliver_actor_changes();
     }
     // Validation/placement and notification staging are already complete.
     // This ordered commit applies only new output entities, never a scene copy.

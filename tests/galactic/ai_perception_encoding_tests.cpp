@@ -43,8 +43,8 @@ Bytes from_hex(const std::string& text) {
         out.push_back(static_cast<std::uint8_t>(std::stoul(text.substr(i, 2), nullptr, 16)));
     return out;
 }
-// Domain "eawr-galactic-perception" (length 24), version 3.
-const std::string head = "18000000" "65617772" "2d" "67616c6163746963" "2d" "70657263657074696f6e" "03000000";
+// Domain "eawr-galactic-perception" (length 24), version 4.
+const std::string head = "18000000" "65617772" "2d" "67616c6163746963" "2d" "70657263657074696f6e" "04000000";
 const std::string zero_word = "0000000000000000";
 
 struct CacheRecord {
@@ -101,6 +101,7 @@ const ai::GalacticVisibility hidden_row{4, 0, false, 0, 0};
 const ai::GalacticStoryFlag flag_row{2, 7, "AB"};
 const ai::GalacticStoryFlag flag_untargeted{1, 0, ""};
 const ai::GalacticHint hint_row{3, "ALPHA", "SCOUTED", bits(0x4000000000000000ULL)};
+const ai::GalacticSpaceConflict conflict_row{2, 9, 77};
 
 void equals_reference() {
     Bytes buffer;
@@ -118,6 +119,9 @@ void equals_reference() {
     }
     ai::encode_hint_record(buffer, hint_row);
     expect(buffer == reference_hint(hint_row), "hint record bytes equal the whole-state encoder");
+    ai::GalacticPerceptionState state; state.space_conflicts.push_back(conflict_row);
+    ai::encode_space_conflict_record(buffer, conflict_row);
+    expect(buffer == ai::encode_perception_state(state, {}), "conflict record bytes equal the whole-state encoder");
 }
 
 // Layouts spelled from the format itself, independent of both encoders.
@@ -125,18 +129,21 @@ void pinned_bytes() {
     Bytes buffer;
     ai::encode_flag_record(buffer, flag_row);
     expect(buffer == from_hex(head + zero_word + zero_word + "0100000000000000" + "02000000" + "0700000000000000"
-        + "02000000" "4142" + zero_word + zero_word), "flag record bytes are pinned");
+        + "02000000" "4142" + zero_word + zero_word + zero_word), "flag record bytes are pinned");
     ai::encode_visibility_record(buffer, visibility_row);
     expect(buffer == from_hex(head + zero_word + "0100000000000000" + "02000000" + "0900000000000000" + "01"
-        + "4d00000000000000" + "05000000" + zero_word + zero_word + zero_word), "visibility record bytes are pinned");
+        + "4d00000000000000" + "05000000" + zero_word + zero_word + zero_word + zero_word), "visibility record bytes are pinned");
     ai::encode_hint_record(buffer, hint_row);
     expect(buffer == from_hex(head + zero_word + zero_word + zero_word + "0100000000000000" + "03000000"
-        + "05000000" "414c504841" + "07000000" "53434f55544544" + "0000000000000040" + zero_word), "hint record bytes are pinned");
+        + "05000000" "414c504841" + "07000000" "53434f55544544" + "0000000000000040" + zero_word + zero_word), "hint record bytes are pinned");
+    ai::encode_space_conflict_record(buffer, conflict_row);
+    expect(buffer == from_hex(head + zero_word + zero_word + zero_word + zero_word + "0100000000000000"
+        + "02000000" + "0900000000000000" + "4d00000000000000" + zero_word), "conflict record bytes are pinned");
     const auto record = pinned_cache();
     ai::encode_cache_record(buffer, view_of(record), record.value, record.interval, record.frame);
     expect(buffer == from_hex(head + "0100000000000000" + "01000000" "00" "00" "0500000000000000"
         + "0100000000000000" "01000000" "54" + "0100000000000000" + "01000000" "50" "00" "0807060504030201"
-        + "1817161514131211" "2827262524232221" "0900000000000000" + zero_word + zero_word + zero_word + zero_word),
+        + "1817161514131211" "2827262524232221" "0900000000000000" + zero_word + zero_word + zero_word + zero_word + zero_word),
         "cache record bytes are pinned");
 }
 
@@ -155,6 +162,7 @@ void allocations() {
         ai::encode_visibility_record(buffer, visibility_row);
         ai::encode_flag_record(buffer, flag_row);
         ai::encode_hint_record(buffer, hint_row);
+        ai::encode_space_conflict_record(buffer, conflict_row);
     }
     encode_alloc_probe::armed = false;
     expect(encode_alloc_probe::calls == 0, "warm single-record encoders allocate nothing");

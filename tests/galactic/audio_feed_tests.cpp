@@ -271,8 +271,17 @@ void retained_feedback() {
         live->submit({{1, galactic::SeatId{2}, 2}, galactic::ExecutePreparedAbility{prepared}});
         live->advance_to(2); expect(live->wait_for(2, 10s), "live corruption starts");
         const auto before = live->galactic_events_after(0);
-        expect(std::none_of(before.events.begin(), before.events.end(), [](const auto& row) { return row.feedback.has_value(); }),
-            "ability success does not masquerade as due corruption completion");
+        // WGCH-09/128: a direct start voices the chosen slot once (no sound cue); it is never the due-completion cue.
+        std::size_t voiced{};
+        for (const auto& row : before.events) if (row.feedback) {
+            expect(row.feedback->kind == Notice::Kind::corruption_success_voiced && row.feedback->player == 2
+                && row.feedback->planet == setup.planets[0].id && row.feedback->slot == prepared.corruption.slot,
+                "ability success does not masquerade as due corruption completion");
+            expect(!audio::galactic_event_sound(row.event, 2, {}, {}, false, {}, row.feedback),
+                "the success voicing selects no sound cue");
+            ++voiced;
+        }
+        expect(voiced == 1, "a direct corruption start voices the chosen slot exactly once");
         live->advance_to(160); expect(live->wait_for(160, 10s), "live corruption reaches completion");
         const auto after = live->galactic_events_after(before.through);
         std::size_t completed{};

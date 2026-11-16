@@ -53,13 +53,15 @@ CampaignSetupModel::CampaignSetupModel(std::vector<CampaignFacts> campaigns, std
         if (left != right) return left < right;
         return before(a.title, b.title);
     });
-    // WGP-40: every playable faction by display name (the drop-down is a sorted control).
+    // WGP-40a: every playable faction, the named ones first in the faction table's own order (nothing sorts the
+    // drop-down by name), then the factions without display text in table order. A captionless faction keeps its
+    // blank title: retail lists it as a row with no caption, after the named sides.
     for (FactionFacts& faction : factions) {
         if (!faction.playable) continue;
-        factions_.push_back({faction.name, faction.title.empty() ? faction.name : faction.title, faction.displayed_tech_adjustment});
+        factions_.push_back({faction.name, faction.title, faction.displayed_tech_adjustment});
     }
-    std::stable_sort(factions_.begin(), factions_.end(), [](const FactionChoice& a, const FactionChoice& b) {
-        return before(a.title, b.title);
+    std::stable_partition(factions_.begin(), factions_.end(), [](const FactionChoice& choice) {
+        return choice.title.find_first_not_of(" \t\r\n") != std::string::npos;
     });
     if (!factions_.empty()) faction_ = factions_.size() - 1;
 }
@@ -69,11 +71,18 @@ void CampaignSetupModel::reset() noexcept {
     row_.reset();
     faction_ = factions_.empty() ? std::nullopt : std::optional<std::size_t>(factions_.size() - 1);
     difficulty_ = CampaignDifficulty::normal;
+    refresh_options_visible();
+}
+
+void CampaignSetupModel::refresh_options_visible() noexcept {
+    if (!row_) { options_visible_ = false; return; }
+    if (const CampaignFacts* found = variant()) options_visible_ = found->supports_custom_settings;
 }
 
 void CampaignSetupModel::select_row(const std::optional<std::size_t> row) {
     accepted_.reset(); editing_.reset(); // WGP-67
     row_ = row && *row < rows_.size() ? row : std::nullopt;
+    refresh_options_visible();
 }
 
 const CampaignRow* CampaignSetupModel::selected() const noexcept { return row_ ? &rows_[*row_] : nullptr; }
@@ -85,6 +94,7 @@ std::string_view CampaignSetupModel::description() const noexcept {
 void CampaignSetupModel::select_faction(const std::optional<std::size_t> faction) {
     accepted_.reset(); editing_.reset(); // WGP-67
     if (faction && *faction < factions_.size()) faction_ = faction;
+    refresh_options_visible();
 }
 
 bool CampaignSetupModel::difficulty_available(const CampaignDifficulty level) const noexcept {
@@ -119,7 +129,8 @@ std::string CampaignSetupModel::start_disabled_reason() const {
     if (variant() != nullptr) return {};
     if (!row_) return "Choose a campaign first.";
     if (!faction_) return "No playable faction is available.";
-    return "This campaign cannot be played as " + factions_[*faction_].title + ".";
+    const FactionChoice& side = factions_[*faction_];
+    return "This campaign cannot be played as " + (side.title.empty() ? side.name : side.title) + ".";
 }
 
 std::optional<CampaignStartRequest> CampaignSetupModel::start_request() const {

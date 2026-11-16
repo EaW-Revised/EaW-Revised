@@ -555,6 +555,18 @@ void test_capture_colorization() {
 
 } // namespace
 
+void test_land_refusal_labels() {
+    using sim::tactical::RejectReason;
+    // #7190: the pane names the simulation's own reason for a refused land drop; reasons a drop never raises name nothing.
+    expect(ui::reinforcement_refusal_label(RejectReason::invalid_position) == "Cannot land there", "a point outside the legal ground has a label");
+    expect(ui::reinforcement_refusal_label(RejectReason::no_population_room) == "No room for this company", "a full cap has a label");
+    expect(ui::reinforcement_refusal_label(RejectReason::not_in_pool) == "Company not available", "an empty pool entry has a label");
+    expect(ui::reinforcement_refusal_label(RejectReason::cannot_produce) == "Company cannot be called down", "a company the land cannot bind has a label");
+    expect(ui::reinforcement_refusal_label(RejectReason::battle_decided) == "The battle is decided", "a decided battle has a label");
+    expect(ui::reinforcement_refusal_label(RejectReason::none).empty() && ui::reinforcement_refusal_label(RejectReason::insufficient_credits).empty(),
+        "no refusal and unrelated reasons name nothing");
+}
+
 int main() {
     ui::PadPalette palette;
     expect(!palette.open(42, false) && !palette.entity(), "WBP-08: proximity/fog/alliance gate opening");
@@ -598,6 +610,7 @@ int main() {
     test_pad_station_transitions();
     test_capture_colorization();
     test_warmed_menu_allocations();
+    test_land_refusal_labels();
     if (test::ui::failures() != 0) {
         std::cerr << test::ui::failures() << " production check(s) failed\n";
         return 1;

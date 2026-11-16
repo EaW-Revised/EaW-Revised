@@ -53,6 +53,9 @@ public:
         // #76: a second clip it switches to (a SPOILER_LOCK craft's UNDEPLOY beside its DEPLOY
         // clip, AB-31); LiveClipPose::alternate picks it.
         std::string alternate_clip{};
+        // #6554: the clip is a SUPER_LASER's attack clip, played over the model's idle clip (which keeps playing
+        // whenever the attack clip is not posed), unlike a death or S-foil clip that replaces it.
+        bool clip_over_idle{};
         bool land_motion{};
         // #81: a death clone (counted apart from the session's units), with
         // or without a clip.
@@ -131,6 +134,10 @@ public:
         // instances and shows this on screen. An interactive view keeps running; a capture run
         // fails with it.
         std::optional<std::string> error;
+        // TSW-15: the map records of environment-drawn objects (a planet backdrop) the battle has destroyed so far, in
+        // the order seen; the environment view stops drawing them. Cumulative, so a frame may repeat a record. A view of the
+        // debris props' own list (no per-frame copy): valid only for the frame that returned it.
+        std::span<const std::uint32_t> hidden_environment_records;
         // N1: work this frame still owes the live step: the unit emitters' last batch is running on the particle
         // workers while the caller did other work. The view calls it once, after its instance copy and submit and
         // before any capture or the end of the step, then nothing else of the frame is outstanding. Empty when the
@@ -158,6 +165,29 @@ public:
 
     [[nodiscard]] virtual bool append_live_ships(GodotRenderer& renderer, const vfs::Vfs& filesystem,
                                         std::span<const PlacedUnit> ships) = 0;
+    // #5097: read the models and textures a later append_live_ships of `ships` will ask for on worker threads, so
+    // that append finds them decoded and only uploads. A ticket (0 = unsupported or refused) is polled until
+    // ready, spent by one append (`use`) and released. Presentation only; nothing here touches the renderer or the scene.
+    enum class AheadState : std::uint8_t { pending, ready, failed };
+    struct AheadStats final {
+        std::uint64_t planned{}, decoded{}, unplanned{}, held_bytes_peak{};
+        double preflight_ms{};
+    };
+    [[nodiscard]] virtual std::uint64_t arrival_ahead_begin(const vfs::Vfs&, std::span<const PlacedUnit>) { return 0; }
+    [[nodiscard]] virtual AheadState arrival_ahead_poll(std::uint64_t) { return AheadState::failed; }
+    // While `use` is set, the next appends take their textures from the read-ahead of the ticket.
+    virtual void arrival_ahead_use(std::uint64_t, bool) {}
+    virtual void arrival_ahead_release(std::uint64_t) {}
+    [[nodiscard]] virtual AheadStats arrival_ahead_stats() const { return {}; }
+    // #5097 PR 2: append_live_ships spread over frames. begin stages the ships (their slots exist at once, nothing is
+    // drawn); each step runs queued compose steps for about `budget_ms` (negative: all of them) and says where it is.
+    // Any other append, or a later begin, first finishes a pending one, so the scene is never appended to out of order.
+    // `ticket` (0 = none) is a read-ahead ticket whose decoded textures the steps take.
+    enum class AppendState : std::uint8_t { idle, pending, done, failed };
+    [[nodiscard]] virtual bool begin_live_append(GodotRenderer&, const vfs::Vfs&, std::span<const PlacedUnit>, std::uint64_t) {
+        return false;
+    }
+    [[nodiscard]] virtual AppendState step_live_append(double) { return AppendState::idle; }
     // All model slots, including those appended by independent projectile pools.
     // The borrowed span is invalidated by a subsequent append.
     [[nodiscard]] virtual std::span<const PlacedUnit> placed_units() const noexcept = 0;

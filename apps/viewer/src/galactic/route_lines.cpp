@@ -113,6 +113,7 @@ core::Result<RouteStyles> load_route_styles(const vfs::Vfs& filesystem) {
         const std::string key = upper(value.name), raw = trim(value.raw_text);
         if (key == "GOOD_SIDE_NAME") result.good_faction = raw;
         else if (key == "EVIL_SIDE_NAME") result.evil_faction = raw;
+        else if (key == "CORRUPT_SIDE_NAME") result.corrupt_faction = raw;
         else if (key == "FLEET_MOVEMENT_LINE_TEXTURE_NAME") result.fleet_texture = raw;
         else if (key == "FLEET_HYPERSPACE_BAND_TEXTURE_NAME") result.band_texture = raw;
     }

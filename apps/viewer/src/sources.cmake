@@ -6,6 +6,7 @@ endif()
 set(EAWR_VIEWER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/register_types.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/crash_handler.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/startup_window.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/viewer_host.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/viewer_host_ready.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/viewer_host_config.cpp"
@@ -32,6 +33,7 @@ set(EAWR_VIEWER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/map_mode_ready.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/map_mode_ready_terrain.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/map_mode_ready_population.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/texture_volumes.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/map_mode_land_live.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/land_battle_scene.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/map_mode_live.cpp"
@@ -104,6 +106,7 @@ set(EAWR_VIEWER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/particle_workers.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/live_fog_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/land_overlay_view.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/land_deploy_zone_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/live_session_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/live_session_report.hpp"
     "${CMAKE_CURRENT_LIST_DIR}/live_session_lan.hpp"

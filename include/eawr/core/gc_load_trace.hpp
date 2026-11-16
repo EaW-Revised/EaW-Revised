@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <mutex>
@@ -77,6 +78,9 @@ private:
     std::vector<Entry> entries_;
 };
 inline Trace trace;
+// Opt-in extra attribution (the viewer sets it from --eawr-load-detail at the press of Start): phase profiles that cost a clock
+// read per item. Presentation only; nothing in the simulation reads it.
+inline std::atomic<bool> detail{false};
 
 class Scope final {
 public:
@@ -87,6 +91,22 @@ public:
 private:
     std::string_view name_;
     Clock::time_point start_;
+};
+
+// A Scope that only exists while the opt-in `detail` is set: when it is off, constructing and destroying one reads no clock
+// and takes no trace lock (one relaxed atomic load at construction), so detail-only phase boundaries cost nothing then.
+class DetailScope final {
+public:
+    explicit DetailScope(std::string_view name) : name_(name) {
+        if (detail.load(std::memory_order_relaxed)) { on_ = true; start_ = Clock::now(); }
+    }
+    DetailScope(const DetailScope&) = delete;
+    DetailScope& operator=(const DetailScope&) = delete;
+    ~DetailScope() { if (on_) trace.span(name_, start_, Clock::now()); }
+private:
+    std::string_view name_;
+    bool on_{};
+    Clock::time_point start_{};
 };
 
 } // namespace eawr::core::gc_load

@@ -43,6 +43,9 @@ std::vector<std::byte> byte_vector(const std::initializer_list<unsigned> values)
 // renderer_resource_tests.cpp
 void particle_texture_contracts();
 void upload_identity_contracts();
+void upload_identity_streaming_contracts();
+void upload_identity_job_failure_contracts();
+void lighting_propagation_contracts();
 void instance_resource_contracts();
 void gpu_memory_ledger_contracts();
 void texture_budget_contracts();

@@ -8,12 +8,16 @@
 #include <cstdint>
 #include <utility>
 #include <string_view>
+#include <stdexcept>
 #include "../../support/check.hpp"
 #include "ai_engine.hpp"
 #include "tactical_ai_world.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
+#include "eawr/sim/tactical/land_session.hpp"
+#include "eawr/skirmish/land_fog.hpp"
 #include "eawr/sim/tactical/session.hpp"
+#include "../../skirmish/land_test_support.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -96,10 +100,16 @@ const std::vector<tactical::SensorProfile>& sensors() {
 
 // A host over a live session; the view is ours, the fog is the session's.
 struct Rig {
-    Rig(tactical::TacticalSession& session_ref, const std::size_t workers) : session(session_ref), executor(workers) {
+    Rig(tactical::TacticalSession& session_ref, const std::size_t workers, const bool land = false)
+        : session(session_ref), executor(workers) {
         host = std::make_shared<foc::detail::Host>();
         host->world = &session;
-        host->setup.bounds = foc::AiBounds{ai::real(-6500), ai::real(6500), ai::real(6500), ai::real(-6500)};
+        // Space: the Coruscant extent centred on the origin. Land (#6942): declared extents that are NOT the land fog rectangle
+        // (the fog is the 96-sample, 20-spacing field from the origin, 0 to 1920), as a shared setup's extents are.
+        host->setup.bounds = land
+            ? foc::AiBounds{ai::real(-480), ai::real(2400), ai::real(2400), ai::real(-480)}
+            : foc::AiBounds{ai::real(-6500), ai::real(6500), ai::real(6500), ai::real(-6500)};
+        if (land) host->setup.domain = tactical::BattleDomain::land;
         foc::AiType station;
         station.type_id = station_type; station.name = "STATION"; station.unit_ai = true; station.star_base = true;
         foc::AiType ship;
@@ -218,6 +228,11 @@ std::vector<std::int64_t> run(const std::size_t workers) {
             expect(anchored && *anchored == Real{}, "PE-25: the living unit's cell is still unaged");
             observed.push_back(static_cast<std::int64_t>(age->repr));
             observed.push_back(static_cast<std::int64_t>(never->repr));
+            // #6942: the space box is still the declared extents, centred on the origin, with 33 x 33 cells.
+            expect(rig.engine->grid().left() == ai::real(-6500) && rig.engine->grid().right() == ai::real(6500)
+                    && rig.engine->grid().top() == ai::real(6500) && rig.engine->grid().bottom() == ai::real(-6500)
+                    && rig.engine->grid().x_cells() == 33 && rig.engine->grid().y_cells() == 33,
+                "#6942: the space grid's box is unchanged: the declared extents");
             // PG-01: the stamp lands by fog index, not by position.
             expect(rig.engine->grid().last_seen(0, 9, 16) == fogged_at && rig.engine->grid().last_seen(0, 10, 16) == 0,
                 "PG-01: fog column 39 stamps threat column 9 (index / 4), not column 10 (position)");
@@ -316,9 +331,181 @@ void restart_mid_game() {
         "PE-25: and so do their ages");
 }
 
+// #6182: a land session. The terrain is 96 x 96 samples of 20 (1920 a side), so the land fog is 128 x 128 cells of 15 and,
+// with four fog cells per threat cell, the threat grid is 32 x 32 cells of 60. A grid sized from the space cell size
+// (1920 / 100 = 20 fog cells, 5 threat cells) would drop every fog row past 19 and stamp the wrong cells.
+constexpr tactical::TypeId land_company = 61;
+constexpr tactical::TypeId land_member = 62;
+
+// The fog the production land start builds for the terrain (skirmish::land_fog_rules, DesiredLandFOWCellSize 15, 6 s regrow),
+// not a hand-written grid: the 128 x 128 cells of the comment above are asserted from it below.
+tactical::FogRules land_fog(const tactical::LandTerrain& terrain) {
+    auto rules = eawr::skirmish::land_fog_rules(terrain.width(), terrain.height(), terrain.spacing(), units(15), units(6));
+    if (!rules) throw std::runtime_error(rules.error().message);
+    return rules.value();
+}
+
+tactical::TacticalContent land_content() {
+    namespace lt = eawr::land_test;
+    tactical::TacticalContent content;
+    content.domain = tactical::BattleDomain::land;
+    content.land_terrain = lt::make_field(std::vector<std::string>(96, std::string(96, '.'))).terrain;
+    content.land.clear_bit = lt::clear;
+    content.land.contacts = {4096, 1, Fixed::from_ratio(1, 3).value(), lt::whole(1)};
+    tactical::LandCompanyBinding binding;
+    binding.type = land_company; binding.company.id = "synthetic-company";
+    binding.company.team_max_speed = lt::whole(60); binding.company.max_squad_size = 1;
+    binding.company.team_collision_class = eawr::units::LandCollisionGroup::infantry;
+    binding.effective_team_max_speed = lt::whole(60);
+    binding.formation_spacing = Fixed::from_ratio(1, 5).value();
+    eawr::units::LandCompanyMember member;
+    member.type = "synthetic-member"; member.kind = eawr::units::LandObjectKind::infantry;
+    member.create_team = true; member.movement_class = "walker"; member.max_speed = lt::whole(80);
+    member.locomotor = "synthetic-walking";
+    binding.company.members.push_back(member);
+    binding.members.push_back({land_member, {lt::whole(80), lt::whole(120), lt::whole(150), lt::whole(2), lt::whole(1), false,
+        eawr::units::LandCollisionGroup::infantry}, 0, {}, {}, {}});
+    content.land.companies.push_back(std::move(binding));
+    content.fog = land_fog(*content.land_terrain);
+    content.sensors = {tactical::SensorProfile{land_company, units(100)}};
+    return content;
+}
+
+tactical::TacticalSetup land_setup() {
+    tactical::TacticalSetup result;
+    result.domain = tactical::BattleDomain::land;
+    result.seed = 49;
+    result.content_identity[0] = 7;
+    result.players = {{rebel, 0, 1, tactical::player_flag_commandable}, {empire, 1, 2, tactical::player_flag_commandable}};
+    const auto place = [&](eawr::sim::EntityId id, tactical::PlayerId owner, std::int64_t x, std::int64_t y) {
+        tactical::UnitState unit;
+        unit.entity_id = id; unit.type_id = land_company; unit.owner = owner;
+        unit.position = {units(x), units(y), Fixed{}};
+        result.units.push_back(unit);
+    };
+    place(1, rebel, 200, 200);    // the scout: walks east along the bottom of the map
+    place(2, empire, 1800, 1800); // the far corner, which only the empire sees
+    return result;
+}
+
+// The rebel scout walks from (200, 200) to (1500, 200). Threat cell (column 3, row 28) holds its start and (25, 28) its goal.
+std::vector<std::int64_t> run_land(const std::size_t workers) {
+    std::vector<std::int64_t> observed;
+    auto made = tactical::TacticalSession::create(land_setup(), land_content());
+    expect(made.has_value(), "the land fog fixture starts");
+    if (!made) return observed;
+    auto session = std::make_unique<tactical::TacticalSession>(std::move(made).value());
+    const auto moved = session->submit(tactical::PlayerCommand{{2, rebel, 1}, {1},
+        tactical::MovePayload{{units(1500), units(200), Fixed{}}, false, false}});
+    expect(moved.has_value(), "the land move command submits");
+    Rig rig(*session, workers, true);
+    constexpr std::int64_t frames = 900;
+    for (std::int64_t frame = 1; frame <= frames; ++frame) rig.tick();
+    const auto scout = rig.session.unit_state(1);
+    expect(scout && scout->position.x.raw() >= units(1450).raw(), "the land scout crossed the map");
+    expect(rig.engine->grid().x_cells() == 32 && rig.engine->grid().y_cells() == 32,
+        "#6182: a land threat grid is sized from the land fog grid: 128 fog cells / 4 = 32 cells a side");
+    // #6942: the grid's box is the land fog rectangle (corners from the session's fog rules), not the setup's declared extents.
+    const tactical::FogRules& fog_rules_land = rig.session.fog_cells()->rules();
+    const Real fog_right = ai::real(static_cast<std::int64_t>(fog_rules_land.cells_wide) * 15);
+    const Real fog_top = ai::real(static_cast<std::int64_t>(fog_rules_land.cells_tall) * 15);
+    expect(rig.engine->grid().left() == Real{} && rig.engine->grid().bottom() == Real{}
+            && rig.engine->grid().right() == fog_right && rig.engine->grid().top() == fog_top
+            && rig.engine->grid().right() == ai::real(1920) && rig.engine->grid().top() == ai::real(1920),
+        "#6942: the land threat grid's box is the land fog rectangle: (0, 0) to (width x spacing, height x spacing)");
+    expect(rig.engine->grid().cell_width() == ai::real(60) && rig.engine->grid().cell_height() == ai::real(60),
+        "#6942: a land threat cell is 60: the fog rectangle over 32 cells");
+    expect(rig.host->setup.bounds && rig.host->setup.bounds->left == ai::real(-480) && rig.host->setup.bounds->top == ai::real(2400),
+        "#6942: the setup's bounds (clamp, ambush walk, CELL regions) are not changed by the grid's box");
+    const auto goal = rig.age(1510, 190, 20, 40, rebel);
+    expect(goal.first && *goal.first == Real{} && goal.second && *goal.second == Real{},
+        "#6182: TimeLastSeen is 0 where the scout is now");
+    const auto start = rig.age(190, 190, 40, 40, rebel);
+    const auto stamped = rig.engine->grid().last_seen(0, 3, 28);
+    expect(stamped > 0 && stamped < frames, "#6182: the start cell is stamped by the land fog row / column index");
+    expect(start.first && *start.first == seconds(frames - stamped, 1),
+        "#6182: the cell the scout left is aged from the tick its fog cells reached 0, not from the game start");
+    expect(start.second && *start.second == fraction(seconds(frames - stamped, 1), frames),
+        "#6182: its plain TimeLastSeen is that age over the game age");
+    const auto corner = rig.age(1810, 1870, 20, 20, rebel);
+    expect(corner.first && *corner.first == seconds(frames, 1), "#6182: a never-seen land cell is as old as the game");
+    const auto enemy = rig.age(1810, 1870, 20, 20, empire);
+    expect(enemy.first && *enemy.first == Real{}, "#6182: the age is per player: the empire sees its own corner");
+    expect(rig.engine->grid().last_seen(1, 3, 28) == 0, "#6182: the other player's grid is unstamped there");
+    // #6942: every cell the index stamp reached is a cell the position read names for the scout's walk along y = 200 with its
+    // sensor radius of 100: rows 27 to 30 (1920 - 300 to 1920 - 100, over 60), columns 1 to 26 (100 to 1600 over 60), one cell
+    // of slack on each side for the cell edges of the reveal circle.
+    std::int32_t off_walk = 0, on_walk = 0;
+    for (std::int32_t row = 0; row < 32; ++row) for (std::int32_t column = 0; column < 32; ++column) {
+        if (rig.engine->grid().last_seen(0, column, row) == 0) continue;
+        const bool near_walk = row >= 26 && row <= 31 && column >= 0 && column <= 27;
+        (near_walk ? on_walk : off_walk) += 1;
+        if (!near_walk) std::cout << "off-walk stamped cell (" << column << ", " << row << ")\n";
+    }
+    expect(rig.engine->grid().last_seen(0, 3, 28) != 0 && on_walk > 0 && off_walk == 0,
+        "#6942: the stamped cells are the ones the position read names along the scout's walk");
+    // #6942: for the four corner cells and the centre cell, the cell a position at the cell's centre reads (box / count, the box
+    // pinned above: left 0, top 1920, cells of 60) is the cell the index stamp names for the fog cell holding that position
+    // (fog row / 4, fog column / 4; fog cells of 15 from the same corner).
+    {
+        const tactical::FogRules& fog = rig.session.fog_cells()->rules();
+        expect(fog.cell_size == units(15) && fog.cells_wide == 128 && fog.cells_tall == 128 && fog.map_left == Fixed{}
+                && fog.map_top == units(1920),
+            "#6942: the land fog rectangle is 128 x 128 cells of 15 from (0, 1920)");
+        const std::int32_t last = 31;
+        const std::pair<std::int32_t, std::int32_t> probes[] = {{0, 0}, {last, 0}, {0, last}, {last, last}, {16, 16}};
+        for (const auto& [column, row] : probes) {
+            const std::int64_t x = static_cast<std::int64_t>(column) * 60 + 30;
+            const std::int64_t y = 1920 - (static_cast<std::int64_t>(row) * 60 + 30);
+            const std::int64_t position_column = x / 60, position_row = (1920 - y) / 60;
+            const std::int64_t fog_column = x / 15, fog_row = (1920 - y) / 15;
+            expect(position_column == column && position_row == row && fog_column / 4 == column && fog_row / 4 == row,
+                "#6942: the index stamp names the cell the position read names, at the four corners and the centre");
+        }
+    }
+    // #6942: a land save keeps its box. A fresh engine on the same session has no box until it restores; after the restore the
+    // box is the fog rectangle again, the stamps are kept and the state saves the same bytes.
+    {
+        auto saved = rig.engine->save_tactical_native(identity, *rig.scripts);
+        expect(saved.has_value(), "#6942: the land engine state saves");
+        if (saved) {
+            Rig again(*session, workers, true);
+            again.view->tick = rig.view->tick;
+            again.view->units = rig.view->units;
+            expect(!again.engine->grid().ready() && again.engine->grid().last_seen(0, 3, 28) == 0,
+                "#6942: a fresh land engine has neither the box nor the stamps");
+            for (std::uint64_t i = 0; i < rig.scripts->completed_tick(); ++i)
+                expect(again.scripts->service(again.executor).has_value(), "the second land scheduler advances");
+            const auto restored = again.engine->restore_tactical_native(saved.value(), identity, *again.scripts);
+            expect(restored.has_value(), "#6942: the land engine state restores");
+            if (restored) {
+                const auto& grid = again.engine->grid();
+                expect(grid.left() == Real{} && grid.bottom() == Real{} && grid.right() == ai::real(1920)
+                        && grid.top() == ai::real(1920) && grid.x_cells() == 32 && grid.y_cells() == 32,
+                    "#6942: the restored land grid keeps the fog rectangle as its box");
+                expect(grid.last_seen(0, 3, 28) == stamped, "#6942: the restored land grid keeps the stamps");
+                const auto resaved = again.engine->save_tactical_native(identity, *again.scripts);
+                expect(resaved && resaved.value() == saved.value(), "#6942: the restored land state saves the same bytes");
+            }
+        }
+    }
+    if (start.first && corner.first) {
+        observed.push_back(static_cast<std::int64_t>(start.first->repr));
+        observed.push_back(static_cast<std::int64_t>(corner.first->repr));
+    }
+    observed.push_back(stamped);
+    return observed;
+}
+
 } // namespace
 
 int main() {
+    std::vector<std::int64_t> land_reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto observed = run_land(workers);
+        if (land_reference.empty()) land_reference = observed;
+        expect(!observed.empty() && observed == land_reference, "#6182: the land ages are equal on 1, 2, 4 and 8 workers");
+    }
     std::vector<std::int64_t> reference;
     for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
         auto observed = run(workers);

@@ -73,6 +73,22 @@ class GalaxyRoutesRuntime(unittest.TestCase):
         self.assertEqual(data["animation_updates"], 1)
         self.assertEqual(data["route_geometry"]["animation_updates"], 1)
 
+    def test_fleet_holding_a_death_star_draws_the_override_model(self):
+        """#6940 / WGP-16: the stock Death Star authors Galactic_Fleet_Override_Model_Name, so a moving fleet that holds
+        one draws that model; the same fleet without it keeps the stock marker. Paths and instances come from the report;
+        the capture is looked at by eye (out/eyecheck/6940)."""
+        expected = {"fleet-transit": "w_planet_fleet_ds.alo", "fleet-transit-plain": "w_planet_fleet.alo"}
+        for fixture, leaf in expected.items():
+            with self.subTest(fixture=fixture):
+                data, _ = self.capture(paused=True, fixture=fixture, seat=3)
+                moving = [fleet for fleet in data["fleets"] if fleet["transit"] and fleet["faction"] == "Empire"]
+                self.assertTrue(moving, data["fleets"])
+                for fleet in moving:
+                    self.assertTrue(fleet["model"].lower().endswith("/" + leaf), (fixture, fleet))
+                    self.assertGreater(fleet["world_model_instances"], 0, fleet)
+                drawn = {model["logical_path"].lower().rsplit("/", 1)[-1]: model["status"] for model in data["models"]}
+                self.assertEqual(drawn.get(leaf), "drawn", drawn)
+
     def test_fleet_models_consume_their_owners_colour(self):
         checked = set()
         for seat, faction in ((3, "Empire"), (4, "Underworld")):

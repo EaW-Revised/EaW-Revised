@@ -210,7 +210,7 @@ Top five release impacts: **G1** claiming mining sites; **G2** paying for and co
 
 ## XML reads and registry gaps
 
-The rule tables identify owned reads and boundary reads. Additional interface fields are ordinary combat `Shield_Points`, `Shield_Refresh_Rate`, `Energy_Capacity`, `Energy_Refresh_Rate`, weapon/targeting/turret definitions and `Collidable_By_Projectile_Living` (combat owns their evaluation); queue `Population_Value`, `Tactical_Production_Queue`, prerequisites/current limits, upgrade replacement and sidebar visibility (production owns their evaluation). Faction spatial feedback reads `SFXEvent_Tactical_Object_Building_Started`, `SFXEvent_Tactical_Object_Building_Loop`, `SFXEvent_Tactical_Object_Building_Complete`, `SFXEvent_Tactical_Object_Sold`; capture/loss uses `SFXEvent_Tactical_Gain_Friendly_Control`, `SFXEvent_Tactical_Lose_Friendly_Control`, `SFXEvent_Tactical_Gain_Enemy_Control`, `SFXEvent_Tactical_Lose_Enemy_Control` through WHZ's presentation interface. `Capture_Point_Time_Multiplier` is a capture-modifier interface owned by WHZ, not a new mine-upgrade effect.
+The rule tables identify owned reads and boundary reads. Additional interface fields are ordinary combat `Shield_Points`, `Shield_Refresh_Rate`, `Energy_Capacity`, `Energy_Refresh_Rate`, weapon/targeting/turret definitions and `Collidable_By_Projectile_Living` (combat owns their evaluation); queue `Population_Value`, `Tactical_Production_Queue`, prerequisites/current limits, upgrade replacement and sidebar visibility (production owns their evaluation). Faction construction feedback reads `SFXEvent_Tactical_Object_Building_Started`, `SFXEvent_Tactical_Object_Building_Loop`, `SFXEvent_Tactical_Object_Building_Complete`, `SFXEvent_Tactical_Object_Sold`; non-positional capture/loss uses `SFXEvent_Tactical_Gain_Friendly_Control`, `SFXEvent_Tactical_Lose_Friendly_Control`, `SFXEvent_Tactical_Gain_Enemy_Control`, `SFXEvent_Tactical_Lose_Enemy_Control` through WHZ's presentation interface. `Capture_Point_Time_Multiplier` is a capture-modifier interface owned by WHZ, not a new mine-upgrade effect.
 
 Nearby tags not claimed as new pad reads: faction `Corruption_Tactical_Build_Pad_Price_Multipliers` belongs only to WBP-11's campaign branch (stock E/R 1,1); `Corruption_Tactical_Build_Pad_Time_Multipliers` is not read by the traced UC initializer. Global `Tactical_Build_Time_Multiplier`, producer bonus/gate fields and `Tech_Level`/`Required_Star_Base_Level` belong to their production/campaign consumers, rather than WBP-15. `Tactical_Build_Start_Lower_Z` has stock value 0 but an unverified consumer. Heal/jamming/tractor activation and visual effect fields are data inputs for U-BP-8 and the abilities workstream; this walk does not claim their inner behavior. Model names, material names, tooltip text and radar assets are presentation data, not simulation timers or economy constants.
 
@@ -278,9 +278,9 @@ The table below is an exact intersection of this walk's owned/interface tag path
 | `SFXEvent_Tactical_Build_Complete` | SpaceUnit, Squadron | todo: economy tag support (legacy EAWR-654) |
 | `SFXEvent_Tactical_Build_Started` | SpaceUnit, Squadron | todo: economy tag support (legacy EAWR-654) |
 | `SFXEvent_Tactical_Gain_Enemy_Control` | Faction | todo: presentation tag support (legacy EAWR-653) |
-| `SFXEvent_Tactical_Gain_Friendly_Control` | Faction | todo: presentation tag support (legacy EAWR-653) |
+| `SFXEvent_Tactical_Gain_Friendly_Control` | Faction | space capture applied: WHZ-48; land remains open |
 | `SFXEvent_Tactical_Lose_Enemy_Control` | Faction | todo: presentation tag support (legacy EAWR-653) |
-| `SFXEvent_Tactical_Lose_Friendly_Control` | Faction | todo: presentation tag support (legacy EAWR-653) |
+| `SFXEvent_Tactical_Lose_Friendly_Control` | Faction | space capture applied: WHZ-48; land remains open |
 | `SFXEvent_Tactical_Object_Building_Complete` | Faction | todo: economy tag support (legacy EAWR-654) |
 | `SFXEvent_Tactical_Object_Building_Loop` | Faction | todo: economy tag support (legacy EAWR-654) |
 | `SFXEvent_Tactical_Object_Building_Started` | Faction | todo: economy tag support (legacy EAWR-654) |

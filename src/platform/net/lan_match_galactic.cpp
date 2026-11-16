@@ -116,11 +116,20 @@ std::shared_ptr<GalacticLaunch> TcpLanMatch::take_galactic_launch() {
         launch->roster.seats[i].player = offer.seats[i].player;
     }
     options.initial_checkpoint = galactic_->checkpoint_bytes();
+    // The campaign driver logs its own stall lines to the same sink as the lobby (diagnostics only).
+    options.diagnostic_sink = diagnostics_->sink;
+    // Cached pair state only (the transport samples the route on its own poll); no native call per read.
+    options.link_route = [this](net::PeerIndex peer) {
+        return io_->transport.tcp ? net_route_of(io_->transport.tcp->pair(peer)) : presentation::ui::NetRouteInfo{};
+    };
     // Reuse the verified selected save on every peer. New games capture once
     // during loading; an unavailable optional base never prevents the launch.
     prepare_galactic_recovery_base(options, *agreement->session,
         dynamic_cast<net::GalacticSessionAdapter*>(&lobby_result_->setup().adapter()), launch->owner->initial_tick);
     options.input_delay = offer.input_delay; options.final_tick_count = offer.final_tick_count;
+    // Online (relayed) co-op: the host proposes the delay from measured RTT; recovery frontiers carry the delay in force.
+    // TCP LAN keeps the offered delay. The campaign driver logs the mode and every agreed change.
+    options.adaptive_timing = online_options_.has_value();
     std::vector<net::PeerIndex> native_peers;
     for (const auto& seat : launch->roster.seats) native_peers.push_back(seat.peer);
     options.quarantine_recovery_peer = [this, native_peers = std::move(native_peers)](net::PeerIndex peer) {

@@ -94,7 +94,8 @@ Bytes encode_rows(const GalacticPerceptionState& state, const Rows& rows,
     const auto visibility = canonical_rows(state.visibility, [](const auto& a, const auto& b) { return std::tie(a.player, a.planet, a.mask) < std::tie(b.player, b.planet, b.mask); });
     const auto flags = canonical_rows(state.flags, [](const auto& a, const auto& b) { return std::tie(a.player, a.planet, a.name) < std::tie(b.player, b.planet, b.name); });
     const auto hints = canonical_rows(state.hints, [](const auto& a, const auto& b) { return std::tie(a.player, a.planet, a.name) < std::tie(b.player, b.planet, b.name); });
-    Writer out; out.text(domain); out.word(3, 4); out.word(rows.size());
+    const auto conflicts = canonical_rows(state.space_conflicts, [](const auto& a, const auto& b) { return std::tie(a.player, a.planet) < std::tie(b.player, b.planet); });
+    Writer out; out.text(domain); out.word(4, 4); out.word(rows.size());
     for (const auto& record : cache) {
         const auto& row = *record.row;
         const auto& key = record.key;
@@ -114,6 +115,8 @@ Bytes encode_rows(const GalacticPerceptionState& state, const Rows& rows,
     for (const auto* record : flags) { const auto& row = *record; out.word(row.player, 4); out.word(row.planet); out.text(row.name); }
     out.word(state.hints.size());
     for (const auto* record : hints) { const auto& row = *record; out.word(row.player, 4); out.text(row.planet); out.text(row.name); out.word(row.value.repr); }
+    out.word(state.space_conflicts.size());
+    for (const auto* record : conflicts) { const auto& row = *record; out.word(row.player, 4); out.word(row.planet); out.word(row.frame); }
     out.word(markup.size()); out.bytes.insert(out.bytes.end(), markup.begin(), markup.end());
     return std::move(out.own);
 }
@@ -126,7 +129,7 @@ struct Decoded { GalacticPerceptionState perception; Bytes markup; };
 core::Result<Decoded> decode(std::span<const std::uint8_t> bytes) {
     if (bytes.size() > galactic_ai::native_state_max_bytes) return fail<Decoded>("perception component exceeds byte limit");
     Reader in{bytes};
-    if (in.text() != domain || in.word(4) != 3) return fail<Decoded>("unsupported perception component domain/version");
+    if (in.text() != domain || in.word(4) != 4) return fail<Decoded>("unsupported perception component domain/version");
     GalacticPerceptionState state;
     const auto caches = in.count(54);
     for (std::uint64_t i = 0; i < caches && !in.bad; ++i) {
@@ -160,6 +163,11 @@ core::Result<Decoded> decode(std::span<const std::uint8_t> bytes) {
         state.hints.push_back(std::move(row));
         if (state.hints.back().planet != upper_case(state.hints.back().planet) || state.hints.back().name != upper_case(state.hints.back().name)) in.bad = true;
     }
+    const auto conflicts = in.count(20);
+    for (std::uint64_t i = 0; i < conflicts && !in.bad; ++i) {
+        GalacticSpaceConflict row; row.player = static_cast<tactical::PlayerId>(in.word(4)); row.planet = in.word(); row.frame = in.word();
+        state.space_conflicts.push_back(row);
+    }
     const auto markup_size = in.word();
     if (in.bad || markup_size != in.bytes.size()) return fail<Decoded>("malformed markup payload length");
     Bytes markup(in.bytes.begin(), in.bytes.end());
@@ -173,17 +181,17 @@ namespace {
 // One record of an otherwise empty component: the framing is constant, so the
 // immutable head is spelled once and the empty trailer is a run of zero words.
 const Bytes& frame_head() {
-    static const Bytes head = [] { Writer out; out.text(domain); out.word(3, 4); return std::move(out.own); }();
+    static const Bytes head = [] { Writer out; out.text(domain); out.word(4, 4); return std::move(out.own); }();
     return head;
 }
-// Which of the four row sections the single record belongs to; every earlier
+// Which of the five row sections the single record belongs to; every earlier
 // section holds a zero count and the later ones plus the markup length follow.
 void begin_record(Bytes& out, std::size_t section) {
     out.clear(); out.insert(out.end(), frame_head().begin(), frame_head().end());
     out.insert(out.end(), section * 8U, std::uint8_t{});
 }
 void end_record(Bytes& out, std::size_t section) {
-    out.insert(out.end(), (4U - section) * 8U, std::uint8_t{}); // later row counts, then markup length 0
+    out.insert(out.end(), (5U - section) * 8U, std::uint8_t{}); // later row counts, then markup length 0
 }
 } // namespace
 
@@ -226,6 +234,11 @@ void encode_hint_record(Bytes& out, const GalacticHint& row) {
     writer.word(row.player, 4); writer.text(row.planet); writer.text(row.name); writer.word(row.value.repr);
     end_record(out, 3);
 }
+void encode_space_conflict_record(Bytes& out, const GalacticSpaceConflict& row) {
+    begin_record(out, 4);
+    Writer writer(out); writer.word(1); writer.word(row.player, 4); writer.word(row.planet); writer.word(row.frame);
+    end_record(out, 4);
+}
 
 void GalacticWorld::update_record(tactical::PlayerId owner, std::uint32_t kind, std::size_t index) const {
     if (!records_ready_) return;
@@ -248,6 +261,8 @@ void GalacticWorld::update_record(tactical::PlayerId owner, std::uint32_t kind, 
         const auto& row = mine.flags.at(index); player = row.player; encode_flag_record(bytes, row);
     } else if (kind == 4) {
         const auto& row = mine.hints.at(index); player = row.player; encode_hint_record(bytes, row);
+    } else if (kind == 5) {
+        const auto& row = mine.space_conflicts.at(index); player = row.player; encode_space_conflict_record(bytes, row);
     } else {
         throw std::out_of_range("unknown perception record kind");
     }
@@ -273,12 +288,15 @@ core::RecordDigest GalacticWorld::rebuild_shard_records(const Shard& mine) const
     for (std::size_t i = 0; i < mine.hints.size(); ++i) {
         one.hints = {mine.hints[i]}; rebuilt.set(one.hints.front().player, 4, i, encode(one, {})); one.hints.clear();
     }
+    for (std::size_t i = 0; i < mine.space_conflicts.size(); ++i) {
+        one.space_conflicts = {mine.space_conflicts[i]}; rebuilt.set(one.space_conflicts.front().player, 5, i, encode(one, {})); one.space_conflicts.clear();
+    }
     return rebuilt;
 }
 void GalacticWorld::rebuild_records() const {
     for (auto& [who, mine] : shards_) {
         static_cast<void>(who);
-        native_record_encodes_ += mine.cache.size() + mine.visibility.size() + mine.flags.size() + mine.hints.size();
+        native_record_encodes_ += mine.cache.size() + mine.visibility.size() + mine.flags.size() + mine.hints.size() + mine.space_conflicts.size();
         mine.records = rebuild_shard_records(mine);
     }
 }
@@ -287,7 +305,7 @@ std::string GalacticWorld::records_digest(bool cold) const {
     for (const auto& [who, mine] : shards_) {
         static_cast<void>(who);
         if (cold) {
-            native_record_encodes_ += mine.cache.size() + mine.visibility.size() + mine.flags.size() + mine.hints.size();
+            native_record_encodes_ += mine.cache.size() + mine.visibility.size() + mine.flags.size() + mine.hints.size() + mine.space_conflicts.size();
             core::RecordDigest::merge_shards(sums, rebuild_shard_records(mine).shards());
         } else core::RecordDigest::merge_shards(sums, mine.records.shards());
     }
@@ -313,7 +331,7 @@ core::Result<galactic_ai::NativeState> GalacticWorld::capture() const {
     if (auto verified = verify_record_sync_hash(); !verified) return core::Result<galactic_ai::NativeState>::failure(verified.error());
     if (!available()) return fail<galactic_ai::NativeState>("perception capture needs a rebound world");
     // The compositor retains one component per owner. Markup shares this owner
-    // and its revision, so its mandatory payload belongs in perception v3.
+    // and its revision; perception v4 also retains per-player space-conflict stamps.
     const auto markup = markup_->encode();
     galactic_ai::NativeState out;
     {
@@ -326,6 +344,7 @@ core::Result<galactic_ai::NativeState> GalacticWorld::capture() const {
             rows.visibility.insert(rows.visibility.end(), mine.visibility.begin(), mine.visibility.end());
             rows.flags.insert(rows.flags.end(), mine.flags.begin(), mine.flags.end());
             rows.hints.insert(rows.hints.end(), mine.hints.begin(), mine.hints.end());
+            rows.space_conflicts.insert(rows.space_conflicts.end(), mine.space_conflicts.begin(), mine.space_conflicts.end());
             cache.insert(cache.end(), mine.cache.begin(), mine.cache.end());
         }
         out.components.emplace(component, encode_rows(rows, cache, markup, [&](const GalacticInternedKey& key) {

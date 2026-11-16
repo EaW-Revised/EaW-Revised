@@ -85,7 +85,7 @@ struct EngineContractAccess {
     }
     struct RuntimeIds {
         tactical::PlayerId player{};
-        std::uint64_t plan{}, force{}, block{}, instance{}, alternate{};
+        std::uint64_t plan{}, force{}, block{}, instance{}, alternate{}, global_block{};
     };
     // Record-inventory fixture, independent of live goal admission/save validation.
     static std::vector<RuntimeIds> runtime_inventory(Engine& e, std::size_t count) {
@@ -101,7 +101,12 @@ struct EngineContractAccess {
                 Block block; block.id = block_id(plan.instance, 17); block.instance = plan.instance; block.taskforce = force.id;
                 owner.taskforces.emplace(force.id, force); owner.blocks.emplace(block.id, block);
                 owner.plan_of_instance.emplace(plan.instance, plan.id); owner.running.emplace(plan.id, plan);
-                if (i == 0) { first.plan = plan.id; first.force = force.id; first.block = block.id; first.instance = plan.instance; }
+                if (i == 0) {
+                    first.plan = plan.id; first.force = force.id; first.block = block.id; first.instance = plan.instance;
+                    Block global; global.id = block_id(plan.instance, 18); global.instance = plan.instance;
+                    global.kind = Block::Kind::galactic_starbase; global.destination_object = 20;
+                    first.global_block = global.id; owner.blocks.emplace(global.id, std::move(global));
+                }
                 if (i == 1) first.alternate = plan.id;
             }
             selected.push_back(first);
@@ -215,6 +220,17 @@ void seeding() {
     expect(left != right, "neighbouring player streams do not repeat each other");
 }
 
+// CGS-26: a type that authors no adjustment for the chosen level (a partial table, or none at all) plays on the dummy adjustment:
+// the galactic barrier starts, it is never refused for it.
+void sparse_difficulty_levels() {
+    eawr::platform::ThreadWorkerAdapter executor(1);
+    s9_fixture::Shape partial; partial.level = "HARD"; // the type authors NORMAL only
+    s9_fixture::Owner partial_owner(partial); partial_owner.begin(executor);
+    expect(Access::seed(*partial_owner.engine, 1) == ai::galactic_stream_seed(42, 1), "a type without an adjustment for the chosen level still starts");
+    s9_fixture::Shape bare; bare.authored_levels.clear(); bare.level = "EASY"; // the type authors no adjustment at all
+    s9_fixture::Owner bare_owner(bare); bare_owner.begin(executor);
+    expect(Access::seed(*bare_owner.engine, 2) == ai::galactic_stream_seed(42, 2), "a type without any adjustment still starts");
+}
 void independence() {
     eawr::platform::ThreadWorkerAdapter executor(1);
     {
@@ -400,6 +416,19 @@ void owned_runtime_records() {
         verify();
         expect(Access::record_owner(*owner.engine, rows[1].player, 23, rows[0].block),
             "foreign TaskForce block keeps its semantic plan owner rather than its storage shard");
+        for (const auto& row : rows) {
+            expect(Access::record_owner(*owner.engine, row.player, 23, row.global_block)
+                && !Access::record_owner(*owner.engine, 0, 23, row.global_block),
+                "TaskForce-free global block keeps its instance plan owner alongside TaskForce-owned blocks");
+            auto global = row; global.block = row.global_block;
+            const auto before = owner.engine->native_record_inspections();
+            const auto work = owner.engine->native_record_work();
+            Access::runtime_record_write(*owner.engine, global, 23);
+            expect(owner.engine->native_record_inspections() - before == 4
+                && owner.engine->native_record_work()[23] == work[23] + 1,
+                "global block mutation reconciles only its selected owner record and header");
+            verify();
+        }
         for (const auto& row : rows) for (const auto kind : {21U, 22U, 23U, 24U}) {
             const auto before = owner.engine->native_record_inspections();
             const auto work = owner.engine->native_record_work();
@@ -427,7 +456,7 @@ void tactical_unchanged() {
 
 int case_galactic_ai_stream_ids_tests() {
     try {
-        seeding(); independence(); identities(); exhaustion(); archive(); bounded_record_reconciliation(); owned_runtime_records(); tactical_unchanged();
+        seeding(); sparse_difficulty_levels(); independence(); identities(); exhaustion(); archive(); bounded_record_reconciliation(); owned_runtime_records(); tactical_unchanged();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

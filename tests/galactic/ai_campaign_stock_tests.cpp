@@ -9,6 +9,8 @@
 #include "eawr/core/sha256.hpp"
 #include "eawr/sim/galactic/offer_pool.hpp"
 #include "eawr/campaign/live_setup.hpp"
+#include "eawr/campaign/galactic_story_scripts.hpp"
+#include "eawr/script/authoritative/galactic_bridge.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "../../src/campaign/galactic_ai_runtime.hpp"
 #include "ai_campaign_gate.hpp"
@@ -41,6 +43,7 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -564,16 +567,17 @@ int installed(bool release, const std::filesystem::path& directory, bool benchma
                 galactic_learning_gate::probe(directory / "learning.json"), human_encounter_only, hash_baseline,
                 !benchmark && !human_encounter_only && !hash_baseline);
             report.write(std::cout);
-            // W1 floors A (owner, 11-07) for digest_mature (the benchmark run) against the stored base: main e536b8302, async, seed 42.
-            // That base stops at galactic frame 9900 on #6337; a run that stops elsewhere has no base yet (refresh it when #6337 or a
-            // reviewed upstream change moves the stop). Floors: builds 10 % (min 2); expansions, attacks, defences and battles within 2;
-            // movements 10 %; maximum tech exact; first tech-3 frame within 300.
+            // W1 floors A (owner, 11-07) for digest_mature (the benchmark run), async, seed 42. The first base (main e536b8302)
+            // stopped at galactic frame 9900 because of #6337 (the lane stage lost an actor the world still wrote); with that fixed the
+            // run reaches the full 27000-frame budget, and the base below is that run (#6337, 11-12).
+            // Floors: builds 10 % (min 2); expansions, attacks, defences and battles within 2; movements 10 %; maximum tech exact;
+            // first tech-3 frame within 300.
             bool floors = true;
             if (benchmark) {
                 struct FloorBase { eawr::sim::galactic::PlayerId id; std::uint64_t started, completed, expansions, attacks, defences, movements;
                     std::int64_t tech; std::uint64_t tech3; };
-                constexpr std::array<FloorBase, 2> floor_base{{{1, 40, 31, 6, 12, 7, 640, 1, 0}, {2, 39, 21, 4, 7, 12, 765, 3, 5164}}};
-                constexpr std::uint64_t base_frames = 9900, base_battles = 19;
+                constexpr std::array<FloorBase, 2> floor_base{{{1, 132, 105, 17, 29, 9, 1218, 3, 25924}, {2, 66, 58, 10, 13, 23, 1766, 5, 5164}}};
+                constexpr std::uint64_t base_frames = 27000, base_battles = 42;
                 const auto within = [](std::uint64_t value, std::uint64_t base, std::uint64_t floor_value) {
                     return (value > base ? value - base : base - value) <= floor_value;
                 };
@@ -592,6 +596,11 @@ int installed(bool release, const std::filesystem::path& directory, bool benchma
                 }
                 std::cout << "GCAI-ASYNC-FLOORS digest_mature frames=" << report.galactic_frames << " base_frames=" << base_frames
                     << " pass=" << (floors ? "true" : "false") << std::endl;
+                // A retired AI player stops for the rest of the campaign; the mature run must keep every AI alive. Its own line, so
+                // it reads from the log while the run's correctness gate is an accepted failure; it also fails the exit code.
+                std::cout << "GCAI-RETIREMENTS digest_mature provider_retirements=" << report.provider_retirements
+                    << " pass=" << (report.provider_retirements == 0 ? "true" : "false") << std::endl;
+                floors = floors && report.provider_retirements == 0;
             }
             if (hash_baseline) return report.mature_samples == 512 && report.failure.empty() && !failures ? 0 : 2;
             if (human_encounter_only) return report.stop_reason == "unattended_human_encounter_advanced" && report.failure.empty() ? 0 : 2;
@@ -1102,6 +1111,194 @@ int remake_save_probe(std::uint64_t ticks) {
     }
     return failed || failures ? 1 : 0;
 }
+// #6345: what stands in orbit of one planet at start and after some ticks, by original type name, for the installed
+// Remake campaign. Census only (prints); the covering assertions live in the synthetic orbit-structure tests.
+int orbit_census_probe(std::uint64_t ticks, const std::string& campaign_name, const std::string& planet_type) {
+    const auto leaf = environment_or("EAWR_REMAKE_MOD_ROOT", "");
+    if (leaf.empty()) { std::cout << "SKIPPED: Remake mod host required\n"; return 77; }
+    bool failed = false;
+    for (const bool native_ai : {false, true}) {
+        InstalledLive fixture(leaf, campaign_name);
+        auto prepared = fixture.prepare(native_ai);
+        auto& game = eawr::platform::AgreedCampaignAccess::session(*prepared);
+        const eawr::platform::ThreadWorkerAdapter executor(1);
+        std::map<galactic::TypeId, std::string> names;
+        for (const auto& row : fixture.setup.types) names.emplace(row.id, row.original_type);
+        galactic::PlanetId target{};
+        for (const auto& location : prepared->plan().locations())
+            if (location.planet && location.original_type == planet_type) target = location.planet->id;
+        expect(target != 0, "the census planet exists in the campaign");
+        {
+            const auto content = must(eawr::campaign::load_world_object_scripts(*fixture.files, fixture.loaded.catalog, prepared->plan()));
+            std::cout << "ORBIT-SCRIPTS types=" << content->types().size() << " modules=" << content->modules().size()
+                      << " notes=" << content->notes().size() << std::endl;
+            for (const auto& note : content->notes()) std::cout << "  note: " << note << std::endl;
+            std::map<std::string, std::size_t> by_module;
+            for (const auto& [type, module] : content->types()) ++by_module[module];
+            for (const auto& [module, count] : by_module) std::cout << "  " << count << " types -> " << module << std::endl;
+            // The perception equations the object scripts ask for (data, not code): print each one's XML once.
+            if (!native_ai) {
+                const std::array<std::string_view, 3> wanted{"Should_Despawn_Orbital_Structure", "CurrentStarbaseLevel", "Time_Since_Conversion"};
+                for (const auto& asset : must(fixture.files->enumerate("data/xml/ai/perceptualequations", ".xml"))) {
+                    const auto bytes = must(fixture.files->open(asset.canonical_path));
+                    const std::string text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+                    for (const auto name : wanted) {
+                        const auto at = text.find("\"" + std::string(name) + "\"");
+                        if (at == std::string::npos) continue;
+                        const auto begin = text.rfind("<", at);
+                        std::cout << "EQUATION " << name << " in " << asset.canonical_path << ": " << text.substr(begin, 1800) << std::endl;
+                    }
+                }
+            }
+        }
+        std::map<std::string, std::size_t> reported;
+        bool perception_refused = false;
+        for (std::uint64_t tick = 0; tick <= ticks; ++tick) {
+            if (tick == 0 || tick == ticks || tick == 5 || tick == 60 || tick == 300 || tick == 600 || tick + 1 == ticks) {
+                const auto snapshot = game.galaxy().snapshot();
+                std::map<std::string, std::size_t> census;
+                std::size_t dummies = 0;
+                for (const auto& fleet : snapshot->fleets()) {
+                    if (fleet.orbit != target) continue;
+                    for (const auto& member : fleet.members) {
+                        const auto found = names.find(member.type);
+                        const auto name = found == names.end() ? std::string("?") : found->second;
+                        ++census[std::to_string(fleet.owner) + " slot" + std::to_string(fleet.orbit_slot) + " " + name];
+                        if (name.find("ORBITAL_DUMMY") != std::string::npos) ++dummies;
+                    }
+                }
+                std::size_t structures = 0;
+                if (const auto& production = snapshot->production())
+                    for (const auto& planet : production->planets) if (planet.planet == target) structures = planet.objects.size();
+                std::map<std::string, std::size_t> actors, structure_names, orbit_members;
+                for (const auto& actor : snapshot->actor_records()) if (actor.planet == target && !actor.dead) {
+                    const auto found = names.find(actor.current_type);
+                    ++actors[std::to_string(actor.owner) + " " + (found == names.end() ? std::string("?") : found->second)];
+                    if (found != names.end()) ++structure_names[found->second];
+                }
+                for (const auto& fleet : snapshot->fleets()) if (fleet.orbit == target)
+                    for (const auto& member : fleet.members) if (const auto found = names.find(member.type); found != names.end()) ++orbit_members[found->second];
+                if (tick == ticks) {
+                    // The Remake's own object scripts give every orbital structure a stand-in unit named after it: one per
+                    // structure, in the orbit of the planet. The names are the mod's data; the rule below only follows them.
+                    std::size_t expected = 0;
+                    for (const auto& [name, count] : structure_names) {
+                        if (std::none_of(names.begin(), names.end(), [&](const auto& row) { return row.second == name + "_ORBITAL_DUMMY"; })) continue;
+                        expected += count;
+                        expect(orbit_members[name + "_ORBITAL_DUMMY"] >= count, "every orbital structure at the planet has its stand-in unit in orbit: " + name);
+                    }
+                    expect(expected > 0, "the planet holds orbital structures that carry stand-in units");
+                }
+                for (const auto& [key, count] : actors) std::cout << "  actor " << count << " x " << key << std::endl;
+                if (auto* scripts = game.galactic_scripts()) if (auto* objects = scripts->object_scheduler())
+                    std::cout << "  object-scripts attached=" << objects->object_scripts().size()
+                              << " live=" << objects->instances().size() << " retired=" << objects->retired_instances().size() << std::endl;
+                std::cout << "ORBIT-CENSUS native_ai=" << native_ai << " tick=" << tick << " planet=" << target
+                          << " dummies=" << dummies << " production_objects=" << structures << std::endl;
+                for (const auto& [key, count] : census) std::cout << "  " << count << " x " << key << std::endl;
+            }
+            if (tick < ticks) {
+                const auto result = must(game.step(executor));
+                for (const auto& diagnostic : result.diagnostics) {
+                    if (++reported[diagnostic.code + " " + diagnostic.message.substr(0, 160)] == 1)
+                        std::cout << "  diag@" << tick << " " << diagnostic.code << " " << diagnostic.message.substr(0, 400) << std::endl;
+                    if (diagnostic.message.find("EvaluatePerception") != std::string::npos) perception_refused = true;
+                }
+            }
+        }
+        expect(!perception_refused, "the orbital scripts' perception equations are all answered");
+    }
+    return failed || failures ? 1 : 0;
+}
+// #6473: the Remake's live object scripts (perception equations, stand-in units, respawns) leave the same world on 1, 2, 4 and 8
+// workers: the state hash after `ticks` steps, and the number of stand-in units at the planet, must not depend on the worker count.
+int orbit_workers_probe(std::uint64_t ticks, const std::string& campaign_name, const std::string& planet_type) {
+    const auto leaf = environment_or("EAWR_REMAKE_MOD_ROOT", "");
+    if (leaf.empty()) { std::cout << "SKIPPED: Remake mod host required\n"; return 77; }
+    std::string reference_hash;
+    std::size_t reference_dummies = 0;
+    for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        InstalledLive fixture(leaf, campaign_name);
+        auto prepared = fixture.prepare(false);
+        auto& game = eawr::platform::AgreedCampaignAccess::session(*prepared);
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::map<galactic::TypeId, std::string> names;
+        for (const auto& row : fixture.setup.types) names.emplace(row.id, row.original_type);
+        galactic::PlanetId target{};
+        for (const auto& location : prepared->plan().locations())
+            if (location.planet && location.original_type == planet_type) target = location.planet->id;
+        expect(target != 0, "the census planet exists in the campaign");
+        for (std::uint64_t tick = 0; tick < ticks; ++tick) must(game.step(executor));
+        std::size_t dummies = 0;
+        for (const auto& fleet : game.galaxy().snapshot()->fleets()) {
+            if (fleet.orbit != target) continue;
+            for (const auto& member : fleet.members) {
+                const auto found = names.find(member.type);
+                if (found != names.end() && found->second.find("ORBITAL_DUMMY") != std::string::npos) ++dummies;
+            }
+        }
+        const auto hash = game.state_sha256();
+        std::cout << "ORBIT-WORKERS workers=" << workers << " ticks=" << ticks << " dummies=" << dummies << " hash=" << hash << std::endl;
+        if (reference_hash.empty()) { reference_hash = hash; reference_dummies = dummies; }
+        else {
+            expect(hash == reference_hash, "the Remake world with live object scripts is equal on every worker count");
+            expect(dummies == reference_dummies, "the stand-in units at the planet do not depend on the worker count");
+        }
+    }
+    expect(reference_dummies > 0, "the Remake planet holds stand-in units");
+    return failures ? 1 : 0;
+}
+// #6345/#6473: which stock object scripts run in the galactic game: per script module, the attached and live instances
+// at some ticks, and every distinct step diagnostic once. Census only (prints).
+int object_script_census_probe(std::uint64_t ticks, const std::string& campaign_name) {
+    bool failed = false;
+    for (const bool native_ai : {false, true}) {
+        InstalledLive fixture({}, campaign_name);
+        auto prepared = fixture.prepare(native_ai);
+        auto& game = eawr::platform::AgreedCampaignAccess::session(*prepared);
+        const eawr::platform::ThreadWorkerAdapter executor(1);
+        std::map<galactic::TypeId, std::string> names;
+        for (const auto& row : fixture.setup.types) names.emplace(row.id, row.original_type);
+        const auto content = must(eawr::campaign::load_world_object_scripts(*fixture.files, fixture.loaded.catalog, prepared->plan()));
+        std::map<galactic::TypeId, std::string> module_of;
+        for (const auto& [type, module] : content->types()) module_of.emplace(type, module);
+        std::cout << "OBJECT-SCRIPTS types=" << content->types().size() << " modules=" << content->modules().size()
+                  << " notes=" << content->notes().size() << std::endl;
+        for (const auto& note : content->notes()) std::cout << "  note: " << note << std::endl;
+        std::map<std::string, std::size_t> reported;
+        for (std::uint64_t tick = 0; tick <= ticks; ++tick) {
+            if (tick == 0 || tick == 5 || tick == 60 || tick == 300 || tick == ticks) {
+                const auto snapshot = game.galaxy().snapshot();
+                std::map<galactic::TypeId, std::string> actor_module;
+                std::map<std::string, std::map<std::string, std::size_t>> by_module; // module -> original type -> actors
+                for (const auto& actor : snapshot->actor_records()) {
+                    if (actor.dead) continue;
+                    const auto found = module_of.find(actor.current_type);
+                    if (found == module_of.end()) continue;
+                    ++by_module[found->second][names.contains(actor.current_type) ? names.at(actor.current_type) : "?"];
+                }
+                std::size_t attached = 0, live = 0, retired = 0;
+                if (auto* scripts = game.galactic_scripts()) if (auto* objects = scripts->object_scheduler()) {
+                    attached = objects->object_scripts().size(); live = objects->instances().size(); retired = objects->retired_instances().size();
+                }
+                std::cout << "OBJECT-CENSUS native_ai=" << native_ai << " tick=" << tick << " attached=" << attached
+                          << " live=" << live << " retired=" << retired << std::endl;
+                for (const auto& [module, types] : by_module) {
+                    std::cout << "  " << module << ":";
+                    for (const auto& [type, count] : types) std::cout << " " << type << "x" << count;
+                    std::cout << std::endl;
+                }
+            }
+            if (tick < ticks) {
+                const auto result = must(game.step(executor));
+                for (const auto& diagnostic : result.diagnostics)
+                    if (++reported[diagnostic.code + " " + diagnostic.message.substr(0, 160)] == 1)
+                        std::cout << "  diag@" << tick << " " << diagnostic.code << " " << diagnostic.message.substr(0, 400) << std::endl;
+            }
+        }
+    }
+    return failed || failures ? 1 : 0;
+}
 // Process CPU time (user + kernel, all threads) in ms, for CPU% of the logical processors next to ms/tick.
 double process_cpu_ms() {
 #ifdef _WIN32
@@ -1361,10 +1558,30 @@ int quality_run(int argc, char** argv) {
     options.campaign = campaign;
     return galactic_quality_run::run(fixture, options, ga::retail_service_periods);
 }
+// #6338: the campaign digest counts retired providers, and a run where nothing retires keeps its digest exactly (no new field).
+void provider_retirement_digest_field() {
+    galactic_campaign_gate::Report quiet;
+    std::ostringstream plain;
+    quiet.write(plain);
+    expect(plain.str().find("provider_retirements") == std::string::npos, "a digest of a run without a retirement has no retirement field");
+    galactic_campaign_gate::Report retired;
+    retired.provider_retirements = 2;
+    std::ostringstream counted;
+    retired.write(counted);
+    expect(counted.str().find("\"provider_retirements\":2,") != std::string::npos, "the digest counts the retired providers");
+}
 } // namespace
 int main(int argc, char** argv) {
     try {
         if (argc > 1 && std::string_view(argv[1]) == "--remake-save-probe") return remake_save_probe(argc > 2 ? std::stoull(argv[2]) : 3000);
+        if (argc > 1 && std::string_view(argv[1]) == "--object-script-census")
+            return object_script_census_probe(argc > 2 ? std::stoull(argv[2]) : 600, argc > 3 ? argv[3] : "Sandbox_Equal_Footing_Underworld");
+        if (argc > 1 && std::string_view(argv[1]) == "--orbit-workers")
+            return orbit_workers_probe(argc > 2 ? std::stoull(argv[2]) : 600, argc > 3 ? argv[3] : "GC_Standard_Web_Way_Imperial",
+                argc > 4 ? argv[4] : "Coruscant_WW");
+        if (argc > 1 && std::string_view(argv[1]) == "--orbit-census")
+            return orbit_census_probe(argc > 2 ? std::stoull(argv[2]) : 600, argc > 3 ? argv[3] : "GC_Standard_Web_Way_Imperial",
+                argc > 4 ? argv[4] : "Coruscant_WW");
         if (argc > 1 && std::string_view(argv[1]) == "--human-encounter")
             return installed(true, argc > 2 ? argv[2] : "out/galactic-human-encounter", true, 0, 1, true);
         if (argc > 1 && std::string_view(argv[1]) == "--coop-victory-r1") return coop_victory_r1(argc > 2 ? std::stoull(argv[2]) : 600);
@@ -1448,6 +1665,7 @@ int main(int argc, char** argv) {
         }
         prepared_restore_contracts();
         authored_selection_contracts();
+        solo_difficulty_level_contracts();
         mp_ai_uses_authored_faction_basic_ai();
         shared_story_local_player_needs_sp_rules_and_one_human();
         mp_ai_uses_agreed_difficulty_mapping();
@@ -1464,6 +1682,7 @@ int main(int argc, char** argv) {
         sparse_actor_change_contracts();
         free_fleet_signal_contracts();
         native_provider_isolation_contracts();
+        provider_retirement_digest_field();
         real_factory_contracts();
         real_factory_contracts(true);
         real_factory_contracts(false, true);

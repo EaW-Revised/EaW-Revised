@@ -1,5 +1,6 @@
 #include "eawr/core/load_note.hpp"
 #include "eawr/core/json_text.hpp"
+#include "eawr/core/text_bounds.hpp"
 
 #include <iterator>
 #include <array>
@@ -8,30 +9,11 @@
 
 namespace eawr::core {
 namespace {
-bool cut(std::string& text, std::size_t limit) {
-    if (text.size() <= limit) return false;
-    constexpr std::string_view marker = "...[truncated]";
-    auto end = limit - marker.size();
-    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xc0U) == 0x80U) --end;
-    text.resize(end); text += marker;
-    return true;
-}
-void redact_paths(std::string& text) {
-    for (std::size_t i = 0; i < text.size(); ++i) {
-        const bool boundary = i == 0 || text[i - 1] == ' ' || text[i - 1] == '\'' || text[i - 1] == '"'
-            || text[i - 1] == '=' || text[i - 1] == '(';
-        if (!boundary) continue;
-        const bool drive = i + 2 < text.size() && ((text[i] >= 'A' && text[i] <= 'Z') || (text[i] >= 'a' && text[i] <= 'z'))
-            && text[i + 1] == ':' && (text[i + 2] == '/' || text[i + 2] == '\\');
-        const bool rooted = i + 1 < text.size() && (text[i] == '/' || text[i] == '\\') && text[i + 1] != ' ';
-        if (drive || rooted) { text.resize(i); text += "[redacted-path]"; return; }
-    }
-}
 void truncate_authored(LoadNote& note) {
     redact_paths(note.message);
-    (void)cut(note.authored_value, 128);
-    (void)cut(note.effective_value, 256);
-    (void)cut(note.message, 512);
+    (void)cut_text(note.authored_value, 128);
+    (void)cut_text(note.effective_value, 256);
+    (void)cut_text(note.message, 512);
     if (note.action == LoadAction::runtime_degraded) note.phase = LoadPhase::runtime;
 }
 auto order(const LoadNote& n) {
@@ -153,11 +135,13 @@ std::string load_notes_json(std::span<const LoadNote> notes, const LoadNoteHeade
             + ",\"C\":" + std::to_string(counts[2]) + '}';
     };
     auto meta = header;
-    bool truncated = cut(meta.chain_fingerprint, 128);
-    if (meta.profile_id) truncated = cut(*meta.profile_id, 256) || truncated;
-    truncated = cut(meta.game_version, 128) || truncated;
-    truncated = cut(meta.written_at, 64) || truncated;
-    std::string prefix = "{\"schema_version\":1,\"chain_fingerprint\":" + json_quote(meta.chain_fingerprint)
+    bool truncated = cut_text(meta.chain_fingerprint, 128);
+    if (meta.profile_id) truncated = cut_text(*meta.profile_id, 256) || truncated;
+    truncated = cut_text(meta.game_version, 128) || truncated;
+    truncated = cut_text(meta.written_at, 64) || truncated;
+    truncated = cut_text(meta.session_id, 64) || truncated;
+    std::string prefix = "{\"schema_version\":1,\"session_id\":" + json_quote(meta.session_id)
+        + ",\"chain_fingerprint\":" + json_quote(meta.chain_fingerprint)
         + ",\"profile_id\":" + (meta.profile_id ? json_quote(*meta.profile_id) : "null")
         + ",\"game_version\":" + json_quote(meta.game_version) + ",\"written_at\":" + json_quote(meta.written_at)
         + ",\"totals\":" + totals(ordered.begin(), ordered.end());
@@ -169,18 +153,18 @@ std::string load_notes_json(std::span<const LoadNote> notes, const LoadNoteHeade
         std::string body;
         bool group_truncated = false;
         auto layer = ordered[first].layer;
-        group_truncated = cut(layer.mod_id, 512) || group_truncated;
+        group_truncated = cut_text(layer.mod_id, 512) || group_truncated;
         auto file = ordered[first].file;
         std::replace(file.begin(), file.end(), '\\', '/');
         if (file.starts_with('/') || file.find(':') != std::string::npos || file == ".."
             || file.starts_with("../") || file.find("/../") != std::string::npos) file = "[redacted-path]";
-        group_truncated = cut(file, 512) || group_truncated;
+        group_truncated = cut_text(file, 512) || group_truncated;
         const auto group_prefix = "{\"layer\":" + layer_json(layer) + ",\"file\":" + json_quote(file)
             + ",\"totals\":" + totals(ordered.begin() + static_cast<std::ptrdiff_t>(first), ordered.begin() + static_cast<std::ptrdiff_t>(end));
         for (auto i = first; i < end; ++i) {
             auto n = ordered[i];
             n.layer = layer; n.file = file;
-            for (auto* field : {&n.code, &n.object, &n.tag, &n.retail, &n.diagnostic_code}) group_truncated = cut(*field, 512) || group_truncated;
+            for (auto* field : {&n.code, &n.object, &n.tag, &n.retail, &n.diagnostic_code}) group_truncated = cut_text(*field, 512) || group_truncated;
             group_truncated = n.authored_value.ends_with("...[truncated]") || n.effective_value.ends_with("...[truncated]")
                 || n.message.ends_with("...[truncated]") || group_truncated;
             auto row = note_json(n);

@@ -265,6 +265,7 @@ void SpacePopulation::write_report(std::ostream& output) const {
            << ", \"hidden_by_hardpoint_state\": " << attached_effects_.hardpoint_hidden
            << ", \"admitted\": " << attached_effects_.admitted
            << ", \"capacity_exhausted\": " << attached_effects_.capacity_exhausted
+           << ", \"dropped\": " << attached_effects_.dropped
            << ", \"report\": " << (attached_effects_.composed ? "\"map_particles\"" : "null")
            << ", \"cause\": " << json(attached_effects_.cause) << '}'
            << ",\n    \"upload_failures\": " << strings(upload_failures_) << ",\n    \"not_drawn_or_partial\": [";

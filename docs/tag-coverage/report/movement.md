@@ -4,22 +4,89 @@
 
 | Status | Space skirmish | Everything |
 |---|---:|---:|
-| applied | 100 | 100 |
-| partial | 195 | 195 |
-| todo | 154 | 154 |
+| applied | 110 | 110 |
+| partial | 210 | 210 |
+| todo | 1391 | 1391 |
 | presentation-later | 0 | 0 |
 | foc-ignores | 24 | 24 |
-| deferred | 16 | 16 |
+| deferred | 13 | 13 |
 | by-design | 2 | 2 |
 | land-or-galactic | 0 | 0 |
 | multiplayer | 0 | 0 |
-| **Total** | **491** | **491** |
+| **Total** | **1750** | **1750** |
 
 Tables group the exact object class families listed together in the registry. Object kinds
 are station, ship, squadron or craft when specified; an empty kind list means the whole
 listed class. Each consumer retains its own kinds and rule IDs. Rule IDs are plain text:
 the registry does not supply public link targets. Tickets refer to the private tracker
 and are plain numbers. Code locations are repository paths without identifier anchors.
+
+## Abilities
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Combat_Bonus_Ability/Movement_Speed_Bonus_Percentage | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Redirect_Blaster_Ability/Turn_To_Face_Unblockable_Shots | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Retreat_Prevention_Ability/Activation_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Assistance_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Crouch_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| FormationGrouping | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationRaggedness | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationSpacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Has_Pre_Turn_Anim | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| IsDeathCloneObstacle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Locomotor_Has_Animation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed_Fraction_For_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MinimumPushReturnDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| On_Fire_Speed_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Overall_Length | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Overall_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Rotation_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Walk_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## AssistanceCompany
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## CableAttackAbility
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Cable_End_Speed_Fraction | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## CIN_SpaceUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## CIN_SpaceUnit, SpaceUnit, UniqueUnit
 
@@ -40,22 +107,38 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
+| Alternate_Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Alternate_Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Avoidance_Disabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 | Behavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); whole class (src/scene/scene_build.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); ship (src/sim/tactical/session_step_systems.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); ship (src/units/unit_motion.cpp); TEAM objects declaring REPLENISH_WINGMEN (src/units/unit_tables_abilities_nested.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); Container (src/units/unit_tables_profiles.cpp); missing: other galactic behavior dispatch, ungated defaults, refined/combined objects, live behavior dispatch | WAR-24; WGT-121; C-05, D-04, L-05, L-23, L-43; WCC-25; WNO-16, WTA-29; WHZ-20, WHZ-21, WHZ-22, WHZ-25; WLPA-07, WLPA-09; WHZ-20; WHE-70; WLPA-03, WLPA-07, WLPA-08; WSU-15, WSU-19, WSU-21 | 1450 | src/campaign/auto_resolve_strength.cpp; src/campaign/conflict_entry.cpp; src/scene/scene_build.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_step_combat.cpp; src/sim/tactical/session_step_systems.cpp; src/skirmish/land_start.cpp; src/units/unit_motion.cpp; src/units/unit_tables_abilities_nested.cpp; src/units/unit_tables_land.cpp; src/units/unit_tables_profiles.cpp | Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice. Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: reviewed |
+| Crouch_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Formation_Formup_Wait_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | FormationSpacing | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | LC-79, LC-80 | 1450 | include/eawr/skirmish/land_content.hpp | Land member spacing defaults to zero additional spacing; hard geometry remains. Team-type and member spacing are retained separately (LC-79/80).; basis: reviewed |
+| Hover_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | LandBehavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); whole class (src/scene/scene_build.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: other galactic behavior dispatch, ungated defaults, refined/combined objects, live behavior dispatch | WAR-24; ML-24; WLPA-07, WLPA-09; WLPA-03, WLPA-07, WLPA-08 | 1450 | src/campaign/auto_resolve_strength.cpp; src/scene/scene_build.cpp; src/skirmish/land_start.cpp; src/units/unit_tables_land.cpp | Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice. Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: reviewed |
 | Layer_Z_Adjust | partial | Galactic_Fleet container marker (apps/viewer/src/galactic/galactic_scene.cpp); missing: Other container presentation paths remain outside the galactic fleet marker. | WGP-16 | 650 | apps/viewer/src/galactic/galactic_scene.cpp | The Galactic_Fleet marker adds the authored Layer_Z_Adjust to the model position; other container paths are not claimed.; basis: reviewed |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Max_Rate_Of_Turn | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | MV-01 | 1450 | include/eawr/skirmish/land_content.hpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
 | Max_Speed | partial | land company members (include/eawr/skirmish/land_content.hpp); craft (src/units/unit_motion.cpp); missing: ship | LC-06, MV-01; WMV-44 | 649 | include/eawr/skirmish/land_content.hpp; src/units/unit_motion.cpp | WMV-44: resolved Create_Team_Type maximum supplies the member formation deceleration ratio; ordinary team-container maximum velocity and land consumers remain open under &#35;649. Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
 | Min_Speed | todo | application not recorded | — | 649 | — | the loader reads it for other classes; the M2 scene's objects of this class never have it read |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | MovementPredictionInterval | todo | application not recorded | — | 3776 | — | no land reader found; basis: reviewed |
 | OccupationStyle | todo | application not recorded | — | 3776 | — | no land reader found; basis: reviewed |
 | Override_Acceleration | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | Override_Deceleration | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | OverrideAcceleration | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | MV-01 | 1450 | include/eawr/skirmish/land_content.hpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
 | OverrideDeceleration | partial | land company members (include/eawr/skirmish/land_content.hpp); craft (src/sim/tactical/fighters.cpp); missing: ship | MV-01; WMV-44 | 649 | include/eawr/skirmish/land_content.hpp; src/sim/tactical/fighters.cpp | WMV-44: space formation upkeep uses the resolved Create_Team_Type container default or mod-authored override, never purchase-template or child data; ordinary team-container and land consumers remain open under &#35;649. Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
+| Primary_Locomotor_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Rotation_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Secondary_Locomotor_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Space_Layer | todo | application not recorded | — | 3776 | — | parsed into movement profile and used for skirmish footprint (economy.cpp) but no land layer consumer pinned; basis: reviewed |
 | SpaceBehavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); whole class (src/scene/idle_tags.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); ship (src/sim/tactical/session_step_systems.cpp); ship (src/units/unit_motion.cpp); TEAM objects declaring REPLENISH_WINGMEN (src/units/unit_tables_abilities_nested.cpp); loaded FIGHTER_LOCOMOTOR craft, including solo heroes (src/units/unit_tables_decode.cpp); Container (src/units/unit_tables_profiles.cpp); missing: other galactic behavior dispatch | WAR-24; BP-31, R-ROT-01, RO-1; WCC-25; WNO-16, WTA-29; WHZ-20, WHZ-21, WHZ-22, WHZ-25; WHZ-20; WHE-70; WHE-SQ-02; WSU-15, WSU-19, WSU-21 | 4532 | src/campaign/auto_resolve_strength.cpp; src/scene/idle_tags.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_step_combat.cpp; src/sim/tactical/session_step_systems.cpp; src/units/unit_motion.cpp; src/units/unit_tables_abilities_nested.cpp; src/units/unit_tables_decode.cpp; src/units/unit_tables_profiles.cpp |  Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | UnitCollisionClass | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | WLPA-35 | 1450 | include/eawr/skirmish/land_content.hpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
+| Use_Smooth_Formation_Movement | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Uses_Multiple_Locomotors | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| WaitsForFormationFormup | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Walk_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## Container, GenericHeroUnit, HeroUnit, Marker, Projectile, SecondaryStructure, SpaceStructure, SpaceUnit, SpecialStructure, TransportUnit, UniqueUnit
 
@@ -101,11 +184,120 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 649 | — | family: movement; read for Squadron purchase types only (load_squadron); craft, solo heroes and ships ignore it.; basis: reviewed |
 
+## DCUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| IsDeathCloneObstacle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| UseSecondaryFacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Death_Clone
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| IsDeathCloneObstacle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Debug_Objects
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| DebugUnit/Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DebugUnit/Can_Hyperspace_Without_Activating_Ability | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DebugUnit/Hyperspace_Fleet_Reveal_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DebugUnit/Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DebugUnit/Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DebugUnit/Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DebugUnit/Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DebugUnit/Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DebugUnit/Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DebugUnit/Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DebugUnit/Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
 ## Decal
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Random_Rotate | todo | application not recorded | — | 649 | — | family: vfx-models; no loader or consumer.; basis: reviewed |
+
+## Dummy
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationPriority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## DummyStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Begin_Turn_Towards_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Collision_Box_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationPriority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed_Fraction_For_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Minimum_Follow_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Obstacle_Proxy_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Strafe_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 
 ## Faction
 
@@ -117,11 +309,29 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Space_Forced_Retreat_Due_To_Superweapon | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
 | Space_Retreat_Countdown_Seconds | partial | campaign tactical return (src/campaign/tactical_return_live.cpp); missing: cinematic flight cadence and hero placement | WR-44, WR-86, WR-87 | 1116 | src/campaign/tactical_return_live.cpp | Validated return bindings feed the native countdown, attrition and scheduled hero records; the remaining cinematic cadence and placement owners are explicit services.; basis: reviewed |
 | Space_Retreat_Flight_Increment | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
-| Space_Retreat_Flight_Move_Increment | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
+| Space_Retreat_Flight_Move_Increment | applied | drawn escape flight (apps/viewer/src/map_mode_hud.cpp) | RC-07 | — | apps/viewer/src/map_mode_hud.cpp | RC-07: the faction increment sets the drawn accelerated step of the retreat flight (presentation; the simulation holds the ships). Stock Empire authors a different, ignored spelling and so uses the debug-build default 250.; basis: reviewed |
 | Space_Retreat_Off_Map_Dest_Pos | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
 | Space_Retreat_Pursue_Max_Speed_Mod_Factor | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
-| Space_Retreat_Unit_Increment_Wait_Frames | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
+| Space_Retreat_Unit_Increment_Wait_Frames | applied | drawn escape flight (apps/viewer/src/map_mode_hud.cpp) | RC-07 | — | apps/viewer/src/map_mode_hud.cpp | RC-07: the wait between prefix members of the drawn retreat flight; a faction that does not author it uses the debug-build default 2.; basis: reviewed |
 | Space_Retreat_Units_Damaged_Mod_Factor | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
+
+## Freighter
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## GameConstants
 
@@ -129,11 +339,11 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Auto_Rotate_For_Space_Targeting | applied | whole class (src/sim/tactical/combat_aim.cpp) | A-05 | — | src/sim/tactical/combat_aim.cpp | basis: reviewed |
 | Base_Shield_Speed_Modifier | todo | application not recorded | — | 3776 | — | GameConstants singleton; no reader on main; land base shields not implemented; basis: reviewed |
-| BetweenFormationSpacing | deferred | application not recorded | — | 626 | — | — |
-| CloseEnoughAngleForMoveStart | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
+| BetweenFormationSpacing | applied | whole class (src/sim/tactical/land_formation.cpp) | LMF-03 | — | src/sim/tactical/land_formation.cpp | basis: reviewed |
+| CloseEnoughAngleForMoveStart | todo | application not recorded | — | 649 | — | Land content consumes the stock value (180 degrees) as a literal where the type does not author Close_Enough_Angle_For_Move_Start (include/eawr/skirmish/land_content.hpp, build_land_bindings); a land game-constants reader, like the camera and fog readers of gameconstants.xml, is a follow-up, so a mod that changes this constant is ignored by land movement.; basis: reviewed |
 | Corruption_Hyperspace_Bonus | applied | galactic travel (src/campaign/fleets.cpp) | WGM-27 | — | src/campaign/fleets.cpp | basis: reviewed |
 | Crouch_Move_Fire_Angle_Cutoff | todo | application not recorded | — | 3776 | — | Evidence says retail reads it in the weapon service; no reader on the origin/main land path.; basis: reviewed |
-| Destination_Collision_Query_Extension | deferred | application not recorded | — | 626 | — | — |
+| Destination_Collision_Query_Extension | applied | whole class (src/sim/tactical/land_formation.cpp) | LMF-05 | — | src/sim/tactical/land_formation.cpp | basis: reviewed |
 | DestinationSearchRadiusIncrementSpace | applied | whole class (src/units/unit_motion.cpp) | AV-05 | — | src/units/unit_motion.cpp | basis: auto |
 | DoubleClickMoveMaxSpeedRatio | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
 | DynamicAvoidanceRectangleBound | deferred | application not recorded | — | 626 | — | — |
@@ -143,18 +353,21 @@ and are plain numbers. Code locations are repository paths without identifier an
 | FinalFacing180Penalty | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
 | FinalFormationFacingDeltaCoefficient | deferred | application not recorded | — | 626 | — | — |
 | FinalFormationFacingMinimumAngle | deferred | application not recorded | — | 626 | — | — |
-| FormationMaximumSideError | partial | space fighter and bomber squadron move lanes (src/sim/tactical/fighters_formation.cpp); missing: land movement formations | FO-10, WSQ-17 | 654 | src/sim/tactical/fighters_formation.cpp | basis: reviewed |
-| FormationMinimumSideError | partial | space fighter and bomber squadron move lanes (src/sim/tactical/fighters_formation.cpp); missing: land movement formations | FO-10, WSQ-17 | 649 | src/sim/tactical/fighters_formation.cpp | basis: reviewed |
+| FormationMaximumSideError | partial | space fighter and bomber squadron move lanes (src/sim/tactical/fighters_formation.cpp); land formation speed availability (src/sim/tactical/session_land_formation.cpp); missing: land formation live lateral correction | FO-10, WSQ-17; LMF-09 | 654 | src/sim/tactical/fighters_formation.cpp; src/sim/tactical/session_land_formation.cpp | basis: reviewed |
+| FormationMinimumSideError | partial | space fighter and bomber squadron move lanes (src/sim/tactical/fighters_formation.cpp); land formation speed availability (src/sim/tactical/session_land_formation.cpp); missing: land formation live lateral correction | FO-10, WSQ-17; LMF-09 | 649 | src/sim/tactical/fighters_formation.cpp; src/sim/tactical/session_land_formation.cpp | basis: reviewed |
 | FramesPerCollisionCheck | deferred | application not recorded | — | 626 | — | — |
+| Game_Speed_Trackbar_Steps | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Hyperspace_Speed_Factor_Empire | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | Hyperspace_Speed_Factor_Rebel | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | MatchFacingDeltaSpace | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
-| Max_Formation_Area | deferred | application not recorded | — | 626 | — | — |
+| Max_Formation_Area | applied | whole class (src/sim/tactical/land_formation.cpp) | LMF-02 | — | src/sim/tactical/land_formation.cpp | basis: reviewed |
+| Max_Game_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Max_Move_Frame_Delay | todo | application not recorded | — | 3776 | — | debug build constant; no land reader found; basis: reviewed |
 | MaxObstacleCostSpace | deferred | application not recorded | — | 626 | — | — |
 | MaxRotationsSpace | applied | whole class (src/units/unit_motion.cpp) | S-12 | — | src/units/unit_motion.cpp | basis: auto |
 | MaxWaypointsPerPath | partial | space queued point movement (src/sim/tactical/session_cmd_orders.cpp); space queued point movement (src/units/unit_motion.cpp); missing: pre-existing formation reuse and exact arrival phase | HCB-58, HCB-59; HCB-58 | 4532 | src/sim/tactical/session_cmd_orders.cpp; src/units/unit_motion.cpp | Queue capacity applies to retained point movement; the value reads as a C integer and compares as unsigned, so -1 is unlimited (HCB-58, &#35;4992); the named completion and formation seams remain tracked.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
-| MinimumDragDistance | todo | application not recorded | — | 649 | — | family: hud-radar; only MinimumDragSelectDistance is modelled (a fixed 100 px constant in selection.hpp); this constant is not read.; basis: reviewed |
+| Min_Game_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MinimumDragDistance | todo | application not recorded | — | 649 | — | family: hud-radar; the 4 px band is modelled as a fixed constant in selection.hpp (minimum_drag_distance, as is MinimumDragSelectDistance at 100 px); the tag is not read from GameConstants.; basis: reviewed |
 | MinimumStoppedVsStoppedOverlapCoefficient | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
 | MovementReevaluationFrameCount | applied | whole class (src/units/unit_motion.cpp) | OR-06 | — | src/units/unit_motion.cpp | basis: reviewed |
 | MovingVsMovingLookAheadTime | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
@@ -162,9 +375,11 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Object_Max_Speed_Multiplier_Space | applied | whole class (src/units/unit_motion.cpp) | BK-01, FM-01 | — | src/units/unit_motion.cpp | basis: auto |
 | ObstacleAreaOverlapForMaxSpace | deferred | application not recorded | — | 626 | — | — |
 | OccupationRadiusCoefficientSpace | applied | whole class (src/units/unit_motion.cpp) | AV-05, AV-13 | — | src/units/unit_motion.cpp | basis: auto |
+| Pathfinder_Slot_Index | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 | Preferred_Pathfinder_Types | todo | application not recorded | — | 3776 | — | Debug build reads it for formation pathfinder choice; pathfinder list todo (legacy &#35;649); family in input was F12, moved to F5; basis: reviewed |
 | Push_Scroll_Speed_Modifier | applied | whole class (src/presentation/camera/camera.cpp) | none recorded | — | src/presentation/camera/camera.cpp | matched by the field's name; the loader is table-driven; basis: auto |
 | RepushDistance | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
+| Retreat_Color_Tint | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Rotate_Formation_Facing_Moves | deferred | application not recorded | — | 626 | — | — |
 | Short_Range_Attack_Formation_Coefficient | deferred | application not recorded | — | 626 | — | — |
 | Space_Collidable_Grid_Cull_Size | by-design | application not recorded | — | — | — | BY-DESIGN-PATHING |
@@ -186,7 +401,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | SpacePathfindMaxExpansions | applied | whole class (src/units/unit_motion.cpp) | none recorded | — | src/units/unit_motion.cpp | basis: auto |
 | SpacePathingTries | applied | whole class (src/units/unit_motion.cpp) | AV-14 | — | src/units/unit_motion.cpp | &#35;853 reassessment: the 9000-tick M2 check changes structural tables but observes no battle change; the cited application remains, and this scenario does not prove its effect.; CHECK-842; basis: reviewed |
 | SpaceStaticObstacleAvoidanceBonusDistance | deferred | application not recorded | — | 626 | — | — |
-| Spread_Out_Spacing_Coefficient | todo | application not recorded | — | 3776 | — | debug build constant; no land reader found; basis: reviewed |
+| Spread_Out_Spacing_Coefficient | applied | land SPREAD_OUT row spacing (src/sim/tactical/session_land_abilities.cpp) | WLAB-13 | — | src/sim/tactical/session_land_abilities.cpp | basis: reviewed |
 | Strategic_Max_Scroll_Speed | todo | application not recorded | — | 1157 | — | Galactic map camera scroll tuning is not read; the map camera uses its own speeds.; basis: reviewed |
 | Strategic_Min_Scroll_Speed | todo | application not recorded | — | 1157 | — | Galactic map camera scroll tuning is not read; the map camera uses its own speeds.; basis: reviewed |
 | Tactical_Max_Scroll_Speed | applied | whole class (src/presentation/camera/camera.cpp) | none recorded | — | src/presentation/camera/camera.cpp | matched by the field's name; the loader is table-driven; basis: auto |
@@ -196,24 +411,66 @@ and are plain numbers. Code locations are repository paths without identifier an
 | TurnInPlaceSlowdownCorvette | applied | whole class (src/units/unit_motion.cpp) | MV-01 | — | src/units/unit_motion.cpp | &#35;853 reassessment: the slowdown applies to face-target motion orders (MV-01); structural tables change but the 9000-tick scenario observes no resulting difference.; CHECK-842; basis: reviewed |
 | TurnInPlaceSlowdownFrigate | applied | whole class (src/units/unit_motion.cpp) | MV-01 | — | src/units/unit_motion.cpp | &#35;853 reassessment: the slowdown applies to face-target motion orders (MV-01); structural tables change but the 9000-tick scenario observes no resulting difference.; CHECK-842; basis: reviewed |
 | UseLinearCollisionChecks | deferred | application not recorded | — | 626 | — | — |
-| VehicleFormationRecruitmentDistance | todo | application not recorded | — | 649 | — | — |
+| VehicleFormationRecruitmentDistance | applied | whole class (src/sim/tactical/session_land_formation.cpp) | LMF-02 | — | src/sim/tactical/session_land_formation.cpp | basis: reviewed |
 | WaitOperatorBaseFrameTime | applied | whole class (src/units/unit_motion.cpp) | S-10 | — | src/units/unit_motion.cpp | basis: auto |
 | WaitOperatorSpeedCoefficient | applied | whole class (src/units/unit_motion.cpp) | AV-05, S-10 | — | src/units/unit_motion.cpp | basis: auto |
 | XYExpansionDistanceSpace | applied | whole class (src/units/unit_motion.cpp) | PC-03, S-12 | — | src/units/unit_motion.cpp | basis: auto |
+
+## GameObjectType
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent_Deployed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Walker_Acceleration_Magic_Number | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## GC_Dummy
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Hyperspace_Fleet_Reveal_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Generic_Structure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Obstacle_Proxy_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 
 ## GenericHeroUnit
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
+| Alternate_Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Alternate_Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Attack_Move_Response_Range | todo | application not recorded | — | 3776 | — | Read into the land unit tables by shoot PR 1 (load_land_body, src/units/unit_tables_land.cpp) and bound into the land start content; the land step applies it in shoot PR 3 (docs/behaviour/walks/land-combat.md LC-26..36). |
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Collision_Box_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| FormationGrouping | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | FormationOrder | todo | application not recorded | — | 3776 | — | no land reader of FormationOrder found on origin/main; basis: reviewed |
 | FormationRaggedness | todo | application not recorded | — | 3776 | — | no land reader of FormationRaggedness found on origin/main; basis: reviewed |
 | FormationSpacing | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | LC-79, LC-80 | 1450 | include/eawr/skirmish/land_content.hpp | Land member spacing defaults to zero additional spacing; hard geometry remains. Team-type and member spacing are retained separately (LC-79/80).; basis: reviewed |
 | Guard_Chase_Range | todo | application not recorded | — | 3776 | — | Read into the land unit tables by shoot PR 1 (load_land_body, src/units/unit_tables_land.cpp) and bound into the land start content; the land step applies it in shoot PR 3 (docs/behaviour/walks/land-combat.md LC-26..36). |
+| Hover_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MinimumPushReturnDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | OccupationStyle | todo | application not recorded | — | 3776 | — | no land reader found; basis: reviewed |
 | OverrideAcceleration | partial | land company members (include/eawr/skirmish/land_content.hpp); ship (src/units/unit_motion.cpp); missing: GenericHeroUnit objects outside adapted land companies | MV-01; MV-01 | 1450 | include/eawr/skirmish/land_content.hpp; src/units/unit_motion.cpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
 | OverrideDeceleration | partial | land company members (include/eawr/skirmish/land_content.hpp); ship (src/units/unit_motion.cpp); missing: GenericHeroUnit objects outside adapted land companies | MV-01; MV-01 | 1450 | include/eawr/skirmish/land_content.hpp; src/units/unit_motion.cpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
+| Primary_Locomotor_Name | partial | land types that use a secondary locomotor (include/eawr/skirmish/land_content.hpp); missing: the jump locomotor profile and its movement (land movement ticket) | WLAB-16 | 7084 | include/eawr/skirmish/land_content.hpp | The land loader keeps the names and the content marks the types that use a secondary locomotor; JET_PACK records the switch (WLAB-16). No locomotor profile is bound for the secondary one yet.; basis: reviewed |
+| Secondary_Locomotor_Name | partial | land types that use a secondary locomotor (include/eawr/skirmish/land_content.hpp); missing: the jump locomotor profile and its movement (land movement ticket) | WLAB-16 | 7084 | include/eawr/skirmish/land_content.hpp | The land loader keeps the names and the content marks the types that use a secondary locomotor; JET_PACK records the switch (WLAB-16). No locomotor profile is bound for the secondary one yet.; basis: reviewed |
+| Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 | UnitCollisionClass | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | WLPA-35 | 1450 | include/eawr/skirmish/land_content.hpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
+| Uses_Multiple_Locomotors | partial | land types that use a secondary locomotor (include/eawr/skirmish/land_content.hpp); missing: the jump locomotor profile and its movement (land movement ticket) | WLAB-16 | 7084 | include/eawr/skirmish/land_content.hpp | The land loader keeps the names and the content marks the types that use a secondary locomotor; JET_PACK records the switch (WLAB-16). No locomotor profile is bound for the secondary one yet.; basis: reviewed |
 
 ## GenericHeroUnit, HeroUnit, SecondaryStructure, SpaceStructure, SpecialStructure, TechBuilding
 
@@ -260,11 +517,156 @@ and are plain numbers. Code locations are repository paths without identifier an
 | */Activation_Tracking_Duration | applied | whole class (src/script/foc/ai_learning.hpp) | GS-32, WTA-11 | — | src/script/foc/ai_learning.hpp | basis: auto |
 | */Tracking_Duration | applied | whole class (src/script/foc/ai_learning.hpp) | GS-32, WTA-11 | — | src/script/foc/ai_learning.hpp | basis: auto |
 
+## GraphicDetailHardwareProfile
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| CPUSpeed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Ground_Structure_Goauld
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Proxy_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Ground_Structure_Neutral
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Snap_Movement_Orders_To_Center | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Ground_Structure_Other
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Ground_Structure_Tauri
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Proxy_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Ground_Structure_Unused
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Proxy_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Ground_Structure_Wraith
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Proxy_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## GroundBuildable
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
 ## GroundCompany
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
+| ContainerArrangement | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
 | Formation_Prority | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| FormationRaggedness | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## GroundInfantry
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Alternate_Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Alternate_Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Backpedal_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Backpedal_Max_Speed_Coefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Can_Hyperspace_Without_Activating_Ability | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Collision_Box_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Deployed_Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Deployed_Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Hover_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Hover_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| IsDeathCloneObstacle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Locomotor_Has_Animation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MaxFacingLookAheadFrames | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MaxSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MinSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Overall_Length | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Overall_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Prepare_Strafe_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Primary_Locomotor_Name | partial | land types that use a secondary locomotor (include/eawr/skirmish/land_content.hpp); missing: the jump locomotor profile and its movement (land movement ticket) | WLAB-16 | 7084 | include/eawr/skirmish/land_content.hpp | The land loader keeps the names and the content marks the types that use a secondary locomotor; JET_PACK records the switch (WLAB-16). No locomotor profile is bound for the secondary one yet.; basis: reviewed |
+| Secondary_Locomotor_Name | partial | land types that use a secondary locomotor (include/eawr/skirmish/land_content.hpp); missing: the jump locomotor profile and its movement (land movement ticket) | WLAB-16 | 7084 | include/eawr/skirmish/land_content.hpp | The land loader keeps the names and the content marks the types that use a secondary locomotor; JET_PACK records the switch (WLAB-16). No locomotor profile is bound for the secondary one yet.; basis: reviewed |
+| SecondaryTurnAngle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| SecondaryTurnInPlaceROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| SecondaryTurnLookaheadDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Stationary_Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Strafe_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Strafe_Max_Speed_Coefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Uses_Multiple_Locomotors | partial | land types that use a secondary locomotor (include/eawr/skirmish/land_content.hpp); missing: the jump locomotor profile and its movement (land movement ticket) | WLAB-16 | 7084 | include/eawr/skirmish/land_content.hpp | The land loader keeps the names and the content marks the types that use a secondary locomotor; JET_PACK records the switch (WLAB-16). No locomotor profile is bound for the secondary one yet.; basis: reviewed |
+| UseSecondaryFacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
 
 ## GroundInfantry, HeroUnit
 
@@ -272,11 +674,75 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | WaitsForFormationFormup | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 
+## GroundStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Hover_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Overall_Length | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Overall_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| UseSecondaryFacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
 ## GroundStructure, Props_Generic, Props_Story, SpaceStructure
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Facing_Adjust | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+
+## GroundVehicle
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Begin_Turn_Towards_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Can_Hyperspace_Without_Activating_Ability | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Collision_Box_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Formation_Formup_Wait_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| LateralAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Movement_Directions_Count | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| On_Fire_Speed_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Strafe_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| WaitsForFormationFormup | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## GroundWarTemplate
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Min_Speed_Fraction_For_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Minimum_Follow_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Movement_Directions_Count | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
 
 ## HardPoint
 
@@ -313,36 +779,97 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Clash_Actions/Move_Action/Move_Use_Jetpack | todo | application not recorded | — | 649 | — | — |
 | Clash_Actions/Move_Action/Wait_For_Finish_If_Target_Using_Jetpack | todo | application not recorded | — | 649 | — | — |
 
+## Hero_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Avoidance_Disabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| FormationGrouping | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationRaggedness | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## HeroCompany
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Collision_Box_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
 ## HeroUnit
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Abilities/Berserker_Ability/Berserker_Speed | todo | application not recorded | — | 3241 | — | land bodies return in load_land_body before load_abilities; no land-path code (load_land_body, land_companies, session_land, land_movement, land_start, live_session_land) reads this tag; space handlers do not count; basis: reviewed |
 | Abilities/Redirect_Blaster_Ability/Turn_To_Face_Unblockable_Shots | todo | application not recorded | — | 3241 | — | land bodies return in load_land_body before load_abilities; no land-path code (load_land_body, land_companies, session_land, land_movement, land_start, live_session_land) reads this tag; space handlers do not count; basis: reviewed |
-| Abilities/Retreat_Prevention_Ability/Activation_Style | todo | application not recorded | — | 760 | — | family: abilities; no loader or consumer for this ability/tag in a tactical battle.; basis: reviewed |
-| Alternate_Max_Rate_Of_Turn | todo | application not recorded | — | 3776 | — | No reader on origin/main (grep src/include/apps/tests, literal and snake_case forms); basis: reviewed |
-| Alternate_Max_Speed | todo | application not recorded | — | 3776 | — | No reader on origin/main (grep src/include/apps/tests, literal and snake_case forms); basis: reviewed |
+| Abilities/Retreat_Prevention_Ability/Activation_Style | partial | campaign space binding (src/campaign/space_rules.cpp); campaign space automatic sources (src/sim/tactical/retreat_session.cpp); automatic ability admission (src/units/unit_tables_abilities_bonuses.cpp); missing: ground, nonautomatic activation and dynamic named locks | WRP-01, WRP-02; WRP-01, WRP-02, WRP-03, WRP-04; WRP-01 | 6245 | src/campaign/space_rules.cpp; src/sim/tactical/retreat_session.cpp; src/units/unit_tables_abilities_bonuses.cpp | Campaign space automatic handlers use bearer-player prevention; ground and nonautomatic handlers remain separate.; basis: reviewed |
+| Alternate_Max_Rate_Of_Turn | todo | application not recorded | — | 3776 | — | Read by the land loader for JET_PACK carriers (WLAB-16, &#35;7084); the flight keeps its facing, so nothing consumes it yet.; basis: reviewed |
+| Alternate_Max_Speed | partial | land JET_PACK flight rows (ratios over Max_Speed) (include/eawr/skirmish/land_content.hpp); land JET_PACK flight (src/sim/tactical/land_jump.cpp); land types that use several locomotors and author Alternate_Max_Speed (src/units/unit_tables_land.cpp); missing: land types without Uses_Multiple_Locomotors | WLAB-16; WLAB-16; WLAB-16 | 3239 | include/eawr/skirmish/land_content.hpp; src/sim/tactical/land_jump.cpp; src/units/unit_tables_land.cpp | Read for land types that use several locomotors: the JET_PACK flight speed is the walking speed times Alternate_Max_Speed over Max_Speed (WLAB-16, &#35;7084).; basis: reviewed |
 | Attack_Move_Response_Range | todo | application not recorded | — | 3776 | — | Read into the land unit tables by shoot PR 1 (load_land_body, src/units/unit_tables_land.cpp) and bound into the land start content; the land step applies it in shoot PR 3 (docs/behaviour/walks/land-combat.md LC-26..36). |
 | Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 3776 | — | Read only by space combat step (session_step_combat.cpp) and profile load; land combat step not on main (hero row); basis: reviewed |
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Can_Hyperspace_Without_Activating_Ability | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Cinematic_Anim_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Collision_Box_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Crouch_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Custom_Hard_XExtent | partial | land company member landing hard footprints (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | LC-79, LC-80 | 4812 | include/eawr/skirmish/land_content.hpp | Positive authored hard extents or model collision extents are scaled for land landing slots; zero additional formation spacing retains this hard geometry.; SCOPE-LAND: only ground objects author it in the effective FoC XML (Boba_Fett, Boba_Fett_NoStealth, Bossk, Chewbacca, Cuddles_The_Rancor, Cuddles_The_Rancor_Death_Clone_00, Cuddles_The_Rancor_Death_Clone_01, Darth_Vader (+23 more)) |
 | Custom_Hard_YExtent | partial | land company member landing hard footprints (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | LC-79, LC-80 | 4812 | include/eawr/skirmish/land_content.hpp | Positive authored hard extents or model collision extents are scaled for land landing slots; zero additional formation spacing retains this hard geometry.; SCOPE-LAND: only ground objects author it in the effective FoC XML (Boba_Fett, Boba_Fett_NoStealth, Bossk, Chewbacca, Cuddles_The_Rancor, Cuddles_The_Rancor_Death_Clone_00, Cuddles_The_Rancor_Death_Clone_01, Darth_Vader (+23 more)) |
 | Custom_Soft_Footprint_Radius | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | WLPA-06, WLPA-14 | 1450 | include/eawr/skirmish/land_content.hpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
-| FormationGrouping | todo | application not recorded | — | 3776 | — | no land reader of FormationGrouping found on origin/main; basis: reviewed |
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationGrouping | applied | whole class (src/sim/tactical/session_land_formation.cpp) | LMF-02 | — | src/sim/tactical/session_land_formation.cpp | basis: reviewed |
 | FormationOrder | todo | application not recorded | — | 3776 | — | no land reader of FormationOrder found on origin/main; basis: reviewed |
 | FormationRaggedness | todo | application not recorded | — | 3776 | — | no land reader of FormationRaggedness found on origin/main; basis: reviewed |
 | FormationSpacing | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | LC-79, LC-80 | 1450 | include/eawr/skirmish/land_content.hpp | Land member spacing defaults to zero additional spacing; hard geometry remains. Team-type and member spacing are retained separately (LC-79/80).; basis: reviewed |
 | Guard_Chase_Range | todo | application not recorded | — | 3776 | — | Read into the land unit tables by shoot PR 1 (load_land_body, src/units/unit_tables_land.cpp) and bound into the land start content; the land step applies it in shoot PR 3 (docs/behaviour/walks/land-combat.md LC-26..36). |
-| Hover_Offset | todo | application not recorded | — | 3776 | — | only space_entry_stock reads Hover_Offset; no land reader; basis: reviewed |
-| Max_Lift | todo | application not recorded | — | 3776 | — | read only in profile decode (unit_tables_profiles.cpp:379) and space craft code; no land consumer; basis: reviewed |
+| Hover_Offset | partial | land JET_PACK flight rows (ratios over Max_Speed) (include/eawr/skirmish/land_content.hpp); land JET_PACK flight (src/sim/tactical/land_jump.cpp); land types that use several locomotors and author Alternate_Max_Speed (src/units/unit_tables_land.cpp); missing: land types without Uses_Multiple_Locomotors | WLAB-16; WLAB-16; WLAB-16 | 3239 | include/eawr/skirmish/land_content.hpp; src/sim/tactical/land_jump.cpp; src/units/unit_tables_land.cpp | Read for land types that use several locomotors: the JET_PACK flight holds this height above the ground (WLAB-16, &#35;7084). Space reads it separately.; basis: reviewed |
+| Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Lift | partial | land JET_PACK flight rows (ratios over Max_Speed) (include/eawr/skirmish/land_content.hpp); land JET_PACK flight (src/sim/tactical/land_jump.cpp); land types that use several locomotors and author Alternate_Max_Speed (src/units/unit_tables_land.cpp); missing: land types without Uses_Multiple_Locomotors | WLAB-16; WLAB-16; WLAB-16 | 3239 | include/eawr/skirmish/land_content.hpp; src/sim/tactical/land_jump.cpp; src/units/unit_tables_land.cpp | Read for land types that use several locomotors: the JET_PACK climb and descent rate is the walking speed times Max_Lift over Max_Speed (WLAB-16, &#35;7084). Space reads it separately.; basis: reviewed |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Max_Rate_Of_Turn | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | MV-01 | 1450 | include/eawr/skirmish/land_content.hpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
 | Max_Speed | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | LC-06, MV-01 | 1450 | include/eawr/skirmish/land_content.hpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MaxSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Min_Speed | todo | application not recorded | — | 3776 | — | read in profile decode (unit_tables_profiles.cpp:374); the applied twin is space fighters only; basis: reviewed |
+| MinSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | OccupationStyle | todo | application not recorded | — | 3776 | — | no land reader found; basis: reviewed |
 | OverrideAcceleration | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | MV-01 | 1450 | include/eawr/skirmish/land_content.hpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
 | OverrideDeceleration | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | MV-01 | 1450 | include/eawr/skirmish/land_content.hpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
+| SecondaryTurnAngle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| SecondaryTurnInPlaceROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| SecondaryTurnLookaheadDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Space_Layer | todo | application not recorded | — | 3776 | — | parsed into movement profile but no land layer consumer pinned; applied twin not confirmed for land; basis: reviewed |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Strafe_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 | UnitCollisionClass | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | WLPA-35 | 1450 | include/eawr/skirmish/land_content.hpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
-| Uses_Multiple_Locomotors | todo | application not recorded | — | 3776 | — | no land reader found; basis: reviewed |
+| Uses_Multiple_Locomotors | partial | land types that use a secondary locomotor (include/eawr/skirmish/land_content.hpp); missing: the jump locomotor profile and its movement (land movement ticket) | WLAB-16 | 7084 | include/eawr/skirmish/land_content.hpp | The land loader keeps the names and the content marks the types that use a secondary locomotor; JET_PACK records the switch (WLAB-16). No locomotor profile is bound for the secondary one yet.; basis: reviewed |
+| UseSecondaryFacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## HeroUnit, SpecialStructure, Squadron, UniqueUnit
 
@@ -356,11 +883,92 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Custom_Hard_XExtent_Offset | partial | craft, ship, station (src/sim/tactical/session_state.cpp); missing: movement | V-21 | 649 | src/sim/tactical/session_state.cpp | Applied to multisample fog boxes; movement tracking offsets remain pending.; basis: reviewed |
 
+## HomeWorldObjects
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| HomeWorldObject/Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| HomeWorldObject/Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| HomeWorldObject/Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| HomeWorldObject/Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| HomeWorldObject/Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Indigenous_Passive
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Avoidance_Disabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Begin_Turn_Towards_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| FormationGrouping | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| FormationRaggedness | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Has_Pre_Turn_Anim | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Hover_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MaxFacingLookAheadFrames | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Min_Speed_Fraction_For_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MinimumPushReturnDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Prepare_Strafe_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Rotation_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Walk_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Indigenous_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Alternate_Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Alternate_Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Locomotor_Has_Animation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MaxSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MinSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MovementBoxExpansionFactor | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MovementPredictionInterval | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Overall_Length | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Overall_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Primary_Locomotor_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| SecondaryTurnAngle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| SecondaryTurnInPlaceROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| SecondaryTurnLookaheadDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Uses_Multiple_Locomotors | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| UseSecondaryFacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| WaitsForFormationFormup | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
 ## LightningEffect
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Rotations_Per_Second | partial | tractor and shield-leech lightning (apps/viewer/src/battle_effects_projectiles.cpp); missing: other lightning effects | TBF-06, TBF-07, TBF-08 | 649 | apps/viewer/src/battle_effects_projectiles.cpp | Tractor and shield-leech authored lightning; other consumers remain incomplete.; basis: reviewed |
+
+## Marker
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Avoidance_Disabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Snap_Movement_Orders_To_Center | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 
 ## Marker, MiscObject, Mobile_Defense_Unit, Projectile, SpaceProp
 
@@ -372,7 +980,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Behavior | partial | Projectile (apps/viewer/src/battle_effects_prepare.cpp); GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); whole class (src/scene/scene_build.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: ungated defaults, refined/combined objects, live behavior dispatch | WPJ-38; WGT-121; C-05, D-04, L-05, L-23, L-43; WLPA-07, WLPA-09; WLPA-03, WLPA-07, WLPA-08 | 1450 | apps/viewer/src/battle_effects_prepare.cpp; src/campaign/conflict_entry.cpp; src/scene/scene_build.cpp; src/skirmish/land_start.cpp; src/units/unit_tables_land.cpp | Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: auto |
+| Behavior | partial | Projectile (apps/viewer/src/battle_effects_prepare.cpp); GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); whole class (src/scene/scene_build.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: ungated defaults, refined/combined objects, live behavior dispatch | WPJ-38; WGT-121; C-05, D-04, L-05, L-23, L-43; WLPA-07, WLPA-09; WLPA-03, WLPA-07, WLPA-08 | 1450 | apps/viewer/src/battle_effects_prepare.cpp; src/campaign/conflict_entry.cpp; src/scene/scene_build.cpp; src/skirmish/land_start.cpp; src/units/unit_tables_land.cpp | Land static marker HIDE_WHEN_FOGGED is read and published; presentation consumer pending L6 P2. DUMMY_TOOLTIP is read as presentation data. Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: auto |
 
 ## Marker, Projectile, SpaceProp
 
@@ -396,21 +1004,88 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Obstacle_X_Offset | partial | ordinary static LAND_OBSTACLE instances at initialization (include/eawr/skirmish/land_content.hpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: non-obstacle roles, combined-object geometry and live invalidation | WLPA-61, WLPA-62, WLPA-63, WLPA-64, WLPA-65, WLPA-66; WLPA-07, WLPA-09; WLPA-03, WLPA-07, WLPA-08 | 1450 | include/eawr/skirmish/land_content.hpp; src/skirmish/land_start.cpp; src/units/unit_tables_land.cpp | Ordinary land static initialization uses model/proxy collision geometry, true refinement default and behavior passability; raw enum-bit qualification remains explicit. |
 | Obstacle_Y_Offset | partial | ordinary static LAND_OBSTACLE instances at initialization (include/eawr/skirmish/land_content.hpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: non-obstacle roles, combined-object geometry and live invalidation | WLPA-61, WLPA-62, WLPA-63, WLPA-64, WLPA-65, WLPA-66; WLPA-07, WLPA-09; WLPA-03, WLPA-07, WLPA-08 | 1450 | include/eawr/skirmish/land_content.hpp; src/skirmish/land_start.cpp; src/units/unit_tables_land.cpp | Ordinary land static initialization uses model/proxy collision geometry, true refinement default and behavior passability; raw enum-bit qualification remains explicit. |
 
+## MenuObject
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
 ## MiscObject
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Avoidance_Disabled | todo | application not recorded | — | 3776 | — | No reader on origin/main (grep src/include/apps/tests, literal and snake_case forms); basis: reviewed |
 | Behavior | partial | GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); whole class (src/scene/scene_build.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); held skirmish upgrades with DUMMY_DESTROY_AFTER_SPECIAL_WEAPON_FIRED (src/sim/tactical/session_cmd_targeted.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); source-bearing map placements (src/skirmish/start.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: ungated defaults, refined/combined objects, live behavior dispatch | WGT-121; C-05, D-04, L-05, L-23, L-43; WCC-25; WSW-08, WSW-09, WSW-10, WSW-11; WNO-16, WTA-29; WLPA-07, WLPA-09; WSW-01; WLPA-03, WLPA-07, WLPA-08 | 1450 | src/campaign/conflict_entry.cpp; src/scene/scene_build.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_cmd_targeted.cpp; src/sim/tactical/session_step_combat.cpp; src/skirmish/land_start.cpp; src/skirmish/start.cpp; src/units/unit_tables_land.cpp | WCC-25: SPECIAL_WEAPON and DUMMY_STAR_BASE admission uses Behavior for loaded unit and structure candidates; projectiles, particles and map markers retain their scene or presentation consumers. HCB-12a..12f: Multiplayer_Beacon_Type objects author MULTIPLAYER_BEACON in Behavior. Their agreed setup consumes only the resolved beacon type and Beacon_Lifetime_In_Secs; Affiliation, Behavior and Tactical_Health are not beacon inputs. Other MiscObject consumers retain their application and trace requirements. Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: reviewed |
+| Collision_Box_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Crouch_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationSpacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace_Fleet_Reveal_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Locomotor_Has_Animation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Mass | todo | application not recorded | — | 3776 | — | no land reader found; basis: reviewed |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Rotation_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Snap_Movement_Orders_To_Center | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 | SpaceBehavior | applied | whole class (src/scene/idle_tags.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); source-bearing map placements (src/skirmish/start.cpp); Dummy_Barrage_Target (src/units/unit_tables_decode.cpp) | BP-31, R-ROT-01, RO-1; WCC-25; WSW-01; WAD-38 | — | src/scene/idle_tags.cpp; src/sim/tactical/combat_targeting.cpp; src/skirmish/start.cpp; src/units/unit_tables_decode.cpp | basis: reviewed |
+| Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 | UnitCollisionClass | todo | application not recorded | — | 3776 | — | no land member reader for MiscObject found; basis: reviewed |
+| Walk_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## MiscObject, SecondaryStructure, SpaceStructure, SpaceUnit, SpecialStructure, StarBase, UniqueUnit
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Layer_Z_Adjust | applied | whole class (src/battle/start.cpp) | LZ-01, LZ-02 | — | src/battle/start.cpp | &#35;718: every start object is created at its placement point raised by its type's height; basis: reviewed |
+
+## Mission_Object
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hover_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Retreat_Self_Destruct_Explosion | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 
 ## Mobile_Defense_Unit
 
@@ -440,6 +1115,32 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Behavior | partial | GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); whole class (src/scene/scene_build.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); held skirmish upgrades with DUMMY_DESTROY_AFTER_SPECIAL_WEAPON_FIRED (src/sim/tactical/session_cmd_targeted.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); source-bearing map placements (src/skirmish/start.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: ungated defaults, refined/combined objects, live behavior dispatch | WGT-121; C-05, D-04, L-05, L-23, L-43; WCC-25; WSW-08, WSW-09, WSW-10, WSW-11; WNO-16, WTA-29; WLPA-07, WLPA-09; WSW-01; WLPA-03, WLPA-07, WLPA-08 | 1450 | src/campaign/conflict_entry.cpp; src/scene/scene_build.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_cmd_targeted.cpp; src/sim/tactical/session_step_combat.cpp; src/skirmish/land_start.cpp; src/skirmish/start.cpp; src/units/unit_tables_land.cpp | WCC-25: SPECIAL_WEAPON and DUMMY_STAR_BASE admission uses Behavior for loaded unit and structure candidates; projectiles, particles and map markers retain their scene or presentation consumers. Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: reviewed |
 
+## MoveAction
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Move_Animation_Speedup | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Move_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## MultiplayerStructureMarker
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Particle
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## PermanentWeaponSwapAbility
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| COMBAT_MOD_SPEED | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
 ## Planet
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
@@ -451,6 +1152,8 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Avoidance_Disabled | todo | application not recorded | — | 649 | — | family: weapons-shields; no loader or consumer.; basis: reviewed |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Projectile_Acceleration_Per_Frame | todo | application not recorded | — | 649 | — | family: weapons-shields; no loader or consumer.; basis: reviewed |
 | Projectile_Bomb_Fall_Accel_Rate | todo | application not recorded | — | 3776 | — | Falling-bomb flight absent (WPJ-19, G2); basis: reviewed |
 | Projectile_Grenade_Sticks_On_Collision | todo | application not recorded | — | 649 | — | family: weapons-shields; no loader or consumer.; basis: reviewed |
@@ -463,6 +1166,449 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | UnitCollisionClass | partial | land company members (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | WLPA-35 | 1450 | include/eawr/skirmish/land_content.hpp | Mixed ground/space, space carriers on HeroUnit: Boba_Fett, Bossk, Chewbacca, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo, IG-88 (+11 more). Mixed ground/space, space carriers on UniqueUnit: Underworld_Vehicle_Transport_Cinematic_Landing, Underworld_Vehicle_Transport_Landing_Saleucami_CIN. Mixed ground/space, space carriers on UniqueUnit: Underworld_Vehicle_Transport_Cinematic_Landing, Underworld_Vehicle_Transport_Landing_Saleucami_CIN. Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
+
+## Prop_Bespin
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Prop_Christophis
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Prop_Community
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Prop_Community_Space
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Prop_Felucia
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Prop_Forest
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Prop_Geonosis
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Prop_Industrial
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Avoidance_Disabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Prop_Jungle
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Prop_Kamino
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Prop_Misc
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Prop_Naboo
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Prop_Ord_Mantell
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Prop_Rock
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Prop_Terrain
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Avoidance_Disabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Snap_Movement_Orders_To_Center | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Prop_Townbuilding
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Prop_Tree
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Prop_Vehicle
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationGrouping | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationSpacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MinimumPushReturnDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Overall_Length | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Overall_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Prop_Wildlife
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Avoidance_Disabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Begin_Turn_Towards_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| FormationGrouping | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationRaggedness | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Has_Pre_Turn_Anim | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hover_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MaxFacingLookAheadFrames | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed_Fraction_For_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Prepare_Strafe_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Rotation_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Strafe_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Base
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Props_Bastion
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Props_BBS
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Props_Christophsis
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Props_Coresaga
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Overall_Length | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Overall_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Coruscant
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Props_Farm
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Props_FotROnly
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Generic
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Industrial
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Props_PortedAotR
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Avoidance_Disabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationGrouping | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationSpacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MinimumPushReturnDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Overall_Length | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Overall_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Snap_Movement_Orders_To_Center | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Ruins
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Props_Space
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Space_Asteroids
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Space_Low_Orbit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Props_Space_Nebula
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Space_Stations
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Stargate
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Debris_Facing_Rotate_Vector | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Debris_Movement_Vector | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Super
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Props_Swamp
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Tatooine
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Urban
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Props_Urban_RaW2
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Props_Wave
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## RetreatProtectionAbility
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Retreat_Loss_Mitigation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## SecondaryStructure, SpaceBuildable, SpaceProp, SpaceStructure, SpecialStructure, StarBase
 
@@ -483,6 +1629,33 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Max_Pitch | applied | whole class (src/presentation/audio/sfx.cpp) | BA-08 | — | src/presentation/audio/sfx.cpp | basis: auto |
 | Min_Pitch | applied | whole class (src/presentation/audio/sfx.cpp) | BA-08 | — | src/presentation/audio/sfx.cpp | basis: auto |
 
+## Space_Indigenous_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Space_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
 ## SpaceBuildable
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
@@ -492,6 +1665,12 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Tractor_Beam_Attack_Ability/Applicable_Unit_Types | partial | ship (src/sim/tactical/session_cmd_abilities.cpp); missing: U-09: excluded locomotor identity, exact timer scaling and AI/autofire policy | WHE-26, WHE-27, WHE-57, WHE-58, WHE-59, WHE-60 | 940 | src/sim/tactical/session_cmd_abilities.cpp | G7 applies traced beam services, target geometry, hardpoint lock/loss and source/category tractor speed. U-09 uses supported ship locomotors and conservative recharge; atlas animation remains separate.; basis: reviewed |
 | Abilities/Tractor_Beam_Attack_Ability/Excluded_Unit_Types | partial | ship (src/sim/tactical/session_cmd_abilities.cpp); missing: U-09: excluded locomotor identity, exact timer scaling and AI/autofire policy | WHE-26, WHE-27, WHE-57, WHE-58, WHE-59, WHE-60 | 940 | src/sim/tactical/session_cmd_abilities.cpp | G7 applies traced beam services, target geometry, hardpoint lock/loss and source/category tractor speed. U-09 uses supported ship locomotors and conservative recharge; atlas animation remains separate.; basis: reviewed |
 | Behavior | partial | GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); whole class (src/scene/scene_build.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); SpaceBuildable (src/sim/tactical/session_economy.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); SpaceBuildable (src/units/unit_tables_profiles.cpp); missing: ungated defaults, refined/combined objects, live behavior dispatch | WGT-121; C-05, D-04, L-05, L-23, L-43; WCC-25; WBP-30, WBP-31, WBP-32; WLPA-07, WLPA-09; WLPA-03, WLPA-07, WLPA-08; WSU-15, WSU-19, WSU-21 | 1450 | src/campaign/conflict_entry.cpp; src/scene/scene_build.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_economy.cpp; src/skirmish/land_start.cpp; src/units/unit_tables_land.cpp; src/units/unit_tables_profiles.cpp | Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: reviewed |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Hyperspace_Fleet_Reveal_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Retreat_Self_Destruct_Explosion | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 | SpaceBehavior | applied | whole class (src/scene/idle_tags.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); SpaceBuildable (src/sim/tactical/session_economy.cpp); SpaceBuildable (src/units/unit_tables_profiles.cpp) | BP-31, R-ROT-01, RO-1; WCC-25; WBP-30, WBP-31, WBP-32; WSU-15, WSU-19, WSU-21 | — | src/scene/idle_tags.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_economy.cpp; src/units/unit_tables_profiles.cpp | basis: reviewed |
 | Turret_Rotate_Speed | partial | space objects declaring TURRET (src/sim/tactical/combat_aim.cpp); missing: non-TURRET objects and manual hardpoint interfaces not covered by the ordinary object path | UA-05, WWP-17 | 4532 | src/sim/tactical/combat_aim.cpp | UA-05: ordinary space objects declaring TURRET load mechanical aim, gate firing on readiness and pose turret/barrel bones; manual cannon behavior remains separate.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
 
@@ -502,6 +1681,43 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Tractor_Beam_Attack_Ability/Activation_Max_Range | partial | ship (src/sim/tactical/session_abilities.cpp); missing: U-09: excluded locomotor identity, exact timer scaling and AI/autofire policy | WHE-26, WHE-27, WHE-57, WHE-58, WHE-59, WHE-60 | 940 | src/sim/tactical/session_abilities.cpp | G7 applies traced beam services, target geometry, hardpoint lock/loss and source/category tractor speed. U-09 uses supported ship locomotors and conservative recharge; atlas animation remains separate. WHE-58: authored distance has no 65536 ceiling; checked subtraction preserves extent-adjusted equality.; basis: reviewed |
 | Abilities/Tractor_Beam_Attack_Ability/Activation_Min_Range | partial | ship (src/sim/tactical/session_abilities.cpp); missing: U-09: excluded locomotor identity, exact timer scaling and AI/autofire policy | WHE-26, WHE-27, WHE-57, WHE-58, WHE-59, WHE-60 | 940 | src/sim/tactical/session_abilities.cpp | G7 applies traced beam services, target geometry, hardpoint lock/loss and source/category tractor speed. U-09 uses supported ship locomotors and conservative recharge; atlas animation remains separate. WHE-58: authored distance has no 65536 ceiling; checked subtraction preserves extent-adjusted equality.; basis: reviewed |
 | Abilities/Tractor_Beam_Attack_Ability/Target_Speed_Decrease_Percent | partial | ship (src/sim/tactical/session_cmd_abilities.cpp); missing: U-09: excluded locomotor identity, exact timer scaling and AI/autofire policy | WHE-26, WHE-27, WHE-57, WHE-58, WHE-59, WHE-60 | 940 | src/sim/tactical/session_cmd_abilities.cpp | G7 applies traced beam services, target geometry, hardpoint lock/loss and source/category tractor speed. U-09 uses supported ship locomotors and conservative recharge; atlas animation remains separate.; basis: reviewed |
+
+## SpaceFauna
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## SpaceHero
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## SpacePrimarySkydome, SpaceSecondarySkydome
 
@@ -521,9 +1737,45 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Behavior | partial | whole class (apps/viewer/src/battle_source_local.cpp); whole class (apps/viewer/src/battle_source_replay.cpp); GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); whole class (src/scene/scene_build.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); source-bearing map placements (src/skirmish/start.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: ungated defaults, refined/combined objects, live behavior dispatch | FW-24; FW-24; WGT-121; C-05, D-04, L-05, L-23, L-43; WNO-16, WTA-29; WLPA-07, WLPA-09; WSW-01; WLPA-03, WLPA-07, WLPA-08 | 1450 | apps/viewer/src/battle_source_local.cpp; apps/viewer/src/battle_source_replay.cpp; src/campaign/conflict_entry.cpp; src/scene/scene_build.cpp; src/sim/tactical/session_step_combat.cpp; src/skirmish/land_start.cpp; src/skirmish/start.cpp; src/units/unit_tables_land.cpp | Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: reviewed |
 | Custom_Soft_Footprint_Radius | applied | whole class (src/sim/tactical/combat_targeting.cpp); whole class (src/units/unit_motion.cpp) | A-07, DG-23, OR-03, R-11, W-05, WWP-21, WWP-27; AV-05 | — | src/sim/tactical/combat_targeting.cpp; src/units/unit_motion.cpp | basis: auto; trace: unrecorded |
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Space_Layer | applied | whole class (src/units/unit_motion.cpp) | AV-01, S-12 | — | src/units/unit_motion.cpp | basis: auto; trace: unrecorded |
 | Space_Obstacle_Radius | applied | whole class (src/sim/tactical/combat_targeting.cpp); whole class (src/units/unit_motion.cpp) | A-07, DG-23, OR-03, R-11, W-05, WWP-21, WWP-27; AV-05 | — | src/sim/tactical/combat_targeting.cpp; src/units/unit_motion.cpp | basis: auto; trace: unrecorded |
 | SpaceBehavior | applied | whole class (apps/viewer/src/battle_source_local.cpp); whole class (apps/viewer/src/battle_source_replay.cpp); whole class (src/scene/idle_tags.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); source-bearing map placements (src/skirmish/start.cpp) | FW-24; FW-24; BP-31, R-ROT-01, RO-1; WNO-16, WTA-29; WSW-01 | — | apps/viewer/src/battle_source_local.cpp; apps/viewer/src/battle_source_replay.cpp; src/scene/idle_tags.cpp; src/sim/tactical/session_step_combat.cpp; src/skirmish/start.cpp | basis: reviewed |
+
+## SpaceProp_Breakoff
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Debris_Facing_Rotate_Vector | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Debris_Movement_Vector | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## SpaceProp_LowOrbit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## SpaceProp_Obstacle
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## SpaceProp_Planet
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## SpaceProp_PlanetScape
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## SpaceStructure
 
@@ -537,15 +1789,30 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Abilities/Super_Laser_Ability/Turn_Rate | todo | application not recorded | — | 760 | — | family: abilities; no loader or consumer for this ability/tag in a tactical battle.; basis: reviewed |
+| Abilities/Super_Laser_Ability/Turn_Rate | applied | ship (src/sim/tactical/session_abilities.cpp) | WSPL-08 | — | src/sim/tactical/session_abilities.cpp | &#91;super laser&#93; applied with the SUPER_LASER handler (WSPL-08, WSPL-09).; basis: reviewed |
 | Avoid_Enemy_Exclusion_Range | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
 | Behavior | partial | session-owned map placements (apps/viewer/src/battle_source_local.cpp); session-owned map placements (apps/viewer/src/battle_source_replay.cpp); galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); whole class (src/scene/scene_build.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); craft, ship (src/sim/tactical/session_step_systems.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); craft, ship (src/units/unit_motion.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); SpaceUnit (src/units/unit_tables_profiles.cpp); missing: other galactic behavior dispatch, ungated defaults, refined/combined objects, live behavior dispatch | FW-24; FW-24; WAR-24; WGT-121; C-05, D-04, L-05, L-23, L-43; WCC-25; WNO-16, WTA-29; WHZ-20, WHZ-21, WHZ-22, WHZ-25; WLPA-07, WLPA-09; WHZ-20; WLPA-03, WLPA-07, WLPA-08; WSU-15, WSU-19, WSU-21 | 1450 | apps/viewer/src/battle_source_local.cpp; apps/viewer/src/battle_source_replay.cpp; src/campaign/auto_resolve_strength.cpp; src/campaign/conflict_entry.cpp; src/scene/scene_build.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_step_combat.cpp; src/sim/tactical/session_step_systems.cpp; src/skirmish/land_start.cpp; src/units/unit_motion.cpp; src/units/unit_tables_land.cpp; src/units/unit_tables_profiles.cpp | Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice. Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: reviewed |
+| Can_Hyperspace_Without_Activating_Ability | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Hyperspace_Fleet_Reveal_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Movement_Directions_Count | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 | Space_Layer | applied | ship (src/units/unit_motion.cpp) | AV-01, AV-21, MV-01 | — | src/units/unit_motion.cpp | &#35;853 reassessment: craft do not author this tag, so the check has no craft baseline node. The debug build keeps their default of no layer (AV-21); motion_table excludes craft from ship profiles and footprints, preserving that default. Authored ship layers remain applied (AV-01, MV-01); no missing craft layer implementation was found.; AV-21; basis: reviewed |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 | SpaceBehavior | partial | session-owned map placements (apps/viewer/src/battle_source_local.cpp); session-owned map placements (apps/viewer/src/battle_source_replay.cpp); galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); whole class (src/scene/idle_tags.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); craft, ship (src/sim/tactical/session_step_systems.cpp); craft, ship (src/units/unit_motion.cpp); loaded FIGHTER_LOCOMOTOR craft, including solo heroes (src/units/unit_tables_decode.cpp); SpaceUnit (src/units/unit_tables_profiles.cpp); missing: other galactic behavior dispatch | FW-24; FW-24; WAR-24; BP-31, R-ROT-01, RO-1; WCC-25; WNO-16, WTA-29; WHZ-20, WHZ-21, WHZ-22, WHZ-25; WHZ-20; WHE-SQ-02; WSU-15, WSU-19, WSU-21 | 4532 | apps/viewer/src/battle_source_local.cpp; apps/viewer/src/battle_source_replay.cpp; src/campaign/auto_resolve_strength.cpp; src/scene/idle_tags.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_step_combat.cpp; src/sim/tactical/session_step_systems.cpp; src/units/unit_motion.cpp; src/units/unit_tables_decode.cpp; src/units/unit_tables_profiles.cpp |  Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
 | Squadron_Capacity | applied | direct non-container galactic members (src/campaign/fleets.cpp) | WGM-24, WGM-87 | — | src/campaign/fleets.cpp | basis: reviewed |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Strafe_Distance | applied | craft (src/units/unit_motion.cpp) | FA-01 | — | src/units/unit_motion.cpp | basis: auto |
-| TSW_Post_Destruction_Wait_Frames | todo | application not recorded | — | 649 | — | family: abilities; no loader or consumer for this ability/tag in a tactical battle.; basis: reviewed |
-| Unit_Abilities_Data/Unit_Ability/Stop_When_Activated | todo | application not recorded | — | 760 | — | family: abilities; no loader or consumer for this ability/tag in a tactical battle.; basis: reviewed |
+| TSW_Post_Destruction_Wait_Frames | applied | TACTICAL_SUPER_WEAPON objects (src/sim/tactical/session_step_tsw.cpp) | TSW-10, TSW-11 | — | src/sim/tactical/session_step_tsw.cpp | Read into the unit table (TSW-02) as frames. The debris creation loads the S10 post wait of this many frames; the sequence completes and releases the victory hold after it (TSW-10, TSW-11).; basis: reviewed |
+| Unit_Abilities_Data/Unit_Ability/Stop_When_Activated | partial | space SELF_DESTRUCT (src/sim/tactical/abilities.cpp); missing: other ability kinds | WSD-02 | 6244 | src/sim/tactical/abilities.cpp | SELF_DESTRUCT stops and locks movement when enabled by the authored flag; other consumers remain open.; basis: reviewed |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| WaitsForFormationFormup | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## SpaceUnit, SpecialStructure
 
@@ -583,19 +1850,103 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Max_Lift | applied | craft (src/units/unit_motion.cpp); ship: foc-ignores | FM-04, FM-06 | — | src/units/unit_motion.cpp | WMV-40; ship: debug build: ordinary layered ship path flight ignores Max_Thrust and Max_Lift; craft flight consumes them (docs/behaviour/walks/movement.md WMV-40). Max_Thrust also has an optional Keep_Moving_In_Battle attack-positioning consumer, retained as an explicit gap.; basis: reviewed |
 | Max_Rate_Of_Roll | applied | whole class (src/units/unit_motion.cpp) | BK-01, C-18, C-19, FM-03 | — | src/units/unit_motion.cpp | basis: auto |
 | Min_Speed | applied | craft (src/units/unit_motion.cpp); ship: foc-ignores | FM-01, FO-11 | — | src/units/unit_motion.cpp | WMV-41; ship: debug build: ordinary layered ship path flight has no Min_Speed floor; the coordinator fetches it but uses minimum-speed ratios only in its no-layer formation merge branch (docs/behaviour/walks/movement.md WMV-41).; basis: reviewed |
-| Min_Speed_Fraction_For_Turn | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
+| Min_Speed_Fraction_For_Turn | partial | land company members (include/eawr/skirmish/land_content.hpp); land company members (src/sim/tactical/land_movement.cpp); missing: objects outside adapted land companies, space bodies | none recorded; none recorded | 649 | include/eawr/skirmish/land_content.hpp; src/sim/tactical/land_movement.cpp | WLPA-90: the land adapter carries the authored fraction (clamped to 0..1, default 0) in the locomotion profile; a land corner below it stops the walk to turn in place. Space motion has no consumer. The retail corner merge/shift step it also enables is not reproduced.; basis: reviewed |
 | OverrideAcceleration | partial | land company members (include/eawr/skirmish/land_content.hpp); ship (src/units/unit_motion.cpp); missing: SpaceUnit objects outside adapted land companies, UniqueUnit objects outside adapted land companies; craft: foc-ignores | MV-01; MV-01, WMV-42 | 1450 | include/eawr/skirmish/land_content.hpp; src/units/unit_motion.cpp |  Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; craft: debug build: craft flight uses Max_Thrust rather than OverrideAcceleration or OverrideDeceleration; ordinary ship flight consumes the overrides (docs/behaviour/walks/movement.md WMV-42). OverrideDeceleration also bounds no-layer formation correction using member-type data; its formation default is zero with no ordinary-flight fallback.; basis: reviewed |
 | OverrideDeceleration | partial | land company members (include/eawr/skirmish/land_content.hpp); craft (src/sim/tactical/fighters_formation.cpp); ship (src/units/unit_motion.cpp); missing: SpaceUnit objects outside adapted land companies, UniqueUnit objects outside adapted land companies | MV-01; WMV-42, WMV-44; MV-01, WMV-42 | 1450 | include/eawr/skirmish/land_content.hpp; src/sim/tactical/fighters_formation.cpp; src/units/unit_motion.cpp | WMV-42/44: ordinary craft flight still uses Max_Thrust; no-layer formation upkeep applies the member type deceleration through its own squadron profile, including standalone Millennium_Falcon. Squadron containers never inherit a child craft override here. Absent or zero values cap positive correction at formation speed. Authored land-company adapter applies this value; raw passability bits, collision ordering and animation completion are explicit gates (docs/behaviour/land-content-adapter.md).; basis: reviewed |
 | Space_Full_Stop_Command | todo | application not recorded | — | 649 | — | family: movement; no loader or consumer in the space motion code.; basis: reviewed |
+
+## Special_Tags
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Hover_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Primary_Locomotor_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Secondary_Locomotor_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Uses_Multiple_Locomotors | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Special_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| FormationGrouping | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationRaggedness | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationSpacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Has_Pre_Turn_Anim | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| IsDeathCloneObstacle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Locomotor_Has_Animation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MaxSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed_Fraction_For_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MinimumPushReturnDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MinSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementBoxExpansionFactor | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementPredictionInterval | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Overall_Length | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Overall_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Rotation_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| SecondaryTurnAngle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| SecondaryTurnInPlaceROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| SecondaryTurnLookaheadDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| UseSecondaryFacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Walk_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## SpecialAbilityData
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Disable_Movement | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## SpecialStructure
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Collision_Box_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Obstacle_Proxy_Type | partial | ordinary static LAND_OBSTACLE instances at initialization (include/eawr/skirmish/land_content.hpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: non-obstacle roles, combined-object geometry and live invalidation | WLPA-61, WLPA-62, WLPA-63, WLPA-64, WLPA-65, WLPA-66; WLPA-07, WLPA-09; WLPA-03, WLPA-07, WLPA-08 | 1450 | include/eawr/skirmish/land_content.hpp; src/skirmish/land_start.cpp; src/units/unit_tables_land.cpp | Ordinary land static initialization uses model/proxy collision geometry, true refinement default and behavior passability; raw enum-bit qualification remains explicit. |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Retreat_Self_Destruct_Explosion | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | SecondaryOccupationPassability | partial | ordinary static LAND_OBSTACLE instances at initialization (include/eawr/skirmish/land_content.hpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: non-obstacle roles, combined-object geometry and live invalidation | WLPA-61, WLPA-62, WLPA-63, WLPA-64, WLPA-65, WLPA-66; WLPA-07, WLPA-09; WLPA-03, WLPA-07, WLPA-08 | 1450 | include/eawr/skirmish/land_content.hpp; src/skirmish/land_start.cpp; src/units/unit_tables_land.cpp | Ordinary land static initialization uses model/proxy collision geometry, true refinement default and behavior passability; raw enum-bit qualification remains explicit. |
 | Space_Layer | applied | whole class (src/units/unit_motion.cpp) | AV-01, S-12 | — | src/units/unit_motion.cpp | WSW-01/14/21: planetary SPECIAL_WEAPON sources do not use ordinary space-body inputs.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | UnitCollisionClass | partial | land battle objects (include/eawr/units/land_companies.hpp); missing: land battle consumers (see note) | WLPA-73 | 3776 | include/eawr/units/land_companies.hpp | class read and ordered like Mobile_Defense_Unit; bunker-specific use not pinned; basis: reviewed |
+
+## SpecialStructures
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| HomeWorldObject/Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| OrbitalStructure/Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| StagStructure/Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| StagStructure/Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 
 ## Squadron
 
@@ -605,15 +1956,61 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Autonomous_Move_Extension_Vs_Attacker | partial | squadron (src/sim/tactical/session_step_combat.cpp); missing: historical escort threat | WMV-17, WTA-29 | 4532 | src/sim/tactical/session_step_combat.cpp | WTA-29 applies the Squadron purchase type extension to accepted self-damage and same-frame escort-damage notifications. Historical escort threats await the general damage-tracking interface. Other object-class loaders retain their existing movement coverage boundary.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
 | Behavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); whole class (src/scene/scene_build.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); squadron (src/sim/tactical/session_step_systems.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); squadron (src/units/unit_motion.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: other galactic behavior dispatch, ungated defaults, refined/combined objects, live behavior dispatch | WAR-24; WGT-121; C-05, D-04, L-05, L-23, L-43; WNO-16, WTA-29; WHZ-20, WHZ-21, WHZ-22, WHZ-25; WLPA-07, WLPA-09; WHZ-20; WLPA-03, WLPA-07, WLPA-08 | 1450 | src/campaign/auto_resolve_strength.cpp; src/campaign/conflict_entry.cpp; src/scene/scene_build.cpp; src/sim/tactical/session_step_combat.cpp; src/sim/tactical/session_step_systems.cpp; src/skirmish/land_start.cpp; src/units/unit_motion.cpp; src/units/unit_tables_land.cpp | Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice. Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: reviewed |
 | Guard_Chase_Range | applied | squadron (src/units/unit_motion.cpp) | FT-02, OR-11, OR-13 | — | src/units/unit_motion.cpp | basis: auto |
+| Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | SpaceBehavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); whole class (src/scene/idle_tags.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); squadron (src/sim/tactical/session_step_systems.cpp); squadron (src/units/unit_motion.cpp); missing: other galactic behavior dispatch | WAR-24; BP-31, R-ROT-01, RO-1; WNO-16, WTA-29; WHZ-20, WHZ-21, WHZ-22, WHZ-25; WHZ-20 | 4532 | src/campaign/auto_resolve_strength.cpp; src/scene/idle_tags.cpp; src/sim/tactical/session_step_combat.cpp; src/sim/tactical/session_step_systems.cpp; src/units/unit_motion.cpp |  Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
+| Use_Smooth_Formation_Movement | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| WaitsForFormationFormup | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## StarBase
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Behavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); whole class (src/scene/scene_build.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); station (src/sim/tactical/session_step_systems.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); station (src/units/unit_motion.cpp); station (src/units/unit_motion.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); StarBase (src/units/unit_tables_profiles.cpp); missing: other galactic behavior dispatch, ungated defaults, refined/combined objects, live behavior dispatch | WAR-24; WGT-121; C-05, D-04, L-05, L-23, L-43; WCC-25; WNO-16, WTA-29; WHZ-20, WHZ-21, WHZ-22, WHZ-25; WLPA-07, WLPA-09; WSL-26; WHZ-20; WLPA-03, WLPA-07, WLPA-08; WSU-15, WSU-19, WSU-21 | 1450 | src/campaign/auto_resolve_strength.cpp; src/campaign/conflict_entry.cpp; src/scene/scene_build.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_step_combat.cpp; src/sim/tactical/session_step_systems.cpp; src/skirmish/land_start.cpp; src/units/unit_motion.cpp; src/units/unit_tables_land.cpp; src/units/unit_tables_profiles.cpp | Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice. Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: reviewed |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed_Fraction_For_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Space_Layer | applied | station (src/units/unit_motion.cpp) | AV-01, S-12 | — | src/units/unit_motion.cpp | &#35;853 reassessment: the 9000-tick M2 check changes structural tables but observes no battle change; the cited application remains, and this scenario does not prove its effect. Stations submit static-layer footprints (AV-01).; CHECK-842; basis: reviewed |
 | SpaceBehavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); whole class (src/scene/idle_tags.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); station (src/sim/tactical/session_step_systems.cpp); station (src/units/unit_motion.cpp); station (src/units/unit_motion.cpp); StarBase (src/units/unit_tables_profiles.cpp); missing: other galactic behavior dispatch | WAR-24; BP-31, R-ROT-01, RO-1; WCC-25; WNO-16, WTA-29; WHZ-20, WHZ-21, WHZ-22, WHZ-25; WSL-26; WHZ-20; WSU-15, WSU-19, WSU-21 | 4532 | src/campaign/auto_resolve_strength.cpp; src/scene/idle_tags.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_step_combat.cpp; src/sim/tactical/session_step_systems.cpp; src/units/unit_motion.cpp; src/units/unit_tables_profiles.cpp |  Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Tactical_Capturable
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Proxy_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Tactical_Structure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## TacticalCamera
 
@@ -629,27 +2026,243 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Yaw_Max | applied | whole class (src/presentation/camera/camera.cpp) | RO-7 | — | src/presentation/camera/camera.cpp | basis: auto |
 | Yaw_Min | applied | whole class (src/presentation/camera/camera.cpp) | RO-7 | — | src/presentation/camera/camera.cpp | basis: auto |
 
+## Template
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Begin_Turn_Towards_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Collision_Box_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| ContainerArrangement | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Crouch_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Custom_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Disallows_Hyperspace_Retreat | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Formation_Formup_Wait_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationGrouping | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationRaggedness | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationSpacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Has_Pre_Turn_Anim | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hover_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hover_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace_Fleet_Reveal_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| LateralAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Locomotor_Has_Animation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MaxFacingLookAheadFrames | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MaxSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed_Fraction_For_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Minimum_Follow_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MinimumPushReturnDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MinSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementPredictionInterval | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Proxy_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| On_Fire_Speed_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Overall_Length | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Overall_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Override_Acceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Override_Deceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Prepare_Strafe_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Rotation_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| SecondaryTurnAngle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| SecondaryTurnInPlaceROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| SecondaryTurnLookaheadDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Stationary_Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Strafe_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| UseSecondaryFacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| WaitsForFormationFormup | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Walk_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Template_Data
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Template/Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Begin_Turn_Towards_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Collision_Box_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/ContainerArrangement | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Crouch_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Custom_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/Disallows_Hyperspace_Retreat | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Formation_Formup_Wait_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/FormationGrouping | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/FormationRaggedness | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/FormationSpacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Has_Pre_Turn_Anim | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Hover_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Hover_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Hyperspace | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Hyperspace_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/LateralAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Locomotor_Has_Animation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/MaxFacingLookAheadFrames | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/MaxSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Min_Speed_Fraction_For_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Minimum_Follow_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/MinimumPushReturnDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/MinSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/MovementPredictionInterval | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/On_Fire_Speed_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Overall_Length | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/Overall_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/Override_Acceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Override_Deceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Prepare_Strafe_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Rotation_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/SecondaryTurnAngle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/SecondaryTurnInPlaceROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/SecondaryTurnLookaheadDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Stationary_Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Strafe_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Template/UseSecondaryFacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/WaitsForFormationFormup | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Template/Walk_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Template_Ground_Structure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Proxy_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_X_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Obstacle_Y_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
 ## Terrain_Effectiveness
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | */* | partial | live galactic auto-resolve (src/campaign/auto_resolve_live.cpp); missing: other tactical consumers | WAR-35 | 1965 | src/campaign/auto_resolve_live.cpp |  Live galactic auto-resolve reads the effective authored value; other tactical consumers remain outside this adapter.; basis: reviewed |
 
+## TIE_Bomber
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| HomeWorldObject/Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| HomeWorldObject/Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| HomeWorldObject/FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| HomeWorldObject/Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| HomeWorldObject/Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## TIE_Fighter
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| HomeWorldObject/Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| HomeWorldObject/Formation_Priority | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| HomeWorldObject/FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| HomeWorldObject/Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| HomeWorldObject/Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## TradeRoute
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Vessel_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## TransportUnit
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
+| Autonomous_Move_Extension_Vs_Attacker | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Avoidance_Disabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 | Bank_Turn_Angle | todo | application not recorded | — | 650 | — | family: other; transport hulls are not deployed as space bodies in a skirmish (WHE-07/49 keep them as metadata); the generic body loader would apply it.; basis: reviewed |
+| Begin_Turn_Towards_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Behavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: other galactic behavior dispatch, ungated defaults, refined/combined objects, live behavior dispatch | WAR-24; WGT-121; WLPA-07, WLPA-09; WLPA-03, WLPA-07, WLPA-08 | 1450 | src/campaign/auto_resolve_strength.cpp; src/campaign/conflict_entry.cpp; src/skirmish/land_start.cpp; src/units/unit_tables_land.cpp | WHE-07/49: the M2 resolver touches carried heroes, unselected transports and unique creation templates as metadata; the generic body or ability consumer for other classes is not applied to these scene objects. Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice. Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: reviewed |
+| Collision_Box_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 | Custom_Hard_XExtent | partial | land company member landing hard footprints (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | LC-79, LC-80 | 650 | include/eawr/skirmish/land_content.hpp | Positive authored hard extents or model collision extents are scaled for land landing slots; zero additional formation spacing retains this hard geometry. |
 | Custom_Hard_YExtent | partial | land company member landing hard footprints (include/eawr/skirmish/land_content.hpp); missing: objects outside adapted land companies | LC-79, LC-80 | 650 | include/eawr/skirmish/land_content.hpp | Positive authored hard extents or model collision extents are scaled for land landing slots; zero additional formation spacing retains this hard geometry. |
+| FormationOrder | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Guard_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Idle_Chase_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Layer_Z_Adjust | todo | application not recorded | — | 650 | — | family: other; transport hulls are not deployed as space bodies in a skirmish (WHE-07/49 keep them as metadata); the generic body loader would apply it.; basis: reviewed |
+| Max_Lift | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Max_Rate_Of_Roll | todo | application not recorded | — | 650 | — | family: other; transport hulls are not deployed as space bodies in a skirmish (WHE-07/49 keep them as metadata); the generic body loader would apply it.; basis: reviewed |
 | Max_Rate_Of_Turn | todo | application not recorded | — | 650 | — | family: other; transport hulls are not deployed as space bodies in a skirmish (WHE-07/49 keep them as metadata); the generic body loader would apply it.; basis: reviewed |
 | Max_Speed | todo | application not recorded | — | 650 | — | family: other; transport hulls are not deployed as space bodies in a skirmish (WHE-07/49 keep them as metadata); the generic body loader would apply it.; basis: reviewed |
 | Min_Speed | todo | application not recorded | — | 650 | — | family: other; transport hulls are not deployed as space bodies in a skirmish (WHE-07/49 keep them as metadata); the generic body loader would apply it.; basis: reviewed |
+| Min_Speed_Fraction_For_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Minimum_Follow_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Space_Layer | todo | application not recorded | — | 650 | — | family: other; transport hulls are not deployed as space bodies in a skirmish (WHE-07/49 keep them as metadata); the generic body loader would apply it.; basis: reviewed |
 | SpaceBehavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); whole class (src/presentation/live/live_units.cpp); missing: other galactic behavior dispatch | WAR-24; FW-24 | 4532 | src/campaign/auto_resolve_strength.cpp; src/presentation/live/live_units.cpp | WHE-07/49: the M2 company resolver touches carried hero or unselected transport metadata without deploying its body; the generic loader consumer for other classes is not applied to these scene objects. Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Strafe_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Turret_Elevate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Turret_Rotate_Extent_Degrees | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 
 ## TransportUnit, UniqueUnit
 
@@ -657,29 +2270,295 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | TacticalBehavior | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 
+## UGC_CE_Object
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## UGC_CE_Planets
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| UGC_CE_Planet/Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## UnderConstructionShip
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Underworld
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| DCUnit/Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DCUnit/Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DCUnit/Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DCUnit/Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DCUnit/Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| DCUnit/Max_Thrust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
 ## UniqueUnit
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Abilities/Concentrate_Fire_Attack_Ability/Target_Speed_Decrease_Percent | applied | concentrate-fire targets (src/sim/tactical/session_abilities.cpp); concentrate-fire activation and manual release (src/sim/tactical/session_cmd_abilities.cpp) | WHE-24, WHE-25; FD-01, WHE-25 | — | src/sim/tactical/session_abilities.cpp; src/sim/tactical/session_cmd_abilities.cpp | The negative authored fraction joins the shared source/category speed reduction and is removed on expiry or source deletion; stock Home One authors zero. Nonzero activation and manual release use the existing command replan transaction even for targets without abilities; synthetic expiry/release cases cover 1/2/4/8 workers.; basis: reviewed |
+| Alternate_Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Alternate_Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Apply_Y_Turret_Rotate_To_Axis | todo | application not recorded | — | 3776 | — | No code on the land path reads it (grep of src/apps finds no reader).; basis: reviewed |
 | Apply_Z_Turret_Rotate_To_Axis | todo | application not recorded | — | 3776 | — | No code on the land path reads it (grep of src/apps finds no reader).; basis: reviewed |
 | Attack_Move_Response_Range | partial | loaded fighter locomotor craft, including solo heroes (src/units/unit_motion.cpp); missing: nonfighter ships and containers | FT-02, WHE-SQ-02 | 649 | src/units/unit_motion.cpp | Fighter flight applies authored diversion ranges through the self-represented group; ship and container consumers remain open.; basis: reviewed |
+| Avoidance_Disabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
 | Behavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); GC map placements with MARKER behavior (src/campaign/conflict_entry.cpp); whole class (src/scene/scene_build.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); ship (src/sim/tactical/session_step_systems.cpp); ordinary static land obstacles with explicit content gates (src/skirmish/land_start.cpp); ship (src/units/unit_motion.cpp); ordinary static land obstacles with explicit content gates (src/units/unit_tables_land.cpp); missing: other galactic behavior dispatch, ungated defaults, refined/combined objects, live behavior dispatch | WAR-24; WGT-121; C-05, D-04, L-05, L-23, L-43; WCC-25; WNO-16, WTA-29; WHZ-20, WHZ-21, WHZ-22, WHZ-25; WLPA-07, WLPA-09; WHZ-20; WLPA-03, WLPA-07, WLPA-08 | 1450 | src/campaign/auto_resolve_strength.cpp; src/campaign/conflict_entry.cpp; src/scene/scene_build.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_step_combat.cpp; src/sim/tactical/session_step_systems.cpp; src/skirmish/land_start.cpp; src/units/unit_motion.cpp; src/units/unit_tables_land.cpp | Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice. Static land initialization applies only authored LAND_OBSTACLE candidates with explicit geometry/passability/refinement gates; see land-content-adapter.md.; basis: reviewed |
-| Close_Enough_Angle_For_Move_Start | todo | application not recorded | — | 3776 | — | No reader on origin/main (grep src/include/apps/tests, literal and snake_case forms); basis: reviewed |
+| Close_Enough_Angle_For_Move_Start | partial | land company members (include/eawr/skirmish/land_content.hpp); land company members (src/sim/tactical/land_movement.cpp); missing: objects outside adapted land companies, the game constants file value | none recorded; none recorded | 3776 | include/eawr/skirmish/land_content.hpp; src/sim/tactical/land_movement.cpp | WLPA-91: the land adapter converts the authored angle (degrees, over 360) into the locomotion profile; an unauthored or non-positive value is the stock game constant (180 degrees, not read from the constants file). A single object's start gate and re-order gate read it; the team container never does (it always turns in place first).; basis: reviewed |
 | Collidable_By_Projectile_Dead | todo | application not recorded | — | 3776 | — | Read into the land unit tables by shoot PR 1 (load_land_body, src/units/unit_tables_land.cpp) and bound into the land start content; the land step applies it in shoot PR 3 (docs/behaviour/walks/land-combat.md LC-26..36). |
+| Combat_Bonus_Ability/Movement_Speed_Bonus_Percentage | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Crouch_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Disallows_Hyperspace_Retreat | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | FormationGrouping | todo | application not recorded | — | 3776 | — | no land reader of FormationGrouping found on origin/main; basis: reviewed |
+| FormationRaggedness | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| FormationSpacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Guard_Chase_Range | partial | loaded fighter locomotor craft, including solo heroes (src/units/unit_motion.cpp); missing: nonfighter ships and containers | FT-02, WHE-SQ-02 | 649 | src/units/unit_motion.cpp | Fighter flight applies authored diversion ranges through the self-represented group; ship and container consumers remain open.; basis: reviewed |
+| Hyperspace_Fleet_Reveal_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| IsDeathCloneObstacle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| MaxFacingLookAheadFrames | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MaxSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MinSecondaryTurnROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Movement_Directions_Count | todo | application not recorded | — | 3776 | — | no land reader found; basis: reviewed |
 | MovementBoxExpansionFactor | todo | application not recorded | — | 3776 | — | no land reader found; basis: reviewed |
 | MovementPredictionInterval | todo | application not recorded | — | 3776 | — | no land reader found; basis: reviewed |
 | OccupationStyle | todo | application not recorded | — | 3776 | — | no land reader found; basis: reviewed |
+| Prepare_Strafe_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Primary_Locomotor_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Retreat_Self_Destruct_Explosion | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| SecondaryTurnAngle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| SecondaryTurnInPlaceROTCoefficient | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| SecondaryTurnLookaheadDistance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | SpaceBehavior | partial | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); whole class (src/scene/idle_tags.cpp); loaded combat candidates with SPECIAL_WEAPON or DUMMY_STAR_BASE (src/sim/tactical/combat_targeting.cpp); loaded UNIT_AI space units and runtime team containers (src/sim/tactical/session_step_combat.cpp); ship (src/sim/tactical/session_step_systems.cpp); ship (src/units/unit_motion.cpp); loaded FIGHTER_LOCOMOTOR craft, including solo heroes (src/units/unit_tables_decode.cpp); missing: other galactic behavior dispatch | WAR-24; BP-31, R-ROT-01, RO-1; WCC-25; WNO-16, WTA-29; WHZ-20, WHZ-21, WHZ-22, WHZ-25; WHZ-20; WHE-SQ-02 | 4532 | src/campaign/auto_resolve_strength.cpp; src/scene/idle_tags.cpp; src/sim/tactical/combat_targeting.cpp; src/sim/tactical/session_step_combat.cpp; src/sim/tactical/session_step_systems.cpp; src/units/unit_motion.cpp; src/units/unit_tables_decode.cpp |  Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
 | Squadron_Capacity | partial | direct non-container galactic members (src/campaign/fleets.cpp); missing: tactical fighter-capacity consumer | WGM-24, WGM-87 | 651 | src/campaign/fleets.cpp | basis: reviewed |
+| Stationary_Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 | Stopped_Rate_Of_Turn | todo | application not recorded | — | 3776 | — | read and required as a tag in land content (unit_tables_land.cpp:183 land_content.hpp:298) but no motion consumer pinned; basis: reviewed |
+| Strafe_Distance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Uses_Multiple_Locomotors | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UseSecondaryFacing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Walk_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Unit_Abilities_Data
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Berserker_Ability/Berserker_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Cable_Ability/Cable_End_Speed_Fraction | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Super_Laser_Ability/Turn_Rate | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Unit_Ability/Disable_Movement | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## UnregognizedObject
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
 
 ## UpgradeObject
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Abilities/Combat_Bonus_Ability/Movement_Speed_Bonus_Percentage | applied | whole class (src/sim/tactical/session_economy.cpp) | WPR-51 | — | src/sim/tactical/session_economy.cpp | basis: reviewed |
+
+## Vehicle_Lance_Walker
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| DCUnit/Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| DCUnit/Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| DCUnit/Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## W_Props_Defunct
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Yoden_GroundStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Yoden_Model_Hero
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Yoden_Model_Infantry
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Crouch_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Rotation_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Walk_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Yoden_Moving_Hero
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Rotation_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Yoden_Moving_Infantry
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Rotation_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Yoden_Moving_Vehicle
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Bank_Turn_Angle | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Has_Pre_Turn_Anim | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Hover_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Roll | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Max_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MaxFacingLookAheadFrames | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Min_Speed_Fraction_For_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Movement_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| MovementClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Overall_Length | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Overall_Width | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| OverrideAcceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| OverrideDeceleration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Prepare_Strafe_Height | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Rotation_Animation_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Stopped_Rate_Of_Turn | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Yoden_Prop_Desert
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Yoden_Prop_Forest
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Yoden_Prop_Snow
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| UnitCollisionClass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+
+## Yoden_Prop_Urban
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Yoden_Props_Generic
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Avoidance_Disabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_XExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Custom_Hard_YExtent | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Snap_Movement_Orders_To_Center | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Yoden_Props_Story
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Cinematic_Anim_Speed | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Facing_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Mass | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+
+## Yoden_SpaceProp
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Custom_Soft_Footprint_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Layer_Z_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Layer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.; basis: auto |
+| Space_Obstacle_Offset | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |
+| Space_Obstacle_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: PF.; basis: auto |

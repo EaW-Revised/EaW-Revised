@@ -6,12 +6,21 @@
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/data/ui/text_database.hpp"
+#include <godot_cpp/classes/color_rect.hpp>
+#include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <ostream>
 
 using namespace godot;
 namespace eawr::presentation::godot_backend {
 namespace {
+// GPD-02: the land map's picture shares the map's file name (`<map>.ted` -> `<map>.dds`; unverified against a retail frame, #5628).
+std::string land_map_picture_name(std::string name) {
+    std::replace(name.begin(), name.end(), '\\', '/');
+    if (const auto slash = name.find_last_of('/'); slash != std::string::npos) name.erase(0, slash + 1);
+    if (const auto dot = name.find_last_of('.'); dot != std::string::npos) name.erase(dot);
+    return name;
+}
 std::string first(const data::ui::CommandBarComponent& component, data::ui::Field field) {
     const auto values = component.list(field);
     return values.empty() ? std::string{} : values.front();
@@ -28,6 +37,15 @@ bool GalacticMode::State::build_radar_hud() {
         // Its radar consumes wheel input itself; bonus/zoom icons and empty art pass it.
         mask->set_force_pass_scroll_events(true);
         mask->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+        // GPD-30: the opened map is a full-screen shell with nothing of the galaxy behind it (the capture shows black
+        // outside the 4:3 backdrop). The rect sits under the shell and is shown with it.
+        auto* black = memnew(ColorRect);
+        black->set_name("AdvancedMapBlack");
+        black->set_color(Color(0, 0, 0, 1));
+        black->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        black->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+        black->hide();
+        mask->add_child(black);
         advanced_map_shell = memnew(EawrTacticalHud); mask->add_child(advanced_map_shell);
         EawrTacticalHud::Setup setup;
         setup.view = presentation::ui::hud_view_model(advanced_map_anchors, command_catalog,
@@ -147,14 +165,44 @@ void GalacticMode::State::build_advanced_map_labels() {
     };
     caption("unit_cap_text", "TEXT_UNIT_CAP");
     caption("building_cap_text", "TEXT_BUILDING_CAP");
-    for (const auto* name : {"Planet_name_text", "Planetary_Income_number", "Day_Counter_text", "unit_cap_text",
-             "unit_cap_number", "building_cap_text", "building_cap_number"}) {
+    // GPD-40: the tray's header and footer captions (the stock component for the footer is spelt `drage_drop_text`).
+    caption("ground_forces_text", "TEXT_GROUND_FORCES");
+    caption("drage_drop_text", "TEXT_DRAG_AND_DROP");
+    caption("back_button", "TEXT_BUTTON_BACK");
+    // GPD-31: the BACK button of the opened map returns to the focused planet view, like the zoom button. The face
+    // is its own icon art (gold-bordered) over the backdrop's recess; the caption is the label below.
+    if (const auto* component = command_catalog.find("back_button"); component && advanced_map_anchors.find("back_button")) {
+        auto* button = memnew(EawrHudButton);
+        button->set_sounds(*component, [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
+        advanced_map_shell->add_child(button);
+        button->set_name("back_button_hit");
+        button->set_texture_normal(command_texture(first(*component, data::ui::Field::icon_texture_name)));
+        button->set_texture_hover(command_texture(first(*component, data::ui::Field::mouse_over_texture_name)));
+        button->set_action([this] { static_cast<void>(request_hud_zoom(false, false)); });
+    }
+    // GPD-40: the original draws no income readout on the opened map, so `Planetary_Income_number` is not built.
+    for (const auto* name : {"Planet_name_text", "Day_Counter_text", "unit_cap_text", "unit_cap_number",
+             "building_cap_text", "building_cap_number", "back_button", "ground_forces_text", "drage_drop_text"}) {
         if (!advanced_map_anchors.find(name) || !command_catalog.find(name)) continue;
         auto* label = memnew(EawrHudText);
         label->set_name(name);
         label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
         advanced_map_shell->add_child(label);
         advanced_map_labels.emplace(name, label);
+    }
+    // GPD-44: the day-progress bar sits at the shell's `day_clock` bone. Its pips are the command bar's own
+    // (`balance_pip`), not built when the shell has no such bone or no day text row.
+    if (advanced_map_anchors.find("Day_Counter_text") && advanced_map_anchors.find_bone("day_clock")
+        && command_catalog.find("balance_pip")) {
+        for (std::size_t index = 0; index < advanced_map_pips.size(); ++index) {
+            auto* pip = memnew(TextureRect);
+            pip->set_name(String::utf8(("day_pip_" + std::to_string(index)).c_str()));
+            pip->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            pip->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+            advanced_map_shell->add_child(pip);
+            pip->hide();
+            advanced_map_pips[index] = pip;
+        }
     }
     if (advanced_map_anchors.find("Allegiance_A")) {
         advanced_map_allegiance = memnew(TextureRect);
@@ -164,43 +212,7 @@ void GalacticMode::State::build_advanced_map_labels() {
         advanced_map_shell->add_child(advanced_map_allegiance);
         advanced_map_allegiance->hide();
     }
-    for (std::size_t slot = 0; slot < land_fleet_buttons.size(); ++slot) {
-        const auto name = galactic_view::land_tray_slot_name(slot);
-        const auto* component = command_catalog.find(name);
-        if (!component || !advanced_map_anchors.find(name)) continue;
-        auto* button = memnew(EawrHudButton);
-        button->set_name(String::utf8(name.c_str()));
-        button->set_sounds(*component, [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
-        // Read-only tray: the button must not swallow map clicks, so it ignores the pointer and the
-        // rollover art is a separate non-blocking TextureRect shown while the pointer is over the slot.
-        button->set_mouse_filter(galactic_view::land_tray_takes_pointer ? Control::MOUSE_FILTER_STOP : Control::MOUSE_FILTER_IGNORE);
-        button->set_order_icon({}, false);
-        button->hide();
-        advanced_map_shell->add_child(button);
-        land_fleet_buttons[slot] = button;
-        auto* hover = memnew(TextureRect);
-        hover->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-        hover->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
-        hover->set_stretch_mode(TextureRect::STRETCH_SCALE);
-        hover->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
-        hover->set_texture(command_texture(first(*component, data::ui::Field::mouse_over_texture_name)));
-        hover->hide();
-        button->add_child(hover);
-        land_fleet_hover[slot] = hover;
-        auto* count = memnew(Label);
-        count->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-        const auto face = hud_fonts->resolve({std::string(component->text(data::ui::Field::font_name)),
-            component->integer(data::ui::Field::font_point_size).value_or(0)}, "english");
-        const int font_size = std::max(1, presentation::ui::font_pixel_height(face.point_size, camera.height));
-        count->add_theme_font_override("font", hud_fonts->command_font(face, font_size));
-        count->add_theme_font_size_override("font_size", font_size);
-        const auto colour = component->color(data::ui::Field::text_color).value_or(data::ui::Rgba8{255, 255, 255, 255});
-        count->add_theme_color_override("font_color", Color(colour.r / 255.0F, colour.g / 255.0F,
-            colour.b / 255.0F, colour.a / 255.0F));
-        count->add_theme_constant_override("outline_size", component->flag(data::ui::Field::text_outline) ? 1 : 0);
-        button->add_child(count);
-        land_fleet_counts[slot] = count;
-    }
+    build_land_tray();
     const auto make_pads = [&](auto& pads, const char* prefix) {
         for (std::size_t slot = 0; slot < pads.size(); ++slot) {
             const auto name = std::string(prefix) + (slot < 10 ? "0" : "") + std::to_string(slot);
@@ -210,12 +222,28 @@ void GalacticMode::State::build_advanced_map_labels() {
             pad->set_name(String::utf8(name.c_str()));
             pad->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
             pad->set_texture_normal(command_texture(first(*style, data::ui::Field::blank_texture_name)));
+            // The icon rectangle the occupant's icon goes into; without it set_icon_texture draws nothing (legacy #7168).
+            pad->set_order_icon({}, false);
             pad->set_disabled(true);
             pad->hide();
             advanced_map_shell->add_child(pad);
             pads[slot] = pad;
         }
     };
+    if (advanced_map_anchors.find("map_window")) {
+        // Built before the pads so they draw over it. The tint is the component's authored colour.
+        advanced_map_preview = memnew(TextureRect);
+        advanced_map_preview->set_name("map_window");
+        advanced_map_preview->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        advanced_map_preview->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+        advanced_map_preview->set_stretch_mode(TextureRect::STRETCH_SCALE);
+        if (const auto* style = command_catalog.find("map_window")) {
+            const auto tint = style->color(data::ui::Field::color).value_or(data::ui::Rgba8{255, 255, 255, 255});
+            advanced_map_preview->set_modulate(Color(tint.r / 255.0F, tint.g / 255.0F, tint.b / 255.0F, tint.a / 255.0F));
+        }
+        advanced_map_preview->hide();
+        advanced_map_shell->add_child(advanced_map_preview);
+    }
     make_pads(detail_build_pads, "build_pad");
     make_pads(detail_unit_pads, "unit_pad");
     for (auto& ring : detail_shield_rings) {
@@ -263,20 +291,60 @@ void GalacticMode::State::update_advanced_map_labels() {
             : point_x - static_cast<float>(pixels.width) * 0.5F, static_cast<float>(pixels.y + point.y_shift)});
         std::string value;
         if (name == "Planet_name_text") value = selected_hud.name;
-        else if (name == "Planetary_Income_number") value = selected_hud.income;
         else if (name == "Day_Counter_text") value = player_hud.cycle;
         else if (name == "unit_cap_number") value = galactic_view::advanced_map_capacity_text(facts, false);
         else if (name == "building_cap_number") value = galactic_view::advanced_map_capacity_text(facts, true);
         else if (const auto caption = advanced_map_captions.find(name); caption != advanced_map_captions.end())
             value = caption->second;
-        const auto upper = String::utf8(value.c_str()).to_upper();
-        if (label->get_text() != upper) label->set_text(upper);
+        // GPD-40: the header texts (name, day, BACK) are drawn in capitals; the capacity and tray captions keep the
+        // text database's own case ("Unit Cap", "Ground forces in orbit").
+        const bool capitals = name == "Planet_name_text" || name == "Day_Counter_text" || name == "back_button";
+        const auto shown = capitals ? String::utf8(value.c_str()).to_upper() : String::utf8(value.c_str());
+        if (label->get_text() != shown) label->set_text(shown);
         configure_command_bar_text(placement, *label, *component, *anchor);
         const auto tint = component->color(data::ui::Field::text_color).value_or(data::ui::Rgba8{255, 255, 255, 255});
         label->set_colour(Color(tint.r / 255.0F, tint.g / 255.0F, tint.b / 255.0F, tint.a / 255.0F));
+        // GPD-40: the owner's colour tints the planet name, as on the focused view (the capture shows it blue for the
+        // Empire).
+        if (name == "Planet_name_text" && facts) label->set_colour(Color(facts->name_colour.r, facts->name_colour.g, facts->name_colour.b));
         label->set_horizontal_alignment(left_justified ? HORIZONTAL_ALIGNMENT_LEFT
             : right_justified ? HORIZONTAL_ALIGNMENT_RIGHT : HORIZONTAL_ALIGNMENT_CENTER);
         label->set_visible(!value.empty());
+    }
+    // GPD-44: pips 0..current are lit, the rest dim. The opened map's shell authors a `day_clock` bone for the bar:
+    // the first pip starts there, then the component's `Offset` pitch and `Icon_Offset` apply as on the command bar.
+    // The row is the day text's. Hidden while the fiscal clock is unavailable or the shell has no `day_clock` bone.
+    for (auto* pip : advanced_map_pips) if (pip) pip->hide();
+    if (const auto* row = advanced_map_anchors.find("Day_Counter_text"))
+        if (const auto* clock = advanced_map_anchors.find_bone("day_clock"))
+        if (const auto* pip_component = command_catalog.find("balance_pip"); pip_component && current_pip) {
+            const auto textures = pip_component->list(data::ui::Field::icon_alternate_texture_name);
+            const auto offset = pip_component->vec2(data::ui::Field::offset).value_or(data::ui::Vec2{});
+            const auto icon_offset = pip_component->vec2(data::ui::Field::icon_offset).value_or(data::ui::Vec2{});
+            for (std::size_t index = 0; index < advanced_map_pips.size() && textures.size() >= 2; ++index) {
+                auto* pip = advanced_map_pips[index];
+                if (!pip) continue;
+                const auto texture = command_texture(textures[index <= *current_pip ? 1 : 0]);
+                if (texture.is_null()) continue;
+                const float x = clock->origin.x + offset.x * static_cast<float>(index) + icon_offset.x;
+                const float y = row->rect.y + icon_offset.y;
+                const auto pixels = presentation::ui::shell_to_screen({x, y, static_cast<float>(texture->get_width()),
+                    static_cast<float>(texture->get_height())}, placement);
+                pip->set_texture(texture);
+                pip->set_meta("lit", index <= *current_pip);
+                pip->set_position({static_cast<float>(pixels.x), static_cast<float>(pixels.y)});
+                pip->set_size({static_cast<float>(pixels.width), static_cast<float>(pixels.height)});
+                pip->show();
+            }
+        }
+    if (auto* back = Object::cast_to<EawrHudButton>(advanced_map_shell->get_node_or_null("back_button_hit"))) {
+        if (const auto* anchor = advanced_map_anchors.find("back_button")) {
+            const auto rect = presentation::ui::shell_to_screen(anchor->rect, placement);
+            back->set_position({static_cast<float>(rect.x), static_cast<float>(rect.y)});
+            back->set_size({static_cast<float>(rect.width), static_cast<float>(rect.height)});
+            back->set_hit_rect({{}, back->get_size()});
+            back->set_disabled(!map_input.gates.hud_enabled || map_input.gates.tutorial_locked);
+        }
     }
     update_advanced_land_tray(placement);
     update_advanced_map_pads(placement);
@@ -318,7 +386,8 @@ void GalacticMode::State::update_advanced_map_weather(const presentation::ui::Sh
     const auto* anchor = advanced_map_anchors.find("weather");
     const auto* style = command_catalog.find("weather");
     if (planet == galaxy->planets.end() || !anchor || !style || planet->weather.icon.empty()) return;
-    const auto texture = command_texture(planet->weather.icon);
+    // #6756: the opened map's weather component takes its art from the mega texture only (a mod's loading picture draws nothing).
+    const auto texture = command_atlas_texture(planet->weather.icon);
     if (!texture.is_valid()) return;
     // Like planet_bonus: the icon is centred on its bone origin at its authored scale.
     const auto origin = anchor->origin.value_or(assets::Vec2f{
@@ -334,58 +403,17 @@ void GalacticMode::State::update_advanced_map_weather(const presentation::ui::Sh
     advanced_map_weather->show();
 }
 
-void GalacticMode::State::update_advanced_land_tray(const presentation::ui::ShellPlacement& placement) {
-    const auto facts = hud_facts.find(selected_planet);
-    const bool owner = facts != hud_facts.end() && galaxy && facts->second.observed_owner == galaxy->local.player;
-    // GPD-14 gates landing by the number already on the surface, not the orbiting stack size.
-    const auto count = facts == hud_facts.end() ? std::optional<std::size_t>{} : facts->second.landed_companies;
-    const auto capacity = facts == hud_facts.end() ? std::optional<std::int64_t>{} : facts->second.unit_capacity;
-    const bool enabled = galactic_view::land_tray_enabled(owner, count, capacity);
-    const auto entries = galactic_view::land_tray_entries(fleet_intelligence.cards, selected_planet, enabled);
-    const auto access = detail_access();
-    for (std::size_t slot = 0; slot < land_fleet_buttons.size(); ++slot) {
-        auto* button = land_fleet_buttons[slot];
-        if (!button) continue;
-        const auto* company = galactic_view::land_tray_entry(entries, slot);
-        if (!company) { button->hide(); land_fleet_shown[slot].reset(); continue; }
-        const auto name = galactic_view::land_tray_slot_name(slot);
-        const auto* anchor = advanced_map_anchors.find(name);
-        if (!anchor) { button->hide(); continue; }
-        const auto pixels = presentation::ui::shell_to_screen(anchor->rect, placement);
-        button->set_position({static_cast<float>(pixels.x), static_cast<float>(pixels.y)});
-        button->set_size({static_cast<float>(pixels.width), static_cast<float>(pixels.height)});
-        button->set_hit_rect({{}, button->get_size()});
-        // Capacity and view-only access disable the tray.
-        button->set_disabled(!company->enabled || !galactic_view::detail_can_edit(access));
-        if (land_fleet_shown[slot] != std::optional<sim::galactic::TypeId>(company->type)) {
-            land_fleet_shown[slot] = company->type;
-            Ref<Texture2D> icon;
-            if (const auto type = production_names.find(company->type); type != production_names.end())
-                if (const auto art = production_art.find(type->second); art != production_art.end())
-                    icon = command_texture(art->second.icon);
-            button->set_icon_texture(icon);
-        }
-        if (auto* count_label = land_fleet_counts[slot]) {
-            const auto* style = command_catalog.find(name);
-            const auto offset = style ? style->vec2(data::ui::Field::text_offset).value_or(data::ui::Vec2{}) : data::ui::Vec2{};
-            count_label->set_position(button->get_size() * 0.5F + Vector2(offset.x, offset.y) * static_cast<float>(placement.scale));
-            count_label->set_text(company->count > 1 ? String("x") + String::num_uint64(company->count) : String{});
-        }
-        button->show();
-        if (auto* hover = land_fleet_hover[slot]; hover && button->get_viewport()) {
-            const auto pointer = button->get_viewport()->get_mouse_position();
-            hover->set_visible(company->enabled && access == galactic_view::PlanetDetailAccess::edit
-                && button->get_global_rect().has_point(pointer));
-        }
-    }
-}
-
 void GalacticMode::State::update_advanced_open_button(const presentation::ui::ShellPlacement& placement) {
     if (!advanced_open_button) return;
     const auto* anchor = fleet_anchors.find("advanced_planetary");
     const auto* component = command_catalog.find("advanced_planetary");
     const auto art = advanced_open_button->get_texture_normal();
     if (!anchor || !component || art.is_null()) { advanced_open_button->hide(); return; }
+    // GPD-12/38: the opener is drawn only where the map can be opened: the owner, or a viewer with ground intelligence.
+    // An enemy planet without it shows the plain base layout text and no magnifier.
+    const bool openable = detail_access() != galactic_view::PlanetDetailAccess::closed;
+    advanced_open_button->set_visible(openable);
+    if (!openable) return;
     const auto face = galactic_view::button_face_rect(*anchor, static_cast<float>(art->get_width()),
         static_cast<float>(art->get_height()), galactic_view::command_bar_component_scale(*component, 1.0F));
     const auto pixels = presentation::ui::shell_to_screen(face, placement);
@@ -499,10 +527,12 @@ galactic_view::PlanetDetailAccess GalacticMode::State::detail_access() const {
 }
 
 void GalacticMode::State::update_advanced_map_pads(const presentation::ui::ShellPlacement& placement) {
+    detail_pads_lit_builds = detail_pads_lit_units = 0;
     const auto hide = [&] {
         for (auto* pad : detail_build_pads) if (pad) pad->hide();
         for (auto* pad : detail_unit_pads) if (pad) pad->hide();
         for (auto* ring : detail_shield_rings) if (ring) ring->hide();
+        if (advanced_map_preview) advanced_map_preview->hide();
     };
     hide();
     if (!content) return;
@@ -513,6 +543,48 @@ void GalacticMode::State::update_advanced_map_pads(const presentation::ui::Shell
     if (art == content->art.end() || facts == hud_facts.end() || roster == ground_hud.rosters.end() || !window) return;
     const auto access = detail_access();
     if (!galactic_view::detail_pads_visible(access)) return;
+    if (advanced_map_preview && filesystem) {
+        if (advanced_map_preview_planet != selected_planet) {
+            // Once per selected planet: the picture's name and, when it is already cached, its picture.
+            advanced_map_preview_planet = selected_planet;
+            advanced_map_preview_name = land_map_picture_name(art->second.land_tactical_map);
+            const auto cached = advanced_map_preview_cache.find(advanced_map_preview_name);
+            advanced_map_preview_ref = cached == advanced_map_preview_cache.end() ? Ref<Texture2D>{} : cached->second;
+            // Settled: no name, or a cached answer (a null picture is a settled miss). Otherwise a load is still to run.
+            advanced_map_preview_settled = advanced_map_preview_name.empty() || cached != advanced_map_preview_cache.end();
+        }
+        using namespace std::chrono_literals;
+        if (advanced_map_preview_load.valid() && advanced_map_preview_load.wait_for(0s) == std::future_status::ready) {
+            auto loaded = advanced_map_preview_load.get();
+            Ref<Texture2D> picture;
+            if (loaded.texture) {
+                const auto begun = std::chrono::steady_clock::now();
+                std::string why;
+                auto pixels = texture_image(*loaded.texture, why);
+                if (pixels.is_valid()) picture = ImageTexture::create_from_image(pixels);
+                advanced_map_preview_copy_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - begun).count());
+            }
+            if (loaded.name == advanced_map_preview_name) { advanced_map_preview_ref = picture; advanced_map_preview_settled = true; }
+            advanced_map_preview_cache.emplace(std::move(loaded.name), std::move(picture));
+        }
+        if (!advanced_map_preview_settled && !advanced_map_preview_load.valid()) {
+            const auto fs = filesystem;
+            advanced_map_preview_load = std::async(std::launch::async, [fs, name = advanced_map_preview_name] {
+                PreviewLoadResult result{name, {}};
+                if (const auto path = presentation::ui::vfs_standalone_textures(*fs)(name))
+                    if (auto loaded = assets::load_texture(*fs, *path)) result.texture = std::move(loaded).value();
+                return result;
+            });
+        }
+        if (advanced_map_preview_ref.is_valid()) {
+            const auto box = presentation::ui::shell_to_screen(window->rect, placement);
+            if (advanced_map_preview->get_texture() != advanced_map_preview_ref) advanced_map_preview->set_texture(advanced_map_preview_ref);
+            advanced_map_preview->set_position({static_cast<float>(box.x), static_cast<float>(box.y)});
+            advanced_map_preview->set_size({static_cast<float>(box.width), static_cast<float>(box.height)});
+            advanced_map_preview->show();
+        }
+    }
     const auto observations = displayed_snapshot ? displayed_snapshot->observations() : decltype(displayed_snapshot->observations()){};
     const auto observed = std::find_if(observations.begin(), observations.end(), [&](const auto& row) {
         return galaxy && row.player == galaxy->local.player && row.planet == selected_planet;
@@ -568,14 +640,23 @@ void GalacticMode::State::update_advanced_map_pads(const presentation::ui::Shell
     }
     const auto ticks = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+    // GPD-36 (and the owner's rule for a held orbit unit): while a ground unit is held from the tray, every free unit pad
+    // lights as a drop target, build pads do not. The tray lands only while the game runs (GPD-37), so a drag the
+    // paused game would refuse lights nothing.
+    const bool tray_held = tray_drag && tray_moving && pause_allows(presentation::GalacticPausedAction::surface_deploy);
     const auto draw = [&](const auto& pads, const auto& models, const char* prefix, bool building) {
         for (std::size_t slot = 0; slot < std::min(pads.size(), models.size()); ++slot) {
             auto* pad = pads[slot]; if (!pad) continue;
             const auto name = std::string(prefix) + (slot < 10 ? "0" : "") + std::to_string(slot);
             const auto* anchor = advanced_map_anchors.find(name); if (!anchor) continue;
             const auto& model = models[slot];
+            // GPD-41: a specific-marker pad with no structure on it is not drawn; only base pads are free slots.
+            if (model.fixed && !model.object) { pad->hide(); continue; }
             const auto x = window->rect.x + model.marker.x * window->rect.width;
-            const auto y = window->rect.y + (1.0F - model.marker.y) * window->rect.height;
+            // Shell units run upwards from the window's lower edge. GPD-10's centred form (c - 0.5) * 2 about the window centre
+            // is the same point as c times the window size from the lower edge, so larger y stays up (the picture's own
+            // orientation is unverified against a retail frame, #5628).
+            const auto y = window->rect.y + model.marker.y * window->rect.height;
             const auto pixels = presentation::ui::shell_to_screen({x - anchor->rect.width * 0.5F,
                 y - anchor->rect.height * 0.5F, anchor->rect.width, anchor->rect.height}, placement);
             pad->set_position({static_cast<float>(pixels.x), static_cast<float>(pixels.y)});
@@ -592,15 +673,17 @@ void GalacticMode::State::update_advanced_map_pads(const presentation::ui::Shell
             pad->set_icon_texture(icon);
             const auto* style = command_catalog.find(name);
             if (style) {
-                const bool pulse = detail_moving && detail_drag && detail_drag->first == building && !model.object && !model.fixed;
+                const bool pulse = !model.object && !model.fixed
+                    && ((detail_moving && detail_drag && detail_drag->first == building) || (tray_held && !building));
                 const auto frames = style->list(data::ui::Field::icon_alternate_texture_name);
                 const auto fps = style->number(data::ui::Field::anim_fps).value_or(0.0F);
                 const auto frame_index = fps > 0 ? static_cast<std::size_t>(static_cast<double>(ticks) * fps / 1000.0) : 0U;
                 const auto frame = frames.empty() ? std::string{} : frames[frame_index % frames.size()];
                 pad->set_texture_normal(command_texture(pulse && !frame.empty() ? frame : first(*style, data::ui::Field::blank_texture_name)));
+                if (pulse && !frame.empty()) ++(building ? detail_pads_lit_builds : detail_pads_lit_units);
             }
             pad->set_disabled(access != galactic_view::PlanetDetailAccess::edit || model.fixed
-                || (detail_moving && detail_drag && detail_drag->first != building));
+                || (detail_moving && detail_drag && detail_drag->first != building) || (tray_held && building));
             pad->set_modulate(Color(1, 1, 1, model.fixed && model.object ? 192.0F / 255.0F : 1.0F));
             pad->show();
             if (building && model.object && model.shield_radius > 0 && model.marker.map_width > 0 && model.marker.map_height > 0) {
@@ -620,7 +703,8 @@ void GalacticMode::State::update_advanced_map_pads(const presentation::ui::Shell
 
 bool GalacticMode::State::detail_hit(Vector2 point) const {
     if (!advanced_map_shell || !advanced_map_shell->is_visible_in_tree()) return false;
-    if (detail_drag) return true;
+    if (detail_drag || tray_drag) return true;
+    if (tray_hit(point)) return true;
     for (auto* pad : detail_build_pads) if (pad && pad->is_visible_in_tree() && pad->get_global_rect().has_point(point)) return true;
     for (auto* pad : detail_unit_pads) if (pad && pad->is_visible_in_tree() && pad->get_global_rect().has_point(point)) return true;
     return false;
@@ -648,8 +732,9 @@ void GalacticMode::State::detail_pointer(int kind, Vector2 point) {
         ground_hud.input->set_tooltip_text(String::utf8(tooltip.c_str()));
     }
     if (!galactic_view::detail_can_edit(detail_access()) || !game || !galaxy) {
-        detail_drag.reset(); detail_moving = false; return;
+        detail_drag.reset(); detail_moving = false; tray_cancel(); return;
     }
+    if (tray_pointer(kind, point, target)) { detail_drag.reset(); detail_moving = false; return; }
     if (kind == 0) {
         detail_drag.reset(); detail_moving = false;
         if (!target) return;
@@ -713,7 +798,9 @@ void GalacticMode::State::update_advanced_map_markers() {
         const auto types = assets::object_type_catalog(*catalog);
         const auto map = assets::load_map(*fs, path, types);
         if (!map) return MarkerLoadResult{path, {}, core::format_diagnostic(map.error())};
-        return MarkerLoadResult{path, assets::ui_map_markers(map.value(), *catalog), {}};
+        std::vector<std::string> notes;
+        auto markers = assets::ui_map_markers(map.value(), *catalog, &notes);
+        return MarkerLoadResult{path, std::move(markers), notes.empty() ? std::string{} : notes.front()};
     });
 }
 
@@ -725,11 +812,31 @@ void GalacticMode::State::update_radar_hud() {
     }
     const bool advanced = seat_flight().advanced_map();
     if (!advanced) {
-        detail_open_planet = 0; detail_defaults_sent = false; detail_drag.reset(); detail_moving = false;
+        detail_open_planet = 0; detail_defaults_sent = false; detail_drag.reset(); detail_moving = false; tray_cancel();
         if (ground_hud.input) ground_hud.input->set_tooltip_text({});
     }
     update_advanced_map_markers();
-    if (advanced_map_shell) advanced_map_shell->set_visible(advanced);
+    if (advanced_map_shell) {
+        advanced_map_shell->set_visible(advanced);
+        if (auto* black = advanced_map_shell->get_parent() ? Object::cast_to<Control>(advanced_map_shell->get_parent()->get_node_or_null("AdvancedMapBlack")) : nullptr)
+            black->set_visible(advanced);
+    }
+    // The opened map covers the whole window, so the galaxy scene behind it is not rendered (it keeps its last frame
+    // and resumes when the map closes). A battle or a loading screen owns these viewports itself (galactic_handoff.cpp).
+    if (!tactical && !loading && galaxy_container && galaxy_container->is_visible() && galaxy_viewport) {
+        const auto mode = advanced ? SubViewport::UPDATE_DISABLED : SubViewport::UPDATE_ALWAYS;
+        if (galaxy_viewport->get_update_mode() != mode) galaxy_viewport->set_update_mode(mode);
+        for (std::size_t index = 0; index < scenes.size(); ++index) {
+            auto* viewport = scenes[index].viewport;
+            // Cached nonworld passes are scheduled at pre-draw. Hiding still
+            // disables every pass immediately; returning refreshes the chain.
+            if (viewport && (advanced || index == 0) && viewport->get_update_mode() != mode)
+                viewport->set_update_mode(mode);
+        }
+    }
+    // The advanced map is a full-screen shell with its own radar, caps and header: the ordinary command bar is not
+    // drawn while it is open (retail frame, #5628 capture 05).
+    if (command_bar) command_bar->set_visible(!advanced);
     update_advanced_map_labels();
     const auto* saved = ActiveSettings::get();
     const bool fit = saved && saved->gameplay.fit_radar_to_galaxy;
@@ -868,6 +975,25 @@ void GalacticMode::State::write_radar_report(std::ostream& output) const {
             << ", " << std::lround(icon_tint.b * 255) << "], \"rect\": [" << rect.position.x << ", "
             << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
     }
-    output << "]}";
+    output << "], \"advanced_labels\": [";
+    written = 0;
+    for (const auto& [name, label] : advanced_map_labels) {
+        const auto colour = label->colour();
+        output << (written++ ? ", " : "") << "{\"name\": " << json(name) << ", \"text\": "
+            << json(galactic_detail::utf8(label->get_text())) << ", \"visible\": "
+            << (label->is_visible_in_tree() ? "true" : "false") << ", \"colour\": ["
+            << std::lround(colour.r * 255) << ", " << std::lround(colour.g * 255) << ", " << std::lround(colour.b * 255) << "]}";
+    }
+    output << "], \"day_pips\": [";
+    written = 0;
+    for (const auto* pip : advanced_map_pips) {
+        if (!pip || !pip->is_visible_in_tree()) continue;
+        const auto rect = pip->get_global_rect();
+        output << (written++ ? ", " : "") << "{\"lit\": " << (static_cast<bool>(pip->get_meta("lit", false)) ? "true" : "false")
+            << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
+    }
+    output << "], \"land_tray\": ";
+    write_land_tray_report(output);
+    output << '}';
 }
 } // namespace eawr::presentation::godot_backend

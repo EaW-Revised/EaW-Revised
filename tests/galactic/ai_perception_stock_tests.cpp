@@ -839,6 +839,9 @@ std::vector<std::uint8_t> perception_archive(ai::GalacticPerceptionState state,
     // Independent WGA-195 wire oracle: the runtime representation and its
     // process-local intern IDs are deliberately unavailable to this writer.
     std::sort(state.cache.begin(), state.cache.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
+    std::sort(state.space_conflicts.begin(), state.space_conflicts.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.player, a.planet) < std::tie(b.player, b.planet);
+    });
     std::vector<std::uint8_t> bytes;
     const auto word = [&](std::uint64_t value, unsigned width = 8) {
         for (unsigned i = 0; i < width; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (8U * i)));
@@ -849,7 +852,7 @@ std::vector<std::uint8_t> perception_archive(ai::GalacticPerceptionState state,
     const auto optional = [&](std::optional<gc::PlayerId> value) {
         word(value.has_value(), 1); if (value) word(*value, 4);
     };
-    text("eawr-galactic-perception"); word(3, 4); word(state.cache.size());
+    text("eawr-galactic-perception"); word(4, 4); word(state.cache.size());
     for (const auto& row : state.cache) {
         word(row.key.player, 4); optional(row.key.enemy); optional(row.key.human); word(row.key.planet);
         word(row.key.tokens.size()); for (const auto& token : row.key.tokens) text(token);
@@ -867,6 +870,10 @@ std::vector<std::uint8_t> perception_archive(ai::GalacticPerceptionState state,
     }
     word(state.flags.size()); word(state.hints.size());
     expect(state.flags.empty() && state.hints.empty(), "wire oracle fixture has no flags or hints");
+    word(state.space_conflicts.size());
+    for (const auto& row : state.space_conflicts) {
+        word(row.player, 4); word(row.planet); word(row.frame);
+    }
     word(markup.size()); bytes.insert(bytes.end(), markup.begin(), markup.end());
     return bytes;
 }
@@ -937,7 +944,7 @@ std::string interned_contracts(unsigned workers) {
     const auto captured = host.world->capture();
     if (!captured) throw std::runtime_error(captured.error().message);
     expect(captured.value().components.at("GALACTIC_PERCEPTION") == perception_archive(state, host.world->markup()->encode()),
-        "interned records encode exactly the original WGA-195 bytes including signed zeros");
+        "interned records encode exactly the v4 WGA-195 bytes including signed zeros");
     auto duplicate = state; auto same = negative; same.key.bindings[0].value = ai::Real{}; duplicate.cache.push_back(same);
     expect(!host.world->restore(duplicate), "signed-zero numeric equality still rejects duplicate cache identities");
     QueryHost restored(fixture_setup(), fixture_data());

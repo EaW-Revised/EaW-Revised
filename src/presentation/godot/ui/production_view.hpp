@@ -102,6 +102,7 @@ public:
         bool reinforcement_allowed{true}; // WR-07/19: permission, command bar, pending victory
         std::uint64_t notifications{};
         double notification_seconds{};
+        std::string refusal; // #7190: the plain label of the reason the simulation refused the last drop; empty for none
         bool operator==(const View&) const = default;
     };
 
@@ -219,6 +220,7 @@ private:
     std::vector<std::unique_ptr<KitText>> pool_texts_;
     KitText credits_text_;
     KitText population_text_;
+    KitText refusal_text_;
     HudIconTextRenderer tactical_population_;
     HudIconTextRenderer tactical_tech_;
     std::string tech_text_;

@@ -101,6 +101,33 @@ namespace {
     if (!tick || !unit) return std::nullopt;
     order.tick = *tick;
     order.unit = *unit;
+    if (kind == "buy" || kind == "reinforce") {
+        // The player id sits where a unit id would; no other unit and no target.
+        if (at == std::string::npos || !order.more.empty()) return std::nullopt;
+        const std::string rest = text.substr(at + 1);
+        const std::size_t comma = rest.find(',');
+        order.type_name = rest.substr(0, comma);
+        if (order.type_name.empty()) return std::nullopt;
+        if (kind == "buy") {
+            if (comma != std::string::npos) return std::nullopt;
+            order.purchase = LiveSessionView::ScheduledOrder::Purchase::buy;
+            return order;
+        }
+        order.purchase = LiveSessionView::ScheduledOrder::Purchase::reinforce;
+        std::vector<sim::math::Fixed> values;
+        for (std::size_t start = comma == std::string::npos ? std::string::npos : comma + 1; start != std::string::npos;) {
+            const std::size_t next = rest.find(',', start);
+            const auto value = parse_double(rest.substr(start, next == std::string::npos ? std::string::npos : next - start));
+            if (!value) return std::nullopt;
+            auto fixed = scene::fixed_from_binary32(static_cast<float>(*value));
+            if (!fixed) return std::nullopt;
+            values.push_back(fixed.value());
+            start = next == std::string::npos ? next : next + 1;
+        }
+        if (values.size() != 3) return std::nullopt;
+        order.point = {values[0], values[1], values[2]};
+        return order;
+    }
     if (kind == "move") order.kind = tactical::OrderKind::move;
     else if (kind == "face") order.kind = tactical::OrderKind::face;
     else if (kind == "stop") order.kind = tactical::OrderKind::stop;
@@ -305,7 +332,8 @@ namespace {
                                 (hud.size() == 6 && hud.substr(0, 2) == "r_" && digits(hud.substr(2))) ||
                                 (hud.size() == 8 && hud.substr(0, 6) == "tqueue" && digits(hud.substr(6)));
         const bool special = hud == "special_weapon" || hud == "movie_camera" || hud == "b_camera_t"
-            || hud == "beacon" || hud == "b_special_weapon2" || hud == "retreat" || hud == "b_retreat";
+            || hud == "beacon" || hud == "b_special_weapon2" || hud == "retreat" || hud == "b_retreat"
+            || hud == "deathstar_switch" || hud == "sl_switch";
         // #3925: the options button and the in-game menu's controls (its Options, Back, Quit Game, Resume
         // buttons and the quit confirmation's Yes and No).
         const bool menu = hud == "options" || hud == "b_option_t" || hud == "menu_options" || hud == "menu_back"
@@ -337,7 +365,7 @@ namespace {
         return input;
     }
     if (input.kind != "click" && input.kind != "dclick" && input.kind != "rclick" && input.kind != "rdclick" && input.kind != "hover"
-        && input.kind != "press" && input.kind != "release") {
+        && input.kind != "press" && input.kind != "release" && input.kind != "rpress" && input.kind != "rrelease") {
         return std::nullopt;
     }
     if (target.rfind("icon=", 0) == 0 && (input.kind == "hover" || input.kind == "click" || input.kind == "dclick"
@@ -414,6 +442,14 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
         } else { options.lan = make_fake_lan_match(text); options.begin_barrier = false; }
     } else if (name == "--eawr-skirmish-map") {
         options.skirmish.map = lower_path(text);
+    } else if (name == "--eawr-skirmish-destroyed-planet") {
+        if (text != "on" && text != "off") error = "--eawr-skirmish-destroyed-planet expects on or off";
+        options.skirmish_destroyed_planet = text == "on";
+    } else if (name == "--eawr-skirmish-tsw-conflict") {
+        // Staging only: a skirmish has no parent conflict, so its super weapon never fires; this gives it the gate input
+        // of an attacked, destroyable planet (no defender) so the sequence can be captured.
+        if (text != "on" && text != "off") error = "--eawr-skirmish-tsw-conflict expects on or off";
+        options.skirmish_tsw_conflict = text == "on";
     } else if (name == "--eawr-skirmish-victory") {
         if (text == "starbase") options.skirmish.victory_condition = tactical::VictoryCondition::enemy_starbase_destroyed;
         else if (text == "all-units") options.skirmish.victory_condition = tactical::VictoryCondition::all_enemy_units_destroyed;
@@ -460,20 +496,31 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
                     if (entry.fleet.empty() || body.ends_with(',')) error = "--eawr-skirmish-fleet expects unit names or none";
                 }
             } else {
-                const auto first = body.find(':');
-                const auto last = body.rfind(':');
-                const auto team = first == last ? std::nullopt : parse_u64(body.substr(first + 1, last - first - 1));
-                const auto control = last == std::string::npos ? std::string{} : body.substr(last + 1);
-                if (first == std::string::npos || first == 0 || !team || *team >= tactical::max_players
-                    || (control != "human" && control != "ai")) {
-                    error = "--eawr-skirmish-slot expects <slot>:<faction>:<team>:<human|ai>";
+                // <faction>:<team>:<human|ai>[:<easy|normal|hard>]; the level applies to an AI slot only (WTA-47).
+                std::vector<std::string> parts;
+                std::istringstream pieces(body);
+                for (std::string piece; std::getline(pieces, piece, ':');) parts.push_back(piece);
+                const bool trailing = !body.empty() && body.back() == ':';
+                const auto team = parts.size() >= 2 ? parse_u64(parts[1]) : std::nullopt;
+                const std::string control = parts.size() >= 3 ? parts[2] : std::string{};
+                const std::string level = parts.size() == 4 ? parts[3] : std::string{};
+                if (trailing || parts.size() < 3 || parts.size() > 4 || parts[0].empty() || !team || *team >= tactical::max_players
+                    || (control != "human" && control != "ai")
+                    || (parts.size() == 4 && (control != "ai" || (level != "easy" && level != "normal" && level != "hard")))) {
+                    error = "--eawr-skirmish-slot expects <slot>:<faction>:<team>:<human|ai>[:<easy|normal|hard>]";
                 } else {
-                    entry.faction = body.substr(0, first);
+                    entry.faction = parts[0];
                     entry.team = static_cast<std::uint32_t>(*team);
                     entry.human = control == "human";
+                    entry.difficulty = level == "easy" ? tactical::AiLevel::easy
+                        : level == "hard" ? tactical::AiLevel::hard : tactical::AiLevel::normal;
                 }
             }
         }
+    } else if (name == "--eawr-skirmish-credits") {
+        const auto credits = parse_u64(text);
+        if (!credits || *credits == 0 || *credits > 1000000) error = "--eawr-skirmish-credits expects 1 to 1000000";
+        else options.skirmish_credits = static_cast<std::int64_t>(*credits);
     } else if (name == "--eawr-live-controller-seat") {
         const auto seat = parse_u64(text);
         if (!seat || *seat == 0 || *seat > std::numeric_limits<std::uint32_t>::max())
@@ -548,7 +595,8 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
         if (!order || options.orders.size() >= 256) {
             error = "--eawr-live-order expects <tick>:<move|face>:<unit>@<x>,<y>,<z>, <tick>:stop:<unit>, "
                     "<tick>:damage:<unit>@<amount>[,<hardpoint>], <tick>:attack:<unit>@<target unit> or "
-                    "<tick>:ability:<unit>@<ABILITY>[,on|off|autofire|manual[,<target unit>]]";
+                    "<tick>:ability:<unit>@<ABILITY>[,on|off|autofire|manual[,<target unit>]], "
+                    "<tick>:buy:<player>@<TYPE> or <tick>:reinforce:<player>@<TYPE>,<x>,<y>,<z>";
         } else {
             options.orders.push_back(*order);
         }
@@ -563,7 +611,7 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
                     "<tick>:key:<name>, each with optional +shift, +ctrl or +alt, "
                     "<tick>:mdrag:<dx>,<dy> or <tick>:mclick:centre, each with optional +ctrl, "
                     "or <tick>:wheel:<in|out>, or <tick>:<click|rclick|hover|press|release>:hud=<pause|fast_forward|resume|quit|"
-                    "b_reinforcement|r_close|r_RRCC|tqueueNN|attack|attack_move|move|waypoint|stop|guard|gift|gift_to_N|special_weapon|retreat|options|menu_options|menu_back|menu_quit|menu_resume|menu_yes|menu_no|menu_save|menu_save_first|"
+                    "b_reinforcement|r_close|r_RRCC|tqueueNN|attack|attack_move|move|waypoint|stop|guard|gift|gift_to_N|special_weapon|deathstar_switch|sl_switch|retreat|options|menu_options|menu_back|menu_quit|menu_resume|menu_yes|menu_no|menu_save|menu_save_first|"
                     "menu_save_button|menu_load|menu_load_first|menu_load_button>; "
                     "f<frame> in place of <tick> fires on that frame after the warm-up";
         } else {
@@ -720,6 +768,21 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
         } else {
             options.save_tick = *tick;
             options.save_path = ViewerPath{text.substr(colon + 1)}.native();
+        }
+    } else if (name == "--eawr-live-letterbox") {
+        // <tick>:<in|out>:<seconds>
+        const auto first = text.find(':');
+        const auto second = first == std::string::npos ? std::string::npos : text.find(':', first + 1);
+        const auto tick = second == std::string::npos ? std::optional<std::uint64_t>{} : parse_u64(std::string_view(text).substr(0, first));
+        const auto direction = second == std::string::npos ? std::string{} : text.substr(first + 1, second - first - 1);
+        double seconds{};
+        const auto tail = second == std::string::npos ? std::string{} : text.substr(second + 1);
+        const auto parsed = std::from_chars(tail.data(), tail.data() + tail.size(), seconds);
+        if (!tick || *tick == 0 || (direction != "in" && direction != "out") || tail.empty() || parsed.ec != std::errc{}
+            || parsed.ptr != tail.data() + tail.size() || !std::isfinite(seconds) || seconds < 0.0) {
+            error = "--eawr-live-letterbox expects <tick>:<in|out>:<seconds> with a tick of 1 or later";
+        } else {
+            options.debug_letterbox.push_back({*tick, direction == "in", seconds});
         }
     } else if (name == "--eawr-live-load") {
         options.load_path = ViewerPath{text}.native();

@@ -137,6 +137,12 @@ def generate(effective: Path, manifest: dict, registrations: dict) -> dict:
                           symbol.split(".")[-1] in declared_members)
             if symbol in {"Free_Random", "GameRandom.Free_Random"}:
                 status, target = "forbidden", "docs/lua-sandbox.md"
+            elif kind == "global" and symbol == "WaitForStarbase":
+                status, target = "partial", "src/script/foc/plan_bindings.cpp"
+            elif kind in {"method", "dotted"} and symbol.split(".")[-1] in {"Is_Raid_Capable", "Raid"}:
+                status, target = "partial", "src/script/foc/plan_bindings.cpp"
+            elif kind in {"method", "dotted"} and symbol.split(".")[-1] == "Is_Corrupted":
+                status, target = "partial", "src/script/foc/galactic_ai_freestore.cpp"
             elif kind == "global" and symbol in {"FindPlanet", "Find_First_Object", "Find_Object_Type", "Spawn_Unit"}:
                 status, target = "partial", "src/campaign/galactic_story_scripts.cpp"
             elif kind in {"method", "dotted"} and symbol.split(".")[-1] == "Prevent_AI_Usage":
@@ -176,7 +182,7 @@ def generate(effective: Path, manifest: dict, registrations: dict) -> dict:
                             "Static dynamic calls and ambiguous requires remain unresolved.",
                             "Standard library calls are partial until checked against sandbox policy; script helpers require their stock modules.",
                             "Tactical world bindings do not count as galactic bindings."],
-            "rules": ["WGA-32", "WGA-37..47", "WST-53..57"],
+            "rules": ["WGA-32", "WGA-37..47", "WGA-450..451", "WST-53..57", "GAR-01..03"],
             "counts": {"roots": len(seeds), "scripts": len(selected), "calls": sum(r["call_count"] for r in rows),
                        "unresolved": len(unresolved), "statuses": dict(sorted(Counter(r["status"] for r in rows).items()))},
             "scripts": [selected[p] for p in sorted(selected)], "rows": rows,

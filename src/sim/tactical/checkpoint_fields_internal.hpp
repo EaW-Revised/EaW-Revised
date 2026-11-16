@@ -2,7 +2,9 @@
 
 #include "checkpoint_access_internal.hpp"
 
-// WLK-04: child domains 21..24 append the spent-lock flag; optional range/invulnerability bits remain.
+// WLK-04: child domains append the spent-lock flag; optional range/invulnerability bits remain.
+// WSPL-08: domains 29..32 (21..28 are refused) append the super laser use state to each special-ability slot.
+// MV-40: domains 33..36 (the same four, plus 4) append the final facing to each order and queued waypoint leg.
 namespace eawr::sim::tactical::checkpoint_detail {
 
 template <> struct Fields<AbilitySlot> {
@@ -276,6 +278,7 @@ template <> struct Fields<OpportunityState> {
 template <> struct Fields<Order> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.kind, v.issued_tick, v.destination, v.target, v.hardpoint, v.through_hazards);
+        if (a.final_facing) a(v.final_yaw);
     }
 };
 
@@ -408,7 +411,9 @@ template <> struct Fields<SpawnerState> {
 template <> struct Fields<SpecialAbilitySlot> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.enabled, v.cancelled, v.despawn_success, v.jammer_initialized, v.jammer_active, v.jammer_registered, v.jammer_unregistered,
-            v.jammer_remaining, v.jammer_disabled_registration, v.next_service_frame, v.context, v.targets);
+            v.jammer_remaining, v.jammer_disabled_registration, v.next_service_frame, v.context, v.targets,
+            v.laser_face, v.laser_anim_started, v.laser_fired, v.laser_ending, v.laser_face_target,
+            v.laser_fire_start, v.laser_anim_tick, v.laser_end_tick);
     }
 };
 
@@ -424,6 +429,17 @@ template <> struct Fields<SpecialActivationContext> {
     }
 };
 
+template <> struct Fields<TswState> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.phase, v.serviced, v.target, v.speed, v.countdown, v.speech_mask);
+    }
+};
+template <> struct Fields<TswDeferredVictory> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.kind, v.owner, v.unit); }
+};
+template <> struct Fields<TswWorld> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.victory_hold, v.planet_destroyed, v.destroyed_targets, v.deferred); }
+};
 template <> struct Fields<SpecialWeaponState> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.recharge_started, v.recharge_until, v.next_pulse_frame, v.target, v.pulses_left, v.instances);
@@ -534,7 +550,10 @@ template <> struct Fields<WeaponState::TurretState> {
 };
 
 template <> struct Fields<MovePayload> {
-    template <class A, class T> static void apply(A& a, T& v) { a(v.destination, v.through_hazards, v.append); }
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.destination, v.through_hazards, v.append);
+        if (a.final_facing) a(v.final_yaw);
+    }
 };
 
 template <> struct Fields<session_detail::Waypoint> {

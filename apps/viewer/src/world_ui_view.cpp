@@ -75,6 +75,7 @@ void WorldUiView::draw(const Frame& frame, const RID canvas_item) {
         bar_rows_.clear();
         icon_rows_.clear();
         flag_rows_.clear();
+        bracket_flag_rows_.clear();
         icons_.clear();
         ability_rows_.clear();
         group_rows_.clear();
@@ -117,6 +118,7 @@ void WorldUiView::draw(const Frame& frame, const RID canvas_item) {
         health_bars_ = 0;
         shield_bars_ = 0;
         bar_rows_.clear();
+        bracket_flag_rows_.clear();
     }
     draw_reticles(frame, canvas_item);
     draw_icons(frame, canvas_item, ui_scale);

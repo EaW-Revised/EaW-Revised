@@ -75,11 +75,22 @@ int main() {
     };
     TextureRecipe generated_chain(chained, load_file, texture_item(chained));
     check(generated_chain.retained() != nullptr, "before upload the chained snapshot remains");
+    {
+        // The stored item names the retained snapshot only (the re-admission miss path must not key a re-read by it).
+        const auto before = generated_chain.read();
+        check(before.get() == generated_chain.retained() && generated_chain.item_for(before.get()) == &generated_chain.item(),
+            "the retained snapshot is keyed by the stored item");
+    }
     generated_chain.uploaded();
     check(!generated_chain.retained() && chained_reads == 1, "a chained texture whose authored levels match the file frees its CPU snapshot");
     const auto readmitted = generated_chain.read();
     check(readmitted && readmitted->mips.size() == 1 && readmitted->mips[0].bytes == authored.mips[0].bytes && chained_reads == 2,
         "re-admission reads the authored levels alone, one file read and no generation");
+    check(generated_chain.item_for(readmitted.get()) == nullptr, "a re-read texture is never keyed by the stored item");
+    const auto reread_item = texture_item(*readmitted);
+    check(reread_item.key != generated_chain.item().key || reread_item.check != generated_chain.item().check,
+        "a chain-generated texture and its authored-only re-read have different identities (the regression the miss path hit)");
+    check(reread_item.mips == 1 && generated_chain.item().mips == 3, "the re-read item describes the levels it holds");
     file.mips[0].bytes[0] = std::byte{3};
     check(!generated_chain.read(), "changed file content still fails the restore");
     file = authored;

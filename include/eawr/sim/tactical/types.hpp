@@ -108,6 +108,10 @@ struct Player {
 // no_hardpoint, which name it where damage and shots do.
 inline constexpr std::uint32_t attack_hull = 0xffffffffU;
 
+// PU-08 / legacy #6266: the tactical activation styles that leave an income stream silent until an
+// event starts it. Retail admits six non-automatic styles; the galactic three belong to the campaign.
+enum class IncomeEventStyle : std::uint8_t { none = 0, special_attack = 1, take_damage = 2, user_input = 3 };
+
 enum class OrderKind : std::uint8_t {
     none = 0,
     stop = 1,
@@ -147,6 +151,7 @@ enum class OrderKind : std::uint8_t {
     script_invulnerable = 28, // TL-03: Lua Make_Invulnerable, replay opcode 34, no unit order.
     land_garrison = 29,
     land_unload = 30,
+    tactical_superweapon = 31, // TSW-10: replay opcode 37, no unit order.
 };
 
 // The order a unit last accepted: a move or face keeps its point in `destination`, an attack its
@@ -160,6 +165,9 @@ struct Order {
     // target type's HardPoints list, or attack_hull for an attack on the unit.
     std::uint32_t hardpoint{attack_hull};
     bool through_hazards{}; // WHZ-08a: double-click move, conditional MVHZ state
+    // MV-40: a move that carries a final facing (degrees in [0, 360), 0 along +X); the unit turns to it
+    // in place after its path ends, at the authored rate (space ships). Cleared by any later order. Conditional MVYW state.
+    std::optional<math::Fixed> final_yaw{};
     friend constexpr bool operator==(const Order&, const Order&) noexcept = default;
 };
 
@@ -221,6 +229,9 @@ struct MovePayload {
     math::Vec3 destination{};
     bool through_hazards{}; // coordinator-reserved opcode 20 when true; ordinary move stays 2
     bool append{}; // HCB-57: optional replay tail; an ordinary move keeps its original bytes.
+    // MV-40: optional arrival heading (degrees in [0, 360), quantised to 0.1 by the producer).
+    // Present: replay opcode 38. Absent: today's move, bit for bit.
+    std::optional<math::Fixed> final_yaw{};
     friend constexpr bool operator==(const MovePayload&, const MovePayload&) noexcept = default;
 };
 
@@ -305,6 +316,52 @@ enum class AbilityKind : std::uint8_t {
     super_laser = 30, // WSPL-01 to WSPL-06
     deploy_squad = 31, // FL-17: manual hangar launch
     lucky_shot = 32, // WLK-01..06: holder-wide shot bonus.
+    // WLAB-01 (#3238): the rest of the 75-name vocabulary, in vocabulary order. Appended once; the value is the replay
+    // byte, so a value is never reused or renumbered. Space tables never carry these (ability_kind() does not name
+    // them); land_ability_kind() (land_abilities.hpp) is their only entry.
+    deploy = 33,
+    harass = 34,
+    spread_out = 35,
+    afterburner = 36,
+    avoid_danger = 37,
+    force_telekinesis = 38,
+    force_whirlwind = 39,
+    force_lightning = 40,
+    flame_thrower = 41,
+    jet_pack = 42,
+    capture_vehicle = 43,
+    targeted_invulnerability = 44,
+    targeted_hack = 45,
+    targeted_repair = 46,
+    sticky_bomb = 47,
+    area_effect_stun = 48,
+    area_effect_heal = 49,
+    area_effect_convert = 50,
+    distract = 51,
+    cable_attack = 52,
+    untargeted_sticky_bomb = 53,
+    deploy_troopers = 54,
+    sprint = 55,
+    maximum_firepower = 56,
+    eject_vehicle_thief = 57,
+    fire_lobbing_superweapon = 58,
+    stun = 59,
+    radioactive_contaminate = 60,
+    berserker = 61,
+    force_sight = 62,
+    saber_throw = 63,
+    force_cloak = 64,
+    force_confuse = 65,
+    tactical_bribe = 66,
+    swap_weapons = 67,
+    place_remote_bomb = 68,
+    detonate_remote_bomb = 69,
+    infection = 70,
+    proximity_mines = 71,
+    stim_pack = 72,
+    drain_life = 73,
+    shield_flare = 74,
+    summon = 75,
 };
 
 // What an ability command asks (AB-10 to AB-13): switch the ability on or off, or set whether it
@@ -478,10 +535,21 @@ struct LandUnloadPayload {
     friend constexpr bool operator==(const LandUnloadPayload&, const LandUnloadPayload&) noexcept = default;
 };
 
+// TSW-10: the Death Star switch (docs/behaviour/space-tactical-superweapon.md). One listed unit, the object with the
+// tactical super weapon behaviour; the stage is the transition the click or the script asks for. `ai_object` marks the
+// script call (an AI admission, never a human wire command).
+enum class TswStage : std::uint8_t { start_approach = 1, start_power_up = 2 };
+enum class TswAdmission : std::uint8_t { player = 0, ai_object = 1 };
+struct TacticalSuperweaponPayload {
+    TswStage stage{TswStage::start_approach};
+    TswAdmission admission{TswAdmission::player};
+    friend constexpr bool operator==(const TacticalSuperweaponPayload&, const TacticalSuperweaponPayload&) noexcept = default;
+};
+
 using CommandPayload = std::variant<StopPayload, MovePayload, AttackPayload, DamagePayload, FacePayload,
     AttackMovePayload, GuardPayload, AbilityPayload, BuyPayload, CancelPayload, ReinforcePayload, PadBuildPayload,
     CreditGrantPayload, QuitPayload, PadSellPayload, AreaAbilityPayload, ManualTargetPayload, RevealAllPayload,
-    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload, LandGarrisonPayload, LandUnloadPayload>;
+    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload, LandGarrisonPayload, LandUnloadPayload, TacticalSuperweaponPayload>;
 
 // Whether a command acts on the issuer's economy (#530) rather than on units.
 [[nodiscard]] constexpr bool economy_command(const CommandPayload& payload) noexcept {
@@ -510,6 +578,7 @@ struct PlayerCommand {
 }
 
 [[nodiscard]] constexpr OrderKind order_kind(const CommandPayload& payload) noexcept {
+    if (std::holds_alternative<TacticalSuperweaponPayload>(payload)) return OrderKind::tactical_superweapon;
     if (std::holds_alternative<LandGarrisonPayload>(payload)) return OrderKind::land_garrison;
     if (std::holds_alternative<LandUnloadPayload>(payload)) return OrderKind::land_unload;
     if (std::holds_alternative<ScriptInvulnerablePayload>(payload)) return OrderKind::script_invulnerable;
@@ -551,6 +620,24 @@ enum class EventKind : std::uint8_t {
     special_weapon_fired = 18, // WSW-22/33: every wrapper pulse; sequence carries source index.
     special_weapon_ready = 19, // WSW-33: source recharge completed while enabled; sequence carries index.
     controller_changed = 20, // ADR-020: one event per transferred live root/member, ordered by ID.
+    // TSW-05/06: `unit` is the tactical super weapon object, `player` its owner. tsw_approach_started opens the
+    // approach, tsw_speech_threshold carries the crossed ETA threshold in whole seconds (60, 30, 15, 5) in `sequence`,
+    // tsw_in_range is the arrival at the attack distance. Presentation events: none of them feeds the state hash.
+    tsw_approach_started = 21,
+    tsw_speech_threshold = 22,
+    tsw_in_range = 23,
+    // TSW-08..TSW-11 (the fire sequence): `unit` is the super weapon object, `player` its owner; for the target events
+    // `sequence` is the 1-based target index (the setup's target list), so the presentation names the prop and its
+    // replacement list. tsw_power_up_started opens the sequence (voice, sound, music, cinematic), tsw_attack_started the
+    // attack clip, tsw_target_destroyed the destruction (explosion, jitter, prop removal), planet_obliterated the planet
+    // commit the galactic side consumes (once per battle), tsw_debris_created the replacement props, tsw_sequence_complete
+    // the end of the post wait. Presentation and hand-off events: none of them feeds the state hash.
+    tsw_power_up_started = 24,
+    tsw_attack_started = 25,
+    tsw_target_destroyed = 26,
+    planet_obliterated = 27,
+    tsw_debris_created = 28,
+    tsw_sequence_complete = 29,
 };
 
 enum class RejectReason : std::uint8_t {

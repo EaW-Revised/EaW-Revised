@@ -3,6 +3,7 @@
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/campaign/setup_plan.hpp"
 #include "eawr/campaign/ai_selection_content.hpp"
+#include "eawr/campaign/shared_unit_tables.hpp"
 #include "eawr/campaign/galactic_story_scripts.hpp"
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
@@ -12,7 +13,13 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <vector>
 
 namespace eawr::campaign {
 // Immutable selected stock closure. No live pointers or saved state belong here.
@@ -24,7 +31,9 @@ struct GalacticAiRuntimeSetup {
     std::map<std::string, std::string> modules;
     // WST-53: the sub-plot scripts of this campaign's plots (null when the plots name none); part of the content identity.
     std::shared_ptr<const GalacticStoryScripts> story_scripts;
+    std::shared_ptr<const GalacticObjectScripts> object_scripts;
     GalacticStoryPlayers story_players;
+    GalacticObjectQueryCatalog object_query_catalog{};
     // RGC-196: the game mode is a multiplayer one; the story scripts' Free_Random then uses the synchronised stream.
     bool multiplayer{};
     std::string content_identity;
@@ -76,6 +85,9 @@ void bind_galactic_ai_actor_changes(script::foc::galactic_ai::NativeActions&,
 // Co-op on single-player rules (D5): with exactly one human seat, every peer agrees on that seat's faction as "local".
 // Multiplayer rules, or any other human count, give no shared local player.
 [[nodiscard]] std::optional<sim::galactic::PlayerId> shared_story_local_player(const CampaignSetupPlan&);
+// #7102: Player.Is_Human in the story host: the player's seat is human-controlled in the setup (fixed for the session; a later
+// SWITCH_CONTROL never changes it, WGS-136).
+[[nodiscard]] bool story_player_human(const CampaignSetupPlan&, sim::galactic::PlayerId);
 [[nodiscard]] core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galactic_ai_runtime(
     const vfs::Vfs&, const data::Catalog&, const data::galactic::GalacticData&, const units::GalacticTypeTable&,
     const CampaignSetupPlan&, std::vector<script::foc::galactic_ai::PlayerSelection>,
@@ -85,7 +97,9 @@ void bind_galactic_ai_actor_changes(script::foc::galactic_ai::NativeActions&,
     script::foc::galactic_ai::ServicePeriods service_periods = script::foc::galactic_ai::retail_service_periods,
     // Production runs the one standard schedule. Tests that assert the per-tick timeline of a decision pass the
     // synchronous reference (K = 1, D = 0); a test of the async behaviour itself uses the default.
-    script::foc::galactic_ai::AsyncSchedule schedule = script::foc::galactic_ai::standard_async_schedule);
+    script::foc::galactic_ai::AsyncSchedule schedule = script::foc::galactic_ai::standard_async_schedule,
+    // One unit-table load shared with the other preparation steps; used only where its type list is the step's own.
+    std::shared_ptr<const SharedUnitTables> shared_tables = {});
 // Qualified owning-lane bindings. Missing functions refuse production startup.
 // Execution writers use replace_retained/mark_state_changed on the passed owner.
 struct GalacticAiDigestWork {
@@ -96,6 +110,35 @@ struct GalacticAiDigestWork {
     std::array<std::uint64_t, 6> owner_encodes{};
     std::map<std::string, std::uint64_t, std::less<>> external_encodes;
     std::uint64_t native_bytes{};
+};
+// #6338: the one warning line per retired galactic AI provider (faction, tick, diagnostic). A retired provider is permanent for the
+// campaign, so this is how a passive faction is explained in test output and the viewer log. Observer only: never saved, hashed or read by a
+// decision. The count of retirements itself is the manager's saved state (`Manager::lifecycle().retired_providers`).
+struct GalacticAiRetirementLog {
+    mutable std::mutex mutex;
+    std::vector<std::string> lines;
+    std::set<sim::galactic::PlayerId> logged;
+    std::map<sim::galactic::PlayerId, std::string> pending;
+    // Records the line of a retirement as it happens, without writing anything: the retirement runs inside the AI's own work.
+    void record(const sim::galactic::PlayerId player, std::string line) {
+        const std::lock_guard lock(mutex);
+        if (!logged.contains(player)) pending.try_emplace(player, std::move(line));
+    }
+    // Writes the recorded lines, once per player, to the process error stream (the viewer log and test output), from the serial side
+    // of the tick that follows the AI's work.
+    void flush() {
+        const std::lock_guard lock(mutex);
+        for (auto& [player, line] : pending) {
+            if (!logged.insert(player).second) continue;
+            std::fprintf(stderr, "%s\n", line.c_str());
+            lines.push_back(std::move(line));
+        }
+        pending.clear();
+    }
+    [[nodiscard]] std::vector<std::string> snapshot() const {
+        const std::lock_guard lock(mutex);
+        return lines;
+    }
 };
 // Async apply-time outcomes, observer only (never saved, hashed or read by a decision): the pending records the window overlay could
 // not replay, the intents refused as stale and, by intent kind (IntentKind order), the intents the world refused at their apply tick.
@@ -113,6 +156,16 @@ struct GalacticAiApplyTally {
     // Production marks noticed outside the AI window (must stay 0: marks come only from the AI's own admission, which runs in the
     // window or, on the reference schedule, at once).
     std::uint64_t marks_outside_window{};
+    // Refusal consequences (a refused hop or purchase) the world queued for the AI's next window start while a slice applied.
+    std::uint64_t refusals_queued{};
+    // Step 2c, sim-side reads of AI state: per-tick hashes that fell back to hashing the live AI scheduler. live_hash_fallbacks counts
+    // the bootstrap ticks (no window publication is visible yet; bounded by the first window and the apply delay); the after_bootstrap
+    // count is a visible publication without its digest, which degrades to a fixed marker (named diagnostic EAWR-GCAI-ASYNC-0006, never a live read): CI keeps it 0.
+    std::uint64_t live_hash_fallbacks{}, live_hash_fallbacks_after_bootstrap{};
+    // Step 2c-2, R2: the sim's per-tick reads of the lifecycle's admission (admits_service) and those that saw anything but the default
+    // {galactic, processing, no auto-resolve}. No production writer exists (pause, battle and held ticks arrive through the world's tick),
+    // so the second count must stay 0; a future writer then fails a gate instead of writing AI-owned state from the sim unnoticed.
+    std::uint64_t admission_reads{}, admission_non_default{};
 };
 struct GalacticAiRuntimeView {
     std::weak_ptr<const script::foc::ai::Engine> engine;
@@ -125,7 +178,16 @@ struct GalacticAiRuntimeView {
     std::weak_ptr<const script::foc::ai::GalacticFunding> funding;
     std::function<core::Result<void>(sim::galactic::PlayerId, std::uint64_t, const sim::PartitionExecutor&)> prepare_path_table{};
     std::shared_ptr<const GalacticAiApplyTally> apply_tally{};
+    std::shared_ptr<const GalacticAiRetirementLog> retirements{};
+    // Async step 2 exit counter (observer only): AI-state writes outside the window body.
+    std::shared_ptr<const script::foc::GalacticAiWriteProbe> write_probe{};
 };
+// #6338: how many of the campaign's galactic AI providers a script error has retired (the manager's saved retirement table); what the
+// campaign digest counts.
+[[nodiscard]] inline std::uint64_t galactic_ai_provider_retirements(const GalacticAiRuntimeView& view) {
+    const auto manager = view.manager.lock();
+    return manager ? manager->lifecycle().retired_providers.size() : 0;
+}
 struct GalacticAiRuntimeProviders {
     using Actions = script::foc::galactic_ai::NativeActions;
     using Execution = script::foc::galactic_ai::LiveExecutionStateContributor;

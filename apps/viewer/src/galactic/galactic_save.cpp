@@ -252,11 +252,19 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     restored_child_tick_ = first.battle ? first.battle->completed_tick() : 0;
     observe_world_selection();
     state_.release_battle_presentation(); state_.game->stop(); state_.game = std::move(started).value();
+    if (state_.story_text) state_.story_text->reset(); if (state_.story_summary) state_.story_summary->reset(); state_.story_hud = {}; state_.story_hud_cursor = 0; state_.story_hud_ticks = 0; state_.story_hud_reported.clear(); // a load recreates no story lock or flash
     state_.owner_lifetime = state_.game->lifetime(); galaxy_pause_ = false; paused_child_ = 0;
     const auto held_summary = first.summary_hold;
     if (held_summary && hints.acknowledgement.contains(held_summary))
         state_.game->reconcile_battle_summary(seat, held_summary);
     state_.restored_auto_summary = std::move(saved_summary);
+    state_.advised_outcome = {}; // WAR-64: the restored summary was announced before the save; re-prime on the next look
+    // WGUI-71/WGP-122: the loaded game is a new timeline: hint deadlines and indices restart (the loaded frame then gets
+    // the restored-save delay), hint data is resolved again for the loaded local faction, and the Droid Log archive of
+    // the old timeline is dropped; the hints checkbox is kept.
+    galactic_view::restart_hint_timeline(state_.advisor_hints); state_.hint_clock_seen = false; state_.hint_data_resolved = false;
+    state_.galactic_hint_keys.clear(); state_.hint_sound.clear();
+    state_.advisor_archive.clear(); ++state_.advisor_archive_revision;
     state_.audio_event_cursor = 0; state_.acknowledged_battle_summary = hints.acknowledgement; state_.presented_conflict.reset();
     state_.briefing_conflict = hints.briefing; state_.briefing_done = hints.briefing_done;
     state_.fleet_gui_indices = hints.fleet_indices; state_.fleet_layout_dirty = true;

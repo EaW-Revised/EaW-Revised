@@ -98,11 +98,11 @@ void test_summary_line_is_stable() {
     report.stall.stalls_last_second = 3;
     report.stall.stalled_ms_last_second = 700;
     report.stall.longest_ms_10s = 900;
-    report.peers.push_back({1, true, 80.4, 5.0, 1.26});
-    report.peers.push_back({2, false, 0.0, 0.0, 0.0});
+    report.peers.push_back({1, true, 80.4, 5.0, 1.26, ui::NetRoute::relay_own});
+    report.peers.push_back({2, false, 0.0, 0.0, 0.0, ui::NetRoute::unknown});
     const std::string expected = "EAWR net summary seat=0 verdict=network wait_peer=1 wait_ms=640 stalls_per_s=3 "
                                  "stalled_ms_1s=700 longest_ms_10s=900 frame_ms=48.0 sim_ms=31.0 "
-                                 "peers=1:rtt_ms=80,jitter_ms=5,loss_pct=1.3;2:unmeasured";
+                                 "peers=1:route=relay-own,rtt_ms=80,jitter_ms=5,loss_pct=1.3;2:route=unknown,unmeasured";
     expect(ui::net_summary_line(report) == expected, "the summary line keeps its format: " + ui::net_summary_line(report));
 
     const ui::NetPerfReport idle;
@@ -111,8 +111,27 @@ void test_summary_line_is_stable() {
            "an idle report prints dashes");
     const std::string json = ui::net_report_json(report);
     expect(json.find("\"verdict\": \"network\"") != std::string::npos && json.find("\"wait_peer\": 1") != std::string::npos
-               && json.find("\"measured\": false") != std::string::npos,
+               && json.find("\"measured\": false") != std::string::npos
+               && json.find("\"route\": \"relay-own\"") != std::string::npos,
            "the report object carries the verdict, the gate peer and unmeasured links");
+}
+
+// The degraded-route hint (observation only): named for the lossiest flagged relayed link, empty when none is flagged.
+void test_degraded_route_hint() {
+    ui::NetPerfReport report;
+    report.peers.push_back({1, true, 80.0, 5.0, 22.4, ui::NetRoute::relay_own, true});
+    report.peers.push_back({2, true, 60.0, 4.0, 31.6, ui::NetRoute::relay_cloudflare, true});
+    report.peers.push_back({3, true, 40.0, 2.0, 55.0, ui::NetRoute::direct, false});
+    expect(ui::net_route_hint(report) == "Network route degraded (relay cloudflare, 32% loss)",
+           "the hint names the lossiest flagged relay and its loss: " + ui::net_route_hint(report));
+    report.peers[1].route_lossy = false;
+    expect(ui::net_route_hint(report) == "Network route degraded (relay own, 22% loss)", "an unflagged link is not named");
+    report.peers[0].route_lossy = false;
+    expect(ui::net_route_hint(report).empty(), "no flagged link, no hint (a lossy direct link is not a relay problem)");
+    report.peers[0].route_lossy = true;
+    expect(ui::net_summary_line(report).find("1:route=relay-own,degraded,rtt_ms=80") != std::string::npos
+           && ui::net_report_json(report).find("\"route_lossy\": true") != std::string::npos,
+           "the summary line and the report carry the flag");
 }
 
 } // namespace
@@ -123,6 +142,7 @@ int main() {
     test_running_wait();
     test_verdict();
     test_summary_line_is_stable();
+    test_degraded_route_hint();
     if (test::ui::failures() != 0) {
         std::cerr << test::ui::failures() << " net perf check(s) failed\n";
         return 1;

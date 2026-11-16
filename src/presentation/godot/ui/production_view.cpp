@@ -433,6 +433,10 @@ void EawrProductionPanel::update_text() {
             const float y = look.text.rect.y + look.text.rect.height / 2.0F + look.text_offset.y;
             draw_text(population_text_, value, rect2(model::shell_to_screen({x, y - 6.0F, 60.0F, 12.0F}, pane_placement())),
                       HORIZONTAL_ALIGNMENT_LEFT, look.text.colour, look.text.point_size, look.text.outline);
+            // #7190: a refused drop names its reason under the population, while the pane is open.
+            const String refusal = pane_open_ ? String::utf8(view_.refusal.c_str()) : String();
+            draw_text(refusal_text_, refusal, rect2(model::shell_to_screen({x - 40.0F, y + 8.0F, 220.0F, 12.0F}, pane_placement())),
+                      HORIZONTAL_ALIGNMENT_LEFT, look.text.colour, look.text.point_size, look.text.outline);
         }
     }
 }

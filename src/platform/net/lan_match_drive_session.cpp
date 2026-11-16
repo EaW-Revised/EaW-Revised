@@ -20,6 +20,17 @@ DriverResult TcpLanMatch::drive_session(const tactical::TacticalSetup& setup, pl
             else set_failure(pumped.error());
             return DriverResult::failure(pumped.error());
         }
+        // Say once which input-delay mode this match runs, then every agreed change and every vote that outlived its deadline.
+        if (const auto delay = session.input_delay(); delay != logged_delay_) {
+            diagnostics_->emit(logged_delay_ == 0 ? "timing-mode" : "input-delay-change", session.adaptive_timing_enabled() ? "adaptive" : "fixed",
+                diagnostics_->seat, "delay=" + std::to_string(delay));
+            logged_delay_ = delay;
+        }
+        if (const auto deferrals = session.timing_deferrals(); deferrals != logged_deferrals_) {
+            diagnostics_->emit("timing-agreement-deferred", "keeping-delay", diagnostics_->seat,
+                "delay=" + std::to_string(session.input_delay()) + " deferrals=" + std::to_string(deferrals));
+            logged_deferrals_ = deferrals;
+        }
         // Core detection occurs inside pump. Arm before the next native poll,
         // with the agreed incident epoch; pair failures remain N4 decision evidence.
         if (auto armed = arm_mesh_repair(session); !armed) {
@@ -108,10 +119,12 @@ DriverResult TcpLanMatch::drive_session(const tactical::TacticalSetup& setup, pl
                     const auto stats = io_->transport.link_stats(peer);
                     if (stats && (!view_.link_stats || stats->smoothed_rtt > view_.link_stats->smoothed_rtt)) view_.link_stats = stats;
                     constexpr double per_ms = 1.0 / 1000.0;
+                    const auto route = io_->transport.tcp ? net_route_of(io_->transport.tcp->pair(peer)) : presentation::ui::NetRouteInfo{};
+                    diagnostics_->route(peer, route, stats ? stats->loss_pct : 0.0);
                     view_.net_peers.push_back(stats
                         ? presentation::ui::NetPeerLink{peer, true, static_cast<double>(stats->smoothed_rtt.count()) * per_ms,
-                                                        static_cast<double>(stats->jitter.count()) * per_ms, stats->loss_pct}
-                        : presentation::ui::NetPeerLink{peer, false, 0.0, 0.0, 0.0});
+                                                        static_cast<double>(stats->jitter.count()) * per_ms, stats->loss_pct, route.route, route.lossy}
+                        : presentation::ui::NetPeerLink{peer, false, 0.0, 0.0, 0.0, route.route, route.lossy});
                 }
             if (view_.phase != LanPhase::ended) {
                 view_.message.clear(); view_.diagnostic_code.clear();

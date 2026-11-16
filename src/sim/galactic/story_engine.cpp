@@ -77,7 +77,8 @@ constexpr std::string_view known_rewards[] = {
     "TUTORIAL_PLAYER", "SET_ADVISOR", "PAUSE_GAME", "PAUSE_GALACTIC", "UNPAUSE_GALACTIC", "PAUSE_GALACTIC_GAME",
     "SWITCH_SIDES", "SWITCH_CONTROL", "TRIGGER_AI", "SET_WEATHER", "INFORMATION", "ENABLE_EVENT", "DISABLE_EVENT"};
 
-enum class Kind : std::uint8_t { trigger, elapsed, flag, tech, click, ai_notification, tactical, pending };
+enum class Kind : std::uint8_t { trigger, elapsed, flag, tech, click, ai_notification, win, lose, conquer, conquer_count,
+    destroy, destroy_base, defeat_hero, enter, move_hero, fleet_bounced, invasion_bounced, construct, construct_level, tactical, pending };
 
 Kind kind_of(std::string_view type) noexcept {
     if (type == "STORY_TRIGGER") return Kind::trigger;
@@ -86,6 +87,19 @@ Kind kind_of(std::string_view type) noexcept {
     if (type == "STORY_TECH_LEVEL") return Kind::tech;
     if (type == "STORY_CLICK_GUI") return Kind::click; // WST-37
     if (type == "STORY_AI_NOTIFICATION") return Kind::ai_notification; // WST-37, WST-55
+    if (type == "STORY_WIN_BATTLES") return Kind::win; // WST-35
+    if (type == "STORY_LOSE_BATTLES") return Kind::lose;
+    if (type == "STORY_CONQUER") return Kind::conquer; // WST-32
+    if (type == "STORY_CONQUER_COUNT") return Kind::conquer_count;
+    if (type == "STORY_DESTROY") return Kind::destroy; // WST-34
+    if (type == "STORY_DESTROY_BASE") return Kind::destroy_base;
+    if (type == "STORY_DEFEAT_HERO") return Kind::defeat_hero; // WST-35
+    if (type == "STORY_CONSTRUCT") return Kind::construct; // WST-33
+    if (type == "STORY_CONSTRUCT_LEVEL") return Kind::construct_level;
+    if (type == "STORY_ENTER") return Kind::enter; // WST-31
+    if (type == "STORY_MOVE") return Kind::move_hero;
+    if (type == "STORY_FLEET_BOUNCED") return Kind::fleet_bounced;
+    if (type == "STORY_INVASION_BOUNCED") return Kind::invasion_bounced;
     if (tactical_event_type(type)) return Kind::tactical;
     return Kind::pending;
 }
@@ -116,6 +130,48 @@ bool compare(std::int64_t flag, std::int64_t value, std::string_view keyword) no
     if (keyword == "LESS_THAN_EQUAL_TO") return flag <= value;
     if (keyword == "NOT_EQUAL_TO") return false;
     return flag > value;
+}
+
+bool counting(Kind kind) noexcept {
+    return kind == Kind::win || kind == Kind::lose || kind == Kind::conquer || kind == Kind::conquer_count || kind == Kind::destroy
+        || kind == Kind::construct || kind == Kind::defeat_hero;
+}
+
+// WST-08: the base-kind keyword is looked up exact-case; a spelling that is not in the table reads as the first value
+// (ground), so `Land` and `LAND` are ground and any non-`SPACE` spelling is too. An absent parameter is not a keyword:
+// it accepts either kind (unverified, WST-U16).
+enum class Domain : std::uint8_t { ground, space, either };
+Domain domain_of(const std::vector<std::string>& tokens) noexcept {
+    if (tokens.empty()) return Domain::either;
+    if (tokens.front() == "SPACE") return Domain::space;
+    if (tokens.front() == "EITHER") return Domain::either;
+    return Domain::ground;
+}
+bool domain_matches(Domain wanted, BaseKind notice) noexcept {
+    return wanted == Domain::either || notice == BaseKind::either
+        || (wanted == Domain::space) == (notice == BaseKind::space);
+}
+
+// WST-08, WST-32/34: relation filters, relative to the sub-plot's owning player. An absent or unknown keyword is the
+// first value, no restriction.
+enum class Relation : std::uint8_t { friendly, neutral, enemy };
+bool filter_passes(const std::vector<std::string>& tokens, Relation relation) noexcept {
+    if (tokens.empty()) return true;
+    const auto& key = tokens.front();
+    const bool f = relation == Relation::friendly, n = relation == Relation::neutral, e = relation == Relation::enemy;
+    if (key == "FILTER_FRIENDLY_ONLY") return f;
+    if (key == "FILTER_NEUTRAL_ONLY") return n;
+    if (key == "FILTER_ENEMY_ONLY") return e;
+    if (key == "FILTER_FRIENDLY_AND_NEUTRAL") return f || n;
+    if (key == "FILTER_ENEMY_AND_NEUTRAL") return e || n;
+    if (key == "FILTER_FRIENDLY_AND_ENEMY") return f || e;
+    return true; // FILTER_NONE, or a spelling outside the table
+}
+// A planet list: empty accepts any planet, otherwise the notice's planet must be named (case-insensitive).
+bool planet_listed(const std::vector<std::string>& tokens, std::string_view planet) {
+    if (tokens.empty()) return true;
+    const auto wanted = upper(planet);
+    return std::any_of(tokens.begin(), tokens.end(), [&](const std::string& name) { return upper(name) == wanted; });
 }
 
 struct Index {
@@ -175,6 +231,40 @@ struct Engine::Impl {
             && (config.solo || defs[s].events[e].multiplayer); // WST-14
     }
     void touch() noexcept { digest_dirty = true; }
+    // WST-32/34/35 counters (State::counters): sparse rows, sorted by (sub-plot, event).
+    [[nodiscard]] std::vector<EventCounter>::iterator counter_at(std::size_t s, std::size_t e) {
+        const std::pair<std::string_view, std::string_view> key{defs[s].name, defs[s].events[e].name};
+        return std::lower_bound(state.counters.begin(), state.counters.end(), key,
+            [](const EventCounter& row, const std::pair<std::string_view, std::string_view>& wanted) {
+                return std::pair<std::string_view, std::string_view>{row.subplot, row.event} < wanted; });
+    }
+    // The event's running values; a row begins counting from `initial` and stays only until the event fires or resets.
+    std::vector<std::int64_t>& counter(std::size_t s, std::size_t e, const std::vector<std::int64_t>& initial) {
+        auto at = counter_at(s, e);
+        if (at == state.counters.end() || at->subplot != defs[s].name || at->event != defs[s].events[e].name)
+            at = state.counters.insert(at, EventCounter{defs[s].name, defs[s].events[e].name, initial});
+        else if (at->values.size() != initial.size()) at->values = initial; // a Lua edit changed the type list
+        touch();
+        return at->values;
+    }
+    void drop_counter(std::size_t s, std::size_t e) {
+        const auto at = counter_at(s, e);
+        if (at == state.counters.end() || at->subplot != defs[s].name || at->event != defs[s].events[e].name) return;
+        state.counters.erase(at);
+        touch();
+    }
+    [[nodiscard]] Relation relation(Player owner, Player other) const {
+        if (owner == other) return Relation::friendly;
+        const auto at = config.relations.find({owner, other});
+        if (at == config.relations.end()) return Relation::neutral;
+        return at->second == Config::Relation::friendly ? Relation::friendly : Relation::enemy;
+    }
+    // One diagnostic per event and reason, however many notices reach it.
+    void diagnose_once(std::size_t s, std::size_t e, const std::string& what, const std::string& reason) {
+        for (const auto& row : diagnostics)
+            if (row.subplot == defs[s].name && row.event == defs[s].events[e].name && row.what == what && row.reason == reason) return;
+        diagnose(s, e, what, reason);
+    }
     void reset_counters(EventState& es) const {
         es.clock = {}; es.clock_last = state.now; es.tech_primed = false; es.idle_stamped = false; es.idle_stamp = {};
     }
@@ -184,6 +274,7 @@ struct Engine::Impl {
         auto& es = state.subplots[s].events[e];
         es.triggered = false;
         reset_counters(es);
+        drop_counter(s, e);
         if (index[s][e].kind == Kind::trigger) es.active = false; // fires again per activation by its prerequisites
         else { es.active = true; es.start = state.now; }
     }
@@ -193,6 +284,7 @@ struct Engine::Impl {
         auto& es = state.subplots[s].events[e];
         es.triggered = false;
         reset_counters(es);
+        drop_counter(s, e);
         es.active = !index[s][e].declared_prereqs;
         es.start = state.now;
     }
@@ -231,6 +323,19 @@ struct Engine::Impl {
     core::Result<void> dispatch_tech(std::optional<Player> player, std::int64_t level);
     core::Result<void> dispatch_click(std::optional<Player> player, std::string_view component);
     core::Result<void> dispatch_ai_notification(std::optional<Player> player, const TextNotice& notice);
+    // WST-32/34/35: `step(s, e)` decides whether one eligible event of the kind fires for the notice (and counts it).
+    template <class Step> core::Result<void> dispatch_counting(std::optional<Player> player, Kind kind, Step&& step);
+    core::Result<void> dispatch_battle(std::optional<Player> player, const BattleNotice& notice);
+    core::Result<void> dispatch_conquest(std::optional<Player> player, const ConquestNotice& notice);
+    core::Result<void> dispatch_conquest_count(std::optional<Player> player);
+    core::Result<void> dispatch_loss(std::optional<Player> player, const LossNotice& notice);
+    core::Result<void> dispatch_travel(std::optional<Player> player, const TravelNotice& notice);
+    core::Result<void> dispatch_move(std::optional<Player> player, const TravelNotice& notice);
+    core::Result<void> dispatch_economy(std::optional<Player> player, const EconomyNotice& notice);
+    // WST-33/34: the per-type countdown of STORY_CONSTRUCT and STORY_DESTROY: the matched type of the list counts down from
+    // its entry of the count list (a short list leaves the rest at one); true when that count reaches zero.
+    bool count_down_type(std::size_t s, std::size_t e, const std::vector<std::string>& types, const std::vector<std::string>& counts,
+        std::string_view type);
     core::Result<void> poll(Fixed time);
 };
 
@@ -270,6 +375,7 @@ core::Result<void> Engine::Impl::trigger(std::size_t s, std::size_t e, bool forc
     if (!defs[s].script.empty())
         script_calls.push_back({s, def.authored_name.empty() ? def.name : def.authored_name});
     es.triggered = true; touch(); // (4)
+    drop_counter(s, e); // a fired event counts no more (a perpetual one starts again from zero, WST-22)
     if (auto done = reward(s, e, depth); !done) return done; // (5)/(6)
     for (const auto dependant : index[s][e].dependants) // (7)
         if (auto done = activate(s, dependant, depth + 1); !done) return done;
@@ -481,6 +587,167 @@ core::Result<void> Engine::Impl::dispatch_ai_notification(std::optional<Player> 
     return ok();
 }
 
+template <class Step>
+core::Result<void> Engine::Impl::dispatch_counting(std::optional<Player> player, Kind kind, Step&& step) {
+    for (std::size_t s = 0; s < defs.size(); ++s) {
+        if (!state.subplots[s].active || (player && defs[s].owner != *player)) continue; // WST-14
+        for (std::size_t e = 0; e < defs[s].events.size(); ++e) {
+            if (index[s][e].kind != kind || !eligible(s, e)) continue;
+            if (!step(s, e)) continue;
+            if (auto done = trigger(s, e, false, 0); !done) return done;
+        }
+    }
+    return ok();
+}
+
+// WST-35: a battle result for a player. The notice kind picks the event type, the base kind (space or ground) must
+// match, the count runs to Event_Param1 (default 1), and only then the planet list is read. The fleet-content test
+// (Event_Param3: a content kind plus ship classes) needs per-side ship classes that the session does not supply yet:
+// an event that lists classes is refused with a diagnostic and never matches (never a wrong match).
+core::Result<void> Engine::Impl::dispatch_battle(std::optional<Player> player, const BattleNotice& notice) {
+    if (notice.kind != Battle::won && notice.kind != Battle::lost) return ok(); // retreat, victory and mission-lost wait for part 2
+    return dispatch_counting(player, notice.kind == Battle::won ? Kind::win : Kind::lose, [&](std::size_t s, std::size_t e) {
+        const auto& p = defs[s].events[e].params;
+        if (!domain_matches(domain_of(p[1]), notice.base)) return false;
+        if (std::any_of(p[2].begin(), p[2].end(), [](const std::string& token) { return token.starts_with("CLASS_"); })) {
+            diagnose_once(s, e, defs[s].events[e].type, "the fleet-content filter lists ship classes but the session supplies no per-side class data yet: the event never matches");
+            return false;
+        }
+        auto& values = counter(s, e, {0});
+        ++values[0];
+        if (values[0] < integer(p[0], 1)) return false;
+        return planet_listed(p[3], notice.planet);
+    });
+}
+
+// WST-32: a planet changing hands. The planet list (empty = any) and the owner filter (relative to the sub-plot's owner,
+// applied to the new owner: unverified, WST-U16) must pass, then the countdown from Event_Param2 (default 1) runs down.
+core::Result<void> Engine::Impl::dispatch_conquest(std::optional<Player> player, const ConquestNotice& notice) {
+    return dispatch_counting(player, Kind::conquer, [&](std::size_t s, std::size_t e) {
+        const auto& p = defs[s].events[e].params;
+        if (!planet_listed(p[0], notice.planet) || !filter_passes(p[2], relation(defs[s].owner, notice.new_owner))) return false;
+        auto& values = counter(s, e, {std::max<std::int64_t>(integer(p[1], 1), 1)});
+        return --values[0] <= 0;
+    });
+}
+
+// WST-32: every conquest adds one to every conquer-count event; no filter, no planet; it fires at Event_Param1.
+core::Result<void> Engine::Impl::dispatch_conquest_count(std::optional<Player> player) {
+    return dispatch_counting(player, Kind::conquer_count, [&](std::size_t s, std::size_t e) {
+        auto& values = counter(s, e, {0});
+        ++values[0];
+        return values[0] >= integer(defs[s].events[e].params[0], 1);
+    });
+}
+
+// WST-34: STORY_DESTROY counts the loss of a listed type down from its entry of the count list (a short list leaves the
+// rest at one). With a planet list the loss must happen at a listed planet and the destroyed object's owner must pass
+// the filter. STORY_DESTROY_BASE fires for a starbase lost at a listed planet (empty = any) of the listed base kind
+// whose owner passes the filter.
+// WST-35: STORY_DEFEAT_HERO counts the defeat of a listed hero type down from its entry of the count list (parameter 2, a
+// short list leaves the rest at one); the owner filter (parameter 3) is relative to the plot's owner and applied to the
+// defeated hero's owner. There is no planet list.
+core::Result<void> Engine::Impl::dispatch_loss(std::optional<Player> player, const LossNotice& notice) {
+    if (notice.kind == Loss::hero_defeat)
+        return dispatch_counting(player, Kind::defeat_hero, [&](std::size_t s, std::size_t e) {
+            const auto& p = defs[s].events[e].params;
+            if (!filter_passes(p[2], relation(defs[s].owner, notice.object_owner))) return false;
+            return count_down_type(s, e, p[0], p[1], notice.type);
+        });
+    if (notice.kind == Loss::destroy_base)
+        return dispatch_counting(player, Kind::destroy_base, [&](std::size_t s, std::size_t e) {
+            const auto& p = defs[s].events[e].params;
+            return planet_listed(p[0], notice.planet) && domain_matches(domain_of(p[1]), notice.base)
+                && filter_passes(p[2], relation(defs[s].owner, notice.object_owner));
+        });
+    return dispatch_counting(player, Kind::destroy, [&](std::size_t s, std::size_t e) {
+        const auto& p = defs[s].events[e].params;
+        const auto wanted = upper(notice.type);
+        if (std::none_of(p[0].begin(), p[0].end(), [&](const std::string& type) { return upper(type) == wanted; })) return false;
+        if (!p[1].empty() && (!planet_listed(p[1], notice.planet) || !filter_passes(p[3], relation(defs[s].owner, notice.object_owner)))) return false;
+        return count_down_type(s, e, p[0], p[2], notice.type);
+    });
+}
+
+bool Engine::Impl::count_down_type(std::size_t s, std::size_t e, const std::vector<std::string>& types,
+    const std::vector<std::string>& counts, std::string_view type) {
+    const auto wanted = upper(type);
+    const auto hit = std::find_if(types.begin(), types.end(), [&](const std::string& listed) { return upper(listed) == wanted; });
+    if (hit == types.end()) return false;
+    std::vector<std::int64_t> initial;
+    for (std::size_t i = 0; i < types.size(); ++i)
+        initial.push_back(std::max<std::int64_t>(i < counts.size() ? integer(std::vector<std::string>{counts[i]}, 1) : 1, 1));
+    auto& values = counter(s, e, initial);
+    return --values[static_cast<std::size_t>(hit - types.begin())] <= 0;
+}
+
+// WST-33: a completed build (STORY_CONSTRUCT) counts its type down from the count list, after the owner filter
+// (Event_Param3, relative to the sub-plot's owner, applied to the builder). A starbase completion also sends its base
+// level (STORY_CONSTRUCT_LEVEL): the planet list (empty = any), a level at or above Event_Param2 (default 1) and a base
+// kind that matches Event_Param3 (absent = either). The level event reaches only the builder's own plots (unverified,
+// WST-U18); ground base levels are not announced yet.
+core::Result<void> Engine::Impl::dispatch_economy(std::optional<Player> player, const EconomyNotice& notice) {
+    if (notice.kind == Economy::construct_level)
+        return dispatch_counting(player, Kind::construct_level, [&](std::size_t s, std::size_t e) {
+            const auto& p = defs[s].events[e].params;
+            return planet_listed(p[0], notice.planet) && domain_matches(domain_of(p[2]), notice.base) && notice.value >= integer(p[1], 1);
+        });
+    return dispatch_counting(player, Kind::construct, [&](std::size_t s, std::size_t e) {
+        const auto& p = defs[s].events[e].params;
+        if (!filter_passes(p[2], relation(defs[s].owner, notice.object_owner))) return false;
+        return count_down_type(s, e, p[0], p[1], notice.type);
+    });
+}
+
+// WST-31: a fleet linking to a planet's orbit (STORY_ENTER), bounced off a planet (STORY_FLEET_BOUNCED) or a refused
+// invasion (STORY_INVASION_BOUNCED) share one test: the planet list (empty = any), the owner filter (Event_Param2,
+// relative to the sub-plot's owner, applied to the fleet's owner), every required type (Event_Param3) inside the fleet,
+// exclusive (Event_Param6: the unflattened member count equals the number of required types), and, with no required
+// types, a stealth fleet passes only when Event_Param5 allows stealth. The orbit-type list (Event_Param4) and the raid
+// flag (Event_Param7) need data the session does not supply: an event that uses them is refused with one diagnostic
+// and never matches.
+// WST-31: STORY_MOVE is sent once per hero (named or generic) in an arriving fleet or in its transports: the hero list
+// (Event_Param1) and the planet list (Event_Param2) both match, an empty list matching anything. There is no owner filter.
+// A notice with no hero name matches only events with an empty hero list.
+core::Result<void> Engine::Impl::dispatch_move(std::optional<Player> player, const TravelNotice& notice) {
+    return dispatch_counting(player, Kind::move_hero, [&](std::size_t s, std::size_t e) {
+        const auto& p = defs[s].events[e].params;
+        if (!planet_listed(p[1], notice.planet)) return false;
+        if (p[0].empty()) return true;
+        if (!notice.hero) return false;
+        const auto hero = upper(*notice.hero);
+        return std::any_of(p[0].begin(), p[0].end(), [&](const auto& name) { return upper(name) == hero; });
+    });
+}
+
+core::Result<void> Engine::Impl::dispatch_travel(std::optional<Player> player, const TravelNotice& notice) {
+    Kind kind{};
+    switch (notice.kind) {
+    case Travel::enter: kind = Kind::enter; break;
+    case Travel::move_hero: return dispatch_move(player, notice);
+    case Travel::fleet_bounced: kind = Kind::fleet_bounced; break;
+    case Travel::invasion_bounced: kind = Kind::invasion_bounced; break;
+    default: return ok(); // land, deploy and planet-destroyed wait for later batches
+    }
+    return dispatch_counting(player, kind, [&](std::size_t s, std::size_t e) {
+        const auto& p = defs[s].events[e].params;
+        if (!planet_listed(p[0], notice.planet) || !filter_passes(p[1], relation(defs[s].owner, notice.fleet.owner))) return false;
+        if (!p[3].empty() || integer(p[6], 0) != 0) {
+            diagnose_once(s, e, defs[s].events[e].type, "the orbit-type list or the raid flag needs data the session does not supply yet: the event never matches");
+            return false;
+        }
+        std::vector<std::string> have;
+        for (const auto& type : notice.fleet.types) have.push_back(upper(type));
+        for (const auto& wanted : p[2])
+            if (std::find(have.begin(), have.end(), upper(wanted)) == have.end()) return false;
+        if (!p[2].empty() && integer(p[5], 0) != 0) {
+            const auto direct = notice.fleet.direct_members ? notice.fleet.direct_members : notice.fleet.types.size();
+            if (direct != p[2].size()) return false;
+        }
+        return !p[2].empty() || !notice.fleet.stealth || integer(p[4], 0) != 0;
+    });
+}
+
 core::Result<void> Engine::Impl::poll(Fixed time) {
     for (std::size_t s = 0; s < defs.size(); ++s) {
         if (!state.subplots[s].active) continue;
@@ -551,9 +818,18 @@ core::Result<Engine> Engine::create(Config config, std::vector<PlotRecord> plots
             }
             if (index.kind == Kind::tactical)
                 impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.type, std::string(land_battle_refusal)});
+            else if (index.kind == Kind::construct_level && !def.params[2].empty() && domain_of(def.params[2]) == Domain::ground)
+                impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.type,
+                    "evaluated, but only starbase completions send a base level: a ground base level is not announced yet and the event cannot fire"});
+            else if (index.kind == Kind::destroy_base)
+                impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.type,
+                    "evaluated, but the session emits no starbase-loss notice yet: the event cannot fire"});
+            else if (index.kind == Kind::invasion_bounced)
+                impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.type,
+                    "evaluated, but the session emits no refused-invasion notice yet: the event cannot fire"});
             else if (index.kind == Kind::pending)
                 impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.type,
-                    "no evaluator yet (the story engine evaluates STORY_TRIGGER, STORY_ELAPSED, STORY_FLAG, STORY_TECH_LEVEL, STORY_CLICK_GUI and STORY_AI_NOTIFICATION)"});
+                    "no evaluator yet (the story engine evaluates STORY_TRIGGER, STORY_ELAPSED, STORY_FLAG, STORY_TECH_LEVEL, STORY_CLICK_GUI, STORY_AI_NOTIFICATION, STORY_WIN_BATTLES, STORY_LOSE_BATTLES, STORY_CONQUER, STORY_CONQUER_COUNT, STORY_DESTROY, STORY_DESTROY_BASE, STORY_DEFEAT_HERO, STORY_ENTER, STORY_MOVE, STORY_FLEET_BOUNCED, STORY_INVASION_BOUNCED, STORY_CONSTRUCT and STORY_CONSTRUCT_LEVEL)"});
             if (tactical_reward_type(def.reward_type))
                 impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.reward_type, std::string(land_battle_refusal)});
             else if (!def.reward_type.empty() && std::find(std::begin(known_rewards), std::end(known_rewards), def.reward_type) == std::end(known_rewards))
@@ -572,11 +848,19 @@ core::Result<void> Engine::notify(std::optional<Player> player, const Payload& p
     if (const auto* elapsed = std::get_if<ElapsedNotice>(&payload)) return service(elapsed->time_seconds, elapsed->paused);
     if (const auto* economy = std::get_if<EconomyNotice>(&payload); economy && economy->kind == Economy::tech_level) // WST-33
         return impl_->dispatch_tech(player, economy->value);
+    if (const auto* economy = std::get_if<EconomyNotice>(&payload);
+        economy && (economy->kind == Economy::construct || economy->kind == Economy::construct_level)) // WST-33
+        return impl_->dispatch_economy(player, *economy);
     if (const auto* text = std::get_if<TextNotice>(&payload); text && text->kind == Text::click_gui) // WST-37
         return impl_->dispatch_click(player, text->text);
     if (const auto* text = std::get_if<TextNotice>(&payload); text && text->kind == Text::ai_notification) // WST-37, WST-55
         return impl_->dispatch_ai_notification(player, *text);
-    return ok(); // WST-31..39 evaluators arrive with the next parts; the walk names each seam
+    if (const auto* battle = std::get_if<BattleNotice>(&payload)) return impl_->dispatch_battle(player, *battle); // WST-35
+    if (const auto* conquest = std::get_if<ConquestNotice>(&payload)) return impl_->dispatch_conquest(player, *conquest); // WST-32
+    if (std::holds_alternative<ConquestCountNotice>(payload)) return impl_->dispatch_conquest_count(player);
+    if (const auto* loss = std::get_if<LossNotice>(&payload)) return impl_->dispatch_loss(player, *loss); // WST-34
+    if (const auto* travel = std::get_if<TravelNotice>(&payload)) return impl_->dispatch_travel(player, *travel); // WST-31
+    return ok(); // WST-31, 33 (except tech), 36..39 evaluators arrive with the next batches; the walk names each seam
 }
 
 core::Result<void> Engine::service(Fixed time, bool paused) {
@@ -647,7 +931,10 @@ core::Result<void> Engine::apply(const PlotCommand& command) {
     auto& def = impl.defs[*s].events[*e];
     const auto text = command.values.empty() ? std::string{} : command.values.front();
     switch (command.op) {
-    case Op::event_param: row.event_params[command.index] = command.values; def.params[command.index] = command.values; ++impl.listener_revision; break;
+    case Op::event_param: // a counting event starts again from zero: its count or lists may have changed (WST-56)
+        row.event_params[command.index] = command.values; def.params[command.index] = command.values; ++impl.listener_revision;
+        impl.drop_counter(*s, *e);
+        break;
     case Op::reward_param: row.reward_params[command.index] = command.values; def.reward_params[command.index] = command.values; break;
     case Op::reward_type: row.reward_type = text; def.reward_type = text; break;
     case Op::dialog: row.dialog = text; def.dialog = text; break;
@@ -659,6 +946,11 @@ core::Result<void> Engine::apply(const PlotCommand& command) {
     return ok();
 }
 
+bool Engine::has_event_type(std::string_view type) const {
+    for (const auto& sub : impl_->defs)
+        for (const auto& event : sub.events) if (event.type == type) return true;
+    return false;
+}
 bool Engine::has_subplot(std::string_view name) const { return impl_->find_subplot(name).has_value(); }
 bool Engine::has_event(std::string_view subplot, std::string_view event) const {
     const auto s = impl_->find_subplot(subplot);
@@ -681,6 +973,18 @@ core::Result<void> Engine::restore(State saved) {
         std::adjacent_find(saved.ai_flags.begin(), saved.ai_flags.end()) != saved.ai_flags.end())
         return invalid("saved AI flags are not sorted and unique");
     for (const auto& flag : saved.ai_flags) if (flag.name != upper(flag.name)) return invalid("saved AI flag name is not upper-case");
+    for (std::size_t i = 0; i < saved.counters.size(); ++i) {
+        const auto& row = saved.counters[i];
+        // Sorted and unique on the key (sub-plot, event): a second row for one event would come back as stale state
+        // after the first is dropped when the event fires or re-arms.
+        if (i > 0 && !(std::pair{std::string_view(saved.counters[i - 1].subplot), std::string_view(saved.counters[i - 1].event)}
+            < std::pair{std::string_view(row.subplot), std::string_view(row.event)}))
+            return invalid("saved event counters are not sorted and unique by (sub-plot, event)");
+        const auto s = impl.find_subplot(row.subplot);
+        const auto e = s ? impl.find_event(*s, row.event) : std::nullopt;
+        if (!e || !counting(impl.index[*s][*e].kind)) return invalid("saved event counter names an event that does not count: " + row.subplot + " " + row.event);
+        if (row.values.empty() || row.values.size() > token_slots_event * 64) return invalid("saved event counter has no values");
+    }
     // Lua edits: the loaded definitions first, then the saved rows over them.
     // Transactional: a failing row puts the definitions, the originals and the edit rows back as they were.
     auto defs_backup = impl.defs;
@@ -714,8 +1018,10 @@ const std::string& Engine::digest() const {
         Writer out;
         constexpr std::string_view domain = "eawr-story-engine-v1";
         out(std::string(domain), kept);
-        if (!kept.edits.empty() || !kept.ai_flags.empty()) out(kept.edits); // an unedited game keeps its old digest
-        if (!kept.ai_flags.empty()) out(kept.ai_flags);
+        const bool counted = !kept.counters.empty();
+        if (!kept.edits.empty() || !kept.ai_flags.empty() || counted) out(kept.edits); // an unedited game keeps its old digest
+        if (!kept.ai_flags.empty() || counted) out(kept.ai_flags);
+        if (counted) out(kept.counters);
         impl_->digest_cache = core::sha256_hex(out.bytes);
         impl_->digest_dirty = false;
     }

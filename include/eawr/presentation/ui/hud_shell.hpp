@@ -33,6 +33,7 @@
 
 namespace eawr::data {
 class Catalog;
+struct EffectiveObject;
 }
 namespace eawr::data::ui {
 struct TextDatabase;
@@ -72,9 +73,10 @@ inline constexpr std::string_view tactical_shell_fallback_model = "i_tactical_co
 // `MT_CommandBar`) as the logical path of its `.mtd`.
 [[nodiscard]] std::string command_bar_mega_texture(const data::ui::CommandBarCatalog& catalog);
 
-enum class ShellBlend : std::uint8_t { alpha, additive };
+enum class ShellBlend : std::uint8_t { alpha, additive, opaque };
 // How a shell mesh's shader blends it. The alpha family (MeshAlpha and its gloss variant, which a mod's
-// shell may use for its panels) blends by alpha; MeshAdditive adds. Any other shader draws nothing here.
+// shell may use for its panels) blends by alpha; MeshAdditive adds; MeshGloss draws opaque (its texture's alpha
+// is the gloss mask, not transparency: the stock advanced-map backdrop is one). Any other shader draws nothing here.
 [[nodiscard]] std::optional<ShellBlend> shell_blend(std::string_view shader);
 
 // One textured shell mesh, drawn as its triangles with their authored
@@ -266,6 +268,18 @@ struct HudShell {
     std::vector<HudShellButton> order_buttons;
     std::optional<HudAbilityButton> special_weapon; // WSW-28/29: one tactical slot
     std::optional<HudAbilityButton> retreat;        // HCB-15: b_retreat, its lockout dial art in `build`
+    // HCB-47: the Death Star switch (a shell anchor; icon = base art, `alternates` = the click animation, Anim_FPS in
+    // `anim_fps`, three tooltip keys in `button.tooltip` order) and its countdown readout style (the component carries
+    // the font, the text offset and the dial art; the readout has no shell anchor, the caller places it).
+    // HCB-46/63: independent ship-targeted SUPER_LASER control and horizontal recharge bar.
+    std::optional<HudAbilityButton> superlaser_switch;
+    std::optional<HudBar> superlaser_recharge;
+    std::optional<HudAbilityButton> deathstar_switch;
+    std::vector<std::string> deathstar_tooltips; // Tooltip_Text keys: too far, ready, fired
+    // The countdown readout's style; its origin is the shell's own bone of that name (a bone without a mesh, like the
+    // hero health bars) when `deathstar_countdown_anchored`, else the caller places it (top centre of the viewport).
+    std::optional<HudIconText> deathstar_countdown;
+    bool deathstar_countdown_anchored{};
     std::optional<HudShellText> planet_name;
     // #425: the unit card slots in component order (s_select_00, 01, ...; a column is two slots)
     // and the column borders (special_border_00, 01, ...). Empty when the shell has none.
@@ -387,6 +401,13 @@ struct PlanetName {
 };
 [[nodiscard]] PlanetName planet_name(const std::optional<std::string>& context_name, const data::Catalog* objects,
                                      const data::ui::TextDatabase* text);
+
+// The Icon_Name the battle UI shows for an object type (unit card, production and hero buttons, the world
+// icon): the type's own authored icon, else the icon authored on the team container it creates
+// (Create_Team_Type), else empty (the caller applies the card fallback, L-7). The icon names are not
+// altered: atlas and file lookups compare them ASCII case-insensitively. One level only: a container's own
+// Create_Team_Type is not followed.
+[[nodiscard]] std::string object_icon_name(const data::EffectiveObject& object, const data::Catalog& objects);
 
 // #425: what a unit card shows for an object type: its Icon_Name (empty without one) and its
 // display name, the Text_ID through the text DB (the type name when either is missing).

@@ -128,6 +128,188 @@ struct ModelRecipeProbe final {
         check(renderer.set_translated_parameters(2, parameters).has_value(), "translated parameters accepted");
         for (int i = 0; i < 4; ++i) renderer.submit(both);
         check(impl.instances_.at(2).batch_group == 0, "translated hull must never group");
+        {
+            // Composition with the shared idle skeleton (real code, batching ON): pieces at rest batch while sharing one
+            // skeleton; a moved piece leaves the batch but keeps the shared skeleton; removal forgets the piece before
+            // its instance and its share of the skeleton are released, in either state. A model on two bones keeps a
+            // skeleton (rigid single-bone pieces hold none; the block after this one covers them).
+            auto rigid = eawr_resource_churn_probe::two_bone_plate(60.0F);
+            rigid.meshes[0].submeshes[0].shader = "Engine/Invented.fx";
+            rigid.meshes[1].submeshes[0].shader = "Engine/Invented.fx";
+            check(impl.upload_resource(811, rigid, texture, material, {}, {}).has_value(), "skinned hull fixture upload failed");
+            const auto scene_of = [&](const std::uint64_t tick, std::initializer_list<sim::EntityId> ids) {
+                std::vector<eawr_resource_churn_probe::Member> placed;
+                std::int64_t x = -100;
+                for (const auto id : ids) { placed.push_back({id, 811, x}); x += 100; }
+                return eawr_resource_churn_probe::scene(tick, placed);
+            };
+            const auto idle_pose = [&](const float shift, std::initializer_list<sim::EntityId> ids) {
+                presentation::animation::BonePose bone, other;
+                bone.skin_asset = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, shift, 0, 0, 1};
+                other.skin_asset = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                const std::array<presentation::animation::BonePose, 2> bones{bone, other};
+                const auto pose = GodotRenderer::prepare_skin_pose(bones);
+                renderer.begin_skin_batch(true);
+                for (const auto id : ids) renderer.prepare_shared_idle_surface(7, id, 811);
+                for (const auto id : ids)
+                    check(renderer.set_prepared_skin_pose(id, 811, pose, 7).has_value(), "shared idle pose bind failed");
+                static_cast<void>(renderer.end_skin_batch());
+            };
+            const auto shares = [&](const sim::EntityId first, const sim::EntityId second) {
+                const auto a = impl.instances_.find(first), b = impl.instances_.find(second);
+                return a != impl.instances_.end() && b != impl.instances_.end() && a->second.shared_idle_skeleton
+                    && a->second.shared_idle_skeleton == b->second.shared_idle_skeleton && a->second.skeleton.is_valid();
+            };
+            renderer.submit(scene_of(10, {30, 31, 32}));
+            idle_pose(0.0F, {30, 31, 32});
+            for (int i = 0; i < 4; ++i) renderer.submit(scene_of(11 + i, {30, 31, 32}));
+            check(shares(30, 31) && shares(31, 32), "three idle pieces must share one skeleton with batching on");
+            check(impl.batch_registry_.member_total() == 3 && impl.batch_groups_.size() == 1,
+                  "rest-pose shared pieces must still batch");
+            {
+                // Replace transition: the same entity now shows another asset. It must drop its share of the skeleton,
+                // leave the old asset's batch group and not stay in it as a stale member; its siblings keep both.
+                check(impl.upload_resource(812, rigid, texture, material, {}, {}).has_value(), "second skinned hull fixture upload failed");
+                renderer.submit(eawr_resource_churn_probe::scene(19, {{30, 811, -100}, {31, 812, 0}, {32, 811, 100}}));
+                const auto replaced = impl.instances_.find(31);
+                check(replaced != impl.instances_.end() && replaced->second.asset_id == 812 && !replaced->second.shared_idle_skeleton
+                          && replaced->second.skeleton.is_valid() && replaced->second.batch_group == 0,
+                      "a replaced shared piece must hold its own skeleton and no batch slot of the old asset");
+                check(impl.batch_registry_.member_total() == 2 && impl.batch_groups_.size() == 1 && shares(30, 32),
+                      "replacing a batched shared piece must leave its siblings batched and sharing");
+            }
+            renderer.submit(scene_of(20, {30, 32}));
+            check(impl.instances_.size() == 2 && impl.batch_registry_.member_total() == 2 && shares(30, 32),
+                  "removing a batched shared piece must leave its siblings batched and sharing");
+            idle_pose(25.0F, {30, 32});
+            renderer.submit(scene_of(21, {30, 32}));
+            check(impl.batch_registry_.member_total() == 0 && impl.batch_groups_.empty() && shares(30, 32),
+                  "a moved shared piece must leave the batch and keep the shared skeleton");
+            renderer.submit(scene_of(22, {32}));
+            check(impl.instances_.size() == 1 && shares(32, 32), "removing a posed shared piece keeps its sibling's skeleton");
+            renderer.submit(scene_of(23, {}));
+            check(impl.instances_.empty() && impl.batch_groups_.empty() && renderer.lifecycle_counts().skeletons == 0,
+                  "removing every shared piece must release the skeleton and the batch");
+            for (const sim::EntityId id : std::initializer_list<sim::EntityId>{30, 31, 32}) renderer.clear_skin_pose(id);
+            check(renderer.release(811).has_value(), "skinned hull fixture release failed");
+            check(renderer.release(812).has_value(), "second skinned hull fixture release failed");
+        }
+        {
+            // Skeleton-free rigid pieces (real code, batching ON): no skeleton RID, the bone folds into the instance
+            // transform; rest pieces batch; a posed piece stays in its group with the bone in its slot; clearing the pose
+            // returns it; a replacement and removals release everything.
+            auto rigid = eawr_resource_churn_probe::plate(60.0F, 1, true);
+            rigid.meshes[0].submeshes[0].shader = "Engine/Invented.fx";
+            check(impl.upload_resource(813, rigid, texture, material, {}, {}).has_value(), "skeleton-free fixture upload failed");
+            const auto scene_of = [&](const std::uint64_t tick, std::initializer_list<sim::EntityId> ids) {
+                std::vector<eawr_resource_churn_probe::Member> placed;
+                std::int64_t x = -100;
+                for (const auto id : ids) { placed.push_back({id, 813, x}); x += 100; }
+                return eawr_resource_churn_probe::scene(tick, placed);
+            };
+            const auto pose_all = [&](const float shift, std::initializer_list<sim::EntityId> ids, const bool rotate = false) {
+                presentation::animation::BonePose bone;
+                // Column-major: a quarter turn about z (x axis to y) when `rotate`, then the shift along x.
+                bone.skin_asset = rotate ? std::array<float, 16>{0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, shift, 0, 0, 1}
+                                         : std::array<float, 16>{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, shift, 0, 0, 1};
+                const std::array<presentation::animation::BonePose, 1> bones{bone};
+                for (const auto id : ids) check(renderer.set_skin_pose(id, 813, bones).has_value(), "skeleton-free pose bind failed");
+            };
+            const auto piece_in_group = [&](const sim::EntityId id) {
+                const auto found = impl.instances_.find(id);
+                return found != impl.instances_.end() && found->second.batch_group != 0;
+            };
+            const auto free_piece = [&](const sim::EntityId id) {
+                const auto found = impl.instances_.find(id);
+                return found != impl.instances_.end() && found->second.rigid_bone == 0 && !found->second.skeleton.is_valid();
+            };
+            renderer.submit(scene_of(40, {50, 51, 52}));
+            check(free_piece(50) && free_piece(51) && free_piece(52), "rigid single-bone pieces must hold no skeleton");
+            auto counts = renderer.lifecycle_counts();
+            check(counts.skeletons == 0 && counts.skeleton_free == 3, "skeleton-free pieces are counted, not their skeletons");
+            for (int i = 0; i < 4; ++i) renderer.submit(scene_of(41 + i, {50, 51, 52}));
+            check(impl.batch_registry_.member_total() == 3 && impl.batch_groups_.size() == 1,
+                  "rest-pose skeleton-free pieces must still batch");
+            pose_all(25.0F, {50, 52});
+            renderer.submit(scene_of(46, {50, 51, 52}));
+            check(impl.batch_registry_.member_total() == 3 && impl.batch_groups_.size() == 1 && free_piece(50) && free_piece(52),
+                  "posed skeleton-free pieces must stay in the batch and stay skeleton-free");
+            {
+                // The group slot holds object x bone: x moved by the bone's 25 units for the posed pieces, not for 51.
+                const auto slot_x = [&](const sim::EntityId id) {
+                    const auto& piece = impl.instances_.at(id);
+                    return impl.batch_groups_.at(piece.batch_group).transforms[static_cast<std::size_t>(piece.batch_slot) * 12 + 3];
+                };
+                check(piece_in_group(50) && piece_in_group(51) && piece_in_group(52)
+                          && std::abs(slot_x(50) - (impl.instances_.at(50).object_transform.origin.x + 25.0F)) < 1e-3F
+                          && std::abs(slot_x(52) - (impl.instances_.at(52).object_transform.origin.x + 25.0F)) < 1e-3F
+                          && std::abs(slot_x(51) - impl.instances_.at(51).object_transform.origin.x) < 1e-3F,
+                      "a posed member's group slot must hold object x bone");
+                // The slot must equal the instance's composed world transform (object x bone), basis and origin.
+                const auto slot_matches_world = [&](const sim::EntityId id) {
+                    const auto& piece = impl.instances_.at(id);
+                    const Transform3D world = GodotRenderer::Impl::world_transform(piece);
+                    const auto& transforms = impl.batch_groups_.at(piece.batch_group).transforms;
+                    const std::size_t base = static_cast<std::size_t>(piece.batch_slot) * 12;
+                    bool same = true;
+                    for (std::size_t row = 0; row < 3; ++row) {
+                        for (std::size_t column = 0; column < 3; ++column)
+                            same = same && std::abs(transforms[base + row * 4 + column] - static_cast<float>(world.basis.rows[row][column])) < 1e-3F;
+                    }
+                    return same && std::abs(transforms[base + 3] - static_cast<float>(world.origin.x)) < 1e-3F;
+                };
+                // A second move that also rotates must rewrite the slot (not only the first translation).
+                pose_all(40.0F, {50}, true);
+                check(!impl.instances_.at(50).bone_transform.basis.is_equal_approx(Basis()) && piece_in_group(50)
+                          && std::abs(slot_x(50) - (impl.instances_.at(50).object_transform.origin.x + 40.0F)) < 1e-3F && slot_matches_world(50),
+                      "a second, rotating bone move must rewrite the member's group slot");
+                // Copying a pose onto a grouped skeleton-free piece goes through the same slot write.
+                renderer.copy_instance_pose(50, 51, 1.0F);
+                check(piece_in_group(51) && !impl.instances_.at(51).bone_transform.basis.is_equal_approx(Basis())
+                          && std::abs(slot_x(51) - (impl.instances_.at(51).object_transform.origin.x + 40.0F)) < 1e-3F && slot_matches_world(51),
+                      "a pose copied onto a grouped skeleton-free piece must rewrite its group slot");
+                renderer.clear_skin_pose(51);
+                pose_all(25.0F, {50});
+            }
+            {
+                const auto posed = impl.instances_.at(50);
+                const auto evidence = renderer.bone_evidence(50, 0);
+                check(evidence && std::abs((*evidence)[9] - 25.0F) < 1e-3F, "the bone must read back as posed");
+                // The engine transform itself is not readable through the extension API; the state it is built
+                // from is: the bone matrix, and the world transform composed from it.
+                check(std::abs(posed.bone_transform.origin.x - 25.0F) < 1e-3F
+                          && std::abs(GodotRenderer::Impl::world_transform(posed).origin.x
+                                      - (posed.object_transform.origin.x + 25.0F)) < 1e-3F,
+                      "the instance transform must be object x bone");
+            }
+            pose_all(0.0F, {50});
+            renderer.clear_skin_pose(52);
+            renderer.submit(scene_of(47, {50, 51, 52}));
+            {
+                const auto& piece = impl.instances_.at(52);
+                check(piece.batch_group != 0 && std::abs(impl.batch_groups_.at(piece.batch_group).transforms[
+                          static_cast<std::size_t>(piece.batch_slot) * 12 + 3] - piece.object_transform.origin.x) < 1e-3F,
+                      "clearing the pose must rewrite the member's group slot to the object transform");
+                const auto& cleared = impl.instances_.at(52);
+                check(cleared.bone_transform == Transform3D()
+                          && GodotRenderer::Impl::world_transform(cleared) == cleared.object_transform,
+                      "clearing the pose must return the instance to its object transform");
+            }
+            // Replace transition: entity 51 now shows a non-rigid asset and must drop the bone state.
+            check(impl.upload_resource(814, eawr_resource_churn_probe::plate(60.0F), texture, material, {}, {}).has_value(),
+                  "plain fixture upload failed");
+            renderer.submit(eawr_resource_churn_probe::scene(48, {{50, 813, -100}, {51, 814, 0}, {52, 813, 100}}));
+            check(impl.instances_.at(51).rigid_bone == -1 && !impl.instances_.at(51).skeleton.is_valid()
+                      && impl.instances_.at(51).bone_transform == Transform3D(),
+                  "a replaced piece must drop its bone state");
+            renderer.submit(scene_of(49, {}));
+            counts = renderer.lifecycle_counts();
+            check(impl.instances_.empty() && counts.skeletons == 0 && counts.skeleton_free == 0,
+                  "removing every skeleton-free piece must leave nothing behind");
+            for (const sim::EntityId id : std::initializer_list<sim::EntityId>{50, 51, 52}) renderer.clear_skin_pose(id);
+            check(renderer.release(813).has_value(), "skeleton-free fixture release failed");
+            check(renderer.release(814).has_value(), "plain fixture release failed");
+        }
         // Leave batching in its production state so the churn and leak steps that follow run with it on.
         hull_batching::enabled = batching_before;
         return failures;
@@ -283,6 +465,9 @@ struct ModelRecipeProbe final {
             check(renderer.upload(asset, ModelUpload{owner, ModelSurface{0, 1, false}},
                 texture, material).has_value(), "production shared-model upload failed");
         }
+        // The upload identity is hashed on a pool worker from shared snapshots that include the model; a worker still hashing
+        // holds one more reference. Wait for both digests (the job drops its inputs before its digest is observable), then count.
+        for (const sim::AssetId asset : {810U, 811U}) impl.resources_.at(asset).identity.wait();
         check(owner.use_count() == 3, "production uploads must retain the cache owner twice without copying");
         const auto shared_memory = renderer.recipe_memory();
         check(shared_memory.recipes == 2 && shared_memory.models == 1 && shared_memory.textures == 1
@@ -556,12 +741,12 @@ void EawrResourceChurnProbe::verify_churn_switch(
         } else if (now.texture != churn_full_.texture || now.buffer != churn_full_.buffer) {
             ++churn_texture_drift_;
         }
-        check(counts.skeletons == 2, "a full scene must hold exactly two live skeletons");
+        check(counts.skeletons + counts.skeleton_free == 2, "a full scene must hold exactly two live skeleton holders");
     }
     if (item == 2) {
         check(now.texture == with_assets_.texture && now.buffer == with_assets_.buffer,
             "an empty scene must hold exactly the uploaded assets' memory");
-        check(counts.skeletons == 0, "an empty scene must hold no skeleton");
+        check(counts.skeletons == 0 && counts.skeleton_free == 0, "an empty scene must hold no skeleton");
     }
 }
 
@@ -788,7 +973,7 @@ void EawrResourceChurnProbe::build_shutdown_steps(const ProbeAssets& probe_asset
         const auto counts = renderer_->lifecycle_counts();
         evidence_.push_back("\"shutdown_live\":{\"assets\":" + std::to_string(counts.assets) + ",\"instances\":"
             + std::to_string(counts.instances) + ",\"skeletons\":" + std::to_string(counts.skeletons)
-            + ",\"skin_poses\":" + std::to_string(counts.skin_poses) + ",\"red_references\":"
+            + ",\"skeleton_free\":" + std::to_string(counts.skeleton_free) + ",\"skin_poses\":" + std::to_string(counts.skin_poses) + ",\"red_references\":"
             + std::to_string(references(red)) + "}");
         renderer_.reset();
         expected_drawn_ = 0;

@@ -3,8 +3,10 @@
 #include "eawr/platform/campaign_end_view.hpp"
 
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace eawr::viewer::galactic {
@@ -53,5 +55,36 @@ struct CampaignScoreCaptions {
 // WGP-111, WGS-116/117: Escape or the quit button only act while the score is the
 // topmost dialog; the destination is the presentation callback's decision.
 using CampaignScoreExit = std::function<void(platform::CampaignScoreDestination)>;
+
+// WGP-107..110: what the score screen plays for one movie request of the end chain. A declaration with `Has_Credits`
+// (the stock `Credits`) rolls the credits over it, under the score dialog. Unverified (ECE-U02, #7332): the layering.
+// Any other movie (a faction win or finale movie, only reachable once a story enables victory movies, WGP-105) has no
+// full-screen player yet (#1951) and opens as a failure, which WGP-108 continues synchronously.
+struct CampaignMovieDeclaration {
+    bool has_credits{}, cannot_skip{};
+};
+struct CampaignMovieState {
+    std::uint64_t token{};   // the request last handled
+    bool rolling{};          // that request is the credits roll now on screen
+    bool cannot_skip{};
+    std::string name;
+};
+// Hands every new request of `chain` to `declare` (name -> declaration, absent when it cannot be resolved) until one
+// plays or none is left. A request that cannot play is reported as an initialized-scene open failure.
+template <class Declare>
+void advance_campaign_movies(platform::CampaignEndPresentation& chain, CampaignMovieState& state, const Declare& declare) {
+    for (int guard = 0; guard < 8; ++guard) {
+        const auto& request = chain.movie_request();
+        if (!request) { state.rolling = false; state.name.clear(); return; }
+        if (request->token == state.token) return;
+        state.token = request->token;
+        state.name = request->name;
+        const std::optional<CampaignMovieDeclaration> declared = declare(request->name);
+        state.rolling = declared && declared->has_credits;
+        state.cannot_skip = declared && declared->cannot_skip;
+        chain.movie_open_result(state.token, state.rolling, true);
+        if (state.rolling) return;
+    }
+}
 
 } // namespace eawr::viewer::galactic

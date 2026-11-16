@@ -19,8 +19,10 @@ struct InstalledCampaignRequest {
     std::uint64_t ticks{};
     std::uint64_t live_ticks{}; // run the viewer's live session with the native AI for this many ticks (0 = off)
     bool live_ai{}; // install the native AI for the live run
+    bool lobby_prepare{}; // measure the production two-seat lobby preparation, without starting gameplay
     std::string perception_trace; // --live-perception: root equation whose failed leaves are printed
     std::uint64_t goals_every{}; // with live_ai: note the native AI's goals every this many ticks (0 = off)
+    bool fingerprint{}; // with live: note a SHA-256 of the live run's end state (#6933); off by default
     std::uint64_t play_ticks{}; // each of the human player's test orders may run this long (0 = no orders)
     std::uint64_t seed{42};
     std::size_t workers{1};

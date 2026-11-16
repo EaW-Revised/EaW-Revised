@@ -7,7 +7,8 @@ blob id of this file with the plan's payload entry before it runs it). Standard 
   verify   check the tree is the kit commit with clean tracked files, check every staged input against the plan, unpack the
            Revised layer, and stage the pinned engine
   package  run the packager (package_release.py) with one fixed command line; both routes call this code
-  receipt  after packaging: check the tree is still clean, hash the outputs, record the toolchain, and write the host receipt
+  receipt  after packaging: check the tree is still clean, hash the outputs, record the toolchain and the land skirmish compile
+           defines of both build trees (build.ninja), and write the host receipt
 
 Nothing here copies a script over the tree: a script that is not the kit commit's byte for byte shows up as a dirty file.
 """
@@ -199,6 +200,18 @@ def compiler_record(build_dir: Path | None) -> tuple[str | None, str | None]:
     return compiler, linker
 
 
+def linux_godot_record(exe) -> str | None:
+    """The Linux editor the pre-import ran with, as "<--version> sha256 <hash>"; None when the route has none."""
+    if not exe:
+        return None
+    path = Path(exe)
+    try:
+        version = subprocess.run([str(path), "--version"], capture_output=True, text=True, timeout=60).stdout.strip()
+        return f"{version.splitlines()[0] if version else 'unknown'} sha256 {sha256_file(path)}"
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def toolchain(build_dir: Path | None = None) -> dict:
     """What built and packaged this kit. Best effort: a tool that is not there is recorded as null, never guessed. The
     compiler and linker are the ones CMake recorded for the build tree; PATH is only the fallback."""
@@ -211,13 +224,13 @@ def toolchain(build_dir: Path | None = None) -> dict:
         return text.splitlines()[0].strip() if result.returncode == 0 and text else None
 
     compiler, linker = compiler_record(build_dir)
-    wine = os.environ.get("EAWR_WINE")
+    linux_godot = os.environ.get("EAWR_LINUX_GODOT")
     shell = shutil.which("pwsh") or shutil.which("powershell")
     return {
         "python": platform.python_version(), "os": platform.platform(), "machine": platform.machine(),
         "clang": compiler or first_line([shutil.which("clang") or shutil.which("clang-cl") or "clang", "--version"]),
         "lld": (first_line([linker, "--version"]) or linker) if linker else first_line([shutil.which("lld-link") or shutil.which("ld.lld") or "lld-link", "--version"]),
-        "wine": first_line([wine, "--version"], 180) if wine else None,
+        "linux_godot": linux_godot_record(linux_godot),
         "powershell": first_line([shell, "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"]) if shell else None,
         "git": first_line(["git", "--version"]),
         "windows_sdk": os.environ.get("WindowsSDKVersion") or os.environ.get("WINDOWSSDKVERSION"),
@@ -226,7 +239,7 @@ def toolchain(build_dir: Path | None = None) -> dict:
 
 def packager_command(packager, *, expect_identity: str, build_dir, version: str, out, symbol_store, godot, launcher,
                      mods_service, launcher_artifact, revised_layer=None, allow_missing_revised_layer=False,
-                     public=False, no_symbols=False, debug=False, python=None) -> list[str]:
+                     public=False, no_symbols=False, debug=False, python=None, linux_import_godot=None) -> list[str]:
     """The one command line of the player packager. The routes differ in where they find the built binaries, how they stage
     the tree and which runner runs the engine; none of them builds this line itself."""
     if no_symbols and public:
@@ -237,6 +250,8 @@ def packager_command(packager, *, expect_identity: str, build_dir, version: str,
                "--launcher-artifact", str(launcher_artifact)]
     if revised_layer:
         command += ["--revised-layer", str(revised_layer)]
+    if linux_import_godot:
+        command += ["--linux-import-godot", str(linux_import_godot)]
     for flag, enabled in (("--allow-missing-revised-layer", allow_missing_revised_layer), ("--public", public),
                           ("--no-symbols", no_symbols), ("--debug", debug)):
         if enabled:
@@ -289,6 +304,22 @@ def verify(args) -> int:
     return 0
 
 
+LAND_DEFINE = "EAWR_LAND_SKIRMISH=1"
+
+
+def land_define_count(build_dir) -> int | None:
+    """How many lines of the build tree's build.ninja carry the land skirmish compile define (None: no tree or no build.ninja).
+    The tree's own build rules say what was compiled; the requested flag and the overlay files do not."""
+    if not build_dir:
+        return None
+    path = Path(build_dir) / "build.ninja"
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return sum(1 for line in handle if LAND_DEFINE in line)
+    except OSError:
+        return None
+
+
 def outputs_of(out: Path) -> list[dict]:
     return [{"name": f.name, "size": f.stat().st_size, "sha256": sha256_file(f)} for f in sorted(Path(out).iterdir()) if f.is_file()]
 
@@ -309,6 +340,7 @@ def receipt(args) -> int:
     document = {"schema": RECEIPT_SCHEMA, "plan_sha256": args.plan_sha256, "kit_sha": args.kit_sha,
                 "host": args.host, "public": bool(args.public), "tree": after, "inputs": seen,
                 "outputs": outputs_of(Path(args.out)),
+                "land_skirmish": {"root": land_define_count(args.build_dir), "viewer": land_define_count(args.viewer_build_dir)},
                 "toolchain": toolchain(Path(args.build_dir) if args.build_dir else None)}
     text = json.dumps(document, indent=2, sort_keys=True) + "\n"
     if args.receipt:
@@ -344,6 +376,7 @@ def main(argv=None) -> int:
             p.add_argument("--receipt")
             p.add_argument("--public", action="store_true", help="the package was made with the packager's --public")
             p.add_argument("--build-dir", help="the build tree; its CMake cache names the compiler and linker to record")
+            p.add_argument("--viewer-build-dir", help="the viewer build tree; the receipt counts its land skirmish compile defines")
     args = parser.parse_args(argv)
     try:
         return {"verify": verify, "receipt": receipt, "package": package}[args.command](args)

@@ -130,6 +130,17 @@ void BattleInput::write_report(std::ostream& output, const BattleCamera& space) 
         meshes += unit.mesh != nullptr && !unit.mesh->triangles.empty() ? 1U : 0U;
         spheres += unit.sphere_radius > 0.0F ? 1U : 0U;
     }
+    // #6992: the pick volumes by entity and content type (a land structure is a pad or a pre-built building, so a case can
+    // find the entity to click), capped so a large battle does not flood the report.
+    output << ", \"pickable\": [";
+    for (std::size_t index = 0; index < units_.size() && index < 1024; ++index) {
+        const ui::BattleUnit& unit = units_[index];
+        output << (index ? ", " : "") << "{\"entity\": " << unit.entity << ", \"type\": "
+               << json(live_ ? live_->unit_type_name(unit.type) : std::string{}) << ", \"own\": " << (unit.own ? "true" : "false")
+               << ", \"selectable\": " << (unit.selectable ? "true" : "false")
+               << ", \"position\": [" << unit.position[0] << ", " << unit.position[1] << ", " << unit.position[2] << "]}";
+    }
+    output << "]";
     output << ", \"pick_meshes\": " << meshes << ", \"pick_spheres\": " << spheres << ", \"double_click_candidates\": [";
     for (std::size_t click = 0; click < double_click_candidates_.size(); ++click) {
         output << (click ? ", " : "") << "[";
@@ -166,6 +177,8 @@ void BattleInput::write_report(std::ostream& output, const BattleCamera& space) 
            << ", \"refused\": " << refused_ << ", \"boxes\": " << boxes_
            << ", \"camera_focuses\": " << focuses_ << ", \"camera_follow_moves\": " << follow_moves_
            << ", \"scripted_fired\": " << scripted_fired_
+           << ", \"compass_drawn\": " << (compass_drawn_ ? "true" : "false")
+           << ", \"compass_frames\": " << compass_frames_
            << ", \"acceptance_attempts\": [";
     for (std::size_t index = 0; index < acceptance_attempts_.size(); ++index) {
         const auto& attempt = acceptance_attempts_[index];
@@ -252,7 +265,16 @@ void BattleInput::write_report(std::ostream& output, const BattleCamera& space) 
         const ui::BuildButton& button = build_buttons_[index];
         output << (index ? ", " : "") << "{\"slot\": " << button.slot << ", \"type\": " << button.type << ", \"price\": "
                << button.price << ", \"enabled\": " << (button.enabled ? "true" : "false") << ", \"state\": "
-               << static_cast<int>(button.state) << "}";
+               << static_cast<int>(button.state);
+        if (button.option < build_diagnostics_.size()) {
+            const BuildDiagnostic& why = build_diagnostics_[button.option];
+            output << ", \"available\": " << (why.available ? "true" : "false") << ", \"visible\": "
+                   << (why.visible ? "true" : "false") << ", \"menu_enabled\": " << (why.enabled ? "true" : "false")
+                   << ", \"kind\": " << static_cast<int>(why.kind) << ", \"queue\": " << static_cast<int>(why.queue)
+                   << ", \"limits\": [" << why.limits[0] << ", " << why.limits[1] << ", " << why.limits[2] << ", "
+                   << why.limits[3] << "], \"prerequisites\": " << why.prerequisites;
+        }
+        output << "}";
     }
     output << "]}";
     output << ", \"hovered\": ";

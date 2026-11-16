@@ -18,7 +18,7 @@ using Player = std::uint32_t;
 using Object = std::uint64_t;
 enum class Travel { enter, move_hero, land, deploy_hero, fleet_bounced, invasion_bounced, planet_destroyed };
 enum class Economy { construct, construct_level, credits, tech_level, era };
-enum class Loss { destroy, destroy_base };
+enum class Loss { destroy, destroy_base, hero_defeat };
 enum class Battle { won, lost, retreat, victory, mission_lost };
 enum class Corruption { changed, complete, failed };
 enum class Text { ai_notification, speech_done, generic, click_gui, open_corruption, black_market, sabotage };
@@ -35,6 +35,7 @@ struct Fleet {
     std::vector<std::string> heroes; // Includes heroes inside transports (WST-31).
     std::vector<std::string> orbit_types;
     bool stealth{}, raid_capable{};
+    std::size_t direct_members{}; // unflattened member count (WST-31 exclusive); zero = use types.size()
 };
 struct TravelNotice { Travel kind{}; std::string planet; Fleet fleet; std::optional<std::string> hero; };
 struct EconomyNotice { Economy kind{}; std::int64_t value{}; std::string type, planet; BaseKind base{BaseKind::either}; Player object_owner{}; };
@@ -60,6 +61,8 @@ struct Notification {
 // WST-32/33: one ownership/construction notice may evaluate multiple engine event families.
 [[nodiscard]] std::string_view notification_seam(const Payload& payload);
 // WST-34: report both final and original types when different, preserving notification order.
+// WST-31: one STORY_MOVE notice per hero of an arriving fleet, in the order given (the caller passes ascending type id).
+[[nodiscard]] std::vector<TravelNotice> hero_moves(const TravelNotice& arrival, std::span<const std::string> heroes);
 [[nodiscard]] std::vector<LossNotice> destruction(std::string type, std::string original_type,
     std::string planet, Player owner);
 struct DispatchGate {

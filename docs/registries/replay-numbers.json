@@ -148,6 +148,12 @@
     "constant": "replay_extension_market_purchases",
     "name": "market purchases",
     "documented": true
+   },
+   {
+    "tag": 20,
+    "constant": "replay_extension_tactical_superweapon",
+    "name": "tactical super weapon setup",
+    "documented": true
    }
   ],
   "opcodes": [
@@ -366,6 +372,18 @@
     "constant": "opcode_land_unload",
     "name": "land unload",
     "documented": true
+   },
+   {
+    "value": 37,
+    "constant": "opcode_tactical_superweapon",
+    "name": "tactical super weapon switch",
+    "documented": true
+   },
+   {
+    "value": 38,
+    "constant": "opcode_move_facing",
+    "name": "move with a final facing",
+    "documented": true
    }
   ]
  },
@@ -551,6 +569,11 @@
    "documented": true
   },
   {
+   "tag": "MVYW",
+   "constant": "final_facing_tag",
+   "documented": true
+  },
+  {
    "tag": "NEBC",
    "constant": "nebula_tag",
    "documented": true
@@ -673,7 +696,7 @@
   {
    "tag": "WYPT",
    "constant": "waypoint_tag",
-   "documented": false
+   "documented": true
   }
  ]
 }

@@ -661,6 +661,28 @@ std::optional<core::Diagnostic> bind_combat_profile_identity(const UnitType& uni
     profile.category_bits = unit.category_bits;
     profile.attack_category_restrictions = unit.attack_category_restrictions;
     profile.hero = unit.named_hero || unit.generic_hero;
+    if (unit.tactical_super_weapon) {
+        // TSW-01..05: seconds become whole frames by truncation (the debris delay and post wait are authored as frames);
+        // Max_Speed and Max_Thrust are the object's own tags, read as authored (the approach is not a locomotor move).
+        const auto& weapon = *unit.tactical_super_weapon;
+        constexpr std::int64_t frame_cap = 3600 * static_cast<std::int64_t>(tactical::logical_frames_per_second);
+        const auto frames = [&](const Fixed value, const bool seconds) -> std::uint32_t {
+            if (value.raw() <= 0) return 0;
+            const auto whole = seconds ? (value.raw() > 3600 * Fixed::scale ? frame_cap
+                    : value.raw() * static_cast<std::int64_t>(tactical::logical_frames_per_second) / Fixed::scale)
+                : value.raw() / Fixed::scale;
+            return static_cast<std::uint32_t>(whole > frame_cap ? frame_cap : whole);
+        };
+        tactical::TswProfile tsw;
+        tsw.attack_distance = weapon.attack_distance;
+        tsw.max_speed = unit.movement.max_speed.value_or(Fixed{});
+        tsw.max_thrust = unit.movement.max_thrust.value_or(Fixed{});
+        tsw.power_up_frames = frames(weapon.power_up_countdown_seconds, true);
+        tsw.attack_anim_frames = frames(weapon.attack_clip_seconds, true);
+        tsw.debris_delay_frames = frames(weapon.explosion_debris_creation_frame_delay, false);
+        tsw.post_destruction_wait_frames = frames(weapon.post_destruction_wait_frames, false);
+        profile.tactical_super_weapon = tsw;
+    }
     profile.redirect_damage_to_teammates = unit.redirect_damage_to_teammates;
     profile.passive_missile_shield_radius = unit.passive_missile_shield_radius.value_or(Fixed{});
     profile.ranged_target_z_adjust = unit.ranged_target_z_adjust.value_or(Fixed{});

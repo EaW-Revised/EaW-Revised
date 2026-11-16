@@ -1,5 +1,6 @@
 #include "unit_tables_foc_fixtures.hpp"
 
+#include "eawr/assets/map.hpp"
 #include "eawr/units/land_companies.hpp"
 #include "eawr/skirmish/land_content.hpp"
 
@@ -215,6 +216,11 @@ std::string combat_xml() {
   <Projectile_Does_Shield_Damage>No</Projectile_Does_Shield_Damage>
   <Projectile_Does_Hitpoint_Damage>Yes</Projectile_Does_Hitpoint_Damage>
 </Projectile>
+<Projectile Name="Shoot_Proj_Rocket">
+  <Max_Speed>7</Max_Speed><Projectile_Category>Laser</Projectile_Category>
+  <Projectile_Max_Flight_Distance>500</Projectile_Max_Flight_Distance>
+  <Projectile_Damage>5.0</Projectile_Damage><Damage_Type>Damage_Blaster</Damage_Type>
+</Projectile>
 <Container Name="Shoot_Team"><LandBehavior>LAND_TEAM_CONTAINER_LOCOMOTOR</LandBehavior><Max_Speed>.8</Max_Speed></Container>
 <GroundInfantry Name="Shoot_Trooper">
   <Create_Team>Yes</Create_Team><Create_Team_Type>Shoot_Team</Create_Team_Type>
@@ -242,6 +248,18 @@ std::string combat_xml() {
   <Targeting_Fire_Inaccuracy> Fighter, 4.0 </Targeting_Fire_Inaccuracy>
   <Death_Clone>Damage_Blaster, Shoot_Trooper_Death</Death_Clone>
   <Death_Fade_Time>3</Death_Fade_Time><Death_Persistence_Duration>5</Death_Persistence_Duration>
+  <Uses_Multiple_Locomotors>Yes</Uses_Multiple_Locomotors>
+  <Primary_Locomotor_Name>WALK_LOCOMOTOR</Primary_Locomotor_Name><Secondary_Locomotor_Name>JETPACK_LOCOMOTOR</Secondary_Locomotor_Name>
+  <Hover_Offset>16.0</Hover_Offset><Max_Lift> .6 </Max_Lift><Alternate_Max_Speed> 2.5 </Alternate_Max_Speed><Alternate_Max_Rate_Of_Turn> 6.0 </Alternate_Max_Rate_Of_Turn>
+  <Unit_Abilities_Data SubObjectList="Yes">
+    <Unit_Ability><Type>JET_PACK</Type><Recharge_Seconds>45</Recharge_Seconds><Effective_Radius> 150.0 </Effective_Radius></Unit_Ability>
+    <Unit_Ability>
+      <Type>STIM_PACK</Type><Expiration_Seconds>8</Expiration_Seconds><Recharge_Seconds>40</Recharge_Seconds>
+      <Damage_Percent_When_Activated>0.3</Damage_Percent_When_Activated>
+      <Mod_Multiplier>SPEED_MULTIPLIER, 2.0</Mod_Multiplier><Mod_Multiplier>WEAPON_DELAY_MULTIPLIER, 0.5</Mod_Multiplier>
+    </Unit_Ability>
+    <Unit_Ability><Type>SPRINT</Type><Expiration_Seconds>8</Expiration_Seconds><Recharge_Seconds>40</Recharge_Seconds></Unit_Ability>
+  </Unit_Abilities_Data>
 </GroundInfantry>
 <GroundVehicle Name="Shoot_Tank">
   <MovementClass>ModHover</MovementClass><LandBehavior>HOVER_LOCOMOTOR</LandBehavior>
@@ -263,10 +281,42 @@ std::string combat_xml() {
   <Tactical_Health>150</Tactical_Health><Projectile_Damage>6.0</Projectile_Damage>
   <Targeting_Max_Attack_Distance>250</Targeting_Max_Attack_Distance>
 </GroundVehicle>
-<Props_Generic Name="Shoot_Wall"><LandBehavior>LAND_OBSTACLE</LandBehavior>
+<Props_Generic Name="Shoot_Wall"><LandBehavior>LAND_OBSTACLE, DISABLE_FORCE_ABILITIES</LandBehavior>
+  <Disable_Force_Abilities_Range>150</Disable_Force_Abilities_Range>
   <Land_Model_Name>test_frigate</Land_Model_Name><Scale_Factor>1</Scale_Factor>
   <Tactical_Health>500</Tactical_Health><Armor_Type>Armor_Tank</Armor_Type>
   <Collidable_By_Projectile_Living>Yes</Collidable_By_Projectile_Living>
+</Props_Generic>
+<Props_Generic Name="Shoot_Rocket_Gun"><LandBehavior>LAND_OBSTACLE</LandBehavior>
+  <Land_Model_Name>test_frigate</Land_Model_Name><Scale_Factor>1</Scale_Factor>
+  <Tactical_Health>80</Tactical_Health><Armor_Type>Armor_Tank</Armor_Type><Damage_Type>Damage_Blaster</Damage_Type>
+  <Collidable_By_Projectile_Living>Yes</Collidable_By_Projectile_Living>
+  <Targeting_Max_Attack_Distance>120</Targeting_Max_Attack_Distance>
+  <Projectile_Types>Shoot_Proj_Blaster, Shoot_Proj_Rocket</Projectile_Types>
+  <Projectile_Fire_Recharge_Seconds>2</Projectile_Fire_Recharge_Seconds>
+  <Projectile_Fire_Pulse_Count>1</Projectile_Fire_Pulse_Count>
+  <Projectile_Fire_Pulse_Delay_Seconds>.2</Projectile_Fire_Pulse_Delay_Seconds>
+  <Fire_Weapon_When_In_Rocket_Attack_Mode>No</Fire_Weapon_When_In_Rocket_Attack_Mode>
+  <Abilities SubObjectList="Yes">
+    <Permanent_Weapon_Swap_Ability Name="Shoot_Swap">
+      <Activation_Style>Ground_Automatic</Activation_Style><Weapon_Index>1</Weapon_Index>
+      <Initially_Enabled>Yes</Initially_Enabled>
+    </Permanent_Weapon_Swap_Ability>
+  </Abilities>
+</Props_Generic>
+<Props_Generic Name="Shoot_Bad_Swap_Gun"><LandBehavior>LAND_OBSTACLE</LandBehavior>
+  <Land_Model_Name>test_frigate</Land_Model_Name><Scale_Factor>1</Scale_Factor>
+  <Tactical_Health>80</Tactical_Health><Armor_Type>Armor_Tank</Armor_Type><Damage_Type>Damage_Blaster</Damage_Type>
+  <Collidable_By_Projectile_Living>Yes</Collidable_By_Projectile_Living>
+  <Targeting_Max_Attack_Distance>120</Targeting_Max_Attack_Distance>
+  <Projectile_Types>Shoot_Proj_Blaster</Projectile_Types>
+  <Projectile_Fire_Recharge_Seconds>2</Projectile_Fire_Recharge_Seconds>
+  <Projectile_Fire_Pulse_Count>1</Projectile_Fire_Pulse_Count>
+  <Projectile_Fire_Pulse_Delay_Seconds>.2</Projectile_Fire_Pulse_Delay_Seconds>
+  <Abilities SubObjectList="Yes">
+    <Permanent_Weapon_Swap_Ability Name="Shoot_Bad_Swap"><Activation_Style>Ground_Automatic</Activation_Style>
+      <Weapon_Index>1</Weapon_Index></Permanent_Weapon_Swap_Ability>
+  </Abilities>
 </Props_Generic>
 <GroundCompany Name="Shoot_Infantry_Company">
   <Company_Units>Shoot_Trooper, Shoot_Trooper</Company_Units>
@@ -405,9 +455,11 @@ void land_combat_rows() {
     respell_file(constants, "Object_Max_Health_Multiplier_Space", "Object_Max_Health_Multiplier_Land");
     respell_file(constants, "</GameConstants>", "<Damage_To_Armor_Mod> Damage_Blaster, Armor_Infantry, 0.8 </Damage_To_Armor_Mod>"
         "<WalkAnimationCutoff>0.6</WalkAnimationCutoff><MoveBlendTime>0.5</MoveBlendTime>"
-        "<Garrisoned_Max_Attack_Distance_Multiplier>1.5</Garrisoned_Max_Attack_Distance_Multiplier></GameConstants>");
+        "<Garrisoned_Max_Attack_Distance_Multiplier>1.5</Garrisoned_Max_Attack_Distance_Multiplier>"
+        "<Force_Ability_Disable_Time>0.5</Force_Ability_Disable_Time>"
+        "<Spread_Out_Spacing_Coefficient>1.8</Spread_Out_Spacing_Coefficient></GameConstants>");
     const std::vector<std::string> companies{"Shoot_Infantry_Company", "Shoot_Armor_Company"};
-    const auto land = load_types(tree.root, BattleDomain::land, companies, {"Shoot_Wall"});
+    const auto land = load_types(tree.root, BattleDomain::land, companies, {"Shoot_Wall", "Shoot_Rocket_Gun", "Shoot_Bad_Swap_Gun"});
     if (!land.tables) return;
     const auto& tables = *land.tables;
     const auto constant = [&](const std::string_view tag) -> std::optional<Fixed> {
@@ -421,6 +473,51 @@ void land_combat_rows() {
         std::optional<Fixed> garrisoned;
         for (const auto& row : tables.constants.scalars) if (row.tag == "Garrisoned_Max_Attack_Distance_Multiplier") garrisoned = row.value;
         expect(garrisoned == Fixed::from_decimal("1.5").value(), "LC-102: a land load reads the garrisoned range multiplier");
+    }
+    {
+        std::optional<Fixed> disable_time;
+        for (const auto& row : tables.constants.scalars) if (row.tag == "Force_Ability_Disable_Time") disable_time = row.value;
+        expect(disable_time == Fixed::from_decimal("0.5").value(), "WLAB-08: a land load reads the Force disabling time");
+    }
+    {
+        std::optional<Fixed> spread;
+        for (const auto& row : tables.constants.scalars) if (row.tag == "Spread_Out_Spacing_Coefficient") spread = row.value;
+        expect(spread == Fixed::from_decimal("1.8").value(), "WLAB-13: a land load reads the spread-out spacing coefficient");
+    }
+    {
+        // WLAB-15: STIM_PACK's self-damage share reaches the land ability row; only STIM_PACK carries it.
+        const auto* body = tables.find("Shoot_Trooper");
+        std::vector<eawr::core::Diagnostic> notes;
+        const auto abilities = eawr::units::land_ability_table(tables, eawr::units::ContentErrors::strict, &notes);
+        const auto* profile = abilities && body ? abilities.value().find(eawr::assets::object_type_crc(body->id)) : nullptr;
+        const auto stim = profile ? eawr::sim::tactical::ability_slot(*profile, eawr::sim::tactical::AbilityKind::stim_pack) : std::nullopt;
+        const auto sprint = profile ? eawr::sim::tactical::ability_slot(*profile, eawr::sim::tactical::AbilityKind::sprint) : std::nullopt;
+        expect(body && stim && sprint && profile->abilities[*stim].activation_damage == Fixed::from_decimal("0.3").value()
+            && profile->abilities[*stim].modifiers.speed == Fixed::from_integer(2).value()
+            && profile->abilities[*stim].modifiers.weapon_delay == Fixed::from_decimal("0.5").value()
+            && profile->abilities[*sprint].activation_damage == Fixed{},
+            "WLAB-15: Damage_Percent_When_Activated and the row multipliers reach the land STIM_PACK profile");
+        // WLAB-16: JET_PACK's Effective_Radius reaches its row, and the locomotor names reach the type.
+        const auto jet = profile ? eawr::sim::tactical::ability_slot(*profile, eawr::sim::tactical::AbilityKind::jet_pack) : std::nullopt;
+        expect(jet && profile->abilities[*jet].effective_radius == Fixed::from_integer(150).value()
+            && profile->abilities[*jet].recharge_frames == 45 * 30 && profile->abilities[*jet].expiration_frames == 0,
+            "WLAB-16: JET_PACK reads its Effective_Radius and recharges from the switch");
+        expect(body && body->uses_multiple_locomotors && body->primary_locomotor_name == "WALK_LOCOMOTOR"
+            && body->secondary_locomotor_name == "JETPACK_LOCOMOTOR",
+            "WLAB-16: a land type that uses several locomotors keeps their names");
+        const auto* tank_body = tables.find("Shoot_Tank");
+        expect(tank_body && !tank_body->uses_multiple_locomotors && tank_body->secondary_locomotor_name.empty(),
+            "WLAB-16: a type that does not use several keeps no names");
+        // WLAB-16 (#7084): the flight tags of a type that uses several locomotors reach its row; a type that does not has none.
+        const auto close = [](const Fixed a, const Fixed b) {
+            return (a.raw() > b.raw() ? a.raw() - b.raw() : b.raw() - a.raw()) <= Fixed::scale / 1000;
+        };
+        expect(body && body->land_jump && close(body->land_jump->alternate_max_speed, Fixed::from_decimal("2.5").value())
+            && close(body->land_jump->max_lift, Fixed::from_decimal("0.6").value())
+            && close(body->land_jump->hover_offset, Fixed::from_integer(16).value())
+            && body->land_jump->alternate_rate_of_turn && close(*body->land_jump->alternate_rate_of_turn, Fixed::from_integer(6).value()),
+            "WLAB-16: Alternate_Max_Speed, Max_Lift, Hover_Offset and Alternate_Max_Rate_Of_Turn reach the type's flight row");
+        expect(tank_body && !tank_body->land_jump, "WLAB-16: a type that does not use several locomotors has no flight row");
     }
     // The companies pull their members in: no second pass over the member names.
     const auto* trooper = tables.find("Shoot_Trooper");
@@ -454,6 +551,34 @@ void land_combat_rows() {
         "LS-P1: tank rows; an object without its own Projectile_Damage keeps the projectile row's");
     expect(wall->hull == number(500) && wall->living_projectile_collision && !wall->weapon,
         "LS-P1: a damageable static loads its durability and collision rows");
+    expect(wall->force_disable_range == number(150) && !trooper->force_disable_range && !tank->force_disable_range,
+        "WLAB-08: DISABLE_FORCE_ABILITIES with its range makes a Force-disabling carrier row; other types have none");
+    // WLAB-18, WLAB-19, WLAB-71 (#3239): the projectile type count, the second projectile, the attack-mode flags of the object
+    // weapon and the nested permanent swap decode.
+    {
+        const auto* gun = tables.find("Shoot_Rocket_Gun");
+        const auto* bad = tables.find("Shoot_Bad_Swap_Gun");
+        expect(gun != nullptr, "WLAB-19/71: the several-projectile fixture type loads");
+        expect(bad != nullptr, "WLAB-71: the single-projectile swap fixture type loads");
+        if (gun && bad) {
+            expect(gun->projectile_type_count == 2U && gun->alternate_projectile == "Shoot_Proj_Rocket"
+                    && gun->alternate_projectile_index != eawr::units::no_index
+                    && gun->weapon && gun->weapon->projectile == "Shoot_Proj_Blaster",
+                "WLAB-19: a land body keeps its projectile type count and the second projectile; the first stays the weapon's own");
+            expect(trooper->projectile_type_count == 1U && trooper->alternate_projectile.empty()
+                    && trooper->alternate_projectile_index == eawr::units::no_index,
+                "WLAB-19: a land body with one projectile type has no second projectile");
+            expect(gun->weapon && !gun->weapon->fire_in_rocket_mode && gun->weapon->fire_in_normal_mode
+                    && trooper->weapon && trooper->weapon->fire_in_rocket_mode && trooper->weapon->fire_in_normal_mode,
+                "WLAB-18: a land object weapon reads Fire_Weapon_When_In_Rocket_Attack_Mode; both modes default to Yes");
+            expect(gun->permanent_weapon_swap && gun->permanent_weapon_swap->name == "Shoot_Swap"
+                    && gun->permanent_weapon_swap->weapon_index == 1U && gun->permanent_weapon_swap->initially_enabled
+                    && gun->permanent_weapon_swap->automatic && !trooper->permanent_weapon_swap,
+                "WLAB-71: the nested Permanent_Weapon_Swap_Ability decodes (Weapon_Index, Initially_Enabled, Ground_Automatic)");
+            expect(bad->permanent_weapon_swap && bad->projectile_type_count == 1U,
+                "WLAB-71: the decode keeps the row for a type with one projectile type; the content binding drops it");
+        }
+    }
     // A tag change reaches the row: the variant changes tags only.
     expect(tank_mod->hull == number(150) && tank_mod->weapon && tank_mod->weapon->damage == number(6)
             && tank_mod->targeting_max_attack_distance == number(250) && tank_mod->weapon->pulse_count == 4U,
@@ -474,6 +599,35 @@ void land_combat_rows() {
     expect(static_cast<bool>(built), "LS-P1: the stock-shaped companies bind");
     if (!built) return;
     const auto& bound = built.value();
+    // WLAB-08: the carrier and the window bind into the content. 0.5 s is 15 whole frames on top of the stock three.
+    expect(bound.land.force_disablers.size() == 1 && bound.land.force_disablers.front().type == eawr::assets::object_type_crc("Shoot_Wall")
+            && bound.land.force_disablers.front().range == number(150) && bound.land.force_disable_frames == 18U,
+        "WLAB-08: the carrier row binds with its radius, and an authored time of 0.1 s or more adds its frames to the stock three");
+    // WLAB-13, WLAB-16, #3239: the spread-out coefficient, the multi-locomotor types and the ability effects bind into the content.
+    expect(bound.land.spread_out_spacing == Fixed::from_decimal("1.8").value()
+            && bound.land.multi_locomotor_types == std::vector<eawr::sim::tactical::TypeId>{eawr::assets::object_type_crc("Shoot_Trooper")}
+            && bound.land.ability_effects && bound.land.ability_effects->find(eawr::sim::tactical::AbilityKind::jet_pack) != nullptr
+            && bound.land.ability_effects->find(eawr::sim::tactical::AbilityKind::deploy) != nullptr,
+        "WLAB-13/16: the spacing coefficient, the types with a secondary locomotor and the G2 effects bind");
+    // WLAB-16 (#7084): the flight row binds as ratios over the type's Max_Speed (1 here), the hover height and the default take-off
+    // wait of 2.5 s (75 whole frames) for a type the measured table does not name.
+    {
+        const auto near = [](const Fixed a, const Fixed b) {
+            return (a.raw() > b.raw() ? a.raw() - b.raw() : b.raw() - a.raw()) <= Fixed::scale / 1000;
+        };
+        expect(bound.land.jumps.size() == 1 && bound.land.jumps.front().type == eawr::assets::object_type_crc("Shoot_Trooper")
+                && near(bound.land.jumps.front().cruise_ratio, Fixed::from_decimal("2.5").value())
+                && near(bound.land.jumps.front().lift_ratio, Fixed::from_decimal("0.6").value())
+                && near(bound.land.jumps.front().hover, Fixed::from_integer(16).value())
+                && bound.land.jumps.front().takeoff_frames == 75U,
+            "WLAB-16: the flight row binds as speed and lift ratios over Max_Speed, the hover height and the take-off wait");
+    }
+    // WLAB-19, WLAB-71: only the type with several projectile types binds a swap row, carrying its permanent index.
+    expect(bound.land.weapon_swaps.size() == 1 && bound.land.weapon_swaps.front().type == eawr::assets::object_type_crc("Shoot_Rocket_Gun")
+            && bound.land.weapon_swaps.front().permanent == std::optional<std::uint8_t>(1)
+            && bound.land.ability_effects->find(eawr::sim::tactical::AbilityKind::swap_weapons) != nullptr
+            && bound.land.ability_effects->find(eawr::sim::tactical::AbilityKind::rocket_attack) != nullptr,
+        "WLAB-19/71: the weapon swap rows and the ROCKET_ATTACK and SWAP_WEAPONS effects bind into the content");
     const auto* trooper_life = durability_row(bound.durability, "Shoot_Trooper");
     const auto* tank_life = durability_row(bound.durability, "Shoot_Tank_Mod");
     // The land health multiplier is the fixture's 1.5.
@@ -816,6 +970,106 @@ void land_pad_rows() {
         "LR4-15: a constructed land structure reads its authored income stream");
 }
 
+// #6993 (LR4-05/06): a completed structure that authors a production menu reads its menu rows, the companies the menu names are
+// decoded with it, and each company carries its own price, time, queue, limits and prerequisites. A company the land content
+// cannot bind is left out of an optional binding with a note, and never refuses the content.
+void land_producer_rows() {
+    TempTree tree;
+    auto xml = units_xml("3600", "Unit_Select_Test");
+    xml.insert(xml.rfind("</Objects>"), combat_xml());
+    xml.insert(xml.rfind("</Objects>"), R"xml(
+<GroundStructure Name="Shoot_Factory"><Land_Model_Name>test_frigate</Land_Model_Name><Tactical_Health>200</Tactical_Health>
+  <Tactical_Buildable_Objects_Multiplayer>Rebel, Shoot_Priced_Company, Shoot_Free_Company</Tactical_Buildable_Objects_Multiplayer>
+</GroundStructure>
+<GroundCompany Name="Shoot_Priced_Company">
+  <Company_Units>Shoot_Tank, Shoot_Tank</Company_Units><Max_Squad_Size>1</Max_Squad_Size>
+  <Population_Value>2</Population_Value>
+  <Tactical_Build_Cost_Multiplayer>900</Tactical_Build_Cost_Multiplayer>
+  <Tactical_Build_Time_Seconds>25</Tactical_Build_Time_Seconds>
+  <Tactical_Production_Queue>Tactical_Units</Tactical_Production_Queue>
+  <Tactical_Build_Prerequisites>Shoot_Upgrade</Tactical_Build_Prerequisites>
+  <Build_Limit_Current_Per_Player>3</Build_Limit_Current_Per_Player>
+</GroundCompany>
+<GroundCompany Name="Shoot_Free_Company">
+  <Company_Units>Shoot_Tank_Mod</Company_Units><Max_Squad_Size>1</Max_Squad_Size>
+</GroundCompany>
+)xml");
+    write_fixture(tree.root, xml);
+    write(tree.root / "XML" / "FactionFiles.xml", "<Faction_Files><File>pad_factions.xml</File></Faction_Files>");
+    write(tree.root / "XML" / "pad_factions.xml", "<Factions><Faction Name=\"Rebel\" /></Factions>");
+    write(tree.root / "XML" / "MovementClassTypeDefs.xml",
+        "<MovementClassType><Infantry>Clear | ModSurface</Infantry><ModHover>Clear | Water</ModHover></MovementClassType>");
+    const auto constants = tree.root / "XML" / "GameConstants.xml";
+    respell_file(constants, "Object_Max_Speed_Multiplier_Space", "Object_Max_Speed_Multiplier_Land");
+    respell_file(constants, "Object_Max_Health_Multiplier_Space", "Object_Max_Health_Multiplier_Land");
+    const auto loaded = load_types(tree.root, BattleDomain::land, {"Shoot_Factory", "Shoot_Infantry_Company"}, {});
+    if (!loaded.tables) return;
+    const auto& tables = *loaded.tables;
+    const auto number = [](const std::int64_t whole) { return Fixed::from_integer(whole).value(); };
+    const auto* factory = tables.find("Shoot_Factory");
+    expect(factory && factory->production.buildable.size() == 1 && factory->production.buildable.front().types.size() == 2
+            && factory->production.buildable.front().types.front() == "Shoot_Priced_Company",
+        "LR4-01: a completed land structure that authors a menu reads it (it is neither a pad nor a construction child)");
+    const auto company = [&](const std::string_view id) -> const LandCompany* {
+        for (const auto& row : tables.land_companies) if (row.id == id) return &row;
+        return nullptr;
+    };
+    const auto* priced = company("Shoot_Priced_Company");
+    const auto* free = company("Shoot_Free_Company");
+    expect(priced && free, "LR4-01: the companies of a structure's menu are decoded with it");
+    if (!priced || !free) return;
+    expect(priced->production.build_cost_multiplayer == std::optional<Fixed>(number(900))
+            && priced->production.build_time_seconds == std::optional<Fixed>(number(25))
+            && priced->production.production_queue == "Tactical_Units"
+            && priced->production.prerequisites == std::vector<std::string>{"Shoot_Upgrade"}
+            && priced->production.current_player == std::optional<std::uint32_t>(3U) && !priced->production.lifetime_player
+            && priced->population_value == std::optional<std::uint32_t>(2U),
+        "LR4-05/06: a company reads its own price, time, queue, limit and prerequisites");
+    expect(!free->production.build_cost_multiplayer && !free->production.build_time_seconds && free->production.prerequisites.empty()
+            && free->production.production_queue.empty(),
+        "LR4-05/06: an absent purchase tag stays absent (no default price or time)");
+    auto repriced = tables;
+    for (auto& row : repriced.land_companies)
+        if (row.id == "Shoot_Priced_Company") row.production.build_cost_multiplayer = number(901);
+    expect(eawr::units::content_identity(repriced) != eawr::units::content_identity(tables),
+        "a company's price moves the land table identity");
+
+    eawr::skirmish::LandContentInputs inputs;
+    inputs.unverified_passability_bits = {{"Clear", 1}, {"ModSurface", 8}, {"Water", 4}};
+    inputs.collision_class_order = {{"Infantry", 7}, {"Vehicle", 9}};
+    inputs.contacts = {100, 5, Fixed{}, Fixed{}};
+    const std::vector<std::string> selected{"Shoot_Infantry_Company"};
+    const std::vector<std::string> offered{"Shoot_Priced_Company", "No_Such_Company"};
+    const auto built = eawr::skirmish::build_land_bindings(tables, selected, inputs, offered);
+    expect(static_cast<bool>(built), "an offered company that cannot be bound does not refuse the content");
+    if (!built) return;
+    const auto bound_types = [&](const eawr::skirmish::LandStartBindings& value) {
+        std::vector<std::string> names;
+        for (const auto& row : value.land.companies) names.push_back(row.company.id);
+        return names;
+    };
+    expect(bound_types(built.value()) == std::vector<std::string>{"Shoot_Infantry_Company", "Shoot_Priced_Company"},
+        "an offered company that binds follows the selected ones");
+    expect(std::any_of(built.value().static_notes.begin(), built.value().static_notes.end(),
+            [](const auto& note) { return note.find("No_Such_Company not offered") != std::string::npos; }),
+        "an offered company that is absent is named in the binding notes");
+    expect(durability_row(built.value().durability, "Shoot_Tank") != nullptr,
+        "an offered company's members get durability rows");
+    // A company whose collision class the ordering gate lacks is refused as a selected one, and only left out when offered.
+    auto narrow = inputs;
+    narrow.collision_class_order = {{"Infantry", 7}};
+    const auto left_out = eawr::skirmish::build_land_bindings(tables, selected, narrow, offered);
+    expect(left_out && bound_types(left_out.value()) == std::vector<std::string>{"Shoot_Infantry_Company"}
+            && std::any_of(left_out.value().static_notes.begin(), left_out.value().static_notes.end(),
+                [](const auto& note) { return note.find("Shoot_Priced_Company not offered") != std::string::npos; }),
+        "an offered company the gate cannot order is left out with a note");
+    const std::vector<std::string> required{"Shoot_Infantry_Company", "Shoot_Priced_Company"};
+    expect(!eawr::skirmish::build_land_bindings(tables, required, narrow),
+        "the same company is still refused when it is selected");
+    const auto plain = eawr::skirmish::build_land_bindings(tables, selected, inputs);
+    expect(plain && bound_types(plain.value()) == selected, "a build without offered companies binds the selected ones only");
+}
+
 // A placed CAPTURE_POINT structure that omits the radius or the transition time (the stock Secondary_* structures) keeps the type
 // constructor defaults of the debug build, 200 and 2, and still loads (it used to be refused as a missing required tag).
 void land_static_capture_defaults() {
@@ -849,6 +1103,42 @@ void land_static_capture_defaults() {
         "land static behavior and combat flags are read from the effective type");
     expect(!bare->hide_when_fogged && !bare->dummy_tooltip && !bare->immune_to_damage && bare->valid_target,
         "land static flags retain their defaults when absent");
+}
+
+// LE-OCCUPY (WLPA-66): a placed pad's authored collision class and hard extents are read as data for any placed static; an
+// unknown class name leaves the class absent (a mod may author any engine-fixed name, never a new one).
+void land_static_pad_collision() {
+    TempTree tree;
+    auto xml = units_xml("3600", "Unit_Select_Test");
+    xml.insert(xml.rfind("</Objects>"), R"xml(
+<GroundBuildable Name="Pad_Hard"><Behavior>TACTICAL_BUILD_OBJECTS</Behavior>
+  <UnitCollisionClass>Build Pad</UnitCollisionClass>
+  <Custom_Hard_XExtent>10.0</Custom_Hard_XExtent><Custom_Hard_YExtent>6.0</Custom_Hard_YExtent></GroundBuildable>
+<GroundBuildable Name="Pad_Soft"><Behavior>TACTICAL_BUILD_OBJECTS</Behavior><UnitCollisionClass>Infantry</UnitCollisionClass></GroundBuildable>
+<GroundBuildable Name="Pad_Odd"><Behavior>TACTICAL_BUILD_OBJECTS</Behavior><UnitCollisionClass>Not A Class</UnitCollisionClass></GroundBuildable>
+<GroundBuildable Name="Pad_Bare"><Behavior>TACTICAL_BUILD_OBJECTS</Behavior></GroundBuildable>
+)xml");
+    write_fixture(tree.root, xml);
+    const auto loaded = load_types(tree.root, BattleDomain::land, {}, {"Pad_Hard", "Pad_Soft", "Pad_Odd", "Pad_Bare"});
+    if (!loaded.tables) return;
+    const auto find = [&](const std::string_view id) -> const eawr::units::LandStaticObject* {
+        for (const auto& row : loaded.tables->land_static_objects) if (row.id == id) return &row;
+        return nullptr;
+    };
+    const auto* hard = find("Pad_Hard");
+    const auto* soft = find("Pad_Soft");
+    const auto* odd = find("Pad_Odd");
+    const auto* bare = find("Pad_Bare");
+    expect(hard && soft && odd && bare, "LE-OCCUPY: the placed pads load");
+    if (!hard || !soft || !odd || !bare) return;
+    const auto number = [](const std::int64_t whole) { return Fixed::from_integer(whole).value(); };
+    expect(hard->collision_class == std::optional(eawr::units::LandCollisionGroup::build_pad)
+            && hard->fog.custom_hard_x == std::optional<Fixed>(number(10)) && hard->fog.custom_hard_y == std::optional<Fixed>(number(6)),
+        "LE-OCCUPY: a pad reads its authored collision class and hard extents");
+    expect(soft->collision_class == std::optional(eawr::units::LandCollisionGroup::infantry),
+        "LE-OCCUPY: the authored class is read as authored, whatever it is");
+    expect(!odd->collision_class && !bare->collision_class && !bare->fog.custom_hard_x && !bare->fog.custom_hard_y,
+        "LE-OCCUPY: an unknown or absent class and absent extents stay absent");
 }
 
 void land_capture_influence() {
@@ -1288,7 +1578,9 @@ void land_companies() {
     land_reveal_rows();
     land_static_reveal_rows();
     land_pad_rows();
+    land_producer_rows();
     land_static_capture_defaults();
+    land_static_pad_collision();
     land_capture_influence();
 }
 

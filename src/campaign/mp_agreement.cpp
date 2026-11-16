@@ -1,6 +1,7 @@
 #include "eawr/campaign/mp_agreement.hpp"
 
 #include "eawr/campaign/live_setup.hpp"
+#include "eawr/campaign/mp_lobby_catalog.hpp"
 #include "eawr/core/gc_load_trace.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
@@ -89,7 +90,7 @@ core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRost
     const auto* campaign = data.campaign(roster.campaign);
     if (!campaign) return refuse<Derived>("campaign " + roster.campaign + " is not installed");
     const bool multiplayer_entry = campaign->is_multiplayer.value_or(false);
-    const auto flavour = terms.rules_flavour.value_or(multiplayer_entry ? CampaignRulesFlavour::multiplayer : CampaignRulesFlavour::single_player);
+    const auto flavour = terms.rules_flavour.value_or(campaign_rules_flavour(*campaign));
     if (!multiplayer_entry) {
         // Co-op on a single-player entry (design B2, D3): single-player rules only, never a story campaign or tutorial.
         if (flavour != CampaignRulesFlavour::single_player || !campaign->is_listed.value_or(true) || campaign->tutorial.value_or(false)
@@ -266,7 +267,7 @@ Digest rules_digest(const MpLocalContent& local, CampaignRulesFlavour flavour) {
     out.integer(gc::galactic_rules_version); out.integer(gc::galactic_frames_per_second);
     out.integer(sim::math::Fixed::fractional_bits);
     out.text(abi.name); out.integer(abi.version);
-    out.text(script::authoritative::sandbox_policy_identity);
+    out.text(local.sandbox_policy.empty() ? script::authoritative::sandbox_policy_identity : std::string_view(local.sandbox_policy));
     out.integer(local.command_quota); out.integer(local.byte_quota);
     return out.digest();
 }

@@ -128,7 +128,7 @@ std::string normalise_invitation_code(std::string_view code) {
 std::string usage() {
     return "usage: eawr_online_test <host|join> [--config server.conf] [--code XXXX] [--log file]\n"
            "       [--address A --port P (--pin SHA256HEX | --system-ca) [--certificate-name N]]\n"
-           "       [--turn-only] [--timeout seconds]\n";
+           "       [--turn-only] [--turn-provider auto|own|cloudflare] [--timeout seconds]\n";
 }
 
 Parsed<Options> parse_arguments(const std::vector<std::string>& arguments, const std::filesystem::path& executable_directory) {
@@ -149,7 +149,10 @@ Parsed<Options> parse_arguments(const std::vector<std::string>& arguments, const
         if (i + 1 >= arguments.size()) return fail("missing value for " + flag);
         const auto& value = arguments[++i];
         if (flag == "--config") config = value;
-        else if (flag == "--code") options.code = normalise_invitation_code(value);
+        else if (flag == "--turn-provider") {
+            if (value != "auto" && value != "own" && value != "cloudflare") return fail("--turn-provider takes auto, own or cloudflare");
+            options.turn_provider = value;
+        } else if (flag == "--code") options.code = normalise_invitation_code(value);
         else if (flag == "--log") options.log_path = value;
         else if (flag == "--address") { given.address = value; address = true; }
         else if (flag == "--port") { if (!parse_port(value, given.port)) return fail("port must be 1-65535"); port = true; }

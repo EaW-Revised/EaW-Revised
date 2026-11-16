@@ -20,6 +20,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 #include "eawr/core/diagnostic.hpp"
 
@@ -49,9 +50,11 @@ inline constexpr int default_network_port = 1234;
 inline constexpr int display_size_maximum = 16384;
 inline constexpr int display_size_minimum = 320;
 
-// The render profile, a project-authored setting (ST-P1): the retail look or the enhanced
-// look (anti-aliasing and anisotropic filtering). `automatic` is the run's own choice.
-enum class RenderProfileSetting : std::uint8_t { automatic, retail, enhanced };
+// AA quality (ST-P1): four levels; automatic keeps the run's launch default.
+// retail is explicit Off, serialized as "off" to distinguish old saved "retail" values.
+enum class RenderProfileSetting : std::uint8_t { automatic, retail, low, medium, high };
+
+inline constexpr std::array supersampling_scales{1.0F, 1.5F, 2.0F};
 
 struct AudioSettings final {
     int master_percent{master_default_percent};
@@ -84,6 +87,8 @@ struct VideoSettings final {
     bool widescreen{false};
     bool hardware_cursor{true};
     std::array<int, detail_slot_count> detail{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+    // Supersampling is independent of AA: Off (native), 1.5x, 2x.
+    int supersampling{};
     RenderProfileSetting render_profile{RenderProfileSetting::automatic};
 
     friend bool operator==(const VideoSettings&, const VideoSettings&) = default;
@@ -159,7 +164,8 @@ struct GameplaySettings final {
     bool delay_tooltips{false};
     bool reinforcement_areas_only_while_placing{true}; // PD-01: presentation only.
     bool animated_loading_background{false};
-    bool fit_radar_to_galaxy{false}; // WGUI-177: optional galactic radar expansion.
+    bool fit_radar_to_galaxy{true}; // WGUI-177 / DEV-9: galactic radar expansion, on by default (the original's fixed frame is the opt-out).
+    bool space_pauses_galactic{false}; // DEV-13 (#6291): Space pauses the galaxy clock; off = the original's Space (cinematic tour).
     int hover_owner_names{-1}; // #5130: -1 follows mode (MP on, solo off), 0 off, 1 on.
     bool right_button_scroll{false};
     bool both_buttons_rotate{false};
@@ -199,6 +205,9 @@ struct NetworkSettings final {
     std::string online_pin;
     std::string online_ca_file;
     bool online_relay_only{};
+    // Which of the service's relay (TURN) providers online games use: auto tries the operator's own server first and Cloudflare
+    // after it (a fallback for a server that does not answer, not for loss); own or cloudflare keep only that provider.
+    std::string online_turn_provider{"auto"};
 
     [[nodiscard]] bool uses_default_port() const noexcept { return port == default_network_port; }
 
@@ -221,6 +230,7 @@ struct SelectionActionConfig final {
 struct SelectionConfig final {
     bool enabled{};
     std::array<SelectionActionConfig, 2> actions{{{"Ctrl+Q", {}, {}, {}, true}, {"Q", {}, {}, {}, true}}};
+    SelectionActionConfig gift{}; // GIFT_UNITS uses the same advisor mapping, without a keyboard binding.
     friend bool operator==(const SelectionConfig&, const SelectionConfig&) = default;
 };
 
@@ -243,11 +253,19 @@ struct PlayerSettings final {
     friend bool operator==(const PlayerSettings&, const PlayerSettings&) = default;
 };
 
-// SH-01: verified unoccupied physical chords, shared by the editor and dispatcher.
-inline constexpr std::array<std::string_view, 4> selection_key_choices{"Q", "Ctrl+Q", "Ctrl+U", "Ctrl+Y"};
+// SH-01: a selection chord is one physical letter, optionally with Ctrl ("Q", "Ctrl+Y"); the
+// dispatcher matches exactly these. Chords the command, camera and ability maps already use are reserved.
 inline constexpr std::array<std::string_view, 2> selection_commands{"SELECT_OWN_ALL", "SELECT_OWN_SCREEN"};
+enum class SelectionChordStatus : std::uint8_t { ok, malformed, reserved, duplicate };
+// The chord text a pressed physical letter stands for ("" when it is not A-Z).
+[[nodiscard]] std::string selection_chord_for(char letter, bool ctrl);
+// Shape and reservation only (what an XML default must satisfy).
+[[nodiscard]] bool selection_chord_usable(std::string_view chord) noexcept;
+// Whether `action` may take `chord`: shape, reservation, and the other action's binding.
+[[nodiscard]] SelectionChordStatus selection_chord_status(const PlayerSettings&, std::size_t action,
+    std::string_view chord) noexcept;
 [[nodiscard]] std::string_view selection_key(const PlayerSettings&, std::size_t action) noexcept;
-// Reject occupied/duplicate chords without changing the saved binding.
+// Reject reserved/duplicate chords without changing the saved binding.
 bool set_selection_key(PlayerSettings&, std::size_t action, std::string_view chord);
 // No action while disabled, and exact modifier matching (Meta is never admitted).
 [[nodiscard]] std::optional<std::size_t> selection_action(const PlayerSettings&, char physical,
@@ -310,6 +328,49 @@ struct DisplaySize final {
 // settings hold), each once, ascending. The list is project-authored: the window system, not
 // the game, owns the display modes here.
 [[nodiscard]] std::vector<DisplaySize> resolution_choices(DisplaySize screen, std::span<const DisplaySize> extras);
+
+// --- Where the window starts ------------------------------------------------------------------
+
+// A monitor's usable area (the desktop minus taskbars) in desktop pixels. The origin can be negative (a monitor
+// left of or above the primary one); sizes are the physical pixels the window system works in, so a DPI scale needs
+// no correction here.
+struct ScreenArea final {
+    int x{};
+    int y{};
+    int width{};
+    int height{};
+
+    friend bool operator==(const ScreenArea&, const ScreenArea&) = default;
+};
+
+// What the window system adds around the client area: title bar and borders.
+struct FrameInsets final {
+    int left{};
+    int top{};
+    int right{};
+    int bottom{};
+
+    friend bool operator==(const FrameInsets&, const FrameInsets&) = default;
+};
+
+struct WindowPlacement final {
+    int x{};  // client area, desktop pixels
+    int y{};
+    int width{};
+    int height{};
+
+    friend bool operator==(const WindowPlacement&, const WindowPlacement&) = default;
+};
+
+// Resolve the transient launcher hint; absent, malformed or disconnected screens keep the current screen.
+[[nodiscard]] std::size_t startup_window_screen(std::span<const std::string> arguments, int current, int count);
+
+// Where a window of client size `wanted` goes on screen `screen_index` (clamped into the list; no screens gives
+// the wanted size at the origin). The size shrinks to the usable area, frame included, and the whole frame ends up
+// on the screen. `keep` is the window's current client position: with it the window only moves as far as needed
+// to be fully visible; without it (the start of a run) the window is centred on the screen.
+[[nodiscard]] WindowPlacement place_window(DisplaySize wanted, FrameInsets frame, std::span<const ScreenArea> screens,
+                                           std::size_t screen_index, std::optional<std::pair<int, int>> keep);
 
 // --- What each retail control does today -----------------------------------------------------
 

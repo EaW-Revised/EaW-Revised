@@ -7,6 +7,9 @@
 #include "texture_prefetch_policy.hpp"
 #include "battle_content.hpp"
 #include "shader_activation_owner.hpp"
+#include "environment_texture.hpp"
+#include "eawr/assets/texture_chain.hpp"
+#include "eawr/core/load_profile.hpp"
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
 #include "eawr/presentation/camera/overview.hpp"
@@ -17,6 +20,7 @@
 #include "load_job.hpp"
 #include "menu_timeline.hpp"
 #include "model_cache_budget.hpp"
+#include "no_fog_option.hpp"
 
 #include <godot_cpp/classes/project_settings.hpp>
 
@@ -358,6 +362,8 @@ void MapMode::State::parse_ready_arguments(std::string& lighting_argument, std::
             if (argument == String("--eawr-fog-inject-input")) state.fog_inject_input = true;
             if (argument == String("--eawr-space-populate-reject-upload-test"))
                 state.space_populate_reject_upload_test = true;
+            if (argument == String("--eawr-map-particle-reject-resource-test"))
+                state.particle_reject_resource_test = true;
             if (!has_value) {
                 if (argument == String("--eawr-fog-grid") || argument == String("--eawr-fog-sha256")
                     || argument == String("--eawr-fog-team") || argument == String("--eawr-fog-revision")
@@ -414,6 +420,7 @@ void MapMode::State::parse_ready_arguments(std::string& lighting_argument, std::
             }
             if (argument == String("--eawr-bloom") && bloom_argument.empty()) bloom_argument = value.get_data();
             if (argument == String("--eawr-space-camera")) state.space_camera = value.get_data();
+            if (argument == String("--eawr-space-sweep")) state.space_sweep = value.get_data();
             if (argument == String("--eawr-space-control")) state.space_control = value.get_data();
         }
     }
@@ -459,6 +466,13 @@ bool MapMode::State::configure_ready_options(std::string& lighting_argument, std
         state.live_options.player = state.options.lan ? state.options.lan->local_player() : 1U;
         if (state.options.lan) { state.live_options.begin_barrier = false; state.live_options.reveal = false; }
     }
+    // --eawr-no-fog (owner convenience, not retail): the draw-only tactical reveal, space and land alike. A LAN
+    // battle refuses it instead of dropping it, so nobody plays a match believing the fog is off.
+    if (eawr::viewer::no_fog_requested(viewer_profile_options().arguments)) {
+        if (const auto* refusal = eawr::viewer::no_fog_refusal(true, state.options.lan != nullptr))
+            return state.fail_ready(refusal);
+        state.live_options.reveal = true;
+    }
     for (const auto& identity : state.options.observer_names) {
         const auto found = std::find_if(state.live_options.observer_names.begin(), state.live_options.observer_names.end(),
             [&](const auto& supplied) { return supplied.first == identity.first; });
@@ -471,6 +485,7 @@ bool MapMode::State::configure_ready_options(std::string& lighting_argument, std
         state.live_options.fixture = "replay";
         state.live_options.borrowed_battle = state.options.borrowed_battle;
         state.live_options.borrowed_feed = state.options.borrowed_feed;
+        state.live_options.tactical_production = false;
         state.live_options.player = state.options.borrowed_player;
         state.live_options.begin_barrier = false;
     }
@@ -1141,16 +1156,22 @@ struct MapMode::State::ReadyLoad final {
             }
 
             state.record_terrain_slots(mesh);
-            const land_look::TextureLookup lookup_texture = [&state](const std::string_view declared)
-                -> std::optional<assets::Texture> {
-                const auto resolved = probe_reference(*state.filesystem, "data/art/textures/", declared, texture_suffixes);
-                if (!resolved) return std::nullopt;
-                auto decoded = assets::load_texture(*state.filesystem, *resolved);
-                if (!decoded) return std::nullopt;
-                // RGBA rows top-left where the decoder kept BGRA or bottom-left rows.
-                if (auto normal = space::normalize_texture(decoded.value())) return std::move(normal.value());
-                return std::move(decoded.value());
+            const auto land_texture_lookup = [&state](const bool environment) {
+                return [&state, environment](const std::string_view declared) -> std::optional<assets::Texture> {
+                    const auto resolved = probe_reference(*state.filesystem, "data/art/textures/", declared, texture_suffixes);
+                    if (!resolved) return std::nullopt;
+                    // LAND-6722: the sky dome and its clouds are environment textures; a single-level mod
+                    // sky must get the same completed chain as the space sky (environment_texture.hpp).
+                    auto decoded = environment ? load_environment_texture(*state.filesystem, *resolved)
+                                               : assets::load_texture(*state.filesystem, *resolved);
+                    if (!decoded) return std::nullopt;
+                    // RGBA rows top-left where the decoder kept BGRA or bottom-left rows.
+                    if (auto normal = space::normalize_texture(decoded.value())) return std::move(normal.value());
+                    return std::move(decoded.value());
+                };
             };
+            const land_look::TextureLookup lookup_texture = land_texture_lookup(false);
+            const land_look::TextureLookup sky_lookup_texture = land_texture_lookup(true);
             auto blend = terrain::blend_map(map);
             if (!blend) return state.fail_ready(core::format_diagnostic(blend.error()));
             auto blend_bindings = land_look::register_terrain_blend(*state.renderer, blend.value(),
@@ -1173,8 +1194,23 @@ struct MapMode::State::ReadyLoad final {
             const assets::Texture unused_texture = placeholder_texture();
             if (!state.upload_terrain_surfaces(mesh, terrain_material, unused_texture, instances, next_asset, next_entity)) return false;
 
+            // MT-02 (docs/behaviour/texture-mip-upload.md), land water (legacy #6764): the water plane and the river, track and water-decoration
+            // textures are sampled with linear mip filtering, so a single-level mod texture gets its chain completed
+            // here, on the loading thread, once per water texture, while the map composes; never during the battle.
+            // Plain box chain (the same kind as the environment textures); a complete chain or a format the generator
+            // does not handle comes back as decoded. The terrain blend layers need nothing: the renderer keeps their top
+            // level and regenerates the chain after resizing them to one edge.
+            const land_look::TextureLookup water_lookup_texture = [&lookup_texture](const std::string_view declared)
+                -> std::optional<assets::Texture> {
+                auto texture = lookup_texture(declared);
+                if (texture) {
+                    core::load_profile::Scope scope(core::load_profile::Phase::texture);
+                    assets::extend_mip_chain(*texture, assets::ChainKind::colour);
+                }
+                return texture;
+            };
             // Approximate water: the header's plane and every authored river.
-            if (auto water = land_look::compose_water(*state.renderer, map, mesh, lookup_texture,
+            if (auto water = land_look::compose_water(*state.renderer, map, mesh, water_lookup_texture,
                     next_asset, next_entity, instances, state.water_capture_time, state.options.interactive,
                     state.fog.has_value())) {
                 state.water = std::move(water.value());
@@ -1184,8 +1220,10 @@ struct MapMode::State::ReadyLoad final {
                 return state.fail_ready("water: " + core::format_diagnostic(water.error()));
             }
 
-            state.compose_skydome(map, catalog, catalog_failure, lookup_texture, next_asset, next_entity, instances);
+            state.compose_skydome(map, catalog, catalog_failure, sky_lookup_texture, next_asset, next_entity, instances);
 
+            // #6144: the land session first, so the static composition sees the start's removed records.
+            if (!state.live_options.fixture.empty() && !state.ready_land_session(host, map)) return false;
             if (!state.ready_land_population(map, instances, next_asset, next_entity)) return false;
 
             // A top-down camera makes the terrain footprint a known central rectangle,

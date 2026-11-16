@@ -1,4 +1,5 @@
 #include "gns_transport_impl.hpp"
+#include "stun_list.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -93,7 +94,12 @@ void GnsTransport::Impl::release_listener() {
 }
 
 std::vector<SteamNetworkingConfigValue_t> GnsTransport::Impl::config() const {
-    std::vector<SteamNetworkingConfigValue_t> values(5 + (turn ? 4 : 0) + (options.stun_servers.empty() ? 0 : 1));
+    // Online games have the relay's TURN list: derive the STUN list from it so GNS offers public (server-reflexive) addresses
+    // and a direct pair is possible; a caller's own list wins, and relay-only play needs no STUN.
+    derived_stun.clear();
+    if (options.stun_servers.empty() && turn && !options.turn_only) derived_stun = stun_list_for(turn->uri);
+    const std::string& stun = options.stun_servers.empty() ? derived_stun : options.stun_servers;
+    std::vector<SteamNetworkingConfigValue_t> values(5 + (turn ? 4 : 0) + (stun.empty() ? 0 : 1));
     values[0].SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
         reinterpret_cast<void*>(Runtime::changed));
     values[1].SetInt32(k_ESteamNetworkingConfig_TimeoutInitial, static_cast<std::int32_t>(options.handshake_timeout.count()));
@@ -114,8 +120,7 @@ std::vector<SteamNetworkingConfigValue_t> GnsTransport::Impl::config() const {
         values[8].SetInt32(k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable, options.turn_only
             ? k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Relay : k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_All);
     }
-    if (!options.stun_servers.empty())
-        values.back().SetString(k_ESteamNetworkingConfig_P2P_STUN_ServerList, options.stun_servers.c_str());
+    if (!stun.empty()) values.back().SetString(k_ESteamNetworkingConfig_P2P_STUN_ServerList, stun.c_str());
     return values;
 }
 
@@ -189,6 +194,8 @@ void GnsTransport::Impl::stop(unsigned reason, std::string message) {
 
 void GnsTransport::Impl::forget_route() {
     route = GnsRoute::unknown;
+    relay_provider = GnsRelayProvider::none;
+    loss_hint.reset();
 }
 
 void GnsTransport::Impl::control(Bytes bytes) { outbound_bytes += bytes.size(); outbound.push_back({std::move(bytes), false, 0}); }
@@ -435,8 +442,20 @@ void GnsTransport::Impl::pump() {
         SteamNetConnectionInfo_t info{};
         const bool info_ok = sockets().GetConnectionInfo(stream, &info);
         const bool connected = info_ok && info.m_eState == k_ESteamNetworkingConnectionState_Connected;
+        const auto previous_route = route;
+        const auto previous_provider = relay_provider;
         route = classify_gns_route(connected, (info.m_nFlags & k_nSteamNetworkConnectionInfoFlags_Relayed) != 0,
             !info.m_addrRemote.IsIPv6AllZeros(), info.m_idPOPRelay != 0 || info.m_idPOPRemote != 0);
+        relay_provider = classify_relay_provider(route, route == GnsRoute::relayed ? gns_recent_turn_servers() : std::string{}, own_turn,
+            turn ? std::string_view(turn->uri) : std::string_view{});
+        if (loss_hint.observe(now, route == GnsRoute::relayed, loss))
+            gns_log_push(static_cast<int>(local_slot), -1, loss_hint.active()
+                ? "ROUTE: lossy " + route_text(route, relay_provider) + ", " + std::to_string(static_cast<int>(loss_hint.peak_pct()))
+                    + "% receive loss for " + std::to_string(GnsLossHint::raise_after.count()) + " s"
+                : "ROUTE: loss recovered", false, "route");
+        // One line whenever the route (or its provider) changes, so the log says how every session connected.
+        if (route != GnsRoute::unknown && (route != previous_route || relay_provider != previous_provider))
+            gns_log_push(static_cast<int>(local_slot), -1, "ROUTE: " + route_text(route, relay_provider), false, "route");
     }
     if (accepted && !closing && outbound.empty() && now - last_write >= options.keepalive)
         control({static_cast<std::uint8_t>(TcpMessage::keepalive)});

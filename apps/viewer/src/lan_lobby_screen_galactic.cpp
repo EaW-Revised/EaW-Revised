@@ -158,16 +158,38 @@ void EawrLanLobby::finish_pending_galactic() {
     if (load && page_ == Page::staging) open_checkpoint_list();
 }
 
+namespace {
+// #6468: the host's mod list will not be shared with the guests. Say so in the lobby and the log, and release Start.
+void report_host_mod_list_not_shared(bool& refresh_due, std::string& notice, const std::string& reason) {
+    refresh_due = false;
+    notice = reason;
+    const auto line = "EAWR lobby: host mod list not shared: " + reason;
+    UtilityFunctions::print(String::utf8(line.data(), static_cast<std::int64_t>(line.size())));
+}
+} // namespace
+
 std::optional<std::string> EawrLanLobby::host_galactic_game() {
     Impl& impl = *impl_;
+    impl.host_mod_notice.clear(); // a notice belongs to one room: this is where a new room starts, and it may raise one below
     if (!impl.galactic_backend) return std::string("No campaign content is loaded.");
     const auto description = mounted_mod_description();
     const auto encoded = description ? mods::encode_description(*description) : std::nullopt;
+    // The room opens now with whatever is known. Digests still being computed are sent as a refresh once they are done.
+    impl.host_mod_refresh_due = !mounted_mods_ready();
+    impl.host_mod_refresh_retry = {};
+    match_->expect_host_mod_refresh(impl.host_mod_refresh_due); // Start waits for the refresh (#6468)
     // The mod list is display only. When it cannot be encoded or the room codec would refuse it, the room still opens and the guest
     // is told the host's list could not be checked (empty bytes mean "not known").
-    if (encoded && encoded->size() <= net::max_lobby_mod_description_bytes && net::valid_lobby_mod_description(*encoded))
-        impl.galactic_backend->set_mounted_mods(*encoded);
-    else impl.galactic_backend->set_mounted_mods({});
+    const auto unsendable = impl.host_mod_refresh_due ? std::string{} : viewer::host_mod_list_unsendable_reason(encoded);
+    if (impl.host_mod_refresh_due || unsendable.empty()) {
+        // Digests still pending: the room opens with what is known; an unsendable list there is judged when the refresh is due.
+        if (encoded && encoded->size() <= net::max_lobby_mod_description_bytes && net::valid_lobby_mod_description(*encoded))
+            impl.galactic_backend->set_mounted_mods(*encoded);
+        else impl.galactic_backend->set_mounted_mods({});
+    } else {
+        impl.galactic_backend->set_mounted_mods({});
+        report_host_mod_list_not_shared(impl.host_mod_refresh_due, impl.host_mod_notice, unsendable);
+    }
     if (!impl.galactic_backend->content_ready()) return std::string("Campaign content is still loading.");
     if (const auto error = impl.galactic_backend->load_error()) return core::format_diagnostic(*error);
     const auto& campaigns = impl.galactic_backend->campaigns();
@@ -191,6 +213,30 @@ void EawrLanLobby::refresh_galactic_staging() {
     // The galactic room is not built from a skirmish selection: the host's options opened it, edits go through the list.
     match_->pump_setup(skirmish::FixtureOptions{});
     review_host_mods();
+    if (impl.host_mod_refresh_due && mounted_mods_ready()) {
+        // A nonblocking refresh of the host description once its digests are ready. Joins never wait for it; Start does (the match
+        // keeps it off until the refresh went out). A refusal is retried with a growing pause and given up after a few tries, with
+        // a visible message, so this never encodes the list every frame.
+        const auto now = std::chrono::steady_clock::now();
+        if (impl.host_mod_refresh_retry.ready(now)) {
+            const auto settled = mounted_mod_description();
+            const auto encoded = settled ? mods::encode_description(*settled) : std::nullopt;
+            const auto unsendable = viewer::host_mod_list_unsendable_reason(encoded);
+            if (!unsendable.empty()) {
+                // The list cannot travel: say why instead of skipping it silently, and let Start go ahead, as when a room opens with a
+                // list that cannot be sent.
+                report_host_mod_list_not_shared(impl.host_mod_refresh_due, impl.host_mod_notice, unsendable);
+                match_->expect_host_mod_refresh(false);
+            } else if (match_->refresh_host_mod_description(*encoded)) {
+                impl.host_mod_refresh_due = false;
+            } else if (impl.host_mod_refresh_retry.refused(now)) {
+                report_host_mod_list_not_shared(impl.host_mod_refresh_due, impl.host_mod_notice,
+                    "The room refused the mod list " + std::to_string(impl.host_mod_refresh_retry.attempts)
+                    + " times, so the other players cannot check it against theirs.");
+                match_->expect_host_mod_refresh(false);
+            }
+        }
+    }
     const LanView view = match_->view();
     const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
     refresh_staging_connections(impl, view, online);
@@ -214,16 +260,28 @@ void EawrLanLobby::refresh_galactic_staging() {
 
 void EawrLanLobby::review_host_mods() {
     const auto view = match_->view();
+    if (!view.mod_review_pending && view.host_mod_refreshes != impl_->seen_host_mod_refreshes) {
+        // The host's digests finished after this joiner was admitted: compare again once the local digests are ready too.
+        impl_->seen_host_mod_refreshes = view.host_mod_refreshes;
+        if (auto refreshed = mods::decode_description(view.host_mod_refresh)) impl_->deferred_mod_review = std::move(refreshed);
+    }
     if (impl_->box) { impl_->review_digest_wait.reset(); return; }
     if (!view.mod_review_pending) {
         impl_->review_digest_wait.reset();
-        if (!impl_->deferred_mod_review || !mounted_mods_ready()) return;
-        const auto local = mounted_mod_description();
-        const auto message = local ? viewer::mod_mismatch_message(*impl_->deferred_mod_review, *local) : std::string{};
-        impl_->deferred_mod_review.reset();
+        std::string message;
+        std::string caption = "Mods differ";
+        if (!impl_->host_mod_notice.empty()) {
+            // Host: the settled mod list could not be sent (see refresh_galactic_staging).
+            message = std::move(impl_->host_mod_notice); impl_->host_mod_notice.clear(); caption = "Mod list not shared";
+        } else {
+            if (!impl_->deferred_mod_review || !mounted_mods_ready()) return;
+            const auto local = mounted_mod_description();
+            message = local ? viewer::mod_mismatch_message(*impl_->deferred_mod_review, *local) : std::string{};
+            impl_->deferred_mod_review.reset();
+        }
         if (message.empty()) return;
         model::MessageBoxRequest request;
-        request.caption = "Mods differ";
+        request.caption = caption;
         request.lines[0] = message; request.literal_lines[0] = true;
         request.buttons.push_back({"TEXT_BUTTON_OK", 1, false});
         Resources& resources = *resources_;

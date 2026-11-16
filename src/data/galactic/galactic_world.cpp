@@ -70,6 +70,7 @@ void load_planets(const Catalog& catalog, GalacticData& data) {
         planet.force_strength = record.number("Force_Strength");
         planet.political_faction = record.text("Political_Faction");
         planet.planet_retains_residual_influence = record.boolean("Planet_Retains_Residual_Influence");
+        planet.planet_is_destroyable_by_tsw = record.boolean("Planet_Is_Destroyable_By_TSW");
         planet.planet_credit_value = record.number("Planet_Credit_Value");
         planet.planet_destroyed_credit_value = record.number("Planet_Destroyed_Credit_Value");
         planet.max_space_base = record.whole("Max_Space_Base");
@@ -95,6 +96,11 @@ void load_planets(const Catalog& catalog, GalacticData& data) {
         planet.describe_terrain = record.text("Describe_Terrain");
         planet.describe_population = record.text("Describe_Population");
         planet.encyclopedia_text = record.names("Encyclopedia_Text");
+        for (std::size_t slot = 0; slot < planet.corruption_success_speech_event.size(); ++slot) {
+            const auto prefix = "Corruption_" + std::to_string(slot + 1) + "_Success_";
+            planet.corruption_success_speech_event[slot] = record.text(prefix + "Speech_Event");
+            planet.corruption_success_hologram_name[slot] = record.text(prefix + "Bink_Hologram_Name");
+        }
         planet.scale_factor = record.number("Scale_Factor");
         planet.destroyed_galactic_model_name = record.text("Destroyed_Galactic_Model_Name");
         planet.space_tactical_map = record.text("Space_Tactical_Map");
@@ -128,6 +134,7 @@ void load_factions(const Catalog& catalog, GalacticData& data) {
         faction.is_neutral = record.boolean("Is_Neutral");
         faction.can_control_planets = record.boolean("Can_Control_Planets");
         faction.primary_enemy = record.text("Primary_Enemy");
+        faction.tech_tree_dialog_name = record.text("Tech_Tree_Dialog_Name");
         faction.basic_ai = record.text("Basic_AI");
         faction.allies = record.names("Allies");
         faction.enemies = record.names("Enemies");
@@ -329,8 +336,9 @@ void load_constants(const vfs::Vfs& filesystem, GalacticData& data) {
         const auto* node = record.node(tag);
         // CGS-15: raid masks reset to zero. An absent/empty scalar leaves that
         // empty category set intact; it does not make the raid policy incomplete.
+        // CGS-25: the required faction is likewise a null reference when omitted or blank, and a null faction admits any owner.
         if (node == nullptr && (tag == "Raid_Force_Free_Object_Category_Mask"
-            || tag == "Raid_Force_Limited_Object_Category_Mask")) {
+            || tag == "Raid_Force_Limited_Object_Category_Mask" || tag == "Raid_Force_Required_Faction")) {
             data.constants.push_back({std::string(tag), {}, std::nullopt});
             continue;
         }

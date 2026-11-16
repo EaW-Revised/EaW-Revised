@@ -9,11 +9,13 @@
 #include "eawr/sim/galactic/snapshot.hpp"
 #include "eawr/sim/galactic/hero_return.hpp"
 #include "eawr/sim/galactic/story_goals.hpp"
+#include "eawr/campaign/campaign_switch.hpp"
 #include "eawr/campaign/conflict.hpp"
 #include "eawr/campaign/invasion_offer.hpp"
 #include "eawr/campaign/conflict_policy.hpp"
 #include "eawr/campaign/setup_plan.hpp"
 #include "eawr/campaign/story_notices.hpp"
+#include "eawr/platform/live_story_feed.hpp"
 #include "eawr/platform/tactical_feed.hpp"
 #include "eawr/platform/campaign_tactical_view.hpp"
 #include "eawr/platform/campaign_loading_view.hpp"
@@ -33,6 +35,7 @@
 #include <vector>
 
 namespace eawr::campaign { class CampaignRoot; }
+namespace eawr::vfs { class Vfs; }
 
 // ADR-019: presentation consumes values and immutable snapshots, never the owning session.
 namespace eawr::platform {
@@ -79,6 +82,7 @@ struct LiveSaveRequest {
     std::string name;
     bool overwrite{}, quick{}, autosave{}, prebattle{};
     std::vector<std::uint8_t> presentation_hints;
+    std::uint32_t attempts{}; // automatic retries after a save barrier overlapped a timing or roster transition
 };
 enum class LiveSavePhase { requested, rejected, captured, completed, failed };
 struct LiveSaveMenuFacts { bool pending_battle{}, tactical{}; };
@@ -120,6 +124,17 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// Called on the thread that runs the preparation (for the presentation: the loader thread that calls create, before it returns)
+// at points of a campaign preparation where the presentation may start work of its own
+// (presentation only: nothing here is saved, hashed or read by the simulation). The callee must return quickly.
+class CampaignPrepareObserver {
+public:
+    virtual ~CampaignPrepareObserver() = default;
+    // The space entry stage (unit tables and models: the stage that reads the most) has finished and its readers are idle;
+    // the serial stages that follow take tens of seconds on a large campaign.
+    virtual void space_entry_joined() noexcept = 0;
+};
+
 // WGS-03/68, ADR-019: opaque initialized campaign owner for presentation startup.
 // The plan/layout and snapshot are read-only values; transfer starts its live thread.
 class PreparedLiveCampaign final {
@@ -130,7 +145,8 @@ public:
         std::shared_ptr<const vfs::Vfs>, const data::Catalog&, const data::galactic::GalacticData&,
         const units::GalacticTypeTable&, std::string_view campaign,
         campaign::CampaignSetupOptions, std::string_view difficulty, bool install_native_ai = false,
-        std::array<std::uint64_t, 6> ai_service_periods = {300, 1, 3, 3, 300, 1}, bool observe_native_ai = false);
+        std::array<std::uint64_t, 6> ai_service_periods = {300, 1, 3, 3, 300, 1}, bool observe_native_ai = false,
+        CampaignPrepareObserver* observer = nullptr);
     // Initialize an already agreed multiplayer plan, including native AI, before its tick-zero hash.
     [[nodiscard]] static core::Result<std::unique_ptr<PreparedLiveCampaign>> from_plan(
         std::shared_ptr<const vfs::Vfs>, const data::Catalog&, const data::galactic::GalacticData&,
@@ -138,7 +154,7 @@ public:
         bool install_native_ai = true,
         std::array<std::uint64_t, 6> ai_service_periods = {300, 1, 3, 3, 300, 1}, bool observe_native_ai = false,
         std::span<const std::uint8_t> exact_checkpoint = {},
-        std::array<std::uint8_t, 32> checkpoint_mod_list = {});
+        std::array<std::uint8_t, 32> checkpoint_mod_list = {}, CampaignPrepareObserver* observer = nullptr);
     [[nodiscard]] std::shared_ptr<const CampaignServiceConfiguration> services() const noexcept;
     ~PreparedLiveCampaign();
     [[nodiscard]] const campaign::CampaignSetupPlan& plan() const noexcept;
@@ -247,6 +263,9 @@ struct LiveGameFrame {
     sim::EntityId summary_closed{};
     sim::galactic::SeatId summary_closed_seat{};
     std::shared_ptr<const std::vector<sim::galactic::HeroReturnView>> hero_returns{};
+    // LOAD_CAMPAIGN (WST-95): the switch a plot asked for, as authored, from the tick that recorded it until the host settles
+    // it. The host resolves it and starts the named campaign, or refuses it and calls settle_campaign_switch().
+    std::shared_ptr<const campaign::CampaignSwitchRequest> campaign_switch{};
 };
 [[nodiscard]] std::optional<CampaignTacticalView> campaign_tactical_view_for_observer(
     const LiveGameFrame&, sim::galactic::SeatId);
@@ -293,17 +312,6 @@ struct LiveGalacticEvent {
     // `event` is unused; the recipient is retained independently of snapshots.
     std::optional<sim::galactic::PlayerId> construction_options_player{};
     std::optional<sim::galactic::GalacticFeedbackNotice> feedback{};
-};
-// WST-58: a holocron goal's presentation request for the plot owner's seat, in trigger order. Local rendering input
-// only (never saved, hashed or replayed); a reader that falls behind the bounded window sees `incomplete`.
-struct LiveStoryPresentation {
-    std::uint64_t cursor{};
-    sim::galactic::story::PresentationEvent event;
-};
-struct LiveStoryPresentations {
-    std::uint64_t through{};
-    bool incomplete{};
-    std::vector<LiveStoryPresentation> events;
 };
 struct LiveGalacticEvents {
     std::uint64_t through{};
@@ -384,6 +392,9 @@ public:
         // notes), under the session state mutex like command_source: it must not call back into the session.
         // Headless reports use it; presentation does not.
         std::function<void(std::span<const core::Diagnostic>)> tick_diagnostics{};
+        // The mounted game data. When set (a prepared campaign fills it in), the script faults of a step are counted in the
+        // degradation ledger under the layer their script comes from; unset, they are counted as "unknown". Observation only.
+        std::shared_ptr<const vfs::Vfs> fault_files{};
         // Startup notes run synchronously at root start; new runtime notes drain
         // once from frame() on the presentation caller, outside session locks.
         std::function<void(std::span<const core::LoadNote>)> load_note_sink{};
@@ -438,6 +449,8 @@ public:
     // commands for the current tick drive one step even when the galaxy is paused.
     // Future input waits for its tick; paused sessions never generate empty ticks to reach it.
     void submit(LiveGameOrder order);
+    // Orders that must reach the simulation in the same command boundary and in this order (one lock, one inbox append).
+    void submit_batch(std::vector<LiveGameOrder> orders);
     void submit(sim::galactic::GameCommand command);
     // Admission/capture runs on the simulation thread; file completion is separate.
     [[nodiscard]] std::uint64_t request_save(LiveSaveRequest);
@@ -455,6 +468,10 @@ public:
     [[nodiscard]] LiveGameFrame frame(sim::galactic::SeatId observer) const;
     // WGP-162: admitted human participants only; no unrestricted loading facts.
     [[nodiscard]] std::shared_ptr<const CampaignLoadingView> loading(sim::galactic::SeatId) const;
+    // LOAD_CAMPAIGN (WST-95): the host has dealt with the published campaign_switch (it refused the target and keeps this
+    // session). The session thread drops the pending request at its next turn, which lifts the save refusal. Starting the
+    // named campaign needs no call: the host stops this session.
+    void settle_campaign_switch();
     // Allocation-free menu polling; terminal save results are copied once.
     [[nodiscard]] LiveSaveMenuFacts save_menu_facts() const;
     [[nodiscard]] std::optional<LiveSaveOutcome> terminal_save_outcome(std::uint64_t token) const;
@@ -501,5 +518,23 @@ private:
     explicit LiveGameSession(std::shared_ptr<Impl> impl) noexcept;
     std::shared_ptr<Impl> impl_;
 };
+
+// A caller with no presentation (the headless driver, a profile harness) that drives a Pacing::driven session to `tick`.
+// While a conflict that involves the human seat is pending, the paused galaxy publishes nothing until that seat answers,
+// and nobody does: the run would wait out its whole timeout for a tick that cannot publish. This answers a ready
+// conflict choice once per conflict (fight = false: Resolve, as a player pressing it; a conflict that refuses Resolve (forced
+// tactical, a single-button alert, a queued campaign conflict) is answered with Fight, while a refused Fight is not retried as
+// Resolve) and gives up on any other wait
+// that stops the session tick from moving for `stall_limit`, naming it. The galaxy's own clock decides what is awaited
+// (awaited_input); nothing here steps or resumes it.
+struct UnattendedAdvance {
+    bool reached{};   // wait_for's verdict: the tick published, or the session ended or failed (check failure())
+    bool timed_out{}; // `timeout` elapsed first
+    std::optional<LiveAwaitedInput> stalled; // the named wait it gave up on
+    std::size_t answered{};                  // conflict choices it answered
+};
+[[nodiscard]] UnattendedAdvance advance_unattended(LiveGameSession& live, std::uint64_t tick,
+    std::chrono::milliseconds timeout, sim::EntityId& answered_conflict, bool fight = false,
+    std::chrono::milliseconds stall_limit = std::chrono::seconds(20));
 
 } // namespace eawr::platform

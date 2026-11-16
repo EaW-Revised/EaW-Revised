@@ -169,11 +169,17 @@ Existing starts continue to apply SK-01 to SK-24 and SC-01/SC-02.
   list skin as the retail capture shows it: the small frame's rim around the skin's
   translucent backing, the entries in the list font and left aligned, no mark beside
   the chosen one. The popup contents scale with their owning combo. **UI-COMBO-01:**
-  scrolling resources (`WS_VSCROLL`) in both setup screens retain the combo height minus the closed text box
-  as the list budget. After frame margins, capacity rounds down to complete rows;
+  every combo a resource builds (the two setup screens, the campaign staging dialog and every other dialog; all
+  120 stock combos write `WS_VSCROLL`, so only mod resources and project controls change) retains the resource's combo height
+  minus the closed text box as the list budget, whether or not the resource also writes `WS_VSCROLL` (the
+  Remake's campaign staging dialog writes its faction combo, 115 units high in its base layer and 150 in a
+  middle layer, without it; with the style gate its "Choose your side" list took the whole screen height and
+  spilled out of the dialog). After frame margins, capacity rounds down to complete rows;
   longer lists scroll and entries outside the frame are clipped. The list stays
-  within the viewport. Generated player rows inherit that budget. Controls whose
-  geometry describes only a closed box keep the viewport-bounded fallback.
+  within the viewport. Generated player rows inherit that budget. A rectangle that cannot hold one
+  complete row describes only a closed box and keeps the viewport-bounded fallback. A combo with such a
+  budget keeps that box height whatever the list length, as the original does (retail Remake capture: a
+  150-unit box around five entries, blank below them); a combo with no budget shrinks to its entries.
   Backing alpha remains authored by the skin, so translucent
   art can still show the dialog beneath it. Evidence: targeted debug-build list
   initialization, visibility, refresh and scrollbar reads, and the dialog resource.
@@ -196,3 +202,16 @@ below the frame is this project's own and keeps its hand placement. Text metrics
 the animated background remain adaptations; this is not a pixel-identical
 reproduction. The native fallback capture is 1920 by 1061, not a verified 1080p
 layout. Official/custom filtering follows WSS-07; multiplayer is deferred.
+
+## Project rule: a refused start is never silent
+
+- **PR-SETUP-01 (project rule, not retail):** Retail shows nothing when a script or a data fault ends a
+  skirmish start. This project does not copy that, so that a mod author or a tester need not open the log
+  (owner rule for mod support: a failure is never silent) (legacy EAWR-6816). Every refusal between Start and the
+  first battle tick (the scoring script, the script manifest, the content, the AI scripts, the map, the mod
+  chain, the script sandbox, a LAN start) returns to the setup screen with the same two messages: the status
+  line under the rows, and a box with the heading `The battle could not start. (<code>)`, the first line of the
+  error and where the full text is (the viewer log and the run report). The code is the first `EAWR-...` code in
+  the failure text, and the box shows no code when the text has none. A refusal without any text says
+  so. The attract demo is excluded on purpose: it logs and skips (a demo is not a player's start). A failure
+  during a running match keeps the red "Live session stopped" banner.

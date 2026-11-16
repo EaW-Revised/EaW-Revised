@@ -240,12 +240,16 @@ void ui_marker_contracts() {
     if (!catalog) { testing::remove_temp_directory(root); return; }
     Fixture fixture; fixture.new_header = true; fixture.records.clear();
     const auto types = assets::object_type_catalog(catalog.value().catalog);
-    const auto add = [&](const std::string& name, float x, std::uint32_t record) {
-        while (fixture.raw_records.size() < record) fixture.raw_records.push_back(object_record({}));
+    const auto put = [&](Fixture& target, const std::string& name, float x, float y, std::uint32_t record) {
+        while (target.raw_records.size() < record) target.raw_records.push_back(object_record({}));
         std::vector<std::byte> body;
         mini(body, 1, integer(assets::object_type_crc(name)));
-        mini(body, 4, vector3(x, 0, 0));
-        fixture.raw_records.push_back(object_record(body));
+        mini(body, 4, vector3(x, y, 0));
+        target.raw_records.push_back(object_record(body));
+    };
+    // Positions are measured from the map corner, so the fixture's offsets sit around the middle of the 4000-wide map.
+    const auto add = [&](const std::string& name, float x, std::uint32_t record) {
+        put(fixture, name, x + 2000.0F, 0.0F, record);
     };
     add("IN BASE SPECIAL STRUCTURE POSITION", -20, 1);
     add("IN BASE SPECIAL STRUCTURE POSITION", 0, 2);
@@ -264,8 +268,10 @@ void ui_marker_contracts() {
     expect(markers.size() == 18 && markers[0].record == 2 && markers[3].record == 5 && markers[4].record == 4,
         "marker order, eligibility and unit cap");
     if (markers.size() != 18) { testing::remove_temp_directory(root); return; }
-    expect(markers[0].x == 0.5F && markers[0].y == 0.5F && markers[3].specific_types == "Fixture",
+    expect(markers[0].x == 0.5F && markers[0].y == 0.0F && markers[3].specific_types == "Fixture",
         "marker normalisation and specific type");
+    expect(std::any_of(markers.begin(), markers.end(), [](const auto& marker) { return marker.x == 2020.0F / 4000.0F; }),
+        "a marker is its position over the declared size, measured from the map corner");
     expect(markers[15].kind == assets::UiMarkerKind::reinforcement && markers[16].kind == assets::UiMarkerKind::bunker
         && markers[17].kind == assets::UiMarkerKind::build_pad, "display-only groups retained");
     for (std::uint32_t i = 0; i < 90; ++i) add("OUT BASE SPECIAL STRUCTURE POSITION", 0, 100 + i);
@@ -278,6 +284,32 @@ void ui_marker_contracts() {
         return marker.kind == assets::UiMarkerKind::in_base || marker.kind == assets::UiMarkerKind::specific
             || marker.kind == assets::UiMarkerKind::out_base;
     }) == 80, "build pads cap at 80");
+    {
+        // Both axes, both edges and a non-square size (4000 by 3000): edge positions are valid, anything outside is skipped.
+        Fixture edge; edge.new_header = true; edge.records.clear();
+        put(edge, "IN BASE SPECIAL STRUCTURE POSITION", 4000.0F, 3000.0F, 1);
+        put(edge, "IN BASE SPECIAL STRUCTURE POSITION", 0.0F, 0.0F, 2);
+        put(edge, "IN BASE SPECIAL STRUCTURE POSITION", 1000.0F, 2250.0F, 3);
+        put(edge, "IN BASE SPECIAL STRUCTURE POSITION", -1.0F, 100.0F, 4);
+        put(edge, "IN BASE SPECIAL STRUCTURE POSITION", 4000.5F, 10.0F, 5);
+        put(edge, "IN BASE SPECIAL STRUCTURE POSITION", 100.0F, 3001.0F, 6);
+        const auto edge_decoded = load(edge, types);
+        expect(static_cast<bool>(edge_decoded), "edge marker TED loads");
+        if (edge_decoded) {
+            std::vector<std::string> notes;
+            const auto edge_markers = assets::ui_map_markers(edge_decoded.value(), catalog.value().catalog, &notes);
+            const auto find = [&](std::uint32_t record) {
+                return std::find_if(edge_markers.begin(), edge_markers.end(), [&](const auto& m) { return m.record == record; });
+            };
+            expect(edge_markers.size() == 3 && find(1) != edge_markers.end() && find(2) != edge_markers.end()
+                && find(3) != edge_markers.end(), "positions outside the declared size are skipped, edges are kept");
+            if (find(1) != edge_markers.end()) expect(find(1)->x == 1.0F && find(1)->y == 1.0F, "far corner maps to 1, 1");
+            if (find(2) != edge_markers.end()) expect(find(2)->x == 0.0F && find(2)->y == 0.0F, "near corner maps to 0, 0");
+            if (find(3) != edge_markers.end())
+                expect(find(3)->x == 0.25F && find(3)->y == 0.75F, "a non-square map divides each axis by its own size");
+            expect(notes.size() == 1 && notes.front().starts_with("3 "), "the skipped positions are reported once");
+        }
+    }
     map.declared_extents.reset();
     expect(assets::ui_map_markers(map, catalog.value().catalog).empty(), "missing map size yields no guessed markers");
     testing::remove_temp_directory(root);

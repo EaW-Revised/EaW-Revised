@@ -59,6 +59,9 @@ GalaxySnapshotStub synthetic_galaxy() {
         planet(108, "Synthetic Theta", "Data/Art/Models/W_planet_bonadan_low.alo", 200, -110, 180, 2),
         planet(109, "Synthetic Iota", "Data/Art/Models/W_planet_Asteroids.alo", 90, -190, 180, 3),
     };
+    // As the stock planet types author it: every planet but the asteroid field turns into the field when it is destroyed.
+    for (auto& item : galaxy.planets)
+        if (item.id != 109) item.destroyed_model = galaxy.planets.back().model;
     galaxy.routes = {
         {201, 101, 102}, {202, 101, 103}, {203, 102, 104}, {204, 103, 104}, {205, 103, 105},
         {206, 101, 106}, {207, 106, 105}, {208, 104, 107}, {209, 105, 107}, {210, 107, 108},

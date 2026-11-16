@@ -1,3 +1,5 @@
+#include "eawr/assets/asset_degrade.hpp"
+#include "eawr/presentation/animation/degraded_clips.hpp"
 #include "eawr/assets/memory.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "../revised_layer.hpp"
@@ -8,6 +10,11 @@
 #include "galactic_mode_internal.hpp"
 #include "battle_content.hpp"
 #include "family_textures.hpp"
+#include "galactic_texture_chain.hpp"
+#include "galactic_texture_name.hpp"
+#include "galaxy_asset_ahead.hpp"
+#include "texture_volumes.hpp"
+#include "viewer_path.hpp"
 #include "model_preview.hpp"
 
 #include "eawr/core/sha256.hpp"
@@ -20,11 +27,13 @@
 #include <godot_cpp/classes/mesh.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/world3d.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/packed_color_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <pugixml.hpp>
 #include <cmath>
 #include <limits>
@@ -88,26 +97,136 @@ void synchronize_zoom_rotation(assets::Animation& clip) {
     }
 }
 
-// The scene's texture rule: the authored name, then its stem with each known suffix.
+// The scene's texture rule is the shared resolver's (#6771 row 4, galactic_texture_name.hpp).
 [[nodiscard]] std::optional<std::string> probe_texture(const vfs::Vfs& filesystem, const std::string_view name) {
-    std::string folded;
-    for (const char character : name) folded.push_back(character == '\\' ? '/' : fold(character));
-    if (folded.empty()) return std::nullopt;
-    const std::string root = "data/art/textures/";
-    if (filesystem.stat(root + folded)) return root + folded;
-    std::string stem = folded;
-    for (const std::string_view suffix : {std::string_view(".tga"), std::string_view(".dds")}) {
-        if (stem.size() > suffix.size() && stem.ends_with(suffix)) {
-            stem.resize(stem.size() - suffix.size());
-            break;
-        }
-    }
-    for (const std::string_view suffix : {std::string_view(".tga"), std::string_view(".dds")}) {
-        const std::string candidate = root + stem + std::string(suffix);
-        if (filesystem.stat(candidate)) return candidate;
-    }
-    return std::nullopt;
+    return eawr::viewer::galactic::scene_texture_path(filesystem, name);
 }
+
+// WGP-01: the same data-driven lighting drives Planet.fx and all legacy surfaces. Without game data the synthetic fixture uses
+// a neutral axis.
+[[nodiscard]] space::EnvironmentEffectInputs galaxy_effect_inputs(const presentation::lighting::Environment& environment) {
+    space::EnvironmentEffectInputs inputs;
+    inputs.id = "galactic-light-0";
+    inputs.time_seconds = 0.0F;
+    inputs.light_scale = {1.0F, 1.0F, 1.0F, 1.0F};
+    const auto direction = environment.lights[0].direction;
+    inputs.light_direction = space::render_from_source({-direction.x, -direction.y, -direction.z});
+    inputs.ambient_light = {0.05F, 0.05F, 0.05F};
+    inputs.diffuse_light = {0.5F, 0.5F, 0.5F};
+    inputs.specular_light = {0.0F, 0.0F, 0.0F};
+    return inputs;
+}
+
+// The material one surface of a galaxy model is drawn with and the textures it names. The upload and the texture read-ahead's plan
+// both read it here, so the read-ahead offers exactly what the upload will ask for.
+struct SurfaceMaterial final {
+    MaterialDescription material;
+    std::vector<std::pair<std::string, std::string>> declared; // binding, declared texture name
+    const scene::LegacySelector* legacy_selector{};            // set for a legacy-effect surface
+    std::string skip;                                          // not empty: the surface cannot be drawn, and why
+};
+
+[[nodiscard]] SurfaceMaterial plan_surface_material(const assets::Model& model, const space::SceneSurface& surface,
+                                                    const space::EnvironmentEffectInputs& inputs) {
+    SurfaceMaterial result{
+        MaterialDescription{
+            .schema_version = MaterialDescription::current_schema_version,
+            .route = MaterialRoute::modern_spatial,
+            .pass = RenderPass::opaque,
+            .program = {},
+            .technique = {},
+            .pass_name = {},
+            .bindings = {},
+        },
+        {},
+        nullptr,
+        {},
+    };
+    if (surface.route == space::SceneRoute::planet) {
+        const space::EnvironmentEffectPlan plan = space::plan_environment_effect(
+            model, surface.mesh_index, surface.submesh_index, "t0", inputs);
+        if (plan.status != space::EnvironmentEffectStatus::ready) {
+            result.skip = "plan " + std::string(space::to_string(plan.status)) + ": " + plan.detail;
+            return result;
+        }
+        result.material = plan.material;
+        result.declared = plan.textures;
+        return result;
+    }
+    const scene::LegacySelector* selector = scene::find_legacy_selector(surface.shader);
+    result.legacy_selector = selector;
+    if (selector == nullptr) {
+        result.skip = "no legacy selector for " + surface.shader;
+        return result;
+    }
+    result.material.route = MaterialRoute::legacy_effect;
+    result.material.pass = selector->transparent ? RenderPass::transparent : RenderPass::opaque;
+    result.material.program = std::string(selector->program);
+    result.material.technique = std::string(selector->technique);
+    result.material.pass_name = std::string(selector->pass);
+    for (const assets::MaterialParameter& parameter : model.meshes[surface.mesh_index].submeshes[surface.submesh_index].parameters)
+        result.material.bindings.push_back({parameter.name, parameter.value});
+    result.declared.emplace_back("BaseTexture", surface.base_texture);
+    return result;
+}
+
+// legacy #6726: the chain policy of a declared binding. BaseTexture: the effect's policy (planets: the plain colour chain, as
+// every environment texture); the other planet-plan textures take the plain chain too.
+[[nodiscard]] scene::TextureProcessing declared_processing(const SurfaceMaterial& planned, const space::SceneRoute route,
+                                                           const std::string_view binding) {
+    return ieq(binding, "BaseTexture") || route == space::SceneRoute::planet
+        ? galactic_base_processing(planned.legacy_selector) : scene::TextureProcessing::none;
+}
+
+// The family textures of a legacy-effect surface that the effect samples as tangent-space normal maps (only for an effect that chains).
+[[nodiscard]] std::vector<std::string> normal_map_names(const SurfaceMaterial& planned) {
+    std::vector<std::string> normal_maps;
+    if (planned.legacy_selector != nullptr && texture_processing_for(*planned.legacy_selector) != scene::TextureProcessing::none)
+        for (const std::string_view slot : normal_binding_names(*planned.legacy_selector)) {
+            const MaterialBinding* binding = legacy::bindings::find(planned.material, slot);
+            if (const auto* named = binding == nullptr ? nullptr : std::get_if<std::string>(&binding->value))
+                normal_maps.push_back(*named);
+        }
+    return normal_maps;
+}
+
+[[nodiscard]] scene::TextureProcessing family_processing(const SurfaceMaterial& planned, const std::string_view name,
+                                                         const std::vector<std::string>& normal_maps) {
+    return planned.legacy_selector == nullptr ? scene::TextureProcessing::none
+        : galactic_family_processing(*planned.legacy_selector, name, normal_maps);
+}
+
+// The texture read-ahead's plan: what the upload will ask for, per surface, in the order it asks.
+class GalaxyTexturePlanner final : public GalaxyAssetAhead::TexturePlanner {
+public:
+    GalaxyTexturePlanner(const vfs::Vfs& filesystem, space::EnvironmentEffectInputs inputs)
+        : filesystem_(&filesystem), inputs_(std::move(inputs)) {}
+    [[nodiscard]] std::vector<GalaxyAssetAhead::TextureWant> wants(const assets::Model& model) const override {
+        std::vector<GalaxyAssetAhead::TextureWant> result;
+        for (const space::SceneSurface& surface : space::scene_surfaces(model)) {
+            const SurfaceMaterial planned = plan_surface_material(model, surface, inputs_);
+            if (!planned.skip.empty()) continue;
+            bool resolved = true;
+            for (const auto& [binding, name] : planned.declared) {
+                const auto path = probe_texture(*filesystem_, name);
+                if (!path) { resolved = false; break; } // the upload skips the surface here
+                result.push_back({*path, declared_processing(planned, surface.route, binding)});
+            }
+            if (!resolved || planned.material.route != MaterialRoute::legacy_effect) continue;
+            const auto normal_maps = normal_map_names(planned);
+            static_cast<void>(family_binding_textures(planned.material, [&](const std::string_view name) -> std::optional<assets::Texture> {
+                if (const auto path = probe_texture(*filesystem_, name))
+                    result.push_back({*path, family_processing(planned, name, normal_maps)});
+                return std::nullopt;
+            }));
+        }
+        return result;
+    }
+
+private:
+    const vfs::Vfs* filesystem_;
+    space::EnvironmentEffectInputs inputs_;
+};
 
 // Q24 render instance matrix from a source-basis affine.
 [[nodiscard]] std::optional<sim::math::Mat3x4> instance_matrix(const space::Affine& source) {
@@ -238,9 +357,7 @@ void sphere(std::vector<Overlay::Vertex>& triangles, const galactic_view::Vec3& 
 
 } // namespace
 
-std::optional<std::string> resolve_texture(const vfs::Vfs& filesystem, std::string_view name) {
-    constexpr std::string_view root = "data/art/textures/";
-    if (name.starts_with(root)) name.remove_prefix(root.size());
+std::optional<std::string> resolve_texture(const vfs::Vfs& filesystem, const std::string_view name) {
     return probe_texture(filesystem, name);
 }
 
@@ -427,6 +544,32 @@ bool GalacticMode::State::load_camera_constants() {
 }
 
 bool GalacticMode::State::upload_models() {
+    // Detail timers (presentation only, nothing saved or hashed): the summed wall time of each kind of work the loader's thread
+    // does in this phase, written as one span each when the phase ends. The kinds do not overlap.
+    struct Detail final {
+        using Clock = std::chrono::steady_clock;
+        Clock::time_point start{Clock::now()};
+        Clock::duration model_take{}, texture_take{}, gpu{};
+        std::size_t models{}, textures{};
+        ~Detail() {
+            const auto emit = [&](const char* name, const Clock::duration total) { core::gc_load::trace.span(name, start, start + total); };
+            emit("gc.upload_models.model_take", model_take);
+            emit("gc.upload_models.texture_take", texture_take);
+            emit("gc.upload_models.gpu_upload", gpu);
+            core::gc_load::trace.mark("gc.upload_models.counts.models=" + std::to_string(models) + ".textures=" + std::to_string(textures));
+        }
+    } detail;
+    const auto timed = [](Detail::Clock::duration& total, auto&& work) {
+        const auto begin = Detail::Clock::now();
+        struct Add final { Detail::Clock::duration& total; Detail::Clock::time_point begin; ~Add() { total += Detail::Clock::now() - begin; } } add{total, begin};
+        return work();
+    };
+    // The read-ahead (models and textures with their chain) ends with this phase, whichever way it ends.
+    struct Finish final {
+        std::shared_ptr<GalaxyAssetAhead> ahead;
+        ~Finish() { if (ahead) ahead->finish(); }
+    } read_ahead{asset_ahead};
+    if (asset_ahead) asset_ahead->start();
     std::map<std::string, std::size_t> by_path;
     std::map<std::string, assets::Texture> textures;
     sim::AssetId next_asset = 1;
@@ -439,36 +582,64 @@ bool GalacticMode::State::upload_models() {
         for (const auto& entry : textures) texture_bytes += assets::payload_capacity(entry.second).texture_payload_bytes;
         MemoryAttribution::load_detail("gc.upload_models", models.size(), texture_bytes);
     };
-    const auto load_texture = [&](const std::string_view declared, std::string& logical) -> std::optional<assets::Texture> {
+    std::size_t chained_by_upload = 0; // legacy #6726: textures this thread gave a chain (none while the read-ahead runs)
+    double chain_seconds = 0.0;        // and the wall time that took
+    // legacy #6726: a mod texture that stops above 1x1 gets its chain once per path and policy, at scene load (never per frame; on
+    // the read-ahead's threads when they run); a complete chain is untouched. The same file wanted with two policies is two entries.
+    const auto load_texture = [&](const std::string_view declared, std::string& logical,
+                                  const scene::TextureProcessing processing) -> std::optional<assets::Texture> {
         const auto path = probe_texture(*filesystem, declared);
         if (!path) return std::nullopt;
         logical = *path;
-        if (const auto cached = textures.find(*path); cached != textures.end()) return cached->second;
-        auto loaded = assets::load_texture(*filesystem, *path);
-        if (!loaded) return std::nullopt;
-        auto normalized = space::normalize_texture(loaded.value());
-        if (!normalized) return std::nullopt;
-        return textures.emplace(*path, std::move(normalized.value())).first->second;
+        const std::string key = ComposeTextureCache::key(*path, processing);
+        if (const auto cached = textures.find(key); cached != textures.end()) return cached->second;
+        return timed(detail.texture_take, [&]() -> std::optional<assets::Texture> {
+            std::optional<assets::Texture> normalized;
+            if (asset_ahead) {
+                auto loaded = asset_ahead->take_texture(*path, processing);
+                if (!loaded) return std::nullopt;
+                auto result = space::normalize_texture(loaded.value());
+                if (!result) return std::nullopt;
+                normalized = std::move(result.value());
+            } else {
+                auto loaded = assets::load_texture(*filesystem, *path);
+                if (!loaded) return std::nullopt;
+                const auto chain_start = std::chrono::steady_clock::now();
+                if (apply_galactic_chain(loaded.value(), processing)) {
+                    ++chained_by_upload;
+                    chain_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - chain_start).count();
+                }
+                auto result = space::normalize_texture(loaded.value());
+                if (!result) return std::nullopt;
+                normalized = std::move(result.value());
+            }
+            ++detail.textures;
+            return textures.emplace(key, std::move(*normalized)).first->second;
+        });
     };
-    // WGP-01: the same data-driven lighting drives Planet.fx and all legacy
-    // surfaces. Without game data the synthetic fixture uses a neutral axis.
-    space::EnvironmentEffectInputs inputs;
-    inputs.id = "galactic-light-0";
-    inputs.time_seconds = 0.0F;
-    inputs.light_scale = {1.0F, 1.0F, 1.0F, 1.0F};
     const auto environment = content ? content->lighting : galactic_view::galaxy_lighting({});
-    const auto direction = environment.lights[0].direction;
-    inputs.light_direction = space::render_from_source({-direction.x, -direction.y, -direction.z});
-    inputs.ambient_light = {0.05F, 0.05F, 0.05F};
-    inputs.diffuse_light = {0.5F, 0.5F, 0.5F};
-    inputs.specular_light = {0.0F, 0.0F, 0.0F};
+    const space::EnvironmentEffectInputs inputs = galaxy_effect_inputs(environment);
+    // ASD-01: one load note per refused asset and stage, however many objects share it. Published at the next HUD update,
+    // whichever way this phase ends.
+    animation::DegradedClips degraded;
+    struct PublishDegraded final {
+        animation::DegradedClips& clips;
+        std::vector<core::LoadNote>& pending;
+        ~PublishDegraded() { for (auto& note : clips.drain()) pending.push_back(std::move(note)); }
+    } publish_degraded{degraded, pending_texture_notes};
 
     // Upload the fleet asset while stationed too, so the first departure can
     // reuse it without a load during snapshot publication.
+    {
+        std::vector<std::pair<galactic_view::ObjectId, std::string>> authored;
+        for (const auto& planet : galaxy->planets) authored.emplace_back(planet.id, planet.destroyed_model);
+        destroyed_preloads = destroyed_models_of(authored);
+    }
     const auto objects = render_objects(true);
     for (const galactic_view::PlanetView& planet : objects) {
         GodotRenderer& target = planet_renderer(planet.id);
         const std::string model_key = std::to_string(planet_layer(planet.id)) + ":" + planet.model;
+        planet_model_requests[planet.id] = {planet_layer(planet.id), planet.model};
         if (!filesystem || planet.model.empty()) {
             planet_models[planet.id] = std::nullopt;
             continue;
@@ -486,19 +657,21 @@ bool GalacticMode::State::upload_models() {
             planet_models[planet.id] = upload.status == "drawn" ? std::optional(models.size()) : std::nullopt;
             models.push_back(std::move(upload));
         };
-        auto bytes = filesystem->open(planet.model);
-        if (!bytes) {
-            upload.cause = core::format_diagnostic(bytes.error());
-            finish();
-            continue;
-        }
-        upload.sha256 = hash_bytes(bytes.value());
-        auto loaded = assets::load_model(*filesystem, planet.model);
+        // One read: the hash is of the bytes that were decoded (from the read-ahead when it has the model).
+        auto taken = timed(detail.model_take, [&] {
+            return asset_ahead ? asset_ahead->take_model(planet.model) : scene::read_hash_decode_model(*filesystem, planet.model);
+        });
+        upload.sha256 = std::move(taken.sha256);
+        auto& loaded = taken.model;
         if (!loaded) {
             upload.cause = core::format_diagnostic(loaded.error());
+            // ASD-01: an unreadable model leaves the object undrawn; the note names the file and the mod that supplied it.
+            degraded.add(assets::asset_degraded_note(*filesystem, planet.model, assets::DegradedAsset::model,
+                                                     assets::DegradedStage::load, loaded.error()));
             finish();
             continue;
         }
+        ++detail.models;
         const assets::Model& model = loaded.value();
         const auto levels = eawr::viewer::model_preview::unit_levels(model);
         const auto surfaces = eawr::viewer::model_preview::unit_surfaces(model, levels);
@@ -523,17 +696,22 @@ bool GalacticMode::State::upload_models() {
         std::optional<assets::Animation> idle_clip;
         std::vector<animation::BonePose> reference_bones;
         const std::string idle_path = planet.model.substr(0, planet.model.find_last_of('.')) + "_idle_00.ala";
-        if (filesystem->stat(idle_path)) {
-            auto clip = assets::load_animation(*filesystem, idle_path);
-            if (!clip) { failure = core::format_diagnostic(clip.error()); return false; }
-            idle_clip.emplace(std::move(clip.value()));
+        // ASD-01: an idle clip the loader refuses (empty file, no root group, ...) is a degradation, never a failed start: the
+        // object keeps its model, plays no idle clip, and one load note names the file and the mod that supplied it.
+        if (filesystem->stat(idle_path)) idle_clip = degraded.load(*filesystem, idle_path);
+        if (idle_clip) {
             if (options.zoom_probe_planet) {
-                auto original = animation::Player::create(model, &*idle_clip);
-                if (!original) { failure = core::format_diagnostic(original.error()); return false; }
-                auto reference = original.value().sample({0.0F, animation::PlaybackMode::clamp, 0.0F});
-                if (!reference) { failure = core::format_diagnostic(reference.error()); return false; }
-                reference_bones = std::move(reference.value().bones);
-                upload.authored_idle_probe.emplace(std::move(original.value()));
+                // The probe is opt-in and measures the authored clip; a clip that does not fit the model gives it nothing to measure.
+                if (auto original = degraded.bind(*filesystem, model, *idle_clip, idle_path)) {
+                    auto reference = original->sample({0.0F, animation::PlaybackMode::clamp, 0.0F});
+                    if (!reference) {
+                        degraded.add(assets::asset_degraded_note(*filesystem, idle_path, assets::DegradedAsset::animation,
+                                                                 assets::DegradedStage::bind, reference.error()));
+                    } else {
+                        reference_bones = std::move(reference.value().bones);
+                        upload.authored_idle_probe.emplace(std::move(*original));
+                    }
+                }
             }
             synchronize_zoom_rotation(*idle_clip);
         }
@@ -561,54 +739,25 @@ bool GalacticMode::State::upload_models() {
                 item.cause = std::move(cause);
                 upload.surfaces.push_back(std::move(item));
             };
+            SurfaceMaterial planned = plan_surface_material(model, surface, inputs);
+            if (!planned.skip.empty()) {
+                skip(std::move(planned.skip));
+                continue;
+            }
             // Environment surfaces are a material inspection view: their baked
             // geometry drops the skeleton. Keep the authored mesh/submesh and
             // complete bone palette for the shared animated/billboard renderer.
             assets::Model geometry = model;
             geometry.meshes = {model.meshes[surface.mesh_index]};
             geometry.meshes.front().submeshes = {model.meshes[surface.mesh_index].submeshes[surface.submesh_index]};
-            MaterialDescription material{
-                .schema_version = MaterialDescription::current_schema_version,
-                .route = MaterialRoute::modern_spatial,
-                .pass = RenderPass::opaque,
-                .program = {},
-                .technique = {},
-                .pass_name = {},
-                .bindings = {},
-            };
-            std::vector<std::pair<std::string, std::string>> declared;
-            if (surface.route == space::SceneRoute::planet) {
-                const space::EnvironmentEffectPlan plan = space::plan_environment_effect(
-                    model, surface.mesh_index, surface.submesh_index, "t0", inputs);
-                if (plan.status != space::EnvironmentEffectStatus::ready) {
-                    skip("plan " + std::string(space::to_string(plan.status)) + ": " + plan.detail);
-                    continue;
-                }
-                material = plan.material;
-                declared = plan.textures;
-            } else {
-                const scene::LegacySelector* selector = scene::find_legacy_selector(surface.shader);
-                if (selector == nullptr) {
-                    skip("no legacy selector for " + surface.shader);
-                    continue;
-                }
-                material.route = MaterialRoute::legacy_effect;
-                material.pass = selector->transparent ? RenderPass::transparent : RenderPass::opaque;
-                material.program = std::string(selector->program);
-                material.technique = std::string(selector->technique);
-                material.pass_name = std::string(selector->pass);
-                for (const assets::MaterialParameter& parameter :
-                     model.meshes[surface.mesh_index].submeshes[surface.submesh_index].parameters) {
-                    material.bindings.push_back({parameter.name, parameter.value});
-                }
-                declared.emplace_back("BaseTexture", surface.base_texture);
-            }
+            MaterialDescription material = planned.material; // `planned` stays whole: the chain policy reads its bindings
+            const auto& declared = planned.declared;
             std::optional<assets::Texture> primary;
             std::vector<GodotRenderer::BindingTexture> extra;
             std::string missing;
             for (const auto& [binding, name] : declared) {
                 std::string logical;
-                auto texture = load_texture(name, logical);
+                auto texture = load_texture(name, logical, declared_processing(planned, surface.route, binding));
                 if (!texture) {
                     missing = binding + " " + name + " does not resolve";
                     break;
@@ -626,8 +775,9 @@ bool GalacticMode::State::upload_models() {
             }
             if (material.route == MaterialRoute::legacy_effect) {
                 std::string unused;
+                const auto normal_maps = normal_map_names(planned);
                 for (auto& family : family_binding_textures(material, [&](const std::string_view name) {
-                         return load_texture(name, unused);
+                         return load_texture(name, unused, family_processing(planned, name, normal_maps));
                      })) {
                     extra.push_back(std::move(family));
                 }
@@ -637,15 +787,15 @@ bool GalacticMode::State::upload_models() {
             const bool effect_clock = surface.route == space::SceneRoute::planet || legacy::reads_effect_time(material);
             if (legacy::reads_effect_time(material)) material.bindings.push_back({"eawr_effect_time", 0.0F});
             item.asset = next_asset++;
-            if (auto uploaded = target.upload(item.asset, geometry, *primary, material, extra); !uploaded) {
+            auto uploaded = timed(detail.gpu, [&] { return target.upload(item.asset, geometry, *primary, material, extra); });
+            if (!uploaded) {
                 item.asset = 0;
                 skip(core::format_diagnostic(uploaded.error()));
                 continue;
             }
             if (idle_clip) {
-                auto player = animation::Player::create(geometry, &*idle_clip);
-                if (!player) { failure = core::format_diagnostic(player.error()); return false; }
-                item.idle.emplace(std::move(player.value()));
+                // ASD-01: a clip that parses but does not fit this model plays nothing; the surface is still drawn.
+                if (auto player = degraded.bind(*filesystem, geometry, *idle_clip, idle_path)) item.idle.emplace(std::move(*player));
             }
             if (effect_clock) upload.effect_clock_assets.push_back(item.asset);
             item.status = "drawn";
@@ -656,7 +806,33 @@ bool GalacticMode::State::upload_models() {
         if (upload.status != "drawn" && upload.cause.empty()) upload.cause = "no surface of the model could be drawn";
         finish();
     }
+    if (chained_by_upload != 0)
+        UtilityFunctions::print("[eawr-gc] galactic texture chains: ", static_cast<int64_t>(chained_by_upload), " textures, ",
+            static_cast<int64_t>(chain_seconds * 1000.0), " ms");
     return refresh_model_instances();
+}
+
+void GalacticMode::State::prepare_asset_ahead(const galactic_view::GalaxySnapshotStub& scene) {
+    // A lobby launch and a restore prepare through other owners and keep the plain upload.
+    if (!filesystem || options.lan_start || options.restore_save || options.campaign == galactic_view::synthetic_campaign) return;
+    // The order upload_models asks in: the planets, the authored stations, the fleet model, the selection cursor.
+    std::vector<std::string> paths;
+    for (const auto& planet : scene.planets) paths.push_back(planet.model);
+    {
+        std::vector<std::pair<galactic_view::ObjectId, std::string>> authored;
+        for (const auto& planet : scene.planets) authored.emplace_back(planet.id, planet.destroyed_model);
+        for (const auto& [layer, path] : destroyed_models_of(authored)) paths.push_back(path);
+    }
+    for (const auto& [name, art] : production_art)
+        if (art.station && !art.galactic_model.empty()) paths.push_back(art.galactic_model);
+    if (content && !content->fleet_model.empty()) paths.push_back(content->fleet_model);
+    for (const auto& [name, art] : production_art)
+        if (!art.fleet_override_model.empty()) paths.push_back(art.fleet_override_model);
+    paths.emplace_back(selection_cursor_model);
+    const auto environment = content ? content->lighting : galactic_view::galaxy_lighting({});
+    asset_ahead = std::make_shared<GalaxyAssetAhead>(*filesystem, std::move(paths),
+        std::make_unique<GalaxyTexturePlanner>(*filesystem, galaxy_effect_inputs(environment)),
+        game_data_volumes_solid_state(ViewerPath::utf8(options.game_root), ViewerPath::utf8(options.mod_root)));
 }
 
 bool GalacticMode::State::refresh_model_instances() {
@@ -681,12 +857,18 @@ bool GalacticMode::State::refresh_model_instances() {
     // Keep each object surface identity across topology changes. Inserting the
     // focused station must not inherit the selection cursor's faction light scale.
     for (const galactic_view::PlanetView& planet : objects) {
-        if (!planet_models.contains(planet.id)) {
+        // WGP-16: a fleet marker's model follows the types it holds, so a marker whose uploaded model is no longer its
+        // model is looked up again.
+        const auto requested = std::pair{planet_layer(planet.id), planet.model};
+        const auto remembered = planet_model_requests.find(planet.id);
+        // A new authored choice invalidates a refused upload too. An unchanged refusal remains cached.
+        if (!planet_models.contains(planet.id) || remembered == planet_model_requests.end() || remembered->second != requested) {
             const auto upload = std::find_if(models.begin(), models.end(), [&](const auto& model) {
                 return model.logical_path == planet.model && model.layer == planet_layer(planet.id) && model.status == "drawn";
             });
             planet_models[planet.id] = upload == models.end() ? std::nullopt
                 : std::optional(static_cast<std::size_t>(upload - models.begin()));
+            planet_model_requests[planet.id] = requested;
         }
         const auto chosen = planet_models.at(planet.id);
         if (!chosen) continue;
@@ -721,6 +903,7 @@ bool GalacticMode::State::refresh_model_instances() {
                 // actual owner's colour, independently of planet HUD colours.
                 planet_renderer(planet.id).set_unit_colorization(entity,
                     {planet.colour.r, planet.colour.g, planet.colour.b});
+                scene_refresh.invalidate(planet_layer(planet.id));
             }
             // WGP-05/06's inspected geometry-colour path consumes only the
             // HUD name's secondary colour, pending #1155. Planet.fx and
@@ -734,6 +917,8 @@ bool GalacticMode::State::refresh_model_instances() {
         planet_renderer(piece.first.first).forget_instance_pose(piece.second);
         return true;
     });
+    for (auto& scene : scenes)
+        std::erase_if(scene.applied_visibility, [this](const auto& entry) { return !instance_planets.contains(entry.first); });
     return true;
 }
 
@@ -896,6 +1081,12 @@ std::vector<galactic_view::PlanetView> GalacticMode::State::render_objects(const
     // GHUD-S78: load authored station display assets once, before publication changes.
     // Their identities are presentation-only and never enter a campaign command.
     if (preload_fleets) {
+        // The planets' destroyed-state models load with the scene too, so a planet that gets destroyed needs no load.
+        for (std::size_t slot = 0; slot < destroyed_preloads.size(); ++slot) {
+            galactic_view::PlanetView object;
+            object.id = destroyed_model_id_base - slot; object.name = "Destroyed_Planet_Model"; object.model = destroyed_preloads[slot].second;
+            result.push_back(std::move(object));
+        }
         for (const auto& [name, art] : production_art) {
             if (!art.station || art.galactic_model.empty()) continue;
             galactic_view::PlanetView object;
@@ -908,12 +1099,32 @@ std::vector<galactic_view::PlanetView> GalacticMode::State::render_objects(const
         object.model = orbit_hud.model; object.position = orbit_hud.position;
         result.push_back(std::move(object));
     }
+    if (preload_fleets) {
+        // WGP-16: the override models load with the scene too, so a fleet that gains such a member needs no load.
+        std::set<std::string> loaded;
+        for (const auto& [name, art] : production_art) {
+            if (art.fleet_override_model.empty() || !loaded.insert(art.fleet_override_model).second) continue;
+            galactic_view::PlanetView object;
+            object.id = fleet_override_id; object.name = "Galactic_Fleet_Override"; object.model = art.fleet_override_model;
+            result.push_back(std::move(object));
+        }
+    }
+    // WGP-16: the model a fleet's marker uses, from the types it holds; the stock marker when none authors an override.
+    const auto override_of = [this](const sim::galactic::TypeId type) -> std::string {
+        const auto name = production_names.find(type);
+        const auto art = name == production_names.end() ? production_art.end() : production_art.find(name->second);
+        return art == production_art.end() ? std::string{} : art->second.fleet_override_model;
+    };
+    std::map<galactic_view::ObjectId, const sim::galactic::Fleet*> published;
+    if (displayed_snapshot) for (const auto& fleet : displayed_snapshot->fleets()) published.emplace(fleet.id, &fleet);
     if (content && !content->fleet_model.empty()) for (const auto& marker : galaxy->fleets) {
         if (!marker.transit && !preload_fleets) continue; // WGP-07: HUD orbit presence.
         galactic_view::PlanetView object;
         object.id = marker.fleet;
         object.name = "Galactic_Fleet";
-        object.model = content->fleet_model;
+        const auto source = published.find(marker.fleet);
+        object.model = source == published.end() ? content->fleet_model
+            : galactic_view::fleet_marker_model(source->second->members, content->fleet_model, override_of);
         object.position = marker.position;
         object.position.z += content->fleet_layer_z;
         object.scale = content->fleet_scale;

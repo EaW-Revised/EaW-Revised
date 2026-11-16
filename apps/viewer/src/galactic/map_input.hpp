@@ -132,6 +132,30 @@ struct PendingAbilityDrop {
     }
 };
 
+// The host answers each hero ability drop later, for the supplied object or a bearer it carries. Every drop waits here
+// until the host prepares, settles, cancels or refuses it, so a refusal is shown for its own drop even after a second
+// drop, and a settled drop's source no longer claims an unrelated later refusal. At most 16 wait (the oldest goes).
+struct DroppedAbilities {
+    std::vector<ObjectId> sources;
+    void dropped(ObjectId source) {
+        if (!source) return;
+        std::erase(sources, source);
+        sources.push_back(source);
+        if (sources.size() > 16) sources.erase(sources.begin());
+    }
+    // `container(id)` is the published container of an actor (0 when it has none or is unknown). True when `subject`
+    // is a waiting source or is carried by one; that drop stops waiting.
+    template <class Container>
+    bool answered(ObjectId subject, const Container& container) {
+        for (std::size_t depth = 0; subject && depth < 64; ++depth) {
+            const auto at = std::find(sources.begin(), sources.end(), subject);
+            if (at != sources.end()) { sources.erase(at); return true; }
+            subject = container(subject);
+        }
+        return false;
+    }
+};
+
 // WGUI-172: bind a published actor/container capability to the fleet being dragged.
 // Follow current observer identities; missing, dead, foreign or cyclic links fail closed.
 [[nodiscard]] inline bool ability_source_in_fleet(const sim::galactic::GalacticSnapshot& snapshot,
@@ -284,7 +308,19 @@ struct SurfaceOrbitTarget {
     return std::move(path).value().planets;
 }
 
-// WGM-38 / WGUI-25: use the same current transport/payload facts as landing execution.
+// GGS-11: use the same transport and destination-alliance admission as command execution.
+[[nodiscard]] inline bool transport_can_land(const sim::galactic::GalacticSnapshot& snapshot,
+    PlayerId local, ObjectId planet, const sim::galactic::FleetMember& member) {
+    if (!snapshot.control() || !snapshot.fleet_control()) return false;
+    const auto planets = snapshot.planets();
+    const auto destination = std::find_if(planets.begin(), planets.end(),
+        [&](const auto& row) { return row.id == planet; });
+    if (destination == planets.end()) return false;
+    const auto qualified = sim::galactic::can_land_transport(*snapshot.control(), *snapshot.fleet_control(),
+        local, destination->owner, member, snapshot.movement());
+    return qualified && qualified.value();
+}
+
 [[nodiscard]] inline bool fleet_can_land(const sim::galactic::GalacticSnapshot& snapshot,
     PlayerId local, ObjectId id, std::span<const ObjectId> stack = {}) {
     if (!snapshot.control() || !snapshot.fleet_control()) return false;
@@ -298,16 +334,44 @@ struct SurfaceOrbitTarget {
             return false;
         merged.members.insert(merged.members.end(), other->members.begin(), other->members.end());
     }
+    const auto planets = snapshot.planets();
+    const auto destination = std::find_if(planets.begin(), planets.end(),
+        [&](const auto& row) { return row.id == fleet->orbit; });
+    if (destination == planets.end()) return false;
     bool capable = false;
     for (const auto& member : merged.members) {
-        const auto& types = snapshot.fleet_control()->types;
-        const auto type = std::find_if(types.begin(), types.end(), [&](const auto& row) { return row.type == member.type; });
-        if (type == types.end() || !type->transport) continue;
-        const auto qualified = sim::galactic::has_ground_capability(*snapshot.control(), member, snapshot.movement());
+        const auto qualified = sim::galactic::can_land_transport(*snapshot.control(), *snapshot.fleet_control(),
+            local, destination->owner, member, snapshot.movement());
         if (!qualified) return false;
         capable = capable || qualified.value();
     }
     return capable;
+}
+
+// #7178: a dragged unit cell lands only the units it names, never the other members of their fleet. Each named
+// unit must be a local transport in a non-transit orbit fleet at the planet that the landing command would take
+// (the simulation re-checks every admission, capacity included). The ids keep the dragged order.
+[[nodiscard]] inline std::optional<std::vector<ObjectId>> dragged_units_landing(
+    const sim::galactic::GalacticSnapshot& snapshot, PlayerId local, ObjectId planet,
+    std::span<const sim::galactic::FleetMemberRef> members) {
+    if (members.empty() || !planet || !snapshot.control() || !snapshot.fleet_control()) return std::nullopt;
+    const auto fleets = snapshot.fleets();
+    std::vector<ObjectId> units;
+    for (const auto& ref : members) {
+        if (!ref.member || std::find(units.begin(), units.end(), ref.member) != units.end()) return std::nullopt;
+        const auto fleet = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) { return row.id == ref.fleet; });
+        if (fleet == fleets.end() || fleet->owner != local || fleet->orbit != planet || fleet->motion.transit)
+            return std::nullopt;
+        const auto member = std::find_if(fleet->members.begin(), fleet->members.end(),
+            [&](const auto& row) { return row.id == ref.member; });
+        if (member == fleet->members.end()) return std::nullopt;
+        const auto& types = snapshot.fleet_control()->types;
+        const auto type = std::find_if(types.begin(), types.end(), [&](const auto& row) { return row.type == member->type; });
+        if (type == types.end() || !type->transport) return std::nullopt;
+        if (!transport_can_land(snapshot, local, planet, *member)) return std::nullopt;
+        units.push_back(ref.member);
+    }
+    return units;
 }
 
 [[nodiscard]] inline std::optional<std::vector<sim::galactic::CommandPayload>> fleet_stack_orders(

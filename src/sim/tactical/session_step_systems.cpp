@@ -420,7 +420,7 @@ core::Result<void> session_detail::Tick::commit_environmental_hits(std::vector<L
         if (!applied) return core::Result<void>::failure(applied.error());
         impl_->track_damage(unit, hull, shields);
         const auto previous_changes = damage_changes_.size();
-        record_damage_change(unit, hull);
+        record_damage_change(unit, hull, hit.source);
         if (damage_changes_.size() > previous_changes && hit.source != invalid_entity_id) {
             const auto source = std::lower_bound(inputs.begin(), inputs.end(), hit.source,
                 [](const LiveUnit& candidate, const EntityId sought) { return candidate.state.entity_id < sought; });
@@ -751,7 +751,7 @@ core::Result<void> session_detail::Tick::systems() {
     systems_.emplace();
     auto& inputs = systems_.value().inputs.emplace(staged.release());
     if (auto serviced = impl_->service_healing(inputs, arrivals, tick, executor, targets_->combat_events.value()); !serviced) return serviced;
-    if (auto serviced = impl_->service_beams(inputs, tick, executor); !serviced) return serviced;
+    if (auto serviced = impl_->service_beams(inputs, tick, executor, true); !serviced) return serviced;
     if (auto serviced = impl_->service_weaken(inputs, tick, executor); !serviced) return serviced;
     if (inputs.size() != impl_->concentrate_service_census
         || (!inputs.empty() && inputs.back().state.entity_id != impl_->concentrate_service_last_id)) {

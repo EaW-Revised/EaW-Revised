@@ -8,6 +8,9 @@
 #include <cmath>
 #include <unordered_set>
 
+#include "eawr/presentation/diagnostic_switches.hpp"
+#include "eawr/presentation/skin_pose_profile.hpp"
+
 namespace eawr::presentation::render_categories {
 
 // Presentation provenance, independent of asset identity and simulation state.
@@ -57,7 +60,7 @@ inline constexpr std::array<std::string_view, 19> experiments{
     return requested && (ablation == "off" || index >= role_count || ablation != names[index]);
 }
 [[nodiscard]] inline bool engine_casts(bool requested) noexcept {
-    return requested && ablation != "shadows" && ablation != "fighter-shadows";
+    return requested && !diagnostic_switches::active.shadows && ablation != "shadows" && ablation != "fighter-shadows";
 }
 
 [[nodiscard]] inline bool fighter_experiment() noexcept { return ablation.starts_with("fighter-"); }
@@ -106,6 +109,47 @@ inline void begin_fighter_frame(std::uint64_t frame) noexcept {
     if (fighter_work_frame != frame) { fighter_work = {}; fighter_work_frame = frame; }
 }
 
+// Why pieces are not drawn through an instanced hull group (B stage 0 census). Sampled on the render
+// counters' cadence, visible and hidden pieces separately; diagnostic only, nothing reads it back.
+// `pieces`/`surfaces` are exclusive: each piece counts under the FIRST reason that applies, in the order of
+// the batching key (hull_batching eligibility). `flag_*` count every condition independently. `unobserved`: eligible
+// but not yet seen by the registry (changed since the last batch update); `batch_off`: eligible while instanced hulls
+// are off (launch argument or a drawtype ablation), where no registry exists.
+enum class BatchReason : std::uint8_t {
+    batched, hidden, reserved_proxy, no_rid, no_resource, no_mesh, translated, non_opaque, billboard, opacity, posed,
+    sticky, maturing, alone, unobserved, batch_off, count };
+inline constexpr std::size_t batch_reason_count = static_cast<std::size_t>(BatchReason::count);
+inline constexpr std::array<std::string_view, batch_reason_count> batch_reason_names{
+    "batched", "hidden", "reserved_proxy", "no_rid", "no_resource", "no_mesh", "translated", "non_opaque", "billboard",
+    "opacity", "posed", "sticky", "maturing", "alone", "unobserved", "batch_off"};
+inline constexpr std::size_t census_bucket_count = 5; // 1, 2, 3-4, 5-8, 9+
+[[nodiscard]] constexpr std::size_t census_bucket(const std::uint64_t value) noexcept {
+    return value <= 2 ? (value == 0 ? 0 : static_cast<std::size_t>(value) - 1) : value <= 4 ? 2 : value <= 8 ? 3 : 4;
+}
+struct BatchCensus final {
+    bool valid{};
+    std::array<std::uint64_t, batch_reason_count> pieces{}, surfaces{};
+    std::array<std::array<std::uint64_t, role_count>, batch_reason_count> by_role{};
+    // Visible pieces, each condition counted independently of the others.
+    std::uint64_t visible{}, flag_translated{}, flag_non_opaque{}, flag_billboard{}, flag_opacity{}, flag_posed{},
+        flag_skinned{}, flag_palette_surfaces{}, flag_proxy{};
+    // Posed pieces: how many bones left bind pose, and whether a bone-set group could hold the piece
+    // (opaque, no billboard, not translated, no palette-skinned surface).
+    std::uint64_t posed_rigid_only{}, posed_with_palette_surfaces{}, posed_groupable{}, posed_groupable_surfaces{};
+    std::array<std::uint64_t, census_bucket_count> moved_bones{};
+    // Distinct counts among visible pieces: assets, posed assets, (posed asset, moved-bone set) pairs.
+    std::uint64_t distinct_assets{}, distinct_posed_assets{}, distinct_posed_bone_sets{};
+    // Surface kinds summed over visible pieces (piece-weighted), and bones carrying a rigid surface.
+    std::uint64_t surfaces_rigid{}, surfaces_palette{}, surfaces_plain{}, rigid_bone_sets{};
+    // Skeletons held by instances.
+    std::uint64_t skeleton_instances{}, shared_idle_instances{}, skeleton_bones{}, skeleton_free_instances{};
+    // Live groups by member count (1 is impossible; 2, 3-4, 5-8, 9-16, 17+), groups and members.
+    std::array<std::uint64_t, 5> group_sizes{}, group_size_members{};
+    std::uint64_t groups_distinct_assets{}, groups_with_colour{};
+    SkinWriteCensus skin_writes{};
+    std::uint64_t submit_serial{};
+};
+
 struct Counts final {
     std::uint64_t submitted{}, retained{}, eligible_casters{}, retained_surfaces{}, retained_triangles{}, material_incidence{}, potential_shadow_surfaces{};
 };
@@ -125,6 +169,7 @@ struct Sample final {
     bool batch_enabled{}, batch_active{};
     std::uint64_t batch_groups{}, batch_members{}, batch_collapsed_surfaces{}, batch_joins{}, batch_leaves{};
     std::uint64_t batch_sticky{}, batch_flushes{}, batch_repairs{}, batch_key_builds{};
+    BatchCensus census{};
     std::uint64_t frame{};
     std::uint64_t viewport{};
     std::array<Counts, role_count> roles{};
@@ -148,6 +193,54 @@ struct Sample final {
 // Intrusive registration allocates nothing; disabled frames never enumerate sources.
 inline bool enabled{};
 inline Sample latest{};
+inline void write_census_json(std::ostream& out, const BatchCensus& c) {
+    const auto array = [&out](const auto& values) {
+        out << '[';
+        for (std::size_t index = 0; index < values.size(); ++index) out << (index ? "," : "") << values[index];
+        out << ']';
+    };
+    out << ",\"census\":{\"visible\":" << c.visible << ",\"reasons\":{";
+    for (std::size_t reason = 0; reason < batch_reason_count; ++reason) {
+        out << (reason ? "," : "") << '"' << batch_reason_names[reason] << "\":{\"pieces\":" << c.pieces[reason]
+            << ",\"surfaces\":" << c.surfaces[reason] << ",\"roles\":";
+        array(c.by_role[reason]);
+        out << '}';
+    }
+    out << "},\"role_order\":[";
+    for (std::size_t role = 0; role < role_count; ++role) out << (role ? "," : "") << '"' << names[role] << '"';
+    out << "],\"flags\":{\"translated\":" << c.flag_translated << ",\"non_opaque\":" << c.flag_non_opaque
+        << ",\"billboard\":" << c.flag_billboard << ",\"opacity\":" << c.flag_opacity << ",\"posed\":" << c.flag_posed
+        << ",\"skinned\":" << c.flag_skinned << ",\"palette_surfaces\":" << c.flag_palette_surfaces
+        << ",\"proxy\":" << c.flag_proxy << "},\"posed\":{\"rigid_only\":" << c.posed_rigid_only
+        << ",\"with_palette_surfaces\":" << c.posed_with_palette_surfaces << ",\"groupable\":" << c.posed_groupable
+        << ",\"groupable_surfaces\":" << c.posed_groupable_surfaces << ",\"moved_bones_1_2_3to4_5to8_9plus\":";
+    array(c.moved_bones);
+    out << "},\"distinct\":{\"assets\":" << c.distinct_assets << ",\"posed_assets\":" << c.distinct_posed_assets
+        << ",\"posed_bone_sets\":" << c.distinct_posed_bone_sets << "},\"surface_kinds\":{\"rigid\":" << c.surfaces_rigid
+        << ",\"palette\":" << c.surfaces_palette << ",\"plain\":" << c.surfaces_plain
+        << ",\"rigid_bone_sets\":" << c.rigid_bone_sets << "},\"skeletons\":{\"free\":" << c.skeleton_free_instances << ",\"instances\":" << c.skeleton_instances
+        << ",\"shared_idle\":" << c.shared_idle_instances << ",\"bones\":" << c.skeleton_bones
+        << "},\"group_sizes_2_3to4_5to8_9to16_17plus\":{\"groups\":";
+    array(c.group_sizes);
+    out << ",\"members\":";
+    array(c.group_size_members);
+    out << "},\"groups_distinct_assets\":" << c.groups_distinct_assets << ",\"groups_with_colour\":" << c.groups_with_colour
+        << ",\"skin_writes\":{\"paths\":[\"idle\",\"live\",\"create\"],\"binds\":";
+    array(c.skin_writes.binds);
+    out << ",\"zero_binds\":";
+    array(c.skin_writes.zero_binds);
+    out << ",\"dirty_skeletons\":";
+    array(c.skin_writes.dirty_skeletons);
+    out << ",\"rigid_binds\":";
+    array(c.skin_writes.rigid_binds);
+    out << ",\"rigid_writes\":";
+    array(c.skin_writes.rigid_writes);
+    out << ",\"bone_writes\":";
+    array(c.skin_writes.bone_writes);
+    out << ",\"billboard_refreshes\":" << c.skin_writes.billboard_refreshes
+        << ",\"billboard_bone_writes\":" << c.skin_writes.billboard_bone_writes
+        << ",\"no_instance_binds\":" << c.skin_writes.no_instance_binds << "},\"submit_serial\":" << c.submit_serial << '}';
+}
 inline void write_json(std::ostream& out, const Sample& sample) {
     out << "{\"frame\":" << sample.frame << ",\"sample_ms\":" << sample.sample_ms
         << ",\"viewport\":" << sample.viewport
@@ -181,6 +274,7 @@ inline void write_json(std::ostream& out, const Sample& sample) {
         << ",\"joins\":" << sample.batch_joins << ",\"leaves\":" << sample.batch_leaves
         << ",\"sticky\":" << sample.batch_sticky << ",\"flushes\":" << sample.batch_flushes
         << ",\"repairs\":" << sample.batch_repairs << ",\"key_builds\":" << sample.batch_key_builds << '}';
+    if (sample.census.valid) write_census_json(out, sample.census);
     if (ablation != "off") out << ",\"ablation\":\"" << ablation << '"';
     if (ablation != "off") out << ",\"diagnostic\":{\"cutoff\":" << band_cutoff()
         << ",\"band_hidden_instances\":" << sample.band_hidden_instances

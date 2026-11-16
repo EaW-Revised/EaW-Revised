@@ -188,8 +188,18 @@ namespace session_detail {
     }
     unit.speed = sample.value().speed;
     if (sample.value().finished) {
+        const bool final_facing = unit.motion->kind == MotionKind::path && !unit.formation
+            && unit.state.order.kind == OrderKind::move && unit.state.order.final_yaw.has_value();
         unit.motion = MotionState{};
         unit.speed = math::Fixed{};
+        // MV-40: keep the ordinary path and braking, then start the arrival turn at rest.
+        // A pending replacement formation must finish installing its own path first.
+        if (final_facing && wrap_degrees(math::Fixed::from_raw(
+                unit.state.order.final_yaw->raw() - sample.value().yaw.raw())).raw() != 0) {
+            auto turn = plan_face_yaw(*profile, tick, unit.state.position, sample.value().yaw, *unit.state.order.final_yaw);
+            if (!turn) return core::Result<void>::failure(turn.error());
+            unit.motion = std::move(turn).value();
+        }
     }
     return core::Result<void>::success();
 }
@@ -331,11 +341,27 @@ core::Result<TacticalSession::Impl::PathInputs> TacticalSession::Impl::path_inpu
         return core::Result<PathInputs>::success(PathInputs{unit.state.position, yaw.value(), unit.speed, limits.value()});
     }
 
-void TacticalSession::Impl::take_plan(LiveUnit& unit, MotionState plan) {
+core::Result<void> TacticalSession::Impl::take_plan(LiveUnit& unit, MotionState plan,
+    const math::Vec3 target, const std::uint64_t start) const {
+        // MV-40: a successful move can already be complete (zero distance, or AV-19's
+        // short move). Failed searches retain their retry wait and never enter here.
+        if (plan.kind == MotionKind::none && unit.state.order.kind == OrderKind::move && unit.state.order.final_yaw
+            && motion_detail::within_coordinates(target) && motion_detail::within_coordinates(unit.state.position)) {
+            const auto yaw = yaw_degrees(unit.state.rotation);
+            if (!yaw) return core::Result<void>::failure(yaw.error());
+            if (const auto* profile = motion.find(unit.state.type_id)) {
+                auto turn = plan_face_yaw(*profile, start, unit.state.position, yaw.value(),
+                    *unit.state.order.final_yaw);
+                if (!turn) return core::Result<void>::failure(turn.error());
+                if (turn.value().nodes.size() >= 2 && turn.value().nodes.front().yaw != turn.value().nodes.back().yaw)
+                    plan = std::move(turn).value();
+            }
+        }
         unit.motion = std::move(plan);
-        if (unit.motion->kind == MotionKind::none) {
+        if (unit.motion->kind != MotionKind::path) {
             unit.speed = math::Fixed{};
         }
+        return core::Result<void>::success();
     }
 
 void TacticalSession::Impl::retain_path_failure(LiveUnit& unit, const math::Vec3 target,
@@ -388,7 +414,8 @@ core::Result<bool> TacticalSession::Impl::plan_path_within(LiveUnit& unit, const
                     retain_path_failure(unit, target, start, in.limits.max_speed);
                     return core::Result<bool>::success(true);
                 }
-                take_plan(unit, std::move(*within.value()));
+                if (auto taken = take_plan(unit, std::move(*within.value()), target, start); !taken)
+                    return core::Result<bool>::failure(taken.error());
                 return core::Result<bool>::success(true);
             }
             bool exhausted = false;
@@ -400,12 +427,14 @@ core::Result<bool> TacticalSession::Impl::plan_path_within(LiveUnit& unit, const
                 retain_path_failure(unit, target, start, in.limits.max_speed);
                 return core::Result<bool>::success(true);
             }
-            take_plan(unit, std::move(plan).value());
+            if (auto taken = take_plan(unit, std::move(plan).value(), target, start); !taken)
+                return core::Result<bool>::failure(taken.error());
             return core::Result<bool>::success(true);
         }
         auto plan = plan_move(in.limits, motion.rules, start, in.position, in.yaw, in.speed, target);
         if (!plan) return core::Result<bool>::failure(plan.error());
-        take_plan(unit, std::move(plan).value());
+        if (auto taken = take_plan(unit, std::move(plan).value(), target, start); !taken)
+            return core::Result<bool>::failure(taken.error());
         return core::Result<bool>::success(true);
     }
 
@@ -414,6 +443,9 @@ core::Result<TacticalSession::Impl::SlicedSearch> TacticalSession::Impl::start_s
     const CollisionWorld& world) const {
         // The movement phase of each tick up to `frame` advances the unit along its plan.
         LiveUnit ahead = unit;
+        // MV-41: this predicts the retained path while the replacement search waits.
+        // Its new order's final heading belongs to the path being planned, not this one.
+        ahead.state.order.final_yaw.reset();
         for (auto tick = now + 1; tick <= frame; ++tick) {
             if (auto advanced = advance(ahead, motion.find(unit.state.type_id), tick); !advanced) {
                 return core::Result<SlicedSearch>::failure(advanced.error());

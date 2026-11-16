@@ -130,6 +130,27 @@ void test_append_equals_rebuild() {
     }
     expect(reused != 0, "appended ships are indexed");
     expect(!incremental.opacity_changed(1, .5F), "growth keeps the cached opacity of existing ships");
+    // Retirement erases a ship's pieces and rebuilds; an append after that must still equal a full rebuild
+    // (the incremental path relies on every erase going through a rebuild first).
+    const std::size_t ships = 9;
+    std::erase_if(pieces, [](const Piece& piece) { return piece.live == std::size_t{2}; });
+    std::erase_if(clips, [](const Clip& clip) { return clip.ship == 2; });
+    incremental.rebuild(ships, pieces, clips, hull);
+    {
+        const auto first_piece = pieces.size();
+        const auto first_clip = clips.size();
+        add_ship(ships);
+        incremental.append(ships + 1, pieces, first_piece, clips, first_clip, hull);
+        space::PopulationIndex full;
+        full.rebuild(ships + 1, pieces, clips, hull);
+        for (std::size_t ship = 0; ship < ships + 1; ++ship) {
+            const auto same = [](const auto lhs, const auto rhs) { return std::equal(lhs.begin(), lhs.end(), rhs.begin(), rhs.end()); };
+            expect(same(incremental.pieces(ship), full.pieces(ship)) && same(incremental.entities(ship), full.entities(ship))
+                   && same(incremental.entities(ship, true), full.entities(ship, true))
+                   && same(incremental.clips(ship), full.clips(ship)), "append after a retire-and-rebuild equals a full rebuild");
+        }
+        expect(incremental.pieces(2).empty(), "the retired ship stays empty after the append");
+    }
     incremental.truncate(5);
     expect(incremental.ship_count() == 5 && incremental.entities(5).empty(), "truncate drops the appended rows");
 }
@@ -146,6 +167,34 @@ void test_attachment_marks() {
         marks.mark(2, 2);
         expect(marks.count() == 1, "hidden and destroyed attachments leave no stale marks next frame");
     }
+}
+
+void test_attachment_marks_extend_equals_configure() {
+    // Growth extends the marks by the new decisions; the result must behave like a configure of all of them.
+    const std::vector<std::vector<unsigned>> first{{0, 0}, {}, {0, 0, 0}};
+    const std::vector<std::vector<unsigned>> all{{0, 0}, {}, {0, 0, 0}, {0}, {0, 0}};
+    space::AttachmentMarks extended;
+    extended.configure(first);
+    extended.mark(2, 2);
+    extended.extend(all);
+    space::AttachmentMarks configured;
+    configured.configure(all);
+    expect(extended.decisions() == configured.decisions() && extended.decisions() == all.size(), "extend adds a row per new decision");
+    extended.clear();
+    for (unsigned frame = 0; frame < 4; ++frame) {
+        for (auto* marks : {&extended, &configured}) {
+            marks->clear();
+            marks->mark(4, 1); marks->mark(3, 0); marks->mark(4, 1); marks->mark(0, 1); marks->mark(2, 2); marks->mark(3, 0);
+        }
+        expect(extended.count() == 4 && extended.count() == configured.count(), "extended marks count like configured ones");
+    }
+    extended.truncate(3);
+    expect(extended.decisions() == 3, "truncate drops the extended rows");
+    const std::vector<std::vector<unsigned>> grown{{0, 0}, {}, {0, 0, 0}, {0, 0, 0, 0}};
+    extended.extend(grown);
+    extended.clear();
+    extended.mark(3, 3);
+    expect(extended.count() == 1, "re-extending after a truncate gives usable rows");
 }
 
 class Executor final : public eawr::presentation::particles::StepExecutor {
@@ -295,6 +344,7 @@ int main() {
     test_linear_frame_budget();
     test_append_equals_rebuild();
     test_attachment_marks();
+    test_attachment_marks_extend_equals_configure();
     test_exact_parallel_compose();
     test_parallel_visibility_and_palettes();
     if (failures) return 1;

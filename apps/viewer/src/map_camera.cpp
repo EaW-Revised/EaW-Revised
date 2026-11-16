@@ -711,7 +711,12 @@ core::Result<void> MapCameraBridge::step(const float seconds) {
         // adds the difference as a host tilt, clamped like the orbit.
         .pitch_adjust_degrees = (orbit_pitch_per_mouse_unit() - constants_.pitch_per_mouse_unit)
             * consumed.orbit_pitch_units,
-        .translate_units = {consumed.translate_x, consumed.translate_y},
+        // The overview draws a fixed yaw and never turns, so its sums are exact;
+        // otherwise events after a same-step turn are put back at the start yaw (#5789).
+        .translate_units = overview_view_yaw_
+            ? presentation::camera::PanDisplacement{consumed.translate_x, consumed.translate_y}
+            : presentation::camera::PanDisplacement{consumed.translate_at_start_x,
+                                                    consumed.translate_at_start_y},
         .pan_speed_scale = adapter_.table()->pan_speed_scale,
         .orbit_pitch_range = orbit_pitch_range(),
         .view_yaw_degrees = overview_view_yaw_,

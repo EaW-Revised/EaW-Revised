@@ -8,6 +8,7 @@
 #include "eawr/presentation/particles/catchup_screen_space.hpp"
 #include "eawr/presentation/particles/map_attachment_owner.hpp"
 #include "eawr/presentation/particles/map_effect_plan.hpp"
+#include "eawr/presentation/particles/ordered_spread.hpp"
 #include "eawr/presentation/particles/prewarmed_capacity.hpp"
 #include "eawr/presentation/particles/proxy_binding.hpp"
 #include "eawr/presentation/space/debris.hpp"
@@ -193,6 +194,50 @@ void UnitEmitters::place(const std::size_t index, const sim::math::Mat3x4& pose)
         }
         ++running;
     }
+}
+
+void UnitEmitters::compute_placed(const Ship& ship, const sim::math::Mat3x4& pose, PlacedEmitter* const out) {
+    std::size_t next = 0;
+    for (const Running& running : ship.running) {
+        PlacedEmitter& placed = out[next++];
+        placed = {};
+        if (auto world = sim::math::compose(pose, running.local)) placed.frame = particles::source_emitter_frame(world.value());
+        if (running.mesh_local) {
+            if (auto world = sim::math::compose(pose, *running.mesh_local)) {
+                const particles::EmitterFrame owner = particles::source_emitter_frame(world.value());
+                placed.mesh = particles::MeshFrame{owner.origin, owner.basis};
+            }
+        }
+    }
+}
+
+void UnitEmitters::place_prepared(const std::size_t index, const PlacedEmitter* const placed) {
+    Ship& ship = ships_[index];
+    std::size_t next = 0;
+    for (auto running = ship.running.begin(); running != ship.running.end();) {
+        const PlacedEmitter& entry = placed[next++];
+        const std::optional<particles::EmitterFrame>& frame = entry.frame;
+        const std::optional<particles::MeshFrame>& mesh = entry.mesh;
+        const bool ok = frame && (!running->mesh_local || mesh) && registry_->set_frame(running->handle, *frame)
+            && (!mesh || registry_->set_mesh_frame(running->handle, *mesh));
+        if (!ok) {
+            ship.reconciled = false;
+            static_cast<void>(registry_->release(running->handle));
+            ++stopped_["frame_overflow"];
+            running = ship.running.erase(running);
+            continue;
+        }
+        if (running->log < start_log_.size() && !start_log_[running->log].origin) {
+            start_log_[running->log].origin = std::array<float, 3>{frame->origin.x, frame->origin.y, frame->origin.z};
+        }
+        ++running;
+    }
+}
+
+bool UnitEmitters::update_is_noop(const Ship& ship, const SpacePopulation::LiveShipEmitterView& view,
+                                  const std::span<const scene::HardpointState> states, const Modes& modes) {
+    return ship.planned && ship.reconciled && ship.entity == view.entity && ship.modes == modes
+        && std::equal(ship.states.begin(), ship.states.end(), states.begin(), states.end());
 }
 
 bool UnitEmitters::step_clone_proxy(CloneProxy& proxy, const bool visible, const particles::EmitterFrame& frame,
@@ -594,7 +639,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
                          const FixedCamera& camera, const double presented_tick, const bool reveal,
                          const FadeOpacity& fade_opacity, const std::span<const sim::EntityId> unfogged_props,
                          const ProjectileOpacity& projectile_opacity, const BirthAt& clone_birth_at,
-                         const ProjectileBirthAt& projectile_birth_at) {
+                         const ProjectileBirthAt& projectile_birth_at, const EngineBrightness& engine_brightness) {
     if (released_) return true;
     // A frame whose caller never finished the last one (a failed view step): complete it first, as the owner of the order.
     if (final_pending_ && !finish_frame(population)) return false;
@@ -652,6 +697,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
     FrameTimer owner_catchup(measure_owner_ ? &owner_timings_[2] : nullptr);
     sample_seconds_ = presentation_constants::logical_frame_seconds;
     const bool folded = particles::EffectRegistry::catchup_folding_default() && due > samples_ && due - samples_ > 2;
+    if (folded) ++folded_frames_;
     // No deferred scope or registry scan on the ordinary one-sample path; two or more samples upload only the last pass.
     const auto frame_uploads = registry_->defer_uploads(particles::EffectRegistry::defers_catchup_uploads(due, samples_));
     const auto folded_start = samples_;
@@ -680,9 +726,81 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
             // of them runs its emitters (least visible, as a hidden ship's, BP-44).
             ++unknown_samples_;
         }
-        for (std::size_t index = 0; index < ships_.size(); ++index) {
+        // PF particle spread (E): as the frame's own sample below, the pure part of each ship's pass (the pose it stands at
+        // in this sample, its states and modes, the frames of its emitters) runs on the particle workers and the registry
+        // writes commit on this thread in ship order. A ship the pure stage does not take (a death clone, a projectile, a
+        // hidden or unknown ship) runs the full serial path in its commit.
+        prepared_.resize(ships_.size());
+        std::size_t placed_total = 0;
+        for (std::size_t position = 0; position < ships_.size(); ++position) {
+            prepared_[position].placed_first = placed_total;
+            placed_total += ships_[position].running.size();
+        }
+        placed_.resize(placed_total);
+        const auto prepare_sample_ship = [&](const std::size_t index) {
+            ShipPrep& prep = prepared_[index];
+            const std::size_t first = prep.placed_first;
+            prep = ShipPrep{};
+            prep.placed_first = first;
+            const Ship& ship = ships_[index];
+            if (ship.skip_historical || !before || !after) return;
+            prep.view = population.live_ship_emitter_view(index);
+            const auto& view = prep.view;
+            if (!view || view->death_clone || view->placement == nullptr || view->projectile) return;
+            const auto unit = std::lower_bound(units.begin(), units.end(), view->entity,
+                [](const live::LiveUnitPose& pose, const sim::EntityId id) { return pose.entity < id; });
+            if (unit == units.end() || unit->entity != view->entity) return;
+            // The model transform SpacePopulation::pose_live gives the same pose.
+            std::array<sim::math::Fixed, 6> values{};
+            const std::array<double, 6> source{unit->position[0], unit->position[1], unit->position[2],
+                                               unit->yaw_degrees, unit->roll_degrees, unit->pitch_degrees};
+            bool finite = true;
+            for (std::size_t axis = 0; axis < values.size(); ++axis) {
+                auto fixed = scene::fixed_from_binary32(static_cast<float>(source[axis]));
+                finite = finite && static_cast<bool>(fixed);
+                if (fixed) values[axis] = fixed.value();
+            }
+            if (!finite) return;
+            auto placed = scene::placement_transform(values[0], values[1], values[2], values[3],
+                values[5], values[4], sim::math::Fixed::from_raw(view->placement->scale_raw));
+            if (!placed) return;
+            prep.pose = placed.value();
+            prep.states.assign(view->states.begin(), view->states.end());
+            const sim::tactical::TacticalInstance* instance = unit->instance;
+            prep.modes = modes_of(instance, ion_stun_types_);
+            if (instance != nullptr && instance->durability) {
+                const auto& hardpoints = instance->durability->hardpoints;
+                for (std::size_t hardpoint = 0; hardpoint < hardpoints.size() && hardpoint < prep.states.size(); ++hardpoint) {
+                    prep.states[hardpoint] = static_cast<scene::HardpointState>(hardpoints[hardpoint].state);
+                }
+            }
+            prep.normal = true;
+            prep.noop = update_is_noop(ship, *view, prep.states, prep.modes);
+            // A folded sample never updates, and a ship whose update changes nothing keeps its emitters: either way
+            // their frames at this pose do not depend on the commit.
+            if ((folded || prep.noop) && !ship.running.empty()) {
+                FrameTimer timer(measure_preparation_ ? &prep.compute_ms : nullptr, true);
+                compute_placed(ship, *prep.pose, placed_.data() + prep.placed_first);
+                prep.placed = true;
+                prep.placed_count = ship.running.size();
+            }
+        };
+        const auto commit_sample_ship = [&](const std::size_t index) {
             Ship& ship = ships_[index];
-            if (ship.skip_historical) continue;  // D-ss: one pass at the drawn pose (decide_single_pass)
+            if (ship.skip_historical) return;  // D-ss: one pass at the drawn pose (decide_single_pass)
+            ShipPrep& prep = prepared_[index];
+            if (prep.normal) {
+                if (!folded && !(prep.noop && ship.reconciled)) {
+                    update(ship, *prep.view, prep.states, prep.modes, base + 1U, samples_);
+                }
+                if (prep.placed && prep.placed_count == ship.running.size()) {
+                    if (measure_preparation_) emitter_prepare_ms_ += prep.compute_ms;
+                    place_prepared(index, placed_.data() + prep.placed_first);
+                } else {
+                    place(index, *prep.pose);
+                }
+                return;
+            }
             const auto view = population.live_ship_emitter_view(index);
             // #421: a death clone runs its own proxies on its clip pose at this sample's tick.
             if (view && view->death_clone && view->placement != nullptr) {
@@ -696,12 +814,12 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
                         static_cast<void>(step_clone_proxy(proxy, proxy.life->active().has_value(), *proxy.last,
                             proxy.last_mesh ? &*proxy.last_mesh : nullptr, view->entity, base + 1U, samples_));
                 }
-                continue;
+                return;
             }
             if (!view) orphan_clone(ship);
             if (!view || view->death_clone || view->placement == nullptr) {
                 stop_all(ship, !view ? "retired" : view->death_clone ? "death_clone" : "not_shown");
-                continue;
+                return;
             }
             // #456: a model projectile's proxies (the missile's trail) ride its flight at this
             // sample's tick; a slot whose projectile was not in flight then runs nothing.
@@ -709,7 +827,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
                 auto pose = projectile_pose_at ? projectile_pose_at(index, tick) : std::nullopt;
                 if (!pose) {
                     stop_all(ship, "not_shown");
-                    continue;
+                    return;
                 }
                 if (folded && projectile_pose_at && projectile_birth_at) {
                     const auto current = projectile_birth_at(index);
@@ -729,17 +847,17 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
                 }
                 if (!folded) update(ship, *view, view->states, Modes{}, base + 1U, samples_);
                 place(index, *pose);
-                continue;
+                return;
             }
             if (!before || !after) {
                 stop_all(ship, "pose_unknown");
-                continue;
+                return;
             }
             const auto unit = std::lower_bound(units.begin(), units.end(), view->entity,
                 [](const live::LiveUnitPose& pose, const sim::EntityId id) { return pose.entity < id; });
             if (unit == units.end() || unit->entity != view->entity) {
                 stop_all(ship, "not_shown");
-                continue;
+                return;
             }
             // The model transform SpacePopulation::pose_live gives the same pose.
             std::array<sim::math::Fixed, 6> values{};
@@ -760,7 +878,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
             }
             if (!pose) {
                 stop_all(ship, "frame_overflow");
-                continue;
+                return;
             }
             std::vector<scene::HardpointState> states(view->states.begin(), view->states.end());
             const sim::tactical::TacticalInstance* instance = unit->instance;
@@ -773,6 +891,10 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
             }
             if (!folded) update(ship, *view, states, modes, base + 1U, samples_);
             place(index, *pose);
+        };
+        if (!particles::spread_ordered(workers_, ships_.size(), min_spread_ships, prepare_sample_ship, commit_sample_ship)) {
+            failure_ = "unit emitter: the particle workers could not run the catch-up ships' pass";
+            return false;
         }
         rebuild_busy();
         if (!advance_projectiles(tick) || !advance_sample()) return false;
@@ -798,9 +920,70 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
         if (ships_[index].running.empty() && ships_[index].clone.empty()
             && !population.live_ship_emitter_visit(index)) continue;
         visit_.push_back(index);
+    }
+    // PF particle spread (E): the pure part of every ship's pass (its view, modes, brightness and the frames of its
+    // emitters) runs on the particle workers; everything that writes the registry or the owner's counters commits on
+    // this thread in ship order, as the plain loop did. A ship's pure stage reads that ship alone and the frame's
+    // read-only inputs, so the result does not depend on the thread count.
+    prepared_.resize(visit_.size());
+    std::size_t placed_total = 0;
+    for (std::size_t slot = 0; slot < visit_.size(); ++slot) {
+        prepared_[slot].placed_first = placed_total;
+        placed_total += ships_[visit_[slot]].running.size();
+    }
+    placed_.resize(placed_total);
+    const auto prepare_ship = [&](const std::size_t position) {
+        ShipPrep& prep = prepared_[position];
+        const std::size_t first = prep.placed_first;
+        prep = ShipPrep{};
+        prep.placed_first = first;
+        const std::size_t index = visit_[position];
+        const Ship& ship = ships_[index];
+        prep.view = population.live_ship_emitter_view(index);
+        const auto& view = prep.view;
+        if (!view || view->death_clone || !view->model_to_world || view->placement == nullptr) return;
+        prep.normal = true;
+        prep.now = instance_of(latest, view->entity);
+        prep.modes = modes_of(prep.now, ion_stun_types_);
+        prep.noop = update_is_noop(ship, *view, view->states, prep.modes);
+        // BP-45: FoC's engine emitter brightness from this tick's step.
+        const sim::tactical::TacticalInstance* const now = prep.now;
+        const sim::tactical::TacticalInstance* const before =
+            now != nullptr && now->durability && now->durability->max_speed ? instance_of(previous, view->entity) : nullptr;
+        if (now != nullptr && before != nullptr && now->durability && now->durability->max_speed
+            && now->durability->max_speed->raw() > 0) {
+            double step = 0.0;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                const double delta = to_double(now->fixed_transform.rows[axis][3])
+                    - to_double(before->fixed_transform.rows[axis][3]);
+                step += delta * delta;
+            }
+            prep.has_brightness = true;
+            prep.brightness = prep.modes.engines_online
+                ? std::clamp(std::sqrt(step) * 0.8 / to_double(*now->durability->max_speed) + 0.2, 0.0, 1.0)
+                : 0.0;
+        }
+        // #4444 FC-R05: a retreating ship's engines rise to full as it jumps, whatever its (held) speed says.
+        if (engine_brightness) {
+            if (const auto forced = engine_brightness(view->entity)) {
+                prep.has_brightness = true;
+                prep.brightness = prep.modes.engines_online ? static_cast<double>(*forced) : 0.0;
+            }
+        }
+        // A ship whose update changes nothing keeps its emitters: their frames at the drawn pose do not depend on it.
+        if (prep.noop && !ship.running.empty()) {
+            FrameTimer timer(measure_preparation_ ? &prep.compute_ms : nullptr, true);
+            compute_placed(ship, *view->model_to_world, placed_.data() + prep.placed_first);
+            prep.placed = true;
+            prep.placed_count = ship.running.size();
+        }
+    };
+    const auto commit_ship = [&](const std::size_t position) {
+        const std::size_t index = visit_[position];
+        ShipPrep& prep = prepared_[position];
         FrameTimer owner_update(measure_owner_ ? &owner_timings_[3] : nullptr, true);
         Ship& ship = ships_[index];
-        const auto view = population.live_ship_emitter_view(index);
+        const auto& view = prep.view;
         // #421: a death clone runs its own proxies on its clip pose, once per sample due.
         if (view && view->death_clone && view->placement != nullptr) {
             stop_all(ship, "death_clone");
@@ -843,24 +1026,31 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
                     }
                 }
             }
-            continue;
+            return;
         }
         if (!view) orphan_clone(ship);
         // BP-44: a ship that is not shown this frame (fogged, or gone from the session) runs
         // nothing; its emitters stop at once.
         if (!view || view->death_clone || !view->model_to_world || view->placement == nullptr) {
             stop_all(ship, !view ? "retired" : view->death_clone ? "death_clone" : "not_shown");
-            continue;
+            return;
         }
-        const sim::tactical::TacticalInstance* now = instance_of(latest, view->entity);
-        const Modes modes = modes_of(now, ion_stun_types_);
-        const bool engines_online = modes.engines_online;
+        const Modes& modes = prep.modes;
         const auto projectile_birth = view->projectile && projectile_birth_at ? projectile_birth_at(index) : std::nullopt;
+        // The placed frames of the pure stage belong to the running emitters it saw: not to ones this commit stops or starts.
+        bool rebuilt = false;
         if (projectile_birth) {
-            if (folded && ship.projectile_generation != projectile_birth->second) stop_all(ship, "projectile_rebound");
+            if (folded && ship.projectile_generation != projectile_birth->second) {
+                stop_all(ship, "projectile_rebound");
+                rebuilt = true;
+            }
             ship.projectile_generation = projectile_birth->second;
         }
-        update(ship, *view, view->states, modes, latest.completed_tick(), samples_);
+        // A projectile rebound above stops the ship's emitters (reconciled is cleared): its update then has work to do.
+        if (!prep.noop || !ship.reconciled) {
+            update(ship, *view, view->states, modes, latest.completed_tick(), samples_);
+            rebuilt = true;
+        }
         // Folded-interval births use the endpoint pose: during stalls / raised
         // sim speed this can displace the historical origin (~100 world units
         // in the moving-ship fixture). Exact birth poses are follow-up #5308.
@@ -935,17 +1125,8 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
             for (auto& running : ship.running) if (running.born == samples_ && !running.draining)
                 running.catchup_seconds = delta - frame_delta;
         }
-        // BP-45: the brightness FoC gives the engine emitters this tick.
-        const sim::tactical::TacticalInstance* before =
-            now != nullptr && now->durability && now->durability->max_speed ? instance_of(previous, view->entity) : nullptr;
-        if (now != nullptr && before != nullptr && now->durability && now->durability->max_speed
-            && now->durability->max_speed->raw() > 0) {
-            double step = 0.0;
-            for (std::size_t axis = 0; axis < 3; ++axis) {
-                const double delta = to_double(now->fixed_transform.rows[axis][3])
-                    - to_double(before->fixed_transform.rows[axis][3]);
-                step += delta * delta;
-            }
+        // BP-45: the brightness FoC gives the engine emitters this tick (computed in the pure stage).
+        if (prep.has_brightness) {
             // The report's per-entity map keeps its node for the ship's entity: no lookup per frame.
             // The cached pointer is safe only because engine_brightness_ is never erased from
             // (std::map nodes stay put on insert).
@@ -953,9 +1134,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
                 ship.brightness_slot = &engine_brightness_[view->entity];
                 ship.brightness_entity = view->entity;
             }
-            *ship.brightness_slot = engines_online
-                ? std::clamp(std::sqrt(step) * 0.8 / to_double(*now->durability->max_speed) + 0.2, 0.0, 1.0)
-                : 0.0;
+            *ship.brightness_slot = prep.brightness;
             ship.engine_brightness = static_cast<float>(*ship.brightness_slot);
         }
         // BP-40: every running emitter stands at its bone on the ship's drawn pose for the
@@ -963,7 +1142,12 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
         // were born.
         owner_update.finish();
         FrameTimer owner_place(measure_owner_ ? &owner_timings_[4] : nullptr, true);
-        place(index, *view->model_to_world);
+        if (prep.placed && !rebuilt && prep.placed_count == ship.running.size()) {
+            if (measure_preparation_) emitter_prepare_ms_ += prep.compute_ms;
+            place_prepared(index, placed_.data() + prep.placed_first);
+        } else {
+            place(index, *view->model_to_world);
+        }
         owner_place.finish();
         FrameTimer owner_brightness(measure_owner_ ? &owner_timings_[5] : nullptr, true);
         // BP-45/FW-19: engine brightness and shared unit opacity multiply at presentation;
@@ -984,6 +1168,10 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
             ++stopped_["frame_overflow"];
             running = ship.running.erase(running);
         }
+    };
+    if (!particles::spread_ordered(workers_, visit_.size(), min_spread_ships, prepare_ship, commit_ship)) {
+        failure_ = "unit emitter: the particle workers could not run the ships' pass";
+        return false;
     }
     busy_.clear();
     for (const std::size_t index : visit_) {

@@ -58,6 +58,7 @@ struct SpacePopulation::ComposeOwner final {
     std::vector<std::uint32_t> records;
     scene::VfsAssetCache cache;
     scene::BuildInput input;
+    std::vector<assets::Placement> replacement_props; // WGT-57/101; input.extra_placements points here
     scene::ObjectResolver resolve;
     ComposeContext context;
 

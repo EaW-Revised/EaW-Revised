@@ -1,6 +1,7 @@
 #include "bc3_fixture.hpp"
 #include "eawr/assets/assets.hpp"
 #include "eawr/assets/texture_chain.hpp"
+#include "eawr/assets/texture_digest.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/scene/texture_prefetch.hpp"
 #include "eawr/vfs/vfs.hpp"
@@ -107,6 +108,23 @@ bool same_texture(const eawr::assets::Texture& left, const eawr::assets::Texture
     return true;
 }
 
+// The identity digest as it was computed before the single-pass version: two independent passes over the same bytes.
+eawr::assets::TextureDigest reference_digest(const eawr::assets::Texture& texture) {
+    eawr::assets::ContentDigest digest;
+    eawr::assets::ContentDigest check(1);
+    for (eawr::assets::ContentDigest* item : {&digest, &check}) {
+        item->scalar(texture.format);
+        item->scalar(texture.width);
+        item->scalar(texture.height);
+        item->scalar(static_cast<std::uint64_t>(texture.mips.size()));
+    }
+    for (const auto& mip : texture.mips) {
+        digest.bytes(mip.bytes.data(), mip.bytes.size());
+        check.bytes(mip.bytes.data(), mip.bytes.size());
+    }
+    return {digest.value(), check.value()};
+}
+
 // A gate the decode hook waits at, so a test decides when a reader may finish.
 struct Gate final {
     std::mutex mutex;
@@ -150,16 +168,32 @@ void results_equal_plain_decode_in_loader_order() {
         prefetch.offer("DATA/ART/TEXTURES/T3.TGA", 99); // so is a case variant
         prefetch.offer("data/art/textures/missing.tga", 5); // a missing file stays the loader's
         bool all_equal = true;
+        bool digests_equal = true;
+        int with_digest = 0;
         for (int i = 0; i < 24; ++i) {
             auto got = prefetch.acquire(path_of(i));
             auto plain = eawr::assets::load_texture(vfs, path_of(i));
             all_equal = all_equal && got && plain && same_texture(got.value(), plain.value());
+            // A texture the loader decoded itself (the reader had not reached it) carries no digest; one a reader decoded
+            // carries exactly the two-pass reference.
+            if (got && plain) {
+                if (got.value().content_digest) {
+                    ++with_digest;
+                    digests_equal = digests_equal && *got.value().content_digest == reference_digest(plain.value());
+                }
+                digests_equal = digests_equal && !plain.value().content_digest.has_value()
+                    && eawr::assets::compute_texture_digest(plain.value()) == reference_digest(plain.value());
+            }
             prefetch.advance(static_cast<std::uint64_t>(i + 1));
         }
         expect(all_equal, "every acquired texture equals the plain decode" + label);
+        expect(digests_equal, "a digest a reader attached equals the two-pass reference" + label);
         prefetch.finish();
         const auto stats = prefetch.stats();
         expect(stats.planned == 24, "the plan holds the distinct existing files" + label);
+        // Holds because a reader decode that failed is never served (the loader decodes it itself).
+        expect(static_cast<std::uint64_t>(with_digest) == stats.served_ready + stats.served_inflight,
+               "every texture served from a reader carries its digest, and no other does" + label);
         expect(stats.served_ready + stats.served_inflight + stats.served_unstarted == 24 && stats.unplanned == 0,
                "every ask was planned and served once" + label);
         expect(stats.readers == readers, "reader count as asked" + label);
@@ -268,6 +302,44 @@ void advance_drops_dead_hints() {
     prefetch.finish();
     const auto stats = prefetch.stats();
     expect(stats.skipped == 5 && stats.unrequested >= 5, "five hints were skipped and counted as unrequested");
+}
+
+// #5097: a session-long read-ahead serves the same path to every append that asks for it, and says when nothing is pending.
+void reoffer_taken_serves_the_next_consumer() {
+    TempTree tree;
+    write_textures(tree, 3);
+    const auto vfs = mount(tree);
+    TexturePrefetchOptions options;
+    options.fixed_readers = 2;
+    options.window_bytes = 64U << 20U;
+    options.reoffer_taken = true;
+    TexturePrefetch prefetch(vfs, options);
+    for (int i = 0; i < 3; ++i) prefetch.offer(path_of(i), 1);
+    expect(wait_until([&] { return prefetch.pending_count() == 0; }), "every offer is decoded or taken");
+    expect(prefetch.held_count() == 3, "the three decodes are held");
+    for (int i = 0; i < 3; ++i) expect(static_cast<bool>(prefetch.acquire(path_of(i))), "the first consumer takes each");
+    expect(prefetch.held_count() == 0 && prefetch.stats().unplanned == 0, "taking releases the hold, nothing was unplanned");
+    // The next append names the same shared hull textures again.
+    for (int i = 0; i < 3; ++i) prefetch.offer(path_of(i), 2);
+    expect(wait_until([&] { return prefetch.pending_count() == 0 && prefetch.held_count() == 3; }), "a taken path is decoded again for the next consumer");
+    auto again = prefetch.acquire(path_of(1));
+    auto plain = eawr::assets::load_texture(vfs, path_of(1));
+    expect(again && plain && same_texture(again.value(), plain.value()), "the second decode equals a plain decode");
+    expect(prefetch.stats().unplanned == 0, "the second consumer was planned");
+    prefetch.advance(3); // the remaining two were never asked for
+    expect(prefetch.held_count() == 0, "advance frees what the append left");
+    // Without the option a taken path stays taken: the load's one-shot read-ahead is unchanged.
+    TexturePrefetchOptions once;
+    once.fixed_readers = 1;
+    once.window_bytes = 64U << 20U;
+    TexturePrefetch one_shot(vfs, once);
+    one_shot.offer(path_of(0), 1);
+    expect(wait_until([&] { return one_shot.pending_count() == 0; }), "one-shot decode finishes");
+    expect(static_cast<bool>(one_shot.acquire(path_of(0))), "one-shot first take");
+    one_shot.offer(path_of(0), 2);
+    expect(one_shot.pending_count() == 0, "a taken path is not offered again by default");
+    auto second = one_shot.acquire(path_of(0));
+    expect(static_cast<bool>(second) && one_shot.stats().unplanned == 1, "the default read-ahead leaves the repeat to the loader");
 }
 
 // The loader asking for a path a reader is decoding waits for it and gets the reader's result.
@@ -388,6 +460,9 @@ void mip_chain_is_built_by_a_reader_when_asked() {
     const auto chained = prefetch.acquire(light, TextureProcessing::colour_mip_chain);
     expect(chained && expected && chained.value().mips.size() == 7 && same_texture(chained.value(), expected.value()),
            "a single-level BC3 texture arrives with its full chain, as the generator makes it");
+    expect(chained && chained.value().content_digest.has_value() && *chained.value().content_digest == reference_digest(chained.value()),
+           "the digest of a generated chain covers the whole chain");
+    expect(expected && !expected.value().content_digest.has_value(), "extend_mip_chain leaves no stale digest");
     const auto plain = prefetch.acquire(light);
     const auto plain_decode = eawr::assets::load_texture(vfs, light);
     expect(plain && plain_decode && same_texture(plain.value(), plain_decode.value()) && plain.value().mips.size() == 1,
@@ -421,6 +496,7 @@ int main() {
     oversized_texture_runs_alone();
     failures_are_the_loaders();
     advance_drops_dead_hints();
+    reoffer_taken_serves_the_next_consumer();
     inflight_ask_waits();
     cancel_and_shutdown();
     if (failures != 0) {

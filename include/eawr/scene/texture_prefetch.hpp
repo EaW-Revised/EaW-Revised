@@ -41,6 +41,10 @@ struct TexturePrefetchOptions final {
     std::uint64_t window_bytes{};
     // Called on a reader thread before it decodes a path; tests use it to block or count decodes.
     std::function<void(std::string_view)> decode_hook;
+    // A path the loader already took may be offered again and is decoded again for the next request. Off (the load's
+    // one-shot read-ahead) keeps the first offer for good; a session-long read-ahead (arrivals during a battle, where
+    // every append asks for the textures of the shared hull art once more) turns it on.
+    bool reoffer_taken{};
 };
 
 struct TexturePrefetchStats final {
@@ -95,6 +99,8 @@ public:
     // Held entries and charged bytes right now (tests).
     [[nodiscard]] std::size_t held_count() const;
     [[nodiscard]] std::uint64_t charged_bytes() const;
+    // Offered paths no reader has finished yet (queued or decoding): zero means every offer so far is held or taken.
+    [[nodiscard]] std::size_t pending_count() const;
     [[nodiscard]] static unsigned policy_readers(bool solid_state, unsigned logical_processors) noexcept;
 
 private:

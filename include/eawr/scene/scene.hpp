@@ -164,6 +164,9 @@ struct Surface final {
     std::uint32_t submesh_index{};
     std::string mesh_name;
     std::string shader;
+    // The scene has a material for it: a legacy selector, the missing-effect fallback, a native translation or the
+    // planet material (`planet_effect`, which has no selector). A consumer that must build the material itself asks
+    // draws_in_space() (or checks planet_effect) instead of reading this alone.
     bool supported{};
     std::string technique;
     std::string pass;
@@ -171,7 +174,18 @@ struct Surface final {
     // ALDEFAULT-01: effect lookup failed; use the built-in green material.
     bool effect_missing{};
     bool translated{};
+    // The stock planet material (Planet.fx, t0/t0_p0 fallback) on a unit or prop surface. It is supported, but it is
+    // not a legacy selector: the viewer builds its material through the environment planet adapter
+    // (presentation::space::plan_environment_effect), so material_selector() stays null for it.
+    bool planet_effect{};
 };
+
+// Whether `program` names the stock planet material (exact name, ASCII case-insensitive).
+[[nodiscard]] bool is_planet_effect(std::string_view program) noexcept;
+
+// Whether the space compose can build a material for the surface: a supported surface with a legacy selector (or its
+// markers) or the planet material. The one definition of "drawable in a space scene" for supported surfaces.
+[[nodiscard]] inline bool draws_in_space(const Surface& surface) noexcept;
 
 // The renderer-owned selector used only after mounted-file lookup establishes
 // absence. The authored effect name remains on Surface for evidence.
@@ -188,6 +202,10 @@ struct Surface final {
 }
 [[nodiscard]] inline const LegacySelector* material_selector(const Surface& surface) noexcept {
     return material_selector(surface.shader, surface.effect_missing, surface.translated);
+}
+
+inline bool draws_in_space(const Surface& surface) noexcept {
+    return surface.supported && (surface.planet_effect || material_selector(surface) != nullptr);
 }
 
 struct AttachedEffect final {
@@ -288,6 +306,8 @@ struct Placement final {
     std::vector<AttachedEffect> effects;
     std::optional<Transform> transform;
     std::vector<Issue> issues;  // sorted by cause then detail, unique
+    // BP-70: the root model is a particle system the object runs as its own effect (no mesh, no skeleton).
+    bool particle_root{};
 
     [[nodiscard]] bool resolved() const noexcept { return issues.empty(); }
     [[nodiscard]] bool drawable() const noexcept;
@@ -337,6 +357,12 @@ struct BuildInput final {
     std::string map_sha256;
     const data::Catalog* catalog{};
     AssetAccess access;
+    // BP-70: a live-session object placed past the map's records (not a map record). A particle-system
+    // root model is such an object's effect; the same model on a map record stays on the map particle route.
+    bool live_objects{};
+    // WGT-57/101: props the battle adds to the map's records (replacements of a destroyed planet backdrop), taken in
+    // order after the map's own placements; their record ordinals lie past the map's.
+    const std::vector<assets::Placement>* extra_placements{};
 };
 
 struct ExecutionStats final {

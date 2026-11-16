@@ -69,6 +69,15 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
         const ui::Modifiers modifiers = modifiers_of(*button);
         if (index == MOUSE_BUTTON_LEFT) {
             if (button->is_pressed()) {
+                if (right_start_ && population.domain() == sim::tactical::BattleDomain::space
+                    && !selection_.empty() && std::none_of(units_.begin(), units_.end(), [&](const auto& unit) {
+                        return selection_.contains(unit.entity) && unit.part != sim::invalid_entity_id;
+                    })) {
+                    right_start_.reset();
+                    hide_compass();
+                    ignore_left_release_ = true;
+                    return true; // O-2: both buttons cancel the compass.
+                }
                 if (button->is_double_click() && !beacon_targeting_
                     && (!live.order_input() || live.order_input()->mode() != ui::OrderMode::waypoint)) {
                     // FoC: the double click selects the type on screen and its release is spent.
@@ -105,7 +114,24 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
             }
         } else if (button->is_pressed()) {
             right_start_ = at;
+            right_held_seconds_ = 0.0;
+            hide_compass();
             right_double_click_ = button->is_double_click();
+            // O-2: a drag orders at the press, so keep its ray and whether it was on a selected unit
+            // (a facing-only drag) now; the ships and the camera move while the button is held.
+            right_press_ray_ = ray(at[0], at[1]);
+            right_press_on_selected_ = false;
+            right_press_allows_compass_ = false;
+            if (right_press_ray_ && !selection_.empty()) {
+                auto pressed = ui::pick_unit(*right_press_ray_, units_);
+                if (const auto icon = world_ui_->icon_at(at)) pressed = *icon;
+                right_press_on_selected_ = pressed && selection_.contains(*pressed);
+                const auto over = std::find_if(units_.begin(), units_.end(), [&](const auto& unit) {
+                    return pressed && unit.entity == *pressed;
+                });
+                right_press_allows_compass_ = over == units_.end() || right_press_on_selected_
+                    || (over->own && !over->hostile);
+            }
         } else {
             right_release(at, modifiers, live);
         }
@@ -373,10 +399,17 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
             cancel_ability_target(unit == units_.end() ? "empty space" : "not an enemy");
             return;
         }
+        // A squadron is aimed at through the craft clicked (space-abilities AB-62).
+        const auto aimed = unit->part != sim::invalid_entity_id ? unit->part : unit->entity;
+        if (!ability_filter_admits(aimed, live)) {
+            // #7186: the ability's authored target filter refuses this contact (WHE-14); same refusal as a non-enemy.
+            negative_feedback();
+            cancel_ability_target("target filtered");
+            return;
+        }
         auto request = *ability_target_;
         ability_target_.reset();
-        // A squadron is aimed at through the craft clicked (space-abilities AB-62).
-        request.target = unit->part != sim::invalid_entity_id ? unit->part : unit->entity;
+        request.target = aimed;
         ++ability_targeted_;
         note("ability " + std::string(ui::ability_name(request.ability)) + " at " + std::to_string(request.target));
         if (ability_commands_ != nullptr) ability_commands_->request(request);
@@ -430,6 +463,7 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
 void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifiers modifiers, LiveSessionView& live) {
     const auto start = right_start_;
     right_start_.reset();
+    hide_compass();
     if (beacon_targeting_) { beacon_targeting_ = false; return; }
     if (special_target_source_) { cancel_special_target("right click"); return; }
     if (placing_) {
@@ -442,16 +476,11 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
         cancel_ability_target("right click");
         return;
     }
-    switch (ui::right_release(start, at)) {
-    case ui::RightRelease::ignored:
-        return;  // the press was cancelled (focus loss, pointer exit) or never seen
-    case ui::RightRelease::compass:
-        // FoC's right drag sets a facing (the compass); the rules have no move-with-facing command.
-        note("right drag: compass facing not modelled");
-        return;
-    case ui::RightRelease::click:
-        break;
-    }
+    auto gesture = ui::right_release(start, at);
+    if (gesture == ui::RightRelease::ignored) return;  // the press was cancelled (focus loss, pointer exit) or never seen
+    // O-2: the double-click move ignores the drag rules (the release point orders it, as a click does).
+    if (right_double_click_) gesture = ui::RightRelease::click;
+    // O-2: the release point still decides what the order is; a drag only changes a plain move.
     ui::OrderInput* input = live.order_input();
     if (input != nullptr && input->mode() == ui::OrderMode::none && !modifiers.ctrl && !modifiers.alt) {
         if (const auto reticle = world_ui_->reticle_at(at);
@@ -516,17 +545,66 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
     if (reticle && over != nullptr && over->hostile) pick.hardpoint = reticle->hardpoint;
     input->set_selection(controlled_selection(live));
     const std::uint64_t tick = live.order_tick();
-    auto issued = input->world_command(pick, ui::CommandOrigin::world_click, ui::OrderModifiers{modifiers.ctrl, modifiers.alt, right_double_click_});
+    // O-2: a drag past MinimumDragDistance orders a move at the PRESS point (a drag of MinimumDragSelectDistance
+    // or more cancels it); a press on a selected ship in space turns the ships in place towards the drag
+    // instead (MV-20, land has no facing-only order). O-6 carries the space ship move's final yaw.
+    std::optional<ui::RightDrag> drag;
+    ui::Vec3f order_point = *point;
+    if (gesture == ui::RightRelease::cancel) {
+        drag = ui::RightDrag{{}, true, std::nullopt};
+    } else if (gesture == ui::RightRelease::compass) {
+        std::optional<ui::Vec3f> press_point;
+        if (right_press_ray_) press_point = ground_point(*right_press_ray_);
+        const bool space = scene_ != nullptr && scene_->domain() == sim::tactical::BattleDomain::space;
+        const auto plan = ui::compass_plan(press_point, *point, right_press_on_selected_, space);
+        const auto press_x = scene::fixed_from_binary32(plan.press[0]);
+        const auto press_y = scene::fixed_from_binary32(plan.press[1]);
+        if (plan.kind == ui::CompassPlan::Kind::cancel || !press_x || !press_y) {
+            // The press met no ground: the release point must not stand in for it (O-2), nothing is ordered.
+            drag = ui::RightDrag{{}, true, std::nullopt};
+        } else {
+            drag = ui::RightDrag{{press_x.value(), press_y.value(), sim::math::Fixed{}}, false, std::nullopt};
+            order_point = plan.press;
+            if (plan.kind == ui::CompassPlan::Kind::face) {
+                const auto toward_x = scene::fixed_from_binary32(plan.toward[0]);
+                const auto toward_y = scene::fixed_from_binary32(plan.toward[1]);
+                if (toward_x && toward_y) drag->face_toward = sim::math::Vec3{toward_x.value(), toward_y.value(), sim::math::Fixed{}};
+            } else if (space && !right_press_on_selected_) {
+                // Fighters keep their existing orders. A mixed selection also keeps the plain move.
+                const bool fighters = std::any_of(units_.begin(), units_.end(), [&](const auto& unit) {
+                    return selection_.contains(unit.entity) && unit.part != sim::invalid_entity_id;
+                });
+                if (!fighters) drag->final_yaw = ui::compass_yaw(plan.press, *point);
+            }
+        }
+    }
+    const bool turning = drag && drag->face_toward;
+    auto issued = input->world_command(pick, ui::CommandOrigin::world_click,
+        ui::OrderModifiers{modifiers.ctrl, modifiers.alt, right_double_click_}, drag ? &*drag : nullptr);
+    if (issued && !issued.value() && drag && drag->cancel) {
+        note("right drag: move cancelled");
+        return;
+    }
     if (issued && issued.value()) {
         ++orders_;
         std::string units;
         for (const sim::EntityId entity : selection_.units()) units += (units.empty() ? "" : ",") + std::to_string(entity);
-        char where[96];
-        std::snprintf(where, sizeof(where), "%.9g,%.9g,0", static_cast<double>((*point)[0]), static_cast<double>((*point)[1]));
         // Move mode moves even onto an enemy (O-3).
         const bool attacked = pick.hostile && mode != ui::OrderMode::move && mode != ui::OrderMode::waypoint;
+        // O-2: a compass drag moved the point move to the press; an attack or a guard keeps the release point.
+        const bool dragged = drag && !attacked && !guarding;
+        sim::math::Vec3 destination = pick.point;
+        if (dragged) destination = drag->press_point;
+        char where[96];
+        const auto& shown = dragged ? order_point : *point;
+        std::snprintf(where, sizeof(where), "%.9g,%.9g,0", static_cast<double>(shown[0]), static_cast<double>(shown[1]));
         std::string what = "move @" + std::string(where);
-        if (attacked) {
+        if (drag && drag->final_yaw) what += " final yaw " + std::to_string(
+            static_cast<double>(drag->final_yaw->raw()) / sim::math::Fixed::scale);
+        if (dragged && turning) {
+            what = "face (right drag) toward " + std::to_string(static_cast<double>(drag->face_toward->x.raw()) / sim::math::Fixed::scale) + ","
+                + std::to_string(static_cast<double>(drag->face_toward->y.raw()) / sim::math::Fixed::scale);
+        } else if (attacked) {
             what = "attack " + std::to_string(pick.entity);
             if (pick.hardpoint != sim::tactical::attack_hull) {
                 what += " hardpoint " + std::to_string(pick.hardpoint);
@@ -540,14 +618,17 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
             what = "attack-move @" + std::string(where);
         }
         note(what + " units " + units + " tick " + std::to_string(tick));
-        if (!attacked && move_feedback_ && local_order_selection(live)) {
-            move_feedback_(pick.point, guarding ? ui::OrderMode::guard
+        if (!attacked && !(dragged && turning) && move_feedback_ && local_order_selection(live)) {
+            move_feedback_(destination, guarding ? ui::OrderMode::guard
                 : attack_moving ? ui::OrderMode::attack_move : ui::OrderMode::move, right_double_click_, tick);
         }
         // BA-25/26 (SND-20/23): retain the aimed hardpoint; guard has its own response.
-        acknowledge(attacked ? Acknowledgement::Kind::attack
-                             : guarding ? Acknowledgement::Kind::guard : Acknowledgement::Kind::move,
-                    pick.entity, pick.hardpoint, pick.point);
+        // O-4: a turn in place is not a move: no move response (retail response for it unverified).
+        if (!(dragged && turning)) {
+            acknowledge(attacked ? Acknowledgement::Kind::attack
+                                 : guarding ? Acknowledgement::Kind::guard : Acknowledgement::Kind::move,
+                        pick.entity, pick.hardpoint, destination);
+        }
     } else if (!issued) {
         ++refused_;
         note("refused: " + issued.error().message);

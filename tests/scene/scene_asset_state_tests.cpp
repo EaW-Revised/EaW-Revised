@@ -717,10 +717,41 @@ void missing_material_effect_contracts() {
     expect(!surfaces[2].supported && !surfaces[2].effect_missing && !surfaces[2].textures.empty(),
         "an existing unsupported effect retains its unsupported status and texture evidence");
 }
+
+// The stock planet material on a unit or prop surface: supported through the environment planet adapter, never a
+// legacy selector (the coverage manifest lists selectors only), and only when its effect file exists.
+void planet_effect_contracts() {
+    using eawr::scene::is_planet_effect;
+    expect(is_planet_effect("Planet.fx") && is_planet_effect("PLANET.FX") && !is_planet_effect("Planet_Deathstar.fx")
+               && !is_planet_effect("Planet.fxo") && !is_planet_effect("Nebula.fx") && !is_planet_effect(""),
+        "only the exact stock planet name, ASCII case-insensitive, is the planet material");
+    Assets assets;
+    assets.files.insert("data/art/shaders/planet.fxo");
+    assets.models.emplace("data/art/models/eawr_planet_unit.alo",
+        model({"Planet.fx", "MeshGloss.fx", "Planet.fx"}, "eawr_scene_prop.tga", {}));
+    const auto surfaces = eawr::scene::construction_surfaces(assets.access(), "data/art/models/eawr_planet_unit.alo");
+    expect(surfaces.size() == 3, "every surface of the planet-shaded model is listed");
+    if (surfaces.size() != 3) return;
+    expect(surfaces[0].supported && surfaces[0].planet_effect && !surfaces[0].translated && !surfaces[0].effect_missing
+               && surfaces[0].technique == "t0" && surfaces[0].pass == "t0_p0",
+        "Planet.fx is supported on the planet adapter's explicitly selected t0 fallback");
+    expect(eawr::scene::material_selector(surfaces[0]) == nullptr
+               && eawr::scene::find_legacy_selector("Planet.fx") == nullptr,
+        "the planet material is not a legacy selector");
+    expect(surfaces[1].supported && !surfaces[1].planet_effect && surfaces[1].technique == "sph_t0"
+               && eawr::scene::material_selector(surfaces[1]) != nullptr,
+        "a legacy surface beside it keeps its selector and no planet flag");
+    assets.files.erase("data/art/shaders/planet.fxo");
+    const auto missing = eawr::scene::construction_surfaces(assets.access(), "data/art/models/eawr_planet_unit.alo");
+    expect(missing.size() == 3 && missing[0].effect_missing && !missing[0].planet_effect
+               && eawr::scene::material_selector(missing[0]) == &eawr::scene::missing_effect_selector(),
+        "an absent Planet.fx effect file takes the missing-effect route, not the planet material");
+}
 } // namespace
 
 void selector_contracts() {
     translated_scene_contracts();
+    planet_effect_contracts();
     asset_name_contracts();
     expect(eawr::scene::legacy_selectors().size() == 22, "the selector table matches the accepted legacy list");
     const auto* alpha = eawr::scene::find_legacy_selector("MeshAlpha.fx");

@@ -5,6 +5,8 @@
 #include <godot_cpp/classes/item_list.hpp>
 #include <godot_cpp/classes/texture_rect.hpp>
 #include <godot_cpp/variant/callable_method_pointer.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
+#include <godot_cpp/core/object.hpp>
 #include <algorithm>
 #include <sstream>
 
@@ -77,22 +79,79 @@ void caption(const BuiltGadget& gadget, const std::string& value) {
 CampaignScoreDialog::CampaignScoreDialog(Control& parent, Style style, std::function<bool()> space_draw,
     viewer::galactic::CampaignScoreExit exit)
     : style_(std::move(style)), space_draw_(std::move(space_draw)), exit_(std::move(exit)) {
+    // WGP-37: the score is the topmost surface. Its own layer sits just over the campaign-end credits roll
+    // (EawrCreditsScreen::layer_index), which hides the galaxy and the HUD under it (WGP-107, game-hidden).
+    layer_ = memnew(CanvasLayer);
+    layer_->set_name("CampaignScoreLayer");
+    layer_->set_layer(EawrCreditsScreen::layer_index + 1);
+    parent.add_child(layer_);
     root_ = memnew(Control);
-    parent.add_child(root_);
+    layer_->add_child(root_);
     root_->set_name("CampaignScoreDialog");
     root_->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
-    // Above the battle dialog (30): WGP-37 closes every other dialog under the score.
-    root_->set_z_index(40);
     root_->set_mouse_filter(Control::MOUSE_FILTER_STOP);
     root_->hide();
 }
 CampaignScoreDialog::~CampaignScoreDialog() {
+    close_credits();
     // The owning State tears down before its parent node.
-    if (root_) memdelete(root_);
+    if (layer_) memdelete(layer_);
+}
+EawrCreditsScreen* CampaignScoreDialog::credits_screen() const {
+    return credits_id_ && UtilityFunctions::is_instance_id_valid(credits_id_)
+        ? Object::cast_to<EawrCreditsScreen>(ObjectDB::get_instance(static_cast<uint64_t>(credits_id_))) : nullptr;
+}
+void CampaignScoreDialog::close_credits() {
+    if (auto* screen = credits_screen(); screen && !screen->finished()) screen->skip(); // frees itself
+    credits_id_ = 0;
+}
+void CampaignScoreDialog::service_movies() {
+    if (!shown_ || !presentation_) return;
+    // WGP-110: the roll reaching its end is the credits-completion consumer (the rendering device is operational
+    // whenever this mode draws).
+    if (movie_.rolling) {
+        auto* screen = credits_screen();
+        if (!screen || screen->finished()) {
+            credits_id_ = 0; ++credits_completed_;
+            presentation_->credits_completed(movie_.token, true);
+        }
+    }
+    viewer::galactic::advance_campaign_movies(*presentation_, movie_, [this](std::string_view name) {
+        auto declared = style_.movie ? style_.movie(name) : std::nullopt;
+        if (declared && declared->has_credits) {
+            close_credits();
+            auto* screen = style_.open_credits ? style_.open_credits() : nullptr;
+            if (screen) { credits_id_ = static_cast<std::int64_t>(screen->get_instance_id()); ++credits_rolls_; }
+            else declared->has_credits = false; // cannot be shown: an open failure (WGP-108)
+        }
+        return declared;
+    });
+    if (!movie_.rolling && credits_id_) close_credits();
+    // WGP-107: the first continuation stops music and speech.
+    if (presentation_->take_stop_music_and_speech()) {
+        ++audio_stops_;
+        if (style_.stop_music_and_speech) style_.stop_music_and_speech();
+    }
+}
+bool CampaignScoreDialog::movie_key() {
+    if (!shown_ || exited_ || !presentation_ || !movie_.rolling || !credits_screen()) return false;
+    const auto token = movie_.token;
+    // The credits roll hides the game and the main menu is not active while the score is up.
+    if (!presentation_->movie_skip_key(true, true, true, false, movie_.cannot_skip)) return false;
+    ++movie_keys_;
+    const auto& request = presentation_->movie_request();
+    if (!request || request->token != token) {
+        movie_.rolling = false;
+        close_credits();
+        service_movies();
+    }
+    return true;
 }
 void CampaignScoreDialog::present(std::shared_ptr<const platform::CampaignEndView> view) {
     if (view == view_) return;
     view_ = std::move(view);
+    close_credits();
+    movie_ = {};
     presentation_.reset();
     exited_ = false; destination_ = platform::CampaignScoreDestination::none;
     shown_ = view_ && viewer::galactic::campaign_score_shown(*view_);
@@ -116,6 +175,7 @@ void CampaignScoreDialog::activate_quit(bool escape) {
     const auto destination = presentation_->score_exit(true, true);
     if (destination == platform::CampaignScoreDestination::none) return;
     exited_ = true; destination_ = destination; ++exits_;
+    movie_.rolling = false; close_credits(); // the exit clears the retained movie names
     if (exit_) exit_(destination);
 }
 void CampaignScoreDialog::rebuild() {
@@ -207,9 +267,15 @@ std::string CampaignScoreDialog::report_json() const {
         << ",\"title_key\":" << json(captions_.title_key)
         << ",\"efficiencies\":[" << json(captions_.efficiencies[0]) << ',' << json(captions_.efficiencies[1])
         << ',' << json(captions_.efficiencies[2]) << ']'
-        // H121/GHUD-S49 owns the movie chain; this names the request it would run.
         << ",\"movie_request\":" << json(presentation_ && presentation_->movie_request() ? presentation_->movie_request()->name : "")
-        << ",\"movie_seam\":\"GHUD-S49 authored movie chain, gate and rendering\""
+        << ",\"movie\":{\"name\":" << json(movie_.name) << ",\"rolling\":" << (movie_.rolling ? "true" : "false")
+        << ",\"cannot_skip\":" << (movie_.cannot_skip ? "true" : "false")
+        << ",\"credits_open\":" << (credits_screen() ? "true" : "false")
+        << ",\"credits_layer\":" << (credits_screen() ? credits_screen()->get_layer() : 0)
+        << ",\"score_layer\":" << (layer_ ? layer_->get_layer() : 0)
+        << ",\"credits_rolls\":" << credits_rolls_ << ",\"credits_completed\":" << credits_completed_
+        << ",\"keys\":" << movie_keys_ << ",\"audio_stops\":" << audio_stops_ << '}'
+        << ",\"movie_seam\":\"faction win and finale movies need the full-screen player of the story campaigns (#1951)\""
         << ",\"scoring_seam\":\"GHUD-S61 scoring ledger and script title/efficiency provider\""
         << ",\"controls\":[";
     std::size_t count{};

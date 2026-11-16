@@ -247,8 +247,9 @@ core::Result<Bytes> encode_lobby_frame(const LobbyFrame& frame) {
         const auto room = room_of(frame);
         if (!valid_room(room)) throw std::runtime_error("invalid room identifier");
         out.u8(frame.index() < 8 ? static_cast<std::uint8_t>(lobby_snapshot_kind + frame.index())
-            : (std::holds_alternative<LobbyPrepare>(frame) ? lobby_prepare_kind : lobby_prepared_kind));
-        out.u32(3); out.text(room, 64);
+            : (std::holds_alternative<LobbyPrepare>(frame) ? lobby_prepare_kind
+                : std::holds_alternative<LobbyPrepared>(frame) ? lobby_prepared_kind : lobby_mods_refresh_kind));
+        out.u32(lobby_wire_version); out.text(room, 64);
         std::visit([&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, LobbySnapshot>) {
@@ -278,6 +279,9 @@ core::Result<Bytes> encode_lobby_frame(const LobbyFrame& frame) {
             } else if constexpr (std::is_same_v<T, LobbySetupFrame>) {
                 if (!value.revision || value.frame.empty()) throw std::runtime_error("invalid setup envelope");
                 out.u64(value.revision); out.blob(value.frame, max_lobby_payload_bytes); out.digest(value.attempt);
+            } else if constexpr (std::is_same_v<T, LobbyModsRefresh>) {
+                if (value.mounted_mods.empty() || !valid_mod_description(value.mounted_mods)) throw std::runtime_error("invalid mounted mods");
+                out.blob(value.mounted_mods, mod_description_limit);
             } else if constexpr (std::is_same_v<T, LobbyPrepare>) {
                 validate_prepare(value);
                 out.u64(value.revision); out.blob(value.snapshot, max_lobby_payload_bytes); out.domains(value.inputs);
@@ -304,7 +308,7 @@ core::Result<LobbyFrame> decode_lobby_frame(std::span<const std::uint8_t> bytes)
         if (bytes.size() > max_lobby_frame_bytes) throw std::runtime_error("oversized room frame");
         Reader in{bytes, 0};
         const auto kind = in.u8();
-        if (in.u32() != 3) throw std::runtime_error("unsupported room protocol version; Galactic preparation requires version 3");
+        if (in.u32() != lobby_wire_version) throw std::runtime_error("unsupported room protocol version; this build needs version 4 (host mod refresh)");
         auto room = in.text(64);
         if (!valid_room(room)) throw std::runtime_error("invalid room identifier");
         LobbyFrame result;
@@ -349,6 +353,13 @@ core::Result<LobbyFrame> decode_lobby_frame(std::span<const std::uint8_t> bytes)
             value.room = room; value.revision = in.u64(); const auto raw = in.blob(max_lobby_payload_bytes); value.frame.assign(raw.begin(), raw.end());
             value.attempt = in.digest();
             if (value.revision == 0 || value.frame.empty()) throw std::runtime_error("invalid setup envelope");
+            result = std::move(value); break;
+        }
+        case lobby_mods_refresh_kind: {
+            LobbyModsRefresh value; value.room = room;
+            const auto mods = in.blob(mod_description_limit);
+            if (mods.empty() || !valid_mod_description(mods)) throw std::runtime_error("invalid mounted mods");
+            value.mounted_mods.assign(mods.begin(), mods.end());
             result = std::move(value); break;
         }
         case lobby_prepare_kind: {
@@ -454,7 +465,7 @@ struct LobbyRuntime {
     // setup waits on it. The room stays in staging on the wire while the host waits: guests' setup deadlines start with the offer.
     std::optional<std::uint64_t> start_pending;
     bool setup_pending{};
-    std::uint64_t snapshot_query_time{}, dropped{};
+    std::uint64_t snapshot_query_time{}, dropped{}, mods_refreshes{};
     std::unique_ptr<SetupStream> stream;
     std::optional<LobbySetupContext> context;
     std::optional<SetupSession> setup;
@@ -873,6 +884,12 @@ struct LobbyRuntime {
             }
             return core::Result<void>::success();
         }
+        if (const auto* refresh = std::get_if<LobbyModsRefresh>(&frame)) {
+            // Display only: staging keeps no revision for it, and a frozen room's snapshots must stay byte-equal to the manifest.
+            if (!initialized || state.phase != LobbyPhase::staging) return core::Result<void>::success();
+            if (state.mounted_mods != refresh->mounted_mods) { state.mounted_mods = refresh->mounted_mods; ++mods_refreshes; }
+            return core::Result<void>::success();
+        }
         if (const auto* chat = std::get_if<LobbyChat>(&frame)) {
             if (!initialized) return failure<void>(LobbyReason::authority, "room chat before admission");
             if (awaiting_snapshot || chat->sequence != chat_sequence + 1) return query_snapshot();
@@ -997,6 +1014,16 @@ core::Result<void> LobbySession::chat(std::string text) {
         return failure<void>(LobbyReason::frozen, "room chat unavailable");
     text = sanitize_lobby_text(text, chat_limit);
     return value.is_host ? value.post(value.transport->self(), std::move(text)) : value.send(value.state.host, LobbyChatRequest{value.state.room, std::move(text)});
+}
+core::Result<void> LobbySession::refresh_mounted_mods(std::vector<std::uint8_t> mounted_mods) {
+    auto& value = *runtime_;
+    if (!value.is_host) return failure<void>(LobbyReason::authority, "only the host refreshes its mod description");
+    if (!value.initialized || value.taken || value.state.phase != LobbyPhase::staging || value.start_pending)
+        return failure<void>(LobbyReason::frozen, "the mod description cannot change while the room is starting");
+    if (mounted_mods.empty() || !valid_mod_description(mounted_mods)) return failure<void>(LobbyReason::malformed, "invalid mounted mods");
+    if (mounted_mods == value.state.mounted_mods) return core::Result<void>::success();
+    value.state.mounted_mods = std::move(mounted_mods);
+    return value.broadcast(LobbyModsRefresh{value.state.room, value.state.mounted_mods});
 }
 core::Result<void> LobbySession::kick(PeerIndex peer, std::uint64_t revision) {
     auto& value = *runtime_; if (auto valid = value.allowed(revision, true, true); !valid) return valid;
@@ -1351,6 +1378,7 @@ const std::deque<LobbyChat>& LobbySession::chat_history() const { return runtime
 const std::optional<LobbyNotice>& LobbySession::notice() const { return runtime_->notice; }
 std::optional<SetupPhase> LobbySession::setup_phase() const { return runtime_->setup ? std::optional{runtime_->setup->phase()} : std::nullopt; }
 std::uint64_t LobbySession::dropped_frames() const { return runtime_->dropped; }
+std::uint64_t LobbySession::mounted_mods_refreshes() const { return runtime_->mods_refreshes; }
 const LobbySnapshot& LobbyResult::snapshot() const { return lifetime_->state; }
 MessageTransport& LobbyResult::transport() { return *lifetime_->stream; }
 

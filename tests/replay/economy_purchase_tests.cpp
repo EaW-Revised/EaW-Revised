@@ -141,6 +141,87 @@ void test_roster_gate() {
 }
 
 
+// WPR-15/16 (#6863): a queue-created income upgrade registers its own stream after that frame's income,
+// pays from the next pass, replaces the lower level it removes, and ends with its station.
+void test_upgrade_income() {
+    constexpr tactical::TypeId level_two_type = 91;
+    const auto make_rules = [&] {
+        auto economy = rules();
+        for (auto& menu : economy.menus) {
+            for (auto& option : menu.options) {
+                if (option.type != upgrade_type) continue;
+                option.price = units(100);
+                option.build_frames = 20;
+                option.ai_build_frames = 20;
+                option.available = true;
+            }
+            auto second = menu.options.back();
+            second.type = level_two_type;
+            menu.options.push_back(second);
+        }
+        tactical::UpgradeProfile first;
+        first.type = upgrade_type;
+        tactical::UpgradeProfile second;
+        second.type = level_two_type;
+        second.removes_previous = upgrade_type;
+        economy.upgrades = {first, second};
+        tactical::IncomeProfile stream;
+        stream.base_value = units(50); stream.interval_seconds = units(10); stream.per_frame = Fixed::from_raw(one / 10);
+        tactical::IncomeProfile better = stream;
+        better.per_frame = Fixed::from_raw(one / 5);
+        stream.source = upgrade_type;
+        better.source = level_two_type;
+        economy.income.push_back(stream);
+        economy.income.push_back(better);
+        return economy;
+    };
+    const auto station_rate = rules().income.front().per_frame.raw() + rules().income.front().bonuses.front().per_frame.raw();
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::create(setup(), sensors, {}, motion(), std::nullopt, {}, {}, {}, make_rules());
+        expect(static_cast<bool>(created), "WPR-15: the income upgrade session is created");
+        if (!created) continue;
+        auto& world = created.value();
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(static_cast<bool>(world.submit(buy(1, human, 0, human_station, upgrade_type))), "WPR-15: the upgrade buy is submitted");
+        std::vector<std::int64_t> deltas;
+        std::vector<bool> owned;
+        auto previous = ledger(world, human)->credits;
+        const auto advance = [&](const unsigned frames) {
+            for (unsigned frame = 0; frame < frames; ++frame) {
+                const auto stepped = world.step(executor);
+                expect(static_cast<bool>(stepped), "WPR-15: an income upgrade step succeeds");
+                if (!stepped) return;
+                const auto& account = *ledger(world, human);
+                deltas.push_back(account.credits.raw() - previous.raw());
+                owned.push_back(!account.completed.empty());
+                previous = account.credits;
+            }
+        };
+        advance(40);
+        const auto done = std::find(owned.begin(), owned.end(), true);
+        expect(done != owned.end(), "WPR-15: the upgrade completes");
+        if (done == owned.end()) continue;
+        const auto completed = static_cast<std::size_t>(done - owned.begin());
+        // The completion frame pays only the station (the stream appears after that frame's income); the
+        // price is charged at the purchase frame, before this.
+        expect(deltas[completed] == station_rate, "WPR-16: the completion frame pays no upgrade income");
+        expect(deltas[completed + 1] == station_rate + Fixed::from_raw(one / 10).raw()
+            && deltas.back() == deltas[completed + 1], "WPR-16: the next pass and every later one pay the stream");
+        // WPR-22: the next level removes the lower one; the stream of the higher level replaces it.
+        expect(static_cast<bool>(world.submit(buy(world.completed_tick() + 1, human, 1, human_station, level_two_type))),
+            "WPR-22: the level-two buy is submitted");
+        deltas.clear(); owned.clear();
+        advance(40);
+        expect(ledger(world, human)->completed.size() == 1 && ledger(world, human)->completed.front().type == level_two_type,
+            "WPR-22: level two replaces level one");
+        expect(deltas.back() == station_rate + Fixed::from_raw(one / 5).raw(), "WPR-22: only the higher stream pays");
+        // PU-05 (#6863): the stream ends with its station.
+        expect(static_cast<bool>(world.stage_remove(human_station)), "PU-05: the station is removed");
+        advance(3);
+        expect(deltas.back() == 0, "PU-05: a station lost takes its upgrade stream with it");
+    }
+}
+
 // PC-01, PU-02 to PU-04: 5 credits a second each.
 void test_income() {
     auto world = session();

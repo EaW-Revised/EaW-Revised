@@ -47,7 +47,8 @@ void activate_following(FollowingLand& land, const std::string_view min_height,
     if (!config || !constants) return;
     if (with_coast) {
         constants->constants.scroll_acceleration_factor = 0.1F;
-        constants->constants.scroll_deceleration_factor = 0.2F;
+        // A divisor above 1, so the pan keeps coasting through two 0.1 s steps.
+        constants->constants.scroll_deceleration_factor = 1.1F;
     }
     eawr::viewer::TerrainGround ramp{17, 13, 40.0F, {}};
     for (std::uint32_t row = 0; row < ramp.height; ++row) {

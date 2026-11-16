@@ -1,6 +1,7 @@
 #include "model_methods.hpp"
 #include "loadcheck.hpp"
 #include "records.hpp"
+#include "digest_pause.hpp"
 #include "profile_locks.hpp"
 #include "eawr/mods/chain.hpp"
 #include "eawr/core/sha256.hpp"
@@ -104,10 +105,9 @@ mods::ContentDigests& content_digests(ModelState& m) {
         // takes that result when it is there (#6588).
         options.worker_count = 2;
         options.background_io = false;   // below-normal CPU only: background I/O mode is ~6x slower and ~4x the kernel CPU
-        options.pause_while = [user_data = m.user_data] {
-            const ProfileLocks locks = read_profile_locks(user_data);
-            return !locks.locks.empty() || !locks.unreadable.empty();
-        };
+        // An unreadable state file holds the digest back only for a short grace (digest_pause.hpp), never for good.
+        const auto gate = std::make_shared<DigestPauseGate>();
+        options.pause_while = [gate, user_data = m.user_data] { return gate->paused(read_profile_locks(user_data)); };
         m.digests = std::make_shared<mods::ContentDigests>(std::move(options));
     }
     return *m.digests;

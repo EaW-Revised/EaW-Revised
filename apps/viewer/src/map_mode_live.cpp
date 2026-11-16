@@ -112,7 +112,10 @@ void MapMode::close_requested() {
 
 void MapMode::State::record_frame_trace(double delta, const core::tick_profile::Recording& ui_recording) {
     State& state = *this;
-    if (state.perf_trace && state.live_session) {
+    // The population the view composes: space's, or the land battle scene (derived from it).
+    const SpacePopulation* const population = state.space_population ? state.space_population.get()
+        : static_cast<const SpacePopulation*>(state.land_population.get());
+    if (state.perf_trace && state.live_session && population) {
         PerfTrace::Frame trace_frame;
         trace_frame.frame_ms = delta * 1000.0;
         const auto& clock = state.live_session->clock_trace();
@@ -166,14 +169,23 @@ void MapMode::State::record_frame_trace(double delta, const core::tick_profile::
         if (state.unit_emitters) trace_frame.emitter_timing = state.unit_emitters->particle_timings();
         if (state.battle_effects) trace_frame.effects_timing = state.battle_effects->particle_timings();
         if (state.debris_props) trace_frame.debris_timing = state.debris_props->particle_timings();
-        trace_frame.submit_ms = state.space->live_submit_ms();
-        trace_frame.pieces = state.space->live_submit_pieces();
-        trace_frame.sent = state.space->live_submit_sent();
+        // Space and land share one writer: where a column has no land source it stays 0, like any off feature.
+        if (state.space) {
+            trace_frame.submit_ms = state.space->live_submit_ms();
+            trace_frame.pieces = state.space->live_submit_pieces();
+            trace_frame.sent = state.space->live_submit_sent();
+        } else {
+            trace_frame.submit_ms = state.land_submit_ms;
+            trace_frame.pieces = state.land_submit_pieces;
+            trace_frame.sent = state.land_submit_sent;
+        }
         trace_frame.bookkeeping_ms = state.live_session->bookkeeping_ms();
         trace_frame.slots_grown = state.live_session->frame_slots_grown();
         trace_frame.slot_growth_ms = state.live_session->slot_growth_ms();
         trace_frame.launch_preload_fallbacks = state.live_session->preload_fallbacks();
         trace_frame.launch_read_bytes = state.live_session->frame_launch_read_bytes();
+        trace_frame.hangar_warm_ms = state.live_session->hangar_warm_ms();
+        trace_frame.hangar_warm_slots = state.live_session->hangar_warm_slots();
         trace_frame.hud_ms = state.hud_ms;
         trace_frame.audio_ms = state.audio_ms;
         if (state.battle_audio) {
@@ -185,14 +197,22 @@ void MapMode::State::record_frame_trace(double delta, const core::tick_profile::
         trace_frame.fog_ms = state.fog_ms;
         trace_frame.pose_ms = state.live_session->pose_ms();
         trace_frame.opacity_ms = state.live_session->opacity_ms();
-        trace_frame.compose_ms = state.space_population->compose_ms();
-        trace_frame.refresh_ms = state.space_population->refresh_ms();
-        trace_frame.idle_frame_ms = state.space_population->idle_frame_ms();
-        trace_frame.idle_sample_ms = state.space_population->idle_sample_ms();
-        trace_frame.idle_upload_ms = state.space_population->idle_upload_ms();
-        trace_frame.idle_skin_work = state.space_population->idle_skin_work();
-        trace_frame.idle_placements = state.space_population->idle_placement_count();
-        trace_frame.idle_surfaces = state.space_population->idle_surface_count();
+        trace_frame.projectile_observe_ticks_ms = state.live_session->projectile_observe_ticks_ms();
+        trace_frame.projectile_observe_final_ms = state.live_session->projectile_observe_final_ms();
+        trace_frame.projectile_opacity_ms = state.live_session->projectile_opacity_ms();
+        trace_frame.compose_ms = population->compose_ms();
+        trace_frame.refresh_ms = population->refresh_ms();
+        trace_frame.idle_frame_ms = population->idle_frame_ms();
+        trace_frame.idle_sample_ms = population->idle_sample_ms();
+        trace_frame.idle_upload_ms = population->idle_upload_ms();
+        trace_frame.idle_skin_work = population->idle_skin_work();
+        trace_frame.idle_placements = population->idle_placement_count();
+        trace_frame.idle_surfaces = population->idle_surface_count();
+        trace_frame.idle_uploaded = population->idle_placements_uploaded();
+        trace_frame.idle_skipped = population->idle_placements_skipped();
+        trace_frame.idle_visited = population->idle_instances_visited();
+        trace_frame.idle_disturbed = population->idle_placements_disturbed();
+        trace_frame.idle_causes = population->idle_disturbance_causes();
 
         for (const platform::LiveTickCost& cost : state.live_session->tick_costs_after(state.perf_trace_tick)) {
             state.perf_trace_tick = cost.tick;
@@ -363,7 +383,7 @@ void MapMode::State::record_frame_trace(double delta, const core::tick_profile::
                         const auto unit = std::find_if(visible.begin(), visible.end(),
                             [&](const auto& candidate) { return candidate.entity == subject; });
                         std::optional<BattleScene::LiveShipBox> box;
-                        if (unit != visible.end() && state.space_population) box = state.space_population->live_ship_box(unit->ship);
+                        if (unit != visible.end() && population) box = population->live_ship_box(unit->ship);
                         if (box) {
                             perf_movers::Mat3d rotation{};
                             for (std::size_t row = 0; row < 3; ++row)
@@ -446,6 +466,12 @@ bool MapMode::State::finalize_camera() {
     if (!state.space || !state.live_session
         || state.live_session->phase() != LiveSessionView::Phase::running) return false;
     // The battlecam, or the follow focus, now reads the pose this frame's live step composed (#6448 J1).
+    // TSW-16: this frame's events are in the battle frame already, so a power-up accepted in this frame's ticks takes the
+    // camera before the frame is drawn (the check after the frame step only ends a running shot).
+    state.update_tsw_cinematic();
+    if (state.retreat_cinematic.active) return state.apply_retreat_pose();
+    if (state.tsw_cinematic.active) return state.apply_tsw_pose();
+    if (state.arrival_cinematic.active) return state.apply_arrival_pose();
     if (state.space->live_camera_movie()) return state.apply_movie_pose();
     return state.update_follow_camera(std::nullopt);
 }
@@ -648,7 +674,18 @@ std::optional<int> MapMode::State::draw_map_frame(double delta) {
     state.pose_units(tick);
     // Foliage bends on the scene clock (#147), which follows the same clock.
     state.advance_wind(delta);
-    state.renderer->submit(state.snapshot);
+    if (state.perf_trace && state.land_population) {
+        // The land counterpart of the space view's submit columns (#6475); no clock reads without the trace.
+        const std::uint64_t sent_before = state.renderer->submit_work().transforms_sent;
+        {
+            FrameTimer timer(&state.land_submit_ms, true);
+            state.renderer->submit(state.snapshot);
+        }
+        state.land_submit_sent = state.renderer->submit_work().transforms_sent - sent_before;
+        state.land_submit_pieces = state.snapshot ? state.snapshot->instances().size() : 0U;
+    } else {
+        state.renderer->submit(state.snapshot);
+    }
     if (state.fog && !state.renderer->fog_status().ready()) {
         state.completed = true;
         const auto fog_status = state.renderer->fog_status();
@@ -944,6 +981,10 @@ std::optional<int> MapMode::process(const double delta) {
     state.sync_net_perf(delta);
     state.sync_perf_overlay();
     state.advance_movie(delta);
+    // legacy #6634 (HCB-75): a tactical script's Letter_Box_In / Letter_Box_Out reaches the same bands the battle camera draws
+    // (and hides the GUI the same way); applied in script order before the slide of this frame.
+    if (state.hud && state.live_session)
+        for (const auto& request : state.live_session->take_letterbox_requests()) state.hud->set_script_letterbox(request.in, request.seconds);
     if (state.hud) state.hud->advance_movie_bands(delta);
     if (state.space) {
         if (!state.finalize_camera_installed) {
@@ -951,6 +992,7 @@ std::optional<int> MapMode::process(const double delta) {
                 [&state] { return state.finalize_camera(); });
         }
         const std::optional<int> finished = state.space->process(delta);
+        state.update_tsw_cinematic(); // TSW-16: ends a shot that ran out or whose battle left the running phase
         if (state.space->live_camera_movie()
             && (finished || (state.live_session && state.live_session->phase() != LiveSessionView::Phase::running)))
             state.set_movie_mode(false, true);
@@ -986,7 +1028,7 @@ std::optional<int> MapMode::process(const double delta) {
         return 2;
     }
     if (!state.advance_map_camera(delta)) return 2;
-    if (state.land_population) return state.process_land_live(delta);
+    if (state.land_population) return state.process_land_live(delta, ui_recording);
     if (!state.phases.empty()) return state.process_comparison_capture();
     if (const auto failed = state.draw_map_frame(delta)) return failed;
     if (state.frame == state.options.warmup_frames) {
@@ -1113,6 +1155,8 @@ void MapMode::input(const Ref<InputEvent>& event) {
         state.land_overlay->set_shown(!state.land_overlay->shown());
         return;
     }
+    // FS-R09, SK-ARR-06: a campaign cinematic takes no world input; its camera is not the player's.
+    if (state.cinematic_owns_camera()) return;
     if (state.space) {
         const auto raw = map_camera_event(event);
         if (raw && state.space->preview_key(*raw)) {
@@ -1301,6 +1345,7 @@ void MapMode::set_attract_paused(const bool paused) {
 }
 
 void MapMode::focus(const bool focused) {
+    if (!focused && state_->arrival_cinematic.active) ++state_->arrival_cinematic.focus_losses;
     if (state_->battle && !focused) state_->battle->cancel();
     if (state_->space) {
         state_->space->camera_focus(focused);

@@ -46,6 +46,8 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         environment_records, catalog, options_.map_sha256);
     auto& input = owner->input;
     const auto& resolve = owner->resolve;
+    owner->replacement_props = replacement_placements(map, options_.battle_start);
+    if (!owner->replacement_props.empty()) input.extra_placements = &owner->replacement_props;
     scene_ = scene::build(input);
     decisions_ = scene::classify_space_placements(
         *scene_, [&](const std::string_view object_id) -> std::optional<scene::SpaceObjectTags> {
@@ -121,6 +123,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         debug_ship_yaw_ = source.orientation_degrees ? source.orientation_degrees->z : 0.0F;
         debug_map.placements.push_back(std::move(source));
         scene::BuildInput debug_input = input;
+        debug_input.extra_placements = nullptr; // a one-ship scene: the remains props belong to the map's scene only
         debug_input.map = &debug_map;
         scene::Scene debug_scene = scene::build(debug_input);
         if (debug_scene.placements.size() != 1 || !debug_scene.placements.front().drawable()) {

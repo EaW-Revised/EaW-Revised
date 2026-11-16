@@ -191,11 +191,33 @@ void scene_contracts() {
         }
     }
     {
+        // WGT-57/101: placements a caller supplies (replacement props of a destroyed target) join the scene after the
+        // map's own, keep their order, and are built like authored ones.
+        auto first = map.value().placements.front();
+        first.key.record_ordinal = 0x40000000U;
+        std::vector<eawr::assets::Placement> extras{first, first};
+        extras[1].key.record_ordinal = 0x40000001U;
+        auto joined_input = input;
+        joined_input.extra_placements = &extras;
+        const auto plain = eawr::scene::build(input);
+        const auto joined = eawr::scene::build(joined_input);
+        const auto authored = plain.placements.size();
+        expect(joined.placements.size() == authored + 2 && joined.placements[authored].scene_ordinal == authored
+            && joined.placements[authored + 1].scene_ordinal == authored + 1
+            && joined.placements[authored].object_id == plain.placements.front().object_id
+            && joined.placements[authored].drawable() == plain.placements.front().drawable(),
+            "extra placements follow the map's placements in order and are built like authored ones");
+        for (std::size_t i = 0; i < authored; ++i)
+            expect(joined.placements[i].object_id == plain.placements[i].object_id, "extra placements leave the authored ones unchanged");
+        expect(eawr::scene::build(input).placements.size() == authored, "without extra placements the scene is the map's alone");
+    }
+    {
         // BP-70: an invented root particle projectile follows the effect-only route.
         const std::vector<Record> rounds{
             {"EAWR_SCENE_PARTICLE_ROUND", std::array<float, 3>{11, 22, 33}},
             {"EAWR_SCENE_PARTICLE_BAD_SCALE", std::array<float, 3>{11, 22, 33}},
             {"EAWR_SCENE_PARTICLE_PROP", std::array<float, 3>{11, 22, 33}},
+            {"EAWR_SCENE_PARTICLE_UNIT", std::array<float, 3>{11, 22, 33}},
         };
         const auto round_bytes = ted(rounds);
         auto round_source = source;
@@ -210,8 +232,8 @@ void scene_contracts() {
             round_input.access.exists = [&](const std::string_view name) { return name == path; };
             round_input.access.particle_system = [&](const std::string_view name) { return name == path; };
             const auto round_scene = eawr::scene::build(round_input);
-            expect(round_scene.placements.size() == 3, "root particle fixtures compose");
-            if (round_scene.placements.size() == 3) {
+            expect(round_scene.placements.size() == 4, "root particle fixtures compose");
+            if (round_scene.placements.size() == 4) {
                 const auto& round = round_scene.placements[0];
                 expect(eawr::scene::drawable_projectile_effects(round) && round_scene.assets.size() == 1
                        && round_scene.assets[0].sha256 == "sha-of:" + path,
@@ -225,6 +247,35 @@ void scene_contracts() {
                        "invalid root particle scale still blocks drawing");
                 expect(has(round_scene.placements[2], Cause::model_particle_system),
                        "other object types retain particle model rejection");
+                // A unit on a map record stays on the map particle route (rejected here, not drawn as a mesh).
+                expect(has(round_scene.placements[3], Cause::model_particle_system)
+                       && !round_scene.placements[3].particle_root
+                       && !eawr::scene::drawable_projectile_effects(round_scene.placements[3]),
+                       "BP-70: a map-placed unit with a particle root keeps the map particle route");
+                // #6572: the same unit placed live (past the map's records) is drawn as its own effect.
+                auto live_input = round_input;
+                live_input.live_objects = true;
+                const auto live_scene = eawr::scene::build(live_input);
+                expect(live_scene.placements.size() == 4, "live particle-root fixtures compose");
+                if (live_scene.placements.size() == 4) {
+                    const auto& unit = live_scene.placements[3];
+                    expect(unit.particle_root && eawr::scene::drawable_projectile_effects(unit)
+                           && unit.effects.size() == 1 && unit.effects[0].resolved == path
+                           && has(unit, Cause::model_has_no_surface) && !has(unit, Cause::model_particle_system)
+                           && unit.transform && unit.scale_raw == 2 * Fixed::scale,
+                           "BP-70: a live unit with a particle root carries its own effect, pose and scale");
+                    // The live route is for units only: a projectile keeps its slot-gated route, unmarked.
+                    expect(!live_scene.placements[0].particle_root
+                           && eawr::scene::drawable_projectile_effects(live_scene.placements[0])
+                           && live_scene.placements[0].effects.size() == 1
+                           && has(live_scene.placements[0], Cause::model_has_no_surface),
+                           "BP-70: a live particle-root projectile stays effect-only without the unit mark");
+                    expect(!round_scene.placements[0].particle_root,
+                           "BP-70: a map particle-root projectile carries no unit mark");
+                    expect(has(live_scene.placements[2], Cause::model_particle_system)
+                           && !live_scene.placements[2].particle_root,
+                           "BP-70: live placement does not extend the effect route to other object types");
+                }
             }
         }
     }

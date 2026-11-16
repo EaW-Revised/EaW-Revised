@@ -249,6 +249,34 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
     });
     method("Attack_Target", taskforce_move(host, "attack", false));
     method("Move_To", taskforce_move(host, "move", true));
+    // GAR-01: composition query only; a target's ownership is not part of capability.
+    method("Is_Raid_Capable", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto* force = taskforce_of(*host, arguments[0]);
+        if (!force || !force->galactic_fleet) return one(boolean(false));
+        return context.query_immediate("galactic.fleet_raid_capable", {handle(handle_game_object, force->galactic_fleet)});
+    });
+    method("Raid", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto* force = taskforce_of(*host, arguments[0]);
+        if (!force || !force->galactic_fleet || force->units.empty()) return fail("Raid: No units in TaskForce");
+        const auto* world = dynamic_cast<const ai::GalacticWorld*>(host->ai_world.get());
+        if (!world || !world->containing_planet(force->galactic_fleet)) return fail("Raid: fleet is not at a planet");
+        const auto capable = context.query_immediate("galactic.fleet_raid_capable", {handle(handle_game_object, force->galactic_fleet)});
+        if (!capable) return capable;
+        if (capable.value().size() != 1 || !std::get_if<bool>(&capable.value()[0].data)) return fail("Raid: capability reader did not answer");
+        if (!std::get<bool>(capable.value()[0].data)) return fail("Raid: TaskForce is not raid capable");
+        if (arguments.size() < 2) return fail("Raid: no destination");
+        std::optional<sim::EntityId> destination;
+        if (const auto* target = target_of(*host, arguments[1])) destination = target->object;
+        else if (const auto* object = as_handle(arguments[1], handle_game_object)) destination = object->id;
+        if (!destination || world->containing_planet(*destination) != destination) return fail("Raid: destination is not a live planet");
+        const auto* plan = host->engine->plan(force->plan);
+        if (!plan || !host->engine->galactic_movement_reach(plan->id)) return fail("Raid requires retained goal reachability");
+        if (!host->galactic_execution || !host->galactic_execution->supports(galactic_ai::ActionKind::raid))
+            return fail("Raid requires its rebuilt movement owner");
+        const auto sequence = context.command_sequence();
+        stage(context, "galactic_raid", {arguments[0], handle(handle_game_object, *destination)});
+        return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
+    });
     method("Guard_Target", taskforce_move(host, "guard", false));
     // Fidelity list: the exploration block's sweep is not hosted; the TaskForce moves to the area.
     method("Explore_Area", taskforce_move(host, "move", true));
@@ -420,6 +448,22 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
         stage(context, "removable", {arguments[1]});
         return none();
     });
+    // PL-46: TaskForce.Test_Target_Contrast(boolean) switches the contrast test of the plan's goal on or off. One boolean parameter is
+    // required (a wrong count or type is a script error); a TaskForce whose plan has no goal or potential plan only warns.
+    method("Test_Target_Contrast", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() != 2)
+            return fail("Test_Target_Contrast - invalid number of parameters; expected 1, got " + std::to_string(arguments.size() - 1));
+        if (!std::holds_alternative<bool>(arguments[1].data))
+            return fail("Test_Target_Contrast - invalid type for parameter 1.  Expected boolean.");
+        stage(context, "test_contrast", {arguments[1]});
+        return none();
+    });
+    // PL-47: TaskForce.Get_Goal_Type_Name() returns the authored name of the goal type the TaskForce's plan serves (the plan's
+    // own goal, not its category); the empty string when the TaskForce has no plan or its goal is gone. It reads no parameters.
+    method("Get_Goal_Type_Name", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
+        return one(Value::text(taskforce && host->engine ? host->engine->goal_type_name(taskforce->plan) : std::string{}));
+    });
     method("Release_Unit", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
         if (taskforce == nullptr || arguments.size() < 2 || as_handle(arguments[1], handle_game_object) == nullptr) return none();
@@ -529,10 +573,18 @@ void register_blocks(ScriptScheduler& scripts, const HostPtr& host, std::vector<
         const Handle* found = as_handle(arguments[0], ai::handle_block);
         const ai::Block* block = found == nullptr || host->engine == nullptr ? nullptr : host->engine->block(found->id);
         if (block == nullptr) return one(boolean(false));
+        if (block->kind == ai::Block::Kind::galactic_starbase) {
+            const auto level = context.query_immediate("galactic.starbase_level", {handle(handle_game_object, block->destination_object)});
+            if (!level) return level;
+            if (level.value().size() != 1 || !std::get_if<LuaNumber>(&level.value()[0].data)) return fail("WaitForStarbase lost its base reader");
+            return one(boolean(std::get<LuaNumber>(level.value()[0].data) >= LuaNumber(block->side)));
+        }
         if (block->kind == ai::Block::Kind::galactic_invade && block->galactic_request) {
             const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(host->galactic_execution.get());
             const auto* invasion = actions ? actions->invasion_status(block->galactic_request) : nullptr;
-            if (!invasion) return fail("invasion block lost its retained queue owner");
+            // Absent from the world: still coming while the lane holds it, otherwise refused, a finished (failed) invasion.
+            if (!invasion) return actions ? one(boolean(!actions->invasion_pending(block->galactic_request)))
+                                          : fail("invasion block requires its native action owner");
             if (invasion->state == sim::galactic::GalacticSession::NativeInvasion::State::completed)
                 stage(context, "galactic_retire_invasion", {arguments[0]});
             return one(boolean(invasion->state == sim::galactic::GalacticSession::NativeInvasion::State::completed));
@@ -555,11 +607,13 @@ void register_blocks(ScriptScheduler& scripts, const HostPtr& host, std::vector<
         const Handle* found = as_handle(arguments[0], ai::handle_block);
         const ai::Block* block = found == nullptr || host->engine == nullptr ? nullptr : host->engine->block(found->id);
         if (block == nullptr) return none();
+        if (block->kind == ai::Block::Kind::galactic_starbase) return none();
         if (block->kind == ai::Block::Kind::galactic_invade && !block->galactic_request) return one(boolean(block->result));
         if (block->kind == ai::Block::Kind::galactic_invade && block->galactic_request) {
             const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(host->galactic_execution.get());
             const auto* invasion = actions ? actions->invasion_status(block->galactic_request) : nullptr;
-            if (!invasion) return fail("invasion result lost its retained queue owner");
+            // A refused (or not yet applied) invasion has no success.
+            if (!invasion) return actions ? one(boolean(false)) : fail("invasion result requires its native action owner");
             return one(boolean(invasion->success));
         }
         const bool galactic = host->ai_world && host->ai_world->goal_mode() == "GALACTIC";
@@ -890,6 +944,21 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
         if (auto added = scripts.register_binding(name, std::move(binding)); !added) errors.push_back(added.error());
     };
     register_story_plot_bindings(scripts, host, errors); // Get_Story_Plot (#5495)
+    // GAR-03: exactly two arguments, inclusive numeric bounds, then truncate.
+    add("WaitForStarbase", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() != 2) return fail("WaitForStarbase expects a planet and level");
+        const auto* planet = as_handle(arguments[0], handle_game_object);
+        const auto* world = dynamic_cast<const ai::GalacticWorld*>(host->ai_world.get());
+        if (!planet || !world || world->containing_planet(planet->id) != planet->id)
+            return fail("WaitForStarbase parameter 1 must be a live planet");
+        const auto* level = std::get_if<LuaNumber>(&arguments[1].data);
+        if (!level || !(*level >= LuaNumber(0) && *level <= LuaNumber(5)))
+            return fail("WaitForStarbase parameter 2 must be a number between 0 and 5");
+        if (!host->engine || !host->engine->plan_of_instance(context.instance())) return fail("WaitForStarbase requires a live plan");
+        const auto sequence = context.command_sequence();
+        stage(context, "galactic_starbase", {arguments[0], number(LuaNumber(ai::truncate(*level)))});
+        return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
+    });
     add("GiveDesireBonus", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         // Retail requires five arguments and returns a timed bonus block. The
         // timed native owner is an open gap; nil lets BlockOnCommand decline
@@ -975,7 +1044,7 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
         const std::uint64_t draw = context.random().next_below(std::uint64_t{1} << 15);
         return one(number(low + (high - low) * LuaNumber(draw) / LuaNumber(32767)));
     });
-    add("Find_All_Objects_Of_Type", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+    add("Find_All_Objects_Of_Type", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         // RGC-112/113: filters are recognized in order and intersect; a player
         // may appear alone or on either side of the name/type filter.
         const Handle* player = nullptr;
@@ -1034,6 +1103,8 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
         }
         if (player == nullptr && !type && unrestricted(categories) && unrestricted(properties))
             return fail("Find_All_Objects_Of_Type expects at least one filter");
+        // The scan visits every unit of the view whatever the filters keep, so it is charged by the units visited.
+        context.charge_host_work(host->view->units.size());
         std::vector<Value> out;
         for (const ViewUnit& unit : host->view->units) {
             if (player != nullptr && unit.owner != player->id) continue;

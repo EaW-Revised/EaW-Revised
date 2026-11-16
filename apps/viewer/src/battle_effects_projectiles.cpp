@@ -303,6 +303,7 @@ void BattleEffects::pose_projectile_models(const tactical::TacticalSnapshot& pre
                                            BattleScene* population, GodotRenderer* renderer) {
     particles::lane::guard_main(); // L1.2: counts a main-thread call while a lane job owns this state; never aborts
     modelled_now_.clear();
+    posed_ships_.clear();
     if (released_ || model_pools_.empty()) return;
     // Birth metadata follows the projectile identity, not its reusable renderer slot.
     // Retire it with the snapshot so the cache stays bounded by live demand.
@@ -422,6 +423,7 @@ void BattleEffects::pose_projectile_models(const tactical::TacticalSnapshot& pre
             if (!pose) continue;
             if (auto placed = live_pose(pool.ships[*slots[index]], *pose)) {
                 live.push_back(std::move(*placed));
+                posed_ships_.push_back(pool.ships[*slots[index]]);
                 modelled_now_.push_back(projectile.id);
                 if (ability_projectiles_.contains(projectile.id) || barrage_projectiles_.contains(projectile.id)) ++ability_shots_drawn_[name];
                 if (projectile.reflected) ++reflected_shots_drawn_[name];
@@ -801,6 +803,7 @@ bool BattleEffects::draw_ability_beams(const sim::tactical::TacticalSnapshot& la
     std::set<sim::EntityId> active_energy;
     std::set<sim::EntityId> active_tractors;
     std::set<sim::EntityId> active_leeches;
+    std::set<sim::EntityId> active_lasers;
     for (auto& look : hero_beams_) {
         look.batch.stream.clear();
         look.sparks.stream.clear();
@@ -820,8 +823,16 @@ bool BattleEffects::draw_ability_beams(const sim::tactical::TacticalSnapshot& la
         for (const auto& status : instance.abilities) {
             if (!status.active || (status.kind != tactical::AbilityKind::energy_weapon && status.kind != tactical::AbilityKind::tractor_beam
                 && status.kind != tactical::AbilityKind::leech_shields && status.kind != tactical::AbilityKind::super_laser)) continue;
-            const auto target = units(status.target);
-            if (!target) continue;
+            // #6554 (WSPL-08/09): the SUPER_LASER beam exists from its fire stage; after the target left the world it
+            // continues to the end point it last reached.
+            const bool laser = status.kind == tactical::AbilityKind::super_laser;
+            if (laser && status.laser_phase != tactical::LaserPhase::fired && status.laser_phase != tactical::LaserPhase::continuing) continue;
+            const bool continuing = laser && status.laser_phase == tactical::LaserPhase::continuing;
+            if (laser) active_lasers.insert(instance.entity_id);
+            const auto target = continuing ? std::optional<UnitFrame>{} : units(status.target);
+            const auto remembered = laser_endpoints_.find(instance.entity_id);
+            const auto* stored = laser_point::usable(remembered != laser_endpoints_.end() ? &remembered->second : nullptr, status);
+            if (!target && !(continuing && stored != nullptr)) continue;
             const auto beam = status.kind == tactical::AbilityKind::energy_weapon ? 0U
                 : (status.kind == tactical::AbilityKind::leech_shields || status.kind == tactical::AbilityKind::super_laser) ? 2U : 1U;
             if (beam == 1) active_tractors.insert(instance.entity_id);
@@ -834,13 +845,25 @@ bool BattleEffects::draw_ability_beams(const sim::tactical::TacticalSnapshot& la
                     origin_from_pose = true;
                 }
             }
-            auto endpoint = target->position;
-            if (const auto target_type = types_.find(target->type); target_type != types_.end()
+            auto endpoint = target ? target->position : *stored;
+            if (target) if (const auto target_type = types_.find(target->type); target_type != types_.end()
                 && status.target_hardpoint < target_type->second.hardpoint_points.size()) {
                 const auto point = vec(target_type->second.hardpoint_points[status.target_hardpoint]);
                 // hardpoint_points are unit-frame points, already turned by the loader for the sim's aim.
                 endpoint = space::live_unit_point({point.x, point.y, point.z}, target->position,
                     target->yaw_degrees, target->roll_degrees, target->pitch_degrees);
+            }
+            if (laser) {
+                // A beam drawn before its fire stage would be a regression of the gate above.
+                if (status.laser_phase == tactical::LaserPhase::aiming || status.laser_phase == tactical::LaserPhase::clip)
+                    ++laser_beams_before_fire_;
+                if (target) {
+                    // WSPL-06: kept for use after the target is gone, for this use only.
+                    laser_endpoints_[instance.entity_id] = laser_point::store(source->position, endpoint, status.laser_clip_tick);
+                } else {
+                    ++laser_continuation_beams_;
+                    laser_continuation_ticks_.insert(latest.completed_tick());
+                }
             }
             if (beam == 0 && !type->second.energy_owner_particle.empty()) {
                 active_energy.insert(instance.entity_id);
@@ -1060,6 +1083,7 @@ bool BattleEffects::draw_ability_beams(const sim::tactical::TacticalSnapshot& la
             }
         }
     }
+    std::erase_if(laser_endpoints_, [&](const auto& entry) { return !active_lasers.contains(entry.first); });
     if (!draw_defence_beams(latest, units, view)) return false;
     for (auto active = energy_owner_effects_.begin(); active != energy_owner_effects_.end();) {
         if (active_energy.contains(active->first)) { ++active; continue; }

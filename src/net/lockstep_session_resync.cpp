@@ -696,7 +696,11 @@ GalacticRecoveryRefusal GalacticRecoveryStream::receive(std::span<const std::uin
 
 namespace eawr::net {
 core::Result<RecoverySessionFrontier> LockstepSession::recovery_frontier(bool obsolete_owner) const {
-    if ((failure_ && !obsolete_owner) || !pending_.empty() || agreement_ || held_ || resync_ || checkpoint_ || timing_ || (mesh_ && mesh_->running()) || options_.adaptive_timing)
+    // An adaptive session carries the delay in force. A pending timing agreement, or a change applied so recently that
+    // its old-delay horizon is still immutable (completed tick below retain_until_), has no single delay yet: refuse as
+    // for any other agreement in progress; the caller retries.
+    if ((failure_ && !obsolete_owner) || !pending_.empty() || agreement_ || held_ || resync_ || checkpoint_ || timing_ || (mesh_ && mesh_->running())
+        || (options_.adaptive_timing && adapter_->completed_tick() < retain_until_))
         return lockstep_detail::refused<RecoverySessionFrontier>(reconnect_errors::unavailable, "frontier_agreement_in_progress");
     RecoverySessionFrontier frontier;
     frontier.completed_tick = adapter_->completed_tick(); frontier.input_delay = options_.input_delay; frontier.split = recovery_split_;
@@ -719,7 +723,8 @@ core::Result<void> LockstepSession::restore_recovery_frontier(const RecoverySess
         return lockstep_detail::refused<void>(reconnect_errors::log, std::move(reason));
     };
     const auto tick = adapter_->completed_tick();
-    if (recorded_zero_ || !ready_.empty() || !pending_.empty() || failure_ || options_.adaptive_timing || (mesh_ && mesh_->running())
+    // An adaptive session is built at the frontier's delay (checked below), so its policy clock already starts there.
+    if (recorded_zero_ || !ready_.empty() || !pending_.empty() || failure_ || (mesh_ && mesh_->running())
         || options_.reconnect || options_.resync || frontier.completed_tick != tick || initial_tick_ != tick
         || frontier.input_delay != options_.input_delay || frontier.peers.size() != seats_.size())
         return bad("invalid_private_recovery_frontier");

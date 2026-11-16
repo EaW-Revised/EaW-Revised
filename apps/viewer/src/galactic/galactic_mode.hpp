@@ -3,6 +3,7 @@
 #include "map_input.hpp"
 #include "galactic_lan_hud.hpp"
 
+#include "eawr/campaign/campaign_switch.hpp"
 #include "eawr/platform/campaign_end_view.hpp"
 #include "eawr/mods/save_description.hpp"
 #include "eawr/presentation/ui/front_end.hpp"
@@ -15,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace eawr::presentation::godot_backend {
@@ -44,6 +46,9 @@ public:
         std::vector<viewer::galactic::LanPlayer> lan_players;
         std::filesystem::path lan_acceptance_directory;
         std::string campaign;
+        // The staging dialog's level (easy, normal or hard; empty reads normal): a fresh solo start maps it to the
+        // campaign's difficulty adjustment (CGS-26). A restored save keeps the adjustment it was saved with.
+        std::string difficulty_level;
         std::optional<presentation::ui::CampaignStartRequest::Economy> custom_economy{};
         std::filesystem::path game_root;
         std::filesystem::path mod_root;
@@ -57,6 +62,8 @@ public:
         bool seat_invalid{};
         bool coop_preview{}; // Explicit multi-human presentation qualification.
         std::uint32_t focus_planet{};
+        bool dismiss_story{}; // Capture: close the intro summary dialog before the frame is taken.
+        bool advanced_map{}; // Capture: open the advanced planetary map on the focus planet (second zoom-in).
         std::uint32_t zoom_probe_planet{}; // Opt-in GPU continuity qualification.
         bool zoom_timing{}; // Opt-in per-frame main-thread attribution in the report.
         std::uint32_t flight_milliseconds{};
@@ -68,6 +75,7 @@ public:
         std::string queue_type;
         std::uint32_t queue_planet{}; // 0 = first planet the local player is offered the type on
         bool red_green_routes{}; // Profile adapter seam; explicit in synthetic captures.
+        unsigned map_filters{}; // Capture seam: the galactic filter bits switched on at start (1 credits, 2 levels, 4 abilities); the retail start is 0.
         bool native_ai{true}; // --eawr-galactic-ai on|off: fresh campaign install, default on.
         bool native_ai_invalid{};
         bool model_cache_budget_off{}; // Hidden same-binary RAM/launch qualification control.
@@ -76,6 +84,7 @@ public:
         bool gc_prep_trim_invalid{};
         bool galactic_reveal{}; // --eawr-galactic-reveal on|off: draw-only fog reveal, default off (#3931).
         bool galactic_reveal_invalid{};
+        bool no_fog{}; // --eawr-no-fog: the launcher's "Fog of war: off"; implies galactic_reveal, refused in multiplayer
         // --eawr-galactic-hud-verify yes (#4331): after every publication the HUD facts are rebuilt from nothing and compared with
         // the retained ones, and an unchanged command bar or weapon-action key still runs its full update and must change nothing.
         // Mismatches are counted in the report. Qualification only; it costs the work the retained state saves.
@@ -89,6 +98,9 @@ public:
         // Foundation harness: synthetic conflict on the M2 map, then return.
         bool synthetic_battle{};
         std::string space_cycle_proof; // opt-in ordinary-command GPU acceptance
+        // Eye-check proof beside --eawr-galactic-space-proof: capture a lit frame per arrival cinematic frame; "defender"
+        // forces the defender shot (SK-ARR-04) so one proof battle shows both. Empty: nothing captured, no role forced.
+        std::string arrival_proof;
         bool battle_invalid{};
         std::uint64_t battle_frames{120};
         std::uint32_t battle_cycles{1};
@@ -148,6 +160,11 @@ public:
     // The in-game menu's Quit Game was confirmed; like the score destination, the host decides what
     // leaving means (the main menu when there is one).
     [[nodiscard]] bool leave_requested() const;
+    // LOAD_CAMPAIGN (WST-95): the campaign a plot asked to start, already resolved (campaign entry, the faction its player
+    // takes, the level), until the host acts. The mode keeps running; the host stops it and starts the target through the
+    // setup screen's start path, or calls decline_campaign_switch() to keep this campaign.
+    [[nodiscard]] std::optional<campaign::CampaignSwitchTarget> campaign_switch() const;
+    void decline_campaign_switch(std::string_view reason);
     // The window closed: an interactive run writes its report.
     void close();
     // Why ready() or a frame failed; empty while running (e.g. a refused restore_save).

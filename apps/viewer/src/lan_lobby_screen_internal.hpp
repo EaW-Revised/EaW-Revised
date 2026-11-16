@@ -447,6 +447,14 @@ struct EawrLanLobby::Impl final {
     bool refused{};
     bool mod_review_box{};
     std::optional<mods::ModDescription> deferred_mod_review;
+    // Host: the room opened before this process's mod digests finished, so its description still has to be refreshed once.
+    bool host_mod_refresh_due{};
+    // Host: a message for the host when its settled mod list could not be sent to the guests.
+    std::string host_mod_notice;
+    // Host: pacing and cap for a refused refresh (see HostModRefreshRetry).
+    viewer::HostModRefreshRetry host_mod_refresh_retry;
+    // Guest: how many host refreshes were already taken from the match view.
+    std::uint64_t seen_host_mod_refreshes{};
     EawrMessageBox* box{};
     // The rows as last shown, for the report and the start checks.
     std::vector<model::StagingRow> rows;

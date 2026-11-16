@@ -32,6 +32,8 @@ inline constexpr std::array<std::string_view, 4> embedded_faces{
     "EmpireAtWar-Bold", "EmpireAtWar-Light", "EmpireAtWar-Medium", "EmpireAtWar-Stencil"};
 // UI-F3: the game's default Unicode face, then EaW-Medium.
 inline constexpr std::string_view unicode_face = "Arial Unicode MS";
+// UI-F5 (legacy #6721): the face the OS font mapper usually gives a Latin request whose face is not installed.
+inline constexpr std::string_view mapper_pick_face = "Arial";
 inline constexpr std::string_view last_resort_face = "EmpireAtWar-Medium";
 inline constexpr std::int32_t russian_minimum_point_size = 7;
 

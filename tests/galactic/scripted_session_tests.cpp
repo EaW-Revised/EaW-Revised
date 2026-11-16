@@ -259,6 +259,186 @@ Create_Thread('main')
     return scripts;
 }
 
+// An uncaught Lua error in a story or object script ends the failing call (its output rolled back) and the script
+// goes on; the AI providers keep the retirement rule. The script keeps working across a checkpoint round trip.
+void script_thread_fault() {
+    const eawr::sim::InlineExecutor executor;
+    constexpr std::string_view source = R"LUA(
+Seen = 0
+function Handler(kind)
+    if kind == 'bad' then Missing_Engine_Function() end
+    Seen = Seen + 1
+    Emit(Seen)
+end
+function main() while true do coroutine.yield(true) end end
+Create_Thread('main')
+)LUA";
+    const auto build = [&](bool retire) {
+        auth::SessionConfig config;
+        config.seed = 77;
+        config.galactic_clock = true;
+        config.retire_on_lua_error = retire;
+        auth::ModuleManifest modules;
+        expect(bool(modules.add("Main.lua", std::string(source))), "thread fault module");
+        auto scripts = auth::ScriptScheduler::create(config, std::move(modules)).value();
+        expect(bool(scripts.register_binding("Emit", [](auth::BindingContext& context, const auth::ValueList& arguments) {
+            context.issue_command("mark", arguments);
+            return eawr::core::Result<auth::ValueList>::success({});
+        })), "thread fault binding");
+        return scripts;
+    };
+    const auto call = [&](auth::ScriptScheduler& scripts, std::uint64_t tick, std::string_view kind) {
+        auth::ScriptEvent event;
+        event.key = {tick, auth::first_simulation_producer, 1, 0};
+        event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Handler";
+        event.arguments.push_back(auth::Value::text(std::string(kind)));
+        expect(bool(scripts.submit_event(std::move(event))), "post handler call");
+    };
+    const auto emitted = [](const auth::ServiceReport& report, int expected) {
+        if (report.commands.size() != 1 || report.commands[0].arguments.size() != 1) return false;
+        const auto* number = std::get_if<LuaNumber>(&report.commands[0].arguments[0].data);
+        return number != nullptr && *number == LuaNumber(expected);
+    };
+    for (const bool retire : {true, false}) {
+        auto scripts = build(retire);
+        expect(bool(scripts.create_instance(1, "Main.lua")), "thread fault instance");
+        call(scripts, 1, "bad");
+        const auto first = scripts.service(executor);
+        expect(bool(first) && first.value().diagnostics.size() == 1 && first.value().commands.empty(),
+            "the failing handler is diagnosed and its output dropped");
+        if (!first) continue;
+        if (retire) {
+            expect(scripts.retired_instances() == std::vector<std::uint64_t>{1} && scripts.instances().empty(),
+                "provider rule: an uncaught Lua error retires the instance");
+            continue;
+        }
+        expect(scripts.retired_instances().empty() && scripts.instances() == std::vector<std::uint64_t>{1}
+            && first.value().load_notes.empty(), "story and object rule: the script is not retired by an error in one call");
+        call(scripts, 2, "ok");
+        const auto second = scripts.service(executor);
+        expect(bool(second) && second.value().diagnostics.empty() && emitted(second.value(), 1),
+            "a later call still runs, and the failed call left no state behind");
+        const auto saved = scripts.save();
+        expect(bool(saved), "save after a failed call");
+        if (!saved) continue;
+        auto restored = build(false);
+        expect(bool(restored.load(saved.value())), "load after a failed call");
+        call(restored, 3, "bad");
+        const auto after_load = restored.service(executor);
+        expect(bool(after_load) && after_load.value().diagnostics.size() == 1 && restored.retired_instances().empty(),
+            "a failure after a checkpoint round trip still ends only that call");
+        call(restored, 4, "ok");
+        const auto last = restored.service(executor);
+        expect(bool(last) && emitted(last.value(), 2), "the restored script keeps handling calls");
+    }
+}
+
+// An uncaught error ends the failing thread only (the L-23 thread rule): the other threads of the script keep running,
+// what the failing resume staged is rolled back, the diagnostic names the thread, and the service reports the failure so
+// a host can release what the thread's plot locked. A script whose only thread fails stays (not retired); the host
+// removes a script left with no live thread, as it does for one that returned. A failing call that repeats is reported
+// a few times and then by count.
+void script_thread_failures() {
+    const eawr::sim::InlineExecutor executor;
+    const auto build = [&](std::string_view source) {
+        auth::SessionConfig config;
+        config.seed = 78;
+        config.galactic_clock = true;
+        config.retire_on_lua_error = false;
+        auth::ModuleManifest modules;
+        expect(bool(modules.add("Main.lua", std::string(source))), "thread failure module");
+        auto scripts = auth::ScriptScheduler::create(config, std::move(modules)).value();
+        expect(bool(scripts.register_binding("Emit", [](auth::BindingContext& context, const auth::ValueList& arguments) {
+            context.issue_command("mark", arguments);
+            return eawr::core::Result<auth::ValueList>::success({});
+        })), "thread failure binding");
+        expect(bool(scripts.create_instance(1, "Main.lua")), "thread failure instance");
+        return scripts;
+    };
+    const auto marks = [](const auth::ServiceReport& report) {
+        std::vector<std::string> out;
+        for (const auto& command : report.commands)
+            if (!command.arguments.empty())
+                if (const auto* text = std::get_if<std::string>(&command.arguments[0].data)) out.push_back(*text);
+        return out;
+    };
+    {
+        auto scripts = build(R"LUA(
+function Good() while true do Emit('good') coroutine.yield(true) end end
+function Bad()
+    Emit('bad_before')
+    coroutine.yield(true)
+    Emit('bad_staged')
+    Missing_Engine_Function()
+end
+Create_Thread('Good')
+Create_Thread('Bad')
+)LUA");
+        const auto first = scripts.service(executor);
+        expect(bool(first) && marks(first.value()) == std::vector<std::string>{"good", "bad_before"}
+            && first.value().diagnostics.empty() && first.value().thread_failures.empty(), "both threads run before the error");
+        const auto second = scripts.service(executor);
+        expect(bool(second) && marks(second.value()) == std::vector<std::string>{"good"},
+            "the failing resume's staged output is rolled back and the other thread's output survives");
+        expect(bool(second) && second.value().diagnostics.size() == 1
+            && second.value().diagnostics[0].instance == 1 && second.value().diagnostics[0].thread == 1
+            && second.value().diagnostics[0].message.find("thread 1:") == 0
+            && second.value().diagnostics[0].message.find("Missing_Engine_Function") != std::string::npos
+            && second.value().thread_failures == std::vector<std::uint64_t>{1},
+            "one diagnostic names the instance, the thread slot and the cause, and the failure is reported to the host");
+        const auto third = scripts.service(executor);
+        expect(bool(third) && marks(third.value()) == std::vector<std::string>{"good"} && third.value().diagnostics.empty()
+            && third.value().thread_failures.empty() && scripts.retired_instances().empty(),
+            "the other thread keeps running, and nothing repeats");
+        const auto slots = scripts.thread_slots(1);
+        expect(bool(slots) && slots.value() == std::vector<bool>{true, false}, "only the failing thread's slot ended");
+    }
+    {
+        // The main thread is an ordinary thread: when it errors and no other thread lives, the script keeps its handlers
+        // until the host removes it (a script with no live thread), and is not retired.
+        auto scripts = build(R"LUA(
+function Main() Missing_Engine_Function() end
+function Handler() Emit('handled') end
+Create_Thread('Main')
+)LUA");
+        const auto first = scripts.service(executor);
+        expect(bool(first) && first.value().thread_failures == std::vector<std::uint64_t>{1} && scripts.retired_instances().empty()
+            && scripts.instances() == std::vector<std::uint64_t>{1}, "a failing main thread does not retire its script");
+        const auto slots = scripts.thread_slots(1);
+        expect(bool(slots) && std::none_of(slots.value().begin(), slots.value().end(), [](bool live) { return live; }),
+            "the failed main thread has ended and nothing restarts it");
+        auth::ScriptEvent event;
+        event.key = {2, auth::first_simulation_producer, 1, 0};
+        event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Handler";
+        expect(bool(scripts.submit_event(std::move(event))), "post handler call");
+        const auto second = scripts.service(executor);
+        expect(bool(second) && marks(second.value()) == std::vector<std::string>{"handled"}, "its handlers still run");
+    }
+    {
+        auto repeated = build(R"LUA(
+function Handler() Missing_Engine_Function() end
+function main() while true do coroutine.yield(true) end end
+Create_Thread('main')
+)LUA");
+        std::size_t reported = 0;
+        std::string last;
+        for (std::uint64_t tick = 1; tick <= 20; ++tick) {
+            auth::ScriptEvent event;
+            event.key = {tick, auth::first_simulation_producer, 1, 0};
+            event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Handler";
+            expect(bool(repeated.submit_event(std::move(event))), "post repeated call");
+            const auto report = repeated.service(executor);
+            expect(bool(report), "repeated failing call service");
+            if (!report) break;
+            reported += report.value().diagnostics.size();
+            if (!report.value().diagnostics.empty()) last = report.value().diagnostics.back().message;
+        }
+        // Occurrences 1, 2, 3, 4, 8 and 16 of twenty are reported; the last carries its count.
+        expect(reported == 6 && last.find("(occurrence 16)") != std::string::npos && repeated.retired_instances().empty(),
+            "a repeating failing call is reported by count, not once per call: " + std::to_string(reported) + " " + last);
+    }
+}
+
 void provider_retirement() {
     for (const std::string_view fault : {"error('injected Lua failure')", "Fail()", "while true do end"}) {
         for (const bool immediate : {false, true}) {
@@ -364,7 +544,7 @@ function main() Warn(); coroutine.yield(true) end
     expect(bool(scripts.service(executor)) && bool(scripts.service(executor)), "corruption fixture retires instance");
     expect(bool(scripts.remove_instance(3)), "corruption fixture has only a retired provider");
     const auto bytes = scripts.save().value();
-    // Independent v3 corpus row: retirement count=1, ID=1, then empty object,
+    // Independent v4 corpus row: retirement count=1, ID=1, then empty object,
     // pending-event and live-instance registries. No old-format loader exists.
     const std::string suffix = std::string("\1\0\0\0\1", 5) + std::string(19, '\0');
     expect(bytes.ends_with(suffix), "current-format GC retirement corpus suffix");
@@ -383,7 +563,7 @@ function main() Warn(); coroutine.yield(true) end
     collision[offset] = '\1'; collision.insert(offset + 4, std::string("\1", 1) + std::string(7, '\0')); reject(collision);
     reject(bytes.substr(0, bytes.size() - 1));
     auto old = bytes;
-    const auto version = old.find("eawr-script-galactic-save-v3");
+    const auto version = old.find("eawr-script-galactic-save-v4");
     expect(version != std::string::npos, "current GC save domain");
     if (version != std::string::npos) { old[version + std::string_view("eawr-script-galactic-save-v").size()] = '2'; reject(old); }
     auto notified = scripts.save().value();
@@ -399,8 +579,10 @@ function main() Warn(); coroutine.yield(true) end
     auto effects = std::make_shared<CounterHost>(); effects->refuse = true;
     auto infrastructure = retirement_scheduler("Fail()", effects);
     const auto refused = infrastructure.service(executor);
-    expect(!refused && refused.error().code == auth::codes::session_abort && !infrastructure.service(executor),
-        "immediate publication infrastructure failure remains terminal");
+    expect(bool(refused) && refused.value().commands.empty() && effects->state.value == 0
+        && infrastructure.retired_instances() == std::vector<std::uint64_t>{1, 3} && refused.value().load_notes.size() == 2
+        && bool(infrastructure.service(executor)),
+        "a refused immediate publication retires the instances whose effects it dropped; the service and the session go on");
     struct FailedExecutor final : eawr::sim::PartitionExecutor {
         std::size_t worker_count() const noexcept override { return 1; }
         eawr::core::Result<void> execute(std::size_t, const std::function<void(std::size_t)>&) const override {
@@ -677,6 +859,31 @@ void complete_service_phase_seam() {
     }
 }
 
+// Async AI step 2c-3 (R3): the per-tick AI/story disjointness check reads a sim-side copy of the AI scheduler's instance ids and reads the
+// scheduler's list again only when its instance revision moved (create, remove, load); a host that mutates the AI scheduler between steps
+// is seen at the next step, and a colliding id is still refused.
+void ai_instance_copy_seam() {
+    const eawr::sim::InlineExecutor executor;
+    auto host = session();
+    expect(host.ai_instance_list_reads() == 0 && host.ai_instance_copy_matches(), "no list read before the first step");
+    const auto revision = host.ai_scheduler().instance_revision();
+    expect(bool(host.step(executor)), "first step");
+    expect(host.ai_instance_list_reads() == 1, "the first step copies the AI instance ids once");
+    for (unsigned tick = 0; tick < 5; ++tick) expect(bool(host.step(executor)), "steady steps");
+    expect(host.ai_instance_list_reads() == 1 && host.ai_scheduler().instance_revision() == revision && host.ai_instance_copy_matches(),
+        "steady ticks read no id list: the copy is used while the revision stands");
+    expect(bool(host.ai_scheduler().create_instance(9, "Main.lua")), "the host creates an AI instance between steps");
+    expect(host.ai_scheduler().instance_revision() != revision, "creating an instance moves the revision");
+    expect(bool(host.step(executor)), "step after the creation");
+    expect(host.ai_instance_list_reads() == 2 && host.ai_instance_copy_matches(), "the next step re-reads the list once and the copy matches");
+    expect(bool(host.ai_scheduler().remove_instance(9)), "the host removes it again");
+    expect(bool(host.step(executor)) && host.ai_instance_list_reads() == 3 && host.ai_instance_copy_matches(),
+        "a removal is seen at the next step");
+    // A colliding id (the story scheduler holds 2) is refused by the per-tick check, as before the copy.
+    expect(bool(host.ai_scheduler().create_instance(2, "Main.lua")), "an AI instance whose id the story scheduler uses is created by the host");
+    expect(!host.step(executor), "the per-tick check refuses ids shared with the story scheduler");
+}
+
 void worker_parity() {
     const eawr::sim::InlineExecutor inline_executor;
     const auto baseline = trace(inline_executor, false);
@@ -691,6 +898,106 @@ void worker_parity() {
         }), "shared scheduler uses the partitioned script-instances phase");
     }
 }
+
+void object_scheduler_barrier() {
+    struct ObjectEngine final : auth::GalacticObjectScriptEngine {
+        eawr::core::Result<auth::ServiceReport> service(const eawr::sim::PartitionExecutor& executor,
+            galactic::GalacticSession& world, auth::ScriptScheduler& scripts) override {
+            if (auto set = scripts.set_galactic_frame(world.clock().galactic_frame); !set)
+                return eawr::core::Result<auth::ServiceReport>::failure(set.error());
+            auth::ServiceOptions options; options.time_tick = world.clock().galactic_frame;
+            return scripts.service(executor, options);
+        }
+    };
+    const eawr::sim::InlineExecutor executor;
+    auto host = auth::ScriptedGalacticSession::create(galactic::GalacticSession::create(setup()).value(),
+        scheduler(1, std::string(loop)), scheduler(2, std::string(loop)), scheduler(3, std::string(loop))).value();
+    wire(host);
+    expect(bool(host.set_object_engine(std::make_shared<ObjectEngine>())), "object engine installed");
+    const auto first = host.step(executor);
+    expect(first && first.value().objects && first.value().objects->commands.size() == 1,
+        "the object scheduler contributes to the galactic barrier");
+    auto changed_objects = auth::ScriptedGalacticSession::create(galactic::GalacticSession::create(setup()).value(),
+        scheduler(1, std::string(loop)), scheduler(2, std::string(loop)), scheduler(3, std::string(loop))).value();
+    wire(changed_objects);
+    expect(bool(changed_objects.set_object_engine(std::make_shared<ObjectEngine>())), "different object state engine installed");
+    auth::ScriptEvent object_state;
+    object_state.key = {1, auth::first_simulation_producer, 3, 0}; object_state.target = 3;
+    object_state.kind = auth::ScriptEvent::Kind::assign; object_state.name = "ObjectOnlyState";
+    object_state.parameter = auth::Value::number(LuaNumber(7));
+    expect(bool(changed_objects.object_scheduler()->submit_event(std::move(object_state))), "object state change admitted");
+    const auto changed_tick = changed_objects.step(executor);
+    expect(first && changed_tick && host.world().state_sha256() == changed_objects.world().state_sha256()
+        && first.value().state_hash.get() != changed_tick.value().state_hash.get(),
+        "object script state changes the sim-side hash without changing the world or AI state");
+    auto saved = host.save_scripts();
+    expect(saved && saved.value().objects.has_value(), "object scheduler graph is saved");
+    auto no_host_world = galactic::GalacticSession::from_replay(host.record()).value();
+    while (no_host_world.completed_tick() < host.completed_tick()) expect(bool(no_host_world.step(executor)), "missing host world replay");
+    expect(!auth::ScriptedGalacticSession::restore(std::move(no_host_world), scheduler(1, std::string(loop)),
+        scheduler(2, std::string(loop)), saved.value()), "a saved object graph cannot be restored without its scheduler");
+    auto restored_world = galactic::GalacticSession::from_replay(host.record()).value();
+    while (restored_world.completed_tick() < host.completed_tick()) expect(bool(restored_world.step(executor)), "object host world replay");
+    auto restored = auth::ScriptedGalacticSession::restore(std::move(restored_world), scheduler(1, std::string(loop)),
+        scheduler(2, std::string(loop)), saved.value(), scheduler(3, std::string(loop)));
+    expect(bool(restored), "the separate object scheduler restores at the same barrier");
+    if (!restored) return;
+    expect(restored.value().script_state_hash().value() == host.script_state_hash().value(), "restored object state enters the hash");
+    wire(restored.value());
+    expect(bool(restored.value().set_object_engine(std::make_shared<ObjectEngine>())), "restored object engine installed");
+    const auto continued = host.step(executor);
+    const auto resumed = restored.value().step(executor);
+    expect(continued && resumed && continued.value().state_hash.get() == resumed.value().state_hash.get(),
+        "restored object service continues identically");
+    auto without_engine = auth::ScriptedGalacticSession::create(galactic::GalacticSession::create(setup()).value(),
+        scheduler(1, std::string(loop)), scheduler(2, std::string(loop)), scheduler(3, std::string(loop))).value();
+    expect(!without_engine.step(executor), "an installed object scheduler cannot silently run without its engine");
+    auth::SessionConfig empty_config; empty_config.galactic_clock = true;
+    auto without_ai = auth::ScriptedGalacticSession::create(galactic::GalacticSession::create(setup()).value(),
+        auth::ScriptScheduler::create(empty_config, {}).value(), auth::ScriptScheduler::create(empty_config, {}).value()).value();
+    wire(without_ai);
+    expect(bool(without_ai.set_object_scheduler(scheduler(3, std::string(loop))))
+        && bool(without_ai.set_object_engine(std::make_shared<ObjectEngine>())),
+        "world setup installs an object host when native AI is absent");
+    expect(!without_ai.set_object_scheduler(scheduler(4, std::string(loop))), "object host cannot be installed twice");
+    const auto ai_off = without_ai.step(executor);
+    expect(ai_off && ai_off.value().objects && ai_off.value().objects->commands.size() == 1,
+        "the object scheduler services scripts with no AI instance");
+    expect(!without_ai.set_object_scheduler(scheduler(4, std::string(loop))), "a stepped world cannot replace the object host");
+    const auto ai_off_save = without_ai.save_scripts();
+    expect(bool(ai_off_save), "AI-off object scripts save at the barrier");
+    if (!ai_off_save) return;
+    auto ai_off_world = galactic::GalacticSession::from_replay(without_ai.record()).value();
+    while (ai_off_world.completed_tick() < without_ai.completed_tick())
+        expect(bool(ai_off_world.step(executor)), "AI-off world replay reaches the saved barrier");
+    auto ai_off_restored = auth::ScriptedGalacticSession::restore(std::move(ai_off_world),
+        auth::ScriptScheduler::create(empty_config, {}).value(), auth::ScriptScheduler::create(empty_config, {}).value(),
+        ai_off_save.value(), scheduler(3, std::string(loop)));
+    expect(bool(ai_off_restored), "AI-off object scheduler restores without a native AI owner");
+    if (ai_off_restored) {
+        wire(ai_off_restored.value());
+        expect(bool(ai_off_restored.value().set_object_engine(std::make_shared<ObjectEngine>())), "AI-off restored engine installed");
+        const auto live = without_ai.step(executor), resumed = ai_off_restored.value().step(executor);
+        expect(live && resumed && live.value().state_hash.get() == resumed.value().state_hash.get(),
+            "AI-off object scripts continue identically after restore");
+    }
+    auto live_commands = auth::ScriptedGalacticSession::create(galactic::GalacticSession::create(setup()).value(),
+        scheduler(1, std::string(loop)), scheduler(2, std::string(loop)), scheduler(3, std::string(loop))).value();
+    wire(live_commands);
+    expect(bool(live_commands.set_object_engine(std::make_shared<ObjectEngine>())), "object command engine installed");
+    unsigned committed{};
+    live_commands.set_story_command_committer([&](auth::ServiceReport& report) {
+        std::erase_if(report.commands, [&](const auto& command) {
+            if (command.issuer != 3) return false;
+            ++committed; return true;
+        });
+        return eawr::core::Result<void>::success();
+    });
+    const auto live = live_commands.step(executor);
+    expect(live && live.value().objects && live.value().objects->commands.empty() && committed == 1
+        && live_commands.pending_script_commands() == 2,
+        "object story commands commit in the current barrier rather than route as next-tick orders");
+}
 } // namespace
 
 int main() {
@@ -698,11 +1005,15 @@ int main() {
     named_fault_and_guardrails();
     terminal_failure();
     provider_retirement();
+    script_thread_fault();
+    script_thread_failures();
     routing_failures_and_finished_plot();
     staged_orbit_recheck();
     scheduler_phase_rollback();
     complete_service_phase_seam();
+    ai_instance_copy_seam();
     worker_parity();
+    object_scheduler_barrier();
     if (failures) return 1;
     std::cout << "galactic Lua host contracts passed\n";
     return 0;

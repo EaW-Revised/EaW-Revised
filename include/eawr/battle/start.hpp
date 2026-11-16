@@ -54,6 +54,8 @@ struct MapPlacement final {
     std::optional<Fixed> layer_z_adjust{};      // Layer_Z_Adjust (SK-05)
     bool special_weapon_source{}; // WSW-01: DUMMY_SPECIAL_WEAPON_SOURCE
     bool tactical_super_weapon_target{}; // TSW-01: DUMMY_TACTICAL_SUPER_WEAPON_TARGET
+    // WGT-57/101: Death_By_TSW_Replacements, the object types that stand where this target is destroyed, in authored order.
+    std::vector<std::string> death_by_tsw_replacements{};
     // WGT-121: copied campaign branch facts; ordinary skirmish does not consume them.
     bool branched_discardable{true};
     bool loads_when_faction_present{};
@@ -149,6 +151,7 @@ enum class Removal : std::uint8_t {
     no_player,        // no player of its non-playable faction, and not a kept decoration
     roster_gated,     // MAT-08: a demo map's force the roster gate disables (RG-04)
     campaign_branch, // WGT-121: rejected by the supplied campaign map admission rule
+    destroyed_planet, // WGT-57 (interim): the planet backdrop of a destroyed planet, see destroyed_backdrop_record
 };
 
 [[nodiscard]] std::string_view to_string(Removal reason) noexcept;
@@ -160,6 +163,20 @@ struct RemovedObject final {
     Removal reason{Removal::playable_faction};
 };
 
+// WGT-57/101: a prop that stands in place of a destroyed super weapon target. Props are presentation placements, not
+// simulation objects: the record is a map-record ordinal past the map's own, which the viewer's scene gives to the prop.
+// Their record ordinals start here, far above any map record and any live-ship ordinal (map size + ship index).
+inline constexpr std::uint32_t replacement_prop_record_base = 0x40000000U;
+
+struct ReplacementProp final {
+    std::uint32_t record{};
+    std::string type;
+    Vec3 position{};
+    Vec3 orientation_degrees{}; // roll X, pitch Y, yaw Z
+    std::uint32_t replaces{}; // the record of the target this prop stands in for; props belong to the neutral player (WGT-57)
+    friend bool operator==(const ReplacementProp&, const ReplacementProp&) = default;
+};
+
 struct BattleStart final {
     bool campaign_intro_admitted{}; // WGT-23: one-shot presentation input, outside replay bytes
     sim::MatchIdentity identity;
@@ -168,6 +185,7 @@ struct BattleStart final {
     std::vector<StartPlayer> players; // player ID order
     std::vector<StartUnit> units;     // entity ID order
     std::vector<RemovedObject> removed; // map objects deleted at the start, record order
+    std::vector<ReplacementProp> props; // WGT-57: props created in place of a removed destroyed-planet backdrop; presentation only
     std::vector<StartMarker> markers; // lobby team markers, record order
     std::vector<Launch> launches;
     sim::tactical::TacticalSetup setup;
@@ -204,5 +222,22 @@ struct TacticalSuperWeaponStart final {
 // skips nothing.
 [[nodiscard]] core::Result<std::vector<Vec3>> tactical_super_weapon_targets(
     const std::vector<MapPlacement>& placements, std::string_view own_faction);
+// TSW-03: the sim-side target list of a battle with a tactical super weapon object: every
+// DUMMY_TACTICAL_SUPER_WEAPON_TARGET placement with a position, in record order, with the faction its owner index names.
+// The conflict gate is not set here (a skirmish has none; the campaign entry sets it).
+[[nodiscard]] sim::tactical::TswSetup tactical_super_weapon_setup(const std::vector<MapPlacement>& placements);
+
+// WGT-57: the record of the planet backdrop a destroyed planet's space battle removes: the placement carrying
+// DUMMY_TACTICAL_SUPER_WEAPON_TARGET nearest to the world origin (the first on a tie), whatever its owner; a target is
+// a SpaceProp (a backdrop), so no other element qualifies. Absent when the map has none (the rule is then a no-op).
+[[nodiscard]] core::Result<std::optional<std::uint32_t>> destroyed_backdrop_record(
+    const std::vector<MapPlacement>& placements);
+
+// WGT-57/101: the one path that stands the replacement props in a destroyed target's place, shared by the destroyed-planet
+// battle start and a mid-battle obliteration. Every type of `types` (the target's Death_By_TSW_Replacements, authored order;
+// an unresolved type is the viewer's to skip) stands at `position` facing `orientation_degrees`, owned as the target is,
+// numbered from `first_record` upward. An empty list stands nothing (the target is still removed).
+[[nodiscard]] std::vector<ReplacementProp> replace_target_prop(const MapPlacement& target,
+    std::span<const std::string> types, Vec3 position, Vec3 orientation_degrees, std::uint32_t first_record);
 
 } // namespace eawr::battle

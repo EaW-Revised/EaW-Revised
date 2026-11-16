@@ -548,5 +548,36 @@ class RemakeBenchTests(unittest.TestCase):
                 self.assertEqual(row["window_ticks"], [low, 2300])
 
 
+    def test_heavy_save_scenes_carry_the_owner_setups_and_save_at_the_owner_ticks(self):
+        # The setups come from the owner's saves (embedded replay SKSU record): map, seed 67, slots, AI levels, credits.
+        anaxes, raw = bench.SCENES["heavy-anaxes"]["args"], bench.SCENES["raw-heavy-yavin"]["args"]
+        self.assertEqual(anaxes[anaxes.index("--eawr-skirmish-seed") + 1], "67")
+        self.assertEqual(anaxes[anaxes.index("--eawr-skirmish-credits") + 1], "10000")
+        self.assertEqual(anaxes[anaxes.index("--eawr-map") + 1], "data/art/maps/anaxes sprawl.ted")
+        self.assertEqual(anaxes[anaxes.index("--eawr-skirmish-players") + 1], "1,2,3")
+        self.assertEqual([a for a in anaxes if a.endswith(":none")], ["1:none", "2:none", "3:none"])
+        self.assertEqual([a for a in anaxes if a[:2] in ("1:", "2:", "3:") and not a.endswith(":none")],
+                         ["1:Rebel:0:human", "2:Rebel:0:ai:normal", "3:Empire:1:ai:normal"])
+        slots = [a for a in raw if a[:2] in tuple(f"{n}:" for n in range(1, 8)) and not a.endswith(":none")]
+        self.assertEqual(len(slots), 7)
+        self.assertTrue(all(s.endswith(":ai:hard") for s in slots[1:]))
+        self.assertEqual(raw[raw.index("--eawr-skirmish-credits") + 1], "16000")
+        self.assertEqual(bench.from_save_tick("heavy-anaxes", None), 20310)
+        self.assertEqual(bench.from_save_tick("heavy-anaxes-ai", None), 20310)
+        self.assertEqual(bench.from_save_tick("raw-heavy-yavin", None), 19700)
+        self.assertEqual(bench.select("heavy-save"), ["heavy-anaxes", "heavy-anaxes-ai", "raw-heavy-yavin"])
+
+
+    def test_heavy_save_describe_reads_a_committed_battle_save(self):
+        spec = importlib.util.spec_from_file_location("heavy_save", ROOT / "tools/performance/heavy_save.py")
+        heavy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(heavy)
+        described = heavy.describe(ROOT / "tests/skirmish/fixtures/saves/tactical-v2-host.eawr-ckp")
+        self.assertEqual((described["tick"], described["players"], described["setup_units"], described["commands"]), (7, 3, 9, 10))
+        self.assertEqual(heavy.SAVE_TICKS, {"heavy-anaxes": 20310, "heavy-anaxes-ai": 20310, "raw-heavy-yavin": 19700})
+        for scene in heavy.SAVE_TICKS:
+            self.assertEqual(bench.from_save_tick(scene, None), heavy.SAVE_TICKS[scene])
+
+
 if __name__ == "__main__":
     unittest.main()

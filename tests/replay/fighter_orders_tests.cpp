@@ -1086,4 +1086,161 @@ void test_squadron_hardpoint_attack() {
     }
 }
 
+// FM-20 (#6966): a squadron guarding a moving unit flies at its own maximum speed outside the near
+// zone and at most twice the unit's maximum speed inside it, also inside the 90-unit circle. Mod-scale numbers: the craft's
+// Min_Speed is 1.0 and its Max_Speed 4.0, the guarded corvette flies `guarded` per frame, the
+// attack distance is 1250 (near zone 625 of Space_Guard_Range 2000). Craft 11 leads squadron 10,
+// which starts `behind` units behind the corvette 30 (800 for the long run, 200 for the 90-unit band).
+struct GuardSpeedRun {
+    std::vector<std::string> hashes;
+    std::vector<math::Vec3> leader;   // craft 11 by tick
+    std::vector<math::Vec3> follower; // craft 12 by tick
+    std::vector<math::Vec3> guarded;  // corvette 30 by tick
+};
+
+[[nodiscard]] GuardSpeedRun run_guard_speed(const std::size_t workers, const Fixed guarded_speed,
+    const std::int64_t behind = 800) {
+    GuardSpeedRun run;
+    tactical::TacticalSetup setup;
+    setup.seed = seed;
+    setup.players = players();
+    setup.units = {unit(10, squadron_a, empire, at(-behind, 0)), unit(11, craft_type, empire, at(-behind, 0)),
+        unit(12, craft_type, empire, at(-behind - 10, 10)), unit(20, frigate_type, rebel, at(0, 20000)),
+        unit(30, corvette_type, empire, at(0, 0))};
+    setup.squadrons = {{10, {11, 12}}};
+    auto table = motion();
+    table.squadrons.spawners.clear();
+    table.squadrons.craft.front().min_speed = units(1);
+    table.squadrons.craft.front().max_speed = units(4);
+    table.squadrons.craft.front().attack_distance = units(1250);
+    table.rules.arc_degrees = units(15);
+    table.rules.expansion_distance = units(300);
+    table.rules.guard_range = units(2000);
+    tactical::MotionProfile corvette;
+    corvette.type_id = corvette_type;
+    corvette.max_speed = corvette.acceleration = corvette.deceleration = guarded_speed;
+    corvette.rate_of_turn = units(90);
+    corvette.turn_in_place_slowdown = units(1);
+    table.profiles = {corvette};
+    auto created = tactical::TacticalSession::create(setup, sensors(), durability(), table, std::nullopt, combat());
+    expect(static_cast<bool>(created), "FM-20: the guard speed session builds: "
+        + (created ? std::string{} : created.error().message));
+    if (!created) return run;
+    auto session = std::move(created).value();
+    expect(static_cast<bool>(session.submit({{2, empire, 1}, {30}, tactical::MovePayload{at(20000, 0)}})),
+        "FM-20: the guarded unit's move submits");
+    expect(static_cast<bool>(session.submit({{3, empire, 2}, {10}, tactical::GuardPayload{{}, 30}})),
+        "FM-20: the guard order submits");
+    const eawr::platform::ThreadWorkerAdapter executor(workers);
+    for (int tick = 0; tick < 700; ++tick) {
+        const auto stepped = session.step(executor);
+        if (!stepped) {
+            expect(false, "FM-20: step failed: " + stepped.error().message);
+            break;
+        }
+        run.hashes.push_back(stepped.value().state_sha256);
+        const auto* craft = instance(*stepped.value().snapshot, 11);
+        const auto* wing = instance(*stepped.value().snapshot, 12);
+        const auto* ship = instance(*stepped.value().snapshot, 30);
+        if (craft == nullptr || wing == nullptr || ship == nullptr) break;
+        run.leader.push_back(position(*craft));
+        run.follower.push_back(position(*wing));
+        run.guarded.push_back(position(*ship));
+    }
+    return run;
+}
+
+[[nodiscard]] double planar_gap(const math::Vec3& a, const math::Vec3& b) {
+    const double dx = static_cast<double>(a.x.raw() - b.x.raw()) / static_cast<double>(one);
+    const double dy = static_cast<double>(a.y.raw() - b.y.raw()) / static_cast<double>(one);
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+[[nodiscard]] double step_length(const math::Vec3& a, const math::Vec3& b) {
+    const double dx = static_cast<double>(a.x.raw() - b.x.raw()) / static_cast<double>(one);
+    const double dy = static_cast<double>(a.y.raw() - b.y.raw()) / static_cast<double>(one);
+    const double dz = static_cast<double>(a.z.raw() - b.z.raw()) / static_cast<double>(one);
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+void check_guard_speed(const Fixed guarded_speed, const double cap, const std::string& label) {
+    const auto run = run_guard_speed(1, guarded_speed);
+    expect(run.hashes.size() == 700 && run.leader.size() == 700, label + ": 700 ticks");
+    if (run.leader.size() != 700) return;
+    constexpr double near_zone = 625.0;
+    double far_top = 0.0;
+    double near_top = 0.0;
+    double worst = 0.0;
+    int entered = -1;
+    for (std::size_t tick = 1; tick < run.leader.size(); ++tick) {
+        const double speed = step_length(run.leader[tick], run.leader[tick - 1]);
+        worst = std::max(worst, speed);
+        const bool inside = planar_gap(run.leader[tick], run.guarded[tick]) < near_zone;
+        if (inside && entered < 0) entered = static_cast<int>(tick);
+        if (!inside && entered < 0) far_top = std::max(far_top, speed);
+        // A cap lower than the craft's maximum takes effect within its thrust limit (0.2 per frame).
+        if (entered >= 0 && static_cast<int>(tick) > entered + 15) near_top = std::max(near_top, speed);
+    }
+    double worst_follower = 0.0;
+    for (std::size_t tick = 1; tick < run.follower.size(); ++tick) {
+        worst_follower = std::max(worst_follower, step_length(run.follower[tick], run.follower[tick - 1]));
+    }
+    expect(worst <= 4.0 + 0.01, label + ": the craft never fly above their own maximum speed, " + std::to_string(worst));
+    expect(run.follower.size() == 700 && worst_follower <= 4.0 + 0.05,
+        label + ": the follower never flies above its own maximum speed, " + std::to_string(worst_follower));
+    expect(far_top > 3.5, label + ": outside the near zone the craft fly at their own maximum, " + std::to_string(far_top)
+        + " (the Min_Speed 1.0 crawl is gone)");
+    expect(entered > 0, label + ": the squadron reaches the near zone of the unit");
+    expect(near_top <= cap + 0.05, label + ": inside the near zone the speed holds the cap " + std::to_string(cap)
+        + ", got " + std::to_string(near_top));
+    const double gap = planar_gap(run.leader.back(), run.guarded.back());
+    expect(gap < near_zone, label + ": the squadron keeps up with the unit, " + std::to_string(gap) + " behind it");
+    std::cout << label << ": entered the near zone at tick " << entered << ", far top " << far_top
+        << ", near top " << near_top << ", final gap " << gap << '\n';
+    for (const std::size_t workers : {2U, 4U, 8U}) {
+        expect(run_guard_speed(workers, guarded_speed).hashes == run.hashes,
+            label + ": " + std::to_string(workers) + " workers hash like one");
+    }
+}
+
+// FM-20 (#6966): inside the 90-unit circle a guard keeps flying at its guard speed; the idle ratio
+// (about half a unit per frame for the leader) must not take over. The squadron starts 200 units
+// behind a corvette flying 3.1 and closes on it within the first ticks; once it has been inside
+// 90 units for 30 ticks its mean speed stays near its own maximum and no craft exceeds that.
+void check_guard_band(const Fixed guarded_speed, const std::string& label) {
+    const auto run = run_guard_speed(1, guarded_speed, 200);
+    expect(run.leader.size() == 700 && run.follower.size() == 700, label + ": 700 ticks");
+    if (run.leader.size() != 700 || run.follower.size() != 700) return;
+    int inside_ticks = 0;
+    int settled = 0;
+    double sum = 0.0;
+    double worst_leader = 0.0;
+    double worst_follower = 0.0;
+    for (std::size_t tick = 1; tick < run.leader.size(); ++tick) {
+        const double speed = step_length(run.leader[tick], run.leader[tick - 1]);
+        worst_leader = std::max(worst_leader, speed);
+        worst_follower = std::max(worst_follower, step_length(run.follower[tick], run.follower[tick - 1]));
+        if (planar_gap(run.leader[tick], run.guarded[tick]) >= 90.0) continue;
+        if (++inside_ticks <= 30) continue;
+        ++settled;
+        sum += speed;
+    }
+    expect(settled >= 50, label + ": the leader stays inside 90 units of the unit, " + std::to_string(settled) + " ticks");
+    const double mean = settled > 0 ? sum / settled : 0.0;
+    expect(mean >= 3.0, label + ": inside 90 units the leader keeps its guard speed, mean " + std::to_string(mean));
+    expect(worst_leader <= 4.0 + 0.01, label + ": the leader never flies above its own maximum, " + std::to_string(worst_leader));
+    expect(worst_follower <= 4.0 + 0.05, label + ": the follower never flies above its own maximum, " + std::to_string(worst_follower));
+    std::cout << label << ": " << settled << " ticks inside 90 units, mean leader speed " << mean << '\n';
+}
+
+void test_guard_speed() {
+    // The mod-scale case: the corvette flies 3.1, faster than the craft's Min_Speed; the cap is 6.2,
+    // above the craft's own maximum, so the craft fly flat out until they hold beside it.
+    check_guard_speed(Fixed::from_raw(one * 31 / 10), 4.0, "FM-20 guard of a 3.1 corvette");
+    // A slow guarded unit: the near-zone cap (twice 1.5) is below the craft's maximum.
+    check_guard_speed(Fixed::from_raw(one * 15 / 10), 3.0, "FM-20 guard of a 1.5 corvette");
+    check_guard_band(Fixed::from_raw(one * 31 / 10), "FM-20 guard band of a 3.1 corvette");
+}
+
+
 } // namespace fighter_test_support

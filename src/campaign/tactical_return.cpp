@@ -21,40 +21,8 @@ bool destroyed(const ForceResult& row) {
 }
 core::Result<gc::PlanetId> retreat_destination(const gc::GalacticSnapshot& snapshot, const gc::PlanetId source,
     const gc::PlayerId owner, const bool surface) {
-    const auto src = std::find_if(snapshot.planets().begin(), snapshot.planets().end(), [&](const auto& row) { return row.id == source; });
-    if (src == snapshot.planets().end()) return fail<gc::PlanetId>("retreat source is absent");
-    const auto base = [&](const auto id) { return snapshot.control() && std::any_of(snapshot.control()->planets.begin(), snapshot.control()->planets.end(),
-        [&](const auto& row) { return row.planet == id && (row.starbase.owner == owner || row.ground_base.owner == owner); }); };
-    const auto neutral = [&](const auto player) { return snapshot.control() && std::any_of(snapshot.control()->players.begin(), snapshot.control()->players.end(),
-        [&](const auto& row) { return row.player == player && row.neutral; }); };
-    for (unsigned tier = 0; tier < 4; ++tier) {
-        std::optional<sim::math::Vec3> nearest; gc::PlanetId selected{};
-        // WGM-212 / WGS-184: planets have increasing creation IDs; live objects are front-inserted.
-        for (auto at = snapshot.planets().rbegin(); at != snapshot.planets().rend(); ++at) {
-            const auto& planet = *at;
-            if (planet.id == source) continue;
-            if (tier == (surface ? 1U : 0U)) {
-                const auto occupant = gc::orbital_occupation(snapshot.control(), planet.id, snapshot.fleets(),
-                    snapshot.movement(), snapshot.actor_records());
-                if (!occupant) return core::Result<gc::PlanetId>::failure(occupant.error());
-                if (occupant.value() != owner) continue;
-            } else if ((tier == (surface ? 0U : 1U) && !base(planet.id))
-                || (tier == 2 && !neutral(planet.owner))) continue;
-            const auto x = sim::math::subtract(planet.position.x, src->position.x);
-            const auto y = sim::math::subtract(planet.position.y, src->position.y);
-            const auto z = sim::math::subtract(planet.position.z, src->position.z);
-            if (!x || !y || !z) return fail<gc::PlanetId>("retreat destination distance overflow");
-            const sim::math::Vec3 distance{x.value(), y.value(), z.value()};
-            // WGM-211: compare squared distances strictly; equal candidates retain the first hit.
-            if (!nearest || sim::math::compare_squared_lengths(distance, *nearest) < 0) {
-                nearest = distance; selected = planet.id;
-            }
-        }
-        if (selected) {
-            return core::Result<gc::PlanetId>::success(selected);
-        }
-    }
-    return core::Result<gc::PlanetId>::success(source); // WGM-99 orbital fallback
+    return gc::select_retreat_destination(snapshot.planets(), snapshot.control(), snapshot.fleets(), snapshot.movement(),
+        snapshot.actor_records(), source, owner, surface);
 }
 namespace {
 void put(std::vector<std::uint8_t>& bytes, std::uint64_t value, unsigned size = 8) {
@@ -172,6 +140,20 @@ core::Result<void> apply_tactical_return(gc::GalacticSession& galaxy, const Conf
     const TacticalReturnPlan& plan, TacticalReturnState& state, const sim::PartitionExecutor& executor) {
     auto applied = galaxy.apply_battle_losses(plan.destroyed, plan.killers);
     if (!applied) return applied;
+    // TSW-10: the battle's planet fact reaches the galaxy exactly once, here, as the planet's ruins. The request refuses a
+    // planet that is already destroyed, so a second return of the same planet cannot commit it twice.
+    if (plan.result.planet_destroyed) {
+        // WGT-102 / WGS-79: before the ruins, the obliteration's leader-kill test credits the super weapon's owner (the
+        // owner of the conflict's superweapon force).
+        const auto weapon = std::find_if(conflict.forces.begin(), conflict.forces.end(),
+            [&](const auto& force) { return conflict.superweapon && force.id == conflict.superweapon; });
+        if (weapon != conflict.forces.end() && weapon->owner) {
+            auto leader = galaxy.apply_tactical_obliteration_victory(weapon->owner, conflict.planet);
+            if (!leader) return core::Result<void>::failure(leader.error());
+        }
+        auto ruined = galaxy.request_planet_ruins(conflict.planet, true);
+        if (!ruined) return core::Result<void>::failure(ruined.error());
+    }
     std::vector<std::pair<gc::PlayerId, sim::math::Fixed>> credits;
     for (const auto& row : plan.result.credits) credits.emplace_back(row.player, row.credits);
     if (!credits.empty()) { applied = galaxy.apply_battle_credits(credits); if (!applied) return applied; }

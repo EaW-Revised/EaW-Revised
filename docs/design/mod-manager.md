@@ -203,6 +203,12 @@ provenance so the UI can say why a parent is there: `player`, `modinfo`, `known-
 - `launch.frame_rate_limit` and other values that already exist in the settings file are applied as a per-profile
   overlay (`video.frame_rate_limit`). They are not copied into the player's global settings.
 - `render_thread` maps to Godot's `--render-thread` command-line option, which the launcher passes.
+- `launch.no_fog` (boolean, absent = off; the file only carries it when it is on) is the launch option "Fog of war:
+  off". `EAWR.exe` reads it from the selected profile and passes one game flag, `--eawr-no-fog` (also `EAWR.exe
+  --no-fog` for every profile). It is an owner convenience, not a retail rule: the viewer draws every unit in space and
+  land battles and the whole galaxy for the local player. It is draw-only (the simulation, AI, saves, digests and
+  replays never see it, see `apps/viewer/README.md`), and a LAN battle or a multi-human or LAN campaign refuses it with
+  a message. A non-boolean value makes the profile invalid (`EAWR-MODS-0105`).
 
 **File index** (the file-conflict view; built once per chain fingerprint, see "Indexes and cost"):
 

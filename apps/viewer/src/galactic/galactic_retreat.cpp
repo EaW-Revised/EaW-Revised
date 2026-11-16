@@ -1,6 +1,13 @@
 #include "galactic_mode_internal.hpp"
 
+#include "eawr/presentation/camera/arrival_camera.hpp"
+
+#include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/viewport_texture.hpp>
 #include <godot_cpp/core/binder_common.hpp>
+
+#include <filesystem>
+#include <string>
 
 namespace eawr::presentation::godot_backend {
 using namespace godot;
@@ -59,6 +66,22 @@ bool GalacticMode::State::build_retreat_controls() {
     return true;
 }
 
+// Eye-check proof only (--eawr-galactic-space-proof retreat): one lit frame per simulation cinematic frame, named by
+// its frame number, beside the proof's own captures. The image is the last frame drawn, so it can lag the name by one.
+void GalacticMode::State::capture_retreat_cinematic_frame(const std::uint32_t frame) {
+    if (proof_cinematic_frame && *proof_cinematic_frame == frame) return;
+    proof_cinematic_frame = frame;
+    const auto directory = options.report_path.parent_path() / "space-cycle" / "retreat-cinematic";
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error) { failure = "Cannot create the retreat cinematic capture directory"; return; }
+    std::string name = std::to_string(frame);
+    name.insert(0, name.size() < 4 ? 4 - name.size() : 0, '0');
+    const auto image = host->get_viewport()->get_texture()->get_image();
+    if (image.is_null() || image->save_png(String((directory / ("k" + name + ".png")).generic_string().c_str())) != OK)
+        failure = "Cannot capture retreat cinematic frame " + std::to_string(frame);
+}
+
 void GalacticMode::State::request_retreat(sim::tactical::RetreatAction action) {
     if (!game || !conflict || !retreat_view) return;
     using namespace sim::tactical;
@@ -82,7 +105,7 @@ void GalacticMode::State::service_retreat_controls() {
     const auto observed = platform::campaign_tactical_view_for_observer(frame, sim::SeatId{galaxy->local.seat});
     if (!observed || !frame.battle || !frame.conflict || frame.conflict->id != conflict) {
         retreat_view.reset(); retreat_snapshot.reset(); retreat_dialog_open = false;
-        if (tactical) tactical->update_retreat_countdown({}, 0, false);
+        if (tactical) { tactical->update_retreat_countdown({}, 0, false); tactical->end_retreat_cinematic(); }
         retreat_dialog->frame->hide(); if (retreat_hud) retreat_hud->set_retreat({});
         retreat_root->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
         return;
@@ -91,7 +114,7 @@ void GalacticMode::State::service_retreat_controls() {
         [&](const auto& seat) { return seat.seat == sim::SeatId{galaxy->local.seat}; });
     if (binding == frame.conflict->seats.end()) {
         retreat_view.reset(); retreat_snapshot.reset(); retreat_dialog_open = false;
-        if (tactical) tactical->update_retreat_countdown({}, 0, false);
+        if (tactical) { tactical->update_retreat_countdown({}, 0, false); tactical->end_retreat_cinematic(); }
         retreat_dialog->frame->hide(); if (retreat_hud) retreat_hud->set_retreat({});
         retreat_root->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
         return;
@@ -111,17 +134,42 @@ void GalacticMode::State::service_retreat_controls() {
     const bool escaping = retreat_view && (retreat_view->state.phase == RetreatPhase::escaping || retreat_view->state.phase == RetreatPhase::escaped);
     if (frame.battle->outcome() || !retreat_view || escaping || !eligible || countdown || !solver_allowed)
         retreat_dialog_open = false; // WAR-65: pending victory/withdrawal closes the dialog.
-    if (retreat_view && retreat_view->state.phase == RetreatPhase::escaping && retreat_view->state.player == binding->player
-        && !retreat_completion_sent) {
-        // WR-50: no playback is installed in this route. Publish that fact
-        // once; the drawn flight/station cinematic remains an explicit seam.
-        if (const auto feed = game->battle_feed(conflict, sim::SeatId{galaxy->local.seat})) {
-            feed->submit({binding->player, {}, RetreatCinematicPayload{false, 0}, {}});
-            retreat_completion_sent = true;
+    if (retreat_view && retreat_view->state.phase == RetreatPhase::escaping) {
+        // FS-R08/09: the in-engine cinematic plays through the child battle's camera when it can (an entry marker, the
+        // Unlocked camera data, In_Game_Cinematics). The simulation owns its time (FC-R02); the reports below only tell
+        // it whether playback exists (WR-50) and when it ended.
+        const auto& state = retreat_view->state;
+        const bool playable = tactical && tactical->retreat_cinematic_ready();
+        if (playable) tactical->update_retreat_cinematic(state, frame.battle->completed_tick());
+        const bool playing = playable && tactical->retreat_cinematic_active();
+        if (playing && options.space_cycle_proof == "retreat") capture_retreat_cinematic_frame(state.cinematic_frame);
+        // #4444: retail plays the cinematic for whichever side retreats; only the retreating local player's own reports
+        // are commands of that player (an AI side's seat setting already says its playback exists, and the simulation's
+        // timer ends it, FC-R02).
+        if (state.player == binding->player && !retreat_completion_sent) if (const auto feed = game->battle_feed(conflict, sim::SeatId{galaxy->local.seat})) {
+            if (!playing) {
+                // WR-50: no playback in this battle. Publish that fact once.
+                feed->submit({binding->player, {}, RetreatCinematicPayload{false, 0}, {}});
+                retreat_completion_sent = true;
+            } else {
+                if (!retreat_playback_started) {
+                    feed->submit({binding->player, {}, RetreatCinematicPayload{true, 0}, {}});
+                    retreat_playback_started = true;
+                }
+                // The simulation completes the retreat on the frame that reaches the duration and refuses reports after
+                // it, so the end is reported with the last playing frame.
+                if (state.cinematic_frame + 1 >= state.cinematic_duration) {
+                    feed->submit({binding->player, {}, RetreatCinematicPayload{false, 0}, {}});
+                    retreat_completion_sent = true;
+                }
+            }
         }
+    } else if (tactical && tactical->retreat_cinematic_active()) {
+        tactical->end_retreat_cinematic();
     }
     if (tactical && retreat_view)
-        tactical->update_retreat_countdown(retreat_view->state, frame.battle->completed_tick(), retreat_view->state.playback_playing);
+        tactical->update_retreat_countdown(retreat_view->state, frame.battle->completed_tick(),
+            retreat_view->state.playback_playing || tactical->retreat_cinematic_active());
     if (retreat_hud) retreat_hud->set_retreat(presentation::ui::retreat_button_view(
         retreat_view, frame.battle->completed_tick(), frame.battle->outcome().has_value()));
     retreat_dialog->frame->set_visible(retreat_dialog_open);
@@ -142,5 +190,77 @@ void GalacticMode::State::service_retreat_controls() {
             label->set_text(String(message.c_str()));
         }
     }
+}
+// SK-ARR-01: the campaign space battle opens with the arrival cinematic. It is refused in a multiplayer battle (the debug
+// build builds no cinematic there), for a story-linked battle (SK-ARR-13: the held-arrival mode is the story engine's and is
+// not published yet) and for a battle that is not a space battle. The simulation never hears of it: the camera is a function
+// of the presented tick (SK-ARR-14).
+void GalacticMode::State::service_arrival_cinematic() {
+    if (!tactical || !game || !galaxy || arrival_cinematic_done) return;
+    const auto seat = sim::SeatId{galaxy->local.seat};
+    const auto frame = game->frame(seat);
+    if (!frame.battle || !frame.conflict || frame.conflict->id != conflict) return;
+    if (!arrival_gate_checked) {
+        // SK-ARR-01: a battle restored from a save past its start plays no arrival; one ready at tick 0 does.
+        arrival_gate_checked = true;
+        const bool admitted = presentation::camera::arrival_admits_battle_ready_at(child_ready_tick);
+        arrival_gate_log.emplace_back(child_ready_tick, admitted);
+        if (!admitted) { arrival_cinematic_done = true; return; }
+    }
+    // The battle's loading screen (and its Begin button) comes first: the cinematic starts when the battle does.
+    if (loading && loading->shown()) return;
+    const auto tick = frame.battle->completed_tick();
+    if (tick >= presentation::camera::arrival_rules::duration_frames) {
+        tactical->end_arrival_cinematic();
+        arrival_cinematic_done = true;
+        return;
+    }
+    const auto observed = platform::campaign_tactical_view_for_observer(frame, seat);
+    const auto binding = std::find_if(frame.conflict->seats.begin(), frame.conflict->seats.end(),
+        [&](const auto& candidate) { return candidate.seat == seat; });
+    const bool refused = frame.conflict->layer != campaign::BattleLayer::space || !observed
+        || (observed->policy && observed->policy->multiplayer) || !frame.conflict->linked_mission_options.empty()
+        || binding == frame.conflict->seats.end();
+    if (refused) {
+        arrival_cinematic_done = true;
+        return;
+    }
+    // The battle's map view and camera may not be drawn yet, and a map without an entry marker never will be: look again
+    // next frame until the cinematic window closes.
+    if (!tactical->arrival_cinematic_ready()) return;
+    MapMode::ArrivalRequest request;
+    request.attacker = binding->player == frame.conflict->invader;
+    request.defender = binding->player; // read only when the local player defends
+    if (options.arrival_proof == "defender") {
+        // Eye-check proof only: show the defender shot from the proof's attacker seat, looking at the opponent's star base.
+        request.attacker = false;
+        for (const auto& unit : frame.battle->instances()) {
+            if (unit.owner == binding->player || !sim::tactical::players_hostile(frame.battle->players(), binding->player, unit.owner)) continue;
+            request.defender = unit.owner;
+            break;
+        }
+    }
+    // SK-ARR-09: a presentation-only seed; both ends of one battle derive the same shot.
+    request.seed = static_cast<std::uint64_t>(frame.conflict->id) * 0x9E3779B97F4A7C15ULL + static_cast<std::uint64_t>(frame.conflict->planet);
+    tactical->update_arrival_cinematic(request, tick);
+    if (!arrival_counted && tactical->arrival_cinematic_active()) { arrival_counted = true; ++arrival_cinematic_starts; }
+    if (tactical->arrival_focus_losses() > arrival_focus_losses) arrival_focus_losses = tactical->arrival_focus_losses();
+    if (!options.arrival_proof.empty()) if (const auto shown = tactical->arrival_cinematic_frame()) capture_arrival_cinematic_frame(*shown);
+}
+
+// Eye-check proof only (--eawr-galactic-arrival-proof): one lit frame per presented arrival frame, named by its frame
+// number, beside the proof's own captures. The image is the last frame drawn, so it can lag the name by one.
+void GalacticMode::State::capture_arrival_cinematic_frame(const std::uint32_t frame) {
+    if (proof_arrival_frame && *proof_arrival_frame == frame) return;
+    proof_arrival_frame = frame;
+    const auto directory = options.report_path.parent_path() / "space-cycle" / ("arrival-" + options.arrival_proof);
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error) { failure = "Cannot create the arrival cinematic capture directory"; return; }
+    std::string name = std::to_string(frame);
+    name.insert(0, name.size() < 4 ? 4 - name.size() : 0, '0');
+    const auto image = host->get_viewport()->get_texture()->get_image();
+    if (image.is_null() || image->save_png(String((directory / ("k" + name + ".png")).generic_string().c_str())) != OK)
+        failure = "Cannot capture arrival cinematic frame " + std::to_string(frame);
 }
 } // namespace eawr::presentation::godot_backend

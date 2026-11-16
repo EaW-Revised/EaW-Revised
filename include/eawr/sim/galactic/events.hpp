@@ -14,13 +14,15 @@ namespace eawr::sim::galactic {
 // WGP-53/54: qualified feedback at its committed gameplay owner. Runtime
 // delivery only: these values are neither replay opcodes nor checkpoint state.
 struct GalacticFeedbackNotice {
-    enum class Kind { capture_reward, planet_corrupted, corruption_removed, enemy_approaching, planet_destroyed };
+    enum class Kind { capture_reward, planet_corrupted, corruption_removed, enemy_approaching, planet_destroyed,
+        corruption_success_voiced }; // WGCH-09/128: direct corruption begun; `slot` is the 0-based choice
     Kind kind{};
     PlayerId player{};
     PlanetId planet{};
     std::size_t preceding_events{}; // committed tick events before this notice
     TypeId source_type{}; // authored effect owner, retained even when a supplied transport differs
     std::uint64_t logical_frame{};
+    std::uint8_t slot{}; // corruption_success_voiced only: the chosen Corruption_N slot, N - 1
 };
 
 enum class GalacticEventKind : std::uint8_t {

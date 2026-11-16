@@ -1,8 +1,8 @@
 {
-  "launcher_version": "0.1.24",
+  "launcher_version": "0.1.27",
   "artifact": {
-    "file": "eawr-launcher-0.1.24.zip",
-    "sha256": "4c2f00dc10713fc34adc66bee3a850835e63843aa3363acb37dbe5d6b1974679"
+    "file": "eawr-launcher-0.1.27.zip",
+    "sha256": "a6b510bfc96dcc4fb31c0e909b33d246237aac1f9d8a295e437cc4a938dd9436"
   },
   "protocol": {
     "major": 1,

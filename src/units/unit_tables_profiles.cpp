@@ -320,8 +320,19 @@ void Loader::load_planetary_weapon(Object& object, UnitType& unit) {
 void Loader::read_object_weapon(Object& object, UnitType& unit, const Frames* model, const bool object_damage) {
     const auto projectiles = tokens(object.text("Projectile_Types"));
     if (projectiles.empty()) return;
-    if (projectiles.size() > 1) {
-        report_.note(unit.id, "Projectile_Types", object.text("Projectile_Types"), "several types; the first is loaded");
+    // WLAB-19, WLAB-71 (#3239): a land body keeps the number of its projectile types and the second one (SWAP_WEAPONS and the
+    // permanent swap pick the index 0 or 1); a space object keeps the first only.
+    const bool land = input_.domain == sim::tactical::BattleDomain::land;
+    if (projectiles.size() > (land ? 2U : 1U)) {
+        report_.note(unit.id, "Projectile_Types", object.text("Projectile_Types"),
+            land ? "several types; the first two are loaded" : "several types; the first is loaded");
+    }
+    if (land) {
+        unit.projectile_type_count = static_cast<std::uint32_t>(projectiles.size());
+        if (projectiles.size() > 1) {
+            unit.alternate_projectile = projectiles[1];
+            want_projectile(unit.alternate_projectile);
+        }
     }
     Weapon weapon;
     weapon.projectile = projectiles.front();
@@ -331,6 +342,12 @@ void Loader::read_object_weapon(Object& object, UnitType& unit, const Frames* mo
     weapon.pulse_count = count(object, "Projectile_Fire_Pulse_Count", true);
     weapon.pulse_delay_seconds = object.fixed("Projectile_Fire_Pulse_Delay_Seconds", report_, true);
     weapon.damage_type = unit.damage_type;
+    // WLAB-18 (#3239): a land object weapon fires only in the attack modes it authors (both default to Yes). The mode is the
+    // active ROCKET_ATTACK slot of the holder, read by the shared weapon gate (WRA-02); a space object keeps firing in both.
+    if (land) {
+        weapon.fire_in_rocket_mode = flag(object, "Fire_Weapon_When_In_Rocket_Attack_Mode", false).value_or(true);
+        weapon.fire_in_normal_mode = flag(object, "Fire_Weapon_When_In_Normal_Attack_Mode", false).value_or(true);
+    }
     // LS shoot PR 1: a land object authors its own Projectile_Damage; a positive value replaces the
     // projectile row's damage in the shot profile (space object weapons take the row's).
     if (object_damage) weapon.damage = object.fixed("Projectile_Damage", report_, false);
@@ -428,12 +445,18 @@ void Loader::load_body(Object& object, UnitType& unit) {
         unit.footprint = read_footprint(object, model);
         movement.layer_z_adjust = object.fixed("Layer_Z_Adjust", report_, false);
         if (has_behavior(object, "TACTICAL_SUPER_WEAPON")) {
-            // TSW-01: the debug build's type constructor leaves each of these at zero or off.
+            // TSW-01: the debug build's type constructor leaves the distances and the height adjust at zero and sets the
+            // match-target-height flag on (debug build, 2026-11-13); an authored tag overrides each.
             UnitType::TacticalSuperWeapon weapon;
             weapon.start_distance = object.fixed("TSW_Start_Distance_From_Target", report_, false).value_or(Fixed{});
             weapon.attack_distance = object.fixed("TSW_Attack_Distance_From_Target", report_, false).value_or(Fixed{});
             weapon.z_adjust = object.fixed("TSW_Z_Adjust_Relative_To_Target_Pos", report_, false).value_or(Fixed{});
-            weapon.start_pos_match_target_z = flag(object, "TSW_Start_Pos_Match_Targets_Z", false).value_or(false);
+            weapon.start_pos_match_target_z = flag(object, "TSW_Start_Pos_Match_Targets_Z", false).value_or(true);
+            // TSW-02..TSW-05: the sequence timings (a later slice services the frames from power-up on).
+            weapon.power_up_countdown_seconds = object.fixed("TSW_Power_Up_Countdown_Seconds", report_, false).value_or(Fixed{});
+            weapon.attack_clip_seconds = object.fixed("TSW_Attack_Anim_Duration_Seconds", report_, false).value_or(Fixed{});
+            weapon.explosion_debris_creation_frame_delay = object.fixed("TSW_Explosion_Debris_Creation_Frame_Delay", report_, false).value_or(Fixed{});
+            weapon.post_destruction_wait_frames = object.fixed("TSW_Post_Destruction_Wait_Frames", report_, false).value_or(Fixed{});
             unit.tactical_super_weapon = weapon;
         }
 

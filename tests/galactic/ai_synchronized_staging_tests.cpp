@@ -1,6 +1,7 @@
 #include "ai_selector_test_support.hpp"
 
-std::string assembly_contract(const eawr::sim::PartitionExecutor& executor, unsigned scenario, bool sparse) {
+static std::string assembly_case(const eawr::sim::PartitionExecutor& executor, unsigned scenario, bool sparse,
+    unsigned removal = 0) {
     const bool synchronized = scenario == 4 || scenario >= 14;
     auto configured = setup();
     configured.players.push_back({2, 2, 0});
@@ -359,6 +360,100 @@ std::string assembly_contract(const eawr::sim::PartitionExecutor& executor, unsi
             member_killed = true;
         }
         const auto requests = owner.engine->galactic_movement_requests();
+        if (removal && !requests.empty()) {
+            auto& tasks = ai::EngineContractAccess::player(*owner.engine).tasks;
+            const auto task = std::find_if(tasks.begin(), tasks.end(), [](const auto& row) {
+                return row.object == 100 && row.joined && !row.finished && row.galactic_assembly_request;
+            });
+            if (task == tasks.end()) continue;
+            const auto request = task->galactic_assembly_request;
+            const auto moving_actor = owner.actions->assembly_location(1, 100);
+            expect(moving_actor && moving_actor->transit,
+                "member-removal witness has a real joined transport in native travel");
+            const auto before = must(codec.capture());
+            ai::EngineContractAccess::unsettled_member_removal(*owner.engine, 100);
+            expect(!codec.capture(), "strict validator rejects the pre-existing unsettled member-removal window");
+            must(codec.restore(before)); owner.engine->set_galactic_funding(owner.funding);
+            expect(must(codec.capture()).components == before.components,
+                "member-removal control restores the archive before rebinding transient owners");
+            expect(ai::EngineContractAccess::service_owners_match(*owner.engine, nullptr, nullptr),
+                "goal restore clears transient service owners");
+            must(owner.engine->begin_galactic_barrier(*owner.world,
+                {session.snapshot()->completed_tick(), session.snapshot()->clock().galactic_frame},
+                owner.scripts, owner.sequence, selection, &executor));
+            expect(ai::EngineContractAccess::service_owners_match(*owner.engine, &owner.scripts, &executor),
+                "member removal resumes through the production barrier's service owners");
+            if (removal == 1) {
+                const std::array<eawr::sim::EntityId, 1> destroyed{100}; must(session.apply_battle_losses(destroyed));
+                must(owner.world->bind(session.snapshot(), staging_connectivity, executor,
+                    session.snapshot()->completed_tick(), session.next_entity_id()));
+                must(owner.engine->begin_galactic_barrier(*owner.world,
+                    {session.snapshot()->completed_tick(), session.snapshot()->clock().galactic_frame},
+                    owner.scripts, owner.sequence, selection, &executor));
+            } else {
+                auth::ServiceReport released; auth::ScriptCommand command;
+                command.issuer = instance; command.sequence = 18; command.verb = ai::verb_ai;
+                command.arguments = {auth::Value::text(removal == 2 ? "release" : "release_all"),
+                    auth::Value{auth::Handle{ai::handle_taskforce, force_id}}};
+                if (removal == 2) command.arguments.push_back(auth::Value{auth::Handle{foc::handle_game_object, 100}});
+                released.commands.push_back(std::move(command)); must(owner.engine->after_service(released));
+            }
+            const auto& retained = ai::EngineContractAccess::player(*owner.engine);
+            for (const auto& row : retained.tasks) if (removal == 3 || row.object == 100) {
+                expect(row.joined && row.finished && row.failed
+                    && row.galactic_assembly == ai::BuildTask::GalacticAssembly::failed && !row.galactic_assembly_request,
+                    "real loss or release settles each joined assembly task before another execution service");
+                expect(!retained.assigned.contains(row.object), "removed assembly member no longer has an assignment");
+            }
+            expect(!owner.actions->movements().at(request).registered,
+                "member removal retires its actual retained native movement listener");
+            assembly_records();
+            const auto saved = must(codec.capture()); const auto native = must(owner.actions->capture());
+            const auto saved_scripts = must(owner.scripts.save(executor)); const auto saved_sequence = owner.sequence;
+            Owner fresh(session, executor); ai::EngineContractAccess::assembly_fixture(*fresh.engine);
+            must(fresh.scripts.load(saved_scripts)); fresh.sequence = saved_sequence;
+            must(fresh.world->bind(session.snapshot(), staging_connectivity, executor,
+                session.snapshot()->completed_tick(), session.next_entity_id()));
+            ga::bind_movement_references(*fresh.actions, fresh.engine);
+            ai::GoalStateContributor fresh_codec(fresh.engine, eawr::core::sha256_hex(std::span<const std::uint8_t>{}));
+            must(fresh_codec.restore(saved)); fresh.engine->set_galactic_funding(fresh.funding);
+            fresh.actions->bind_freestore_validation([&](const auto& restored) {
+                if (restored.encode() != owner.actions->qualified_freestore().encode()) {
+                    eawr::core::Diagnostic error; error.code = "EAWR-TEST-0001";
+                    error.message = "fresh member-removal freestore differs from the fixture owner's canonical bytes";
+                    return eawr::core::Result<void>::failure(std::move(error));
+                }
+                return eawr::core::Result<void>::success();
+            });
+            must(fresh.actions->restore(native));
+            expect(must(fresh_codec.capture()).components == saved.components
+                && must(fresh.actions->capture()).components == native.components
+                && must(fresh.scripts.save(executor)) == saved_scripts && fresh.sequence == saved_sequence,
+                "joined-member loss/release restores goal, native, Lua and sequence state exactly");
+            expect(ai::EngineContractAccess::service_owners_match(*fresh.engine, nullptr, nullptr),
+                "fresh goal restore clears transient service owners before continuation");
+            must(owner.engine->begin_galactic_barrier(*owner.world,
+                {session.snapshot()->completed_tick(), session.snapshot()->clock().galactic_frame},
+                owner.scripts, owner.sequence, selection, &executor));
+            must(fresh.engine->begin_galactic_barrier(*fresh.world,
+                {session.snapshot()->completed_tick(), session.snapshot()->clock().galactic_frame},
+                fresh.scripts, fresh.sequence, selection, &executor));
+            expect(ai::EngineContractAccess::service_owners_match(*owner.engine, &owner.scripts, &executor)
+                && ai::EngineContractAccess::service_owners_match(*fresh.engine, &fresh.scripts, &executor),
+                "both continuations bind their own reconstructed service owners at the barrier");
+            must(owner.engine->service_galactic_system(1, ga::Service::execution, owner.scripts, owner.sequence));
+            must(fresh.engine->service_galactic_system(1, ga::Service::execution, fresh.scripts, fresh.sequence));
+            expect(ai::EngineContractAccess::retained_block(*owner.engine, block_id).finished
+                && !ai::EngineContractAccess::retained_block(*owner.engine, block_id).result,
+                "next execution reduces the failed member to the existing production-failed outcome");
+            expect(must(codec.capture()).components == must(fresh_codec.capture()).components
+                && must(owner.actions->capture()).components == must(fresh.actions->capture()).components
+                && must(owner.scripts.save(executor)) == must(fresh.scripts.save(executor))
+                && owner.sequence == fresh.sequence,
+                "fresh restored and straight member-removal continuations remain byte-identical");
+            assembly_records(); record_digest_contract(fresh_codec, "fresh member-removal records match cold reconstruction");
+            return must(codec.state_hash()) + must(owner.actions->state_hash()) + ":removal=" + std::to_string(removal);
+        }
         if (scenario == 16 && !requests.empty()) for (const auto& task : ai::EngineContractAccess::player(*owner.engine).tasks)
             if (task.galactic_assembly == ai::BuildTask::GalacticAssembly::moving) {
                 late_wait = true;
@@ -433,6 +528,7 @@ std::string assembly_contract(const eawr::sim::PartitionExecutor& executor, unsi
         if (native_frontier) assembly_records();
     }
     const auto& block = ai::EngineContractAccess::retained_block(*owner.engine, block_id);
+    expect(!removal, "joined-member removal witness executes before assembly completion");
     std::string completion_detail = "assembly completion scenario=" + std::to_string(scenario)
         + " tick=" + std::to_string(session.snapshot()->completed_tick())
         + " finished=" + std::to_string(block.finished) + " result=" + std::to_string(block.result);
@@ -472,4 +568,11 @@ std::string assembly_contract(const eawr::sim::PartitionExecutor& executor, unsi
         "actual same-barrier native launch/split prepares fewer force planets than a full bind");
     return session.state_sha256() + must(codec.state_hash()) + must(owner.actions->state_hash())
         + ":frontier=" + std::to_string(frontier_binds) + ":reads=" + std::to_string(movement_reads);
+}
+
+std::string assembly_contract(const eawr::sim::PartitionExecutor& executor, unsigned scenario, bool sparse) {
+    auto trace = assembly_case(executor, scenario, sparse);
+    if (scenario == 5) for (unsigned removal = 1; removal <= 3; ++removal)
+        trace += assembly_case(executor, scenario, sparse, removal);
+    return trace;
 }

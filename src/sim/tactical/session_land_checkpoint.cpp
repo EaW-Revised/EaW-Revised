@@ -78,7 +78,7 @@ std::vector<std::uint8_t> TacticalSession::Impl::land_bytes(const bool partition
     records(moving.contacts, state.contact_parts);
     out(moving.contact_complexity, moving.last_contact_frame, moving.contacts_serviced, state.requests,
         state.combat_state, state.dynamic_children, state.formations, state.landings, state.landed, state.next_landing,
-        state.walking_formations, state.garrison_entries);
+        state.walking_formations, state.garrison_entries, state.force_disable_stamps, state.ability_motion);
     out(static_cast<std::uint64_t>(state.searches.size()));
     for (const auto& [id, search] : state.searches) out(id, LandPathService::checkpoint(search));
     state.canonical_size_hint = out.bytes.size();
@@ -112,8 +112,10 @@ core::Result<void> TacticalSession::Impl::restore_land(const std::span<const std
         std::uint64_t next_landing{};
         std::map<EntityId, session_detail::LandWalkingFormation> walking_formations;
         std::map<EntityId, session_detail::LandGarrisonEntry> garrison_entries;
+        std::map<EntityId, std::uint64_t> force_disable_stamps;
+        std::map<EntityId, session_detail::LandAbilityMotion> ability_motion;
         in(id, version, terrain_identity, clear_bit, occupancy, moving, requests, combat_state, dynamic_children, formations,
-            landings, landed, next_landing, walking_formations, garrison_entries);
+            landings, landed, next_landing, walking_formations, garrison_entries, force_disable_stamps, ability_motion);
         if (id != section_id || version != section_version || terrain_identity != land->occupancy.terrain().identity()
             || clear_bit != land->content.clear_bit || moving.tick != completed_tick)
             throw Invalid("land section terrain, version or tick disagrees with session");
@@ -341,6 +343,37 @@ core::Result<void> TacticalSession::Impl::restore_land(const std::span<const std
             for (const auto& unit : live) carried_roots += unit.state.contained.size();
             if (carried_roots != hidden_members) throw Invalid("land garrison carried objects disagree with the records");
         }
+        // Version 18 (WLAB-08): a stamp is no later than the tick the section was saved at (the map is ascending by
+        // construction). A unit killed after the scan keeps its stamp until the next scan drops it, so the roster is not
+        // compared. A content without carriers keeps no stamp.
+        for (const auto& [stamped, tick] : force_disable_stamps)
+            if (stamped == invalid_entity_id || tick > moving.tick || land->content.force_disablers.empty())
+                throw Invalid("land Force disabling stamp disagrees with the saved tick or the content");
+        // Version 19/20 (WLAB-16/17/19): a record is never the default one, names a unit, and keeps a flag only in its range. A
+        // dead unit keeps its record, so the roster is not compared. A pending jump keeps its point; no jump keeps a zero one. A
+        // projectile index of 1 needs the unit's own type to have more than one projectile type (a row of the content): the type is
+        // the unit's binding (dead units keep theirs), else its live row. A unit with neither (a created object that died before
+        // the save) cannot be checked, so only the content-wide rule applies to it.
+        const auto has_swap_row = [&](const TypeId type) {
+            const auto& rows = land->content.weapon_swaps;
+            const auto row = std::lower_bound(rows.begin(), rows.end(), type, [](const auto& entry, const TypeId key) { return entry.type < key; });
+            return row != rows.end() && row->type == type;
+        };
+        for (const auto& [unit_id, record] : ability_motion) {
+            if (unit_id == invalid_entity_id || record.idle() || record.locomotor > 1 || record.deploy > 1 || record.projectile > 1
+                || (record.projectile != 0 && land->content.weapon_swaps.empty())
+                || record.jump_phase > 3 || (record.jump_phase != 1 && !(record.jump_point == math::Vec3{}))
+                || (record.jump_phase != 1 && record.jump_frames != 0)
+                || (record.jump_phase < 2 && (!(record.jump_speed == math::Fixed{}) || !(record.jump_position == math::Vec3{}))))
+                throw Invalid("land ability motion record disagrees with its rules");
+            if (record.projectile == 0) continue;
+            std::optional<TypeId> type;
+            if (const auto bound = land->bindings.find(unit_id); bound != land->bindings.end()) type = bound->second.first;
+            else if (const auto unit = std::lower_bound(live.begin(), live.end(), unit_id,
+                         [](const auto& row, EntityId key) { return row.state.entity_id < key; });
+                     unit != live.end() && unit->state.entity_id == unit_id) type = unit->state.type_id;
+            if (type && !has_swap_row(*type)) throw Invalid("land projectile index disagrees with the unit type");
+        }
         auto field = LandOccupancy::from_checkpoint(land->occupancy.terrain_handle(), clear_bit, occupancy);
         // Terrain is immutable; searches below reference the new stable field, never the old host.
         if (!field) throw Invalid(field.error().message);
@@ -362,6 +395,9 @@ core::Result<void> TacticalSession::Impl::restore_land(const std::span<const std
             restored->static_roots.emplace(child, unit->state);
         }
         restored->dynamic_children = std::move(dynamic_children);
+        // LE-OCCUPY: the pad bodies are derived, never archived; a retained row naming a pad was accepted above as a participant
+        // that was not yet a body, and becomes a normal row here.
+        if (!session_detail::land_refresh_pads(*restored, pads)) throw Invalid("land pad pose is outside the supported range");
         for (const auto object : landed) {
             const auto unit = std::lower_bound(live.begin(), live.end(), object,
                 [](const auto& row, EntityId key) { return row.state.entity_id < key; });
@@ -372,6 +408,8 @@ core::Result<void> TacticalSession::Impl::restore_land(const std::span<const std
             for (const auto& hidden : pair.second.hidden)
                 restored->bindings.emplace(hidden.state.entity_id, std::pair{hidden.state.type_id, hidden.state.owner});
         restored->garrison_entries = std::move(garrison_entries);
+        restored->force_disable_stamps = std::move(force_disable_stamps);
+        restored->ability_motion = std::move(ability_motion);
         restored->landings = std::move(landings);
         restored->landed = std::move(landed);
         restored->next_landing = next_landing;
@@ -413,8 +451,15 @@ core::Result<void> TacticalSession::Impl::restore_land(const std::span<const std
         const auto check_position = [&](const auto& row) {
             const auto unit = std::lower_bound(live.begin(), live.end(), row.object,
                 [](const auto& value, EntityId key) { return value.state.entity_id < key; });
-            if (unit == live.end() || unit->state.entity_id != row.object
-                || unit->state.position.x != row.position.x || unit->state.position.y != row.position.y)
+            if (unit == live.end() || unit->state.entity_id != row.object) throw Invalid("land section and child-state poses disagree");
+            // Version 21 (WLAB-16): a unit that is flying or coming down is where its record says; its movement body already
+            // stands at the landing position.
+            if (const auto flying = restored->ability_motion.find(row.object);
+                flying != restored->ability_motion.end() && flying->second.jump_phase >= 2) {
+                if (unit->state.position != flying->second.jump_position) throw Invalid("land section and child-state poses disagree");
+                return;
+            }
+            if (unit->state.position.x != row.position.x || unit->state.position.y != row.position.y)
                 throw Invalid("land section and child-state poses disagree");
         };
         for (const auto& member : restored->movement.members()) check_position(member);

@@ -99,6 +99,24 @@ class GodotShaderCache::Impl final {
 public:
     std::map<std::string, std::shared_ptr<const CachedShader>, std::less<>> entries;
     std::size_t source_bytes{};
+    std::size_t refused_full{};
+    // The one admission rule for every program: the exact backend source is the key, a full cache
+    // (entries or bytes) refuses without eviction and the caller keeps ownership of its RID.
+    [[nodiscard]] std::shared_ptr<const CachedShader> find(const std::string& source) const {
+        const auto found = entries.find(source);
+        return found == entries.end() ? nullptr : found->second;
+    }
+    [[nodiscard]] std::shared_ptr<const CachedShader> admit(
+        const std::string& source, std::shared_ptr<CachedShader> program) {
+        if (entries.size() >= GodotShaderCache::entry_limit
+            || source.size() > GodotShaderCache::source_byte_limit - source_bytes) {
+            ++refused_full;
+            return nullptr;
+        }
+        entries.emplace(source, program);
+        source_bytes += source.size();
+        return program;
+    }
 };
 
 [[nodiscard]] std::vector<ReflectedUniform> reflected_uniforms(RenderingServer& rendering, const RID& shader);
@@ -135,6 +153,12 @@ public:
         std::optional<AABB> diagnostic_bounds;
         // Rest-pose model-space bounds (all visible surfaces); sizes a batch group's culling box.
         std::optional<AABB> batch_bounds;
+        // Surface census (diagnostic, B stage 0): rigid-on-bone, palette-skinned and unskinned surfaces of
+        // the model, and how many distinct bones carry a rigid surface.
+        std::uint32_t census_rigid_surfaces{}, census_palette_surfaces{}, census_plain_surfaces{}, census_rigid_bones{};
+        // The one bone every surface of this model hangs on (all surfaces rigid, none palette-skinned or
+        // unskinned), or -1. Such a piece can draw without an engine skeleton.
+        std::int32_t rigid_bone{-1};
         RID texture;
         // Per-binding textures (upload with BindingTexture entries), by name.
         std::vector<std::pair<std::string, RID>> binding_textures;
@@ -170,7 +194,8 @@ public:
     struct FogConsumer final {
         GodotRenderer::FogConsumerKind kind{GodotRenderer::FogConsumerKind::batch_mesh_gloss};
         fog::ConsumerId id{}; // 0 while detached
-        RID shader{};         // owned BatchMeshGloss fog variant while attached
+        RID shader{};         // the fog variant while attached; owned unless `shared_shader` is set
+        std::shared_ptr<const CachedShader> shared_shader{}; // set when the variant lives in the shader cache
         RID material{};       // the material registered with the fog backend
     };
     struct ExternalFogConsumer final {
@@ -228,6 +253,13 @@ public:
         // transform lives in a group's multimesh slot. Leaving the group just unhides it.
         bool batch_hidden{}, batch_dirty{}, translated_parameters{};
         std::uint32_t batch_group{}, batch_slot{};
+        // Skeleton-free rigid piece: the bone it hangs on, or -1 (skeleton or unskinned), and
+        // that bone's palette matrix; the engine instance carries object_transform x bone_transform.
+        std::int32_t rigid_bone{-1};
+        Transform3D bone_transform{};
+        // Idle placement (the viewer's shared-idle group) whose last uploaded palette this instance's
+        // skeleton still holds; 0 once anything else wrote or replaced it. See note_idle_unbound.
+        std::uint64_t idle_group{};
     };
 
     struct PendingPose final {
@@ -235,6 +267,9 @@ public:
         std::vector<animation::Matrix> palette{};
         std::vector<Transform3D> model_transforms{};
         std::shared_ptr<const SkinPosePalette<Transform3D>> prepared;
+        // Idle placement whose last uploaded palette this retained pose is (0: written by anything else). An
+        // instance created later from this pose starts out holding it too (see bind_instance_skin).
+        std::uint64_t idle_group{};
         [[nodiscard]] const std::vector<animation::Matrix>& active_palette() const noexcept {
             return prepared ? prepared->palette : palette;
         }
@@ -246,6 +281,35 @@ public:
     [[nodiscard]] core::Result<void> bind_skin_pose(sim::EntityId entity_id, sim::AssetId asset_id,
         const Resource& resource,
         std::shared_ptr<const SkinPosePalette<Transform3D>> prepared, std::uint64_t shared_idle_group = 0);
+    [[nodiscard]] core::Result<void> bind_skin_pose_body(sim::EntityId entity_id, sim::AssetId asset_id,
+        const Resource& resource,
+        std::shared_ptr<const SkinPosePalette<Transform3D>> prepared, std::uint64_t shared_idle_group);
+    // PF idle skin: the viewer skips a placement whose palette did not change, but only while every one of
+    // its instances still holds that palette. Anything that writes, replaces or frees such a skeleton (or an
+    // idle bind that did not land) records the placement here; the viewer drains the list before its next
+    // idle upload and re-uploads exactly those placements.
+    std::vector<std::uint64_t> idle_disturbed_;
+    // Why placements were reported (cumulative; the viewer records per-sample deltas in the perf trace).
+    std::array<std::uint64_t, 9> idle_reasons_{};
+    void note_idle_unbound(Instance& instance, const IdleDisturbance reason) {
+        if (!instance.idle_group) return;
+        idle_disturbed_.push_back(instance.idle_group);
+        ++idle_reasons_[static_cast<std::size_t>(reason)];
+        instance.idle_group = 0;
+    }
+    void note_idle_missed(const std::uint64_t group, const IdleDisturbance reason) {
+        idle_disturbed_.push_back(group);
+        ++idle_reasons_[static_cast<std::size_t>(reason)];
+    }
+    // The retained pose stops being an idle upload (rewritten, copied over, cleared or dropped).
+    void note_idle_unposed(PendingPose& pose, const IdleDisturbance reason) {
+        if (!pose.idle_group) return;
+        idle_disturbed_.push_back(pose.idle_group);
+        ++idle_reasons_[static_cast<std::size_t>(reason)];
+        pose.idle_group = 0;
+    }
+    void track_idle_binding(sim::EntityId entity_id, sim::AssetId asset_id, const Resource& resource,
+        std::uint64_t shared_idle_group, bool bound);
     [[nodiscard]] core::Result<void> set_prepared_skin_pose(sim::EntityId entity_id, sim::AssetId asset_id,
         std::shared_ptr<const SkinPosePalette<Transform3D>> prepared, std::uint64_t shared_idle_group) {
         if (!prepared) return failure(diagnostic_codes::invalid_skin_pose,
@@ -304,6 +368,17 @@ public:
             sample.t1_excluded_pose += self.diagnostic_groups_.t1_excluded_pose;
         }
         self.batch_fill_sample(sample);
+        if (sample.frame % 60 == 0) {
+            // Another renderer on the same viewport (the world-UI one) has few pieces: keep the larger census.
+            render_categories::BatchCensus local;
+            self.batch_census(local);
+            const auto total = [](const render_categories::BatchCensus& value) {
+                std::uint64_t sum{};
+                for (const auto count : value.pieces) sum += count;
+                return sum;
+            };
+            if (!sample.census.valid || total(local) > total(sample.census)) sample.census = local;
+        }
         for (const auto& [entity, instance] : self.instances_) {
             static_cast<void>(entity);
             sample.record(instance.category_role, instance.category_submit_frame == sample.frame,
@@ -327,6 +402,8 @@ public:
         }
     }, [](const void* owner) { return static_cast<std::uint64_t>(static_cast<const Impl*>(owner)->viewport_.get_id()); }};
     bool attach_scene_{true};
+    // GodotRenderer::set_play_uploads: no verify-and-release of kept snapshots, no blocking identity admission.
+    bool play_uploads_{};
 
     ~Impl();
 
@@ -566,7 +643,12 @@ private:
     [[nodiscard]] std::optional<hull_batching::Key> batch_key(sim::EntityId entity, const Instance& instance,
                                                               bool* pose_exit = nullptr) const;
     [[nodiscard]] bool rest_pose(sim::EntityId entity, const Instance& instance, const Resource& resource) const;
+    // First reason a piece cannot join a hull group, in the order of the batching key; `eligible` means it can.
+    enum class BatchReject : std::uint8_t { eligible, hidden, reserved_proxy, no_rid, no_resource, no_mesh, translated,
+        non_opaque, billboard, opacity, posed };
+    [[nodiscard]] BatchReject batch_reject(sim::EntityId entity, const Instance& instance) const;
     void batch_fill_sample(render_categories::Sample& sample) const;
+    void batch_census(render_categories::BatchCensus& census) const;
     hull_batching::Registry batch_registry_;
     std::unordered_map<std::uint32_t, BatchGroup> batch_groups_;
     std::vector<sim::EntityId> batch_dirty_;
@@ -576,23 +658,39 @@ private:
     using InstanceMap = std::unordered_map<sim::EntityId, Instance>;
     InstanceMap::iterator remove_instance(RenderingServer* rendering, const InstanceMap::iterator instance);
 
-    [[nodiscard]] static bool apply_skin_pose(
-        RenderingServer& rendering, const Instance& instance, const PendingPose& pose,
-        std::span<const std::uint8_t> changes = {}, SkinPoseWork* work = nullptr);
+    // The engine transform of an instance: the object, and for a skeleton-free piece also its bone.
+    [[nodiscard]] static Transform3D world_transform(const Instance& instance) noexcept {
+        return instance.rigid_bone >= 0 ? instance.object_transform * instance.bone_transform : instance.object_transform;
+    }
+    // True when a piece of this resource draws without an engine skeleton: its whole model is rigid on one bone, so
+    // the instance transform is object x palette[bone], rewritten when the object or that bone moves. Always on
+    // (presentation only: the pixels are the skinned ones up to float rounding). Never billboards, translated programs
+    // that read skeleton data or reserved proxies, which keep theirs. Per-instance translated parameters are deliberately
+    // not a gate: they are numeric shader uniforms (they never read the skeleton) and arrive after the instance is
+    // bound, so a bind-time check could not cover them.
+    [[nodiscard]] bool skeleton_free_piece(sim::AssetId asset, const Resource& resource) const;
+    // Not static: a skeleton-free member of a hull group keeps its bone in its group slot, which only the renderer owns.
+    [[nodiscard]] bool apply_skin_pose(
+        RenderingServer& rendering, Instance& instance, const PendingPose& pose,
+        std::span<const std::uint8_t> changes = {}, SkinPoseWork* work = nullptr,
+        SkinWriteCensus* census = nullptr, std::size_t path = 1);
 
     void refresh_billboards(RenderingServer& rendering, const sim::EntityId entity,
                             const Instance& instance, const Resource& resource);
 
-    static void bind_instance_skin(
+    void bind_instance_skin(
         RenderingServer& rendering,
         Instance& instance,
         const Resource& resource,
-        const PendingPose* pose);
+        const PendingPose* pose,
+        SkinWriteCensus* census = nullptr,
+        bool without_skeleton = false);
 
     // #2856: the pooled texture for this content, created on first use; its
     // item (one pool reference) is appended to `items`.
+    // `known` is the texture_item the caller already made for `source` (its pixels are not hashed again).
     [[nodiscard]] bool acquire_texture(RenderingServer& rendering, const assets::Texture& source, RID& target,
-        std::vector<detail::GpuItem>& items);
+        std::vector<detail::GpuItem>& items, const detail::GpuItem* known = nullptr);
     [[nodiscard]] bool acquire_texture(RenderingServer& rendering, const detail::TextureRecipe& recipe, RID& target,
         std::vector<detail::GpuItem>& items);
     void release_texture(RenderingServer& rendering, const detail::GpuItem& item);
@@ -708,6 +806,7 @@ private:
     std::unordered_map<sim::EntityId, PendingPose> skin_poses_;
     std::vector<std::uint8_t> skin_changes_;
     SkinPoseWork skin_work_{};
+    SkinWriteCensus skin_census_{};
     bool skin_profile_{};
     SkinPoseBatch<Transform3D> skin_batch_;
     bool skin_batch_active_{};

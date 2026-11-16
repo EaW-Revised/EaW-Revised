@@ -3,6 +3,7 @@
 #include "ai_engine.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/script/foc/galactic_ai_state.hpp"
+#include "eawr/sim/galactic/raid.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -33,7 +34,7 @@ template<class Row> void write_movement(std::vector<std::uint8_t>& bytes, std::u
     word(bytes, row.taskforce); word(bytes, row.finished); word(bytes, row.advance_requested);
     word(bytes, row.observed_tick); word(bytes, row.event_cursor);
     word(bytes, row.plan_id); word(bytes, row.taskforce_id); word(bytes, row.block_id); word(bytes, row.registered);
-    word(bytes, row.freestore_actor);
+    word(bytes, row.freestore_actor); word(bytes, row.raid);
 }
 
 }
@@ -183,6 +184,13 @@ NativeActions::~NativeActions() {
     // fail closed and never retain/dereference its destroyed native owner.
     *lifetime_ = nullptr;
 }
+core::Result<void> NativeActions::probe_births(const gc::GalacticSnapshot& base, const gc::GalacticSession::NativeActionShadow& shadow,
+    std::span<const gc::GalacticSession::NativeActorChange> births, const sim::PartitionExecutor& workers) const {
+    if (births.empty() || !freestore_births_ || !qualified_freestore_available()) return core::Result<void>::success();
+    auto staged = bound().freestore_->clone();
+    auto quiet = staged.suspend_intents();
+    return freestore_births_(staged, base, shadow, births, workers);
+}
 void NativeActions::bind_handlers() {
     if (actor_changes_) world_.set_native_actor_changes_handler([lifetime = lifetime_](const auto& snapshot, auto changes) {
         if (changes.empty()) return core::Result<void>::success();
@@ -215,12 +223,13 @@ bool NativeActions::supports(ActionKind kind) const noexcept {
     return kind == ActionKind::produce || kind == ActionKind::magic || kind == ActionKind::give_money
         || ((kind == ActionKind::land || kind == ActionKind::launch || kind == ActionKind::regroup) && admission_pending_)
         || (kind == ActionKind::invade && admission_pending_ && world_.native_invasion_available())
-        || (kind == ActionKind::move && movement_provider_ && conflict_pending_ && no_hop_ && admission_pending_);
+        || ((kind == ActionKind::move || kind == ActionKind::raid) && movement_provider_ && conflict_pending_ && no_hop_ && admission_pending_);
 }
 const gc::GalacticSession::NativeInvasion* NativeActions::invasion_status(std::uint64_t request) const noexcept {
     return world_.native_invasion(request);
 }
 core::Result<void> NativeActions::retire_invasion(std::uint64_t request) { return world_.retire_native_invasion(request); }
+core::Result<void> NativeActions::retire_unadmitted_invasion(std::uint64_t request) { return world_.retire_native_unadmitted_invasion(request); }
 core::Result<BillDecision> decide_bill(const BillRow& row, const gc::GalacticSession::NativeProductionNotice& input,
     const BillLedgers& ledgers, std::span<const gc::ProductionPlayer> players) {
     using Result = core::Result<BillDecision>;
@@ -229,6 +238,22 @@ core::Result<BillDecision> decide_bill(const BillRow& row, const gc::GalacticSes
     if (!ledger) return invalid<BillDecision>("native bill requires its ledger");
     BillDecision out;
     auto charge = input.amount; auto payer = row.player;
+    // The queue entry's own price (carried by the notice) is the one price the build bills by from its admission to its last bill;
+    // the recorded row can only lag it (a world that moved between the AI's turn and the commit), so the entry's price is the limit.
+    // Pro-rata slices are rounded one by one, so the last slice can ask a raw unit or two past what is left of the price: it pays
+    // exactly what is left, never more (and a later slice pays nothing). A build already billed past its price is a bill that cannot
+    // be paid: it is refused as that one bill (nothing paid, no ledger effect, the timer resets like any unpaid slice), never a
+    // session failure.
+    const auto room = sim::math::subtract(input.price, row.billed);
+    if (!room || room.value().raw() < 0) {
+        out.payment = {false, payer, {}};
+        out.refusal = "native bill exceeds accepted price, refused: player=" + std::to_string(row.player) + " build=" + std::to_string(input.build)
+            + " goal=" + std::to_string(row.goal) + " action=produce billed_raw=" + std::to_string(row.billed.raw()) + " charge_raw=" + std::to_string(charge.raw())
+            + " recorded_price_raw=" + std::to_string(row.price.raw()) + " entry_price_raw=" + std::to_string(input.price.raw())
+            + " notice_amount_raw=" + std::to_string(input.amount.raw()) + " remaining_raw=" + std::to_string(input.remaining.raw());
+        return Result::success(out);
+    }
+    if (room.value() < charge) charge = room.value();
     if (!row.orphan) {
         const auto goal = ledger->goals.find(row.goal);
         if (goal == ledger->goals.end()) { out.payment = {false, payer, {}}; return Result::success(out); }
@@ -255,8 +280,6 @@ core::Result<BillDecision> decide_bill(const BillRow& row, const gc::GalacticSes
         if (owner == players.end() || !ledgers(input.planet_owner)) { out.payment = {false, input.planet_owner, {}}; return Result::success(out); }
         payer = input.planet_owner;
     }
-    const auto total = sim::math::add(row.billed, charge);
-    if (!total || total.value() > row.price) return invalid<BillDecision>("native bill exceeds accepted price");
     out.payment = {true, payer, charge};
     out.effect = {BillEffect::Kind::spend, payer, row.orphan ? 0 : row.goal, charge, input.remaining};
     return Result::success(out);
@@ -331,6 +354,10 @@ core::Result<gc::GalacticSession::NativeProductionPayment> NativeActions::notice
     }
     auto decided = decide_live_bill(input);
     if (!decided) return Result::failure(decided.error());
+    if (!decided.value().refusal.empty()) {
+        report_bill_refusal(decided.value().refusal);
+        return Result::success(decided.value().payment);
+    }
     if (auto applied = apply_bill_effect(input.build, decided.value().effect); !applied) return Result::failure(applied.error());
     return Result::success(decided.value().payment);
 }
@@ -347,7 +374,9 @@ core::Result<BillDecision> NativeActions::decide_live_bill(const gc::GalacticSes
         if (!ledger) ledger = funding_->ledger(player);
         return ledger.get();
     };
-    return decide_bill(bill_row(at->second), input, ledgers, snapshot->production()->players);
+    auto decided = decide_bill(bill_row(at->second), input, ledgers, snapshot->production()->players);
+    if (decided && !decided.value().refusal.empty()) decided.value().refusal += " tick=" + std::to_string(world_.completed_tick());
+    return decided;
 }
 BillRow NativeActions::bill_row(const Purchase& row) {
     return {row.player, row.goal, row.price, row.billed, row.marked, row.remaining, row.orphan};
@@ -466,7 +495,7 @@ core::Result<ActionReceipt> NativeActions::admit(const ActionRequest& request) {
     if (scratch == bound().player_scratch_.end()) return invalid<ActionReceipt>("native action requires a selected player");
     auto& created_ = scratch->second.created;
     if (pending_admission()) return invalid<ActionReceipt>("native actions require ordered nonreentrant admission");
-    if (request.kind == ActionKind::move) return admit_movement(request);
+    if (request.kind == ActionKind::move || request.kind == ActionKind::raid) return admit_movement(request);
     if (request.kind == ActionKind::invade) {
         auto invaded = world_.admit_native_invasion(request.player, request.object, admission_pending_());
         if (!invaded) return Result::failure(invaded.error());
@@ -769,7 +798,8 @@ core::Result<void> NativeActions::advance_movement(Movement& movement, bool task
         }
     }
     // WGA-228: one ordinary hop only. The next poll searches the new world again.
-    auto admitted = world_.admit_native_fleet(movement.player, gc::MoveFleet{movement.actor, {at->orbit, next}, {}}, admission_pending_());
+    auto admitted = world_.admit_native_fleet(movement.player,
+        gc::MoveFleet{movement.actor, movement.raid ? path.value().planets : std::vector<gc::PlanetId>{at->orbit, next}, {}, movement.raid}, admission_pending_());
     if (!admitted) return core::Result<void>::failure(admitted.error());
     if (!admitted.value().admitted) movement.finished = true;
     return core::Result<void>::success();
@@ -821,7 +851,17 @@ core::Result<ActionReceipt> NativeActions::admit_movement(const ActionRequest& r
     if (!world_.graph() || !world_.graph()->node(request.target) || request.reach > MovementReach::any
         || bound().next_movement_ == std::numeric_limits<std::uint64_t>::max())
         return invalid<ActionReceipt>("movement destination, policy or request identity is invalid");
+    if (request.kind == ActionKind::raid) {
+        const auto* control = snapshot->control();
+        if (!control || !snapshot->movement()) return invalid<ActionReceipt>("Raid requires qualified movement and faction inputs");
+        const auto player = std::find_if(control->players.begin(), control->players.end(),
+            [&](const auto& row) { return row.player == request.player; });
+        if (player == control->players.end()
+            || !gc::fleet_raid_capable(*at, *snapshot->movement(), player->faction, snapshot->actor_records()))
+            return invalid<ActionReceipt>("Raid requires a raid-capable fleet");
+    }
     Movement movement; movement.player = request.player; movement.actor = request.object;
+    movement.raid = request.kind == ActionKind::raid;
     movement.destination = request.target; movement.reach = request.reach; movement.taskforce = request.taskforce != 0;
     movement.plan_id = request.plan; movement.taskforce_id = request.taskforce; movement.block_id = request.block;
     movement.observed_tick = snapshot->completed_tick(); movement.event_cursor = snapshot->events().size();
@@ -948,6 +988,29 @@ core::Result<bool> NativeActions::refuse_movement(gc::PlayerId player, gc::Fleet
     if (changed) mark_state_changed();
     return core::Result<bool>::success(changed);
 }
+std::vector<std::uint64_t> NativeActions::unfinished_movements(gc::PlayerId player, gc::FleetId actor) const {
+    std::vector<std::uint64_t> requests;
+    for (const auto& [id, movement] : bound().movements_)
+        if (movement.registered && !movement.finished && movement.player == player && movement.actor == actor) requests.push_back(id);
+    return requests;
+}
+core::Result<bool> NativeActions::refuse_movements(gc::PlayerId player, gc::FleetId actor, std::span<const std::uint64_t> requests) {
+    bool changed{};
+    for (const auto id : requests) {
+        const auto found = bound().movements_.find(id);
+        if (found == bound().movements_.end()) continue;
+        auto& movement = found->second;
+        if (!movement.registered || movement.finished || movement.player != player || movement.actor != actor) continue;
+        RecordWrite record_write{*this, 2, id};
+        movement.finished = true; changed = true;
+    }
+    if (changed) mark_state_changed();
+    return core::Result<bool>::success(changed);
+}
+bool NativeActions::purchase_refusable(gc::PlayerId player, sim::EntityId build) const {
+    const auto found = bound().purchases_.find(build);
+    return found != bound().purchases_.end() && found->second.player == player && !found->second.failed && !found->second.completed;
+}
 core::Result<bool> NativeActions::refuse_purchase(gc::PlayerId player, sim::EntityId build) {
     const auto found = bound().purchases_.find(build);
     // A completed purchase stays completed: its object exists in the world, and a refusal that arrives afterwards (a late
@@ -958,6 +1021,19 @@ core::Result<bool> NativeActions::refuse_purchase(gc::PlayerId player, sim::Enti
     mark_build_state_changed();
     found->second.completed = false; found->second.failed = true;
     return core::Result<bool>::success(true);
+}
+core::Result<void> NativeActions::adopt_purchase_price(gc::PlayerId player, sim::EntityId build, sim::math::Fixed price) {
+    const auto found = bound().purchases_.find(build);
+    // Nothing to adopt, deliberately and silently: a row that is absent, another player's, already failed or completed, or whose price
+    // already matches was settled by an earlier refusal, completion or admission, and the canonical queue entry stays the authority
+    // for its price either way (the bill limit reads the entry's price, not this row).
+    if (found == bound().purchases_.end() || found->second.player != player || found->second.failed || found->second.completed
+        || found->second.price == price || price.raw() < 0)
+        return core::Result<void>::success();
+    RecordWrite record_write{*this, 1, build};
+    mark_build_state_changed();
+    found->second.price = price;
+    return core::Result<void>::success();
 }
 core::Result<void> NativeActions::retire_freestore_movement(sim::EntityId actor, bool actor_lost) {
     const auto found = bound().freestore_requests_.find(actor);
@@ -1177,7 +1253,7 @@ core::Result<NativeState> NativeActions::capture() const {
     if (auto verified = verify_record_sync_hash(); !verified) return core::Result<NativeState>::failure(verified.error());
     if (pending_admission()) return invalid<NativeState>("production state requires the completed admission barrier");
     NativeState out; auto& bytes = out.components[std::string(component)];
-    word(bytes, component.size()); bytes.insert(bytes.end(), component.begin(), component.end()); word(bytes, 10);
+    word(bytes, component.size()); bytes.insert(bytes.end(), component.begin(), component.end()); word(bytes, 11);
     word(bytes, bound().purchases_.size());
     for (const auto& [id, row] : bound().purchases_) write_purchase(bytes, id, row);
     word(bytes, bound().next_movement_); word(bytes, bound().movements_.size());
@@ -1200,7 +1276,7 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
     };
     if (read() != component.size() || bytes.size() - at < component.size()) return invalid<void>("production domain is invalid");
     for (const auto character : component) if (bytes[at++] != static_cast<std::uint8_t>(character)) valid = false;
-    if (read() != 10) valid = false;
+    if (read() != 11) valid = false;
     const auto count = read();
     if (!valid || count > (bytes.size() - at) / 128) return invalid<void>("production component framing is invalid");
     std::map<sim::EntityId, Purchase> staged;
@@ -1231,23 +1307,23 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
         last = id;
     }
     const auto next_movement = read(), move_count = read();
-    if (!valid || !next_movement || move_count > (bytes.size() - at) / 128) return invalid<void>("movement component framing is invalid");
+    if (!valid || !next_movement || move_count > (bytes.size() - at) / 136) return invalid<void>("movement component framing is invalid");
     std::map<std::uint64_t, Movement> moves; last = 0;
     for (std::uint64_t i = 0; i < move_count; ++i) {
         const auto id = read(), player = read(), actor = read(), destination = read(), location = read(), reach = read();
         const auto taskforce = read(), finished = read(), advance = read(), tick = read(), cursor = read();
         const auto plan_id = read(), taskforce_id = read(), block_id = read(), registered = read();
-        const auto freestore_actor = read();
+        const auto freestore_actor = read(), raid = read();
         if (!valid || !id || id <= last || id >= next_movement || !player || player > std::numeric_limits<gc::PlayerId>::max()
             || actor >= identity_ceiling() || freestore_actor >= identity_ceiling()
-            || (freestore_actor && (plan_id || taskforce_id || block_id || taskforce || reach || location)) || !world_.graph() || !world_.graph()->node(destination)
+            || raid > 1 || (freestore_actor && (plan_id || taskforce_id || block_id || taskforce || reach || location || raid)) || !world_.graph() || !world_.graph()->node(destination)
             || (location && !world_.graph()->node(location)) || reach > static_cast<std::uint64_t>(MovementReach::any)
             || registered > 1 || taskforce > 1 || (taskforce != (taskforce_id != 0)) || finished > 1 || advance > 1 || (!actor && !finished) || tick > world_.snapshot()->completed_tick()
             || (tick == world_.snapshot()->completed_tick() && cursor > world_.snapshot()->events().size())
             || std::none_of(world_.setup().players.begin(), world_.setup().players.end(), [&](const auto& p) { return p.player_id == player; }))
             return invalid<void>("movement identities, policy or listener state are invalid");
         moves.emplace(id, Movement{static_cast<gc::PlayerId>(player), actor, destination, location,
-            static_cast<MovementReach>(reach), taskforce != 0, finished != 0, advance != 0, tick, cursor, plan_id, taskforce_id, block_id, registered != 0, freestore_actor}); last = id;
+            static_cast<MovementReach>(reach), taskforce != 0, finished != 0, advance != 0, tick, cursor, plan_id, taskforce_id, block_id, registered != 0, freestore_actor, raid != 0}); last = id;
     }
     const auto freestore_refusals = read(); const auto freestore_size = read();
     if (!valid || freestore_size != bytes.size() - at) return invalid<void>("production freestore tail framing is invalid");
@@ -1483,6 +1559,27 @@ struct NativeActions::ImmediateState final : authoritative::ImmediateEffectState
             if (!decision) return Result::failure(decision.error());
             return Result::success({authoritative::Value::number(Number(static_cast<std::int64_t>(decision.value())))});
         }
+        if (name == "galactic.fleet_raid_capable") {
+            const auto actor = args.size() == 1 ? id(args[0], handle_game_object) : std::nullopt;
+            if (!actor) return invalid<authoritative::ValueList>("raid capability requires a fleet handle");
+            const auto* fleet = world.fleet(*actor);
+            if (!fleet) return Result::success({authoritative::Value{false}});
+            if (!base->movement() || !base->control())
+                return invalid<authoritative::ValueList>("raid capability requires qualified movement and faction inputs");
+            const auto& players = base->control()->players;
+            const auto player = std::find_if(players.begin(), players.end(), [&](const auto& row) { return row.player == fleet->owner; });
+            if (player == players.end()) return invalid<authoritative::ValueList>("raid capability has no fleet faction");
+            return Result::success({authoritative::Value{gc::fleet_raid_capable(*fleet, *base->movement(), player->faction, base->actor_records())}});
+        }
+        if (name == "galactic.starbase_level") {
+            const auto planet = args.size() == 1 ? id(args[0], handle_game_object) : std::nullopt;
+            if (!planet || !world.planet(*planet) || !base->control())
+                return invalid<authoritative::ValueList>("starbase level requires a live planet and qualified base inputs");
+            const auto& planets = base->control()->planets;
+            const auto row = std::find_if(planets.begin(), planets.end(), [&](const auto& p) { return p.planet == *planet; });
+            if (row == planets.end()) return invalid<authoritative::ValueList>("starbase level has no planet inputs");
+            return Result::success({authoritative::Value::number(Number(row->starbase.level))});
+        }
         if (name == "galactic.planet_ai_usable") {
             // WGA-438: the receiver must be a planet; the answer reads the completed snapshot this shadow was captured from.
             const auto planet = args.size() == 1 ? id(args[0], handle_game_object) : std::nullopt;
@@ -1496,6 +1593,22 @@ struct NativeActions::ImmediateState final : authoritative::ImmediateEffectState
             const auto usable = owner->planet_usability_(*base, *planet);
             if (!usable) return Result::failure(usable.error());
             return Result::success({authoritative::Value{usable.value()}});
+        }
+        if (name == "galactic.planet_corrupted") {
+            // GA-06/WGA-450: whether the receiving planet is corrupted, from the completed snapshot this shadow was captured from.
+            // A receiver that is not a planet is refused like the usability predicate refuses it (the retail answer for other
+            // objects is not confirmed).
+            const auto planet = args.size() == 1 ? id(args[0], handle_game_object) : std::nullopt;
+            if (!planet || !world.planet(*planet))
+                return invalid<authoritative::ValueList>("Is_Corrupted -- object is not a planet.");
+            const auto* owner = *lifetime;
+            if (!owner || !owner->planet_corruption_) {
+                core::Diagnostic error; error.code = std::string(authoritative::codes::missing_api);
+                error.message = "planet corruption reader unbound (WGA-450)"; return Result::failure(std::move(error));
+            }
+            const auto corrupted = owner->planet_corruption_(*base, *planet);
+            if (!corrupted) return Result::failure(corrupted.error());
+            return Result::success({authoritative::Value{corrupted.value()}});
         }
         if (name == "galactic.freestore_count") {
             const auto player = !args.empty() ? id(args[0], ai::handle_freestore) : std::nullopt;

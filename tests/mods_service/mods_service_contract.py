@@ -80,13 +80,27 @@ def write_state(path: pathlib.Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def own_start_time() -> str:
+    """This process's creation time as the launcher writes it to game-running.json (FILETIME ticks)."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.windll.kernel32
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    created, exited, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
+    if not kernel.GetProcessTimes(kernel.GetCurrentProcess(), created, exited, kernel_time, user_time):
+        raise OSError("GetProcessTimes failed")
+    return str((created.dwHighDateTime << 32) | created.dwLowDateTime)
+
+
 def prepare_transcript_session(name: str, user_data: pathlib.Path) -> None:
     """profile_locks: instance 1 runs profile p; this very test process is the live game process."""
     if name != "profile_locks":
         return
     write_state(user_data / "mods" / "profiles" / "p.json", json.dumps(
         {"format": "eawr-mod-profile", "version": 1, "id": "p", "name": "P", "layers": []}))
-    write_state(user_data / "launcher" / "game-running.json", json.dumps({"profile": "p", "pid": os.getpid()}))
+    write_state(user_data / "launcher" / "game-running.json",
+                json.dumps({"profile": "p", "pid": os.getpid(), "process_start_time": own_start_time()}))
 
 
 VOLATILE = re.compile(rb'"(service_version|engine_build|game_release|kit_build)":"[^"\\]*"')
@@ -224,15 +238,18 @@ class ServiceContract(unittest.TestCase):
                     self.assertIn("result", call(3, "profile.save", profile={"id": name, "name": name, "layers": []}))
                 self.assertEqual(call(4, "profile.locks")["result"], {"locked": [], "unreadable": []})
                 me = os.getpid()
-                write_state(user / "launcher" / "game-running.json", json.dumps({"profile": "p", "pid": me}))
+                started = own_start_time()
+                write_state(user / "launcher" / "game-running.json", json.dumps({"profile": "p", "pid": me, "process_start_time": started}))
                 write_state(user / "instances" / "2" / "launcher" / "game-running.json",
-                            json.dumps({"profile": "p", "pid": me, "instance": 2, "host_port": 47626}))
+                            json.dumps({"profile": "p", "pid": me, "process_start_time": started, "instance": 2, "host_port": 47626}))
                 write_state(user / "instances" / "3" / "launcher" / "game-running.json", json.dumps({"profile": "q", "pid": gone}))
                 write_state(user / "instances" / "4" / "launcher" / "game-running.json", json.dumps({"profile": "", "pid": me}))
                 write_state(user / "instances" / "5" / "launcher" / "game-running.json", "{not json")
                 write_state(user / "instances" / "6" / "launcher" / "game-running.json",
                             json.dumps({"profile": "r", "pid": me, "process_start_time": "1"}))   # PID reused: another creation time
                 write_state(user / "instances" / "9" / "launcher" / "game-running.json", json.dumps({"profile": "r", "pid": me}))  # no such id
+                # A state that records no creation time cannot be told from a reused PID: it holds nothing (#6613).
+                write_state(user / "instances" / "7" / "launcher" / "game-running.json", json.dumps({"profile": "p", "pid": me}))
                 # The corrupt state of instance 5 is not "free": which profile it holds is unknown, so changes fail closed.
                 self.assertEqual(call(5, "profile.locks")["result"],
                                  {"locked": [{"profile": "p", "instances": [1, 2]}], "unreadable": [5]})
@@ -799,6 +816,13 @@ class ServiceContract(unittest.TestCase):
 
     def test_digest_waits_while_a_game_runs_and_finishes_once(self):
         """#6588: the manager's content digest reads nothing while a game instance runs, then finishes and is cached."""
+        self.digest_case(json.dumps({"profile": "p", "pid": os.getpid(), "process_start_time": own_start_time()}), exits=True)
+
+    def test_digest_is_not_held_back_for_good_by_an_unreadable_state(self):
+        """#6613: a corrupt game-running.json holds the digest back only for a short grace, then it finishes by itself."""
+        self.digest_case("{not json", exits=False)
+
+    def digest_case(self, state_text, exits):
         with tempfile.TemporaryDirectory() as temporary:
             base = pathlib.Path(temporary).resolve()
             game, user = base / "game", base / "user"
@@ -808,7 +832,7 @@ class ServiceContract(unittest.TestCase):
             leaf = game / "corruption" / "Mods" / "Leaf"
             for index in range(5):
                 write_state(leaf / "Data" / f"file{index}.txt", "x" * (1000 + index))
-            write_state(user / "launcher" / "game-running.json", json.dumps({"profile": "p", "pid": os.getpid()}))
+            write_state(user / "launcher" / "game-running.json", state_text)
             cache = user / "mods" / "cache" / "content"
             service = Interactive(args=["--user-data", str(user)])
             counter = 1
@@ -829,8 +853,10 @@ class ServiceContract(unittest.TestCase):
                 time.sleep(4)   # longer than the service's pause poll: a running digest would be done by now
                 self.assertEqual(content()["state"], "pending")
                 self.assertEqual(list(cache.glob("content-*.json")) if cache.exists() else [], [])
-                (user / "launcher" / "game-running.json").unlink()   # the game exits
-                deadline = time.time() + 30
+                if exits:
+                    (user / "launcher" / "game-running.json").unlink()   # the game exits
+                # else: the file stays corrupt; the digest must still finish once the grace has passed
+                deadline = time.time() + 45
                 state = "pending"
                 while state == "pending" and time.time() < deadline:
                     time.sleep(0.5)

@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <utility>
+#include <vector>
 
 // WGCH-20..26/52/63/91..95/131..134: live hero neutralization on the shared ability host. Preparation enumerates the
 // visible hostile heroes at the planet, prices each (WGCH-22/23) and samples its two absence times (WGCH-21/93);
@@ -176,9 +178,36 @@ void GalacticSession::Impl::prepare_neutralization(const GameCommand& command, c
         return refuse(!foreign_heroes ? GalacticRejectReason::neutralize_no_hero
             : allied_heroes == foreign_heroes ? GalacticRejectReason::neutralize_allied_hero
             : GalacticRejectReason::neutralize_not_targetable);
+    // WGCH-24/93: an AI keeps the valid options its credits cover, weights each 1, samples one with a synchronized draw
+    // and executes it; with none it returns without executing. Both absence samples above were already taken for every
+    // option, as in the original. A human gets the menu.
+    const auto* purchaser = find(economy_corruption->players, actor.owner, [](const auto& p) { return p.player; });
+    const auto* account = find(economy->players, actor.owner, [](const auto& p) { return p.player; });
+    std::optional<std::uint32_t> selected;
+    if (purchaser && !purchaser->human) {
+        // A seat without an economy row (a mod faction) has no credits to cover any option: nothing is admissible.
+        if (!account) return;
+        std::vector<std::uint32_t> admissible;
+        for (std::uint32_t i = 0; i < prepared.target_choices.size(); ++i)
+            if (prepared.target_choices[i].valid && account->credits >= prepared.target_choices[i].price) admissible.push_back(i);
+        if (admissible.empty()) return;
+        auto draw = economy_draw(*economy_corruption, setup.seed);
+        if (!draw) { failed = true; return; }
+        dirty[static_cast<std::size_t>(StateSection::economy_corruption)] = true;
+        const auto pick = std::min<std::size_t>(admissible.size() - 1,
+            static_cast<std::size_t>(draw.value().raw() * static_cast<std::int64_t>(admissible.size()) / Fixed::scale));
+        selected = admissible[pick];
+    }
     prepared.id = ability_host->next_request++;
     if (auto* menu = find(economy_corruption->menus, actor.id, [](const auto& m) { return m.buyer; }); menu && menu->active) {
         menu->active = false; dirty[static_cast<std::size_t>(StateSection::economy_corruption)] = true;
+    }
+    if (selected) {
+        auto request = prepared_ability(prepared, *selected);
+        put(ability_host->preparations, std::move(prepared), [](const auto& p) { return p.actor; });
+        touch_abilities(); ++ability_work.executions;
+        request.preparation = find(ability_host->preparations, actor.id, [](const auto& p) { return p.actor; })->id;
+        execute_neutralization(command, actor, request, tick, events); return;
     }
     event.kind = GalacticEventKind::ability_prepared; event.value = prepared.id;
     put(ability_host->preparations, std::move(prepared), [](const auto& p) { return p.actor; });

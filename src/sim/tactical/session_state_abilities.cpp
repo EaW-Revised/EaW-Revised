@@ -53,6 +53,38 @@ void TacticalSession::Impl::append_canonical_special_weapons_state(std::vector<s
         }
 }
 
+void TacticalSession::Impl::append_canonical_tsw_state(std::vector<std::uint8_t>& bytes) const {
+        // TSW-02: optional block, present only while a super weapon object has a record; every other battle keeps
+        // its bytes. Ascending object ID. The target list and the conflict gate are setup (bound by the content and
+        // the replay header), the records are the only state.
+        if (tsw_states.empty()) return;
+        bytes.insert(bytes.end(), {'T', 'S', 'W', 'S'});
+        sim::detail::append_u32(bytes, 2);
+        sim::detail::append_u32(bytes, 0);
+        sim::detail::append_u64(bytes, tsw_states.size());
+        for (const auto& [id, state] : tsw_states) {
+            sim::detail::append_u64(bytes, id);
+            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(state.phase));
+            sim::detail::append_u32(bytes, state.serviced ? 1U : 0U);
+            sim::detail::append_u32(bytes, state.target);
+            sim::detail::append_u32(bytes, state.countdown);
+            sim::detail::append_u32(bytes, state.speech_mask);
+            sim::detail::append_u32(bytes, 0);
+            sim::detail::append_i64(bytes, state.speed.raw());
+        }
+        // TSW-09/10: the victory hold with its deferred tests, the destroyed targets and the planet fact.
+        sim::detail::append_u32(bytes, tsw_world.victory_hold);
+        sim::detail::append_u32(bytes, tsw_world.planet_destroyed ? 1U : 0U);
+        sim::detail::append_u64(bytes, tsw_world.destroyed_targets.size());
+        for (const auto target : tsw_world.destroyed_targets) sim::detail::append_u32(bytes, target);
+        sim::detail::append_u64(bytes, tsw_world.deferred.size());
+        for (const auto& test : tsw_world.deferred) {
+            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(test.kind));
+            sim::detail::append_u32(bytes, test.owner);
+            sim::detail::append_u64(bytes, test.unit);
+        }
+}
+
 void TacticalSession::Impl::append_canonical_abilities_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts, const std::span<const std::vector<std::uint8_t>> encoded) const {
         // Unit abilities (#76), ascending ID, only when a live unit's type has abilities.
         std::uint64_t able = counts ? counts->able : 0;

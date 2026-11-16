@@ -1,5 +1,7 @@
 #include "map_camera_movement_support.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -9,6 +11,7 @@
 #include <string_view>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace eawr_map_camera_test {
 
@@ -108,7 +111,7 @@ void test_bridge_uses_motion_constants() {
     if (!config || !loaded) return;
     loaded->constants.distance_smooth_time = 0.1F;
     loaded->constants.scroll_acceleration_factor = 0.1F;
-    loaded->constants.scroll_deceleration_factor = 0.2F;
+    loaded->constants.scroll_deceleration_factor = 1.5F;
     MapCameraBridge bridge(true, input::Context::space);
     expect(bridge.activate(*config, loaded->constants,
         read("space-map-camera-bindings.json"), 1280, 720, std::nullopt).has_value(),
@@ -337,6 +340,88 @@ void test_plain_middle_drag_translates() {
         close(space.bridge.frame().target[2], before.target[2] + 160.0F, "space plain drag down moves back");
         close(space.bridge.controller().state().pitch_degrees, 45.0F, "space plain drag does not tilt");
     }
+}
+
+// #5789: the same middle-drag motion gives the same camera at any frame rate.
+// A pointer move is a plain translate or a Ctrl turn by the Ctrl state of its
+// own event; a long frame carrying a plain move and then a Ctrl turn must put
+// the move at the yaw it was made at, not at the yaw the frame ends at (a 180
+// degree turn in one frame used to flip left and right).
+namespace {
+
+struct DragMove {
+    float dx{};
+    float dy{};
+    bool turn{};
+};
+
+struct DragResult {
+    std::array<float, 3> target{};
+    float yaw{};
+    float pitch{};
+};
+
+// `frames` lists, per frame, the moves its events carry; the grab is pressed
+// before the first frame and released after the last.
+std::optional<DragResult> run_drag(const std::vector<std::vector<DragMove>>& frames) {
+    Space space;
+    activate(space, read("space-map-camera.xml"));
+    if (!space.ok) return std::nullopt;
+    auto& bridge = space.bridge;
+    if (!handled(bridge, middle(true))) return std::nullopt;
+    for (const auto& frame : frames) {
+        for (const auto& move : frame) {
+            const auto event = move.turn ? ctrl(pointer(move.dx, move.dy)) : pointer(move.dx, move.dy);
+            if (!handled(bridge, event)) return std::nullopt;
+        }
+        if (!bridge.step(0.0F).has_value()) return std::nullopt;
+    }
+    if (!handled(bridge, middle(false)) || !bridge.step(0.0F).has_value()) return std::nullopt;
+    return DragResult{bridge.frame().target, bridge.controller().yaw_degrees(),
+                      bridge.controller().state().pitch_degrees};
+}
+
+}  // namespace
+
+void test_middle_drag_is_frame_rate_independent() {
+    // Plain moves at yaw 0, then a Ctrl turn (the table reverses it: +px turns
+    // negative), then plain moves at the turned view, then a turn back past 180.
+    const std::vector<DragMove> moves{
+        {-64.0F, 36.0F, false}, {640.0F, 0.0F, true}, {64.0F, 0.0F, false},
+        {0.0F, -36.0F, false}, {-1100.0F, 0.0F, true}, {32.0F, 18.0F, false},
+    };
+    const auto result_of = [&](const std::size_t per_frame) {
+        std::vector<std::vector<DragMove>> frames;
+        for (std::size_t index = 0; index < moves.size(); index += per_frame) {
+            frames.emplace_back(moves.begin() + static_cast<std::ptrdiff_t>(index),
+                moves.begin() + static_cast<std::ptrdiff_t>(std::min(moves.size(), index + per_frame)));
+        }
+        return run_drag(frames);
+    };
+    const auto fast = result_of(1);      // one move per frame
+    const auto mid = result_of(2);
+    const auto slow = result_of(moves.size());  // the whole drag in one frame
+    expect(fast && mid && slow, "the drag runs at every frame rate");
+    if (!fast || !mid || !slow) return;
+    for (const auto* other : {&mid, &slow}) {
+        const std::string rate = other == &mid ? "2 moves per frame" : "one long frame";
+        close(other->value().target[0], fast->target[0], rate + ": same X as one move per frame", 0.05F);
+        close(other->value().target[2], fast->target[2], rate + ": same Z as one move per frame", 0.05F);
+        close(other->value().yaw, fast->yaw, rate + ": same yaw", 1e-3F);
+        close(other->value().pitch, fast->pitch, rate + ": same pitch", 1e-3F);
+    }
+
+    // Sign: the first plain move (64 px left) is made at yaw 0, so a drag that
+    // does that and then turns half a revolution in the same frame still moved
+    // left (-X) and not right.
+    const auto flipped = run_drag({{{-64.0F, 0.0F, false}, {-1280.0F, 0.0F, true}}});
+    const auto split = run_drag({{{-64.0F, 0.0F, false}}, {{-1280.0F, 0.0F, true}}});
+    const auto start = run_drag({{}});  // no moves: the authored start target
+    expect(flipped && split && start, "the half turn drag runs");
+    if (!flipped || !split || !start) return;
+    expect(flipped->target[0] < start->target[0], "a left move before a turn in the same frame still moves left");
+    close(flipped->target[0], split->target[0], "a half turn in the same frame keeps the direction", 0.05F);
+    close(flipped->target[2], split->target[2], "and the depth", 0.05F);
 }
 
 // FoC: a middle click resets zoom, yaw and pitch around the current target;

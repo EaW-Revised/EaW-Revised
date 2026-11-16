@@ -320,16 +320,21 @@ func _process(delta):
                 data, _ = self.run_wheel(target)
                 self.assertEqual(data["flights"][0]["state"], "overview")
                 self.assertFalse(data["radar_hud"]["advanced"])
+                # #4440: the wheel's outward flight plays the authored zoom cue once; the scripted focus start plays none.
+                self.assertEqual(data["galactic_audio"]["sounds"].get("GUI_Zoom", 0), 1, data["galactic_audio"])
 
     def test_inward_wheel_over_fleet_and_ground_enters_advanced(self):
         for target in ("fleet", "ground"):
             with self.subTest(target=target):
                 data, _ = self.run_wheel(target, inward=True)
                 self.assertTrue(data["radar_hud"]["advanced"])
+                # #4440: opening the planet map panel from the focused view is no zoom flight, so no zoom cue.
+                self.assertEqual(data["galactic_audio"]["sounds"].get("GUI_Zoom", 0), 0, data["galactic_audio"])
 
     def test_scroll_container_consumes_wheel_without_zooming(self):
         data, pointer = self.run_wheel("scroll")
         self.assertGreater(pointer["scroll"], 0, pointer)
+        self.assertEqual(data["galactic_audio"]["sounds"].get("GUI_Zoom", 0), 0, data["galactic_audio"])  # no zoom, no cue (#4440)
         self.assertEqual(data["flights"][0]["state"], "focused")
         self.assertFalse(data["radar_hud"]["advanced"])
 

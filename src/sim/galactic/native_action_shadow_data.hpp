@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace eawr::sim::galactic {
@@ -32,6 +33,18 @@ struct GalacticSession::NativeActionShadow::Data {
     using OrbitRecheckRequest = NativeActionShadow::OrbitRecheckRequest;
     std::map<FleetId, std::optional<Fleet>> fleet_rows;
     std::map<EntityId, std::optional<CensusObject>> actor_rows;
+    // Private script-batch tombstones. They are not actor-change notifications.
+    std::set<EntityId> script_removed;
+    struct ScriptStep {
+        enum class Kind { force, cash, journal, despawn } kind{};
+        std::size_t force{};
+        PlayerId player{};
+        math::Fixed actual{};
+        NativeEffectKind effect{};
+        std::vector<std::uint8_t> payload;
+        EntityId actor{};
+    };
+    std::vector<ScriptStep> script_steps;
     std::map<EntityId, std::optional<DetachedUnit>> detached_rows;
     std::map<FleetId, bool> fleet_blockers;
     std::map<PlanetId, ControlPlanet> control_rows;

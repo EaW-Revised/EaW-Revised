@@ -630,8 +630,17 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
             bool complete = true;
             for (std::size_t i = 0; complete && i < fiscal.planets.size(); ++i) {
                 const auto& row = contributions.value()[i];
-                value.planets.push_back({fiscal.planets[i].planet, planet_base_credits(i), row.total, {}, {}});
+                value.planets.push_back({fiscal.planets[i].planet, planet_base_credits(i), row.total, {}, {}, {}});
                 value.planets.back().trade = fiscal.contributions ? std::optional(row.trade) : std::nullopt;
+                // WGSI-11: the view player's own siphon on this planet, by the same WGEP-12 rule the payment applies.
+                if (economy_corruption && i < economy_corruption->planets.size()) {
+                    const auto& siphoned = economy_corruption->planets[i];
+                    if (siphoned.siphon.recipient == player->player) {
+                        auto taken = corruption_fixture::income({siphoned.corruption, current_planets[i].owner, row.total,
+                            siphoned.piracy, siphoned.siphon, clock.galactic_frame, economy_corruption->income_factors}, {}, false);
+                        if (taken && taken.value().siphon_active) value.planets.back().siphoned = taken.value().siphon_accrual;
+                    }
+                }
                 if (!player->earns_planet_income || current_planets[i].owner != player->player) continue;
                 complete = math::try_add(value.base, row.base, value.base)
                     && math::try_add(value.bonus, row.bonus, value.bonus)
@@ -703,8 +712,12 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     const bool offers_stale = !published_production_offers || published_offer_inputs != offer_inputs;
     offer_step.emplace(gc_profile::Phase::off_rebuild);
     if (offers_stale) {
-        published_production_offers = std::make_shared<const std::vector<ObservedProductionOffer>>(
-            observed_production_offers(offer_inputs, live_fleets, offer_workers, view_player));
+        // Producers whose own inputs did not change keep the previous publication's rows (#6933).
+        const OfferReuse reuse{&published_offer_inputs, published_production_offers.get()};
+        auto rebuilt = observed_production_offers(offer_inputs, live_fleets, offer_workers, view_player, &reuse);
+        if (verify_cached_hash && rebuilt != observed_production_offers(offer_inputs, live_fleets, offer_workers, view_player))
+            throw std::runtime_error("galactic incremental production offers differ from an independent recomputation");
+        published_production_offers = std::make_shared<const std::vector<ObservedProductionOffer>>(std::move(rebuilt));
         published_offer_inputs = std::move(offer_inputs);
         ++production_offer_rebuilds;
     } else if (verify_cached_hash && *published_production_offers != observed_production_offers(offer_inputs, live_fleets, offer_workers, view_player)) {
@@ -758,6 +771,35 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
         completed_tick, published, std::vector<GalacticPlayer>{}, std::vector<Planet>{}, std::vector<Route>{}, std::vector<Fleet>{}, std::move(events), setup.rules.maximum_fleet_movement_distance, std::nullopt, movement_inputs, seat_control, seats, std::nullopt, std::nullopt, std::nullopt, control_effects, population, std::nullopt, std::nullopt, std::nullopt, std::vector<ObservedProductionOffer>{}, observer_projection, std::move(forecast), published_production_originals, std::nullopt, std::nullopt, std::nullopt, planet_access, observer_input_generation, economy_input_generation, published_actor_records, published_black_market_menus, published_ability_results, published_hero_action_menus, published_corruption_menu, published_sale_types, published_corruption_transitions, offers, published_production, projected_rows, view_player);
 }
 
+void GalacticSession::Impl::publish_snapshot(std::vector<GalacticEvent> events, const PartitionExecutor* executor, ObserverViewContext view) {
+    // Inside a batch the write only marks the slot stale (#6933): the rebuild runs once on the next read of the snapshot or
+    // when the batch ends, from the events of the last write, so every read sees what an immediate rebuild would have shown.
+    // A publication with a partition executor or a player view is never deferred.
+    if (snapshot_batch_depth && !executor && !view.player && snapshot) {
+        snapshot_pending_events = std::move(events);
+        snapshot.defer();
+        return;
+    }
+    snapshot_pending_events.clear();
+    snapshot = make_snapshot(std::move(events), executor, view);
+}
+std::vector<GalacticEvent> GalacticSession::Impl::current_snapshot_events() const {
+    if (snapshot.pending()) return snapshot_pending_events;
+    const auto events = snapshot->events();
+    return std::vector<GalacticEvent>(events.begin(), events.end());
+}
+void GalacticSession::Impl::refresh_snapshot() { publish_snapshot(current_snapshot_events()); }
+void GalacticSession::Impl::rebuild_pending_snapshot() {
+    // Runs under the slot's lock on the first reader; the build reads the slot's previous value, exactly as an immediate
+    // rebuild would. The pending events are kept until the build succeeded.
+    snapshot = make_snapshot(snapshot_pending_events);
+    snapshot_pending_events.clear();
+}
+void GalacticSession::Impl::end_snapshot_batch() {
+    if (snapshot_batch_depth == 0 || --snapshot_batch_depth != 0) return;
+    (void)snapshot.current(); // settles a stale slot: the batch's last write is published before the batch is over
+}
+
 GalacticSession::GalacticSession(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 GalacticSession::GalacticSession(GalacticSession&&) noexcept = default;
 GalacticSession& GalacticSession::operator=(GalacticSession&&) noexcept = default;
@@ -766,6 +808,7 @@ GalacticSession::~GalacticSession() = default;
 core::Result<GalacticSession> GalacticSession::create(const GalacticSetup& setup) {
     if (auto valid = validate_setup(setup); !valid) return core::Result<GalacticSession>::failure(valid.error());
     auto impl = std::make_unique<Impl>();
+    impl->snapshot.bind(impl.get(), [](void* owner) { static_cast<Impl*>(owner)->rebuild_pending_snapshot(); });
     impl->verify_cached_hash = hash_verification_requested();
     impl->setup = setup;
     impl->native_population_schema = session_detail::native_population_schema(setup);
@@ -942,6 +985,12 @@ core::Result<GalacticSession> GalacticSession::create(const GalacticSetup& setup
             return fail<void>(diagnostic_codes::invalid_setup, "invalid story AI-usage journal");
         return world.set_story_ai_usage(actor, prevent ? std::optional<bool>(prevent == 2) : std::nullopt,
             prefer ? std::optional<bool>(prefer == 2) : std::nullopt);
+    });
+    impl->native_replayers.emplace(NativeEffectKind::object_despawn, [](GalacticSession& world, const NativeEffect& effect, const PartitionExecutor&) {
+        sim::detail::Reader in(effect.payload); EntityId actor{};
+        if (!in.read_u64(actor) || !actor || in.remaining())
+            return fail<void>(diagnostic_codes::invalid_setup, "invalid script despawn journal");
+        return world.despawn_script_object(actor);
     });
     impl->native_replayers.emplace(NativeEffectKind::ability_lifecycle, [](GalacticSession& world, const NativeEffect& effect, const PartitionExecutor&) {
         sim::detail::Reader in(effect.payload); EntityId actor{}; std::uint8_t operation{};

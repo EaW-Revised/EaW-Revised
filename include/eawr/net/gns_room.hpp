@@ -36,6 +36,8 @@ public:
     virtual core::Result<void> send(PeerIndex slot, std::span<const std::uint8_t> blob) = 0;
     virtual core::Result<std::optional<GnsRoomSignal>> poll() = 0;
     virtual std::optional<GnsTurnCredentials> turn_credentials() const = 0;
+    // See GnsSignallingEndpoint::own_turn_uris.
+    virtual std::optional<std::string> own_turn_uris() const { return std::nullopt; }
     virtual GnsRoomLease lease() const = 0;
     virtual core::Result<void> status() const = 0;
     virtual core::Result<void> leave() = 0;

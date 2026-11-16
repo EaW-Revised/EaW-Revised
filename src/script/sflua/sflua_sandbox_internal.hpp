@@ -66,6 +66,7 @@ struct Sandbox::Impl {
     lua_State* state{};
     SandboxLimits limits;
     ::std::int64_t budget{};
+    ::std::uint64_t host_units{}; // host-side work charged to `budget` since it was set (Sandbox::charge_host_work)
     SandboxFault fault{SandboxFault::none};
     int identity_suspended{};
     ::std::unordered_map<const void*, ::std::uint64_t> identities;
@@ -217,6 +218,8 @@ int sandbox_foreachi(lua_State* state);
 int sandbox_rep(lua_State* state);
 int sandbox_tostring(lua_State* state);
 int sandbox_collectgarbage(lua_State* state);
+int sandbox_gcinfo(lua_State* state);
+int sandbox_loadstring(lua_State* state);
 bool stored_size_on_top(lua_State* state);
 void set_field_function(lua_State* state, int table, const char* name, lua_CFunction function);
 void set_forbidden(lua_State* state, int table, const char* name, const char* shown_name);

@@ -5,6 +5,8 @@
 #include "galactic_support.hpp"
 #include "galactic_ai_actions.hpp"
 #include "galactic_ai_movement_runtime.hpp"
+#include "galactic_ai_world.hpp"
+#include "eawr/sim/galactic/raid.hpp"
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/campaign/auto_resolve_live.hpp"
 #include "eawr/campaign/conflict_policy.hpp"
@@ -87,6 +89,14 @@ gc::GalacticSetup fixture() {
     }
     return s;
 }
+gc::GalacticSetup raid_fixture() {
+    auto setup = fixture(); setup.planets.back().owner = 2;
+    setup.fleets.front().members = {{21, 2}, {22, 2}};
+    setup.movement->contents = {{21, {{40, 1}}}, {22, {{41, 1}}}};
+    setup.movement->raid = gc::RaidSetup{{1, 1, 2, 1, 2}, {{1, 2, false, false}, {2, 0, false, false}}};
+    setup.control->planets.back().ground_base = {2, 1}; setup.control->planets.back().starbase = {2, 3};
+    return setup;
+}
 // Fixture/stock harness supplies ordinary-world inputs from live control. The
 // qualified TaskForce AI-planet classifier remains a runtime adapter seam;
 // the installed proof deliberately exercises the generic native command.
@@ -126,6 +136,100 @@ void bind(ga::NativeActions& actions, gc::GalacticSession& world, bool& pending,
         ++searches; return eawr::core::Result<ga::NativeActions::MovementInput>::success(copied(player, snapshot));
     }, [&] { return pending; }, [&](auto player, auto actor) { return world.recheck_native_orbit(player, actor); });
 }
+void raid_script_and_movement() {
+    namespace auth = eawr::script::authoritative;
+    namespace foc = eawr::script::foc;
+    std::string baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto world = take(gc::GalacticSession::create(raid_fixture()));
+        auto actions = std::make_shared<ga::NativeActions>(world, std::make_shared<ai::GalacticFunding>(), ga::NativeActions::Placement{}, std::map<gc::PlayerId, Fixed>{});
+        bool pending{}; std::uint64_t searches{}; bind(*actions, world, pending, searches);
+        ai::GalacticPerceptionSetup perception;
+        perception.players = {{1, 1, "One", "Normal", false, true, false, 1}, {2, 2, "Two", "Normal", false, true, false, 3}, {3, 3, "Three", "Normal", true, false, false, 0}};
+        perception.planets = {{1, "A", 101, {}, {}, {}, {}, {}}, {2, "B", 102, {}, {}, {}, {}, {}}, {3, "C", 103, {}, {}, {}, {}, {}}};
+        for (const auto id : {1U, 2U}) { foc::AiType type; type.type_id = id; type.name = std::to_string(id); perception.types.push_back(type); }
+        auto ai_world = std::make_shared<ai::GalacticWorld>(std::move(perception));
+        done(ai_world->bind(world.snapshot(), {}, executor, 0, world.next_entity_id()));
+        auto host = std::make_shared<foc::detail::Host>(); host->ai_world = ai_world; host->view = ai_world->view(); host->galactic_execution = actions;
+        auto engine = std::make_shared<ai::Engine>(host, ai::AiData{}, std::vector<ai::PlanDef>{}); host->engine = engine.get();
+        ai::GoalType definition; definition.reachability = "ANY"; ai::EngineContractAccess::movement_fixture(*engine, definition);
+        auth::ModuleManifest manifest;
+        done(manifest.add("RAID_CONTRACT.LUA", R"(
+function Start(force, planet)
+    Capable = force.Is_Raid_Capable()
+    Low = WaitForStarbase(planet, 2.9); Equal = WaitForStarbase(planet, 3)
+    High = WaitForStarbase(planet, 4); Zero = WaitForStarbase(planet, 0)
+    RaidBlock = force.Raid(planet)
+end
+function PollBases()
+    LowDone = Low.IsFinished(); EqualDone = Equal.IsFinished()
+    HighDone = High.IsFinished(); ZeroDone = Zero.IsFinished()
+end
+function BadCount(planet) WaitForStarbase(planet) end
+function BadObject(planet) WaitForStarbase(3, 2) end
+function BadType(planet) WaitForStarbase(planet, "2") end
+function BadLow(planet) WaitForStarbase(planet, -0.1) end
+function BadHigh(planet) WaitForStarbase(planet, 5.1) end
+function BadRaid(force) force.Raid(3) end
+function BadRaidMissing(force) force.Raid() end
+function Capability(force) Capable = force.Is_Raid_Capable() end
+)"));
+        auth::SessionConfig config; config.tick_duration = {1, 30}; config.galactic_clock = true;
+        auto scripts = take(auth::ScriptScheduler::create(config, std::move(manifest)));
+        std::vector<eawr::core::Diagnostic> errors; foc::detail::register_plan_bindings(scripts, host, errors);
+        expect(errors.empty(), "raid and starbase bindings register");
+        done(scripts.set_immediate_effect_host(actions->immediate_host({}, 32), 1));
+        done(scripts.create_instance(ai::first_plan_instance, "RAID_CONTRACT.LUA"));
+        const auto object = [](eawr::sim::EntityId id) { return auth::Value{auth::Handle{foc::handle_game_object, id}}; };
+        const auth::Value force{auth::Handle{ai::handle_taskforce, ai::galactic_id_base(0) | 8}};
+        std::uint64_t sequence{};
+        const auto invoke = [&](std::string name, auth::ValueList args) {
+            auth::ScriptEvent event; event.key = {scripts.completed_tick() + 1, auth::first_simulation_producer, 1, sequence++};
+            event.target = ai::first_plan_instance; event.kind = auth::ScriptEvent::Kind::call; event.name = std::move(name); event.arguments = std::move(args);
+            done(scripts.submit_event(std::move(event))); return take(scripts.service(executor));
+        };
+        const auth::Value missing_force{auth::Handle{ai::handle_taskforce, ai::galactic_id_base(0) | 99}};
+        expect(invoke("Capability", {missing_force}).diagnostics.empty()
+            && !std::get<bool>(take(scripts.read_global(ai::first_plan_instance, "Capable"))->data), "missing fleet answers false, never a block");
+        for (const auto name : {"BadCount", "BadObject", "BadType", "BadLow", "BadHigh", "BadRaid", "BadRaidMissing"}) {
+            const auto saved = take(scripts.save(executor));
+            auto report = invoke(name, name == std::string_view("BadRaid") || name == std::string_view("BadRaidMissing") ? auth::ValueList{force} : auth::ValueList{object(3)});
+            expect(report.diagnostics.size() == 1, std::string(name) + " reports a script argument error"); done(scripts.load(saved));
+        }
+        auto report = invoke("Start", {force, object(3)}); expect(report.diagnostics.empty(), "raid plan reaches capability and Raid without retiring");
+        expect(std::get<bool>(take(scripts.read_global(ai::first_plan_instance, "Capable"))->data), "raid capability is an immediate boolean");
+        done(engine->after_service(report));
+        const auto raid_handle = std::get<auth::Handle>(take(scripts.read_global(ai::first_plan_instance, "RaidBlock"))->data);
+        const auto* block = engine->block(raid_handle.id);
+        expect(block && block->kind == ai::Block::Kind::move && block->galactic_request, "Raid returns the ordinary retained movement block");
+        const auto request = block->galactic_request;
+        expect(actions->movements().at(request).raid && world.snapshot()->fleets().front().raid_destination == 3
+            && world.snapshot()->fleets().front().motion.transit->path == std::vector<gc::PlanetId>{1, 2},
+            "fleet retains the final raid target while executing only the friendly first hop");
+        report = invoke("PollBases", {}); expect(report.diagnostics.empty(), "starbase blocks poll real native levels");
+        for (const auto name : {"LowDone", "EqualDone", "ZeroDone"}) expect(std::get<bool>(take(scripts.read_global(ai::first_plan_instance, name))->data), "starbase comparison includes equality, zero and truncated fractions");
+        expect(!std::get<bool>(take(scripts.read_global(ai::first_plan_instance, "HighDone"))->data), "starbase wait remains pending below its level");
+        ai::EngineContractAccess::blocks(*engine);
+        const auto high = std::get<auth::Handle>(take(scripts.read_global(ai::first_plan_instance, "High"))->data);
+        expect(!engine->block(high.id)->finished, "ordinary block service cannot finish a starbase wait");
+        ga::bind_movement_references(*actions, engine);
+        const auto saved = take(actions->capture()); done(actions->restore(saved));
+        expect(take(actions->capture()).components == saved.components && actions->movements().at(request).raid, "mid-transit raid intent round-trips canonically");
+        bool final_raid{};
+        for (unsigned tick = 0; tick < 200 && !take(actions->poll_movement(request)).finished; ++tick) {
+            (void)take(world.step(executor));
+            for (const auto& fleet : world.snapshot()->fleets()) if (fleet.id == 10 && fleet.raid_destination == 3) final_raid = true;
+        }
+        expect(final_raid && searches >= 2 && take(actions->poll_movement(request)).finished, "raid routes across multiple ordinary hops with its final target retained");
+        ga::ActionRequest ordinary; ordinary.kind = ga::ActionKind::move; ordinary.player = 1; ordinary.object = 10; ordinary.target = 2;
+        ordinary.reach = ga::MovementReach::any;
+        expect(take(actions->admit(ordinary)).admitted && !world.snapshot()->fleets().front().raid_destination,
+            "ordinary accepted movement clears the preceding raid destination");
+        const auto hash = world.cached_state_hash().get() + take(actions->state_hash());
+        if (baseline.empty()) baseline = hash; else expect(hash == baseline, "raid Lua/native continuation agrees on 1/2/4/8 workers");
+    }
+}
 void shared_movement_block() {
     auto world = take(gc::GalacticSession::create(fixture()));
     auto actions = std::make_shared<ga::NativeActions>(world, std::make_shared<ai::GalacticFunding>(), ga::NativeActions::Placement{}, std::map<gc::PlayerId, Fixed>{});
@@ -151,7 +255,7 @@ void shared_movement_block() {
     expect(ga::movement_subscribed(*actions, *engine, block->galactic_request), "restored native request binds exact retained shared block");
     auto missing = saved; auto& bytes = missing.components.at("galactic-production");
     // Codec 6's counter and empty qualified-freestore frame occupy 40 trailing bytes.
-    bytes.erase(bytes.end() - 40 - 128, bytes.end() - 40);
+    bytes.erase(bytes.end() - 40 - 136, bytes.end() - 40);
     std::fill(bytes.end() - 40 - 8, bytes.end() - 40, std::uint8_t{});
     expect(!actions->restore(missing), "restore refuses a shared block with no saved native request");
     const auto before = searches; ai::EngineContractAccess::blocks(*engine);
@@ -179,7 +283,7 @@ void movement_associations() {
     const auto recaptured = take(actions.capture());
     expect(recaptured.version == saved.version && recaptured.components == saved.components, "associated movement exact recapture preserves consumer IDs and registration");
     auto malformed = saved; auto& bytes = malformed.components.at("galactic-production");
-    bytes[bytes.size() - 40 - 128 + 88] ^= 1;
+    bytes[bytes.size() - 40 - 136 + 88] ^= 1;
     expect(!actions.restore(malformed), "malformed restored movement association refuses");
     const auto unchanged = take(actions.capture());
     expect(unchanged.version == saved.version && unchanged.components == saved.components, "malformed restored movement association refuses before publication");
@@ -676,6 +780,59 @@ void summary_hold_survives_undefended_resume() {
         else expect(game.state_sha256() == baseline, "overlapping hold release equality on 1/2/4/8 workers");
     }
 }
+void raid_native_disk() {
+    std::string baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto setup = raid_fixture();
+        auto closed = setup;
+        for (auto& access : closed.movement->access) if (access.player == 1 && access.planet == 3) access.accessible = false;
+        auto blocked = take(gc::GalacticSession::create(closed));
+        auto blocked_shadow = take(blocked.begin_native_actions(1, 8));
+        const gc::MoveFleet command{10, {1, 2, 3}, {}, true};
+        expect(take(blocked_shadow.admit_fleet(1, command, false)).admitted,
+            "shadow defers final landing eligibility while travelling an ordinary intermediate hop");
+        done(blocked.commit_native_actions(blocked_shadow));
+        for (unsigned tick = 0; tick < 60; ++tick) (void)take(blocked.step(executor));
+        expect(blocked.snapshot()->fleets().front().orbit == 2 && blocked.snapshot()->fleets().front().raid_destination == 3,
+            "live publication preserves travel and the final raid target even while that target is inaccessible");
+        expect(!take(blocked.admit_native_fleet(1, gc::MoveFleet{10, {2, 3}, {}, true})).admitted
+            && !blocked.snapshot()->fleets().front().motion.transit,
+            "final raid hop still enforces the target's landing eligibility");
+        auto session = take(cp::GameSession::create(setup));
+        gc::GalacticSession* owner{};
+        done(session.configure_native_replay_owners([&](auto& world) {
+            owner = &world; return eawr::core::Result<void>::success();
+        }));
+        auto shadow = take(owner->begin_native_actions(1, 8));
+        expect(take(shadow.admit_fleet(1, command, false)).admitted, "shadow admits the complete raid destination through a friendly hop");
+        const auto* predicted = shadow.fleet(10);
+        expect(predicted && predicted->raid_destination == 3 && predicted->motion.transit
+            && predicted->motion.transit->path == std::vector<gc::PlanetId>{1, 2}, "shadow retains the final target but schedules only the first hop");
+        done(owner->commit_native_actions(shadow));
+        const auto& actual = owner->snapshot()->fleets().front();
+        expect(actual.raid_destination == predicted->raid_destination && actual.motion == predicted->motion,
+            "ordered native publication agrees with the shadow raid admission");
+        const auto build = eawr::checkpoint::game_identities(setup);
+        for (const auto frontier : {0U, 4U}) {
+            while (session.completed_tick() < frontier) (void)take(session.step(executor));
+            const auto bytes = take(eawr::checkpoint::save_game_checkpoint(session, build));
+            auto direct = take(eawr::checkpoint::load_game_checkpoint(bytes, build, {}, executor));
+            auto replayed = take(eawr::checkpoint::replay_game_checkpoint_for_testing(bytes, build, {}, executor));
+            expect(direct.session.state_sha256() == session.state_sha256()
+                && replayed.session.state_sha256() == session.state_sha256(), "direct and historical native raid restore preserve target and one-hop transit");
+            expect(replayed.session.record().native_effects == session.record().native_effects, "reconstructed raid journal retains the full destination request");
+        }
+        for (unsigned tick = 0; tick < 60; ++tick) (void)take(session.step(executor));
+        const auto& arrived = owner->snapshot()->fleets().front();
+        expect(arrived.orbit == 2 && !arrived.motion.transit && arrived.raid_destination == 3,
+            "intermediate arrival retains the raid destination and waits for the next AI hop");
+        expect(take(owner->admit_native_fleet(1, gc::MoveFleet{10, {2, 1}, {}})).admitted
+            && !owner->snapshot()->fleets().front().raid_destination, "ordinary native movement clears the retained final raid target");
+        const auto hash = session.state_sha256();
+        if (baseline.empty()) baseline = hash; else expect(hash == baseline, "native raid shadow, publication and disk reconstruction agree on 1/2/4/8 workers");
+    }
+}
 void native_journal_disk() {
     std::string baseline;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
@@ -1036,7 +1193,7 @@ int case_galactic_ai_movement_tests(int argc, char** argv) {
     }
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
-        else { shared_movement_block(); movement_associations(); taskforce_containment(); invasion_queue_disk(); invasion_retention(); equal_owner_invasion_block(); summary_hold_survives_undefended_resume(); native_journal_disk(); contracts(); changed_path(); bribed_traversal_without_owner(); skipped_arrival_polls(); arrival_then_conflict_before_poll(); packed_remnant_hash(); native_management_gate(); population_memo_equality(); }
+        else { raid_script_and_movement(); raid_native_disk(); shared_movement_block(); movement_associations(); taskforce_containment(); invasion_queue_disk(); invasion_retention(); equal_owner_invasion_block(); summary_hold_survives_undefended_resume(); native_journal_disk(); contracts(); changed_path(); bribed_traversal_without_owner(); skipped_arrival_polls(); arrival_then_conflict_before_poll(); packed_remnant_hash(); native_management_gate(); population_memo_equality(); }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

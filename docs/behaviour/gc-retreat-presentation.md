@@ -17,6 +17,7 @@ tactical retreat out; these rows apply to the campaign tactical battle.
 | RP-08 | The line's colour is the retreating faction's `Space_Retreat_Countdown_Color_RGBA` (four 0..255 channels; stock white). | debug build |
 | RP-09 | At the station-wait boundary of FS-R06 each living owned station with a `Retreat_Self_Destruct_Explosion` creates that object at its z-adjusted target position, facing the station's facing, before it receives its lethal damage. The object is a projectile whose shooter is the station: its instant area blast (stock `Self_Destruct_Star_Base_Level_N_*`: range and damage 1200 + 200 per level, damage type `Damage_StarBase_Self_Destruct`) damages what is near, so the explosion is **gameplay**, not presentation only. The projectile's detonation particle and sound are the authored ones. | debug build; FS-R06 |
 | RP-10 | `Space_Surrender_SFXEvent` has a tag-table row but no accessor or reader in the debug build; it plays nothing (as does `Land_Surrender_SFXEvent`). | debug build (no reader found; unverified beyond a name search) |
+| RP-11 | From k=30 a departing ship's jump sound plays once where the ship is: the ship type's `SFXEvent_Retreat_Engines_Jump`, else its owner's faction `SFXEvent_Exit_Into_Hyperspace` (RC-08 of the retreat frame schedule). | debug build; FC-R05 |
 
 ## Remake
 

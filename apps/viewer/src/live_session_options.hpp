@@ -42,6 +42,13 @@ struct PreparedBattle {
     std::optional<battle::BattleStart> start;
 };
 
+// legacy #6634: one injected tactical-script letterbox call (--eawr-live-letterbox), at the tick of the script service that makes it.
+struct DebugLetterbox final {
+    std::uint64_t tick{};
+    bool in{};
+    double seconds{};
+};
+
 struct ScheduledOrder final {
     std::uint64_t tick{};
     sim::tactical::OrderKind kind{sim::tactical::OrderKind::stop};
@@ -54,6 +61,11 @@ struct ScheduledOrder final {
     // ability only (#76): which ability, and on, off or its autofire.
     sim::tactical::AbilityKind ability{sim::tactical::AbilityKind::none};
     sim::tactical::AbilityAction action{sim::tactical::AbilityAction::activate};
+    // `<tick>:buy:<player>@<TYPE>` and `<tick>:reinforce:<player>@<TYPE>,<x>,<y>,<z>` (#5097 measurement hooks): the
+    // purchase and the call-in of a type as that player, through the commands the HUD issues. `unit` holds the player id.
+    enum class Purchase : std::uint8_t { none, buy, reinforce };
+    Purchase purchase{Purchase::none};
+    std::string type_name;
 };
 
 struct ScriptedInput final {
@@ -79,6 +91,8 @@ struct ScriptedInput final {
 
 struct Options final {
     bool land{};
+    // HCB-46/63: skirmish has tactical production; GC tactical children do not.
+    bool tactical_production{true};
     bool observer_multiplayer{};
     sim::SeatId controller_seat{};
     std::vector<std::pair<sim::SeatId, std::string>> controller_names;
@@ -91,6 +105,9 @@ struct Options final {
     std::shared_ptr<LanMatch> lan;
     std::string fixture;                                  // --eawr-live-session (m2|skirmish|replay|melee)
     skirmish::FixtureOptions skirmish;                    // --eawr-skirmish-* (#908)
+    bool skirmish_tsw_conflict{};                         // --eawr-skirmish-tsw-conflict on: staging, the super weapon's gate is open
+    bool skirmish_destroyed_planet{};                     // --eawr-skirmish-destroyed-planet on: start as at a destroyed planet (WGT-57)
+    std::optional<std::int64_t> skirmish_credits;           // --eawr-skirmish-credits <n>: the lobby's starting credits (default: MP_Default_Credits)
     // `attract` (MAT-08): the main-menu demo battle. `skirmish.map` names the demo map; the
     // forces are its placed objects and `attract_ai` names the AI player type each editor
     // player index runs (MAT-09). There is no lobby, no victory condition and no local player.
@@ -179,6 +196,9 @@ struct Options final {
     std::optional<std::uint64_t> save_tick;
     std::filesystem::path save_path;
     std::filesystem::path load_path;
+    // legacy #6634: --eawr-live-letterbox <tick>:<in|out>:<seconds> (repeatable) injects a tactical script's Letter_Box_In / Letter_Box_Out
+    // in the script service of that tick, for tests of the battle HUD's bands; the battle must run scripts (the AI on).
+    std::vector<DebugLetterbox> debug_letterbox;
     // A saved battle the host already prepared for exactly this `load_path` (the queue step, skirmish_prepare.hpp). The
     // first load stage takes it only for the same mounted content and path; otherwise it prepares the battle itself.
     std::shared_ptr<SavedBattlePreparation> saved_preparation;

@@ -77,18 +77,19 @@ bool GalacticSession::Impl::plan_orbit_loss(const PlanetId planet, const std::sp
     return true;
 }
 
-// The same ordered commit the control service applies to an owner change; a forced Neutral transition has
-// no capture reward because the planet is already ruined (WGM-76, WGCH-150).
+// The same ordered commit the control service applies to an owner change; a forced transition has no capture
+// reward (the hack: the planet is already ruined, WGM-76, WGCH-150; the story planet reward: WST-42 names none).
+// `level` is the political control the planet holds afterwards: zero for the hack, one for a story gift.
 core::Result<void> GalacticSession::Impl::force_planet_owner(const PlanetId planet_id, const PlayerId new_owner,
-    const std::uint64_t tick, std::vector<GalacticEvent>& events) {
+    const std::uint64_t tick, std::vector<GalacticEvent>& events, const math::Fixed level) {
     const auto* surface = find(control->planets, planet_id, [](const auto& r) { return r.planet; });
     if (!surface) return core::Result<void>::success();
     const auto index = static_cast<std::size_t>(surface - control->planets.data());
     auto& state = control->state[index];
     const auto before = state;
-    if (before.current_player == new_owner && before.target_player == new_owner && before.current == Fixed{}) return core::Result<void>::success();
+    if (before.current_player == new_owner && before.target_player == new_owner && before.current == level) return core::Result<void>::success();
     state.current_player = state.target_player = new_owner;
-    state.current = state.target = Fixed{};
+    state.current = state.target = level;
     dirty[static_cast<std::size_t>(StateSection::control)] = true;
     ++income_control_generation;
     PoliticalControlEffect effect; effect.planet = planet_id; effect.old_owner = before.current_player; effect.new_owner = new_owner;

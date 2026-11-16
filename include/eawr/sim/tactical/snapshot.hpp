@@ -8,6 +8,7 @@
 #include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/types.hpp"
 #include "eawr/sim/tactical/retreat.hpp"
+#include "eawr/sim/tactical/tsw.hpp"
 #include "eawr/sim/tactical/victory.hpp"
 
 #include <cstdint>
@@ -139,10 +140,13 @@ public:
         std::vector<RetreatView> retreat_views = {},
         std::vector<GarrisonTimerView> garrison_timers = {},
         std::vector<BeaconState> beacons = {},
-        std::optional<BattleControllerPolicy> controllers = std::nullopt);
+        std::optional<BattleControllerPolicy> controllers = std::nullopt,
+        std::vector<TswView> tsw_views = {});
 
     [[nodiscard]] const std::optional<BattleControllerPolicy>& controller_policy() const noexcept { return controllers_; }
     [[nodiscard]] std::span<const RetreatView> retreat_views() const noexcept { return retreat_views_; }
+    // TSW-13: the super weapon objects' switch facts, ascending entity id. Presentation only: not part of canonical_bytes().
+    [[nodiscard]] std::span<const TswView> tsw_views() const noexcept { return tsw_views_; }
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     [[nodiscard]] std::span<const SnapshotPlayer> players() const noexcept;
     [[nodiscard]] std::span<const TacticalInstance> instances() const noexcept;
@@ -179,6 +183,7 @@ public:
 
 private:
     std::vector<RetreatView> retreat_views_;
+    std::vector<TswView> tsw_views_;
     std::uint64_t completed_tick_{};
     std::vector<SnapshotPlayer> players_;
     std::vector<TacticalInstance> instances_;

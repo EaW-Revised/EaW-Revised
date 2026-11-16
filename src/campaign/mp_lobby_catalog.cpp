@@ -92,6 +92,42 @@ std::array<std::string, 3> campaign_difficulties(const data::galactic::GalacticD
 } // namespace
 
 namespace {
+// One campaign entry as a lobby row, without its difficulty list (that needs the playable check first).
+sim::galactic::MpLobbyCampaign make_row(const data::galactic::GalacticData& data, const data::galactic::Campaign& campaign,
+    const bool multiplayer) {
+    std::set<std::string> named;
+    name_all(named, campaign.home_locations); name_all(named, campaign.starting_credits);
+    name_all(named, campaign.starting_tech_levels); name_all(named, campaign.max_tech_levels);
+    name_all(named, campaign.starting_forces); name_all(named, campaign.ai_player_control);
+    sim::galactic::MpLobbyCampaign row;
+    row.name = campaign.name;
+    row.text_id = campaign.text_id;
+    row.description_text = campaign.description_text;
+    for (const auto& planet_name : campaign.planets) {
+        const auto* planet = data.planet(planet_name);
+        if (planet == nullptr || !planet->galactic_position) continue;
+        row.planet_points.emplace_back(planet->galactic_position->x, planet->galactic_position->y);
+    }
+    row.single_player_rules = !multiplayer;
+    row.supports_custom_settings = campaign.supports_custom_settings.value_or(false);
+    row.minimum_custom_tech = campaign.minimum_custom_tech;
+    row.maximum_custom_tech = campaign.maximum_custom_tech;
+    // LSA-40: a signed atoi of seconds; a negative timeout reads as already elapsed, so as zero here.
+    if (const auto* timeout = data.constant("Battle_Pending_Timeout_Seconds"))
+        row.vote_timeout_seconds = std::max<std::int64_t>(0, data::retail::integer_constant(timeout->text));
+    sim::galactic::PlayerId next{};
+    for (const auto& faction : data.factions) {
+        const bool neutral = faction.is_neutral.value_or(false);
+        if (!neutral && !named.contains(upper(faction.name))) continue;
+        ++next;
+        // A single-player entry names its human faction; every other faction is an AI seat.
+        const bool playable = faction.is_playable.value_or(false) && !neutral
+            && (multiplayer || upper(faction.name) == upper(campaign.starting_active_player));
+        row.factions.push_back({next, next, 0, faction.name, playable, neutral});
+    }
+    return row;
+}
+
 std::vector<sim::galactic::MpLobbyCampaign> list_campaigns(const data::galactic::GalacticData& data, bool single_player_sets,
     const LobbyAiLevels& ai_levels) {
     std::vector<sim::galactic::MpLobbyCampaign> out;
@@ -102,36 +138,7 @@ std::vector<sim::galactic::MpLobbyCampaign> list_campaigns(const data::galactic:
         // Co-op on a single-player entry (design D3): story campaigns stay out, and an entry without a human
         // faction has nothing to seat the players on: no starter, or a starter that is not a playable faction.
         if (!multiplayer && (campaign.is_story_campaign.value_or(false) || !playable_starter(data, campaign.starting_active_player))) continue;
-        std::set<std::string> named;
-        name_all(named, campaign.home_locations); name_all(named, campaign.starting_credits);
-        name_all(named, campaign.starting_tech_levels); name_all(named, campaign.max_tech_levels);
-        name_all(named, campaign.starting_forces); name_all(named, campaign.ai_player_control);
-        sim::galactic::MpLobbyCampaign row;
-        row.name = campaign.name;
-        row.text_id = campaign.text_id;
-        row.description_text = campaign.description_text;
-        for (const auto& planet_name : campaign.planets) {
-            const auto* planet = data.planet(planet_name);
-            if (planet == nullptr || !planet->galactic_position) continue;
-            row.planet_points.emplace_back(planet->galactic_position->x, planet->galactic_position->y);
-        }
-        row.single_player_rules = !multiplayer;
-        row.supports_custom_settings = campaign.supports_custom_settings.value_or(false);
-        row.minimum_custom_tech = campaign.minimum_custom_tech;
-        row.maximum_custom_tech = campaign.maximum_custom_tech;
-        // LSA-40: a signed atoi of seconds; a negative timeout reads as already elapsed, so as zero here.
-        if (const auto* timeout = data.constant("Battle_Pending_Timeout_Seconds"))
-            row.vote_timeout_seconds = std::max<std::int64_t>(0, data::retail::integer_constant(timeout->text));
-        sim::galactic::PlayerId next{};
-        for (const auto& faction : data.factions) {
-            const bool neutral = faction.is_neutral.value_or(false);
-            if (!neutral && !named.contains(upper(faction.name))) continue;
-            ++next;
-            // A single-player entry names its human faction; every other faction is an AI seat.
-            const bool playable = faction.is_playable.value_or(false) && !neutral
-                && (multiplayer || upper(faction.name) == upper(campaign.starting_active_player));
-            row.factions.push_back({next, next, 0, faction.name, playable, neutral});
-        }
+        auto row = make_row(data, campaign, multiplayer);
         // The starter must also be one of the entry's own factions, or no row could seat a player.
         if (!multiplayer && std::none_of(row.factions.begin(), row.factions.end(), [](const auto& faction) { return faction.playable; })) continue;
         row.difficulties = campaign_difficulties(data, campaign, row.factions, multiplayer, ai_levels);
@@ -152,6 +159,34 @@ std::vector<sim::galactic::MpLobbyCampaign> list_all_lobby_campaigns(const data:
     auto coop = list_campaigns(data, true, ai_levels);
     out.insert(out.end(), std::make_move_iterator(coop.begin()), std::make_move_iterator(coop.end()));
     return out;
+}
+
+std::string solo_difficulty_entry(const data::galactic::GalacticData& data, const std::string_view campaign,
+    const std::string_view level, const LobbyAiLevels& ai_levels) {
+    // The staging dialog's three radios; an empty or unknown level is the engine's default level, Normal.
+    std::size_t index = 1;
+    std::string folded = upper(level);
+    if (folded == "EASY") index = 0;
+    else if (folded == "HARD") index = 2;
+    // CGS-26 fallback: a campaign whose AI types name no entry for the level runs on the stock name of that level.
+    static constexpr std::array<const char*, 3> stock{"Easy_Default", "Normal_Default", "Hard_Default"};
+    const auto* authored = data.campaign(campaign);
+    if (authored == nullptr) return stock[index];
+    const auto row = make_row(data, *authored, authored->is_multiplayer.value_or(false));
+    const auto entries = campaign_difficulties(data, *authored, row.factions, authored->is_multiplayer.value_or(false), ai_levels);
+    return entries[index].empty() ? std::string(stock[index]) : entries[index];
+}
+
+CampaignRulesFlavour campaign_rules_flavour(const data::galactic::Campaign& campaign) noexcept {
+    return campaign.is_multiplayer.value_or(false) ? CampaignRulesFlavour::multiplayer : CampaignRulesFlavour::single_player;
+}
+
+std::string local_start_faction(const data::galactic::GalacticData& data, const data::galactic::Campaign& campaign) {
+    const bool multiplayer = campaign.is_multiplayer.value_or(false);
+    if (!multiplayer) return campaign.starting_active_player;
+    for (const auto& faction : make_row(data, campaign, true).factions)
+        if (faction.playable && !faction.neutral) return faction.name;
+    return {};
 }
 
 const sim::galactic::MpLobbyCampaign* find_mp_lobby_campaign(const std::vector<sim::galactic::MpLobbyCampaign>& campaigns,

@@ -4,21 +4,25 @@
 #include "galactic_support.hpp"
 #include "eawr/campaign/control.hpp"
 #include "eawr/campaign/galactic_world_immediate_host.hpp"
+#include "eawr/campaign/galactic_story_scripts.hpp"
 #include "eawr/campaign/auto_resolve_outcome.hpp"
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/numeric/q24_boundary.hpp"
+#include "eawr/script/authoritative/galactic_bridge.hpp"
 #include "eawr/sim/galactic/production.hpp"
 #include "eawr/sim/galactic/observer.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "galactic/planet_hud.hpp"
 #include "../../src/script/foc/galactic_ai_economic_replay.hpp"
 #include "../../src/campaign/galactic_ai_runtime.hpp"
+#include "../../src/campaign/galactic_object_perception.hpp"
 #include "../../src/sim/galactic/encoding.hpp"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -31,6 +35,7 @@
 #include <ostream>
 #include <span>
 #include <stdexcept>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -135,8 +140,11 @@ void payload_ground_capability() {
             }
             const auto snapshot = game.galaxy().snapshot();
             const auto& landed = snapshot->control()->planets[friendly ? 0 : 1].landed;
-            expect(landed.size() == 1 && landed[0].id == 21 && snapshot->fleets()[0].members == std::vector<gc::FleetMember>{{31, 2}},
-                "friendly and hostile landings admit capable cargo and keep a stays-in-transport payload in orbit");
+            expect(landed.size() == (friendly ? 2U : 1U) && landed[0].id == 21,
+                "allied landing includes noncombat passengers; hostile landing requires capable cargo");
+            expect(friendly ? landed.size() == 2 && landed[1].id == 31 && snapshot->fleets().size() == 1
+                : !snapshot->fleets().empty() && snapshot->fleets()[0].members == std::vector<gc::FleetMember>{{31, 2}},
+                "noncombat transport leaves orbit only at an allied destination");
             if (workers == 1) reference = actual; else expect(actual == reference, "direct payload landing has 1/2/4/8 canonical equality");
         }
     }
@@ -570,6 +578,168 @@ void categories() {
     expect(calculate(c, p, prior, {}, s.routes).state.target == f(3), "allied trade endpoint at allegiance one contributes gain");
     c.state[1].current = Fixed::from_ratio(1, 2).value();
     expect(calculate(c, p, prior, {}, s.routes).state.target == f(2), "trade needs BOTH endpoints at allegiance at least one");
+}
+// #6798 / WGM-66, WGM-67: a system with no ground surface changes hands by orbital presence alone, through the live session and its
+// events. The production controller is the owner of the item currently under production, derived every tick, never the planet's owner.
+void with_production(gc::GalacticSetup& s) {
+    s.fleets[0].members = {{21, 2}};
+    s.movement->types[1].fleet_container = true;
+    s.movement->contents = {{21, {{30, 1}, {31, 1}}}};
+    s.player_economy.emplace(); s.fiscal.emplace(); s.fiscal->credit_cap_per_planet = f(1000);
+    for (const auto& player : s.players) {
+        s.player_economy->players.push_back({player.player_id, f(100), f(1000), 0, 5});
+        s.fiscal->players.push_back({player.player_id, true, f(1)});
+    }
+    for (const auto& planet : s.planets) s.fiscal->planets.push_back({planet.id, f(1)});
+    enable_production(s);
+    s.census = gc::PopulationCensus{{{1, f(100), 0}, {2, f(0), 0}, {3, f(1), 0}}, // player 1's capacity leaves room for a purchase
+        {{1, 2, false, {}}, {2, 100, false, {}}, {3, 100, false, {}}},
+        {{21, 2, 1, 1, 10, false, false}, {22, 1, 2, 3, 11, false, false}, {30, 1, 1, 1, 21, false, false},
+         {31, 1, 1, 1, 21, false, false}}};
+    qualify_census_roles(*s.census, {21});
+}
+void space_only_conquest_for(const std::string& shape, const bool retains_residual) {
+    const eawr::sim::InlineExecutor executor;
+    const auto owner_after = [&](gc::GalacticSetup initial, gc::PlanetId planet, std::uint64_t ticks, bool& event_seen) {
+        auto world = gc::GalacticSession::create(initial).value();
+        gc::PlayerId owner{};
+        for (std::uint64_t i = 0; i < ticks; ++i) {
+            const auto tick = world.step(executor).value();
+            owner = tick.snapshot->planets()[planet - 1].owner;
+            for (const auto& event : tick.snapshot->events())
+                if (event.kind == gc::GalacticEventKind::planet_owner_changed && event.subject == planet) event_seen = true;
+        }
+        return owner;
+    };
+    const auto retained = [](gc::GalacticSetup& initial, std::vector<gc::PlanetControl> rows) { initial.control->state = std::move(rows); };
+    // Planet 3 is neutral (owner 3) and unoccupied; player 2's fleet 11 sits in its orbit. The planet row carries the stale shape the
+    // campaign loader used to seed (the planet's own owner as production controller): the service must not honour it.
+    bool seen = false;
+    auto unoccupied = setup(); with_production(unoccupied);
+    unoccupied.control->planets[2].surface_accessible = false; unoccupied.control->planets[2].retains_residual = retains_residual; unoccupied.control->planets[2].production_owner = {3, 3};
+    retained(unoccupied, {state(1, 1, 2), state(2, 3, 0), state(3, 3, 0)});
+    expect(owner_after(unoccupied, 3, 5, seen) == 2 && seen, shape + ": an unoccupied space-only system is conquered by a fleet's presence, with its ownership event");
+    // The same with a fleet already in orbit at the start: the initial control (CGS-02) names the fleet's owner as the controller.
+    seen = false;
+    auto at_start = setup(); with_production(at_start);
+    at_start.control->planets[2].surface_accessible = false; at_start.control->planets[2].retains_residual = retains_residual; at_start.control->planets[2].production_owner = {3, 3};
+    expect(owner_after(at_start, 3, 5, seen) == 2, shape + ": a fleet present from the start controls a space-only system from the initial control");
+    seen = false;
+    auto accessible = setup(); with_production(accessible);
+    retained(accessible, {state(1, 1, 2), state(2, 3, 0), state(3, 3, 0)});
+    expect(owner_after(accessible, 3, 5, seen) == 3 && !seen, shape + ": an accessible neutral surface is not conquered by orbit alone");
+    // Takeover: planet 2 belongs to player 1 with no surface force, base, structure or production; player 2's fleet moves into its orbit.
+    seen = false;
+    auto owned = setup(); owned.planets[1].owner = 1; with_production(owned);
+    owned.control->planets[1].surface_accessible = false; owned.control->planets[1].retains_residual = retains_residual; owned.fleets[1].orbit = 2;
+    owned.control->planets[1].production_owner = {1, 1};
+    retained(owned, {state(1, 1, 2), state(2, 1, 1), state(3, 3, 0)});
+    expect(owner_after(owned, 2, 600, seen) == 2 && seen, shape + ": a hostile fleet takes over an owned space-only system, with its ownership event");
+    // An idle planet keeps no stale seed once the service has run.
+    auto idle = setup(); with_production(idle);
+    idle.control->planets[2].production_owner = {3, 3};
+    auto world = gc::GalacticSession::create(idle).value();
+    const auto settled = world.step(executor).value();
+    expect(settled.snapshot->control()->planets[2].production_owner == std::array<gc::PlayerId, 2>{},
+        shape + ": a planet with nothing in production has no production controller after the service");
+}
+// WGM-66/67: the production controller is the owner of the front queue entry; it outranks an orbiting fleet's orbital control.
+void production_controller_from_queues() {
+    auto s = setup(); with_production(s);
+    auto control = *s.control; auto production = *s.production;
+    control.planets[1].production_owner = {2, 2}; // a stale seed
+    gc::ProductionEntry mine; mine.type = 1; mine.builder = 1; mine.build_id = 900;
+    gc::ProductionEntry later = mine; later.builder = 2; later.build_id = 901;
+    production.planets[1].queues[1] = {mine, later}; // space queue: the front entry is the one in progress
+    production.planets[2].queues[0] = {later};
+    expect(gc::derive_production_controllers(control, production), "a queue change updates the production controllers");
+    expect(control.planets[0].production_owner == std::array<gc::PlayerId, 2>{}, "an idle planet has no production controller");
+    expect(control.planets[1].production_owner == std::array<gc::PlayerId, 2>{0, 1}, "the front entry of the space queue names its owner");
+    expect(control.planets[2].production_owner == std::array<gc::PlayerId, 2>{2, 0}, "the ground queue is read separately from the space queue");
+    expect(!gc::derive_production_controllers(control, production), "deriving again changes nothing");
+    // An inaccessible surface with an item under production keeps its controller against an orbiting enemy fleet.
+    auto planet = control.planets[1]; planet.surface_accessible = false; planet.production_owner = {0, 1};
+    auto enemy = s.fleets[1]; enemy.orbit = 2;
+    expect(calculate(control, planet, state(2, 1, 1), {enemy}).state.controller == 1,
+        "an item under production keeps the controller of a no-surface planet");
+    planet.production_owner = {};
+    expect(calculate(control, planet, state(2, 1, 1), {enemy}).state.controller == 2,
+        "with nothing under production the orbiting fleet controls it");
+}
+// WGM-67: an owned planet that authors no residual influence and has no presence or production falls to the neutral player: placed that
+// way it is neutral at placement without an ownership event, emptied later it changes hands once, and one that retains residual
+// influence keeps its owner. The surface is accessible here (the rule is not specific to no-surface systems).
+void residual_influence_none() {
+    const eawr::sim::InlineExecutor executor;
+    const auto events_for = [&](gc::GalacticSession& world, const gc::PlanetId planet) {
+        std::size_t count = 0;
+        for (const auto& event : world.snapshot()->events())
+            if (event.kind == gc::GalacticEventKind::planet_owner_changed && event.subject == planet) ++count;
+        return count;
+    };
+    // Starts owned by player 1 (planet 2), nothing present: the initial control (CGS-02) places it with the neutral player.
+    auto placed = setup(); placed.planets[1].owner = 1; placed.control->planets[1].retains_residual = false;
+    auto world = gc::GalacticSession::create(placed).value();
+    expect(world.snapshot()->planets()[1].owner == 3 && events_for(world, 2) == 0,
+        "a start-owned planet without residual influence is neutral at placement, with no ownership event");
+    std::size_t later = 0;
+    for (int i = 0; i < 5; ++i) { (void)world.step(executor).value(); later += events_for(world, 2); }
+    expect(world.snapshot()->planets()[1].owner == 3 && later == 0, "it stays neutral afterwards");
+    // Owned by player 1 under retained control, then found empty: one change of hands, one event.
+    auto emptied = setup(); emptied.planets[1].owner = 1; emptied.control->planets[1].retains_residual = false;
+    emptied.control->state = {state(1, 1, 2), state(2, 1, 1), state(3, 3, 0)};
+    auto emptied_world = gc::GalacticSession::create(emptied).value();
+    std::size_t events = 0;
+    for (int i = 0; i < 8; ++i) { (void)emptied_world.step(executor).value(); events += events_for(emptied_world, 2); }
+    expect(emptied_world.snapshot()->planets()[1].owner == 3 && events == 1, "an emptied planet without residual influence goes neutral with exactly one event");
+    // The same planet that retains residual influence keeps its owner.
+    auto retained = setup(); retained.planets[1].owner = 1; retained.control->planets[1].retains_residual = true;
+    retained.control->state = {state(1, 1, 2), state(2, 1, 1), state(3, 3, 0)};
+    auto retained_world = gc::GalacticSession::create(retained).value();
+    std::size_t kept_events = 0;
+    for (int i = 0; i < 8; ++i) { (void)retained_world.step(executor).value(); kept_events += events_for(retained_world, 2); }
+    expect(retained_world.snapshot()->planets()[1].owner == 1 && kept_events == 0, "a planet that retains residual influence keeps its owner");
+}
+// WST-42 PLANET_FACTION: the planet goes to the named player at full control and stays there; unknown planets and players change
+// nothing; an open native barrier has no staged owner change, so the call is refused there without failing the session.
+void planet_faction_gift() {
+    const eawr::sim::InlineExecutor executor;
+    const auto owner_of = [](gc::GalacticSession& world, const gc::PlanetId planet) {
+        for (const auto& row : world.snapshot()->planets()) if (row.id == planet) return row.owner;
+        return gc::PlayerId{};
+    };
+    // The stock planets retain residual influence (the sourced default); the fixture's planets do not unless asked, and a planet
+    // that retains none falls back to the neutral player on the next control tick (WGM-67), which is not what a gift is.
+    auto given_setup = setup(); given_setup.control->planets[1].retains_residual = true;
+    auto world = gc::GalacticSession::create(given_setup).value();
+    expect(owner_of(world, 2) == 3, "planet 2 starts with the neutral player");
+    const auto unknown_planet = world.set_planet_faction(99, 2), unknown_player = world.set_planet_faction(2, 9);
+    expect(unknown_planet && !unknown_planet.value() && unknown_player && !unknown_player.value() && owner_of(world, 2) == 3,
+        "an unknown planet or player changes nothing and is not an error");
+    const auto given = world.set_planet_faction(2, 2);
+    expect(given && given.value() && owner_of(world, 2) == 2, "the planet goes to the named player");
+    std::size_t events = 0;
+    for (const auto& event : world.snapshot()->events())
+        if (event.kind == gc::GalacticEventKind::planet_owner_changed && event.subject == 2) ++events;
+    expect(events == 1, "one ownership event is published");
+    for (int i = 0; i < 6; ++i) (void)world.step(executor).value();
+    expect(owner_of(world, 2) == 2, "full control keeps the gift in place through the following ticks");
+    auto staged = gc::GalacticSession::create(setup()).value();
+    const std::array<gc::PlayerId, 1> players{2};
+    auto barrier = staged.begin_native_barrier(players, 8).value();
+    expect(bool(barrier->select_player(2)), "the AI player's barrier opens");
+    const auto refused = staged.set_planet_faction(2, 2);
+    expect(refused && !refused.value(), "inside a native barrier the change is refused, not failed");
+    expect(bool(barrier->begin_tail()) && bool(barrier->commit()), "the barrier commits");
+    expect(owner_of(staged, 2) == 3, "the refused change leaves the planet with its owner");
+    (void)staged.step(executor).value();
+}
+void space_only_conquest() {
+    production_controller_from_queues();
+    residual_influence_none();
+    planet_faction_gift();
+    space_only_conquest_for("space-only system that retains residual influence", true);
+    space_only_conquest_for("Antar-shaped system (no residual influence)", false);
 }
 void alignment_strength() {
     const auto half = Fixed::from_ratio(1, 2).value();
@@ -2299,6 +2469,971 @@ void native_view_reuse_is_exact() {
 // Give_Money on a native shadow of the world; nothing reaches the AI before it publishes; at publication the births and the
 // AI-usage writes go out as one actor notification in call order and the windfall as a credit notice; a discarded batch leaves
 // nothing; the journal replays it; the caller's own verbs run on the same batch (the #6385 seam); equal on 1/2/4/8 workers.
+void world_script_despawn_contract() {
+    namespace auth = eawr::script::authoritative;
+    namespace campaign = eawr::campaign;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    const eawr::sim::InlineExecutor executor;
+    auto world = take(gc::GalacticSession::create(native_force_fixture()));
+    std::vector<gc::GalacticSession::NativeActorChange> delivered;
+    world.set_native_actor_changes_handler([&](const auto&, auto changes) {
+        delivered.insert(delivered.end(), changes.begin(), changes.end());
+        return eawr::core::Result<void>::success();
+    });
+    campaign::GalacticWorldImmediateRules rules;
+    rules.credit_multipliers.emplace(1, f(1));
+    rules.ai_players.insert(1);
+    campaign::add_galactic_object_world_rules(rules, {}, executor);
+    auto host = campaign::make_galactic_world_immediate_host(world, std::move(rules), 32);
+    auth::SessionConfig config; config.galactic_clock = true;
+    auth::ModuleManifest modules;
+    require(modules.add("Rollback.lua", R"LUA(
+function main()
+    Object().Despawn()
+    error('rollback')
+end
+Create_Thread('main')
+)LUA"));
+    auto scripts = take(auth::ScriptScheduler::create(config, std::move(modules)));
+    require(campaign::register_galactic_object_bindings(scripts, {}));
+    require(scripts.register_binding("Object", [](auth::BindingContext&, const auth::ValueList&) {
+        return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{eawr::script::foc::handle_game_object, 20}}});
+    }));
+    require(scripts.set_immediate_effect_host(host, 1));
+    require(scripts.create_instance(7, "Rollback.lua"));
+    auth::ServiceOptions options; options.time_tick = 1;
+    const auto report = take(scripts.service(executor, options));
+    expect(!report.diagnostics.empty() && delivered.empty()
+        && std::any_of(world.snapshot()->actor_records().begin(), world.snapshot()->actor_records().end(),
+            [](const auto& actor) { return actor.id == 20; }),
+        "a fault after Despawn discards the private removal without an AI loss notification");
+    auto invalid = take(host->capture());
+    const auth::Value player{auth::Handle{eawr::script::foc::handle_player, 1}};
+    require(invalid->apply("galactic.give_money", {player, auth::Value::number(eawr::script::numeric::LuaNumber(50))}));
+    const auth::Value missing{auth::Handle{eawr::script::foc::handle_game_object, 999999}};
+    expect(!invalid->apply("galactic.object_despawn", {missing}), "an unknown actor is refused during batch validation");
+    invalid.reset();
+    expect(world.snapshot()->player_economy()->players.front().credits == f(100) && delivered.empty(),
+        "a discarded batch with an invalid removal does not pay staged credits");
+    const auto before_batch = take(world.save_checkpoint_state());
+    auto batch = take(host->capture());
+    const auto deaths_before = world.score_ledger().deaths;
+    const auth::Value object{auth::Handle{eawr::script::foc::handle_game_object, 20}};
+    const auto prevented = take(batch->apply("galactic.story_prevent_ai_usage", {object, auth::Value{true}}));
+    expect(prevented.size() == 1 && std::get<bool>(prevented.front().data),
+        "the AI-usage write is staged before the same actor is despawned");
+    require(batch->apply("galactic.object_despawn", {object}));
+    require(batch->apply("galactic.object_despawn", {object}));
+    const auto valid = take(batch->query("galactic.object_valid", {object}));
+    expect(valid.size() == 1 && !std::get<bool>(valid.front().data) && delivered.empty(),
+        "a staged despawn is visible only in the private batch");
+    expect(take(world.save_checkpoint_state()) == before_batch, "a checkpoint during an uncommitted batch contains only the prior world");
+    require(host->publish(std::move(batch)));
+    expect(std::none_of(world.snapshot()->actor_records().begin(), world.snapshot()->actor_records().end(),
+            [](const auto& actor) { return actor.id == 20; })
+        && std::any_of(delivered.begin(), delivered.end(), [](const auto& row) {
+            return row.actor == 20 && row.kind == gc::GalacticSession::NativeActorChange::Kind::lost;
+        }) && world.score_ledger().deaths == deaths_before,
+        "a published despawn removes the actor before notifying the AI without scoring a battle death");
+    expect(std::none_of(delivered.begin(), delivered.end(), [](const auto& row) {
+        return row.actor == 20 && row.prevent_ai_usage.has_value();
+    }), "an AI-usage write for a later despawn is dropped without a partial publication");
+    auto replay = take(gc::GalacticSession::from_replay(world.record()));
+    require(replay.replay_native_barrier(executor));
+    expect(replay.canonical_state_bytes() == world.canonical_state_bytes(), "script despawn replays to the same world");
+
+    auto projected_world = take(gc::GalacticSession::create(native_force_fixture()));
+    campaign::GalacticWorldImmediateRules projected_rules;
+    bool placement_saw_removal = false;
+    projected_rules.placement = [&](const auto&, const auto& view, auto first) {
+        placement_saw_removal = std::none_of(view.orbit.begin(), view.orbit.end(), [](const auto& fleet) {
+            return std::any_of(fleet.members.begin(), fleet.members.end(), [](const auto& member) { return member.id == 20; });
+        });
+        gc::GalacticSession::NativeForcePlacement result; result.next_id = first + 1;
+        result.special_control = view.presence.special_control;
+        result.structures.push_back({first, 1, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure});
+        gc::CensusObject actor; actor.id = first; actor.original_type = actor.current_type = 1;
+        actor.owner = 1; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::ordinary;
+        result.originals.push_back(actor);
+        return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(std::move(result));
+    };
+    campaign::add_galactic_object_world_rules(projected_rules, {}, executor);
+    auto projected_host = campaign::make_galactic_world_immediate_host(projected_world, std::move(projected_rules), 32);
+    auto projected_batch = take(projected_host->capture());
+    require(projected_batch->apply("galactic.object_despawn", {object}));
+    const auth::Value projected_planet{auth::Handle{eawr::script::foc::handle_game_object, 2}};
+    const auth::Value projected_type{auth::Handle{eawr::script::foc::handle_type, 1}};
+    take(projected_batch->apply("galactic.spawn_unit", {player, projected_planet, projected_type}));
+    expect(placement_saw_removal, "a later same-batch creation sees the earlier removal in its orbital placement inputs");
+    require(projected_host->publish(std::move(projected_batch)));
+    auto projected_replay = take(gc::GalacticSession::from_replay(projected_world.record()));
+    eawr::script::foc::galactic_ai::NativeActions::bind_economic_replay_owners(projected_replay,
+        [](const auto&, const auto& snapshot, auto first) {
+            gc::GalacticSession::NativeForcePlacement result; result.next_id = first + 1;
+            result.special_control = snapshot.control()->planets[1].special_control;
+            result.structures.push_back({first, 1, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure});
+            gc::CensusObject actor; actor.id = first; actor.original_type = actor.current_type = 1;
+            actor.owner = 1; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::ordinary;
+            result.originals.push_back(actor);
+            return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(std::move(result));
+        });
+    require(projected_replay.replay_native_barrier(executor));
+    expect(projected_replay.canonical_state_bytes() == projected_world.canonical_state_bytes(),
+        "a creation after scripted removal replays in the same order");
+
+    auto birth_world = take(gc::GalacticSession::create(native_force_fixture()));
+    campaign::GalacticWorldImmediateRules birth_rules;
+    birth_rules.placement = [](const auto&, const auto& view, auto first) {
+        gc::GalacticSession::NativeForcePlacement result; result.next_id = first + 1;
+        result.special_control = view.presence.special_control;
+        result.structures.push_back({first, 1, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure});
+        gc::CensusObject actor; actor.id = first; actor.original_type = actor.current_type = 1;
+        actor.owner = 1; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::ordinary;
+        result.originals.push_back(actor);
+        return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(std::move(result));
+    };
+    campaign::add_galactic_object_world_rules(birth_rules, {}, executor);
+    auto birth_host = campaign::make_galactic_world_immediate_host(birth_world, std::move(birth_rules), 32);
+    auto birth_batch = take(birth_host->capture());
+    const auth::Value planet{auth::Handle{eawr::script::foc::handle_game_object, 2}};
+    const auth::Value type{auth::Handle{eawr::script::foc::handle_type, 1}};
+    const auto made = take(birth_batch->apply("galactic.spawn_unit", {player, planet, type}));
+    const auto created = std::get<std::vector<auth::Value>>(made.front().data).front();
+    require(birth_batch->apply("galactic.object_despawn", {created}));
+    const auto created_id = std::get<auth::Handle>(created.data).id;
+    expect(std::none_of(birth_world.snapshot()->actor_records().begin(), birth_world.snapshot()->actor_records().end(),
+        [&](const auto& actor) { return actor.id == created_id; }), "an in-flight birth is not published mid-batch");
+    require(birth_host->publish(std::move(birth_batch)));
+    expect(std::none_of(birth_world.snapshot()->actor_records().begin(), birth_world.snapshot()->actor_records().end(),
+        [&](const auto& actor) { return actor.id == created_id; }), "a same-batch birth can be despawned without leaving an actor");
+    auto birth_replay = take(gc::GalacticSession::from_replay(birth_world.record()));
+    eawr::script::foc::galactic_ai::NativeActions::bind_economic_replay_owners(birth_replay,
+        [](const auto&, const auto& snapshot, auto first) {
+            gc::GalacticSession::NativeForcePlacement result; result.next_id = first + 1;
+            result.special_control = snapshot.control()->planets[1].special_control;
+            result.structures.push_back({first, 1, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure});
+            gc::CensusObject actor; actor.id = first; actor.original_type = actor.current_type = 1;
+            actor.owner = 1; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::ordinary;
+            result.originals.push_back(actor);
+            return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(std::move(result));
+        });
+    require(birth_replay.replay_native_barrier(executor));
+    expect(birth_replay.canonical_state_bytes() == birth_world.canonical_state_bytes(),
+        "a same-batch creation and despawn replay in order");
+}
+
+// #6704: a scripted Despawn runs the same removal commit as a battle casualty, at any barrier. Whatever it removes must leave
+// no row behind that still names the actor (a landed surface force, the observer's reference to it, the planet's landed count,
+// a fleet member), and the journal replay and a checkpoint round trip must land on the same bytes, on 1/2/4/8 workers.
+void script_despawn_leaves_no_dangling_rows() {
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    const auto dangling = [](const gc::GalacticSession& world) {
+        std::vector<std::string> found;
+        const auto snapshot = world.snapshot();
+        std::set<eawr::sim::EntityId> live;
+        for (const auto& actor : snapshot->actor_records()) live.insert(actor.id);
+        if (const auto* control = snapshot->control()) for (const auto& planet : control->planets) {
+            for (const auto& force : planet.landed) if (!live.contains(force.id))
+                found.push_back("landed " + std::to_string(force.id) + " on planet " + std::to_string(planet.planet));
+            for (const auto& entry : planet.ground_layout) if (!live.contains(entry.object))
+                found.push_back("ground layout " + std::to_string(entry.object));
+        }
+        const auto observer = snapshot->observer();
+        if (observer) for (const auto& planet : observer->planets)
+            for (const auto& transport : planet.landed_transports) if (!live.contains(transport.id))
+                found.push_back("observer landed " + std::to_string(transport.id));
+        const auto production = snapshot->production();
+        if (production) if (const auto* control = snapshot->control())
+            for (const auto& planet : production->planets) {
+                const auto at = std::find_if(control->planets.begin(), control->planets.end(),
+                    [&](const auto& row) { return row.planet == planet.planet; });
+                if (at != control->planets.end() && planet.landed_transports != static_cast<std::int64_t>(at->landed.size()))
+                    found.push_back("landed count of planet " + std::to_string(planet.planet));
+            }
+        for (const auto& fleet : snapshot->fleets()) for (const auto& member : fleet.members) if (!live.contains(member.id))
+            found.push_back("fleet " + std::to_string(fleet.id) + " member " + std::to_string(member.id));
+        return found;
+    };
+    struct Case { const char* name; eawr::sim::EntityId actor; };
+    // 51: a landed transport of player 1 on planet 2 (the surface force row); 20: a member of a fleet in orbit; 22: the only member
+    // of fleet 11 (the fleet leaves with it).
+    const std::array<Case, 3> cases{{{"landed surface force", 51}, {"fleet member", 20}, {"last fleet member", 22}}};
+    // The removal at the start of the match and after a completed tick (scripts run in the world service of a completed tick).
+    for (const auto& scenario : cases) for (const unsigned steps : {0U, 1U}) {
+        std::vector<std::uint8_t> reference_state;
+        std::optional<gc::GalacticReplay> reference_record;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            auto world = take(gc::GalacticSession::create(native_control_fixture()));
+            for (unsigned step = 0; step < steps; ++step) static_cast<void>(take(world.step(executor)));
+            const auto& records = world.snapshot()->actor_records();
+            if (steps && std::none_of(records.begin(), records.end(), [&](const auto& actor) { return actor.id == scenario.actor; })) {
+                // The first tick's services already retired this fixture actor; the start-of-match case above covers it.
+                std::cout << "#6704 note: " << scenario.name << " is gone after " << steps << " tick(s); not despawned" << std::endl;
+                break;
+            }
+            require(world.despawn_script_object(scenario.actor));
+            const auto message = [&](const char* what) {
+                return std::string("#6704 ") + scenario.name + " after " + std::to_string(steps) + " tick(s): " + what;
+            };
+            expect(std::none_of(world.snapshot()->actor_records().begin(), world.snapshot()->actor_records().end(),
+                [&](const auto& actor) { return actor.id == scenario.actor; }), message("the actor is gone"));
+            const auto left = dangling(world);
+            expect(left.empty(), message(left.empty() ? "no row names the removed actor" : ("a row still names it: " + left.front()).c_str()));
+            auto replay = take(gc::GalacticSession::from_replay(world.record()));
+            for (unsigned step = 0; step < steps; ++step) static_cast<void>(take(replay.step(executor)));
+            require(replay.replay_native_barrier(executor));
+            expect(replay.canonical_state_bytes() == world.canonical_state_bytes(), message("the journal replays to the same world"));
+            expect(dangling(replay).empty(), message("the replayed world has no dangling row either"));
+            const auto saved = take(world.save_checkpoint_state());
+            // A direct restore adopts the recording the session was built from as its applied journal.
+            auto restored = take(gc::GalacticSession::from_replay(world.record()));
+            require(restored.load_checkpoint_state(saved));
+            expect(restored.canonical_state_bytes() == world.canonical_state_bytes(), message("a checkpoint round trip lands on the same bytes"));
+            if (reference_state.empty()) { reference_state = world.canonical_state_bytes(); reference_record.emplace(world.record()); }
+            expect(world.canonical_state_bytes() == reference_state && world.record() == *reference_record,
+                message("the world and its journal are equal on 1/2/4/8 workers"));
+        }
+    }
+}
+
+// The commit of a removal batch is all-or-nothing: a journal that cannot take the batch's entries in order is refused before
+// the first credit, force or removal reaches the world, and the session stays playable.
+void world_script_despawn_is_atomic() {
+    namespace auth = eawr::script::authoritative;
+    namespace campaign = eawr::campaign;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    const eawr::sim::InlineExecutor executor;
+    auto world = take(gc::GalacticSession::create(native_force_fixture()));
+    std::vector<gc::GalacticSession::NativeActorChange> delivered;
+    world.set_native_actor_changes_handler([&](const auto&, auto changes) {
+        delivered.insert(delivered.end(), changes.begin(), changes.end());
+        return eawr::core::Result<void>::success();
+    });
+    campaign::GalacticWorldImmediateRules rules;
+    rules.credit_multipliers.emplace(1, f(1));
+    rules.ai_players.insert(1);
+    campaign::add_galactic_object_world_rules(rules, {}, executor);
+    auto host = campaign::make_galactic_world_immediate_host(world, std::move(rules), 32);
+    // The journal's last entry is a world-service one at the current tick: a barrier-phase entry would rewind it, the
+    // same class of failure as a full journal or an oversized payload, which the apply step used to hit mid-batch.
+    require(world.append_native_effect(gc::NativeEffectKind::cash, {}, gc::NativeEffectPhase::world_service));
+    const auto before = take(world.save_checkpoint_state());
+    const auto journal_before = world.native_effects().size();
+    const auth::Value player{auth::Handle{eawr::script::foc::handle_player, 1}};
+    const auth::Value object{auth::Handle{eawr::script::foc::handle_game_object, 20}};
+    auto batch = take(host->capture());
+    require(batch->apply("galactic.give_money", {player, auth::Value::number(eawr::script::numeric::LuaNumber(50))}));
+    require(batch->apply("galactic.object_despawn", {object}));
+    expect(!host->publish(std::move(batch)), "a removal batch the journal cannot take is refused at publication");
+    expect(take(world.save_checkpoint_state()) == before && world.native_effects().size() == journal_before
+        && world.snapshot()->player_economy()->players.front().credits == f(100) && delivered.empty()
+        && std::any_of(world.snapshot()->actor_records().begin(), world.snapshot()->actor_records().end(),
+            [](const auto& actor) { return actor.id == 20; }),
+        "a refused removal batch leaves credits, actors, journal and notifications untouched");
+    // The refusal is a diagnostic, not a failed match: an equivalent batch on a clean journal still publishes.
+    auto fresh = take(gc::GalacticSession::create(native_force_fixture()));
+    campaign::GalacticWorldImmediateRules fresh_rules;
+    fresh_rules.credit_multipliers.emplace(1, f(1));
+    campaign::add_galactic_object_world_rules(fresh_rules, {}, executor);
+    auto fresh_host = campaign::make_galactic_world_immediate_host(fresh, std::move(fresh_rules), 32);
+    auto accepted = take(fresh_host->capture());
+    require(accepted->apply("galactic.give_money", {player, auth::Value::number(eawr::script::numeric::LuaNumber(50))}));
+    require(accepted->apply("galactic.object_despawn", {object}));
+    require(accepted->apply("galactic.object_despawn", {object}));
+    require(fresh_host->publish(std::move(accepted)));
+    const auto despawns = std::count_if(fresh.native_effects().begin(), fresh.native_effects().end(),
+        [](const auto& effect) { return effect.kind == gc::NativeEffectKind::object_despawn; });
+    expect(despawns == 1 && std::none_of(fresh.snapshot()->actor_records().begin(), fresh.snapshot()->actor_records().end(),
+            [](const auto& actor) { return actor.id == 20; }),
+        "a duplicate despawn of one actor in a batch is journaled and applied once");
+}
+
+// The one result a force step reads from constructed state is a placed fleet's combat-skip facts. A fleet that names a
+// payload the placement never built used to fail inside the apply loop, after the earlier steps of the batch had landed.
+// It is now refused before the first mutation: no credit, actor, fleet, control, production, journal or AI notification of
+// the batch reaches the world, the session is not poisoned, and a clean batch still publishes afterwards.
+void world_script_force_failure_is_atomic() {
+    namespace auth = eawr::script::authoritative;
+    namespace campaign = eawr::campaign;
+    using Placement = gc::GalacticSession::NativeForcePlacement;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    const eawr::sim::InlineExecutor executor;
+    auto config = native_force_fixture();
+    config.production->fleet_blockers.emplace();
+    auto world = take(gc::GalacticSession::create(config));
+    std::vector<gc::GalacticSession::NativeActorChange> delivered;
+    world.set_native_actor_changes_handler([&](const auto&, auto changes) {
+        delivered.insert(delivered.end(), changes.begin(), changes.end());
+        return eawr::core::Result<void>::success();
+    });
+    bool broken = true;
+    campaign::GalacticWorldImmediateRules rules;
+    rules.credit_multipliers.emplace(1, f(1));
+    rules.ai_players.insert(1);
+    rules.placement = [&](const auto&, const auto& view, auto first) {
+        Placement result; result.next_id = first + 2; result.special_control = view.presence.special_control;
+        result.fleets.push_back({first, 1, 2, {{first + 1, 2}}});
+        // A transport carries a payload table; the broken placement omits it, so the combat-skip read has no breakdown.
+        if (!broken) result.contents.push_back({first + 1, {}});
+        for (unsigned i = 0; i < 2; ++i) {
+            gc::CensusObject actor; actor.id = first + i; actor.original_type = actor.current_type = i + 1;
+            actor.owner = 1; actor.planet = 2; actor.container = i == 0 ? 2 : first;
+            actor.combat_role = i == 1 ? gc::ActorCombatRole::transport : gc::ActorCombatRole::ordinary;
+            result.originals.push_back(actor);
+        }
+        return eawr::core::Result<Placement>::success(std::move(result));
+    };
+    campaign::add_galactic_object_world_rules(rules, {}, executor);
+    auto host = campaign::make_galactic_world_immediate_host(world, std::move(rules), 32);
+    const auth::Value player{auth::Handle{eawr::script::foc::handle_player, 1}};
+    const auth::Value planet{auth::Handle{eawr::script::foc::handle_game_object, 2}};
+    const auth::Value type{auth::Handle{eawr::script::foc::handle_type, 2}};
+    const auth::Value object{auth::Handle{eawr::script::foc::handle_game_object, 20}};
+    const auto before = take(world.save_checkpoint_state());
+    const auto before_canonical = world.canonical_state_bytes();
+    const auto journal_before = world.native_effects().size();
+    const auto next_before = world.next_entity_id();
+    const auto fleets_before = world.snapshot()->fleets().size();
+    auto batch = take(host->capture());
+    require(batch->apply("galactic.give_money", {player, auth::Value::number(eawr::script::numeric::LuaNumber(50))}));
+    take(batch->apply("galactic.spawn_unit", {player, planet, type}));
+    require(batch->apply("galactic.object_despawn", {object}));
+    // The batch passed staging and the world's own validation of every earlier step: only the force's read of its
+    // fleet breakdown fails, and it is the apply step that reads it.
+    const auto refused = host->publish(std::move(batch));
+    expect(!refused && refused.error().message.find("actor_payload_unavailable") != std::string::npos,
+        "a force whose fleet breakdown cannot be read is refused at publication with the combat-skip diagnostic");
+    const auto rows = world.snapshot()->actor_records();
+    expect(take(world.save_checkpoint_state()) == before && world.canonical_state_bytes() == before_canonical
+        && world.native_effects().size() == journal_before && world.next_entity_id() == next_before
+        && world.snapshot()->fleets().size() == fleets_before
+        && world.snapshot()->player_economy()->players.front().credits == f(100) && delivered.empty()
+        && std::any_of(rows.begin(), rows.end(), [](const auto& actor) { return actor.id == 20; })
+        && std::none_of(rows.begin(), rows.end(), [&](const auto& actor) { return actor.id >= next_before; }),
+        "a refused force batch leaves credits, fleets, registry, control, production, actors, journal and notifications untouched");
+    // The refusal is a diagnostic: the session is not marked failed and an equivalent well-formed batch publishes.
+    broken = false;
+    auto retry = take(host->capture());
+    require(retry->apply("galactic.give_money", {player, auth::Value::number(eawr::script::numeric::LuaNumber(50))}));
+    take(retry->apply("galactic.spawn_unit", {player, planet, type}));
+    require(retry->apply("galactic.object_despawn", {object}));
+    require(host->publish(std::move(retry)));
+    const auto after = world.snapshot()->actor_records();
+    expect(world.snapshot()->player_economy()->players.front().credits == f(150)
+        && std::none_of(after.begin(), after.end(), [](const auto& actor) { return actor.id == 20; })
+        && world.snapshot()->fleets().size() == fleets_before + 1,
+        "a refused force batch does not poison the session: the corrected batch applies in full");
+}
+
+// A full command journal ends a script's action, not the match: the world host refuses the action that would not fit, as an
+// ordinary error for the calling script, and the session carries on. A batch whose entries no longer fit when it is
+// published (the room changed after the actions were admitted) is refused before the first step, so it leaves no half
+// publication and does not mark the session failed.
+void world_script_journal_bound_contract() {
+    namespace auth = eawr::script::authoritative;
+    namespace campaign = eawr::campaign;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    const eawr::sim::InlineExecutor executor;
+    auto world = take(gc::GalacticSession::create(native_force_fixture()));
+    campaign::GalacticWorldImmediateRules rules;
+    rules.credit_multipliers.emplace(1, f(1));
+    campaign::add_galactic_object_world_rules(rules, {}, executor);
+    auto host = campaign::make_galactic_world_immediate_host(world, std::move(rules), 32);
+    const auth::Value player{auth::Handle{eawr::script::foc::handle_player, 1}};
+    const auth::Value object{auth::Handle{eawr::script::foc::handle_game_object, 20}};
+    const auto pay = [&](auth::ImmediateEffectState& batch) {
+        return batch.apply("galactic.give_money", {player, auth::Value::number(eawr::script::numeric::LuaNumber(10))});
+    };
+    const auto credits = [&] { return world.snapshot()->player_economy()->players.front().credits; };
+    const auto used = [&] { return gc::galactic_max_commands - world.native_journal_room(); };
+    expect(world.native_journal_room() == gc::galactic_max_commands - used(), "the room is the bound less the entries in use");
+
+    // Room for two entries: two payments are admitted, the third is a refusal naming the journal, and the two publish.
+    world.set_command_journal_bound(used() + 2);
+    expect(world.native_journal_room() == 2, "a lowered bound leaves exactly the room above the entries in use");
+    auto batch = take(host->capture());
+    require(pay(*batch));
+    require(pay(*batch));
+    const auto third = pay(*batch);
+    expect(!third && third.error().message.find("journal is full") != std::string::npos,
+        "the action that does not fit the journal is refused with a diagnostic");
+    require(host->publish(std::move(batch)));
+    expect(credits() == f(120) && world.native_journal_room() == 0, "the admitted actions publish and fill the journal");
+
+    // The journal is full: every journaling action is a refusal, the session is not failed, and a batch can still be opened.
+    auto full = take(host->capture());
+    expect(!pay(*full) && !full->apply("galactic.object_despawn", {object}),
+        "a full journal refuses payments and removals as errors for the script");
+    require(host->publish(std::move(full)));
+    expect(credits() == f(120), "an empty batch on a full journal still publishes and changes nothing");
+
+    // A batch admitted with room that is gone by publication is refused whole, before any step lands.
+    world.set_command_journal_bound(used() + 1);
+    auto late = take(host->capture());
+    require(pay(*late));
+    world.set_command_journal_bound(used());
+    const auto before = take(world.save_checkpoint_state());
+    const auto refused = host->publish(std::move(late));
+    expect(!refused && refused.error().message.find("cannot take this batch") != std::string::npos,
+        "a batch that no longer fits the journal is refused at publication");
+    expect(take(world.save_checkpoint_state()) == before && credits() == f(120),
+        "the refused batch leaves the world untouched");
+    world.set_command_journal_bound(used() + 1);
+    auto after = take(host->capture());
+    require(pay(*after));
+    require(host->publish(std::move(after)));
+    expect(credits() == f(130), "the session is not failed by a refused batch: the next one publishes");
+
+    // A batch that removes an actor and pays is refused as one unit when the room for both is gone: the actor stays and
+    // the payment does not land.
+    // `used()` is the bound less the room, so it is the number of entries only while the bound is the global one.
+    world.set_command_journal_bound(gc::galactic_max_commands);
+    const auto entries = used();
+    world.set_command_journal_bound(entries + 2);
+    auto removal = take(host->capture());
+    require(removal->apply("galactic.object_despawn", {object}));
+    require(pay(*removal));
+    world.set_command_journal_bound(entries + 1);
+    const auto actor_present = [&] {
+        const auto snapshot = world.snapshot();
+        const auto actors = snapshot->actor_records();
+        return std::any_of(actors.begin(), actors.end(), [](const auto& row) { return row.id == 20; });
+    };
+    expect(actor_present(), "the despawn is staged, not applied, before publication");
+    const auto kept = take(world.save_checkpoint_state());
+    const auto removal_refused = host->publish(std::move(removal));
+    const bool refusal_named = !removal_refused && removal_refused.error().message.find("cannot take this batch") != std::string::npos;
+    const bool actor_kept = actor_present();
+    const bool credits_kept = credits() == f(130);
+    const bool bytes_kept = take(world.save_checkpoint_state()) == kept;
+    expect(refusal_named && actor_kept && credits_kept && bytes_kept,
+        std::string("a removal and a payment that no longer fit are refused together and change nothing: refused ")
+            + (removal_refused ? "no" : removal_refused.error().message) + ", actor kept " + std::to_string(actor_kept)
+            + ", credits kept " + std::to_string(credits_kept) + ", bytes kept " + std::to_string(bytes_kept));
+}
+
+// A Spawn_Unit the AI could not take is refused before the world changes. The AI runtime supplies a dry run of what its
+// actor-change handler does with the births (`birth_probe`); a failure is an ordinary script error on the batch's private copy,
+// the batch goes on, and nothing of the refused creation publishes.
+void world_script_birth_probe_contract() {
+    namespace auth = eawr::script::authoritative;
+    namespace campaign = eawr::campaign;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    const eawr::sim::InlineExecutor executor;
+    auto world = take(gc::GalacticSession::create(native_force_fixture()));
+    campaign::GalacticWorldImmediateRules rules;
+    rules.credit_multipliers.emplace(1, f(1));
+    rules.placement = [](const auto&, const auto& view, auto first) {
+        gc::GalacticSession::NativeForcePlacement result; result.next_id = first + 1;
+        result.special_control = view.presence.special_control;
+        result.structures.push_back({first, 1, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure});
+        gc::CensusObject actor; actor.id = first; actor.original_type = actor.current_type = 1;
+        actor.owner = 1; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::ordinary;
+        result.originals.push_back(actor);
+        return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(std::move(result));
+    };
+    bool the_ai_refuses = true;
+    std::size_t probes = 0;
+    bool births_visible = true;
+    rules.birth_probe = [&](const auto&, const auto& shadow, auto births, const auto&) {
+        ++probes;
+        for (const auto& change : births) births_visible = births_visible && shadow.created_object(change.actor) != nullptr;
+        if (!the_ai_refuses) return eawr::core::Result<void>::success();
+        eawr::core::Diagnostic error; error.code = "test.ai_type"; error.message = "no selection content for the type";
+        return eawr::core::Result<void>::failure(std::move(error));
+    };
+    campaign::add_galactic_object_world_rules(rules, {}, executor);
+    auto host = campaign::make_galactic_world_immediate_host(world, std::move(rules), 32);
+    const auth::Value player{auth::Handle{eawr::script::foc::handle_player, 1}};
+    const auth::Value planet{auth::Handle{eawr::script::foc::handle_game_object, 2}};
+    const auth::Value type{auth::Handle{eawr::script::foc::handle_type, 1}};
+    const auto actors_before = world.snapshot()->actor_records().size();
+    const auto credits = [&] { return world.snapshot()->player_economy()->players.front().credits; };
+    const auto before_credits = credits();
+
+    auto batch = take(host->capture());
+    const auto refused = batch->apply("galactic.spawn_unit", {player, planet, type});
+    expect(!refused && refused.error().message.find("the AI cannot take this creation") != std::string::npos
+        && refused.error().code != std::string(auth::codes::session_abort) && probes == 1 && births_visible,
+        "a creation the AI cannot take is an ordinary script error, and the probe saw the births on the batch's copy");
+    require(batch->apply("galactic.give_money", {player, auth::Value::number(eawr::script::numeric::LuaNumber(10))}));
+    require(host->publish(std::move(batch)));
+    const auto after_refusal = world.snapshot()->actor_records().size();
+    const bool paid = credits() == eawr::sim::math::add(before_credits, f(10)).value();
+    expect(after_refusal == actors_before && paid,
+        "the refused creation leaves no actor, and the rest of the batch still publishes: actors " + std::to_string(actors_before)
+            + " -> " + std::to_string(after_refusal) + ", paid " + std::to_string(paid));
+
+    the_ai_refuses = false;
+    auto accepted = take(host->capture());
+    require(accepted->apply("galactic.spawn_unit", {player, planet, type}));
+    require(host->publish(std::move(accepted)));
+    const auto after_accept = world.snapshot()->actor_records().size();
+    expect(probes == 2 && after_accept == actors_before + 1,
+        "a creation the AI can take publishes as before: probes " + std::to_string(probes) + ", actors "
+            + std::to_string(actors_before) + " -> " + std::to_string(after_accept));
+}
+
+// A measurement, not a contract (#6702): wall time to spend the 4,000,000-unit service budget in three loops, so the weights of the
+// host-work charges can be read as nanoseconds per unit. Run with `galactic_control_tests --host-work-bench` (ctest -V shows it).
+// The world is the control fixture grown to a few thousand actors; the loops run through the real scheduler and the real
+// world immediate host (`galactic.object_find_all` is the story/object search; a refusal is a refused `galactic.give_money`).
+void host_work_bench() {
+    namespace auth = eawr::script::authoritative;
+    namespace campaign = eawr::campaign;
+    using Clock = std::chrono::steady_clock;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const eawr::sim::InlineExecutor executor;
+    auto world = take(gc::GalacticSession::create(native_force_fixture()));
+    campaign::GalacticWorldImmediateRules rules;
+    rules.credit_multipliers.emplace(1, f(1));
+    rules.placement = [](const auto&, const auto& view, auto first) {
+        gc::GalacticSession::NativeForcePlacement result; result.next_id = first + 1;
+        result.special_control = view.presence.special_control;
+        result.structures.push_back({first, 1, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure});
+        gc::CensusObject actor; actor.id = first; actor.original_type = actor.current_type = 1;
+        actor.owner = 1; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::ordinary;
+        result.originals.push_back(actor);
+        return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(std::move(result));
+    };
+    campaign::add_galactic_object_world_rules(rules, {}, executor);
+    auto host = campaign::make_galactic_world_immediate_host(world, std::move(rules), 4096);
+    const auth::Value player{auth::Handle{eawr::script::foc::handle_player, 1}};
+    const auth::Value planet{auth::Handle{eawr::script::foc::handle_game_object, 2}};
+    const auth::Value type{auth::Handle{eawr::script::foc::handle_type, 1}};
+    std::size_t spawned = 0;
+    {
+        auto batch = take(host->capture());
+        while (spawned < 3000 && batch->apply("galactic.spawn_unit", {player, planet, type})) ++spawned;
+        take(host->publish(std::move(batch)));
+    }
+    const auto records = world.snapshot()->actor_records().size();
+
+    struct Loop { const char* name; std::string source; std::uint64_t calls{}; double nanoseconds{}; bool budget{};
+        std::uint64_t units{}; std::string codes{}; };
+    static std::uint64_t calls = 0;
+    std::vector<Loop> loops{
+        {"lua steps only (while true do end)", "function main() while true do Tick() end end"},
+        {"object search over the world", "function main() while true do Tick() Scan() end end"},
+        {"refused action after 400 admitted ones", "function main() for i = 1, 400 do Pay() end while true do Tick() pcall(Bad) end end"}};
+    for (auto& loop : loops) {
+        auth::SessionConfig config;
+        config.label = "host_work_bench_" + std::to_string(&loop - loops.data());
+        auth::ModuleManifest modules;
+        if (!modules.add("Loop.lua", loop.source + " Create_Thread('main')")) throw std::runtime_error("bench module");
+        auto scripts = take(auth::ScriptScheduler::create(config, std::move(modules)));
+        take(scripts.register_binding("Tick", [](auth::BindingContext&, const auth::ValueList&) {
+            ++calls; return eawr::core::Result<auth::ValueList>::success({});
+        }));
+        take(scripts.register_binding("Scan", [player](auth::BindingContext& context, const auth::ValueList&) {
+            return context.query_immediate("galactic.object_find_all", {player});
+        }));
+        take(scripts.register_binding("Pay", [player](auth::BindingContext& context, const auth::ValueList&) {
+            return context.apply_immediate("galactic.give_money", {player, auth::Value::number(eawr::script::numeric::LuaNumber(1))});
+        }));
+        take(scripts.register_binding("Bad", [](auth::BindingContext& context, const auth::ValueList&) {
+            return context.apply_immediate("galactic.give_money", {});
+        }));
+        take(scripts.set_immediate_effect_host(host, 1));
+        take(scripts.create_instance(1, "Loop.lua"));
+        calls = 0;
+        const auto begin = Clock::now();
+        const auto report = take(scripts.service(executor));
+        loop.nanoseconds = std::chrono::duration<double, std::nano>(Clock::now() - begin).count();
+        loop.calls = calls;
+        loop.budget = std::any_of(report.diagnostics.begin(), report.diagnostics.end(),
+            [](const auto& row) { return row.code == auth::codes::instruction_budget; });
+        for (const auto& row : report.diagnostics) loop.codes += row.code + " ";
+        // The units the loop spent: its own steps and the host work charged beside them.
+        for (const auto& [label, peak] : auth::host_work_peaks())
+            if (label == config.label) loop.units = peak.host_units + static_cast<std::uint64_t>(std::max<std::int64_t>(peak.instructions, 0));
+    }
+    std::cout << "host-work-bench: " << records << " actors in the world, budget 4000000 units per service\n";
+    for (const auto& loop : loops)
+        std::cout << "host-work-bench: " << loop.name << ": " << loop.calls << " loop iterations, ended at the budget "
+                  << (loop.budget ? "yes" : "NO") << " [" << loop.codes << "], " << loop.units << " units, "
+                  << static_cast<std::uint64_t>(loop.nanoseconds / 1e6) << " ms, "
+                  << (loop.units ? loop.nanoseconds / static_cast<double>(loop.units) : 0.0) << " ns per unit\n";
+    // Not asserting the ratio: the numbers are the receipt. The loops must at least have run.
+    expect(std::all_of(loops.begin(), loops.end(), [](const auto& loop) { return loop.calls > 0 && loop.units > 0; }),
+        "every bench loop ran and spent budget");
+}
+
+void world_script_perception_diagnostic() {
+    namespace auth = eawr::script::authoritative;
+    namespace campaign = eawr::campaign;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto root = std::filesystem::temp_directory_path() / ("eawr-object-perception-contract-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(root / "scripts" / "gameobject");
+    {
+        std::ofstream script(root / "scripts" / "gameobject" / "perception.lua");
+        script << "function Base_Definitions() ServiceRate = 0 end\n"
+                  "function main() EvaluatePerception('test', nil) end\n";
+    }
+    eawr::vfs::MountSpec mount; mount.layer_id = "perception-contract"; mount.data_root = root;
+    const auto files = take(eawr::vfs::Vfs::mount(std::vector{mount}));
+    const std::vector<std::pair<gc::TypeId, std::string>> types{{2, "perception"}};
+    const auto content = take(campaign::GalacticObjectScripts::load(files, types));
+    auth::SessionConfig config; config.galactic_clock = true;
+    auto scripts = take(content->create_scheduler(config));
+    auto bound = campaign::register_galactic_object_bindings(scripts, {});
+    if (!bound) throw std::runtime_error(bound.error().message);
+    auto world = take(gc::GalacticSession::create(native_force_fixture()));
+    auto engine = campaign::make_galactic_object_engine(content);
+    const eawr::sim::InlineExecutor executor;
+    // An uncaught error ends only the failing thread of an object script: each attached instance reports its own failure
+    // once (the step publisher collapses equal lines), then its thread is gone and nothing repeats; the script is not retired,
+    // so there is no retirement load note either.
+    // The threads start on the services after the one that attaches the scripts; over four services every instance
+    // reports exactly once (a repeat would make the total exceed the instance count).
+    std::size_t failures = 0, notes = 0;
+    for (int i = 0; i < 4; ++i) {
+        const auto report = take(engine->service(executor, world, scripts));
+        const auto here = static_cast<std::size_t>(std::count_if(report.diagnostics.begin(), report.diagnostics.end(), [](const auto& row) {
+            return row.message.find("EvaluatePerception is not available") != std::string::npos;
+        }));
+        failures += here;
+        notes += report.load_notes.size();
+    }
+    const auto attached = scripts.object_scripts().size();
+    expect(attached > 0 && failures == attached && notes == 0 && scripts.retired_instances().empty(),
+        "an unavailable perception is reported once by each failing thread, and the script is not retired: " + std::to_string(failures)
+            + " diagnostics for " + std::to_string(attached) + " instances, "
+            + std::to_string(notes) + " notes");
+    std::filesystem::remove_all(root);
+}
+
+void world_script_sale_contract() {
+    namespace auth = eawr::script::authoritative;
+    namespace campaign = eawr::campaign;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    const eawr::sim::InlineExecutor executor;
+    auto world = take(gc::GalacticSession::create(native_force_fixture()));
+    campaign::GalacticStoryPlayers players;
+    players.types = {{"Station", 1}, {"Dummy", 2}};
+    players.type_build_costs.emplace(1, f(900));
+    const auto catalog = take(campaign::make_galactic_object_query_catalog(eawr::units::UnitTables{}, players.types));
+    campaign::GalacticWorldImmediateRules rules;
+    rules.credit_multipliers.emplace(1, f(1));
+    campaign::add_galactic_object_world_rules(rules, catalog, executor);
+    auto host = campaign::make_galactic_world_immediate_host(world, std::move(rules), 32);
+    auth::SessionConfig config; config.galactic_clock = true;
+    auth::ModuleManifest modules;
+    require(modules.add("Sale.lua", R"LUA(
+function TestValid(wrapper)
+    if wrapper == nil then return false end
+    if wrapper.Is_Valid == nil then return false end
+    return wrapper.Is_Valid()
+end
+function main()
+    local sell = Object()
+    local planet = sell.Get_Planet_Location()
+    local station = Find_Object_Type('Station')
+    for _, unit in pairs(Find_All_Objects_Of_Type(station)) do
+        if unit.Is_Valid() and unit.Get_Planet_Location() == planet then
+            unit.Despawn()
+            if TestValid(unit) then error('despawned structure still valid') end
+            Player().Give_Money(station.Get_Build_Cost() / 3 + 1)
+            break
+        end
+    end
+    for _, unit in pairs(Find_All_Objects_Of_Type(Find_Object_Type('Dummy'))) do
+        if unit.Is_Valid() and unit ~= sell and unit.Get_Planet_Location() == planet then unit.Despawn() end
+    end
+    sell.Despawn()
+end
+Create_Thread('main')
+)LUA"));
+    auto scripts = take(auth::ScriptScheduler::create(config, std::move(modules)));
+    require(campaign::register_galactic_object_bindings(scripts, players));
+    require(scripts.register_binding("Object", [](auth::BindingContext&, const auth::ValueList&) {
+        return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{eawr::script::foc::handle_game_object, 31}}});
+    }));
+    require(scripts.register_binding("Player", [](auth::BindingContext&, const auth::ValueList&) {
+        return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{eawr::script::foc::handle_player, 1}}});
+    }));
+    require(scripts.set_immediate_effect_host(host, 1));
+    require(scripts.create_instance(7, "Sale.lua"));
+    auth::ServiceOptions options; options.time_tick = 1;
+    const auto report = take(scripts.service(executor, options));
+    const auto actors = world.snapshot()->actor_records();
+    expect(report.diagnostics.empty() && std::none_of(actors.begin(), actors.end(), [](const auto& actor) {
+        return actor.id == 20 || actor.id == 21 || actor.id == 31;
+    }) && world.snapshot()->player_economy()->players.front().credits == f(401),
+        "a scripted sale removes the structure, its dummy and the sell object and refunds one third of its authored cost plus one");
+}
+
+// GOL-17: EvaluatePerception answers the mounted equations from the completed world, equally on 1, 2, 4 and 8 workers.
+void world_script_perception_contract() {
+    namespace auth = eawr::script::authoritative;
+    namespace campaign = eawr::campaign;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    const auto root = std::filesystem::temp_directory_path() / ("eawr-object-perception-values-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(root / "scripts" / "gameobject");
+    std::filesystem::create_directories(root / "xml" / "ai" / "perceptualequations");
+    {
+        std::ofstream script(root / "scripts" / "gameobject" / "probe.lua");
+        script << "function Base_Definitions() ServiceRate = 0 end\n"
+                  "function main()\n"
+                  "  local me = Player()\n"
+                  "  local planet = Object().Get_Planet_Location()\n"
+                  "  local value = EvaluatePerception('Probe_Friendly', me, planet) + 2 * EvaluatePerception('Probe_Enemy', me, planet)\n"
+                  "    + 4 * EvaluatePerception('Probe_Level', me, planet) + 8 * EvaluatePerception('Probe_Nested', me, planet)\n"
+                  "  me.Give_Money(value)\n"
+                  "end\nCreate_Thread('main')\n";
+        std::ofstream unsupported(root / "scripts" / "gameobject" / "unsupported.lua");
+        unsupported << "function Base_Definitions() ServiceRate = 0 end\n"
+                       "function main() EvaluatePerception('Probe_Unsupported', Player(), Object().Get_Planet_Location()) end\n"
+                       "Create_Thread('main')\n";
+        std::ofstream unknown(root / "scripts" / "gameobject" / "unknown.lua");
+        unknown << "function Base_Definitions() ServiceRate = 0 end\n"
+                   "function main() EvaluatePerception('No_Such_Equation', Player(), Object().Get_Planet_Location()) end\n"
+                   "Create_Thread('main')\n";
+        std::ofstream equations(root / "xml" / "ai" / "perceptualequations" / "probe.xml");
+        equations << "<Equations>\n"
+                     "<Probe_Friendly> Variable_Target.FriendlyForce.HasSpaceForce </Probe_Friendly>\n"
+                     "<Probe_Enemy> Variable_Target.EnemyForce.HasSpaceForce </Probe_Enemy>\n"
+                     "<Probe_Level> Variable_Target.StarbaseLevelUnnormalized </Probe_Level>\n"
+                     "<Probe_Nested> 10.0 * Function_Probe_Level.Evaluate + 1.0 </Probe_Nested>\n"
+                     "<Probe_Unsupported> Variable_Target.Hints.Whatever </Probe_Unsupported>\n"
+                     "</Equations>\n";
+    }
+    eawr::vfs::MountSpec mount; mount.layer_id = "perception-values"; mount.data_root = root;
+    const auto files = take(eawr::vfs::Vfs::mount(std::vector{mount}));
+    const std::vector<std::pair<gc::TypeId, std::string>> types{{2, "probe"}, {3, "unsupported"}, {4, "unknown"}};
+    const auto content = take(campaign::GalacticObjectScripts::load(files, types));
+    expect(content->perception() != nullptr && content->perception()->equation_count() == 5,
+        "the mounted perception equations load with the object scripts");
+    campaign::GalacticStoryPlayers players;
+    players.types = {{"Station", 1}};
+    const auto catalog = take(campaign::make_galactic_object_query_catalog(eawr::units::UnitTables{}, players.types));
+    std::vector<std::uint8_t> reference;
+    std::int64_t expected = 0;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto world = take(gc::GalacticSession::create(native_force_fixture()));
+        // The oracle: the same facts read straight from the world, by the plain definitions of the three lookups.
+        const auto snapshot = world.snapshot();
+        std::int64_t friendly = 0, enemy = 0, level = 0;
+        for (const auto& fleet : snapshot->fleets()) {
+            if (fleet.orbit != 2 || fleet.members.empty()) continue;
+            if (fleet.owner == 1) friendly = 1;
+            else {
+                const auto relation = std::find_if(snapshot->control()->relations.begin(), snapshot->control()->relations.end(),
+                    [&](const auto& row) { return row.player == 1 && row.other == fleet.owner; });
+                if (relation == snapshot->control()->relations.end() || !relation->allied) enemy = 1; else friendly = 1;
+            }
+        }
+        for (const auto& row : snapshot->production()->planets) if (row.planet == 2) level = row.space_level;
+        expected = friendly + 2 * enemy + 4 * level + 8 * (10 * level + 1);
+        campaign::GalacticWorldImmediateRules rules;
+        rules.credit_multipliers.emplace(1, f(1));
+        campaign::add_galactic_object_world_rules(rules, catalog, executor, content->perception());
+        auto host = campaign::make_galactic_world_immediate_host(world, std::move(rules), 32);
+        auth::SessionConfig config; config.galactic_clock = true;
+        auto scripts = take(content->create_scheduler(config));
+        require(campaign::register_galactic_object_bindings(scripts, players));
+        require(scripts.register_binding("Object", [](auth::BindingContext&, const auth::ValueList&) {
+            return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{eawr::script::foc::handle_game_object, 31}}});
+        }));
+        require(scripts.register_binding("Player", [](auth::BindingContext&, const auth::ValueList&) {
+            return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{eawr::script::foc::handle_player, 1}}});
+        }));
+        require(scripts.set_immediate_effect_host(host, 4));
+        require(scripts.create_instance(7, "data/scripts/gameobject/probe.lua"));
+        require(scripts.create_instance(8, "data/scripts/gameobject/unsupported.lua"));
+        require(scripts.create_instance(9, "data/scripts/gameobject/unknown.lua"));
+        auth::ServiceOptions options; options.time_tick = 1;
+        const auto report = take(scripts.service(executor, options));
+        const auto after = world.snapshot()->player_economy()->players.front().credits;
+        expect(after == f(100 + expected), "EvaluatePerception answers the equations from the world: " + std::to_string(expected));
+        const auto mentions = [&](std::string_view text) {
+            return std::count_if(report.diagnostics.begin(), report.diagnostics.end(), [&](const auto& row) {
+                return row.message.find(text) != std::string::npos; });
+        };
+        expect(mentions("VARIABLE_TARGET.HINTS.WHATEVER") == 1, "a lookup the host cannot answer is one error of the asking thread, naming the lookup");
+        expect(mentions("No_Such_Equation") == 1, "an unknown equation is one error of the asking thread, naming it");
+        expect(scripts.retired_instances().empty(), "a refused perception ends the failing thread only");
+        auto bytes = world.snapshot()->canonical_bytes();
+        if (reference.empty()) reference = bytes;
+        else expect(bytes == reference, "perception-driven object scripts leave the same world on every worker count");
+    }
+    expect(expected > 0, "the probe world has a friendly force at the planet");
+    std::filesystem::remove_all(root);
+}
+
+// #6963: a mod's stand-in unit for an orbital structure leaves the fleet slot by SCRIPT, not by an engine rule: its own object
+// script compares the planet it started at with `Get_Planet_Location()` and despawns itself when they differ, and a structure
+// script respawns a replacement. The engine hooks that needs: (1) the planet of a fleet member is no value in transit,
+// (2) a member of a moving fleet can be despawned and leaves no dangling row, (3) a replacement can be created at the origin,
+// (4) the same bytes on 1/2/4/8 workers. A fleet that stays put keeps the member (control). No object name is read.
+void orbital_stand_in_leaves_by_script_contract() {
+    namespace auth = eawr::script::authoritative;
+    namespace campaign = eawr::campaign;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    // The stand-in's script, reduced to the departure test of the mod's own: the start planet is the one the fleet is
+    // orbiting (planet 2), so a no-value answer (in transit) or any other planet is a departure.
+    const char* const leave_script = R"LUA(
+function Base_Definitions() ServiceRate = 0 end
+function main()
+    local me = Object()
+    local here = me.Get_Planet_Location()
+    if here == nil then
+        me.Despawn()
+    end
+end
+Create_Thread('main')
+)LUA";
+    const auto in_fleet = [](const gc::GalacticSession& world, eawr::sim::EntityId actor) {
+        for (const auto& fleet : world.snapshot()->fleets())
+            for (const auto& member : fleet.members) if (member.id == actor) return true;
+        return false;
+    };
+    const auto live = [](const gc::GalacticSession& world, eawr::sim::EntityId actor) {
+        const auto rows = world.snapshot()->actor_records();
+        return std::any_of(rows.begin(), rows.end(), [&](const auto& row) { return row.id == actor && !row.dead && !row.delete_pending; });
+    };
+    const auto run = [&](const eawr::sim::PartitionExecutor& executor, const bool move) {
+        auto world = take(gc::GalacticSession::create(native_force_fixture()));
+        if (move) {
+            require(world.submit({{world.snapshot()->completed_tick(), gc::SeatId{1}, 1}, gc::MoveFleet{10, {2, 1}, {}}}));
+            const auto stepped = world.step(executor); require(stepped);
+        }
+        campaign::GalacticWorldImmediateRules rules;
+        rules.credit_multipliers.emplace(1, f(1));
+        campaign::add_galactic_object_world_rules(rules, {}, executor);
+        auto host = campaign::make_galactic_world_immediate_host(world, std::move(rules), 32);
+        auth::SessionConfig config; config.galactic_clock = true;
+        auth::ModuleManifest modules;
+        require(modules.add("Leave.lua", leave_script));
+        auto scripts = take(auth::ScriptScheduler::create(config, std::move(modules)));
+        require(campaign::register_galactic_object_bindings(scripts, {}));
+        require(scripts.register_binding("Object", [](auth::BindingContext&, const auth::ValueList&) {
+            return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{eawr::script::foc::handle_game_object, 20}}});
+        }));
+        require(scripts.set_immediate_effect_host(host, 1));
+        require(scripts.create_instance(7, "Leave.lua"));
+        auth::ServiceOptions options; options.time_tick = 1;
+        const auto report = take(scripts.service(executor, options));
+        expect(report.diagnostics.empty(), "the stand-in's script runs without a script error");
+        return world.snapshot()->canonical_bytes();
+    };
+    const eawr::sim::InlineExecutor inline_executor;
+    {   // Control: the fleet stays in orbit, the script finds its planet, nothing is despawned.
+        auto world = take(gc::GalacticSession::create(native_force_fixture()));
+        expect(live(world, 20) && in_fleet(world, 20), "the stand-in is a live fleet member at the start");
+        const auto kept = run(inline_executor, false);
+        auto other = take(gc::GalacticSession::create(native_force_fixture()));
+        expect(kept == other.snapshot()->canonical_bytes(), "a fleet that stays put keeps its stand-in: the script changes nothing");
+    }
+    {   // Departure: in transit the planet is no value, the script despawns the member, the fleet keeps its other members.
+        auto world = take(gc::GalacticSession::create(native_force_fixture()));
+        require(world.submit({{world.snapshot()->completed_tick(), gc::SeatId{1}, 1}, gc::MoveFleet{10, {2, 1}, {}}}));
+        const auto stepped = world.step(inline_executor); require(stepped);
+        campaign::GalacticWorldImmediateRules rules;
+        rules.credit_multipliers.emplace(1, f(1));
+        campaign::add_galactic_object_world_rules(rules, {}, inline_executor);
+        auto host = campaign::make_galactic_world_immediate_host(world, std::move(rules), 32);
+        auto batch = take(host->capture());
+        const auth::Value member{auth::Handle{eawr::script::foc::handle_game_object, 20}};
+        const auto planet_answer = take(batch->query("galactic.object_planet", {member}));
+        expect(planet_answer.empty(), "a fleet member in transit has no planet location (no value)");
+        const auto valid = take(batch->query("galactic.object_valid", {member}));
+        expect(valid.size() == 1 && std::get<bool>(valid.front().data), "the member is still a valid object in transit");
+        batch.reset();
+        const auto bytes = run(inline_executor, true);
+        auto moved = take(gc::GalacticSession::create(native_force_fixture()));
+        require(moved.submit({{moved.snapshot()->completed_tick(), gc::SeatId{1}, 1}, gc::MoveFleet{10, {2, 1}, {}}}));
+        { const auto again = moved.step(inline_executor); require(again); }
+        expect(bytes != moved.snapshot()->canonical_bytes(), "the departure script changed the world: the stand-in was despawned");
+    }
+    std::vector<std::uint8_t> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto bytes = run(executor, true);
+        if (reference.empty()) reference = bytes;
+        else expect(bytes == reference, "the departure script leaves the same world on every worker count");
+    }
+    {   // The member is gone from the fleet and every row, and a replacement can be created at the origin planet.
+        auto world = take(gc::GalacticSession::create(native_force_fixture()));
+        require(world.submit({{world.snapshot()->completed_tick(), gc::SeatId{1}, 1}, gc::MoveFleet{10, {2, 1}, {}}}));
+        { const auto stepped = world.step(inline_executor); require(stepped); }
+        campaign::GalacticWorldImmediateRules rules;
+        rules.credit_multipliers.emplace(1, f(1));
+        rules.placement = [](const auto&, const auto& view, auto first) {
+            gc::GalacticSession::NativeForcePlacement result; result.next_id = first + 1;
+            result.special_control = view.presence.special_control;
+            result.structures.push_back({first, 1, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure});
+            gc::CensusObject actor; actor.id = first; actor.original_type = actor.current_type = 1;
+            actor.owner = 1; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::ordinary;
+            result.originals.push_back(actor);
+            return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(std::move(result));
+        };
+        campaign::add_galactic_object_world_rules(rules, {}, inline_executor);
+        auto host = campaign::make_galactic_world_immediate_host(world, std::move(rules), 32);
+        auto batch = take(host->capture());
+        const auth::Value member{auth::Handle{eawr::script::foc::handle_game_object, 20}};
+        require(batch->apply("galactic.object_despawn", {member}));
+        const auth::Value player{auth::Handle{eawr::script::foc::handle_player, 1}};
+        const auth::Value origin{auth::Handle{eawr::script::foc::handle_game_object, 2}};
+        const auth::Value type{auth::Handle{eawr::script::foc::handle_type, 1}};
+        const auto made = take(batch->apply("galactic.spawn_unit", {player, origin, type}));
+        const auto created = std::get<std::vector<auth::Value>>(made.front().data).front();
+        require(host->publish(std::move(batch)));
+        const auto created_id = std::get<auth::Handle>(created.data).id;
+        expect(!live(world, 20) && !in_fleet(world, 20), "a despawned member of a moving fleet leaves the fleet and the census");
+        expect(live(world, created_id), "the replacement exists at the origin planet after the despawn");
+        const auto rows = world.snapshot()->actor_records();
+        expect(std::none_of(rows.begin(), rows.end(), [](const auto& row) { return row.container == 20; }),
+            "no row still names the despawned member as its container");
+    }
+}
+
 void world_immediate_host_contract() {
     namespace auth = eawr::script::authoritative;
     namespace ga = eawr::script::foc::galactic_ai;
@@ -2397,6 +3532,26 @@ void world_immediate_host_contract() {
         require(world.set_story_ai_usage(20, {}, true));
         expect(world.state_sha256() != before_fact_change, "world actor AI-usage fact contributes to the world hash");
         require(world.set_story_ai_usage(20, {}, false));
+        {
+            // #6933: inside a snapshot batch a write only marks the snapshot stale; a read still sees the last write, and
+            // the batch's end publishes the same state an immediate republication would have.
+            const auto prefer = [&] {
+                const auto records = world.snapshot()->actor_records();
+                const auto at = std::find_if(records.begin(), records.end(), [](const auto& row) { return row.id == 20; });
+                return at == records.end() ? std::optional<bool>{} : at->story_prefer_ground;
+            };
+            world.begin_snapshot_batch();
+            require(world.set_story_ai_usage(20, {}, true));
+            const auto inside_first = world.snapshot();
+            expect(prefer() == std::optional<bool>(true), "a read inside the batch sees the first write");
+            require(world.set_story_ai_usage(20, {}, false));
+            require(world.set_story_ai_usage(20, {}, true));
+            world.end_snapshot_batch();
+            expect(prefer() == std::optional<bool>(true) && world.snapshot() != inside_first,
+                "the batch's end publishes the last write as a fresh snapshot");
+            require(world.set_story_ai_usage(20, {}, false));
+            expect(prefer() == std::optional<bool>(false), "after the batch an immediate write publishes at once");
+        }
         const auto saved_world = take(world.save_checkpoint_state());
         auto restored_world = take(gc::GalacticSession::from_replay(world.record()));
         require(restored_world.load_checkpoint_state(saved_world));
@@ -3245,6 +4400,47 @@ void installed() {
     const auto catalog = eawr::data::load_catalog(filesystem, eawr::data::Profile::foc).value();
     const auto data = eawr::data::galactic::load_galactic_data(filesystem, catalog.catalog).value();
     const auto types = eawr::units::galactic_type_table(catalog.catalog);
+    // GGS-11 retail capture: both stock teams may return to an owned surface,
+    // although their passengers remain in their transport during land combat.
+    for (const std::string_view name : {"Grand_Moff_Tarkin_Team", "Fleet_Com_Empire_Team"}) {
+        const auto* company = types.find(name);
+        expect(company && company->company_units.size() == 1, "stock noncombat hero company has one authored passenger");
+        if (!company || company->company_units.size() != 1) continue;
+        const std::vector<eawr::campaign::FleetTypeBinding> hero_types{
+            {1, company->company_transport}, {2, company->company_units.front()}, {3, company->name}};
+        const auto traits = eawr::campaign::build_fleet_type_traits(types, hero_types).value();
+        const auto capabilities = eawr::campaign::prepare_ground_capability_types(types, hero_types).value();
+        expect(traits[0].transport && capabilities[1].stays_in_transport,
+            "stock hero uses authored transport and stay-in-transport passenger data");
+        for (const bool selected : {false, true}) {
+            std::vector<std::string> reference;
+            for (const auto workers : {1U, 2U, 4U, 8U}) {
+                auto initial = setup();
+                initial.fleets = {{10, 1, 1, {{21, 1}}}};
+                initial.fleet_control->types = traits;
+                initial.control->ground_capability_types = capabilities;
+                for (std::size_t i = 0; i < traits.size(); ++i) initial.movement->types[i].transport = traits[i].transport;
+                initial.movement->contents = {{21, {{30, 2}}}};
+                expect(!gc::has_ground_capability(*initial.control, {21, 1}, &*initial.movement).value(),
+                    "stock noncombat hero remains ineligible for ground combat");
+                expect(gc::can_land_transport(*initial.control, *initial.fleet_control, 1, 1, {21, 1}, &*initial.movement).value()
+                    && !gc::can_land_transport(*initial.control, *initial.fleet_control, 1, 2, {21, 1}, &*initial.movement).value(),
+                    "stock noncombat hero links to allied ground but cannot invade hostile ground");
+                auto world = gc::GalacticSession::create(initial).value();
+                const gc::CommandPayload command = selected ? gc::CommandPayload{gc::LandUnits{1, {21}}}
+                    : gc::CommandPayload{gc::LandFleet{10, 1}};
+                world.submit({{0, gc::SeatId{1}, 1}, command}).value();
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                std::vector<std::string> hashes;
+                for (unsigned tick = 0; tick != 3; ++tick) hashes.push_back(world.step(executor).value().state_hash.get());
+                const auto snapshot = world.snapshot();
+                expect(snapshot->fleets().empty() && snapshot->control()->planets[0].landed.size() == 1
+                    && snapshot->control()->planets[0].landed[0].id == 21,
+                    "stock Tarkin and Fleet Commander land through selected and whole-fleet commands");
+                if (workers == 1) reference = hashes; else expect(hashes == reference, "stock hero landing agrees on 1/2/4/8 workers");
+            }
+        }
+    }
     gc::PoliticalControlSetup presence; std::vector<eawr::campaign::ControlTypeBinding> bindings;
     for (const auto& t : types.types) if (t.object_class == "SpaceUnit" && t.political_control)
         bindings.push_back({bindings.size() + 1, t.name, false, false});
@@ -3263,19 +4459,26 @@ void installed() {
     expect(bound.value().change_seconds == *data.constant("Political_Control_Change_Time_Seconds")->number, "stock control rate equals loader quantity");
     for (std::size_t i = 0; i < planets.size(); ++i)
         expect(bound.value().planets[i].leaning == *data.planet(planets[i].original_type)->political_control, "stock leaning follows original planet data");
+    // #6798: the stock space-only systems, with the tags exactly as the stock data authors them.
+    for (const std::string_view name : {"VergessoAsteroids", "The_Maw"}) {
+        const auto* planet = data.planet(name);
+        expect(planet && planet->planet_surface_accessible && !*planet->planet_surface_accessible, "stock " + std::string(name) + " authors no accessible surface");
+        if (planet) space_only_conquest_for("stock " + std::string(name), planet->planet_retains_residual_influence.value_or(true));
+    }
     std::cout << "stock control types=" << bindings.size() << " planets=" << planets.size() << " routes=" << routes.size() << '\n';
 }
 } // namespace
 int main(int argc, const char* const argv[]) {
     try {
         if (argc == 3 && std::string_view(argv[1]) == "--generate") { generate(argv[2]); return 0; }
+        if (argc == 2 && std::string_view(argv[1]) == "--host-work-bench") { host_work_bench(); return galactic_test::failures == 0 ? 0 : 1; }
         if (argc == 2 && std::string_view(argv[1]) == "--installed") { installed(); return galactic_test::failures == 0 ? 0 : 1; }
         if (argc == 2 && std::string_view(argv[1]) == "--protection") { protection_lifecycle(); adapter(); transitions(); return galactic_test::failures == 0 ? 0 : 1; }
         if (argc == 2 && std::string_view(argv[1]) == "--capture-build-list") {
             capture_build_and_ground_views(); return galactic_test::failures == 0 ? 0 : 1;
         }
-        selected_landing_commands(); ground_layout_commands(); load_guard_contracts(); authored_mixed_surface_owners(); native_view_reuse_is_exact(); native_invasion_cash_reconciliation(); native_finish_orbit_reconciliation(); native_production_reconciliation(); native_force_reconciliation(); world_immediate_host_contract(); wide_galactic_lua_handles(); independent_native_barrier();
-        native_control_reconciliation(); native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); alignment_strength(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); signed_capture_rewards(); capture_structure_cleanup(); ground_structure_base_level(); hostile_landing_refreshes_ground_base_level(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); child_battle_control(); adapter();
+        selected_landing_commands(); ground_layout_commands(); load_guard_contracts(); authored_mixed_surface_owners(); native_view_reuse_is_exact(); native_invasion_cash_reconciliation(); native_finish_orbit_reconciliation(); native_production_reconciliation(); native_force_reconciliation(); world_immediate_host_contract(); world_script_despawn_contract(); script_despawn_leaves_no_dangling_rows(); world_script_despawn_is_atomic(); world_script_force_failure_is_atomic(); world_script_journal_bound_contract(); world_script_birth_probe_contract(); world_script_sale_contract(); world_script_perception_diagnostic(); world_script_perception_contract(); orbital_stand_in_leaves_by_script_contract(); wide_galactic_lua_handles(); independent_native_barrier();
+        native_control_reconciliation(); native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); space_only_conquest(); alignment_strength(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); signed_capture_rewards(); capture_structure_cleanup(); ground_structure_base_level(); hostile_landing_refreshes_ground_base_level(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); child_battle_control(); adapter();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;
 }

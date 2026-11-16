@@ -53,8 +53,16 @@ core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state()
         out.script_invulnerable = std::any_of(live.begin(), live.end(), [](const auto& unit) {
             return unit.script_invulnerable;
         });
-        // WJM-01: domain 25 base; +1 fire range; +2 script invulnerability.
-        out(std::uint32_t{25U + (out.fire_range_bonuses ? 1U : 0U) + (out.script_invulnerable ? 2U : 0U)});
+        // MV-40: a final facing on a live unit's order or on a queued leg selects the wider order and leg layout.
+        out.final_facing = std::any_of(live.begin(), live.end(), [](const auto& unit) {
+            return unit.state.order.final_yaw.has_value() || (unit.waypoints && std::any_of(
+                unit.waypoints->points.begin(), unit.waypoints->points.end(),
+                [](const auto& point) { return point.move.final_yaw.has_value(); }));
+        });
+        // WSPL-08: domain 29 base (the super laser use state joined the ability slot; a save from domains 21..28 is
+        // refused, never read with the wider slot); +1 fire range; +2 script invulnerability; +4 final facing.
+        out(std::uint32_t{29U + (out.fire_range_bonuses ? 1U : 0U) + (out.script_invulnerable ? 2U : 0U)
+            + (out.final_facing ? 4U : 0U)});
         checkpoint_detail::Access::state(out, std::as_const(*impl_));
         out(live);
         out(checkpoint_detail::Access::visibility(*impl_));
@@ -102,9 +110,10 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         checkpoint_detail::Reader in(bytes);
         std::uint32_t version{};
         in(version);
-        if (version < 25U || version > 28U) throw checkpoint_detail::Invalid("unsupported child state domain");
-        in.fire_range_bonuses = (version - 25U) % 2U == 1U;
-        in.script_invulnerable = version >= 27U;
+        if (version < 29U || version > 36U) throw checkpoint_detail::Invalid("unsupported child state domain");
+        in.fire_range_bonuses = (version - 29U) % 2U == 1U;
+        in.script_invulnerable = (version - 29U) % 4U >= 2U;
+        in.final_facing = version >= 33U;
         const auto cursors = impl_->last_submitted;
         checkpoint_detail::Access::state(in, *impl_);
         // SAE-10: a reinforcement whose search failed advanced its issuer's cursor but is never recorded, so the
@@ -138,6 +147,11 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         if (in.script_invulnerable && std::none_of(live.begin(), live.end(), [](const auto& unit) {
                 return unit.script_invulnerable;
             })) throw checkpoint_detail::Invalid("noncanonical empty script-invulnerable domain");
+        if (in.final_facing && std::none_of(live.begin(), live.end(), [](const auto& unit) {
+                return unit.state.order.final_yaw.has_value() || (unit.waypoints && std::any_of(
+                    unit.waypoints->points.begin(), unit.waypoints->points.end(),
+                    [](const auto& point) { return point.move.final_yaw.has_value(); }));
+            })) throw checkpoint_detail::Invalid("noncanonical empty final-facing domain");
         checkpoint_detail::Access::PublishedVisibility visibility;
         in(visibility);
         if (impl_->completed_tick > max_ticks || live.size() > max_units) throw checkpoint_detail::Invalid("state exceeds tactical limits");
@@ -417,10 +431,11 @@ void TacticalSession::Impl::publish_staged(const std::vector<LiveUnit>& live, st
             if (unit.waypoints) waypoint_queues_present |= !unit.waypoints->points.empty();
             instances.push_back(std::move(instance));
         }
+        auto tsw_rows = tsw_views(instances);
         current_snapshot = std::make_shared<const TacticalSnapshot>(completed_tick, snapshot_players,
             std::move(instances), std::move(events), std::move(combat_events), projectiles, outcome,
             std::vector<SpinningCraft>{}, std::vector<SquadronTarget>{}, squadrons, economy_views(ledgers, shares), pad_views(), quits,
-            losses, productions, manual_clock_views(), economy_cues, ability_spawns, retreat_views(), garrison_timer_views(), beacons, setup.controllers);
+            losses, productions, manual_clock_views(), economy_cues, ability_spawns, retreat_views(), garrison_timer_views(), beacons, setup.controllers, std::move(tsw_rows));
     }
 
 std::vector<GarrisonTimerView> TacticalSession::Impl::garrison_timer_views() const {
@@ -814,6 +829,7 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.mc30"); append_canonical_mc30_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.ion_stuns"); append_canonical_ion_stuns_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.hazard_moves"); append_canonical_hazard_moves_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.final_facing"); append_canonical_final_facing_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.asteroids"); append_canonical_asteroids_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.engine_disable"); append_canonical_engine_disable_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.nebula"); append_canonical_nebula_state(bytes, units, counts); }
@@ -838,6 +854,7 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.charged_blast"); append_canonical_charged_blast_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.waypoints"); append_canonical_waypoints_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.beacons"); append_canonical_beacons_state(bytes); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.tsw"); append_canonical_tsw_state(bytes); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.order_history"); append_canonical_order_history_state(bytes, units, counts); }
         if (land) {
             core::tick_profile::Scope section_scope("serial.tactical.finish.section.land");

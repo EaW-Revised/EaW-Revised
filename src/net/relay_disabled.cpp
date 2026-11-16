@@ -68,6 +68,7 @@ GnsRoomRoster NetworkGnsRoom::roster() const { return {}; }
 core::Result<void> NetworkGnsRoom::send(PeerIndex, std::span<const std::uint8_t>) { return core::Result<void>::failure(relay_disabled()); }
 core::Result<std::optional<GnsRoomSignal>> NetworkGnsRoom::poll() { return core::Result<std::optional<GnsRoomSignal>>::failure(relay_disabled()); }
 std::optional<GnsTurnCredentials> NetworkGnsRoom::turn_credentials() const { return {}; }
+std::optional<std::string> NetworkGnsRoom::own_turn_uris() const { return std::nullopt; }
 GnsRoomLease NetworkGnsRoom::lease() const { return {}; }
 core::Result<void> NetworkGnsRoom::status() const { return core::Result<void>::failure(relay_disabled()); }
 core::Result<bool> NetworkGnsRoom::repair_attachment(std::uint64_t) { return core::Result<bool>::failure(relay_disabled()); }

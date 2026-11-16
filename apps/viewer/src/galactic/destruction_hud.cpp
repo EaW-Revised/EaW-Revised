@@ -275,6 +275,7 @@ bool GalacticMode::State::drop_destruction(galactic_view::ObjectId source, bool 
             ++submitted_orders;
         }
         ++state.accepts; state.accepted_source = state.facts->source; state.accepted_planet = state.facts->planet;
+        state.dropped.dropped(state.facts->source);
         // WGCH-155/156: the published original actor/container reaches the shared host.
         // Controlled observer fixtures retain their acceptance-only behavior.
     }
@@ -304,25 +305,26 @@ void GalacticMode::State::refuse_hero_ability(std::string text) {
 }
 void GalacticMode::State::service_ability_notice() {
     if (!game || !galaxy || !host) return;
-    // Host-side refusals: the order was queued, and the host answered for the supplied object or the bearer it carries.
-    const auto dropped = [&](std::uint64_t subject) {
-        const auto source = destruction_hud.accepted_source;
-        const auto actors = displayed_snapshot ? displayed_snapshot->actor_records() : std::span<const sim::galactic::CensusObject>{};
-        for (std::size_t remaining = actors.size() + 1; source && subject && remaining; --remaining) {
-            if (subject == source) return true;
-            const auto actor = std::lower_bound(actors.begin(), actors.end(), subject,
-                [](const auto& row, auto id) { return row.id < id; });
-            if (actor == actors.end() || actor->id != subject) return false;
-            subject = actor->container;
-        }
-        return false;
+    // Host-side answers: each queued drop waits until the host answers for the supplied object or the bearer it carries
+    // (#5998). A refusal shows its notice; preparation, settlement or cancellation only ends the wait.
+    const auto actors = displayed_snapshot ? displayed_snapshot->actor_records() : std::span<const sim::galactic::CensusObject>{};
+    const auto container = [&](galactic_view::ObjectId subject) -> galactic_view::ObjectId {
+        const auto actor = std::lower_bound(actors.begin(), actors.end(), subject,
+            [](const auto& row, auto id) { return row.id < id; });
+        return actor == actors.end() || actor->id != subject ? 0 : actor->container;
     };
     const auto feed = game->galactic_events_after(ability_event_cursor, sim::SeatId{galaxy->local.seat});
     ability_event_cursor = feed.through;
     for (const auto& row : feed.events) {
         const auto& event = row.event;
-        if (event.kind != sim::galactic::GalacticEventKind::command_rejected
-            || event.producer != sim::SeatId{galaxy->local.seat} || !dropped(event.subject)) continue;
+        if (event.producer != sim::SeatId{galaxy->local.seat}) continue;
+        using Kind = sim::galactic::GalacticEventKind;
+        if (event.kind == Kind::ability_prepared || event.kind == Kind::ability_settled || event.kind == Kind::ability_cancelled) {
+            static_cast<void>(destruction_hud.dropped.answered(event.subject, container));
+            continue;
+        }
+        if (event.kind != Kind::command_rejected || !destruction_hud.dropped.answered(event.subject, container)) continue;
+        if (destruction_hud.refusal_reasons.size() < 16) destruction_hud.refusal_reasons.push_back(static_cast<std::uint8_t>(event.reason));
         refuse_hero_ability(std::string(galactic_view::ability_refusal_text(event.reason)));
     }
     if (!ability_notice_text.empty() && Time::get_singleton()->get_ticks_msec() >= ability_notice_until_msec) ability_notice_text.clear();
@@ -385,6 +387,7 @@ bool GalacticMode::State::drop_hero_ability(galactic_view::ObjectId source, bool
         game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, *command, {}});
         ++submitted_orders; ++state.prepares;
         state.accepted_source = drop->supplied; state.accepted_planet = drop->planet;
+        state.dropped.dropped(drop->supplied);
     }
     return true;
 }
@@ -411,7 +414,10 @@ void GalacticMode::State::write_destruction_report(std::ostream& output) const {
         << ", \"actor\": " << (facts ? facts->actor : 0) << ", \"source_id\": " << (facts ? facts->source : 0)
         << ", \"planet\": " << (facts ? facts->planet : 0) << ", \"refusal\": " << (facts ? static_cast<int>(facts->refusal) : 0)
         << ", \"outcome\": " << (result == results.end() ? 0 : static_cast<int>(result->outcome))
-        << ", \"raid_accepts\": " << state.raid_accepts
+        << ", \"refusal_reasons\": [";
+    for (std::size_t index = 0; index < state.refusal_reasons.size(); ++index)
+        output << (index ? ", " : "") << static_cast<unsigned>(state.refusal_reasons[index]);
+    output << "], \"raid_accepts\": " << state.raid_accepts
         << ", \"raid_slots\": " << state.raids.size()
         << ", \"raid_slot_icons_shown\": " << std::count_if(state.raid_slots.begin(), state.raid_slots.end(),
             [](const auto& row) { return row.second.button && row.second.button->icon_shown(); })

@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <tuple>
 #include <span>
 #include <string>
 #include <utility>
@@ -58,6 +59,8 @@ public:
     bool reconstructing_native_notices{};
     std::map<galactic::PlanetId, std::string> story_planets;
     std::map<galactic::PlayerId, std::string> story_factions;
+    std::map<galactic::TypeId, std::string> story_types; // WST-31: fleet contents by authored type name
+    std::set<galactic::TypeId> story_heroes; // WST-31: the types that count as heroes for STORY_MOVE (named heroes)
     std::vector<GameStoryNotice> story_notices; // current publication only, never saved/hashed
     core::Result<void> story_notice(GameStoryNotice notice);
     // GuiClick commands executed this session tick per seat (max_gui_clicks_per_tick); a bound, never saved or hashed.
@@ -76,12 +79,27 @@ public:
     void apply_story_dialog(const galactic::story::Triggered& record);
     galactic::GalacticSession::TechnologyNoticeHandler technology_handler; // caller's, run after the story saw the notice
     std::vector<std::string> story_notes; // published once as diagnostics of the next step
+    std::vector<std::string> script_warnings; // LOAD_CAMPAIGN refusals: published once as EAWR-SCRIPT warnings of the next step
+    std::optional<CampaignSwitchRequest> campaign_switch;       // pending until the host settles it (WST-95); never saved or hashed
+    std::optional<CampaignSwitchRequest> campaign_switch_fresh; // the request recorded by the current step: published with its tick
+    bool campaign_switch_request(galactic::story::Triggered& record);
     std::vector<std::string> entry_notes; // passengers an entry left out; same publication, never saved or hashed
     StoryRewardApplier story_rewards;
+    std::shared_ptr<AiControlSwitch> ai_control_switch = std::make_shared<AiControlSwitch>();
     const sim::PartitionExecutor* executor{}; // the running step's, for rewards applied inside it
     std::set<std::string> story_reported;     // refusal texts already published (diagnostics only, never saved)
     core::Result<void> apply_story_rewards();
     bool force_click_request(galactic::story::Triggered& record);
+    bool story_hud_request(galactic::story::Triggered& record);
+    bool story_objective_request(galactic::story::Triggered& record);
+    bool story_goal_request(galactic::story::Triggered& record);
+    bool story_text_request(galactic::story::Triggered& record);
+    // #236: the plot that last set LOCK_CONTROLS / SCROLL_LOCK for a seat's owner (owner, sub-plot, reward). A lock must
+    // never outlive its plot: when that sub-plot stops being active the session publishes the release. Local, never saved.
+    std::set<std::tuple<galactic::story::Player, std::string, std::string>> story_locks;
+    void release_ended_story_locks();
+    // Sub-plots whose script had a thread end in an uncaught error since the last release: their locks end too.
+    std::set<std::string> failed_story_plots;
     // WST-20 (3)/55: the engine's Lua callbacks, forwarded to the story scripts before the rewards are applied.
     std::shared_ptr<const GalacticStoryScripts> story_scripts;
     std::uint64_t story_call_sequence{};

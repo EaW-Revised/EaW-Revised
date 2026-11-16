@@ -11,6 +11,13 @@ target_compile_features(texture_chain_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(texture_chain_tests)
 add_test(NAME texture_chain_contracts COMMAND texture_chain_tests)
 
+# legacy #6726: a measurement of the chain step over a mod's textures (skips without EAWR_TEXTURE_TIMING_ROOT).
+add_executable(texture_chain_timing texture_chain_timing.cpp)
+target_link_libraries(texture_chain_timing PRIVATE eawr::assets)
+target_compile_features(texture_chain_timing PRIVATE cxx_std_20)
+eawr_target_project_warnings(texture_chain_timing)
+add_test(NAME texture_chain_timing COMMAND texture_chain_timing)
+
 add_executable(effect_reader_tests effect_reader_tests.cpp effect_reader_fuzz.cpp effect_inventory.cpp effect_native_probe.cpp)
 target_link_libraries(effect_reader_tests PRIVATE eawr::assets)
 target_compile_features(effect_reader_tests PRIVATE cxx_std_20)
@@ -35,6 +42,25 @@ target_link_libraries(mod_atlas_tests PRIVATE eawr::assets eawr::ui_model)
 target_compile_features(mod_atlas_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(mod_atlas_tests)
 add_test(NAME mod_atlas_contracts COMMAND mod_atlas_tests)
+
+add_executable(name_resolution_table_tests name_resolution_table_tests.cpp)
+target_link_libraries(name_resolution_table_tests PRIVATE eawr::assets)
+target_compile_features(name_resolution_table_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(name_resolution_table_tests)
+add_test(NAME name_resolution_table COMMAND name_resolution_table_tests)
+
+add_executable(asset_degrade_tests asset_degrade_tests.cpp)
+target_link_libraries(asset_degrade_tests PRIVATE eawr::assets eawr::presentation)
+target_compile_features(asset_degrade_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(asset_degrade_tests)
+add_test(NAME asset_degrade_contracts COMMAND asset_degrade_tests)
+
+add_executable(loading_name_resolution_tests loading_name_resolution_tests.cpp)
+target_link_libraries(loading_name_resolution_tests PRIVATE eawr::assets)
+target_include_directories(loading_name_resolution_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
+target_compile_features(loading_name_resolution_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(loading_name_resolution_tests)
+add_test(NAME loading_name_resolution COMMAND loading_name_resolution_tests)
 
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
 add_test(

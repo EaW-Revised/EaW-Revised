@@ -4,14 +4,18 @@
 // panning stays inside the WGUI-58 box.
 #include "galactic/galaxy_snapshot_stub.hpp"
 #include "galactic/galaxy_view.hpp"
+#include "galactic/transit_reveal.hpp"
 #include "eawr/presentation/ui/fleet_pathfinder.hpp"
 #include "galactic/corruption_visuals.hpp"
 #include "../presentation/galactic/fleet_hud_fixture.hpp"
 #include "galactic/galactic_reveal.hpp"
+#include "no_fog_option.hpp"
 #include "galactic/map_input.hpp"
 #include "galactic/native_ai_flag.hpp"
 #include "galactic/planet_hud.hpp"
 #include "galactic/ground_stack.hpp"
+#include "eawr/core/diagnostic.hpp"
+#include <iostream>
 #include "eawr/sim/galactic/ground_intelligence.hpp"
 #include "eawr/sim/galactic/session.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -28,8 +32,10 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 using namespace eawr::viewer::galactic;
 
@@ -160,6 +166,44 @@ void empty_ground_slot_returns_only_while_ground_units_are_held() {
     const auto units = ground_stack_units(*returned);
     assert(std::find(units.begin(), units.end(), 8001) != units.end());
     assert(std::find(units.begin(), units.end(), 8002) != units.end());
+    game->stop();
+}
+
+// #6934: a planet that holds no troops and no base has no allegiance (the political model has no base or residual
+// controller for it), so it is not "allied" even when the local player owns it. The slot must still return as a drop
+// target while ground units are held, from every source the overview offers (same planet's stack, another planet's
+// stack, an orbit fleet that can land), because the session admits a landing on an uncontested empty surface.
+void empty_owned_planet_without_a_base_is_a_ground_receiver() {
+    namespace gc = eawr::sim::galactic;
+    auto setup = synthetic_live_setup();
+    configure_synthetic_hud_clock(setup);
+    std::vector<gc::FleetDisplayType> traits;
+    std::vector<gc::FleetDisplayVisibility> visibility;
+    std::map<gc::TypeId, std::string> names;
+    configure_ground_fixture(setup, 1, "ground-slot-return", traits, visibility, names);
+    for (auto& planet : setup.control->planets) {
+        if (planet.planet == 101 || planet.planet == 106) planet.ground_base = {};
+        if (planet.planet == 101) planet.landed.clear();
+    }
+    for (auto& planet : setup.observer->planets) if (planet.planet == 101) planet.landed_transports.clear();
+    // The landed companies are gone from the planet, so their (empty) payload rows go too.
+    std::erase_if(setup.movement->contents, [](const auto& row) { return row.container == 8001 || row.container == 8002 || row.container == 8003; });
+    eawr::platform::LiveGameSession::Options options;
+    options.pacing = eawr::platform::LiveGameSession::Pacing::driven;
+    auto started = eawr::platform::LiveGameSession::start(setup, options);
+    if (!started) std::cerr << "owned planet without a base: " << eawr::core::format_diagnostic(started.error()) << '\n';
+    assert(started);
+    auto game = std::move(started).value();
+    game->advance_to(2);
+    assert(game->wait_for(2, std::chrono::seconds(5)));
+    const auto snapshot = game->frame(gc::SeatId{1}).latest;
+    assert(snapshot);
+    const auto roster = ground_roster(*snapshot, 1, 101);
+    assert(roster.accessible);
+    assert(!ground_stack(*snapshot, 1, 101, 6));                       // nothing landed: no slot at rest
+    assert(roster.count_known && roster.count && *roster.count == 0);   // known empty; no base, so no allegiance either
+    assert(ground_drop_stack(*snapshot, 1, 101, 6, 0, {}, true));       // held surface units: another planet's or this stack
+    assert(ground_drop_stack(*snapshot, 1, 101, 6, 601));               // an orbit fleet that can land
     game->stop();
 }
 
@@ -400,6 +444,47 @@ void planet_bonus_metadata_survives_view_projection() {
         [&](const auto& row) { return row.id == metadata.planets.front().id; });
     assert(projected != live.view->planets.end() && projected->ability.title == "Popup title"
         && projected->ability.description_key == "KEY_B");
+}
+
+// #7187 / WGCH-143: a destroyed planet is drawn with the destroyed-state model its type authors; an intact planet, and a
+// destroyed planet whose type authors none (it is the asteroid field already), keep the ordinary model.
+void destroyed_planet_selects_its_authored_destroyed_model() {
+    namespace gc = eawr::sim::galactic;
+    auto setup = synthetic_live_setup();
+    configure_synthetic_hud_clock(setup);
+    std::vector<gc::FleetDisplayType> traits;
+    std::vector<gc::FleetDisplayVisibility> visibility;
+    std::map<gc::TypeId, std::string> names;
+    configure_ground_fixture(setup, 1, "ground-count", traits, visibility, names);
+    auto metadata = synthetic_galaxy();
+    for (auto& planet : metadata.planets) { planet.model = "data/art/models/planet_" + std::to_string(planet.id) + ".alo"; planet.destroyed_model.clear(); }
+    metadata.planets[0].destroyed_model = "data/art/models/field.alo";
+    metadata.planets[1].destroyed_model = "data/art/models/field.alo";
+    const auto id_a = metadata.planets[0].id, id_b = metadata.planets[1].id;
+    for (const bool destroy_second : {false, true}) {
+        auto copy = setup;
+        for (auto& row : copy.control->planets) if (row.planet == id_a || (destroy_second && row.planet == id_b)) row.destroyed = true;
+        const gc::GalacticSnapshot snapshot(0, {}, copy.players, copy.planets, copy.routes, copy.fleets,
+            {}, {}, copy.fleet_control, {}, {}, {}, {}, {}, copy.control, {}, {}, copy.observer);
+        const auto view = build_live_view(snapshot, metadata, 1, synthetic_neutral_owner);
+        assert(view.view);
+        const auto model_of = [&](const ObjectId id) {
+            const auto row = std::find_if(view.view->planets.begin(), view.view->planets.end(), [&](const auto& item) { return item.id == id; });
+            assert(row != view.view->planets.end());
+            return row->model;
+        };
+        assert(model_of(id_a) == "data/art/models/field.alo");
+        assert(model_of(id_b) == (destroy_second ? "data/art/models/field.alo" : metadata.planets[1].model));
+        for (const auto& planet : metadata.planets)
+            if (planet.id != id_a && planet.id != id_b) assert(model_of(planet.id) == planet.model);
+        // A planet type that authors no destroyed model keeps its own even when destroyed.
+        metadata.planets[0].destroyed_model.clear();
+        const auto kept = build_live_view(snapshot, metadata, 1, synthetic_neutral_owner);
+        assert(kept.view);
+        assert(std::find_if(kept.view->planets.begin(), kept.view->planets.end(), [&](const auto& item) {
+            return item.id == id_a && item.model == metadata.planets[0].model; }) != kept.view->planets.end());
+        metadata.planets[0].destroyed_model = "data/art/models/field.alo";
+    }
 }
 
 void corruption_attachment_edges_and_events_follow_admitted_facts() {
@@ -644,6 +729,43 @@ void live_transit_overrides_orbit_and_synthetic_interpolation() {
         [](const auto& fleet) { return fleet.fleet == 302 && !fleet.transit && fleet.planet == 101; }));
 }
 
+// WGUI-31/32/110/111: range and path context of the local observer's transit reveal.
+void transit_reveal_range_and_path_context() {
+    const RevealCandidate vader{{0, 0, 0}, 75};
+    const RevealCandidate scanner{{500, 0, 0}, 0};
+    const auto discovered = [](std::uint64_t planet) { return planet == 11 || planet == 21; };
+    std::vector<RevealTransit> fleets;
+    fleets.push_back({1, {74.9, 0, 0}, false, 0, 11, 12});   // human, previous discovered, in range
+    fleets.push_back({2, {75, 0, 0}, false, 0, 11, 12});     // exactly at range: strict, hidden
+    fleets.push_back({3, {0, 40, 60}, false, 0, 12, 13});    // 3D distance 72.1 in range, no known path planet
+    fleets.push_back({4, {10, 0, 0}, true, 21, 12, 13});     // AI: enroute discovered
+    fleets.push_back({5, {10, 0, 0}, true, 22, 11, 21});     // AI: enroute undiscovered, path planets ignored
+    fleets.push_back({6, {500, 0, 0}, false, 0, 11, 21});    // only a zero-range candidate covers it
+    fleets.push_back({7, {10, 0, 0}, false, 0, 0, 21});      // human, next discovered
+    const std::vector<RevealCandidate> candidates{scanner, vader};
+    const auto rows = transit_reveal(fleets, candidates, discovered);
+    assert(rows.size() == fleets.size());
+    const std::vector<bool> expected{true, false, false, true, false, false, true};
+    for (std::size_t index = 0; index < rows.size(); ++index)
+        assert(rows[index].fleet == fleets[index].fleet && rows[index].visible == expected[index]);
+    assert(!within_reveal_range({0, 0, 0}, {0, 0, 0}, 0)); // WGUI-110: zero range reveals nothing, even coincident
+    assert(within_reveal_range({0, 0, 0}, {0, 0, 1}, 1.0000001) && !within_reveal_range({0, 0, 0}, {0, 0, 1}, 1));
+    assert(transit_reveal(fleets, {}, discovered).size() == fleets.size()); // no candidate: rows, all hidden
+    for (const auto& row : transit_reveal(fleets, {}, discovered)) assert(!row.visible);
+
+    // A production-built Vader fleet orbits planet P at (500,0,0) with its travel position still unset (0,0,0): the
+    // candidate sits at P, so an enemy passing P is revealed and one passing the galaxy origin is not.
+    const RevealPoint unset{0, 0, 0}, planet{500, 0, 0};
+    const auto orbiting = fleet_reveal_point(false, unset, planet);
+    assert(orbiting.x == 500 && orbiting.y == 0 && orbiting.z == 0);
+    const auto moving = fleet_reveal_point(true, {250, 5, 0}, planet); // in transit: the travel position
+    assert(moving.x == 250 && moving.y == 5);
+    const auto lost = fleet_reveal_point(false, {7, 0, 0}, std::nullopt); // orbit planet unknown: the travel position
+    assert(lost.x == 7);
+    const std::vector<RevealTransit> passing{{8, {520, 0, 0}, false, 0, 11, 12}, {9, {10, 0, 0}, false, 0, 11, 12}};
+    const auto produced = transit_reveal(passing, std::vector<RevealCandidate>{{orbiting, 75}}, discovered);
+    assert(produced.size() == 2 && produced[0].visible && !produced[1].visible);
+}
 void live_fleets_follow_observer_presence_and_transit_visibility() {
     namespace gc = eawr::sim::galactic;
     auto setup = synthetic_live_setup();
@@ -879,6 +1001,41 @@ void galaxy_reveal_is_a_draw_only_omniscient_view() {
     assert(!reveal_refusal(true, 0) && !reveal_refusal(true, 1));
     assert(reveal_refusal(true, 2) && reveal_refusal(true, 4));
     assert(!reveal_refusal(false, 2));
+
+    // --eawr-no-fog (the launcher's "Fog of war: off"): the one flag behind this reveal. Without it the enemy
+    // orbiting the undiscovered system is hidden; with it every enemy fleet of the galaxy has a marker.
+    using eawr::viewer::no_fog_requested;
+    const std::vector<std::string> with_flag{"--eawr-game-root", "game", "--eawr-no-fog", "--eawr-report", "r.json"};
+    const std::vector<std::string> without_flag{"--eawr-game-root", "game", "--eawr-no-fog-later", "--eawr-report", "r.json"};
+    assert(no_fog_requested(with_flag) && !no_fog_requested(without_flag) && !no_fog_requested({}));
+    const auto enemy_planets_shown = [&](bool flag) {
+        const auto view = flag ? reveal_snapshot(truth) : truth;
+        const auto drawn = flag ? build_live_view(*view, synthetic_galaxy(), 1, synthetic_neutral_owner, {},
+                                      {live_fleet_visibility(*view), {}, true, true})
+                                : build_live_view(*view, synthetic_galaxy(), 1, synthetic_neutral_owner, {}, {sight, {}, false});
+        std::size_t shown = 0, enemy = 0;
+        std::set<gc::PlanetId> planets;
+        for (const auto& fleet : setup.fleets) if (fleet.owner != 1 && !fleet.members.empty()) planets.insert(fleet.orbit);
+        for (const auto planet : planets) {
+            ++enemy;
+            shown += drawn.view && std::any_of(drawn.view->fleets.begin(), drawn.view->fleets.end(),
+                [&](const auto& row) { return row.owner != 1 && row.planet == planet; });
+        }
+        return std::pair{shown, enemy};
+    };
+    const auto [fogged_planets, enemy_planets] = enemy_planets_shown(no_fog_requested(without_flag));
+    const auto [open_planets, same_enemy_planets] = enemy_planets_shown(no_fog_requested(with_flag));
+    assert(enemy_planets == same_enemy_planets && enemy_planets >= 2);
+    assert(fogged_planets < enemy_planets);
+    assert(open_planets == enemy_planets);
+    // Single player only: a lobby campaign refuses it with the launch option's own wording, even with one human seat.
+    assert(!reveal_refusal(true, 1, true, false));
+    assert(reveal_refusal(true, 1, true, true) && reveal_refusal(true, 2, true, false));
+    assert(std::string(reveal_refusal(true, 2, true, false)).find("--eawr-no-fog") != std::string::npos);
+    assert(std::string(reveal_refusal(true, 2, false, false)).find("--eawr-galactic-reveal") != std::string::npos);
+    assert(!reveal_refusal(false, 2, true, true));
+    assert(!eawr::viewer::no_fog_refusal(true, false) && !eawr::viewer::no_fog_refusal(false, true));
+    assert(std::string(eawr::viewer::no_fog_refusal(true, true)).find("single-player only") != std::string::npos);
 }
 
 // The reveal runs on every published tick in the viewer. Driving the same seeded session with
@@ -1236,6 +1393,29 @@ void planet_flights_follow_wall_time_and_stock_transforms() {
     assert(same(missing.pose().distance, 0.0F)); // No model/renderable -> radius zero (WGUI-60).
 }
 
+void planet_flights_are_counted_for_the_cue() {
+    // #4440 / WGP-194: the presenter plays the zoom cue once for each new flight, in or out, from any input.
+    const auto view = *build_view(synthetic_galaxy(), 1).view;
+    const auto& selected = planet(view, 101);
+    assert(planet_zoom_cue == "GUI_Zoom" && planet_select_cue == "Planet_Dialog_Appears");
+    PlanetCamera camera;
+    assert(camera.zoom_flights() == 0);
+    assert(!camera.zoom_in(selected, true, {false, false, false}) && camera.zoom_flights() == 0); // refused
+    assert(!camera.zoom_out() && camera.zoom_flights() == 0);                                      // nothing to leave
+    assert(camera.zoom_in(selected, true) && camera.zoom_flights() == 1);
+    assert(!camera.zoom_in(selected, true) && camera.zoom_flights() == 1);                         // already flying
+    camera.service(0); camera.service(650);
+    assert(camera.state() == CameraState::focused);
+    assert(camera.zoom_in(selected, true) && camera.advanced_map() && camera.zoom_flights() == 1); // the map panel opening is no flight
+    assert(camera.zoom_out() && !camera.advanced_map() && camera.zoom_flights() == 1);
+    assert(camera.refocus(selected, true) && camera.zoom_flights() == 1);
+    assert(camera.zoom_out() && camera.zoom_flights() == 2);
+    camera.service(1000); camera.service(1650);
+    assert(camera.toggle(selected, true) && camera.zoom_flights() == 3); // the button toggle is one flight too
+    camera.service(2000); camera.service(2650);
+    assert(camera.toggle(selected, true) && camera.state() == CameraState::outward && camera.zoom_flights() == 4);
+}
+
 void radar_camera_rectangle_follows_zoom_and_pan() {
     // Analytic top-down camera: at height 100 and full FOV 90, source footprint
     // is 400 by 200 for a 2:1 viewport, independently of the radar dimensions.
@@ -1525,6 +1705,7 @@ void pathfinder_slot_contracts() {
 int main() {
     ggs_02_known_ground_counts_and_ggs_04_local_launches();
     empty_ground_slot_returns_only_while_ground_units_are_held();
+    empty_owned_planet_without_a_base_is_a_ground_receiver();
     ggs_09_sanitized_ground_representatives();
     ggs_09_native_fixture_qualifies_all_live_combat_queries();
     pause_preview_matches_published_policy_and_holds();
@@ -1532,11 +1713,13 @@ int main() {
     pathfinder_slot_contracts();
     native_ai_is_on_by_default_and_off_disables_it();
     planet_bonus_metadata_survives_view_projection();
+    destroyed_planet_selects_its_authored_destroyed_model();
     corruption_attachment_edges_and_events_follow_admitted_facts();
     corruption_parameters_and_retained_pairs();
     corruption_projection_rejects_undiscovered_and_other_observers();
     corruption_connection_work_follows_edges();
     live_fleets_follow_observer_presence_and_transit_visibility();
+    transit_reveal_range_and_path_context();
     galaxy_reveal_is_a_draw_only_omniscient_view();
     galaxy_reveal_leaves_a_seeded_session_untouched();
     transit_fixture_moves_before_repausing();
@@ -1551,6 +1734,7 @@ int main() {
     overview_wheel_zoom_out_extends_the_pullback_and_keeps_the_zoom_in_limit();
     overview_pan_follows_the_yaw();
     planet_flights_follow_wall_time_and_stock_transforms();
+    planet_flights_are_counted_for_the_cue();
     radar_camera_rectangle_follows_zoom_and_pan();
     radar_fit_keeps_the_default_and_expands_only_when_requested();
     fitted_radar_uses_loaded_galaxy_positions();

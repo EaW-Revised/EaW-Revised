@@ -76,6 +76,18 @@ HistoryView history_view(const HistoryFacts& facts, HistoryMetric metric) {
     view.available = true;
     return view;
 }
+TreeDialogChoice choose_tree_dialogs(const std::string_view authored,
+    const std::function<bool(std::string_view)>& exists, const std::function<bool(std::string_view)>& has_domain_switch) {
+    TreeDialogChoice choice;
+    // WGP-147: a failed dialog creation falls back to the Rebel dialog.
+    const std::string stem = !authored.empty() && exists(authored) ? std::string(authored) : "IDD_TECH_TREE_REBEL";
+    choice.land = stem;
+    choice.combined = !has_domain_switch(stem);
+    // WGP-147: a missing Space variant also falls back, to the Rebel Space dialog, never a blank page.
+    const auto space = stem + "_SPACE";
+    choice.space = choice.combined ? stem : exists(space) ? space : std::string("IDD_TECH_TREE_REBEL_SPACE");
+    return choice;
+}
 std::vector<TreeViewSlot> tree_view(const TreeFacts& facts, bool space) {
     std::vector<TreeViewSlot> result;
     for (const auto& slot : space && !facts.combined ? facts.space : facts.land)

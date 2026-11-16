@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/core/result.hpp"
+#include "eawr/campaign/campaign_switch.hpp"
 #include "eawr/campaign/conflict.hpp"
 #include "eawr/campaign/conflict_entry.hpp"
 #include "eawr/campaign/auto_resolve_outcome.hpp"
@@ -28,6 +29,7 @@
 #include <cstdint>
 #include <memory>
 #include <map>
+#include <set>
 #include <functional>
 #include <optional>
 #include <span>
@@ -111,6 +113,9 @@ struct GameTick {
     // WST-58: this step's presentation requests for the holocron goals (goal rows and the summary request, in
     // trigger order). Local rendering input only: never saved, hashed or replayed.
     std::vector<sim::galactic::story::PresentationEvent> story_presentation;
+    // LOAD_CAMPAIGN (WST-95): the campaign switch a plot asked for in this step, as authored; the host acts on it between
+    // ticks. Never saved, hashed or replayed: the simulation does not restart itself.
+    std::optional<CampaignSwitchRequest> campaign_switch;
     [[nodiscard]] std::vector<GameStoryNotice> observer_story_notices(sim::galactic::PlayerId) const;
     // WGP-26: retain emission context even when this step selects or retires the conflict.
     std::map<sim::EntityId, PendingConflictAlert> pending_alerts;
@@ -261,7 +266,8 @@ public:
     // Install fresh pinned schedulers, or restore their barrier save after galaxy reconstruction.
     [[nodiscard]] core::Result<void> install_galactic_scripts(script::authoritative::ScriptScheduler ai,
         script::authoritative::ScriptScheduler story,
-        const std::optional<script::authoritative::GalacticScriptSave>& saved = {});
+        const std::optional<script::authoritative::GalacticScriptSave>& saved = {},
+        std::optional<script::authoritative::ScriptScheduler> objects = {});
     [[nodiscard]] script::authoritative::ScriptedGalacticSession* galactic_scripts() noexcept;
     // The Lua side of the plot engine (WST-53/55): the plot engine's per-event callbacks are forwarded to the
     // sub-plot scripts of the installed story scheduler. Absent: the callbacks are dropped, as before.
@@ -314,6 +320,16 @@ public:
     using StoryRewardApplier = std::function<core::Result<StoryRewardOutcome>(
         sim::galactic::GalacticSession&, const sim::galactic::story::Triggered&, const sim::PartitionExecutor&)>;
     void set_story_rewards(StoryRewardApplier);
+    // #6917: the entry the live AI runtime gives the control-switch story reward (a player and an AI player type name; the result is
+    // empty when the switch was accepted, else the reason it was not). The slot is shared and filled at install, so the reward provider
+    // (bound when the session starts) and the AI runtime meet in either order; empty when no native AI is installed.
+    using AiControlSwitch = std::function<core::Result<std::string>(sim::galactic::PlayerId, std::string_view)>;
+    [[nodiscard]] std::shared_ptr<AiControlSwitch> ai_control_switch_slot();
+    // LOAD_CAMPAIGN (WST-95): the request the last such reward recorded, until the host settles it (starting the named
+    // campaign, or refusing the target and keeping this session). While it is pending the session cannot be saved
+    // (checkpoint_recording refuses): it is about to be replaced, and a save would carry a request no restore acts on.
+    [[nodiscard]] const std::optional<CampaignSwitchRequest>& pending_campaign_switch() const noexcept;
+    std::optional<CampaignSwitchRequest> settle_campaign_switch() noexcept;
     [[nodiscard]] const BattleResult* latest_tactical_result() const noexcept;
     // Recorded solo presentation policy; configure before the live owner starts.
     [[nodiscard]] core::Result<void> set_interactive_seat(sim::galactic::SeatId);
@@ -347,7 +363,8 @@ public:
     void set_story_notice_handler(StoryNoticeHandler);
     // Authored content, rebuilt on load; no fixture names in runtime paths.
     void set_story_identities(std::map<sim::galactic::PlanetId, std::string> planets,
-        std::map<sim::galactic::PlayerId, std::string> factions);
+        std::map<sim::galactic::PlayerId, std::string> factions, std::map<sim::galactic::TypeId, std::string> types = {},
+        std::set<sim::galactic::TypeId> heroes = {});
     void set_technology_notice_handler(sim::galactic::GalacticSession::TechnologyNoticeHandler);
     // WGS-07/WGS-140: install the loaded plots before the first step (or before a checkpoint restore
     // fills the saved state). Fails when plots are already installed or the session has stepped.
@@ -356,6 +373,8 @@ public:
     [[nodiscard]] core::Result<void> install_story(sim::galactic::story::Config, std::vector<sim::galactic::story::PlotRecord>,
         std::vector<sim::galactic::story::SubPlotDef>, std::vector<std::string> notes = {});
     [[nodiscard]] const sim::galactic::story::Engine* story_engine() const noexcept;
+    // STORY_MOVE: the named-hero types, derived from the type table by set_story_identities on setup and again on load; never saved.
+    [[nodiscard]] const std::set<sim::galactic::TypeId>& story_heroes() const noexcept;
     // WST-56: a Lua plot request (AI intervention plans) applied to the installed plot engine. It is observable
     // output of the AI service phase: once applied the phase can no longer be rolled back and rerun.
     [[nodiscard]] core::Result<void> apply_story_plot(const sim::galactic::story::PlotCommand&);

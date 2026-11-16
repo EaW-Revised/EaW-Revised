@@ -186,6 +186,8 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted, LiveSes
         engine->parse_input_event(motion);
     } else if (scripted.kind == "press" || scripted.kind == "release") {
         button(MOUSE_BUTTON_LEFT, scripted.kind == "press", *at, false);
+    } else if (scripted.kind == "rpress" || scripted.kind == "rrelease") {
+        button(MOUSE_BUTTON_RIGHT, scripted.kind == "rpress", *at, false);
     } else if (scripted.kind == "click" || scripted.kind == "rclick") {
         const MouseButton index = scripted.kind == "click" ? MOUSE_BUTTON_LEFT : MOUSE_BUTTON_RIGHT;
         button(index, true, *at, false);

@@ -678,7 +678,7 @@ const Player* TacticalSession::Impl::player_of(const PlayerId id) const noexcept
 core::Result<void> TacticalSession::Impl::request_creation_defaults(const std::span<const EntityId> created,
     UnitStage& units, EconomyStage& stage, const std::uint64_t tick) {
     // FS-51/52; UFS-40: the batch has attached the supplied teams before their requests.
-    std::vector<EntityId> pending(created.begin(), created.end());
+    std::vector<EntityId> queued(created.begin(), created.end());
     // Each request fills a team or creates one, and a born team container is itself requested, so data whose
     // container re-creates its own team type never runs out of requests. Bound the units this call may birth:
     // a fixed multiple of the creation batch (a stock team adds a handful per leader), so the chain ends the same
@@ -688,17 +688,17 @@ core::Result<void> TacticalSession::Impl::request_creation_defaults(const std::s
     const auto remember_births = [&](const EntityId first) -> core::Result<void> {
         for (auto id = first; id != invalid_entity_id && id != stage.next_id;
                 id = id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : id + 1) {
-            if (units.find(id) != units.end()) pending.push_back(id);
+            if (units.find(id) != units.end()) queued.push_back(id);
         }
-        if (pending.size() - created.size() > birth_limit) return core::Result<void>::failure(detail::diagnostic(
+        if (queued.size() - created.size() > birth_limit) return core::Result<void>::failure(detail::diagnostic(
             diagnostic_codes::resource_limit, "creation default chain exceeds its birth bound: an authored default "
             "replenishment keeps creating new teams"));
         return core::Result<void>::success();
     };
-    for (std::size_t begin = 0; begin < pending.size();) {
-        const auto end = pending.size();
+    for (std::size_t begin = 0; begin < queued.size();) {
+        const auto end = queued.size();
         for (auto index = begin; index < end; ++index) {
-            const auto id = pending[index];
+            const auto id = queued[index];
             const auto found = units.find(id);
             const auto* profile = found != units.end() ? abilities.find(found->second.state.type_id) : nullptr;
             const auto slot = profile ? ability_slot(*profile, AbilityKind::replenish_wingmen) : std::nullopt;
@@ -710,7 +710,7 @@ core::Result<void> TacticalSession::Impl::request_creation_defaults(const std::s
             }
         }
         for (auto index = begin; index < end; ++index) {
-            const auto id = pending[index];
+            const auto id = queued[index];
             const auto container = units.find(id);
             const auto* profile = container != units.end() ? abilities.find(container->second.state.type_id) : nullptr;
             if (!profile || profile->default_member_abilities.empty()) continue;
@@ -1476,7 +1476,7 @@ core::Result<void> execute_economy_reinforcement(auto& impl, const PlayerCommand
         // FL-12: only an authored hangar on the deployed type creates a spawner.
         if (impl.motion.squadrons.find_spawner(type, issuer) != nullptr) stage.born_spawners.push_back(id);
         if (share > 0) stage.shares.emplace(id, PopulationShare{issuer, share});
-        if (impl.economy.stream(type) != nullptr) stage.earners.emplace_back(id, issuer); // PU-02
+        if (impl.economy.earner_stream(type) != nullptr) stage.earners.emplace_back(id, issuer); // PU-02
         if (!persistent) stage.next_id = id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : id + 1;
         return core::Result<EntityId>::success(id);
     };

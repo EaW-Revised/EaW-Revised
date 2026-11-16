@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <map>
 #include <optional>
 #include <set>
@@ -163,59 +164,105 @@ int installed() {
     const auto filesystem = take(vfs::Vfs::mount(mounts));
     const auto loaded = take(data::load_catalog(filesystem, data::Profile::foc));
     const auto maps = take(skirmish::land_setup_maps(filesystem, loaded.catalog));
+    // The lobby's factions are the ones its dropdown offers: the catalog's playable factions in editor order. Create_Player_In_
+    // Multiplayer_Games and Is_Neutral name the map-owner factions that are not playable; they are no part of this list.
+    std::vector<std::string> lobby;
+    for (const auto& entry : skirmish::setup_factions(loaded.catalog)) lobby.push_back(entry.name);
+    std::cout << lobby.size() << " lobby factions, " << maps.size() << " land maps\n";
+    expect(lobby.size() >= 2, "the catalog has two playable lobby factions");
+    if (lobby.size() < 2) return checks.finish();
     scene::VfsAssetCache cache(filesystem);
-    const auto selected = std::find_if(maps.begin(), maps.end(), [](const auto& map) {
-        return map.path.find("_mp_land_alderaan") != std::string::npos && map.unavailable.empty() && map.metadata.capacity == 2
-            && map.teams.size() >= 2 && map.teams[0].spawn_capacity.value_or(0) >= 1 && map.teams[1].spawn_capacity.value_or(0) >= 1;
-    });
-    expect(selected != maps.end(), "a stock two-player land map exists");
-    if (selected == maps.end()) return checks.finish();
-    // Slot 1 is the AI under test; slot 2 is a human seat so that only one freestore runs.
-    skirmish::Fixture fixture; fixture.map = selected->path; fixture.seed = 6578;
-    fixture.slots = {{1, "Rebel", 0, false, {}}, {2, "Empire", 1, true, {}}};
-    units::UnitTables empty;
-    const auto discovered = take(skirmish::read_land_start_inputs(fixture, filesystem, loaded.catalog, empty));
-    fixture.map_sha256 = discovered.common.map_sha256;
-    fixture.match = discovered.common.match_defaults;
-    fixture.match->pre_built_base = true;
-    units::LoadInput load; load.domain = BattleDomain::land; load.catalog = &loaded.catalog;
-    load.filesystem = &filesystem; const auto access = cache.access(); load.model = access.model;
-    std::set<std::string> requested;
-    for (const auto& slot : fixture.slots) {
-        const auto faction = std::find_if(discovered.factions.begin(), discovered.factions.end(),
-            [&](const auto& row) { return row.faction == slot.faction; });
-        if (faction != discovered.factions.end()) requested.insert(faction->forces.begin(), faction->forces.end());
-    }
-    load.types.assign(requested.begin(), requested.end());
-    auto tables = take(units::load_unit_tables(load));
-    for (const auto& company : tables.land_companies)
-        for (const auto& member : company.members) requested.insert(member.type);
-    load.types.assign(requested.begin(), requested.end());
-    tables = take(units::load_unit_tables(load));
-    const auto inputs = take(skirmish::read_land_start_inputs(fixture, filesystem, loaded.catalog, tables));
-    const auto gates = take(skirmish::authored_land_content_inputs(tables));
-    const auto land = take(skirmish::build_land_start(fixture, inputs, gates));
 
-    const auto candidate = pick(land, inputs, fixture, 1);
-    expect(candidate.has_value(), "the AI starts with a build pad that offers an affordable structure");
-    if (!candidate) return checks.finish();
-    std::cout << "AI pad " << candidate->pad_type << " builds " << candidate->structure << " frames=" << candidate->build_frames << '\n';
+    // The start's pieces stay where they are built: the inputs point at the tables, the land start at both.
+    struct Prepared {
+        skirmish::Fixture fixture;
+        units::UnitTables tables;
+        skirmish::LandStartInputs inputs;
+        skirmish::LandStart land;
+        Candidate candidate;
+    };
+    const auto prepare = [&](const std::string& map_path, const std::string& ai_faction, const std::string& human_faction)
+        -> std::unique_ptr<Prepared> {
+        auto prepared = std::make_unique<Prepared>();
+        auto& fixture = prepared->fixture;
+        // Slot 1 is the AI under test; slot 2 is a human seat so that only one freestore runs. The land start rules (forces,
+        // company caps) are read for the factions the slots name, so the slots come first.
+        fixture.map = map_path; fixture.seed = 6578;
+        fixture.slots = {{1, ai_faction, 0, false, {}}, {2, human_faction, 1, true, {}}};
+        units::UnitTables empty;
+        const auto discovered = take(skirmish::read_land_start_inputs(fixture, filesystem, loaded.catalog, empty));
+        fixture.map_sha256 = discovered.common.map_sha256;
+        fixture.match = discovered.common.match_defaults;
+        fixture.match->pre_built_base = true;
+        units::LoadInput load;
+        load.domain = BattleDomain::land; load.catalog = &loaded.catalog;
+        load.filesystem = &filesystem; const auto access = cache.access(); load.model = access.model;
+        std::set<std::string> requested;
+        for (const auto& slot : fixture.slots) {
+            const auto faction = std::find_if(discovered.factions.begin(), discovered.factions.end(),
+                [&](const auto& row) { return row.faction == slot.faction; });
+            if (faction != discovered.factions.end()) requested.insert(faction->forces.begin(), faction->forces.end());
+        }
+        if (requested.empty()) {
+            std::cout << map_path << ": " << ai_faction << " and " << human_faction << " author no land forces\n";
+            return nullptr;
+        }
+        load.types.assign(requested.begin(), requested.end());
+        prepared->tables = take(units::load_unit_tables(load));
+        for (const auto& company : prepared->tables.land_companies)
+            for (const auto& member : company.members) requested.insert(member.type);
+        load.types.assign(requested.begin(), requested.end());
+        prepared->tables = take(units::load_unit_tables(load));
+        prepared->inputs = take(skirmish::read_land_start_inputs(fixture, filesystem, loaded.catalog, prepared->tables));
+        const auto gates = take(skirmish::authored_land_content_inputs(prepared->tables));
+        prepared->land = take(skirmish::build_land_start(fixture, prepared->inputs, gates));
+        const auto found = pick(prepared->land, prepared->inputs, fixture, 1);
+        if (!found) {
+            std::cout << map_path << ": AI " << ai_faction << " owns no pad that offers an affordable structure\n";
+            return nullptr;
+        }
+        prepared->candidate = *found;
+        return prepared;
+    };
+
+    // The first stock two-player land map (path order) and, on it, the first lobby faction in the AI seat whose pad offers an
+    // affordable structure; the human seat is the next lobby faction.
+    std::unique_ptr<Prepared> chosen;
+    for (const auto& map : maps) {
+        if (!map.unavailable.empty() || map.metadata.capacity != 2 || map.teams.size() < 2
+            || map.teams[0].spawn_capacity.value_or(0) < 1 || map.teams[1].spawn_capacity.value_or(0) < 1) continue;
+        for (std::size_t ai = 0; ai < lobby.size() && !chosen; ++ai) {
+            // Only the checked conditions inside prepare skip a combination (no authored land forces, no affordable pad
+            // structure); any other failure throws and fails the test.
+            chosen = prepare(map.path, lobby[ai], lobby[(ai + 1) % lobby.size()]);
+        }
+        if (chosen) break;
+    }
+    expect(chosen != nullptr, "a stock two-player land map starts the AI with a build pad that offers an affordable structure");
+    if (!chosen) return checks.finish();
+    const auto& fixture = chosen->fixture;
+    const auto& tables = chosen->tables;
+    const auto& inputs = chosen->inputs;
+    const auto& land = chosen->land;
+    const auto& candidate = chosen->candidate;
+    std::cout << "map " << fixture.map << ", AI " << fixture.slots[0].faction << ", pad " << candidate.pad_type << " builds "
+              << candidate.structure << " frames=" << candidate.build_frames << '\n';
 
     // The registry: the AI sees the pad and the structure the pad menu offers; the tables the caller holds do not.
     const auto setup = skirmish::land_ai_setup(land, inputs, tables);
-    expect(has(setup, candidate->pad_type_id) && has(setup, candidate->structure_type_id) && has(setup, candidate->constructed_type_id),
+    expect(has(setup, candidate.pad_type_id) && has(setup, candidate.structure_type_id) && has(setup, candidate.constructed_type_id),
         "the land AI type registry holds the pad, its structure and the constructed type");
     const auto again = skirmish::land_ai_setup(land, inputs, tables);
     expect(setup.content.types.size() == again.content.types.size() && std::equal(setup.content.types.begin(), setup.content.types.end(),
             again.content.types.begin(), [](const auto& a, const auto& b) { return a.type_id == b.type_id; }),
         "the land AI type registry is built in the same order every time");
-    expect(!has(skirmish::ai_setup(land.start, inputs.common, tables), candidate->structure_type_id),
+    expect(!has(skirmish::ai_setup(land.start, inputs.common, tables), candidate.structure_type_id),
         "the tables of the faction forces alone do not hold the pad structure (the gap the merge closes)");
 
     // The scripted pad build, on 1, 2, 4 and 8 workers.
     std::optional<Run> first;
     for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
-        const auto result = run(land, setup, *candidate, workers);
+        const auto result = run(land, setup, candidate, workers);
         const auto label = "workers=" + std::to_string(workers) + ": ";
         expect(result.commanded, label + "the AI script's pad build is issued");
         expect(result.ordered, label + "the pad build order is accepted");

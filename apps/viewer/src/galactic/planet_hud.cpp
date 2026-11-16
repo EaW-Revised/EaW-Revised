@@ -1,6 +1,8 @@
 #include "planet_hud.hpp"
 #include "hud_retained.hpp"
 
+#include "eawr/assets/assets.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -114,6 +116,7 @@ PlanetHudFacts observed_hud_facts(const sim::galactic::ObservedPlanet& observati
     if (!result.discovered) return result;
     result.apparent_owner = observation.apparent_owner;
     result.apparent_allegiance_owner = observation.apparent_allegiance_owner;
+    result.apparent_allegiance_none = observation.apparent_allegiance_none;
     // WGUI-13: basic income is public display data when actual income is hidden.
     // A missing actual-income producer is not permission to substitute a guess.
     result.visible_income = observation.knowledge.income ? actual_income : basic_income;
@@ -231,6 +234,9 @@ PlanetHudView planet_hud_view(const PlanetHudFacts* selected, bool space_tab,
     std::size_t space_components, std::size_t ground_components) {
     PlanetHudView result;
     result.queues.resize(space_components + ground_components);
+    // The panel the player last chose is the view's own tab even with nothing to show, so it is still the choice when a
+    // planet is selected again (#6937).
+    result.space_tab = space_tab;
     if (!selected || !selected->discovered) return result;
     result.selected = selected->planet;
     result.name = selected->display_name; // Unicode uppercasing belongs to the text renderer.
@@ -297,6 +303,7 @@ std::uint64_t label_placement_digest(const PlanetHudFacts& facts) {
     HudDigest digest;
     digest.add(facts.planet); digest.add(facts.discovered);
     digest.add(facts.observed_owner); digest.add(facts.apparent_owner); digest.add(facts.apparent_allegiance_owner);
+    digest.add(facts.apparent_allegiance_none);
     digest.add(facts.locally_controlled); digest.add(facts.local_allegiance);
     digest.add(facts.queue_revealed); digest.add(facts.surface_accessible);
     digest.add(std::string_view{facts.display_name}); digest.add(std::string_view{facts.observed_faction});
@@ -310,12 +317,28 @@ std::uint64_t label_placement_digest(const PlanetHudFacts& facts) {
     digest.add(facts.ground_level_known); digest.add(facts.space_level_known);
     digest.add(facts.corrupted); digest.add(facts.local_benefits_from_corruption);
     digest.add(facts.corruption_type);
+    digest.add(facts.corruption_percent); digest.add(facts.corruption_removing);
+    digest.add(facts.siphon_source); digest.add(facts.bounty_hunter_active); digest.add(facts.siphon_smuggled);
+    digest.add(facts.siphoned_credits);
+    digest.add(facts.hero_ally); digest.add(facts.hero_foreign); digest.add(facts.hero_good);
+    digest.add(facts.hero_evil); digest.add(facts.hero_corrupt); digest.add(facts.hero_red_green);
+    digest.add(static_cast<std::uint64_t>(facts.hero_tips.size()));
+    for (const auto& tip : facts.hero_tips) { digest.add(tip.owner); digest.add(tip.type); digest.add(tip.allied); }
     return digest.value();
 }
 
 std::vector<PlanetStatusIcon> planet_status_icons(const PlanetHudFacts& planet, const bool corruption_layer) {
     std::vector<PlanetStatusIcon> result;
     if (!planet.discovered) return result;
+    // GHUD-S55 component order: heroes (you, enemy, good, evil, corrupt), build, smuggler, bounty, smuggled, corruption.
+    if (planet.hero_red_green) {
+        if (planet.hero_ally) result.push_back(PlanetStatusIcon::hero_ally);
+        if (planet.hero_foreign) result.push_back(PlanetStatusIcon::hero_foreign);
+    } else {
+        if (planet.hero_good) result.push_back(PlanetStatusIcon::hero_good);
+        if (planet.hero_evil) result.push_back(PlanetStatusIcon::hero_evil);
+        if (planet.hero_corrupt) result.push_back(PlanetStatusIcon::hero_corrupt);
+    }
     if (production_activity(planet)) result.push_back(PlanetStatusIcon::build);
     // GHUD-S55 component order: build, smuggler, bounty, smuggled, corruption.
     if (planet.siphon_source) result.push_back(PlanetStatusIcon::smuggler);
@@ -333,7 +356,7 @@ std::string status_icon_texture_name(const PlanetStatusIcon kind,
     const std::vector<std::string>& build_tokens, const std::vector<std::string>& corruption_icons,
     const std::uint8_t corruption_type) {
     if (kind == PlanetStatusIcon::smuggler || kind == PlanetStatusIcon::bounty_hunter
-        || kind == PlanetStatusIcon::smuggled) return {};
+        || kind == PlanetStatusIcon::smuggled || is_hero_status_icon(kind)) return {};
     if (kind == PlanetStatusIcon::build) return build_tokens.empty() ? std::string{} : build_tokens.front();
     if (kind == PlanetStatusIcon::corruption_type) {
         // The authored list is indexed by the corruption type without the none entry.
@@ -349,8 +372,76 @@ std::string status_effect_component_name(const PlanetStatusIcon kind) {
         case PlanetStatusIcon::smuggler: return "g_smuggler";
         case PlanetStatusIcon::bounty_hunter: return "g_bounty_hunter";
         case PlanetStatusIcon::smuggled: return "g_smuggled";
+        case PlanetStatusIcon::hero_foreign: return "g_enemy_hero";
+        case PlanetStatusIcon::hero_ally: case PlanetStatusIcon::hero_good: case PlanetStatusIcon::hero_evil:
+        case PlanetStatusIcon::hero_corrupt: return "g_hero";
         default: return {};
     }
+}
+
+std::vector<sim::galactic::TypeId> hero_tooltip_types(const std::vector<PlanetHeroTip>& heroes, const PlanetStatusIcon kind,
+    const std::function<HeroSide(PlayerId)>& side_of) {
+    std::vector<sim::galactic::TypeId> result;
+    HeroSide wanted = HeroSide::none;
+    switch (kind) {
+        case PlanetStatusIcon::hero_good: wanted = HeroSide::good; break;
+        case PlanetStatusIcon::hero_evil: wanted = HeroSide::evil; break;
+        case PlanetStatusIcon::hero_corrupt: wanted = HeroSide::corrupt; break;
+        case PlanetStatusIcon::hero_ally: case PlanetStatusIcon::hero_foreign: break;
+        default: return result;
+    }
+    for (const auto& hero : heroes) {
+        const bool listed = kind == PlanetStatusIcon::hero_ally ? hero.allied
+            : kind == PlanetStatusIcon::hero_foreign ? !hero.allied
+            : side_of && side_of(hero.owner) == wanted;
+        if (listed) result.push_back(hero.type);
+    }
+    return result;
+}
+
+TooltipSlots tooltip_icon_slots(const std::size_t count) {
+    TooltipSlots result;
+    const std::size_t shown = std::min(count, tooltip_slot_capacity);
+    result.slots.resize(shown);
+    for (std::size_t item = 0; item < shown; ++item) {
+        const std::size_t slot = shown - 1 - item;
+        result.slots[item] = {slot % tooltip_slot_columns, slot / tooltip_slot_columns};
+    }
+    result.columns = std::min(shown, tooltip_slot_columns);
+    result.rows = (shown + tooltip_slot_columns - 1) / tooltip_slot_columns;
+    return result;
+}
+
+bool is_hero_status_icon(const PlanetStatusIcon kind) noexcept {
+    return kind == PlanetStatusIcon::hero_ally || kind == PlanetStatusIcon::hero_foreign || kind == PlanetStatusIcon::hero_good
+        || kind == PlanetStatusIcon::hero_evil || kind == PlanetStatusIcon::hero_corrupt;
+}
+
+HeroSide hero_side(const std::string_view faction, const std::string_view good, const std::string_view evil,
+    const std::string_view corrupt) noexcept {
+    const auto same = [&](const std::string_view side) {
+        return !faction.empty() && !side.empty() && faction.size() == side.size()
+            && std::equal(faction.begin(), faction.end(), side.begin(), [](const char a, const char b) {
+                   return std::toupper(static_cast<unsigned char>(a)) == std::toupper(static_cast<unsigned char>(b));
+               });
+    };
+    if (same(good)) return HeroSide::good;
+    if (same(evil)) return HeroSide::evil;
+    if (same(corrupt)) return HeroSide::corrupt;
+    return HeroSide::none;
+}
+
+std::string hero_status_icon_name(const PlanetStatusIcon kind, const std::vector<std::string>& alternates) {
+    std::size_t index = 0;
+    switch (kind) {
+        case PlanetStatusIcon::hero_ally: index = 0; break;
+        case PlanetStatusIcon::hero_foreign: index = 1; break;
+        case PlanetStatusIcon::hero_good: index = 2; break;
+        case PlanetStatusIcon::hero_evil: index = 3; break;
+        case PlanetStatusIcon::hero_corrupt: index = 4; break;
+        default: return {};
+    }
+    return index < alternates.size() ? alternates[index] : std::string{};
 }
 
 std::string status_effect_icon_name(const PlanetStatusIcon kind, const std::vector<std::string>& component_icons) {
@@ -381,6 +472,23 @@ std::vector<double> status_row_centres(const double origin_x, const std::vector<
         cursor += width;
     }
     return centres;
+}
+
+bool command_bar_icon_in_atlas(const assets::MegaTexture* atlas, const std::string_view icon) noexcept {
+    return atlas != nullptr && !icon.empty() && atlas->find(icon) != nullptr;
+}
+
+int corruption_transition_percent(const float fraction) noexcept {
+    const double clamped = std::clamp(static_cast<double>(fraction), 0.0, 1.0);
+    return static_cast<int>(clamped * 100.0);
+}
+
+std::int64_t siphon_tooltip_credits(const sim::math::Fixed siphoned) noexcept {
+    constexpr auto scale = sim::math::Fixed::scale;
+    const auto raw = siphoned.raw();
+    const auto whole = raw / scale, rest = raw % scale;
+    if (2 * (rest < 0 ? -rest : rest) < scale) return whole;
+    return raw < 0 ? whole - 1 : whole + 1;
 }
 
 BonusIconStyle planet_bonus_icon_style(const bool layer_visible, const std::string& icon, const bool in_command_atlas,

@@ -16,6 +16,7 @@
 #include "eawr/core/result.hpp"
 #include "eawr/script/foc/ai_diagnostics.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
+#include "eawr/script/authoritative/letter_box.hpp"
 #include "eawr/script/authoritative/tactical_bridge.hpp"
 #include "eawr/script/authoritative/tactical_scoring.hpp"
 #include "eawr/script/numeric/lua_number.hpp"
@@ -64,7 +65,11 @@ inline constexpr std::string_view verb_reinforce = "foc.reinforce";
 inline constexpr std::string_view verb_ability = "foc.ability"; // issuer, unit, AbilityKind, AbilityAction (#76)
 inline constexpr std::string_view verb_reveal_all = "foc.reveal_all"; // issuer, player (V-20)
 inline constexpr std::string_view verb_special_fire = "foc.special_fire"; // issuer, source, target, admission (WSW-40/41)
+inline constexpr std::string_view verb_tactical_superweapon = "foc.tsw_request"; // issuer, unit, stage (TswStage as a number; TSW-07, legacy #1713)
 inline constexpr std::string_view verb_make_invulnerable = "foc.make_invulnerable"; // issuer, unit, enabled (TL-03)
+// legacy #6634 (HCB-75): Letter_Box_In / Letter_Box_Out from a tactical script, a presentation verb: "in" or "out", then the seconds as
+// text. It never reaches the world (ScriptedTacticalSession::register_presentation_verb); the viewer draws the battle bands.
+inline constexpr std::string_view verb_letter_box = authoritative::verb_tactical_letter_box;
 inline constexpr std::string_view verb_campaign_retreat = "foc.campaign_retreat"; // issuer, owning campaign translates
 
 // Event producer of the engine side (EventKey::producer).

@@ -21,8 +21,11 @@ namespace {
 using namespace relay;
 bool provider_valid(const RelayServerOptions& o) {
     if (o.turn_provider == TurnProvider::coturn)
-        return o.cloudflare_key_id.empty() && o.cloudflare_api_token.empty();
-    return o.turn_uri.empty() && o.turn_secret.empty() && cloudflare_key_id_valid(o.cloudflare_key_id)
+        return o.cloudflare_key_id.empty() && o.cloudflare_api_token.empty() && o.turn_fallback_uri.empty() && o.turn_fallback_secret.empty();
+    // The operator's own coturn next to Cloudflare: one `turn:` URI and its secret together, or neither.
+    const bool fallback_valid = turn_uri_valid(o.turn_fallback_uri) && (o.turn_fallback_uri.empty() == o.turn_fallback_secret.empty())
+        && (o.turn_fallback_secret.empty() || (o.turn_fallback_secret.size() >= 32 && o.turn_fallback_secret.size() <= 256));
+    return fallback_valid && o.turn_uri.empty() && o.turn_secret.empty() && cloudflare_key_id_valid(o.cloudflare_key_id)
         && cloudflare_api_token_valid(o.cloudflare_api_token)
         && o.cloudflare_calls_per_minute > 0 && o.cloudflare_calls_per_minute <= 600
         && o.cloudflare_timeout >= std::chrono::milliseconds(500) && o.cloudflare_timeout <= std::chrono::seconds(30)
@@ -211,6 +214,7 @@ struct RelayServer::Impl {
             config.key_id = options.cloudflare_key_id; config.api_token = options.cloudflare_api_token;
             config.timeout = options.cloudflare_timeout; config.connect_address = options.cloudflare_connect_address;
             config.ca_file = options.cloudflare_ca_file; config.port = options.cloudflare_port;
+            config.fallback_uri = options.turn_fallback_uri; config.fallback_secret = options.turn_fallback_secret;
             turns = std::make_unique<CloudflareTurnWorker>(config);
             // Renewals use their own worker thread so pairing completions keep a single consumer; both share the call cap.
             if (!turn_refresh) turn_refresh = std::make_shared<CloudflareTurnRefresh>(std::move(config), [this] { return turn_call_allowed(); });
@@ -246,7 +250,10 @@ struct RelayServer::Impl {
     }
     // A revoke that finds the shared call cap spent waits in a bounded queue and goes out as calls free up; one that
     // the provider refuses or fails leaves the credential to expire with its TTL.
-    void revoke_credentials(const std::string& username) {
+    // A merged frame (Cloudflare first, then the operator's own coturn) holds a username per server: only the first, the
+    // Cloudflare one, is revoked at the provider; the HMAC credential of the own coturn simply expires.
+    void revoke_credentials(const std::string& listed) {
+        const auto username = listed.substr(0, listed.find(','));
         if (!turns || username.empty()) return;
         if (!revoke_queue.empty() || !turn_call_allowed()) {
             if (revoke_queue.size() < 1024) revoke_queue.push_back(username);

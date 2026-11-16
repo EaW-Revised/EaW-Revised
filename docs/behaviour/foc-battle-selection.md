@@ -118,15 +118,72 @@ orders, as next-tick commands.
 - O-1 (SEL-9, SEL-10). A right click that is not a drag, with a selection: on an enemy (another
   team) it attacks it; on empty space, or on an own unit that is not selected, it moves the
   selection to the order point. On a selected own unit or an ally it does nothing.
-- O-2 (SEL-1). A right drag larger than `MinimumDragSelectDistance` is the compass (a move with a
-  final facing). Not implemented: the tactical rules have no move-with-facing command; the drag
-  gives no order.
+- O-2 (SEL-1; debug build, evidence SEL-1 follow-up walk 11-13). A right-button press and drag is
+  measured by the larger screen side between the press and the release point, against two
+  `GameConstants` values: `MinimumDragDistance` (4 px) and `MinimumDragSelectDistance` (100 px).
+  The release point still decides what the order is (O-1: attack, move, guard, attack-move). Only a
+  move changes with the drag; an attack or a guard is not affected by it:
+  - up to 4 px, or any drag of a right double click: an ordinary move to the release point;
+  - more than 4 and less than 100 px: the compass. The move is ordered at the PRESS point, not the
+    release point, and the heading from the press point to the release point is its final facing
+    (space ship moves carry it through MV-40; land remains a follow-up). The arrow
+    that shows the heading appears only after the button has been held 500 ms, but the order does
+    not wait for it: a quick flick still gets the compass move;
+  - 100 px or more: the move is cancelled and nothing is ordered (the arrow is hidden while the
+    cursor is in that zone). An armed move mode stays armed.
+  - A left press while the right button is held ends the gesture in the debug build (the two-button
+    state cancels it); Escape is not special there (unverified: low value, not implemented).
+  Works in space and on land, for one unit and for groups; galactic has none. Implemented: the
+  band and the press-point order (`ui::right_release`, `ui::compass_plan`, `RightDrag` in the command
+  sink). A compass release whose press met no battle-plane point cancels like a 100 px drag: the
+  release point never stands in for the press. The two
+  distances are fixed constants in `selection.hpp`, as the left-drag select distance already was (a
+  known deviation from reading them from `GameConstants`; both tag rows stay `todo`). Implemented for space ship selections: the authored `Space_Movement_Compass` prop, resolved through
+  XML with its model, scale and materials, after the 500 ms hold; release, cancellation, focus loss
+  and leaving the compass band hide it. A left press cancels a held right gesture. Fighters and
+  mixed fighter/ship selections keep their previous plain moves and have no arrow. Not
+  implemented: land final facing, the land arrow and preview
+  blobs and the "any unit without a legal slot drops the facing" rule, the classic (left-button)
+  scheme's compass, and the player-profile option that turns the right-button compass off.
 - O-3 (GRP-1, KeyboardMapping defaults). S stops the selection. A and M toggle the attack and move
   modes. In attack mode a right click on an enemy attacks and any other right click disarms the
   mode; in move mode a right click always moves. A click that gives an order disarms the mode.
-- O-4. FoC has no stand-alone face order key; facing comes from the compass drag (O-2).
+- O-4 (debug build). FoC has no stand-alone face order key. Facing comes from a right drag whose PRESS
+  is on a selected unit, with the same 4 px and 100 px limits as O-2 and a release point that would
+  order a move: the selection turns in place towards the drag's heading and does not move. It
+  applies to space ships only (the debug build's executor skips land units for it). Implemented in
+  space: the press ray is kept at the press, and the selection gets the face command
+  ([space movement](space-movement.md) MV-20) towards a point far out along the heading from the
+  press point's battle plane point to the release point's, with the heading rounded to 0.1 degree
+  like the debug build's. One far target keeps the ships' headings parallel (a ship 2000 units from
+  the press point is about 0.8 degree off); every ship receives the same command. The target is
+  cut to stay inside the simulation's coordinate range (a target past it would make the planner stop
+  the ships without a turn), and a press so near the edge that no useful range is left is a plain
+  move at the press point. On land the drag gives no order. A turn in place has no move
+  acknowledgement and no move marker (retail response unverified; the least visible choice).
+  Ctrl (attack-move) and Alt (queue) do not change it: a drag from a selected ship is a facing-only
+  order whatever the modifiers, because the debug build's facing-only event carries only the heading
+  (modifier flags ride on the move-with-facing event, not on this one; the modifier carry-over is
+  UNVERIFIED, so nothing is queued and nothing attack-moves). A drag that starts off the selection
+  keeps its attack-move or queue meaning at the press point.
 - O-5. Orders reach the simulation only as commands through the UI-07 sink, stamped for the next
   open tick, so they are recorded in the replay.
+- O-6 (debug build; the arrival is UNVERIFIED). The compass heading travels with the move to the
+  formation planner as a valid-angle flag and an angle (one angle, shared by every ship of a space
+  group; the slots themselves are mapped around the press point like a plain group move, and land
+  slot boxes are rotated to it). The planner turns it into a ramp along the last stretch of the
+  path: when the path has two or more nodes and the heading differs from the last segment's by at
+  least `FinalFormationFacingMinimumAngle` (10 degrees), the facing is blended from that segment's
+  heading to the dragged one over a length set by `FinalFormationFacingDeltaCoefficient` (0.5).
+  That planning step is not tied to space or land. What a SHIP does with it is open: the value is
+  written each service into a per-object locomotor field, but no reader was found in the ship
+  locomotor's steering, the land walk and bike steering, the land team container or the fighter
+  locomotor (the whole-program field search was cut off), so a ship might arrive on its path heading
+  and use the angle only for its slot. Implemented for off-selection space ship compass moves: one group move at the press point
+  carries one yaw in [0, 360), rounded to 0.1 degree (MV-40/MV-41). Queued moves retain it;
+  attack-move and guard keep their existing command forms. Pressing on the selected ship still
+  turns in place (O-4). Land and fighters are follow-ups; this viewer piece does not change them. `FinalFormationFacingMinimumAngle` and
+  `FinalFormationFacingDeltaCoefficient` stay `deferred`; `FinalFacing180Penalty` (a path-search cost) is not traced.
 
 ## Control groups
 

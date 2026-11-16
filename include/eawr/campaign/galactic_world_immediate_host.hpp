@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,10 @@ public:
     [[nodiscard]] virtual const sim::galactic::GalacticSession& world() const noexcept = 0;
     // A world write applied when the batch publishes, after its native actions, in the order the script asked for it.
     virtual void on_publish(std::function<core::Result<void>(sim::galactic::GalacticSession&)>) = 0;
+    // A query that scans world state reports the budget units of what it visited (records visited times
+    // `script::authoritative::host_record_visit_units`); the script instance that asked pays them from its budget (a scan is
+    // host work the script's own steps do not show).
+    virtual void note_query_work(std::uint64_t units) const noexcept = 0;
 };
 struct GalacticWorldImmediateRules {
     using Placement = std::function<core::Result<sim::galactic::GalacticSession::NativeForcePlacement>(
@@ -45,7 +50,16 @@ struct GalacticWorldImmediateRules {
     Placement placement;                             // the campaign's creation placement (the AI uses the same provider)
     std::set<sim::galactic::PlayerId> ai_players;    // RGC-178 / L-57: the owners with an AI pool
     std::map<sim::galactic::PlayerId, sim::math::Fixed> credit_multipliers; // Give_Money: each AI player's difficulty multiplier
+    // #6917: when set, Give_Money reads this live table instead (the AI runtime updates it when a control switch changes a player's type).
+    std::shared_ptr<const std::map<sim::galactic::PlayerId, sim::math::Fixed>> live_credit_multipliers;
     std::function<const sim::PartitionExecutor*()> executor; // the creation's executor; none: inline
+    // A dry run, on private copies, of what the AI will do with the births a Spawn_Unit just staged (its actor-change
+    // handler reads the new actors' facts and admits them to its free store). A failure refuses the spawn as a script error
+    // before anything is published, instead of failing the handler after the world began to change. None: no AI reads births.
+    using BirthProbe = std::function<core::Result<void>(const sim::galactic::GalacticSnapshot&,
+        const sim::galactic::GalacticSession::NativeActionShadow&,
+        std::span<const sim::galactic::GalacticSession::NativeActorChange>, const sim::PartitionExecutor&)>;
+    BirthProbe birth_probe;
     std::map<std::string, Verb, std::less<>> verbs;
     std::map<std::string, Query, std::less<>> queries;
 };

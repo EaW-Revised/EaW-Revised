@@ -149,6 +149,7 @@ struct Session {
     std::unique_ptr<auth::ScriptScheduler> scheduler;
     std::vector<std::string> commands;
     std::vector<std::string> diagnostics;
+    std::vector<std::string> log; // `print` output: code and text
     std::vector<std::uint64_t> removed;
 };
 
@@ -180,6 +181,7 @@ inline void step(Session& session, const eawr::sim::PartitionExecutor& executor,
         for (const auto& diagnostic : report.value().diagnostics) {
             session.diagnostics.push_back(diagnostic.code + " " + diagnostic.message);
         }
+        for (const auto& line : report.value().log) session.log.push_back(line.code + " " + line.message);
         for (const std::uint64_t id : report.value().removed_instances) session.removed.push_back(id);
     }
 }

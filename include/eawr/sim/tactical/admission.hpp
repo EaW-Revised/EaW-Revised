@@ -43,6 +43,7 @@ EAWR_PAYLOAD_POLICY(BattleControlPayload, engine_only);
 EAWR_PAYLOAD_POLICY(ScriptInvulnerablePayload, engine_only);
 EAWR_PAYLOAD_POLICY(LandGarrisonPayload, human_wire);
 EAWR_PAYLOAD_POLICY(LandUnloadPayload, human_wire);
+EAWR_PAYLOAD_POLICY(TacticalSuperweaponPayload, human_wire);
 EAWR_PAYLOAD_POLICY(RepairHardpointPayload, human_wire);
 EAWR_PAYLOAD_POLICY(AiReservationDebitPayload, engine_only);
 EAWR_PAYLOAD_POLICY(SpecialFirePayload, human_wire);
@@ -86,6 +87,9 @@ struct CampaignReserveAdmission {
     }
     if (const auto* special = std::get_if<SpecialFirePayload>(&payload))
         return special->admission == SpecialFireAdmission::player;
+    // TSW-10: the script call is an AI admission, never a human wire command.
+    if (const auto* switch_command = std::get_if<TacticalSuperweaponPayload>(&payload))
+        return switch_command->admission == TswAdmission::player;
     return true;
 }
 

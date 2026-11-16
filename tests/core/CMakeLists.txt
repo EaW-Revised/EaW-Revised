@@ -5,6 +5,12 @@ target_link_libraries(core_load_note_tests PRIVATE eawr::core eawr::platform)
 eawr_target_project_warnings(core_load_note_tests)
 add_test(NAME core_load_notes COMMAND core_load_note_tests "${CMAKE_CURRENT_BINARY_DIR}/load-note-user")
 
+add_executable(core_degradation_ledger_tests degradation_ledger_tests.cpp)
+target_link_libraries(core_degradation_ledger_tests PRIVATE eawr::core eawr::platform eawr::sim eawr::assets eawr::vfs)
+target_compile_features(core_degradation_ledger_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(core_degradation_ledger_tests)
+add_test(NAME core_degradation_ledger COMMAND core_degradation_ledger_tests "${CMAKE_CURRENT_BINARY_DIR}/dl")
+
 add_executable(core_flat_id_map_tests flat_id_map_tests.cpp)
 target_link_libraries(core_flat_id_map_tests PRIVATE eawr::core)
 target_compile_features(core_flat_id_map_tests PRIVATE cxx_std_20)
@@ -285,6 +291,11 @@ endif()
 # Tier labels (cmake/EawrTestTiers.cmake).
 add_test(NAME headless_missing_replay_contract
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_cli.py"
+            --program "$<TARGET_FILE:sim_headless>")
+
+# sim_headless --degradation-out end to end (the degradation ledger's headless summary, success and failure exits).
+add_test(NAME headless_degradation_out_contract
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_degradation_out.py"
             --program "$<TARGET_FILE:sim_headless>")
 
 # #793: sim_headless acts on the catalog load health (a failed hardpoint include or registry fails the run, a missing include warns).

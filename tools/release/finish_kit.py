@@ -226,6 +226,15 @@ def zip_time(repo, commit):
     return (moment.tm_year, moment.tm_mon, moment.tm_mday, moment.tm_hour, moment.tm_min, moment.tm_sec - moment.tm_sec % 2)
 
 
+def extras_text(extras, manifest):
+    """The README's line about overlay files and land skirmish. Land is claimed only from what the host counted in the build rules
+    of both trees (the receipt), never from the requested flag or the overlay paths."""
+    text = ("Extra files: " + ", ".join(f"`{e}`" for e in extras) + ".") if extras else ""
+    if kit_manifest.land_skirmish_built(((manifest.get("host") or {}).get("receipt"))):
+        text = (text + " Land skirmish: ON in this kit.").strip()
+    return text
+
+
 def delivery_paths(out, name):
     dest, zpath, hashpath = out / name, out / (name + '.zip'), out / (name + '.zip.sha256')
     sidecar = out / (name + kit_manifest.SIDECAR_SUFFIX)
@@ -249,6 +258,10 @@ def main():
     ap.add_argument("--allow-binary-diff", action="append", default=[], metavar="GLOB",
                     help="a pinned or binary file that may differ from the reference; recorded in the manifest")
     ap.add_argument("--expect-base", metavar="REF", help="refuse unless the kit was cut from this commit or ref")
+    ap.add_argument("--tooling-commit", metavar="SHA",
+                    help="release only: this checkout's finish_kit.py and kit_manifest.py come from this LATER commit (a reviewed "
+                         "tool fix made after the tag) instead of the tagged commit; it must be the commit the cut recorded as its "
+                         "orchestrating checkout and must descend from the tagged commit; recorded in the finish section")
     ap.add_argument("--repo", default=str(ROOT))
     a = ap.parse_args()
     meta = json.loads((a.work / "cut.json").read_text(encoding="utf-8"))
@@ -288,12 +301,26 @@ def main():
     # This checkout's finish and verifier must be the kit commit's own bytes, or nothing below can be trusted.
     committed = {e["path"].rsplit("/", 1)[-1]: e["git_blob"] for e in plan.get("payload", [])}
     finish_tool = {}
+    if a.tooling_commit:
+        if not release:
+            fail("--tooling-commit is for a release only")
+        else:
+            for problem in kit_manifest.tooling_problems(repo, plan, a.tooling_commit):
+                fail("tool: " + problem)
+            try:
+                tooling = kit_manifest.git(repo, "rev-parse", a.tooling_commit + "^{commit}").decode().strip()
+                committed = {name: kit_manifest.git(repo, "rev-parse", f"{tooling}:tools/release/{name}").decode().strip()
+                             for name in ("finish_kit.py", "kit_manifest.py")}
+                finish_tool["tooling_commit"] = {"commit": tooling}
+            except kit_manifest.ManifestError as error:
+                fail(f"tool: cannot read the tooling commit's files: {error}")
     for name in ("finish_kit.py", "kit_manifest.py"):
         blob = kit_manifest.blob_id_of_file(repo, "tools/release/" + name, Path(__file__).with_name(name))
         finish_tool[name] = {"git_blob": blob}
         if committed.get(name) != blob:
-            fail(f"tool: {name} in this checkout is not the kit commit's copy; run it from "
-                 f"`git archive {plan['source']['kit_sha'][:12]} tools/release`")
+            where = (f"the tooling commit {a.tooling_commit[:12]}" if a.tooling_commit
+                     else f"the kit commit's copy; run it from `git archive {plan['source']['kit_sha'][:12]} tools/release`")
+            fail(f"tool: {name} in this checkout is not {where}")
     if not problems:
         for problem in kit_manifest.verify(manifest, zip_path=Path(meta["player_zip"]), repo=repo, require_host=True,
                                            expect_base=expect_base):
@@ -408,7 +435,7 @@ def main():
         extras = [e["path"] for e in plan["source"]["overlay"][2:]]
         for key, val in {"@LABEL@": label, "@SHA8@": kit_sha[:8], "@BASESHA@": base_sha, "@LAUNCHER@": pin["launcher_version"],
                          "@CHANGES@": changes,
-                         "@EXTRAS_TEXT@": ("Extra files: " + ", ".join(f"`{e}`" for e in extras) + ".") if extras else ""}.items():
+                         "@EXTRAS_TEXT@": extras_text(extras, manifest)}.items():
             section = section.replace(key, val)
         readme = top / "README.md"
         readme.write_text(section + readme.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")

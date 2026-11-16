@@ -4,6 +4,7 @@
 
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
+#include "eawr/presentation/audio/gift_notifications.hpp"
 #include "eawr/presentation/ui/input_routing.hpp"
 #include "eawr/presentation/ui/special_weapon.hpp"
 #include "eawr/sim/tactical/session.hpp"
@@ -12,6 +13,7 @@
 #include "../../apps/viewer/src/edge_pointer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -194,11 +196,15 @@ void command_sink_contracts() {
     const auto untargeted = scheduler.issue(intent(ui::TacticalVerb::attack, {4}));
     expect(!untargeted && untargeted.error().code == ui::diagnostic_codes::invalid_intent,
         "an attack needs a target");
-    for (const auto verb : {ui::TacticalVerb::face, ui::TacticalVerb::ability}) {
+    for (const auto verb : {ui::TacticalVerb::ability}) {
         const auto refused = scheduler.issue(intent(verb, {4}, point(1, 2), sim::invalid_entity_id, 9));
         expect(!refused && refused.error().code == ui::diagnostic_codes::unsupported_intent,
-            "face and ability have no rules-v1 command");
+            "an ability intent without a modelled ability has no rules-v1 command");
     }
+    // O-2, MV-20: the facing-only right drag is the existing face command, one point for the whole selection.
+    const auto face_payload = ui::command_payload(intent(ui::TacticalVerb::face, {4, 5}, point(1, 2)));
+    expect(face_payload && face_payload.value() == tactical::CommandPayload{tactical::FacePayload{point(1, 2)}},
+        "a face intent becomes the face command");
     // #76 (space-abilities AB-50): an ability intent naming a modelled unit ability is an ability command.
     auto switch_on = intent(ui::TacticalVerb::ability, {4});
     switch_on.unit_ability = tactical::AbilityKind::turbo;
@@ -644,6 +650,28 @@ void paused_reservation_contracts() {
 }
 
 int main() {
+    {
+        tactical::Event gift{5, tactical::EventKind::controller_changed, 1, 4, 7, tactical::OrderKind::gift};
+        gift.previous_controller = {11}; gift.controller = {12};
+        auto member = gift; member.unit = 8;
+        const std::array transfer{gift, member};
+        expect(presentation::audio::gift_notifications(transfer, {11}) == 1, "giver hears one cue per committed gift");
+        expect(presentation::audio::gift_notifications(transfer, {12}) == 1, "receiver hears one cue per committed gift");
+        expect(presentation::audio::gift_notifications(transfer, {13}) == 0, "other seats hear no gift cue");
+        expect(presentation::audio::gift_notifications(transfer, {}) == 0, "observer hears no gift cue");
+        auto second = gift; ++second.sequence;
+        const std::array two{gift, member, second};
+        expect(presentation::audio::gift_notifications(two, {11}) == 2, "separate gifts in one tick retain separate cues");
+        auto other_seat = member; other_seat.previous_controller = {13};
+        const std::array mixed{gift, other_seat};
+        expect(presentation::audio::gift_notifications(mixed, {12}) == 1, "units from two previous seats play one receiver cue");
+        expect(presentation::audio::gift_notifications(mixed, {11}) == 1 && presentation::audio::gift_notifications(mixed, {13}) == 1,
+            "each previous seat hears its own single cue");
+        second.kind = tactical::EventKind::order_rejected;
+        expect(presentation::audio::gift_notifications(std::span(&second, 1), {11}) == 0, "rejected gifts are silent");
+        second = gift; second.controller = second.previous_controller;
+        expect(presentation::audio::gift_notifications(std::span(&second, 1), {11}) == 0, "unchanged controller is silent");
+    }
     {
         ui::CommandScheduler scheduler(local_player, 7, 10);
         auto fire = intent(ui::TacticalVerb::special_fire, {91});

@@ -182,8 +182,8 @@ core::Result<Execution> execute(Fixture& f, const Prepared& p, const ExecutionIn
             if (member.id == identity || (!u.named && member.container == identity)) member.present = false;
         }
     }
-    const bool tactical = p.choice.map && (p.choice.mode == MissionMode::land || p.choice.mode == MissionMode::space)
-        && !a->ai && !input.multiplayer && !input.fast_corruption; // WGCH-08
+    const bool tactical = p.choice.map && p.choice.mode == MissionMode::space
+        && !a->ai && !input.multiplayer && !input.fast_corruption; // WGCH-08; land takes the timed route (WGCH-198)
     if (tactical) {
         result.events.push_back({Effect::queue_mission, p.planet, a->player.id});
         if (!input.mission_queue_accepts) { result.refusal = Refusal::mission_queue; return R::success(std::move(result)); }

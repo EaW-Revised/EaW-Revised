@@ -19,6 +19,7 @@
 #include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/viewport.hpp>
+#include <godot_cpp/classes/sub_viewport.hpp>
 #include <godot_cpp/classes/viewport_texture.hpp>
 #include <godot_cpp/classes/window.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
@@ -223,6 +224,51 @@ bool OptionsMode::State::run_action(const std::string& action) {
         apply_video(screen->committed().video, ApplyTargets{}, report);
         return report.applied.empty();
     }
+    if (verb == "aa-registry-test") {
+        // Opt-in integration contract: the same registry used by player-visible 3D viewports.
+        auto* root = host->get_viewport();
+        const auto saved_profile = active_render_profile();
+        const auto saved_override = render_state().override_aa;
+        const auto saved_supersampling = render_state().supersampling;
+        auto* first = memnew(SubViewport);
+        auto* second = memnew(SubViewport);
+        first->set_size(Vector2i(320, 180));
+        second->set_size(Vector2i(640, 360));
+        host->add_child(first);
+        host->add_child(second);
+        register_render_viewport(*first);
+        register_render_viewport(*first); // Duplicate registration is harmless.
+        register_render_viewport(*second);
+        bool okay = true;
+        apply_aa_override(*root, {});
+        for (const auto profile : aa_slider_profiles) {
+            for (const float ss : {1.0F, 1.5F, 2.0F}) {
+                apply_render_profile(*root, profile, ss);
+                const auto expected = effective_render_settings(profile, RenderScene::general, {}, ss);
+                for (auto* viewport : std::array<Viewport*, 3>{root, first, second}) {
+                    const auto bounded = viewport_aa_budget(expected, viewport->get_texture()->get_size());
+                    okay = okay && render_profile_detail::settings_of(*viewport) == bounded.settings;
+                }
+            }
+        }
+        const AaOverride forced{2U, false, 1.5F};
+        apply_aa_override(*root, forced);
+        apply_render_profile(*root, RenderProfile::medium);
+        okay = okay && render_profile_detail::settings_of(*first) == RenderSettings{2, false, 16, 1.5F};
+        // An already registered target changing dimensions gets its own clamp, even without Options.
+        first->set_size(Vector2i(3840, 2160));
+        refresh_render_viewport_sizes();
+        const auto expected_first = viewport_aa_budget(RenderSettings{2, false, 16, 1.5F}, first->get_texture()->get_size());
+        okay = okay && render_profile_detail::settings_of(*first) == expected_first.settings
+            && render_profile_detail::settings_of(*second).supersampling == 1.5F;
+        unregister_render_viewport(*first);
+        unregister_render_viewport(*second);
+        memdelete(first);
+        memdelete(second);
+        apply_aa_override(*root, saved_override);
+        apply_render_profile(*root, saved_profile, saved_supersampling);
+        return okay;
+    }
     if (verb == "apply-profile") {
         apply_render_profile(*host->get_viewport(), active_render_profile());
         return true;
@@ -235,6 +281,7 @@ bool OptionsMode::State::run_action(const std::string& action) {
         return true;
     }
     if (verb == "press") return screen->press(argument);
+    if (verb == "key") return screen->press_key(argument); // a key press for a waiting binding capture (#5131)
     if (verb == "text") {
         const auto equals = argument.find('=');
         return equals != std::string::npos && screen->set_text_control(argument.substr(0, equals), argument.substr(equals + 1));
@@ -252,6 +299,8 @@ bool OptionsMode::State::run_action(const std::string& action) {
 }
 
 bool OptionsMode::State::capture() {
+    // Headless property/registry contracts have no render surface and request no image.
+    if (options.capture_path.empty() && DisplayServer::get_singleton()->get_name() == String("headless")) return true;
     Ref<Image> image = host->get_viewport()->get_texture()->get_image();
     if (image.is_null() || image->is_empty()) {
         failure = "the viewport could not be read back";

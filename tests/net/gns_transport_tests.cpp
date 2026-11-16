@@ -290,8 +290,8 @@ void turn_refusal_logs() {
     add({uri, "", password, 60s}, "user_empty");
     add({uri, user, "", 60s}, "cred_empty");
     add({"invalid-secret-uri", user, password, 60s}, "uri_list");
-    add({uri + "," + uri, user + ",other", password, 60s}, "user_comma");
-    add({uri, user, password + ",other", 60s}, "cred_comma");
+    add({uri, user + ",other", password, 60s}, "user_list");
+    add({uri + "," + uri, user, password + ",other,third", 60s}, "cred_list");
     add({uri, user, password, 0s}, "lifetime_nonpositive");
     add({uri, user, password, -7s}, "lifetime_nonpositive");
     std::vector<std::string> lines;

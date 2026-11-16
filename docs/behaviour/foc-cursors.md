@@ -102,12 +102,16 @@ beacon, garrison and repair art. Their actions are selected only when input expo
 those modes; loading art does not add commands. Existing M2 targets are enemy-object
 abilities and world-point BARRAGE/WEAKEN_ENEMY. Friendly/terrain target routing must be
 supplied by future input modes. CU-09 is only partially implemented: the current input layer classifies
-ability hover and clicks by hostility. Simulation's private AB-62 ion-shot admission
-also requires a combat profile, but there is no shared admission query including
-the authored type filter, hyperspace, duel and other applicable restrictions. A
-shared evaluated predicate must cover these before full CU-09 parity can be claimed;
-the ordinary hostile-ship and empty-space GPU pair does not establish that parity
-(legacy EAWR-578). These restrictions must not be invented by the cursor adapter.
+ability hover and clicks by hostility and by the aimed ability's authored type filter (WHE-14, the
+simulation's own filter predicate, for the energy weapon, tractor beam, leech shields, super laser,
+concentrate fire, lucky shot and ion shot): a hostile contact the filter refuses shows the invalid
+pointer and a click on it is refused with the usual feedback (legacy EAWR-7186). Retail applies the same
+filter in the same way to whatever object is under the pointer, so a craft is aimable exactly when its
+own category or type is listed (the stock energy-weapon filter lists Fighter and Bomber; a mod's filter
+may not). The other restrictions of the activation (hyperspace, duel, target model, nebula, range, fog)
+have no shared admission query yet; a shared evaluated predicate must cover them before full CU-09
+parity can be claimed; the ordinary hostile-ship and empty-space GPU pair does not establish that
+parity (legacy EAWR-578). These restrictions must not be invented by the cursor adapter.
 CU-12 matches current simulation point admission. BARRAGE's separate debug-build
 firing predicate checks weapon reach, movement, weapon-hit and turret state; those
 checks do not establish an activation range gate. WEAKEN_ENEMY's U-10 placement

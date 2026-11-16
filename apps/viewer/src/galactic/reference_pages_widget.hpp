@@ -8,6 +8,7 @@ namespace eawr::presentation::godot_backend {
 class ReferencePages final {
 public:
     void service(GalacticMode::State&);
+    [[nodiscard]] bool visible() const noexcept { return model_.visible; } // the reference pages are open (a modal layer)
 private:
     viewer::galactic::ReferencePagesModel model_;
     godot::Control* root_{};
@@ -24,6 +25,10 @@ private:
     std::map<viewer::galactic::ObjectId, viewer::galactic::ReferenceType> planets_;
     std::optional<viewer::galactic::TreeFacts> authored_tree_;
     bool dirty_{true};
+    // WGP-123: the Droid Log list is rebuilt from the archive when the page is activated, not on each submission.
+    std::vector<viewer::galactic::ArchiveEntry> shown_log_;
+    bool log_stale_{true};
+    std::optional<std::string> droid_icon_;
     void rebuild(GalacticMode::State&);
     void refresh(GalacticMode::State&);
     void activate(GalacticMode::State&, const std::string&);

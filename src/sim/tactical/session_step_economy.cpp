@@ -159,7 +159,7 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
             survivors.push_back(std::move(final));
             next_id = final_id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : final_id + 1;
             // WBP-22/WPR-16: admission precedes this frame's income pass.
-            if (impl_->economy.stream(profile->constructed) != nullptr) earners.emplace_back(final_id, state.builder);
+            if (impl_->economy.earner_stream(profile->constructed) != nullptr) earners.emplace_back(final_id, state.builder);
             const std::array<EntityId, 1> created{final_id};
             if (auto defaults = request_survivor_defaults(created); !defaults) return defaults;
         }
@@ -338,7 +338,9 @@ core::Result<void> session_detail::Tick::station_upgrades() {
             instances.push_back(impl_->instance_for(survivors.back(),
                 math::to_matrix(old.state.rotation, old.state.position).value(), tick + 1));
             std::erase_if(earners, [&](const auto& earner) {
-                return earner.first == held.station && impl_->economy.stream(menu->next_level) == nullptr;
+                // WIS-01: the next level's stream is event-styled (or absent): the replacement pays only once its own
+                // trigger fires, so the old source's earner entry (triggered or not) ends with the old unit.
+                return earner.first == held.station && impl_->economy.earner_stream(menu->next_level) == nullptr;
             });
             for (auto& earner : earners) if (earner.first == held.station) earner.first = replacement_id;
             // WPR-56 (project), FL-02/08: reconcile by squadron type, never by an old entry index.
@@ -415,6 +417,22 @@ core::Result<void> session_detail::Tick::station_upgrades() {
     return core::Result<void>::success();
 }
 
+// WIS-01..03: an event-styled stream's source becomes an earner when its trigger passes the gates the retail
+// manager applies in order: style, enabled, handler (no target object for these streams). One source starts once.
+void session_detail::Tick::start_event_streams(std::vector<std::pair<EntityId, PlayerId>>& earners) {
+    if (income_triggers_.empty()) return;
+    for (const auto& [id, trigger, has_target_object] : income_triggers_) {
+        const auto* source = survivor(id);
+        const auto* stream = source != nullptr ? impl_->economy.stream(source->state.type_id) : nullptr;
+        if (stream == nullptr || !income_event_admits(*stream, trigger, has_target_object)) continue;
+        if (!named_ability_enabled(named_ability_locks_, source->state.owner, source->state.type_id, stream->name,
+                stream->initially_enabled)) continue;
+        if (std::any_of(earners.begin(), earners.end(), [&](const auto& entry) { return entry.first == id; })) continue;
+        earners.emplace_back(id, source->state.owner);
+    }
+    income_triggers_.clear();
+}
+
 core::Result<void> session_detail::Tick::economy() {
     auto& arrivals = staging_.value().arrivals.value();
     auto& ledgers = staging_.value().ledgers.value();
@@ -430,6 +448,7 @@ core::Result<void> session_detail::Tick::economy() {
         const auto* source = survivor(entry.first);
         return source == nullptr || impl_->economy.stream(source->state.type_id) == nullptr;
     });
+    start_event_streams(earners);
     std::erase_if(shares, [&](const auto& entry) { return survivor(entry.first) == nullptr; });
     std::erase_if(arrivals, [&](const auto& entry) { return survivor(entry.first) == nullptr; });
     // WPR-33/55: queues reuse flat partition scratch; buys shared one census with ordered deltas.
@@ -476,10 +495,71 @@ core::Result<void> session_detail::Tick::economy() {
     // WBP-22/23/26, PU-02..04: workers read live ownership and standing bonuses once
     // per source. Retained disjoint outputs keep this phase allocation-free after warm-up.
     auto& payments = impl_->income_payments;
-    payments.resize(earners.size());
+    // WPR-15/16: an income upgrade held by its station is a source after the unit earners, in ledger
+    // order. It was created by a queue completion after an earlier frame's income pass, so it first pays
+    // on the next pass; the holder's removal retires it (prune_upgrade_holders above).
+    auto& held_sources = impl_->income_upgrade_sources;
+    held_sources.clear();
+    for (const auto& account : ledgers) {
+        for (const auto& held : account.completed) {
+            // A level-up object is replaced by its next-level station (station_upgrades runs first), so it
+            // is not a held income source.
+            const auto* upgrade = impl_->economy.upgrade(held.type);
+            if (upgrade != nullptr && upgrade->level_up) continue;
+            // WIS-01: an event-styled stream pays only once triggered; no trigger reaches a held upgrade (unverified in
+            // retail, see WIS-05), so none pays from the held list.
+            if (impl_->economy.earner_stream(held.type) != nullptr) held_sources.emplace_back(account.player, held.type);
+        }
+    }
+    const auto source_count = earners.size() + held_sources.size();
+    payments.resize(source_count);
+    // PU-05/09: the recipients of one stream, from its owner, the stream's sharing policy and the amount.
+    const auto settle = [&](const IncomeProfile& stream, const PlayerId owner, std::int64_t amount,
+        const std::size_t partition) -> IncomePayment {
+        std::int64_t recipients = 1;
+        if (stream.split_with_allies) {
+            recipients = 0;
+            for (const auto& ledger : ledgers) recipients += impl_->allied(owner, ledger.player) ? 1 : 0;
+        }
+        auto owner_amount = amount;
+        if (stream.split_favors_owner) {
+            // PU-09: the remainder divisor includes the owner, who receives only
+            // its reserved fraction. This policy takes precedence over full sharing.
+            if (amount <= 0) { amount = 0; owner_amount = 0; }
+            else {
+                const auto reserved = math::multiply(math::Fixed::from_raw(amount), stream.owner_income_percentage);
+                if (!reserved) { income_errors[partition] = reserved.error(); return {owner, 0, false, 0}; }
+                owner_amount = std::clamp(reserved.value().raw(), std::int64_t{0}, amount);
+                amount = recipients != 0 ? (amount - owner_amount) / recipients : 0;
+            }
+        } else if (stream.split_with_allies && !stream.full_amount_to_everyone) {
+            if (recipients != 0) amount /= recipients;
+            owner_amount = amount;
+        }
+        return {owner, amount, stream.split_with_allies, owner_amount};
+    };
     const auto source_payments = [&](const std::size_t partition) {
-        const auto range = partition_range(partition, earners.size());
+        const auto range = partition_range(partition, source_count);
         for (auto index = range.begin; index < range.end; ++index) {
+            if (index >= earners.size()) {
+                const auto& [owner, type] = held_sources[index - earners.size()];
+                const auto* stream = impl_->economy.stream(type);
+                payments[index] = {owner, 0, false, 0};
+                if (!stream->automatic || !named_ability_enabled(named_ability_locks_, owner, type, stream->name,
+                    stream->initially_enabled)) continue;
+                auto amount = stream->per_frame.raw();
+                for (const auto& bonus : stream->bonuses) {
+                    // Unverified (no debug-build evidence): an upgrade object has no hardpoints, so only a bonus that is always on
+                    // counts; loaded bonuses are named, so the unnamed branch is reached only by synthetic profiles.
+                    const bool standing = !bonus.name.empty() ? bonus.automatic
+                        && named_ability_enabled(named_ability_locks_, owner, type, bonus.name, bonus.initially_enabled)
+                        : bonus.automatic && bonus.initially_enabled && bonus.hardpoint == always_on;
+                    if (standing) amount += bonus.per_frame.raw();
+                }
+                payments[index] = settle(*stream, owner, amount, partition);
+                if (income_errors[partition]) break;
+                continue;
+            }
             const auto* source = survivor(earners[index].first);
             const auto* stream = impl_->economy.stream(source->state.type_id);
             payments[index] = {source->state.owner, 0, false, 0};
@@ -515,30 +595,11 @@ core::Result<void> session_detail::Tick::economy() {
                     amount = total.value().raw();
                 }
             }
-            std::int64_t recipients = 1;
-            if (stream->split_with_allies) {
-                recipients = 0;
-                for (const auto& ledger : ledgers) recipients += impl_->allied(source->state.owner, ledger.player) ? 1 : 0;
-            }
-            auto owner_amount = amount;
-            if (stream->split_favors_owner) {
-                // PU-09: the remainder divisor includes the owner, who receives only
-                // its reserved fraction. This policy takes precedence over full sharing.
-                if (amount <= 0) { amount = 0; owner_amount = 0; }
-                else {
-                    const auto reserved = math::multiply(math::Fixed::from_raw(amount), stream->owner_income_percentage);
-                    if (!reserved) { income_errors[partition] = reserved.error(); break; }
-                    owner_amount = std::clamp(reserved.value().raw(), std::int64_t{0}, amount);
-                    amount = recipients != 0 ? (amount - owner_amount) / recipients : 0;
-                }
-            } else if (stream->split_with_allies && !stream->full_amount_to_everyone) {
-                if (recipients != 0) amount /= recipients;
-                owner_amount = amount;
-            }
-            payments[index] = {source->state.owner, amount, stream->split_with_allies, owner_amount};
+            payments[index] = settle(*stream, source->state.owner, amount, partition);
+            if (income_errors[partition]) break;
         }
     };
-    if (!earners.empty()) {
+    if (source_count != 0) {
         const auto paid = executor.execute_phase("income-sources", tick_partition_count,
             [&source_payments](const std::size_t partition) { source_payments(partition); });
         if (!paid) return core::Result<void>::failure(paid.error());

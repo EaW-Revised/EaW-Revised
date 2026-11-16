@@ -89,6 +89,8 @@ public:
     [[nodiscard]] core::Result<std::string> state_hash() const override;
     [[nodiscard]] core::Result<std::string> sync_hash() const override;
     [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
+    // The lifecycle owner (owners_[0]) knows the ticks the AI ran.
+    [[nodiscard]] bool oracle_capture_due(std::uint64_t completed_tick) const noexcept override;
     // W1 S4: the per-component sync digests that sync_hash composes, recomputed now (a window publishes them at its commit).
     [[nodiscard]] core::Result<script::foc::galactic_ai::NativeDigests> sync_digests() const;
     // The same digests rebuilt cold from every owner (no caches); `only` non-empty: that one external contributor alone.

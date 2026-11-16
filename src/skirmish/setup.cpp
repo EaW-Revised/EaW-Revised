@@ -1,4 +1,5 @@
 #include "eawr/skirmish/setup.hpp"
+#include "eawr/skirmish/setup_facts.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "skirmish_internal.hpp"
 #include "setup_workers.hpp"
@@ -10,6 +11,8 @@
 
 #include <algorithm>
 #include <charconv>
+#include <mutex>
+#include <optional>
 #include <thread>
 #include <set>
 
@@ -83,6 +86,11 @@ bool setup_map_eligible(const assets::Map& map, const SetupMapQuery& query) {
 
 core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const data::Catalog& catalog,
     const SetupMapQuery& query, const unsigned requested_workers) {
+    return setup_maps(filesystem, catalog, query, requested_workers, nullptr);
+}
+
+core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const data::Catalog& catalog,
+    const SetupMapQuery& query, const unsigned requested_workers, SetupMapFactsStore* const facts) {
     using Result = core::Result<std::vector<SetupMap>>;
     auto records = filesystem.enumerate("data/art/maps/", ".ted");
     if (!records) return Result::failure(records.error());
@@ -99,12 +107,29 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
     // Both directories use the VFS's effective loose/archive winners.
     records.value().insert(records.value().end(), custom_records.value().begin(), custom_records.value().end());
     std::vector<SetupMap> maps;
-    const auto types = assets::object_type_catalog(catalog);
-    const auto playable_factions = setup_factions(catalog);
-    auto texts = data::ui::load_language_text_database(filesystem, "ENGLISH");
-    const auto checks = detail::inspect_setup_content(filesystem, catalog);
+    // What building an entry needs (the object-type index, the playable factions, the text database and the content checks)
+    // is built on the first map that has no stored entry: a list served from the facts store builds none of it.
+    struct ListInputs final {
+        assets::ObjectTypeCatalog types;
+        std::vector<SetupFaction> playable_factions;
+        core::Result<data::ui::TextDatabase> texts;
+        detail::SetupContentChecks checks;
+    };
+    std::once_flag inputs_once;
+    std::optional<ListInputs> inputs_storage;
+    const auto list_inputs = [&]() -> const ListInputs& {
+        std::call_once(inputs_once, [&] {
+            inputs_storage.emplace(ListInputs{assets::object_type_catalog(catalog), setup_factions(catalog),
+                data::ui::load_language_text_database(filesystem, "ENGLISH"), detail::inspect_setup_content(filesystem, catalog)});
+        });
+        return *inputs_storage;
+    };
     const auto build_entry = [&](const vfs::AssetRecord& record, const assets::Map& map,
         const std::span<const std::byte> bytes) {
+        const auto& inputs = list_inputs();
+        const auto& texts = inputs.texts;
+        const auto& playable_factions = inputs.playable_factions;
+        const auto& checks = inputs.checks;
         SetupMap entry;
         entry.path = record.canonical_path;
         entry.name = fallback_name(entry.path);
@@ -119,16 +144,10 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
                 entry.display_name = entry.name;
                 entry.name = "(" + std::to_string(*entry.metadata.capacity) + ") " + entry.name;
             }
-            const auto slash = entry.path.rfind('/');
-            const std::string stem = entry.path.substr(slash + 1, entry.path.size() - slash - 5);
-            for (const auto suffix : {".tga", ".dds"}) {
-                const auto path = "data/art/textures/" + stem + suffix;
-                if (filesystem.stat(path)) { entry.preview_path = path; break; }
-            }
-            if (entry.preview_path.empty()) {
-                for (const auto& chunk : map.chunks) {
-                    if (chunk.id == 19 && !chunk.group) { entry.embedded_preview = chunk.payload; break; }
-                }
+            // The embedded preview is kept here whatever the view holds; finish_preview drops it when a texture file
+            // of the map's name exists (so a stored entry is complete and the view is asked every time).
+            for (const auto& chunk : map.chunks) {
+                if (chunk.id == 19 && !chunk.group) { entry.embedded_preview = chunk.payload; break; }
             }
         }
         auto placements = detail::inspect_setup_placements(map, bytes, entry.path, catalog, checks);
@@ -177,6 +196,19 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
         }
         return entry;
     };
+    // The preview file is looked up in the view for every list, stored entry or not.
+    const auto finish_preview = [&](SetupMap& entry) {
+        const auto slash = entry.path.rfind('/');
+        const std::string stem = entry.path.substr(slash + 1, entry.path.size() - slash - 5);
+        for (const auto suffix : {".tga", ".dds"}) {
+            const auto path = "data/art/textures/" + stem + suffix;
+            if (filesystem.stat(path)) { entry.preview_path = path; break; }
+        }
+        if (!entry.preview_path.empty()) entry.embedded_preview.clear();
+    };
+    // Header and finished-entry facts persist between launches when a store is given (setup_facts.hpp); the context
+    // fingerprint is computed once, here, so a list served from the store pays one pass over the view and no decode.
+    const std::string facts_context = facts ? setup_facts_context(filesystem, catalog, setup_facts_space_kind) : std::string{};
     // Retain only picker records. Full decoded maps and source bytes live on
     // their worker, bounding memory by concurrency even for large mod corpora.
     std::vector<std::optional<SetupMap>> candidates(records.value().size());
@@ -193,24 +225,67 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
             // the picker rejects costs one small read instead of the whole TED (#5197). A header that does not fit
             // the prefix, or any prefix failure, takes the whole-file path, which decides exactly as before.
             constexpr std::uint64_t header_prefix_bytes = 64U * 1024U;
-            if (!query.read_whole_headers && record.size > header_prefix_bytes) {
-                if (auto prefix = filesystem.open_prefix(record.canonical_path, header_prefix_bytes)) {
-                    auto prefix_source = assets::source_from(record);
-                    prefix_source.stored_size = 0;
-                    auto prefix_header = assets::load_map_header(prefix.value(), std::move(prefix_source));
-                    if (prefix_header && !setup_map_eligible(prefix_header.value(), query)) return;
-                }
+            const auto stamp = facts ? setup_facts_stamp(filesystem, record) : std::nullopt;
+            const auto remember_header = [&](const assets::Map& header) {
+                if (stamp) facts->put(setup_facts_header_kind, {}, record.canonical_path, *stamp, encode_setup_header_facts(header));
+            };
+            // The map's authored header: from the store, or read (prefix first) and stored.
+            std::optional<assets::Map> stored_header;
+            if (stamp) {
+                if (const auto body = facts->lookup(setup_facts_header_kind, {}, record.canonical_path, *stamp))
+                    stored_header = decode_setup_header_facts(*body);
             }
-            auto bytes = filesystem.open(record.canonical_path);
-            if (!bytes) return;
-            auto header = assets::load_map_header(bytes.value(), assets::source_from(record));
-            if (!header || !setup_map_eligible(header.value(), query)) return;
+            std::optional<core::Result<std::vector<std::byte>>> bytes;
+            std::optional<assets::Map> read_header;
+            if (stored_header) {
+                if (!setup_map_eligible(*stored_header, query)) return;
+            } else {
+                if (!query.read_whole_headers && record.size > header_prefix_bytes) {
+                    if (auto prefix = filesystem.open_prefix(record.canonical_path, header_prefix_bytes)) {
+                        auto prefix_source = assets::source_from(record);
+                        prefix_source.stored_size = 0;
+                        auto prefix_header = assets::load_map_header(prefix.value(), std::move(prefix_source));
+                        if (prefix_header && !setup_map_eligible(prefix_header.value(), query)) {
+                            remember_header(prefix_header.value());
+                            return;
+                        }
+                    }
+                }
+                bytes = filesystem.open(record.canonical_path);
+                if (!*bytes) return;
+                auto header = assets::load_map_header(bytes->value(), assets::source_from(record));
+                if (!header) return;
+                remember_header(header.value());
+                if (!setup_map_eligible(header.value(), query)) return;
+                read_header = std::move(header).value();
+            }
             // Custom-directory discovery admits only authored custom maps.
             // An official header here must not change the stock picker list.
-            if (record.canonical_path.starts_with("data/custommaps/") && header.value().lobby.custom != true) return;
-            auto map = assets::load_map(bytes.value(), assets::source_from(record), types);
+            const auto& authored = stored_header ? *stored_header : *read_header;
+            if (record.canonical_path.starts_with("data/custommaps/") && authored.lobby.custom != true) return;
+            // A finished entry from the store: nothing of the map is opened or decoded.
+            if (stamp && !facts_context.empty()) {
+                if (const auto body = facts->lookup(setup_facts_space_kind, facts_context, record.canonical_path, *stamp)) {
+                    if (auto stored = decode_setup_entry(*body); stored && stored->path == record.canonical_path
+                        && stored->domain == sim::tactical::BattleDomain::space) {
+                        finish_preview(*stored);
+                        candidates[index] = std::move(*stored);
+                        return;
+                    }
+                }
+            }
+            if (!bytes) {
+                bytes = filesystem.open(record.canonical_path);
+                if (!*bytes) return;
+            }
+            auto map = assets::load_map(bytes->value(), assets::source_from(record), list_inputs().types);
             // A header match still requires a completely valid body.
-            if (map) candidates[index] = build_entry(record, map.value(), bytes.value());
+            if (!map) return;
+            auto entry = build_entry(record, map.value(), bytes->value());
+            if (stamp && !facts_context.empty())
+                facts->put(setup_facts_space_kind, facts_context, record.canonical_path, *stamp, encode_setup_entry(entry));
+            finish_preview(entry);
+            candidates[index] = std::move(entry);
         });
     }();
     for (std::size_t index = 0; index < errors.size(); ++index) {
@@ -224,6 +299,7 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
                 "Could not prepare map " + records.value()[index].canonical_path + ": unknown worker exception"));
         }
     }
+    if (facts) facts->flush();
     // Worker scheduling never chooses list order or a marker's reverse-record priority.
     for (auto& candidate : candidates) if (candidate) maps.push_back(std::move(*candidate));
     // Picker collision policy: original-directory custom maps win same-stem
@@ -259,7 +335,7 @@ core::Result<void> SetupMapCache::load(std::shared_ptr<const vfs::Vfs> filesyste
     std::shared_ptr<const data::Catalog> catalog, const SetupMapQuery& query) {
     if (find(*filesystem, *catalog, query)) return core::Result<void>::success();
     land_failure_.clear();
-    auto maps = setup_domain_maps(*filesystem, *catalog, query, land_skirmish_enabled, &land_failure_);
+    auto maps = setup_domain_maps(*filesystem, *catalog, query, land_skirmish_enabled, &land_failure_, facts_.get());
     if (!maps) return core::Result<void>::failure(maps.error());
     maps_ = std::move(maps).value();
     filesystem_ = std::move(filesystem);
@@ -302,7 +378,16 @@ core::Result<void> validate_setup_slots(const std::span<const LobbySlot> slots,
     if (!metadata.capacity) return fail("This map has no valid authored player capacity.");
     const auto rows = std::min(*metadata.capacity, local_controls ? local_setup_rows
         : static_cast<std::uint32_t>(sim::max_match_seats));
-    if (slots.size() < (complete_teams ? 2U : 1U) || slots.size() > rows) return fail("Choose at least two players within this map's local capacity.");
+    const std::size_t minimum = complete_teams ? 2U : 1U;
+    // #6737: a campaign-battle map authors capacity 1 (mods replace stock multiplayer names with such maps);
+    // say which value refused the start instead of a generic capacity message.
+    if (rows < minimum)
+        return fail("This map's authored player capacity is " + std::to_string(*metadata.capacity)
+                    + "; a skirmish needs at least " + std::to_string(minimum) + " players.");
+    if (slots.size() < minimum) return fail("Choose at least " + std::to_string(minimum) + " players.");
+    if (slots.size() > rows)
+        return fail("This map allows at most " + std::to_string(rows) + " players here (authored capacity "
+                    + std::to_string(*metadata.capacity) + "); " + std::to_string(slots.size()) + " were selected.");
     if (metadata.new_markers == true && (!metadata.start_positions || metadata.start_positions->size() < 2))
         return fail("This map has missing or malformed authored start positions.");
     if (local_controls && (slots.front().slot != 1 || !slots.front().human))

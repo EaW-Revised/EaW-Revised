@@ -134,6 +134,26 @@
           "user-path"
         ],
         "reason": "Synthetic profile path in the public privacy redaction fixture; exact line and value only."
+      },
+      {
+        "path": "tests/core/degradation_ledger_tests.cpp",
+        "regex": "^\\ \\ \\ \\ deg\\x3a\\x3arecord\\(\"EAWR\\-B\\-0002\",\\ \"mod\",\\ \"line\\\\nbreak\",\\ \"cannot\\ open\\ C\\x3a\\x2fUsers\\x2fsomeone\\x2fsecret\\.txt\\ for\\ reading\"\\);$",
+        "value_regex": "C\\x3a\\x2fUsers\\x2fsomeone",
+        "match_only": true,
+        "patterns": [
+          "user-path"
+        ],
+        "reason": "Exact synthetic path in the diagnostic redaction test; no real user path."
+      },
+      {
+        "path": "tests/core/degradation_ledger_tests.cpp",
+        "regex": "^\\ \\ \\ \\ deg\\x3a\\x3arecord\\(\"EAWR\\-B\\-0003\",\\ \"mod\",\\ \"o\",\\ \"cannot\\ open\\ \\x2fhome\\x2fsomeone\\x2fsecret\\.txt\"\\);$",
+        "value_regex": "\\x2fhome\\x2fsomeone",
+        "match_only": true,
+        "patterns": [
+          "home-path"
+        ],
+        "reason": "Exact synthetic path in the diagnostic redaction test; no real user path."
       }
     ],
     "identifier_allow": [
@@ -1127,6 +1147,70 @@
           "lan-host"
         ],
         "reason": "Reviewed local LAN option member access, not a host; exact source line only."
+      },
+      {
+        "path": "apps/viewer/src/battle_source_local.cpp",
+        "sha256": "471ea9314aef4efc4e2347922329454cfbb765ed2646905bda2a4e0d858621ec",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed C++ LAN option member access, no hostname or address; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/battle_source_local.cpp",
+        "sha256": "12b90c53ac5f151372fdafce3ea76f7c1f37fc7075c2b0517a534b4dd2251121",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed C++ LAN option member access, no hostname or address; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "ea1ff7449d8e29b246aa3efad65df999f47c50a3d39338508e5596e75eb9eb5c",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed C++ LAN option member access, no hostname or address; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/map_mode_ready.cpp",
+        "sha256": "a994f4516e744b4b3766ed67606073e8aa1109a2b93aca8ee3024e2b97f8fe77",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed C++ LAN option member access, no hostname or address; exact full line only."
+      },
+      {
+        "path": "docs/deploy/coturn-fallback.md",
+        "sha256": "e7460259c3e478a0bc92f83df8a3ba590f7587e39a09b96e71942c15fe64459d",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Documented RFC 1918 deny range or explanation for coturn, no deployed host; exact full line only."
+      },
+      {
+        "path": "docs/deploy/coturn-fallback.md",
+        "sha256": "31ada10f9fb2c6350865489f83d44882decd820b0ccc6da97d50ee28fdf4f8be",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Documented RFC 1918 deny range or explanation for coturn, no deployed host; exact full line only."
+      },
+      {
+        "path": "docs/deploy/coturn-fallback.md",
+        "sha256": "1a202bc460cec7f3e65caa9918362ccfdf67ad43551180c30c9cbfe07f640704",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Documented RFC 1918 deny range or explanation for coturn, no deployed host; exact full line only."
+      },
+      {
+        "path": "docs/deploy/coturn-fallback.md",
+        "sha256": "fc60e9304b1c20d0eda5802ae788f041227ce0d8e0711a39f038a1c14990309d",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Documented RFC 1918 deny range or explanation for coturn, no deployed host; exact full line only."
       }
     ]
   },
@@ -1184,9 +1268,9 @@
       "third_party/lua/etc/lua.xpm": "2efc535d4e7ea430363a9592a6238217c3a24d825994f6546262bac3c83b709e"
     },
     "binary_allowlist": {
-      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "9844f210a9f8464bd5111a5c444f1b345411fbea49411c74a0614fec34feb27f",
-      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "46df903226e244380ca45e11daf4e1196269d2c70dc96b3cb4b18745d50ca79c",
-      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "9d20b0b7a085f54e8f2eadaacf1332f1e28fc9490a9e461db067da0e265f68c9",
+      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "4ce4d93152740ddb41a2e216c15ebf514eefc53f8d2d70f221df0028b8a055b2",
+      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "88c0a33546b88e953131f2e11d76296fd336298cea47cb098c65f87919609ba4",
+      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "b24a2080d8013304b995aeefef2279cc5c0bfb0f34f38c4f6ce789f550df5f16",
       "tests/fog/fixtures/fog-stub-v1-one-cell.eawr-fog": "a3f3015681fac46bb56f8fd5270c46bf29e7f090559a6d6d2f8e7c29246f9b27",
       "tests/fog/fixtures/fog-stub-v1-zero-tick.eawr-fog": "34a86fcc4b9bc2a39556d8aa249355c5df37e9955a3bda7e983c10bb5e53664b",
       "tests/fog/fixtures/fog-stub-v1.eawr-fog": "259541928e1855e91b084d6743fbde1f579851cd41b81199f440f1881c0a9c58",
@@ -1257,8 +1341,8 @@
       "tests/replay/fixtures/tactical-visibility-frame-6.eawr-replay": "8bc3d6aa2d789702fde9af586071cb36a06ff28f0d679907b3eba9219f85668a",
       "tests/replay/fixtures/tactical-visibility-frame-7.eawr-replay": "74a4215f28f015cae40e791baf58d3be76efb3ba2125ac588e57126d24d7c9c4",
       "tests/replay/fixtures/zero-tick-v1.eawr-replay": "f92cda7a6f86d6a321a1f0a8858b35318959d54b6f35a6457f353d0dbeab9345",
-      "tests/skirmish/fixtures/m2-start.eawr-replay": "da7dccc85723faebd9b01b5404d3f7493ea3f603b39192da3cde6b4a917a5b2f",
-      "tests/skirmish/fixtures/saves/tactical-v2-host.eawr-ckp": "4e3b13204fcc38ea946f33c7df9fe8e2b1d3a1986e42526820713f5b05c86e29",
+      "tests/skirmish/fixtures/m2-start.eawr-replay": "3a1f2c32c62aa2c323a79816b21d69493d8a07210745b3d5901b3ec95983ed4b",
+      "tests/skirmish/fixtures/saves/tactical-v2-host.eawr-ckp": "d82d07f808b9f9480e3e322898d2d75c180168a61a30a61983c0c62de94adbbf",
       "third_party/lua/test/life.lua": "8b6d100472572d4baf4ff06901077aad24d98336cdf7500871f07a486c7a25d2",
       "tests/galactic/fixtures/control-corpus/political-conquest.eawr-gcreplay": "17b8132b81ba1dfcab9c6ca4f5b2f7a954087c1332c6997a267ee0985abf3ac1",
       "tests/galactic/fixtures/corpus/coop-orders.eawr-gcreplay": "7527e20a178cf71d076d5bc8bd788949c77281859bd8467881886186584e1974",

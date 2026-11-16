@@ -59,6 +59,10 @@ public:
             return result;
         }
         result.started = true;
+        // The foreground manager grants this launch loop permission at Play.
+        // Transfer it to the child before resuming its first window creation.
+        // This is permission only: the child activates once, never from polling.
+        AllowSetForegroundWindow(process.dwProcessId);
         if (started && !started(process.dwProcessId)) {
             TerminateProcess(process.hProcess, 1);
             WaitForSingleObject(process.hProcess, INFINITE);

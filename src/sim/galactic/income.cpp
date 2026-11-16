@@ -197,6 +197,31 @@ const EconomicPlanet* location(const IncomeSetup& setup, PlanetId planet) {
 }
 } // namespace
 
+namespace {
+// CGS-27: worst case of one mining bonus for the largest absolute base income (fiscal table and ruined-planet values), summed over every
+// source, in checked arithmetic. With |percentage| <= 2^10 and |absolute| <= 2^24 credits the result is (basic * 2^10 + 2^24) * 2^10
+// credits per source: for a base income of 2^16 credits that is about 2^36 credits against the 2^39 credit int64 range (raw scale 2^24).
+// The dry run states the same thing for the real data and keeps a further 2x headroom for the base income it is added to.
+bool mining_worst_case_fits(const GalacticSetup& setup, const PlanetIncomeAbility& mine) {
+    math::Fixed largest;
+    const auto widen = [&largest](math::Fixed credits) {
+        const auto magnitude = math::negate(credits);
+        if (!magnitude) return false;
+        const auto value = credits.raw() < 0 ? magnitude.value() : credits;
+        if (largest < value) largest = value;
+        return true;
+    };
+    if (setup.fiscal) for (const auto& row : setup.fiscal->planets) if (!widen(row.credits)) return false;
+    if (setup.ability_host) for (const auto& row : setup.ability_host->ruined_income) if (!widen(row.credits)) return false;
+    const auto magnitude = [](math::Fixed n) { return n.raw() < 0 ? math::negate(n).value() : n; };
+    const auto worst = mining_income_bonus(largest, magnitude(mine.percentage), magnitude(mine.absolute), true, magnitude(mine.colony_multiplier));
+    if (!worst) return false;
+    const auto sources = setup.income ? setup.income->sources.size() : 0;
+    const auto total = math::multiply(worst.value(), math::Fixed::from_raw(static_cast<std::int64_t>(sources + 1) * math::Fixed::scale));
+    return total && total.value().raw() <= (std::int64_t{1} << 61);
+}
+} // namespace
+
 core::Result<void> validate_income(const GalacticSetup& setup) {
     if (!setup.income) return core::Result<void>::success();
     const auto invalid = [](const std::string& where = {}) { return core::Result<void>::failure(detail::diagnostic(
@@ -208,23 +233,32 @@ core::Result<void> validate_income(const GalacticSetup& setup) {
     for (std::size_t i = 0; i < income.planets.size(); ++i)
         if (income.planets[i].planet != setup.planets[i].id) return invalid();
     for (const auto& type : income.types) {
-        if (!type.type || type.reductions.size() > galactic_max_objects) return invalid("type " + std::to_string(type.type));
+        if (!type.type || type.reductions.size() > galactic_max_objects) return invalid("type " + std::to_string(type.type) + ": no type id or too many reductions");
         if (type.technology_price_reduction) {
-            if (!setup.economy_corruption) return invalid("type " + std::to_string(type.type));
+            if (!setup.economy_corruption) return invalid("type " + std::to_string(type.type) + ": technology price reduction without economy corruption");
             const auto negative = math::subtract({}, *type.technology_price_reduction);
-            if (!negative || !technology_purchase_multiplier(std::array{TechnologyPriceModifier{1, negative.value(), {}}})) return invalid("type " + std::to_string(type.type));
+            if (!negative || !technology_purchase_multiplier(std::array{TechnologyPriceModifier{1, negative.value(), {}}})) return invalid("type " + std::to_string(type.type) + ": technology price reduction outside the supported range");
         }
         const auto bounded = [](math::Fixed n) { return n.raw() >= -(std::int64_t{1} << 40) && n.raw() <= (std::int64_t{1} << 40); };
-        if (type.mining && (!bounded(type.mining->percentage) || !bounded(type.mining->absolute)
-            || !bounded(type.mining->colony_multiplier) || type.mining->colony_multiplier.raw() < 0)) return invalid("type " + std::to_string(type.type));
+        // CGS-27: a mining ability's authored values are bounded WIDELY at setup, so absurd data refuses at the start and never
+        // as an income error in a running match: |percentage| and colony multiplier <= 2^10, |absolute| <= 2^24 credits (a mod
+        // authors upkeep of tens of thousands of credits). The span alone does not keep a bonus inside int64 because a planet's
+        // base income is only sum-bounded, so the worst case is also dry-run below against the largest base income.
+        if (type.mining) {
+            const auto wide = [](math::Fixed n, int credit_bits) { return n.raw() >= -(std::int64_t{1} << (24 + credit_bits)) && n.raw() <= (std::int64_t{1} << (24 + credit_bits)); };
+            if (type.mining->colony_multiplier.raw() < 0) return invalid("type " + std::to_string(type.type) + ": negative mining colony multiplier");
+            if (!wide(type.mining->percentage, 10) || !wide(type.mining->absolute, 24) || !wide(type.mining->colony_multiplier, 10))
+                return invalid("type " + std::to_string(type.type) + ": mining values beyond the supported span");
+            if (!mining_worst_case_fits(setup, *type.mining)) return invalid("type " + std::to_string(type.type) + ": mining values can overflow against the largest base income");
+        }
         if (type.gambling && (type.gambling->chance.raw() < 0 || type.gambling->chance.raw() > math::Fixed::scale
             || !bounded(type.gambling->minimum) || !bounded(type.gambling->maximum)
             || type.gambling->minimum.raw() > 0 || type.gambling->maximum.raw() < 0
-            || type.gambling->interval_frames > 32767)) return invalid("type " + std::to_string(type.type)); // GFC-09 supported integer span
+            || type.gambling->interval_frames > 32767)) return invalid("type " + std::to_string(type.type) + ": gambling values out of range"); // GFC-09 supported integer span
         // WGEP-163: the authored halt duration must convert to a bounded frame count.
-        if (type.credit_halt && (!bounded(type.credit_halt->seconds) || !halt_frames(type.credit_halt->seconds))) return invalid("type " + std::to_string(type.type));
-        if (!ordered(type.reductions, [](const auto& row) { return std::tuple{row.type, row.price, row.category, row.galaxy_wide}; })) return invalid("type " + std::to_string(type.type));
-        for (const auto& row : type.reductions) if (!row.type || !bounded(row.reduction)) return invalid("type " + std::to_string(type.type));
+        if (type.credit_halt && (!bounded(type.credit_halt->seconds) || !halt_frames(type.credit_halt->seconds))) return invalid("type " + std::to_string(type.type) + ": credit halt duration out of range");
+        if (!ordered(type.reductions, [](const auto& row) { return std::tuple{row.type, row.price, row.category, row.galaxy_wide}; })) return invalid("type " + std::to_string(type.type) + ": reductions not in canonical order");
+        for (const auto& row : type.reductions) if (!row.type || !bounded(row.reduction)) return invalid("type " + std::to_string(type.type) + ": a reduction with no type or an out-of-range value");
     }
     std::map<EntityId, std::tuple<TypeId, PlanetId, PlayerId>> live_sources;
     for (const auto& row : setup.fleets) for (const auto& member : row.members)
@@ -795,8 +829,7 @@ core::Result<GalacticSession::IncomeBlockerReceipt> GalacticSession::halt_planet
     if (auto recorded = append_native_effect(NativeEffectKind::income_block, blocker_journal(blocker_set, row)); !recorded)
         return Receipt::failure(recorded.error());
     impl.apply_income_blocker(planet, actor, row);
-    const auto events = impl.snapshot->events();
-    impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    impl.refresh_snapshot();
     return Receipt::success({true, row.first_expired_frame});
 }
 
@@ -814,8 +847,7 @@ core::Result<bool> GalacticSession::remove_income_blocker(PlanetId planet, Entit
     if (auto recorded = append_native_effect(NativeEffectKind::income_block, blocker_journal(blocker_remove, removed)); !recorded)
         return core::Result<bool>::failure(recorded.error());
     impl.apply_income_blocker(planet, source, std::nullopt);
-    const auto events = impl.snapshot->events();
-    impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    impl.refresh_snapshot();
     return core::Result<bool>::success(true);
 }
 
@@ -843,8 +875,7 @@ core::Result<void> GalacticSession::Impl::replay_income_blocker(GalacticSession&
         if (!present || *at != row) return blocker_failure("reconstruction differs from the retained ledger");
         apply_income_blocker(row.planet, row.source, std::nullopt);
     }
-    const auto events = snapshot->events();
-    snapshot = make_snapshot({events.begin(), events.end()});
+    refresh_snapshot();
     return core::Result<void>::success();
 }
 

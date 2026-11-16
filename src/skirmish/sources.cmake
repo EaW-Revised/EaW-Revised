@@ -15,5 +15,6 @@ set(EAWR_SKIRMISH_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/placement.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/roster_gate.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/setup.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/setup_facts.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/start.cpp"
 )

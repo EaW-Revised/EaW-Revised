@@ -62,6 +62,10 @@ enum class Phase : std::size_t {
     // the rest of the GPU resource creation (the texture and mesh creates nest under their own phases). Inside
     // mesh_gpu_upload: the RenderingServer surface create and the surface-count queries (a render-thread round trip each).
     upload_keep_texture, upload_count_texture, upload_identity_copy, upload_identity_submit, upload_gpu_create,
+    // The parts of upload_gpu_create that were not timed before: the texture pool acquire (texture creates nest under
+    // texture_gpu_upload), the material upload, the mesh upload, and the post-upload verification and release of the kept
+    // CPU snapshots (texture re-decode, model digest). What remains in upload_gpu_create is the rest of Impl::upload.
+    upload_acquire_texture, upload_material, upload_mesh, upload_verify,
     mesh_add_surface, mesh_surface_count,
     // Inside texture_decode (assets::load_texture from a VFS path): the stat and file read of the bytes, and the decode of
     // the bytes read. Recorded on the thread that calls it, so a texture a reader thread decoded ahead is not counted here
@@ -69,9 +73,19 @@ enum class Phase : std::size_t {
     texture_read, texture_parse,
     // The main thread waiting for a texture a read-ahead reader was still decoding (scene::TexturePrefetch::acquire).
     texture_wait,
+    // Detail only (Recording::detailed): where one first-frame slot growth step goes. A step is one arrival slot: the
+    // set-up before the launch slot, the launch slot, its death clone, the per-ship metadata, then the append (a fresh
+    // asset cache and shader admission, the compose of the new slot, and the closing pass of that compose split by its
+    // parts: piece index, instance refresh, lighting, the attached-effect plan). Each nests, so the remainder stays in
+    // the enclosing phase (compose_finish for the closing pass).
+    slot_prologue, slot_launch_slot, slot_death_clone, slot_ship_meta, slot_append, append_cache_setup,
+    finish_piece_index, finish_refresh_instances, finish_lighting, finish_attached_effects,
     // Battle-start identity and save validation on the calling thread: the read and SHA-256 of every mounted Lua/XML file
     // (read_data_identity), and the live-AI plan validation of a saved battle.
-    data_identity, live_ai_validate, count
+    data_identity, live_ai_validate,
+    // Inside the model request of a unit-table load that keeps a simulation projection (GC space entry): the projection of
+    // the decoded model (all bones, collidable meshes) that the table readers see.
+    model_projection, count
 };
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::count)> names{
     "vfs_mount_index", "xml_catalog", "unit_tables", "map_decode", "session_setup_first_frame",
@@ -89,18 +103,22 @@ inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::co
     "model_request", "model_sha256", "bind_frames", "bone_lookup", "unit_link", "unit_projectile_load",
     "model_read", "model_parse", "unit_body", "unit_hardpoint", "unit_abilities", "unit_production", "unit_frames",
     "upload_keep_texture", "upload_count_texture", "upload_identity_copy", "upload_identity_submit", "upload_gpu_create",
+    "upload_acquire_texture", "upload_material", "upload_mesh", "upload_verify",
     "mesh_add_surface", "mesh_surface_count", "texture_read", "texture_parse", "texture_wait",
-    "data_identity", "live_ai_validate"};
+    "slot_prologue", "slot_launch_slot", "slot_death_clone", "slot_ship_meta", "slot_append", "append_cache_setup",
+    "finish_piece_index", "finish_refresh_instances", "finish_lighting", "finish_attached_effects",
+    "data_identity", "live_ai_validate", "model_projection"};
 // Work counters (scan steps, sizes) for the load-check report: added to, never read, by the load path.
 enum class Counter : std::size_t {
     bone_lookups, bone_scan_steps, unit_index_scans, unit_index_steps, projectile_index_scans, projectile_index_steps,
     priority_set_steps, definition_scan_steps, resolve_chain_layers, queue_initial, queue_final, sha_bytes, model_read_bytes, sha_reused_bytes,
-    texture_read_bytes, texture_files, count
+    texture_read_bytes, texture_files, facts_hits, facts_misses, facts_puts, facts_hints_skipped, count
 };
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(Counter::count)> counter_names{
     "bone_lookups", "bone_scan_steps", "unit_index_scans", "unit_index_steps", "projectile_index_scans",
     "projectile_index_steps", "priority_set_steps", "definition_scan_steps", "resolve_chain_layers", "queue_initial",
-    "queue_final", "sha_bytes", "model_read_bytes", "sha_reused_bytes", "texture_read_bytes", "texture_files"};
+    "queue_final", "sha_bytes", "model_read_bytes", "sha_reused_bytes", "texture_read_bytes", "texture_files", "facts_hits", "facts_misses", "facts_puts",
+    "facts_hints_skipped"};
 struct Cost final { double exclusive_ms{}, inclusive_ms{}; std::uint64_t calls{}; double max_ms{}; };
 // One mounted layer's share of the load: the loose-tree walk and MEG header parse of the mount, and the XML parsed
 // from it (registry files with their definitions, then the physical inventory pass).
@@ -150,6 +168,10 @@ struct Recording final {
     // Opt-in sub-timers and per-model compose/upload costs; off = one flag test where they would be taken.
     bool detailed{};
     std::array<Cost, names.size()> costs{};
+    // Detail only (Scope::mark): the phase table at one moment, with the time every scope still open at that moment had
+    // already spent in it, so `costs - at_mark` is exactly what ran after the mark (calls count the scopes closed after it).
+    std::array<Cost, names.size()> at_mark{};
+    bool marked{};
     std::vector<LayerCost> layers;
     std::vector<FileCost> files;
     std::unordered_map<std::string, std::size_t> file_lookup;
@@ -259,6 +281,21 @@ public:
         recording_->note_thread(phase_);
         if (parent_) parent_->children_ms_ += elapsed;
         parent = parent_;
+    }
+    // Copies the calling thread's phase table into `recording.at_mark` together with the part of every scope still open on
+    // this thread (time since it started, minus its closed and open children). Call it where a window starts.
+    static void mark(Recording& recording) {
+        recording.at_mark = recording.costs;
+        recording.marked = true;
+        const auto now = Clock::now();
+        double inner_inclusive_ms = 0.0;
+        for (const Scope* open = parent; open != nullptr; open = open->parent_) {
+            const double elapsed = std::chrono::duration<double, std::milli>(now - open->start_).count();
+            auto& cost = recording.at_mark[static_cast<std::size_t>(open->phase_)];
+            cost.inclusive_ms += elapsed;
+            cost.exclusive_ms += elapsed - open->children_ms_ - inner_inclusive_ms;
+            inner_inclusive_ms = elapsed;
+        }
     }
 private:
     Recording* recording_{};

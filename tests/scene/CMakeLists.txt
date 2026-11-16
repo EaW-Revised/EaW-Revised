@@ -19,6 +19,24 @@ target_compile_features(compose_texture_cache_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(compose_texture_cache_tests)
 add_test(NAME compose_texture_cache_contracts COMMAND compose_texture_cache_tests)
 
+# legacy #6726: the galaxy scene's load-time mip chain policy.
+add_executable(galactic_texture_chain_tests galactic_texture_chain_tests.cpp)
+target_link_libraries(galactic_texture_chain_tests PRIVATE eawr::scene)
+target_include_directories(galactic_texture_chain_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/apps/viewer/src"
+    "${PROJECT_SOURCE_DIR}/src/presentation/godot")
+target_compile_features(galactic_texture_chain_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(galactic_texture_chain_tests)
+add_test(NAME galactic_texture_chain_contracts COMMAND galactic_texture_chain_tests)
+
+# #6771 row 4: the galaxy view's texture names resolve through the shared resolver.
+add_executable(galactic_texture_name_tests galactic_texture_name_tests.cpp)
+target_link_libraries(galactic_texture_name_tests PRIVATE eawr::assets)
+target_include_directories(galactic_texture_name_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
+target_compile_features(galactic_texture_name_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(galactic_texture_name_tests)
+add_test(NAME galactic_texture_name_contracts COMMAND galactic_texture_name_tests)
+
 add_executable(space_population_tests space_population_tests.cpp)
 target_link_libraries(space_population_tests PRIVATE eawr::scene)
 target_compile_features(space_population_tests PRIVATE cxx_std_20)
@@ -78,8 +96,23 @@ target_compile_features(model_sha_reuse_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(model_sha_reuse_tests)
 add_test(NAME model_sha_reuse_contracts COMMAND model_sha_reuse_tests)
 
+add_executable(ordered_model_ahead_tests ordered_model_ahead_tests.cpp)
+target_link_libraries(ordered_model_ahead_tests PRIVATE eawr::scene)
+target_compile_features(ordered_model_ahead_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ordered_model_ahead_tests)
+add_test(NAME ordered_model_ahead_contracts COMMAND ordered_model_ahead_tests)
+
 add_executable(texture_prefetch_tests texture_prefetch_tests.cpp)
 target_link_libraries(texture_prefetch_tests PRIVATE eawr::scene)
 target_compile_features(texture_prefetch_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(texture_prefetch_tests)
 add_test(NAME texture_prefetch_contracts COMMAND texture_prefetch_tests)
+
+add_executable(particle_texture_load_tests particle_texture_load_tests.cpp)
+target_link_libraries(particle_texture_load_tests PRIVATE eawr::scene)
+target_include_directories(particle_texture_load_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/apps/viewer/src"
+    "${PROJECT_SOURCE_DIR}/src/presentation/godot")
+target_compile_features(particle_texture_load_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(particle_texture_load_tests)
+add_test(NAME particle_texture_load_contracts COMMAND particle_texture_load_tests)

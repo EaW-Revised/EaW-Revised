@@ -50,6 +50,10 @@ public:
     // #4043: the network section of an online or LAN match (nothing in a solo run). Drawn under the tick graph.
     void set_network(std::optional<presentation::ui::NetPerfReport> report) { network_ = std::move(report); }
 
+    // #6846: the degradation ledger's one line (core::degradation::overlay_line), drawn as a row above the render counts.
+    // Empty draws no row. The caller refreshes it (at most once a second); the overlay only shows it.
+    void set_degradation(std::string line) { degradation_ = std::move(line); }
+
     // The report's "perf_overlay" object.
     [[nodiscard]] std::string report_json() const;
     [[nodiscard]] presentation::ui::PerfSummary summary() const { return stats_.summary(); }
@@ -74,6 +78,7 @@ private:
     std::optional<std::size_t> visible_units_;
     presentation::ui::PerfStats stats_;
     std::optional<presentation::ui::NetPerfReport> network_;
+    std::string degradation_;
     std::optional<Clock::time_point> last_frame_;
     double since_refresh_{1.0};
     double since_redraw_{1.0};

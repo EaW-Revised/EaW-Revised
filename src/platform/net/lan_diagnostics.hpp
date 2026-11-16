@@ -6,6 +6,23 @@
 #include <map>
 
 namespace eawr::presentation::godot_backend {
+// The route of a GNS pair as the report names it: direct, relayed by the project's own relay or by the Cloudflare one (plain
+// "relay" while the provider is not known), and the transport's "lossy for a while" flag for a relayed pair.
+[[nodiscard]] inline presentation::ui::NetRouteInfo net_route_of(const net::GnsPairDiagnostic& pair) {
+    using Route = presentation::ui::NetRoute;
+    presentation::ui::NetRouteInfo info;
+    switch (pair.route) {
+    case net::GnsRoute::direct: info.route = Route::direct; break;
+    case net::GnsRoute::relayed:
+        info.route = pair.relay_provider == net::GnsRelayProvider::own ? Route::relay_own
+            : pair.relay_provider == net::GnsRelayProvider::cloudflare ? Route::relay_cloudflare : Route::relay;
+        info.lossy = pair.route_lossy;
+        break;
+    case net::GnsRoute::unknown: break;
+    }
+    return info;
+}
+
 // Owned by setup's main thread, then exclusively by the live I/O driver. Main-thread
 // cancellation waits for that driver before reuse; detached drains drop this observer.
 // No addresses, credentials, payloads or hashes enter this log.
@@ -40,6 +57,31 @@ public:
             constexpr std::array names{"connecting", "open", "closed"};
             emit("link", code, peer, std::string("state=") + names[static_cast<std::size_t>(state)]);
             links_[peer] = state;
+        }
+    }
+    // Connect-time route evidence: one line when a peer's route first becomes known and again when it changes
+    // (direct or relayed, and by which relay). An unknown route is not logged.
+    void route(net::PeerIndex peer, const presentation::ui::NetRouteInfo info, const double loss_pct = 0.0) {
+        if (info.route == presentation::ui::NetRoute::unknown) {
+            // A flagged peer whose route is gone (link closed): say it recovered, on the route it was flagged on.
+            if (const auto flagged = lossy_.find(peer); flagged != lossy_.end() && flagged->second) {
+                flagged->second = false;
+                const auto last = routes_.find(peer);
+                emit("route-recovered", presentation::ui::net_route_text(last != routes_.end() ? last->second : info.route), peer,
+                    "loss_pct=" + std::to_string(static_cast<int>(loss_pct + 0.5)));
+            }
+            return;
+        }
+        const auto [at, inserted] = routes_.try_emplace(peer, info.route);
+        if (inserted || at->second != info.route) {
+            at->second = info.route;
+            emit("route", presentation::ui::net_route_text(info.route), peer);
+        }
+        // The transport's degraded-route flag: one line when it sets and one when it clears (observation only).
+        if (info.lossy != lossy_[peer]) {
+            lossy_[peer] = info.lossy;
+            emit(info.lossy ? "route-degraded" : "route-recovered", presentation::ui::net_route_text(info.route), peer,
+                "loss_pct=" + std::to_string(static_cast<int>(loss_pct + 0.5)));
         }
     }
     void view(const LanView& value) {
@@ -81,6 +123,8 @@ public:
 private:
     bool due(std::uint64_t now) const { return !last_stall_ || now - *last_stall_ >= 1000; }
     std::map<net::PeerIndex, net::LinkState> links_;
+    std::map<net::PeerIndex, presentation::ui::NetRoute> routes_;
+    std::map<net::PeerIndex, bool> lossy_;
     LanPhase phase_{LanPhase::idle};
     LanRecovery recovery_{LanRecovery::none};
     std::optional<std::uint64_t> since_, last_stall_;

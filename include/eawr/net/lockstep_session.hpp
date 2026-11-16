@@ -44,6 +44,13 @@ struct AdaptiveTiming {
     // Override for qualification. Empty uses MessageTransport::link_stats smoothed RTT.
     // Missing samples defer the policy. Only the host reads this non-authoritative input.
     std::function<std::optional<std::uint64_t>(PeerIndex)> rtt_ms;
+    // A vote that stays incomplete past completeness_timeout_ms keeps waiting (and counts a deferral)
+    // while every voter stream is open, instead of failing the session at the first deadline. The wait is
+    // bounded: after max_deferrals deferrals of one agreement it fails closed like an expired vote always did,
+    // because dropping an agreement on one peer alone could split the delay. A voter stream that is not open
+    // (closed or still connecting) or a pending departure fails closed at once.
+    bool hold_on_expiry{};
+    std::uint32_t max_deferrals{4};
 };
 
 namespace session_errors {
@@ -57,6 +64,9 @@ inline constexpr std::string_view stalled = "EAWR-NET-0106";
 inline constexpr std::string_view clock = "EAWR-NET-0107";
 inline constexpr std::string_view resource_limit = "EAWR-NET-0108";
 inline constexpr std::string_view simulation = "EAWR-NET-0109";
+// A save barrier was refused because a roster or timing transition overlapped it. Nothing was saved and nothing failed:
+// the request is still wanted, and the caller retries it once the transition has settled.
+inline constexpr std::string_view capture_busy = "EAWR-NET-0110";
 }
 
 struct SeatInput {
@@ -254,6 +264,12 @@ public:
     [[nodiscard]] std::uint64_t received_through(PeerIndex peer) const { return received_through_.at(peer); }
     [[nodiscard]] std::optional<std::uint64_t> last_sent_batch(PeerIndex peer) const { return last_sent_batch_.at(peer); }
     [[nodiscard]] std::uint64_t input_delay() const noexcept { return options_.input_delay; }
+    // Times an adaptive timing vote outlived completeness_timeout_ms and kept waiting (AdaptiveTiming::hold_on_expiry).
+    [[nodiscard]] std::uint64_t timing_deferrals() const noexcept { return timing_deferrals_; }
+    // A timing proposal, a roster/departure agreement or a held seat is in flight: a save barrier begun now is refused as busy.
+    [[nodiscard]] bool transition_pending() const noexcept { return timing_.has_value() || agreement_.has_value() || held_.has_value() || resync_.has_value(); }
+    // Whether the host proposes input-delay changes in this session (AdaptiveTiming set), for logs and tests.
+    [[nodiscard]] bool adaptive_timing_enabled() const noexcept { return options_.adaptive_timing.has_value(); }
     [[nodiscard]] std::uint64_t input_horizon() const noexcept;
     // Trusted verified catch-up log only: apply before the adapter steps the encoded tick.
     // No wire votes or gameplay commands are injected during replay.
@@ -360,6 +376,7 @@ private:
         bool proposed{};
         std::uint64_t since_ms{};
         bool retained{};
+        std::uint32_t deferrals{}; // expired deadlines of this agreement that were held (AdaptiveTiming::hold_on_expiry)
     };
     [[nodiscard]] core::Result<void> begin_departure(PeerIndex target, DepartureReason reason, bool expired = false);
     [[nodiscard]] core::Result<void> receive_departure(const Received& received, bool deferred = false);
@@ -447,7 +464,8 @@ private:
     [[nodiscard]] core::Result<void> receive_checkpoint(const Received&);
     [[nodiscard]] core::Result<bool> service_checkpoint();
     [[nodiscard]] core::Result<void> broadcast_checkpoint(const std::vector<std::uint8_t>&);
-    [[nodiscard]] core::Result<void> abort_checkpoint(std::string message, bool broadcast = true);
+    [[nodiscard]] core::Result<void> abort_checkpoint(std::string message, bool broadcast = true, bool busy = false);
+    [[nodiscard]] std::vector<Received> take_early_checkpoint(std::uint64_t epoch);
     std::optional<CheckpointCallbacks> checkpoint_callbacks_;
     std::optional<CheckpointBarrier> checkpoint_;
     std::deque<Received> early_checkpoint_;
@@ -511,6 +529,7 @@ private:
     std::optional<TimingAgreement> timing_;
     std::optional<TimingEvent> last_timing_;
     std::uint64_t next_policy_tick_{}, retained_delay_{}, retain_until_{};
+    std::uint64_t timing_deferrals_{};
     std::optional<HeldSeat> held_;
     std::uint64_t reconnect_epoch_{};
     std::uint64_t completed_reconnect_epoch_{}, last_hello_ms_{};

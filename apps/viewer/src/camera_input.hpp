@@ -279,6 +279,12 @@ struct StepIntent final {
     // Grab translate in the same units, screen axes after the binding scale.
     float translate_x{};
     float translate_y{};
+    // The same translate with each event's screen axes turned back to the yaw
+    // the step starts at: events after a Ctrl turn in the same step were made
+    // at the turned view, so a long frame and many short ones move the camera
+    // alike (#5789). Equal to translate_x/y when the step does not rotate.
+    float translate_at_start_x{};
+    float translate_at_start_y{};
     std::uint32_t reset_requests{};
     // Click resets (see BindingTable::click_reset): the view resets, the
     // target stays.
@@ -425,6 +431,14 @@ private:
     float orbit_pitch_units_{};
     float translate_x_{};
     float translate_y_{};
+    // Each translate event with the rotate units pending when it arrived, in
+    // event order; take_step turns them back to the step's starting yaw.
+    struct TranslateEvent final {
+        float rotate_before{};
+        float x{};
+        float y{};
+    };
+    std::vector<TranslateEvent> translate_events_;
     float pan_motion_x_{};
     float pan_motion_y_{};
     // Net pointer travel, in pixels, since the held rotate grab was pressed.

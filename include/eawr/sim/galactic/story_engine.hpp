@@ -13,6 +13,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // Live story engine for the plot files of a galactic campaign (docs/behaviour/walks/gc-story.md,
@@ -107,6 +108,16 @@ struct EventState {
     bool idle_stamped{};                        // WST-17
     math::Fixed idle_stamp{};
 };
+// WST-32/34/35: the running count of an event that counts notices (battles won or lost, conquests, losses by type).
+// One sparse row per event that has begun counting, sorted by (subplot, event). Saved only when a row exists, as a
+// checkpoint tail after the AI flags, and folded into the digest only then, so a game that has counted nothing keeps its bytes.
+// `values` is one slot for the battle and conquest events and one slot per listed type for STORY_DESTROY.
+struct EventCounter {
+    std::string subplot, event;
+    std::vector<std::int64_t> values;
+    friend bool operator==(const EventCounter&, const EventCounter&) = default;
+    friend auto operator<=>(const EventCounter&, const EventCounter&) = default;
+};
 struct SubPlotState {
     std::string name;
     Player owner{};
@@ -136,6 +147,8 @@ struct State {
     std::vector<EventEdit> edits;
     // TRIGGER_AI flags, sorted. Saved after the edits as an optional tail, only when present (an unflagged game keeps its bytes).
     std::vector<AiFlag> ai_flags;
+    // Counting events in progress (WST-32/34/35), sorted; saved after the AI flags only when present.
+    std::vector<EventCounter> counters;
 };
 
 // One Lua request on a plot, as plain ordered data (ids are names, never pointers). `subplot` is the file name as
@@ -183,6 +196,11 @@ struct Config {
     // player id of that faction, WST-91) and upper-cased planet name -> planet id. Empty: such a reward is diagnosed.
     std::map<std::string, Player> factions;
     std::map<std::string, std::uint64_t> planets;
+    // WST-32/34: the Event_Param filters (FILTER_FRIENDLY_ONLY ...) are relative to the sub-plot's owning player. A pair
+    // listed here is friendly (allied) or enemy; the same player is always friendly and any other pair is neutral.
+    // The players never change side in stock data, so this is read once at install.
+    enum class Relation : std::uint8_t { friendly, enemy };
+    std::map<std::pair<Player, Player>, Relation> relations;
 };
 
 class Engine final {
@@ -194,8 +212,9 @@ public:
     ~Engine();
 
     // WST-13/14: deliver one game notification. `player` names the dispatch target (only that
-    // player's sub-plots), absence broadcasts. Part 1 evaluates the tech-level notice (WST-33) and
-    // the elapsed notice (same as service); other kinds have no evaluator yet and are ignored.
+    // player's sub-plots), absence broadcasts. Evaluated: the elapsed notice (same as service), tech level (WST-33),
+    // click and AI notifications (WST-37), battles won or lost (WST-35), conquest and its count (WST-32), losses
+    // (WST-34). Other kinds have no evaluator yet and are ignored.
     [[nodiscard]] core::Result<void> notify(std::optional<Player> player, const Payload& payload);
     // WST-11: one story service. Sends the elapsed notice with the mode time, then polls the flag
     // events of every active sub-plot in table order.
@@ -215,6 +234,9 @@ public:
     [[nodiscard]] core::Result<void> apply(const PlotCommand& command);
     [[nodiscard]] bool has_subplot(std::string_view name) const;
     [[nodiscard]] bool has_event(std::string_view subplot, std::string_view event) const;
+    // True when any loaded sub-plot, in any state, holds an event of this exact type name (definition-wide: a plot that
+    // switches on later is still heard). The type of an event never changes after load.
+    [[nodiscard]] bool has_event_type(std::string_view type) const;
 
     [[nodiscard]] const State& state() const noexcept;
     [[nodiscard]] core::Result<void> restore(State state);

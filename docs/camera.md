@@ -36,12 +36,13 @@ rule. The same live distance sets pan speed between `Tactical_Min/Max_Scroll_Spe
 
 Keyboard and edge pan share a velocity in screen axes. Held input requests the
 authored pan speed; its velocity approaches that request with the same
-exponential formula using `Scroll_Acceleration_Factor` as the time constant.
-On release, `Scroll_Deceleration_Factor` multiplies the braking rate, giving
-`release_time = Scroll_Acceleration_Factor / Scroll_Deceleration_Factor`;
-zero factors snap. FoC's 0.08 and 1.5 give a 0.08 second rise time and a
-0.053 second release time, reaching about 90% speed in 0.18 seconds and losing
-about 95% speed in 0.16 seconds.
+exponential formula. Both scroll factors are per-frame gains in the original, so the
+time constants come from them at a 60 Hz reference frame time (CAMIN-REL-1 in
+[tactical-camera-input.md](behaviour/tactical-camera-input.md)): the rise time is the
+travel lag of the original's linear per-frame ramp (`Scroll_Acceleration_Factor`),
+the release time is `(1/60) / (Scroll_Deceleration_Factor - 1)`; factors that
+give no ramp or no braking snap. FoC's 0.08 and 1.5 give a 0.096 second rise time
+and a 0.033 second release time; Remake 5.0's 0.65 and 1.15 give 0.006 and 0.111.
 Displacement integrates that exponential over the frame. While zooming, the
 requested pan speed follows the live distance throughout the frame, and the
 controller integrates both exponentials together. A nonpositive factor snaps

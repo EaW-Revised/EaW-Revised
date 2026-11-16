@@ -1,0 +1,197 @@
+{
+  "mods": {
+    "stock": {
+      "galactic": {
+        "Sandbox_Equal_Footing_Rebel": {
+          "build": "0.3.3+fdb3a5cb24eaead5367b4523209b1e070ae41f54+gcsync2",
+          "classes": {
+            "EAWR-LOAD-1400": {
+              "stock": {
+                "objects": 5,
+                "reason": "a stock AI script called an API that was not bound, so its Lua instance was retired; fixed by change 7024, merged after the sweep binary, so the next update drops these",
+                "ticket": 6913
+              }
+            }
+          },
+          "commit": "fdb3a5cb24eaead5367b4523209b1e070ae41f54"
+        }
+      },
+      "skirmish": {
+        "m2": {
+          "build": "0.3.3+fdb3a5cb24eaead5367b4523209b1e070ae41f54+gcsync2",
+          "classes": {},
+          "commit": "fdb3a5cb24eaead5367b4523209b1e070ae41f54"
+        }
+      }
+    },
+    "workshop:1125571106": {
+      "galactic": {
+        "Custom_FTGU_Era_1_Empire": {
+          "build": "0.3.3+fdb3a5cb24eaead5367b4523209b1e070ae41f54+gcsync2",
+          "classes": {
+            "EAWR-LOAD-1204": {
+              "workshop:1125571106": {
+                "objects": 80,
+                "reason": "",
+                "ticket": "untriaged"
+              }
+            }
+          },
+          "commit": "fdb3a5cb24eaead5367b4523209b1e070ae41f54"
+        }
+      }
+    },
+    "workshop:1145741406": {
+      "galactic": {
+        "Pegasus_Prelude_Ancients": {
+          "build": "0.3.3+fdb3a5cb24eaead5367b4523209b1e070ae41f54+gcsync2",
+          "classes": {
+            "EAWR-LOAD-1032": {
+              "stock": {
+                "objects": 7,
+                "reason": "",
+                "ticket": "untriaged"
+              }
+            },
+            "EAWR-LOAD-1203": {
+              "workshop:1145741406": {
+                "objects": 6,
+                "reason": "",
+                "ticket": "untriaged"
+              }
+            },
+            "EAWR-LOAD-1204": {
+              "workshop:1145741406": {
+                "objects": 31,
+                "reason": "",
+                "ticket": "untriaged"
+              }
+            },
+            "EAWR-LOAD-1300": {
+              "stock": {
+                "objects": 1,
+                "reason": "",
+                "ticket": "untriaged"
+              }
+            }
+          },
+          "commit": "fdb3a5cb24eaead5367b4523209b1e070ae41f54"
+        }
+      }
+    },
+    "workshop:1976399102": {
+      "galactic": {
+        "Sandbox_Custom_Rebel": {
+          "build": "0.3.3+fdb3a5cb24eaead5367b4523209b1e070ae41f54+gcsync2",
+          "classes": {
+            "EAWR-LOAD-1204": {
+              "workshop:1976399102": {
+                "objects": 75,
+                "reason": "",
+                "ticket": "untriaged"
+              }
+            }
+          },
+          "commit": "fdb3a5cb24eaead5367b4523209b1e070ae41f54"
+        }
+      }
+    },
+    "workshop:2712013423": {
+      "galactic": {
+        "Sandbox_Equal_Footing_Rebel": {
+          "build": "0.3.3+fdb3a5cb24eaead5367b4523209b1e070ae41f54+gcsync2",
+          "classes": {
+            "EAWR-LOAD-1204": {
+              "workshop:2712013423": {
+                "objects": 9,
+                "reason": "",
+                "ticket": "untriaged"
+              }
+            },
+            "EAWR-LOAD-1400": {
+              "stock": {
+                "objects": 57,
+                "reason": "a stock AI script called an API that was not bound, so its Lua instance was retired; fixed by change 7024, merged after the sweep binary, so the next update drops these",
+                "ticket": 6913
+              }
+            }
+          },
+          "commit": "fdb3a5cb24eaead5367b4523209b1e070ae41f54"
+        }
+      }
+    },
+    "workshop:3229239424": {
+      "galactic": {
+        "GC_Full_Web_Way_Rebel": {
+          "build": "0.3.3+fdb3a5cb24eaead5367b4523209b1e070ae41f54+gcsync2",
+          "classes": {
+            "EAWR-LOAD-1204": {
+              "workshop:3229239424": {
+                "objects": 11,
+                "reason": "",
+                "ticket": "untriaged"
+              }
+            }
+          },
+          "commit": "fdb3a5cb24eaead5367b4523209b1e070ae41f54"
+        }
+      }
+    },
+    "workshop:3387971722": {
+      "galactic": {
+        "Awakening_of_the_Clone_Wars_Big_Campaign_Republic": {
+          "build": "0.3.3+fdb3a5cb24eaead5367b4523209b1e070ae41f54+gcsync2",
+          "classes": {
+            "EAWR-LOAD-1032": {
+              "stock": {
+                "objects": 1,
+                "reason": "",
+                "ticket": "untriaged"
+              }
+            },
+            "EAWR-XML-0007": {
+              "stock": {
+                "objects": 3,
+                "reason": "",
+                "ticket": "untriaged"
+              }
+            },
+            "EAWR-XML-0008": {
+              "workshop:3387971722": {
+                "objects": 1,
+                "reason": "",
+                "ticket": "untriaged"
+              }
+            }
+          },
+          "commit": "fdb3a5cb24eaead5367b4523209b1e070ae41f54"
+        }
+      }
+    },
+    "workshop:3689306867": {
+      "galactic": {
+        "Campaign_Standard_Rebel": {
+          "build": "0.3.3+fdb3a5cb24eaead5367b4523209b1e070ae41f54+gcsync2",
+          "classes": {
+            "EAWR-LOAD-1204": {
+              "workshop:3689306867": {
+                "objects": 125,
+                "reason": "",
+                "ticket": "untriaged"
+              }
+            },
+            "EAWR-LOAD-1400": {
+              "stock": {
+                "objects": 10,
+                "reason": "a stock AI script called an API that was not bound, so its Lua instance was retired; fixed by change 7024, merged after the sweep binary, so the next update drops these",
+                "ticket": 6913
+              }
+            }
+          },
+          "commit": "fdb3a5cb24eaead5367b4523209b1e070ae41f54"
+        }
+      }
+    }
+  },
+  "schema_version": 1
+}

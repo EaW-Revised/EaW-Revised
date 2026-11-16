@@ -452,7 +452,9 @@ class SpaceCameraGraphical(unittest.TestCase):
                 self.assertEqual(entry["consumed"]["pan"], [1, 0])
                 self.assertEqual(entry["target_before"], baseline["space_camera"]["final"]["target"])
                 seconds = camera["terminal_step_seconds"]
-                acceleration = 0.1  # Synthetic fixture Scroll_Acceleration_Factor.
+                # Synthetic fixture Scroll_Acceleration_Factor 0.1 is a per-frame gain (CAMIN-REL-1):
+                # full speed in ten frames, a lag of 4.5 frames at the 60 Hz reference.
+                acceleration = 4.5 / 60.0
                 eased_travel = seconds - acceleration * (1 - math.exp(-seconds / acceleration))
                 self.assertAlmostEqual(entry["target_after"][0] - entry["target_before"][0],
                                        expected_pan_speed(0.5) * eased_travel, places=2)

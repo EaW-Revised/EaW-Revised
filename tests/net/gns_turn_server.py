@@ -10,6 +10,7 @@ carries the previous nonce gets `438 Stale Nonce` with the new one, and only a r
 """
 import hashlib
 import hmac
+import random
 import select
 import socket
 import struct
@@ -79,8 +80,15 @@ class Allocation:
 
 class TurnServer(threading.Thread):
     def __init__(self, host, allocation_lifetime=6, permission_lifetime=6, username="eawr-turn-test",
-                 password="eawr-turn-secret", realm="eawr.test", blackhole_after=None, nonce_lifetime=None):
+                 password="eawr-turn-secret", realm="eawr.test", blackhole_after=None, nonce_lifetime=None,
+                 loss_pct=0.0, seed=1):
         super().__init__(daemon=True)
+        # Loss knob (relay-switch tests): the share of relayed packets, in each direction, the server silently drops; can be
+        # changed while the server runs (set_loss), so a test can degrade a "provider" in the middle of a session. Seeded, so a
+        # run is repeatable. Allocations, permissions and refreshes are never dropped: only the data path is lossy.
+        self.loss_pct = float(loss_pct)
+        self.dropped_by_loss = 0
+        self._rng = random.Random(seed)
         self.host = host
         self.allocation_lifetime, self.permission_lifetime = allocation_lifetime, permission_lifetime
         self.realm = realm
@@ -105,6 +113,15 @@ class TurnServer(threading.Thread):
         self.socket.close()
         for allocation in list(self.allocations.values()):
             allocation.relay.close()
+
+    def set_loss(self, percent):
+        self.loss_pct = max(0.0, min(100.0, float(percent)))
+
+    def _lost(self):
+        if self.loss_pct > 0.0 and self._rng.random() * 100.0 < self.loss_pct:
+            self.dropped_by_loss += 1
+            return True
+        return False
 
     def statistics(self):
         with self.lock:
@@ -198,11 +215,15 @@ class TurnServer(threading.Thread):
         if not self._permitted(allocation, peer[0]):
             allocation.dropped_without_permission += 1
             return
+        if self._lost():
+            return
         allocation.relay.sendto(payload, peer)
 
     def _from_peer(self, allocation, payload, peer):
         if not self._permitted(allocation, peer[0]):
             allocation.dropped_without_permission += 1
+            return
+        if self._lost():
             return
         allocation.relayed += 1
         self.socket.sendto(_message(DATA_INDICATION, struct.pack("!III", 0, 0, 0), _xor_address(XOR_PEER, peer),

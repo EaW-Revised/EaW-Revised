@@ -36,6 +36,8 @@ def main(argv=None):
     parser.add_argument('--launcher-artifact', required=True, type=Path)
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--symbol-store', required=True, type=Path)
+    parser.add_argument('--linux-import-godot', required=True, type=Path,
+                        help='the pinned official Linux Godot editor that writes the project metadata (no Wine)')
     parser.add_argument('--revised-layer', type=Path)
     parser.add_argument('--allow-missing-revised-layer', action='store_true')
     parser.add_argument('--public', action='store_true')
@@ -66,7 +68,8 @@ def main(argv=None):
                 ROOT / 'tools/release/package_release.py', expect_identity=args.sha, build_dir=args.build_dir,
                 version=args.version, out=args.out, symbol_store=args.symbol_store, godot=godot, launcher=launcher,
                 mods_service=service, launcher_artifact=args.launcher_artifact, revised_layer=args.revised_layer,
-                allow_missing_revised_layer=args.allow_missing_revised_layer, public=args.public, debug=args.debug)
+                allow_missing_revised_layer=args.allow_missing_revised_layer, public=args.public, debug=args.debug,
+                linux_import_godot=args.linux_import_godot)
             subprocess.run(command, check=True)
         for line in host_package.release_file_lines(args.out):
             print(line)

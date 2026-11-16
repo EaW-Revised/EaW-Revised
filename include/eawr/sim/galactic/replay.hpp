@@ -38,7 +38,8 @@ enum class NativeEffectKind : std::uint16_t {
     production_lock = 19, // coordinator-reserved: story production lock (#683)
     story_reward = 20, // coordinator-reserved: story spawn and credits (#683); its replayer is registered by the campaign owner
     identity_reservation = 21, // coordinator-reserved: S9b entity/invasion ID frontiers (GFS-A22)
-    story_ai_usage = 22 // world-owned script actor facts
+    story_ai_usage = 22, // world-owned script actor facts
+    object_despawn = 23 // script removal without battle scoring
 };
 struct NativeEffect {
     std::uint64_t frontier{}, sequence{};

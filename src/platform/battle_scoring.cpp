@@ -6,6 +6,7 @@
 
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
+#include "eawr/script/authoritative/manifest_pins.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 #include "eawr/sim/world.hpp"
@@ -128,19 +129,12 @@ core::Result<std::unique_ptr<BattleScoring>> BattleScoring::create(const vfs::Vf
     }
     if (module.empty() || module.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos)
         return Result::failure(error("Game_Scoring_Script_Name is absent or is not a module name"));
+    // ML-31/ML-38: every module of every directory the scheduler searches is pinned, not only the named one.
     lua::ModuleManifest manifest;
-    auto libraries = files.enumerate("data/scripts/library/", ".lua");
-    if (!libraries) return Result::failure(libraries.error());
-    std::vector<std::string> paths;
-    for (const auto& library : libraries.value()) paths.push_back(library.canonical_path);
-    paths.push_back("data/scripts/miscellaneous/" + module + ".lua");
-    for (const auto& path : paths) {
-        const auto bytes = files.open(path);
-        if (!bytes) return Result::failure(bytes.error());
-        std::string text(bytes.value().size(), '\0');
-        std::transform(bytes.value().begin(), bytes.value().end(), text.begin(), [](std::byte value) { return static_cast<char>(value); });
-        if (auto added = manifest.add(path, std::move(text)); !added) return Result::failure(added.error());
-    }
+    const auto directories = lua::scoring_script_directories();
+    if (auto pinned = lua::pin_script_directories(files, directories, manifest); !pinned) return Result::failure(pinned.error());
+    if (manifest.find("data/scripts/miscellaneous/" + module + ".lua") == nullptr)
+        return Result::failure(error("the scoring module " + module + " is not authored in data/scripts/miscellaneous/"));
     // Own adapter only; every scoring equation remains in the mounted module.
     const std::string adapter = "require(\"" + module + "\")\nEAWR_Result_Value = 0\n"
         "function EAWR_Query_Result(player, control)\n"
@@ -225,7 +219,7 @@ core::Result<std::unique_ptr<BattleScoring>> BattleScoring::fresh() const {
 
 core::Result<std::unique_ptr<BattleScoring>> BattleScoring::initialize(std::unique_ptr<Impl> state) {
     using Result = core::Result<std::unique_ptr<BattleScoring>>;
-    auto created = lua::ScriptScheduler::create({.script_directories = {"data/scripts/library/", "data/scripts/miscellaneous/"}}, state->manifest);
+    auto created = lua::ScriptScheduler::create({.script_directories = lua::scoring_script_directories()}, state->manifest);
     if (!created) return Result::failure(created.error());
     state->scheduler.emplace(std::move(created).value());
     Impl* host = state.get();

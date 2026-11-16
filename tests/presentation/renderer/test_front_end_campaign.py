@@ -151,6 +151,143 @@ func run():
         self.assertTrue((output / "combo.png").is_file())
         self.assertTrue((output / "initial.png").is_file())
 
+    def test_faction_popup_stays_inside_the_dialog(self):
+        # #5451: "Choose your side" lists every playable faction and scrolls; the popup is bounded by the
+        # authored list budget (UI-COMBO-01) and sits inside the dialog frame instead of spilling out of it.
+        self.check_faction_popup(())
+
+    @unittest.skipUnless(os.environ.get("EAWR_REMAKE_MOD_ROOT"), "needs the Remake chain on the host (--needs-mod)")
+    def test_faction_popup_stays_inside_the_dialog_on_the_remake_chain(self):
+        # The Remake's staging dialog writes the faction combo without WS_VSCROLL (and 150 units high in the
+        # middle layer): the list budget still comes from the rectangle, as in the original.
+        self.check_faction_popup(("--eawr-mod-root", os.environ["EAWR_REMAKE_MOD_ROOT"]))
+
+    def test_side_list_follows_the_faction_table_order(self):
+        # #5451 (WGP-40a): the side drop-down holds every playable faction in the faction table's own order, not
+        # sorted by display name. Stock FoC (English text): Rebel, Empire, Underworld; sorted it would open with the
+        # Empire's caption.
+        items = self.read_side_list(())
+        self.assertEqual(len(items), 3, items)
+        self.assertNotEqual(items, sorted(items, key=str.lower), "the side list is sorted by display name: %s" % items)
+
+    @unittest.skipUnless(os.environ.get("EAWR_REMAKE_MOD_ROOT"), "needs the Remake chain on the host (--needs-mod)")
+    def test_side_list_on_the_remake_chain_keeps_blank_rows(self):
+        # The Remake chain's faction table has playable factions without display text (the Dummy factions and some
+        # minors). Retail (owner capture) lists Rebellion, Empire, Criminal Underworld, Separatist Holdouts and
+        # Republic Hardliners first and the blank rows after the named sides: nothing is capped or dropped.
+        items = self.read_side_list(("--eawr-mod-root", os.environ["EAWR_REMAKE_MOD_ROOT"]))
+        self.assertGreaterEqual(len(items), 20, items)
+        self.assertEqual(items[:5], ["Rebellion", "Empire", "Criminal Underworld", "Separatist Holdouts",
+                                     "Republic Hardliners"], items)
+        blanks = [index for index, text in enumerate(items) if not text]
+        self.assertGreaterEqual(len(blanks), 3, "the captionless playable sides are blank rows: %s" % items)
+        self.assertEqual(blanks, list(range(len(items) - len(blanks), len(items))),
+                         "the blank rows come after every named side: %s" % items)
+
+    def read_side_list(self, extra):
+        output = pathlib.Path(tempfile.mkdtemp(prefix="front-end-campaign-sides-"))
+        driver = output / "sides.gd"
+        driver.write_text(r'''extends SceneTree
+func _initialize(): call_deferred("run")
+func run():
+    var scene = load("res://main.tscn").instantiate()
+    root.add_child(scene)
+    current_scene = scene
+    var combo = null
+    for i in range(1200):
+        await process_frame
+        combo = root.find_child("IDC_FACTION_COMBO", true, false)
+        if combo != null and combo.is_visible_in_tree(): break
+    if combo == null or not combo.is_visible_in_tree():
+        print("CAMPAIGN SIDES missing")
+        quit(2)
+        return
+    var items = []
+    for i in range(combo.item_count):
+        items.append(combo.get_item_text(i))
+    print("CAMPAIGN SIDES ", JSON.stringify(items))
+    quit(0)
+''', encoding="utf-8")
+        result, _ = front.run_front_end(output, "sides", (
+            "--eawr-front-end-test-campaign", "start", "--eawr-attract", "off", "--eawr-audio", "off", *extra),
+            engine=("--script", str(driver)), scripted=True, with_capture=False)
+        self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+        line = re.search(r"CAMPAIGN SIDES (\[.*\])", result.stdout)
+        self.assertIsNotNone(line, result.stdout[-6000:])
+        return json.loads(line.group(1))
+
+    def check_faction_popup(self, extra):
+        output = pathlib.Path(tempfile.mkdtemp(prefix="front-end-campaign-popup-"))
+        driver = output / "popup.gd"
+        driver.write_text(r'''extends SceneTree
+func _initialize(): call_deferred("run")
+func run():
+    var scene = load("res://main.tscn").instantiate()
+    root.add_child(scene)
+    current_scene = scene
+    var combo = null
+    for i in range(1200):
+        await process_frame
+        combo = root.find_child("IDC_FACTION_COMBO", true, false)
+        if combo != null and combo.is_visible_in_tree(): break
+    if combo == null or not combo.is_visible_in_tree():
+        print("CAMPAIGN POPUP missing")
+        quit(2)
+        return
+    var frame = combo
+    while frame != null and frame.name != "IDD_CUSTOM_CAMPAIGN_STAGING_DIALOG":
+        frame = frame.get_parent()
+    var popup = combo.get_popup()
+    # The menu's own flow races this script, so each popup is read as soon as it is up.
+    var report = {}
+    for count in [26, 3]:
+        combo.clear()
+        for i in range(count):
+            combo.add_item("Entry %02d" % i)
+        combo.select(0)
+        combo.show_popup()
+        var up = false
+        for i in range(10):
+            await process_frame
+            up = up or popup.visible
+            if up and i >= 1: break
+        var frame_rect = frame.get_global_rect() if frame != null else Rect2()
+        var combo_rect = combo.get_global_rect()
+        var rect = Rect2(Vector2(popup.position), Vector2(popup.size))
+        report[str(count)] = {"shown": up, "items": popup.item_count, "popup": [rect.position.x, rect.position.y, rect.size.x, rect.size.y],
+            "combo": [combo_rect.position.x, combo_rect.position.y, combo_rect.size.x, combo_rect.size.y],
+            "frame": [frame_rect.position.x, frame_rect.position.y, frame_rect.size.x, frame_rect.size.y],
+            "max": [popup.max_size.x, popup.max_size.y], "embedded": popup.is_embedded()}
+        if count == 26:
+            for arg in OS.get_cmdline_user_args():
+                if arg.begins_with("--popup-shot="):
+                    root.get_texture().get_image().save_png(arg.trim_prefix("--popup-shot="))
+        popup.hide()
+        await process_frame
+    print("CAMPAIGN POPUP ", JSON.stringify(report["26"]))
+    print("CAMPAIGN POPUP SHORT ", JSON.stringify({"long": report["26"]["popup"][3], "short": report["3"]["popup"][3], "items": report["3"]["items"], "shown": report["3"]["shown"]}))
+    quit(0)
+''', encoding="utf-8")
+        result, _ = front.run_front_end(output, "popup", (
+            "--eawr-front-end-test-campaign", "start", "--eawr-attract", "off", "--eawr-audio", "off",
+            "--popup-shot=" + str(output / "popup.png"), *extra),
+            engine=("--script", str(driver)), scripted=True, with_capture=False)
+        self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+        line = re.search(r"CAMPAIGN POPUP (\{.*\})", result.stdout)
+        self.assertIsNotNone(line, result.stdout[-6000:])
+        data = json.loads(line.group(1))
+        short = json.loads(re.search(r"CAMPAIGN POPUP SHORT (\{.*\})", result.stdout).group(1))
+        self.assertTrue(short["shown"] and short["items"] == 3, short)
+        self.assertEqual(short["short"], short["long"],
+                         "a short list must keep the authored box height of the long one: %s" % short)
+        self.assertTrue(data["shown"], "the faction popup never opened: %s" % data)
+        self.assertEqual(data["items"], 26, data)
+        px, py, pw, ph = data["popup"]
+        fx, fy, fw, fh = data["frame"]
+        self.assertLess(ph, 0.5 * fh, "the faction popup is not bounded by the authored list budget: %s" % data)
+        self.assertTrue(fx <= px and fy <= py and px + pw <= fx + fw and py + ph <= fy + fh,
+                        "the faction popup spills out of the dialog: %s" % data)
+
     def test_named_campaign_starts_without_editing_technology(self):
         with tempfile.TemporaryDirectory(prefix="front-end-named-campaign-") as temporary:
             output = pathlib.Path(temporary)

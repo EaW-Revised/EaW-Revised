@@ -444,8 +444,14 @@ that connected but did not finish the pair handshake ends with 1768.
 **STUN (source-read, not measured).** The pinned GNS (v1.6.1, `d534c19`) reads only the relayed address from a TURN allocation, so without a
 `P2P_STUN_ServerList` it makes no server-reflexive candidate: two peers behind ordinary NATs reach each other only through
 the relay, or after a peer-reflexive address is learned from checks that crossed it. `GnsOptions::stun_servers` (numeric
-`stun:host:port` URIs) sets that list. coturn answers STUN on its TURN port, so the service can hand out the same host with
-the credentials (slice N3); the adapter applies whatever the caller passes and invents nothing.
+`stun:host:port` URIs) sets that list. When the caller sets none and the connection has relay credentials, the adapter derives
+it (`stun_list.hpp`): Cloudflare's public STUN (`162.159.207.0:3478`) first, then every `turn:<numeric host>:3478` entry of the
+TURN list (coturn answers STUN on its TURN port; a Cloudflare TURN address ignores unauthenticated binding and GNS moves on
+after the timeout). GNS asks the next STUN server only when one does not answer. Relay-only play (`turn_only`) gets no STUN.
+This is what lets two players behind ordinary NATs (endpoint-independent mapping) hole-punch a direct pair; before it, every
+online game was relayed. **Privacy:** a direct pair shows each player's public IP address to the other (lockstep is a mesh, so to
+every player). The setting `network.online_relay_only` (Options > online, "Hide my IP: always use a relay") forces the relay.
+Direct when possible stays the default.
 
 **TURN allocations (source-read, not measured).** Every connection has its own ICE session. When the
 `Relay` candidate type is enabled and TURN servers are configured, the session sends a TURN Allocate on **every local

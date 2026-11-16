@@ -5,6 +5,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "eawr/scene/model_prefetch.hpp"
 #include "eawr/scene/scene.hpp"
+#include "eawr/platform/model_facts.hpp"
 #include <algorithm>
 #include <charconv>
 #include <sstream>
@@ -48,24 +49,29 @@ PrepareBuildCounts prepare_build_counts() noexcept {
 
 // The mounted FoC view's unit tables (the M2 types), or nothing with `failure` set.
 [[nodiscard]] std::optional<units::UnitTables> load_start_tables(const vfs::Vfs& filesystem, const data::Catalog& catalog,
-                                                           std::string& failure, const std::string& space_map,
+                                                           std::string& failure, const std::string& space_map, const bool use_model_facts,
                                                            const std::set<std::string>& additional_types,
                                                            scene::ModelPrefetch* prefetch,
                                                            const std::atomic<bool>* cancel) {
     core::load_profile::Scope load_scope(core::load_profile::Phase::unit_tables);
     (additional_types.empty() ? default_table_builds : extended_table_builds).fetch_add(1, std::memory_order_relaxed);
     scene::VfsAssetCache cache(filesystem);
+    // With a model facts store configured, a model it already knows is not read, hashed or decoded; any other model is
+    // decoded as before and recorded for the next load. Without a store (or in multiplayer, `use_model_facts` false) this is
+    // cache.access().model.
+    platform::ModelFactsScope facts(filesystem, cache, use_model_facts);
     units::LoadInput input;
     input.catalog = &catalog;
     input.filesystem = &filesystem;
     input.space_map = space_map;
-    input.model = cache.access().model;
+    input.model = facts.lookup();
     input.cancel = cancel;
     if (prefetch != nullptr) {
-        // Hints only: the loader asks for the same models in the same order and gets the same store entries.
-        input.model_hint = [prefetch](const std::string& path) { prefetch->offer(path); };
-        input.model_taken = [prefetch](const std::string& path) { prefetch->taken(path); };
-        input.model_skipped = [prefetch](const std::string& path) { prefetch->skipped(path); };
+        // Hints only: the loader asks for the same models in the same order and gets the same store entries. A model a
+        // facts record covers is not offered: the readers would decode it for nothing.
+        facts.wire_hints(input, [prefetch](const std::string& path) { prefetch->offer(path); },
+            [prefetch](const std::string& path) { prefetch->taken(path); },
+            [prefetch](const std::string& path) { prefetch->skipped(path); });
     }
     if (!additional_types.empty()) {
         for (const auto type : units::pinned_m2_types()) input.types.emplace_back(type);
@@ -73,6 +79,7 @@ PrepareBuildCounts prepare_build_counts() noexcept {
         for (const auto type : units::pinned_m2_obstacles()) input.obstacles.emplace_back(type);
     }
     auto tables = units::load_unit_tables(input);
+    facts.finish();
     if (!tables) {
         failure = "live session unit tables: " + core::format_diagnostic(tables.error());
         return std::nullopt;
@@ -92,19 +99,20 @@ core::Result<PreparedSkirmish> tables_failure(const std::string& failure) {
 } // namespace
 
 core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture& fixture,
-    const vfs::Vfs& filesystem, const data::Catalog& catalog) {
+    const vfs::Vfs& filesystem, const data::Catalog& catalog, const bool use_model_facts) {
     std::string failure;
-    auto tables = load_start_tables(filesystem, catalog, failure, fixture.map);
+    auto tables = load_start_tables(filesystem, catalog, failure, fixture.map, use_model_facts);
     if (!tables) return tables_failure(failure);
     auto identity = read_counted_identity(filesystem);
     if (!identity) {
         auto error = identity.error(); error.message = "live session start inputs: " + core::format_diagnostic(error);
         return core::Result<PreparedSkirmish>::failure(std::move(error));
     }
-    return prepare_skirmish(fixture, filesystem, catalog, std::move(*tables), identity.value());
+    return prepare_skirmish(fixture, filesystem, catalog, std::move(*tables), identity.value(), use_model_facts);
 }
 core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture& fixture, const vfs::Vfs& filesystem,
-    const data::Catalog& catalog, units::UnitTables tables, const skirmish::DataIdentity& identity) {
+    const data::Catalog& catalog, units::UnitTables tables, const skirmish::DataIdentity& identity,
+    const bool use_model_facts) {
     std::string failure;
     auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, tables, identity);
     if (!inputs) {
@@ -115,7 +123,7 @@ core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture& fixture
     // Keep the existing closure when every selected type is already loaded.
     const auto missing = missing_start_types(fixture, inputs.value(), tables);
     if (!missing.empty()) {
-        auto extended = load_start_tables(filesystem, catalog, failure, fixture.map, missing);
+        auto extended = load_start_tables(filesystem, catalog, failure, fixture.map, use_model_facts, missing);
         if (!extended) return tables_failure(failure);
         tables = std::move(*extended);
     }
@@ -130,9 +138,15 @@ core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture& fixture
     }
     return core::Result<PreparedSkirmish>::success({std::move(tables), std::move(inputs), std::move(start).value()});
 }
-core::Result<SavedBattlePreparation> prepare_saved_battle(const vfs::Vfs& filesystem, const data::Catalog& catalog,
-    const sim::tactical::TacticalSetup& setup) {
+core::Result<SavedBattlePreparation> prepare_saved_battle(std::shared_ptr<const vfs::Vfs> mounted,
+    std::shared_ptr<const data::Catalog> types, const sim::tactical::TacticalSetup& setup) {
     using Result = core::Result<SavedBattlePreparation>;
+    if (!mounted || !types) {
+        core::Diagnostic error; error.code = "EAWR-NET-0600"; error.message = "The mounted game data is unavailable.";
+        return Result::failure(std::move(error));
+    }
+    const vfs::Vfs& filesystem = *mounted;
+    const data::Catalog& catalog = *types;
     if (!setup.skirmish) {
         core::Diagnostic error; error.code = "EAWR-SAVE-0101"; error.message = "The save has no skirmish setup.";
         return Result::failure(std::move(error));
@@ -145,7 +159,8 @@ core::Result<SavedBattlePreparation> prepare_saved_battle(const vfs::Vfs& filesy
     // (of the options fixture) only supplies the lobby facts replay_fixture records, the second (of the recorded fixture)
     // is the battle's own.
     std::string failure;
-    auto tables = load_start_tables(filesystem, catalog, failure, fixture.value().map);
+    // Single player only (its sole caller is the viewer's saved-battle queue step, and a multiplayer match cannot be saved, live_session_save.cpp can_save): the model facts store stays on.
+    auto tables = load_start_tables(filesystem, catalog, failure, fixture.value().map, true);
     if (!tables) {
         core::Diagnostic error; error.code = "EAWR-NET-0600"; error.message = failure;
         return Result::failure(std::move(error));
@@ -159,9 +174,10 @@ core::Result<SavedBattlePreparation> prepare_saved_battle(const vfs::Vfs& filesy
         return skirmish::replay_fixture(fixture.value(), inputs.value(), setup, false);
     }();
     if (!recorded) return Result::failure(recorded.error());
-    auto prepared = prepare_skirmish(recorded.value(), filesystem, catalog, std::move(*tables), identity.value());
+    auto prepared = prepare_skirmish(recorded.value(), filesystem, catalog, std::move(*tables), identity.value(), true);
     if (!prepared) return Result::failure(prepared.error());
-    return Result::success(SavedBattlePreparation(std::move(recorded).value(), std::move(prepared).value(), filesystem, catalog));
+    return Result::success(SavedBattlePreparation(std::move(recorded).value(), std::move(prepared).value(),
+        std::move(mounted), std::move(types)));
 }
 bool lan_map_supports_rows(const skirmish::SetupMap& map, std::span<const skirmish::LobbySlot> occupied) {
     const auto rows = skirmish::setup_row_count(map, false);

@@ -24,6 +24,7 @@ template <class T> T take(core::Result<T> result) {
     return std::move(result).value();
 }
 
+template <class T> void must(core::Result<T> result) { if (!result) throw std::runtime_error(result.error().message); }
 constexpr TypeId company_type = 11, member_type = 12;
 const TypeId hq_type = skirmish::type_id("synthetic-hq");
 const TypeId pad_type = skirmish::type_id("synthetic-pad");
@@ -226,6 +227,88 @@ void pad_gates() {
     }
 }
 
+// V-20 (#6184): a reveal-all command reveals every cell of the recipient's fog grid from the next publication, in a land
+// session as in a space one. The command lists no unit; it used to fall through the land command loop and do nothing.
+struct RevealRun { std::vector<bool> p1_all_revealed; bool p2_has_fog{}; Bytes state; Bytes checkpoint; Bytes land_checkpoint; };
+bool grid_fully_revealed(const TacticalSession& session, const std::size_t player_index) {
+    const auto values = session.fog_cells()->values(player_index);
+    return !values.empty() && std::none_of(values.begin(), values.end(), [](const std::uint8_t cell) { return cell == 0; });
+}
+RevealRun reveal_run(const Scene& scene, const sim::PartitionExecutor& executor, const int ticks, const std::uint64_t at) {
+    auto session = take(TacticalSession::create(scene.setup, scene.content));
+    must(session.submit({{at, 1, 1}, {}, RevealAllPayload{1}}));
+    RevealRun result;
+    for (int tick = 0; tick < ticks; ++tick) {
+        take(session.step(executor));
+        result.p1_all_revealed.push_back(grid_fully_revealed(session, 0));
+    }
+    result.p2_has_fog = !grid_fully_revealed(session, 1);
+    result.state = session.canonical_state_bytes();
+    result.checkpoint = take(session.save_checkpoint_state());
+    result.land_checkpoint = take(session.save_land_checkpoint_state());
+    return result;
+}
+
+void reveal_all_command() {
+    auto field = make_field(std::vector<std::string>(64, std::string(64, '.')));
+    const auto scene = make_scene(field.terrain, {});
+    const sim::InlineExecutor serial;
+    constexpr std::uint64_t at = 5;
+    const auto run = reveal_run(scene, serial, 12, at);
+    // Step i publishes completed tick i + 1: the command is read at tick 5, so the first publication that can show it is 6.
+    bool early = false, later = true;
+    for (std::size_t i = 0; i < run.p1_all_revealed.size(); ++i) {
+        if (i + 1 <= at && run.p1_all_revealed[i]) early = true;
+        if (i + 1 > at && !run.p1_all_revealed[i]) later = false;
+    }
+    expect(!early, "V-20: a land grid is not fully revealed before the reveal-all command's tick");
+    expect(later, "V-20: a reveal-all in a land session reveals every cell of the recipient's grid from the next publication");
+    expect(run.p2_has_fog, "V-20: the other player's grid keeps its fog");
+    const auto none = reveal_run(scene, serial, 12, 1000);
+    expect(std::none_of(none.p1_all_revealed.begin(), none.p1_all_revealed.end(), [](const bool revealed) { return revealed; }),
+        "V-20: without the command the land grid is not fully revealed (control)");
+    expect(none.state != run.state, "V-20: the full reveal is part of the land state hash");
+    // 1/2/4/8 workers and reversed partitions end in one state.
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter threads(workers);
+        const auto other = reveal_run(scene, threads, 12, at);
+        expect(other.state == run.state && other.p1_all_revealed == run.p1_all_revealed,
+            "V-20: a land reveal-all ends in one state at 1/2/4/8 workers");
+        test_support::ReverseOrderExecutor reverse(workers);
+        expect(reveal_run(scene, reverse, 12, at).state == run.state, "V-20: a land reveal-all ends in one state with reversed partitions");
+    }
+    // A checkpoint taken after the command restores the full reveal and continues identically to the uninterrupted run.
+    auto restored = take(TacticalSession::create(scene.setup, scene.content));
+    must(restored.load_checkpoint_state(run.checkpoint));
+    must(restored.load_land_checkpoint_state(run.land_checkpoint));
+    expect(grid_fully_revealed(restored, 0) && !grid_fully_revealed(restored, 1), "V-20: the full reveal restores from a checkpoint");
+    expect(restored.canonical_state_bytes() == run.state, "V-20: the restored land session has the saved state");
+    auto straight = take(TacticalSession::create(scene.setup, scene.content));
+    must(straight.submit({{at, 1, 1}, {}, RevealAllPayload{1}}));
+    for (int tick = 0; tick < 12; ++tick) take(straight.step(serial));
+    for (int tick = 0; tick < 6; ++tick) { take(straight.step(serial)); take(restored.step(serial)); }
+    expect(straight.canonical_state_bytes() == restored.canonical_state_bytes() && grid_fully_revealed(restored, 0),
+        "V-20: a land session restored after the reveal continues byte-equal to the uninterrupted run");
+}
+
+// V-20 (#6184): the land submit gate admits the reveal-all payload and nothing else that lists no unit: quit, beacon, retreat
+// and retreat-cinematic payloads are still refused with the land gate's own diagnostic.
+void unit_less_payloads_stay_refused() {
+    auto field = make_field(std::vector<std::string>(64, std::string(64, '.')));
+    const auto scene = make_scene(field.terrain, {});
+    auto session = take(TacticalSession::create(scene.setup, scene.content));
+    expect(session.submit({{5, 1, 1}, {}, RevealAllPayload{1}}).has_value(), "V-20: the land gate admits a reveal-all payload");
+    const auto refused = [&](const CommandPayload& payload, const char* name) {
+        const auto result = session.submit({{5, 1, 2}, {}, payload});
+        expect(!result && result.error().message.find("land sessions accept") != std::string::npos,
+            name);
+    };
+    refused(QuitPayload{}, "V-20: the land gate still refuses a quit payload");
+    refused(BeaconPayload{}, "V-20: the land gate still refuses a beacon payload");
+    refused(RetreatPayload{}, "V-20: the land gate still refuses a retreat payload");
+    refused(RetreatCinematicPayload{}, "V-20: the land gate still refuses a retreat-cinematic payload");
+}
+
 void marker_fog_publication() {
     auto field = make_field(std::vector<std::string>(64, std::string(64, '.')));
     auto scene = make_scene(field.terrain, {});
@@ -249,6 +332,8 @@ int main() {
     try {
         sensor_rows();
         pad_gates();
+        reveal_all_command();
+        unit_less_payloads_stay_refused();
         marker_fog_publication();
         return checks.finish();
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }

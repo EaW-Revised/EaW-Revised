@@ -11,7 +11,9 @@ add_executable(unit_tables_tests unit_tables_tests.cpp
     unit_tables_foc_defence_tests.cpp
     unit_tables_foc_weapons_tests.cpp
     unit_tables_foc_world_tests.cpp
-    unit_tables_foc_priority_tests.cpp)
+    unit_tables_foc_priority_tests.cpp
+    unit_tables_index_tests.cpp
+    unit_tables_index_installed_tests.cpp)
 target_link_libraries(unit_tables_tests PRIVATE eawr::units eawr::campaign eawr::platform_live_ai eawr::skirmish eawr::ui_model)
 target_compile_definitions(unit_tables_tests PRIVATE EAWR_UNIT_PINNED_REPLAY="${PROJECT_SOURCE_DIR}/tests/skirmish/fixtures/m2-start.eawr-replay")
 target_compile_features(unit_tables_tests PRIVATE cxx_std_20)
@@ -30,6 +32,12 @@ add_test(NAME unit_formation_deceleration_contracts COMMAND unit_tables_tests --
 eawr_add_game_data_test(NAME unit_formation_deceleration_installed_contracts
     COMMAND unit_tables_tests --formation-deceleration-installed)
 add_test(NAME unit_object_script_resolution COMMAND unit_tables_tests --object-scripts)
+eawr_add_game_data_test(NAME unit_tables_name_index_stock COMMAND unit_tables_tests --name-index-stock)
+add_test(NAME unit_tables_name_index_mod COMMAND unit_tables_tests --name-index-mod)
+set_tests_properties(unit_tables_name_index_mod PROPERTIES SKIP_RETURN_CODE 77)
+eawr_add_game_data_test(NAME unit_tables_name_index_gc_stock COMMAND unit_tables_tests --name-index-gc-stock)
+add_test(NAME unit_tables_name_index_gc_mod COMMAND unit_tables_tests --name-index-gc-mod)
+set_tests_properties(unit_tables_name_index_gc_mod PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(unit_tables_retail_int_tests unit_tables_retail_int_tests.cpp unit_tables_fixture.cpp)
 target_link_libraries(unit_tables_retail_int_tests PRIVATE eawr::units)
@@ -43,6 +51,13 @@ target_compile_features(simulation_model_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(simulation_model_tests)
 add_test(NAME unit_simulation_model_contracts COMMAND simulation_model_tests)
 eawr_add_game_data_test(NAME unit_simulation_model_installed_contracts COMMAND simulation_model_tests --installed)
+
+add_executable(model_facts_tests model_facts_tests.cpp unit_tables_fixture.cpp)
+target_link_libraries(model_facts_tests PRIVATE eawr::platform_model_facts eawr::units eawr::scene)
+target_compile_features(model_facts_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(model_facts_tests)
+add_test(NAME unit_model_facts_contracts COMMAND model_facts_tests)
+eawr_add_game_data_test(NAME unit_model_facts_installed_contracts COMMAND model_facts_tests --installed)
 
 add_executable(galactic_types_tests galactic_types_tests.cpp)
 target_link_libraries(galactic_types_tests PRIVATE eawr::units)

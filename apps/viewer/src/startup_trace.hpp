@@ -1,5 +1,7 @@
 #pragma once
 
+#include "particle_chain_counters.hpp"
+
 #include "eawr/core/load_profile.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/presentation/godot/renderer.hpp"
@@ -68,6 +70,7 @@ public:
         if (runs_.empty() || runs_.back().drawn) return;
         runs_.back().total_ms = milliseconds(runs_.back().start);
         runs_.back().drawn = true;
+        particle_chain_mark_first_frame();
         memory_snapshot(1);
         take_texture_census("first_frame");
         if (const auto filesystem = filesystem_.lock())
@@ -95,6 +98,8 @@ public:
         if (pending()) {
             runs_.back().ready_ms = milliseconds(runs_.back().start);
             memory_snapshot(0);
+            // Detail only: the phase table at the start of the first-draw window, so the window's own split can be written.
+            if (runs_.back().recording.detailed) core::load_profile::Scope::mark(runs_.back().recording);
         }
     }
     void memory_tick_600() {
@@ -153,6 +158,18 @@ public:
                 for (std::size_t phase = 0; phase < run.texture_census.size(); ++phase)
                     output << (phase ? "," : "") << run.texture_census[phase];
                 output << ']';
+            }
+            {
+                const auto& chains = particle_chain_counters();
+                const auto builds = chains.builds.load(std::memory_order_relaxed);
+                const auto first = chains.builds_at_first_frame.load(std::memory_order_relaxed);
+                const auto micros = chains.microseconds.load(std::memory_order_relaxed);
+                const auto first_micros = chains.microseconds_at_first_frame.load(std::memory_order_relaxed);
+                output << ",\"particle_chains\":{\"builds\":" << builds
+                       << ",\"ms\":" << static_cast<double>(micros) / 1000.0
+                       << ",\"builds_at_first_frame\":" << first
+                       << ",\"builds_after_first_frame\":" << (builds - first)
+                       << ",\"ms_after_first_frame\":" << static_cast<double>(micros - first_micros) / 1000.0 << '}';
             }
             output << ",\"phases\":";
             core::load_profile::write_costs(output, run.recording);
@@ -276,7 +293,8 @@ private:
         }
     }
     // <trace>.detail.csv: run,kind,key,a,b,c. kinds: slots_source (count), slots_type (count), spawned_type (count),
-    // model (composed, compose_ms, upload_ms). Written only for a detailed run.
+    // model (composed, compose_ms, upload_ms), window_phase (exclusive_ms, inclusive_ms, calls: what ran between the scene
+    // being ready and the first completed draw, the first-draw window). Written only for a detailed run.
     void write_detail_csv() const {
         const bool any = std::any_of(runs_.begin(), runs_.end(), [](const Run& run) { return run.recording.detailed; });
         if (!any) return;
@@ -290,6 +308,17 @@ private:
             for (const auto& [key, count] : run.census.slots_by_source) output << i << ",slots_source," << key << ',' << count << ",,\n";
             for (const auto& [key, count] : run.census.slots_by_type) output << i << ",slots_type," << key << ',' << count << ",,\n";
             for (const auto& [key, count] : run.census.spawned_by_type) output << i << ",spawned_type," << key << ',' << count << ",,\n";
+            if (run.recording.marked && run.drawn) {
+                for (std::size_t j = 0; j < core::load_profile::names.size(); ++j) {
+                    const auto& end = run.recording.costs[j];
+                    const auto& start = run.recording.at_mark[j];
+                    const double exclusive = end.exclusive_ms - start.exclusive_ms;
+                    const double inclusive = end.inclusive_ms - start.inclusive_ms;
+                    if (end.calls == start.calls && exclusive < 0.05) continue;
+                    output << i << ",window_phase," << core::load_profile::names[j] << ',' << exclusive << ',' << inclusive << ','
+                           << (end.calls - start.calls) << '\n';
+                }
+            }
             for (const auto& model : run.recording.models) {
                 if (model.composed == 0 && model.compose_ms == 0.0) continue;
                 output << i << ",model," << model.path << ',' << model.composed << ',' << model.compose_ms << ',' << model.upload_ms << '\n';

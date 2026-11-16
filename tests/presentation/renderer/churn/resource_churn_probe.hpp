@@ -72,6 +72,9 @@ constexpr sim::AssetId unavailable_other = 405;
 
 [[nodiscard]] assets::Model plate(const float half, const std::size_t surfaces = 1, const bool rigid_skin = false);
 
+// Two surfaces, each rigid on its own bone (a model that keeps an engine skeleton).
+[[nodiscard]] assets::Model two_bone_plate(const float half);
+
 [[nodiscard]] assets::Model partially_invalid_plate();
 
 [[nodiscard]] assets::Texture solid(const std::uint8_t r, const std::uint8_t g, const std::uint8_t b,

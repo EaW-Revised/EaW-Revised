@@ -312,6 +312,14 @@ core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent&
     }
     for (const auto type : source.land.static_objects)
         if (!type || !bound.insert(type).second) return invalid("invalid or duplicate land static-object content binding");
+    // LE-OCCUPY: pad body rows are strictly ordered with positive extents and a class. A row whose type has no static root
+    // in the session is never matched (a caller may trim the static types of a content it reuses).
+    for (std::size_t i = 0; i < source.land.pad_bodies.size(); ++i) {
+        const auto& row = source.land.pad_bodies[i];
+        if (!row.type || (i && !(source.land.pad_bodies[i - 1].type < row.type)) || row.half_x <= Fixed{} || row.half_y <= Fixed{}
+            || row.group == units::LandCollisionGroup::none || row.group > units::LandCollisionGroup::giant_vehicle)
+            return invalid("invalid land pad body content binding");
+    }
     // LC-44..53: reinforcement points and rules are ordered content; a malformed row refuses the content, not a match later.
     for (const auto type : source.land.point_objects)
         if (!type || !bound.insert(type).second) return invalid("invalid or duplicate land point-object content binding");
@@ -334,6 +342,8 @@ core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent&
     moving.contact_settings = source.land.contacts;
     std::vector<LiveUnit> live;
     LandSpawnFilter filter;
+    // LC-104 (G-11/G-14a): a free garrison's setup names start companies; the registered objects are the members they create.
+    std::vector<std::vector<EntityId>> garrison_members(free_garrisons.size());
     // Sparse creation follows authored Company_Units order (LC-01), including partial placement.
     // Ordinary per-member tick work belongs to the partitioned movement service below.
     for (const auto& entry : setup.units) {
@@ -354,15 +364,31 @@ core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent&
         }
         const auto members_before = moving.members.size();
         if (auto created = spawn_land_company(*source.land_terrain, entry, *binding, moving, live, filter); !created) return created;
-        // LC-02/48/50: the start forces count against the company cap like a landed company: each created member
-        // carries the company population divided by the company's member count (LR-STARTPOP closed). The members this
-        // company created are the ones it appended to the movement state, whatever ids the allocator gave them, so a start
-        // with several owners credits each member to its own company.
+        // LC-50 (LR-STARTPOP): the free starting forces never count against the company cap (retail shows 0/9 at the start with
+        // the free companies on the map). Start companies outside a player's free garrison keep the landed-company share:
+        // each created member carries the company population divided by the company's member count (unobserved in retail).
+        // The members this company created are the ones it appended to the movement state, whatever ids the allocator gave
+        // them, so a start with several owners credits each member to its own company.
+        const bool free_start = std::any_of(free_garrisons.begin(), free_garrisons.end(), [&](const auto& garrison) {
+            return garrison.setup.player == entry.owner
+                && std::binary_search(garrison.registered.begin(), garrison.registered.end(), entry.entity_id);
+        });
         const auto share = population_share(binding->company.population_value.value_or(0),
             static_cast<std::uint32_t>(binding->company.members.size()));
-        if (share > 0)
+        if (share > 0 && !free_start)
             for (auto index = members_before; index < moving.members.size(); ++index)
                 shares.emplace(moving.members[index].object, PopulationShare{entry.owner, share});
+        for (std::size_t row = 0; row < free_garrisons.size(); ++row) {
+            const auto& registered = free_garrisons[row].registered;
+            if (free_garrisons[row].setup.player != entry.owner
+                || !std::binary_search(registered.begin(), registered.end(), entry.entity_id)) continue;
+            for (auto index = members_before; index < moving.members.size(); ++index)
+                garrison_members[row].push_back(moving.members[index].object);
+        }
+    }
+    for (std::size_t row = 0; row < free_garrisons.size(); ++row) {
+        std::sort(garrison_members[row].begin(), garrison_members[row].end());
+        free_garrisons[row].registered = std::move(garrison_members[row]);
     }
     std::sort(moving.members.begin(), moving.members.end(), [](const auto& a, const auto& b) { return a.object < b.object; });
     auto movement = LandMovement::from_checkpoint(std::move(moving));
@@ -390,6 +416,33 @@ core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent&
     return core::Result<void>::success();
 }
 
+namespace session_detail {
+bool land_refresh_pads(LandSession& land, const std::map<EntityId, PadState>& pad_states) {
+    auto& pads = land.pad_scratch;
+    pads.clear();
+    const auto& rows = land.content.pad_bodies;
+    if (!rows.empty()) for (const auto& [id, root] : land.static_roots) {
+        const auto row = std::lower_bound(rows.begin(), rows.end(), root.type_id,
+            [](const auto& entry, const TypeId type) { return entry.type < type; });
+        if (row == rows.end() || row->type != root.type_id) continue;
+        // #6976 (WLPA-66 as the data reads): the footprint is solid under a building or its construction. A buildable pad that
+        // carries neither is open ground for the squad that comes to use it (the pad click opens its menu). A pad state exists
+        // for every economy point profile; a pad body row exists only for a type with the build behavior (land_content.hpp), so
+        // today the two sets agree. A later body row for a non-buildable point would need an explicit buildable test here.
+        if (const auto state = pad_states.find(id);
+            state != pad_states.end() && state->second.under_construction == invalid_entity_id && state->second.constructed == invalid_entity_id)
+            continue;
+        // The root's pose is a pure yaw (setup and the economy build it from a heading): the half-angle quaternion gives the
+        // facing in turns. A box is symmetric under a half turn, so the sign ambiguity of the quaternion is harmless.
+        const auto half = math::atan2_turn(root.rotation.z, root.rotation.w);
+        if (!half) return false;
+        pads.push_back({id, {root.position.x, root.position.y}, math::wrap_turn(Fixed::from_raw(2 * half.value().raw())),
+            row->half_x, row->half_y, row->group});
+    }
+    return land.movement.set_pads(pads);
+}
+} // namespace session_detail
+
 core::Result<TacticalTick> TacticalSession::Impl::step_land(TacticalSession& session, const PartitionExecutor& executor) {
     core::tick_profile::Scope profile("serial.tactical.land");
     const auto tick = completed_tick;
@@ -409,9 +462,29 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(TacticalSession& ses
     std::vector<core::Diagnostic> diagnostics;
     // LC-57: the buy, cancel and pad routes run in the shared economy (land_economy) after the frame's combat.
     std::vector<PlayerCommand> economy_commands;
+    // V-20: a reveal-all names a recipient and no unit. The recipients, in command order, are applied to the fog below at the
+    // same point the shared service applies them (before the grids are serviced), and the order is accepted in the events.
+    std::vector<PlayerId> pending_reveals;
+    std::vector<Event> reveal_events;
     for (auto command = pending.begin(); command != pending.end() && command->first.tick == tick;) {
+        if (const auto* reveal = std::get_if<RevealAllPayload>(&command->second.payload)) {
+            pending_reveals.push_back(reveal->player);
+            reveal_events.push_back(Event{tick, EventKind::order_accepted, command->first.player_id, command->first.sequence,
+                invalid_entity_id, OrderKind::reveal_all});
+            executed.push_back(command->second);
+            command = pending.erase(command);
+            continue;
+        }
         if (session_detail::land_economy_route(command->second.payload)) {
             economy_commands.push_back(command->second);
+            executed.push_back(command->second);
+            command = pending.erase(command);
+            continue;
+        }
+        // WLAB-02..11, WLAB-77 (#3238): an ability command switches slots and touches no order, path or formation.
+        if (std::holds_alternative<AbilityPayload>(command->second.payload)
+            || std::holds_alternative<AreaAbilityPayload>(command->second.payload)) {
+            land_ability_command(live, command->second, diagnostics);
             executed.push_back(command->second);
             command = pending.erase(command);
             continue;
@@ -509,6 +582,12 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(TacticalSession& ses
                 continue;
             }
             const auto index = static_cast<std::size_t>(squad - squads.begin());
+            // WLAB-16 (#7084): a squad that is jumping takes no order until it has landed (retail answer unverified, DEV-24).
+            if (session_detail::land_squad_jumping(*land, index)) {
+                diagnostics.push_back(detail::diagnostic(diagnostic_codes::command_rejected,
+                    "land squad is jumping; it takes no order until it has landed", {}, core::Severity::warning));
+                continue;
+            }
             // G-04: any other order replaces a walking entrant's garrison order (a squad inside is not addressable).
             if (!garrison_move) if (const auto walking = land->garrison_entries.find(id); walking != land->garrison_entries.end()
                 && (walking->second.phase == session_detail::LandGarrisonPhase::moving
@@ -725,16 +804,32 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(TacticalSession& ses
     }
     const auto formation_speeds = session_detail::prepare_land_formation_speeds(*land, executor);
     if (!formation_speeds) return core::Result<TacticalTick>::failure(formation_speeds.error());
+    if (!session_detail::land_refresh_pads(*land, pads)) return core::Result<TacticalTick>::failure(detail::diagnostic(
+        diagnostic_codes::invalid_setup, "land pad body is outside the supported range"));
     auto moved = [&] {
         core::tick_profile::Scope phase("land-member-proposals");
         return land->movement.step(land->occupancy, executor, Fixed::from_ratio(1, logical_frames_per_second).value(), true,
             land->formation_speeds);
     }();
     if (!moved) return core::Result<TacticalTick>::failure(moved.error());
+    // WLPA-57 (#6062): each squad's side for the contact rules, from its owner and the immutable player table (WHZ-51).
+    {
+        const auto squads = land->movement.squads();
+        land->contact_sides.assign(squads.size(), -1);
+        for (std::size_t i = 0; i < squads.size(); ++i) {
+            const auto unit = std::lower_bound(live.begin(), live.end(), squads[i].object,
+                [](const auto& row, EntityId key) { return row.state.entity_id < key; });
+            if (unit == live.end() || unit->state.entity_id != squads[i].object) continue;
+            const auto player = std::lower_bound(snapshot_players.begin(), snapshot_players.end(), unit->state.owner,
+                [](const SnapshotPlayer& row, PlayerId value) { return row.player_id < value; });
+            if (player != snapshot_players.end() && player->player_id == unit->state.owner && !player->neutral)
+                land->contact_sides[i] = static_cast<std::int64_t>(player->team_id);
+        }
+    }
     // LR1-03/D5: a late contact path may affect the next ordinary invocation, never a second move here.
     auto contacts = [&] {
         core::tick_profile::Scope phase("land-contacts");
-        return land->movement.service_contacts(land->occupancy, executor, tick);
+        return land->movement.service_contacts(land->occupancy, executor, tick, land->contact_sides);
     }();
     if (!contacts) return core::Result<TacticalTick>::failure(contacts.error());
     {
@@ -783,11 +878,19 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(TacticalSession& ses
             return core::Result<TacticalTick>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
                 "land publication pose is outside the supported range"));
     }
-    std::vector<Event> events;
+    std::vector<Event> events = std::move(reveal_events);
     std::vector<CombatEvent> combat_events;
     // G-04..G-07: the named garrison service seam, after the movement and occupancy commit and before combat.
     if (auto garrisoned = land_garrison_service(live, executor); !garrisoned)
         return core::Result<TacticalTick>::failure(garrisoned.error());
+    // WLAB-09 (#3238): the abilities whose time limit is up end before combat reads their multipliers.
+    land_ability_service(live);
+    // WLAB-08: the Force-disabling carriers scan after the movement commit; the window is read by the next tick's commands.
+    land_force_disable_service(live);
+    // WLAB-71 (#3239): the permanent weapon swap holds its index before combat reads it.
+    land_weapon_swap_service(live);
+    // WLAB-16 (#7084): the jet-pack flights take the published pose of their units before combat reads it.
+    land_jump_service(live);
     Tick phases(session, this, executor);
     if (auto counted = phases.land_victory_census(live); !counted)
         return core::Result<TacticalTick>::failure(counted.error());
@@ -795,6 +898,8 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(TacticalSession& ses
         return core::Result<TacticalTick>::failure(fought.error());
     if (auto serviced = phases.land_economy(live, economy_commands, events, diagnostics); !serviced)
         return core::Result<TacticalTick>::failure(serviced.error());
+    if (auto garrisons = phases.land_free_garrisons(live); !garrisons)
+        return core::Result<TacticalTick>::failure(garrisons.error());
     if (auto landed = phases.land_reinforcements(live, events, diagnostics); !landed)
         return core::Result<TacticalTick>::failure(landed.error());
     phases.land_commit_victory(events);
@@ -816,6 +921,10 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(TacticalSession& ses
         if (auto shown = phases.land_fire_flashes(sensing.value(), combat_events, flashes); !shown)
             return core::Result<TacticalTick>::failure(shown.error());
         auto next = *fog;
+        for (const auto player : pending_reveals) {
+            if (auto revealed = next.reveal_all(player, executor); !revealed)
+                return core::Result<TacticalTick>::failure(revealed.error());
+        }
         if (auto advanced = next.advance(tick, true, revealers(sensing.value(), states), executor, flashes); !advanced)
             return core::Result<TacticalTick>::failure(advanced.error());
         fog = std::move(next);

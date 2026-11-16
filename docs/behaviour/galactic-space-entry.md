@@ -229,14 +229,14 @@ battlefield centre, keeping only the heading; an object standing exactly on the 
 direction to face and gets heading zero. Rig capture 2026-10-16 (Coruscant skirmish, script-spawned
 `Death_Star_II`): its height was -3100, which is the target prop's authored map height (-4300) plus 1200; the prop's
 `Layer_Z_Adjust` (-2500 there) is not added to the target's height. The remake applies the rule when the start is built (skirmish, `place_tactical_super_weapons`)
-and after the class form-up (campaign entry, `form_space_entry`). Not modelled: the following move into attack range
-(attacker only), the in-range-and-ready state the defender starts in, and the super weapon's attack stages; the
-free-space search the debug build runs when a script spawns the object (xy only, not part of a campaign entry).
+and after the class form-up (campaign entry). The move into attack range, the ready state a defender
+starts in and the command are TSW-02 to TSW-07 and the fire sequence TSW-08 to TSW-12 (space-tactical-superweapon.md). Not modelled: the free-space search the debug build runs when a script spawns the object (xy only, not part of a campaign entry).
 
 ## Boundaries retained for qualification
 
-- Generic map choice/cache and destroyed-planet backdrop replacement have qualified
-  rules (WGT-55..57), but their producers still produce named refusals.
+- Generic map choice/cache has qualified rules (WGT-55/56) whose producer still produces named refusals.
+  A destroyed planet's battle (WGT-57) starts on the authored map without the planet backdrop, with the target's
+  `Death_By_TSW_Replacements` props standing in its place; the mid-battle producer (WGT-101) is the open part.
 - The mod ground prevention-source producer (WGT-62, no stock producer) remains
   an explicit placement seam. Initial class form-up implements WGT-45..48,
   including the current-pose collision-model bounds, team bounds/offsets,
@@ -300,10 +300,12 @@ launches a station garrison and exports/replays both parent and child on 1/2/4/8
 installed FoC XML and maps, stages a unique passenger ship, and installs the
 campaign AI host. Native retreat snapshot eligibility drives its retreat goal
 and withdrawal command (WGT-33, WR-45/46/50..56).
-The immutable cinematic seat setting disables playback for the AI (WR-50,
-FC-R02). The engine completes its escape at initialization without a playback
-command. The proof reaches escape and committed battle end without a viewer,
-then compares its hashes and replay bytes on 1/2/4/8 workers.
+The immutable cinematic seat setting resolves to enabled for every seat a
+battle does not state, an AI seat included (WR-50, FC-R02, RC-09 of the retreat
+frame schedule); a seat stated as disabled completes its escape at
+initialization without a playback command. The proof states its AI seat as
+disabled, reaches escape and committed battle end without a viewer, then
+compares its hashes and replay bytes on 1/2/4/8 workers.
 The prepared campaign metadata is projected to each battle's reachable types:
 map objects, deployed forces, reserve pools, riders, applied upgrades and the
 transitive campaign production, squadron, spawner, ability and projectile closure.

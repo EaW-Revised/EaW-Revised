@@ -100,6 +100,55 @@ std::string_view setup_notice(const SetupNotice notice) noexcept {
     return index < notices.size() ? notices[index] : std::string_view{};
 }
 
+namespace {
+
+// The first EAWR-... code in the text: upper-case letters, digits and hyphens, without a trailing hyphen.
+std::string first_error_code(const std::string_view text) {
+    constexpr std::string_view prefix = "EAWR-";
+    for (std::size_t at = text.find(prefix); at != std::string_view::npos; at = text.find(prefix, at + 1)) {
+        std::size_t end = at + prefix.size();
+        while (end < text.size() && ((text[end] >= 'A' && text[end] <= 'Z') || (text[end] >= '0' && text[end] <= '9') || text[end] == '-')) ++end;
+        while (end > at + prefix.size() && text[end - 1] == '-') --end;
+        if (end > at + prefix.size()) return std::string(text.substr(at, end - at));
+    }
+    return {};
+}
+
+// The first line with text, trimmed, and cut to what a box line can show (never inside a UTF-8 sequence).
+std::string first_text_line(const std::string_view text) {
+    constexpr std::size_t limit = 220;
+    std::size_t begin = 0;
+    while (begin < text.size()) {
+        std::size_t end = text.find('\n', begin);
+        if (end == std::string_view::npos) end = text.size();
+        auto line = text.substr(begin, end - begin);
+        const auto blank = [](const char c) { return c == ' ' || c == '\t' || c == '\r'; };
+        while (!line.empty() && blank(line.front())) line.remove_prefix(1);
+        while (!line.empty() && blank(line.back())) line.remove_suffix(1);
+        if (!line.empty()) {
+            if (line.size() <= limit) return std::string(line);
+            std::size_t cut = limit;
+            while (cut > 0 && (static_cast<unsigned char>(line[cut]) & 0xC0U) == 0x80U) --cut;
+            return std::string(line.substr(0, cut)) + "...";
+        }
+        begin = end + 1;
+    }
+    return {};
+}
+
+} // namespace
+
+SetupStartRefusal setup_start_refusal(const std::string_view reason, const std::string_view headline) {
+    SetupStartRefusal refusal;
+    refusal.code = first_error_code(reason);
+    refusal.first_line = first_text_line(reason);
+    if (refusal.first_line.empty()) refusal.first_line = "No reason was reported.";
+    refusal.lines[0] = std::string(headline) + (refusal.code.empty() ? std::string{} : " (" + refusal.code + ")");
+    refusal.lines[1] = refusal.first_line;
+    refusal.lines[2] = "The full error is in the viewer log and the run report.";
+    return refusal;
+}
+
 std::span<const SetupWinCondition> setup_win_conditions() noexcept { return win_conditions; }
 
 std::optional<std::size_t> setup_win_condition_index(const std::string_view name) noexcept {

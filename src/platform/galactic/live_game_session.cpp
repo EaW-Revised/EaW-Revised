@@ -1,4 +1,7 @@
 #include "eawr/platform/live_game_session.hpp"
+#include "eawr/core/degradation_ledger.hpp"
+#include "eawr/platform/degradation_summary.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "eawr/diagnostics/gc_memory_watch.hpp"
 #include "eawr/core/gc_load_trace.hpp"
 #include "eawr/platform/live_game_lockstep.hpp"
@@ -10,6 +13,7 @@
 #include "eawr/core/ascii.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/core/gc_profile.hpp"
+#include "eawr/core/gc_tick_trace.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
 
@@ -17,6 +21,10 @@
 #include "eawr/sim/galactic/victory.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "eawr/campaign/live_setup.hpp"
+#include "eawr/campaign/starting_forces.hpp"
+#include "eawr/campaign/galactic_world_immediate_host.hpp"
+#include "eawr/campaign/auto_resolve_live.hpp"
+#include "eawr/campaign/shared_unit_tables.hpp"
 #include "eawr/campaign/live_conflict.hpp"
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -219,6 +227,7 @@ public:
     std::vector<NativeAiPlayer> native_ai_players;
     std::vector<std::string> native_ai_diagnostics;
     std::function<std::vector<std::string>()> native_ai_goal_reader;
+    std::shared_ptr<const vfs::Vfs> files; // the mounted data, for the degradation ledger's script-fault sources
 };
 PreparedLiveCampaign::PreparedLiveCampaign(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 PreparedLiveCampaign::~PreparedLiveCampaign() = default;
@@ -226,7 +235,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::create
     std::shared_ptr<const vfs::Vfs> filesystem_owner, const data::Catalog& catalog, const data::galactic::GalacticData& data,
     const units::GalacticTypeTable& types, std::string_view name,
     campaign::CampaignSetupOptions options, std::string_view difficulty, bool install_native_ai,
-    std::array<std::uint64_t, 6> ai_service_periods, bool observe_native_ai) {
+    std::array<std::uint64_t, 6> ai_service_periods, bool observe_native_ai, CampaignPrepareObserver* observer) {
     using Result = core::Result<std::unique_ptr<PreparedLiveCampaign>>;
     if (!filesystem_owner) return Result::failure(diagnostic("EAWR-SAVE-0104", "Missing campaign filesystem owner."));
     const auto& filesystem = *filesystem_owner;
@@ -244,7 +253,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::create
     auto plan = campaign::plan_live_campaign_setup(filesystem, data, types, name, std::move(options), difficulty);
     if (!plan) return Result::failure(plan.error());
     auto prepared = from_plan(std::move(filesystem_owner), catalog, data, types, std::move(plan).value(),
-        difficulty, install_native_ai, ai_service_periods, observe_native_ai);
+        difficulty, install_native_ai, ai_service_periods, observe_native_ai, {}, {}, observer);
     if (prepared) prepared.value()->impl_->saved_campaign = std::move(saved_campaign);
     return prepared;
 }
@@ -282,7 +291,8 @@ std::optional<CampaignRetreatPolicy> campaign_retreat_policy(const campaign::Cam
 core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_plan(
     std::shared_ptr<const vfs::Vfs> filesystem_owner, const data::Catalog& catalog, const data::galactic::GalacticData& data,
     const units::GalacticTypeTable& types, campaign::CampaignSetupPlan plan, std::string_view difficulty,
-    bool install_native_ai, std::array<std::uint64_t, 6> ai_service_periods, bool observe_native_ai, std::span<const std::uint8_t> exact_checkpoint, std::array<std::uint8_t, 32> checkpoint_mod_list) {
+    bool install_native_ai, std::array<std::uint64_t, 6> ai_service_periods, bool observe_native_ai, std::span<const std::uint8_t> exact_checkpoint, std::array<std::uint8_t, 32> checkpoint_mod_list,
+    CampaignPrepareObserver* observer) {
     using Result = core::Result<std::unique_ptr<PreparedLiveCampaign>>;
     if (!filesystem_owner) return Result::failure(diagnostic("EAWR-SAVE-0104", "Missing campaign filesystem owner."));
     const auto& filesystem = *filesystem_owner;
@@ -309,9 +319,26 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
         step.emplace("prep.root");
         fresh_root.emplace(campaign::CampaignRoot::create(campaign::CampaignSetupPlan(plan), services.value()));
     }
+    // The main thread would now wait for the space preparation. The auto-resolver's inputs depend on the files, catalog,
+    // data, types and plan only (not on the space provider or the session), so they are built in that wait and shared,
+    // immutable, by the fresh conflict setup below and by every checkpoint restore. A refusal here is not raised: the
+    // later setup rebuilds the inputs itself and refuses at its usual point with its usual error. With tag tracing the
+    // serial path stays (the setup builds them inline).
+    // The unit-table load behind the resolver inputs, the AI selection content and the object-query catalog is one load of
+    // the same types: it is made once here and handed to each of them (each uses it only where its own list is the same).
+    // It is released after the AI runtime preparation and is not kept by the restore closure.
+    std::shared_ptr<const campaign::AutoResolverInputs> resolver_inputs;
+    std::shared_ptr<const campaign::SharedUnitTables> shared_tables;
+    if (overlap) {
+        step.emplace("prep.shared_unit_tables");
+        if (auto loaded = campaign::prepare_shared_unit_tables(filesystem, catalog, plan); loaded) shared_tables = std::move(loaded).value();
+        step.emplace("prep.resolver_inputs");
+        if (auto built = campaign::prepare_auto_resolver_inputs(filesystem, catalog, data, types, plan, shared_tables); built) resolver_inputs = std::move(built).value();
+    }
     step.reset();
     auto provider = space_work.get();
     if (!provider) return Result::failure(provider.error());
+    if (observer != nullptr) observer->space_entry_joined();
     step.emplace("prep.conflicts_and_copies");
     auto configuration = std::make_shared<CampaignServiceConfiguration>();
     const auto space = provider.value();
@@ -323,8 +350,8 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
     configuration->restore.configure_session = [filesystem = std::move(filesystem_owner), catalog = memory_watch.watch("gc.restore.catalog", std::make_shared<data::Catalog>(catalog)),
         data = memory_watch.watch("gc.restore.galactic_data", std::make_shared<data::galactic::GalacticData>(data)),
         types = memory_watch.watch("gc.restore.types", std::make_shared<units::GalacticTypeTable>(types)),
-        plan = std::make_shared<campaign::CampaignSetupPlan>(plan), space](auto& game) {
-        return campaign::configure_live_campaign_conflicts(game, *filesystem, *catalog, *data, *types, *plan, space);
+        plan = std::make_shared<campaign::CampaignSetupPlan>(plan), space, resolver_inputs](auto& game) {
+        return campaign::configure_live_campaign_conflicts(game, *filesystem, *catalog, *data, *types, *plan, space, resolver_inputs);
     };
     configuration->presentation = [space](const auto& conflict) {
         auto content = space->content(conflict);
@@ -420,6 +447,96 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
     step.emplace("prep.ai_runtime");
     std::shared_ptr<const campaign::GalacticAiRuntimeSetup> installed_runtime;
     const auto observed_view = std::make_shared<campaign::GalacticAiRuntimeView>();
+    std::function<core::Result<void>(campaign::GameSession&)> install_world_objects;
+    if (!install_native_ai || !has_ai) {
+        auto content = campaign::load_world_object_scripts(filesystem, catalog, campaign_plan);
+        if (!content) return Result::failure(content.error());
+        if (!content.value()->types().empty()) {
+            campaign::GalacticStoryPlayers players;
+            for (const auto& faction : data.factions) players.factions.push_back(faction.name);
+            for (const auto& binding : campaign_plan.player_bindings())
+                players.players.push_back({binding.player.player_id, binding.faction, "Normal",
+                    campaign::story_player_human(campaign_plan, binding.player.player_id)}); // #7102
+            players.local_player = campaign_plan.solo_reference_human();
+            players.shared_local_player = campaign::shared_story_local_player(campaign_plan);
+            auto next = galactic::TypeId{};
+            for (const auto& binding : campaign_plan.type_bindings()) {
+                players.types.emplace_back(binding.original_type, binding.id);
+                next = std::max(next, binding.id);
+                if (const auto* type = types.find(binding.original_type); type && type->build_cost_credits)
+                    players.type_build_costs.emplace(binding.id, *type->build_cost_credits);
+            }
+            for (const auto& location : campaign_plan.locations()) if (location.planet) {
+                if (next == std::numeric_limits<galactic::TypeId>::max())
+                    return Result::failure(diagnostic(galactic::diagnostic_codes::invalid_setup, "Planet type identity exhausted."));
+                players.types.emplace_back(location.original_type, ++next);
+                players.planets.emplace_back(location.original_type, location.planet->id);
+            }
+            units::LoadInput input; input.catalog = &catalog; input.filesystem = &filesystem;
+            for (const auto& [name, id] : players.types) { (void)id; input.types.push_back(name); }
+            // The shared load answers only when it was made from these files and catalog and requested with exactly this list; otherwise load for this step.
+            std::optional<units::UnitTables> own_vocabulary;
+            const bool shared_hit = shared_tables && shared_tables->built_for(filesystem, catalog) && shared_tables->requested_exactly(input.types);
+            if (!shared_hit) {
+                auto vocabulary = units::load_unit_tables(input);
+                if (!vocabulary) return Result::failure(vocabulary.error());
+                own_vocabulary.emplace(std::move(vocabulary).value());
+            }
+            if (core::gc_load::trace.active()) core::gc_load::trace.mark(std::string("prep.ai_runtime.object_query_unit_tables.shared=") + (shared_hit ? "hit" : "own"));
+            auto query_catalog = campaign::make_galactic_object_query_catalog(shared_hit ? shared_tables->tables() : *own_vocabulary, players.types);
+            if (!query_catalog) return Result::failure(query_catalog.error());
+            campaign::GalacticObjectEffectsFactory effects = [starting = services.value().stock_starting_forces,
+                query_catalog = std::move(query_catalog).value(), players, perception = content.value()->perception()](galactic::GalacticSession& world,
+                const sim::PartitionExecutor& executor) -> core::Result<std::shared_ptr<script::authoritative::ImmediateEffectHost>> {
+                campaign::GalacticWorldImmediateRules rules;
+                rules.placement = [starting](const auto& request, const auto& view, auto first) {
+                    return campaign::stock_native_force_shadow_builder(starting, {request.player, request.target, request.type, {}})(view, first);
+                };
+                for (const auto& player : players.players)
+                    rules.credit_multipliers.emplace(player.id, sim::math::Fixed::from_raw(sim::math::Fixed::scale));
+                rules.executor = [&executor] { return &executor; };
+                campaign::add_galactic_object_world_rules(rules, query_catalog, executor, perception);
+                return core::Result<std::shared_ptr<script::authoritative::ImmediateEffectHost>>::success(
+                    campaign::make_galactic_world_immediate_host(world, std::move(rules), galactic::galactic_max_objects));
+            };
+            script::authoritative::SessionConfig config; config.seed = campaign_plan.galaxy().seed; config.galactic_clock = true;
+            config.tick_duration = {1, galactic::galactic_frames_per_second};
+            const auto prepare = [content = content.value(), players, effects, config]() {
+                using Prepared = checkpoint::GameLoadOptions::PreparedGalacticScripts;
+                using PreparedResult = core::Result<Prepared>;
+                auto ai = script::authoritative::ScriptScheduler::create(config, {});
+                if (!ai) return PreparedResult::failure(ai.error());
+                auto story = script::authoritative::ScriptScheduler::create(config, {});
+                if (!story) return PreparedResult::failure(story.error());
+                auto objects = content->create_scheduler(config);
+                if (!objects) return PreparedResult::failure(objects.error());
+                auto link = std::make_shared<campaign::GalacticStoryLink>();
+                if (auto bound = campaign::register_galactic_object_bindings(objects.value(), players, link); !bound)
+                    return PreparedResult::failure(bound.error());
+                Prepared result{{std::move(ai).value(), std::move(story).value()}, {}, {}, {}, {}, std::move(objects).value(),
+                    [content, link, effects](campaign::GameSession& game) {
+                        return campaign::configure_world_object_scripts(game, content, link, effects);
+                    }};
+                return PreparedResult::success(std::move(result));
+            };
+            configuration->restore.prepare_galactic = prepare;
+            const auto prior_session = configuration->restore.configure_session;
+            configuration->restore.configure_session = [prior_session, starting = services.value().stock_starting_forces](campaign::GameSession& game) {
+                if (prior_session) if (auto configured = prior_session(game); !configured) return configured;
+                return game.configure_native_replay_owners([starting](galactic::GalacticSession& world) {
+                    script::foc::galactic_ai::NativeActions::bind_economic_replay_owners(world,
+                        [starting](const auto& request, const auto& snapshot, auto first) {
+                            return campaign::stock_native_force_builder(starting, {request.player, request.target, request.type, {}})(snapshot, first);
+                        });
+                    return core::Result<void>::success();
+                });
+            };
+            install_world_objects = [content = content.value(), players, effects, config](campaign::GameSession& game) {
+                return campaign::install_world_object_scripts(game, content, config, players,
+                    std::make_shared<campaign::GalacticStoryLink>(), effects);
+            };
+        }
+    }
     if (install_native_ai && has_ai) {
         const auto* fog = data.constant("AIUsesFogOfWarGalactic");
         const auto uses_fog = fog ? data::retail::boolean(fog->text) : std::nullopt;
@@ -429,7 +546,8 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
         // These are resource ceilings, not gameplay pacing or stock-data limits.
         auto runtime = campaign::prepare_stock_galactic_ai_runtime(filesystem, catalog, data, types, campaign_plan, {},
             std::make_shared<sim::InlineExecutor>(), *uses_fog, galactic::galactic_max_objects, galactic::galactic_max_objects, difficulty,
-            ai_service_periods);
+            ai_service_periods, script::foc::galactic_ai::standard_async_schedule, shared_tables);
+        shared_tables.reset();
         if (!runtime) return Result::failure(runtime.error());
         installed_runtime = runtime.value();
         for (const auto& selected : runtime.value()->lifecycle.players)
@@ -459,6 +577,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
         if (auto configured = campaign::configure_galactic_ai_runtime(*configuration, runtime.value(), std::move(factory).value()); !configured)
             return Result::failure(configured.error());
     }
+    shared_tables.reset(); // also when no native AI was prepared: the shared load is never kept past the runtime preparation
     // Restore prepares fresh mounted services without startup placement or AI decisions.
     auto root = [&]() -> core::Result<campaign::CampaignRoot> {
         if (fresh_root) return std::move(*fresh_root);
@@ -476,7 +595,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
     if (!root) return Result::failure(root.error());
     if (exact_checkpoint.empty()) {
         const core::gc_load::Scope conflict_scope("prep.ai_usability.conflict_setup");
-        if (auto configured = campaign::configure_live_campaign_conflicts(root.value(), filesystem, catalog, data, types, provider.value()); !configured)
+        if (auto configured = campaign::configure_live_campaign_conflicts(root.value(), filesystem, catalog, data, types, provider.value(), resolver_inputs); !configured)
             return Result::failure(configured.error());
     }
     // Install before publishing the prepared snapshot: owner transfer must not
@@ -487,12 +606,17 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
         auto configured = configuration->configure_native_ai(*root.value().game());
         if (!configured) return Result::failure(configured.error());
     }
+    if (exact_checkpoint.empty() && install_world_objects) {
+        auto configured = install_world_objects(*root.value().game());
+        if (!configured) return Result::failure(configured.error());
+    }
     // The prepared owner already completed startup; restore uses its independent
     // reconstruction factory rather than rerunning this fresh-campaign callback.
     configuration->configure_native_ai = {};
     step.reset();
     auto impl = std::make_unique<Impl>(std::move(root).value(), std::move(configuration));
     impl->space_load_notes = provider.value()->load_notes();
+    impl->files = scoring_files;
     impl->native_ai_players = std::move(native_ai_players);
     if (installed_runtime) impl->native_ai_diagnostics = installed_runtime->load_diagnostics; // includes what the install skipped
     if ((installed_runtime && observe_native_ai) || diagnostics::GcMemory::enabled())
@@ -590,6 +714,7 @@ public:
         initialize();
     }
     void initialize(bool recovering = false) {
+        script_faults_ = ScriptFaultLedger(options_.fault_files);
         // Root startup already published its initial notes on this caller.
         if (std::holds_alternative<campaign::CampaignRoot>(owner_))
             published_load_note_count_ = session_->galaxy().load_note_count();
@@ -800,6 +925,10 @@ public:
             }
         }
         published_.notify_all();
+        // The simulation thread is gone: write out the rows it queued (the opt-in tick trace stays open for a later session
+        // of this process, and nothing joins its writer at process exit; #7109).
+        // A bounded wait: a stuck trace file never holds the session end.
+        if (auto& trace = gc_profile::TickTrace::instance(); trace.active()) static_cast<void>(trace.flush());
     }
 
     core::Result<std::shared_ptr<const CampaignEndView>> consume_campaign_result(
@@ -973,10 +1102,10 @@ public:
 
     void publish_story_notices(core::Result<campaign::GameTick>& stepped, const galactic::PlayerId observer) {
         refresh_click_listeners();
-        for (auto& event : stepped.value().story_presentation) { // WST-58: unhashed holocron goal requests
-            story_presentation_.push_back({++story_cursor_, std::move(event)});
-            if (story_presentation_.size() > 256) story_presentation_.pop_front(); // a presentation bound, not a gameplay limit
-        }
+        // WST-58: unhashed holocron goal requests; the feed also keeps each owner's objective state for a reader that falls behind.
+        story_feed_.publish(stepped.value().story_presentation, [this](sim::galactic::story::Player owner) {
+            return session_ ? session_->story_goals(owner) : nullptr;
+        });
         story_notice_publications_.clear();
         frame_.story_notices.reset();
         if (!stepped.value().story_notices.empty()) {
@@ -1049,12 +1178,16 @@ public:
         const Clock::time_point source_done, const Clock::time_point step_done,
         const std::vector<LiveGameOrder>& orders, const std::vector<galactic::GameCommand>& commands,
         std::vector<LiveBattleChoiceResponse>& choice_responses, std::unique_lock<std::mutex>& lock) {
+        const gc_profile::Scope publish_scope(gc_profile::Phase::tick_publish); // lands in the next traced row
         {
             const auto ms = [](const Clock::time_point from, const Clock::time_point to) {
                 return std::chrono::duration<double, std::milli>(to - from).count();
             };
             LiveTickCost cost{stepped.value().completed_tick, ms(step_started, step_done),
                 {{"command-source", ms(step_started, source_done)}, {"session-step", ms(source_done, step_done)}}};
+            // #6933: the opt-in per-tick series (EAWR_GC_TICK_TRACE); one bool test when off.
+            if (auto& trace = gc_profile::TickTrace::instance(); trace.active())
+                trace.record(cost.tick, cost.total_ms, cost.phases[0].ms, cost.phases[1].ms);
             costs_.push_back(std::move(cost));
             if (costs_.size() > tick_cost_history) costs_.pop_front();
         }
@@ -1091,6 +1224,9 @@ public:
             for (const auto& row : stepped.value().hero_returns)
                 if (row.owner == frame_.latest->observer()->solo_reference_human) solo_returns.push_back(row);
         frame_.hero_returns = hero_return_publication(std::move(solo_returns), previous_hero_returns);
+        if (stepped.value().campaign_switch) // WST-95: sticky until the host settles it
+            campaign_switch_pub_ = std::make_shared<const campaign::CampaignSwitchRequest>(*stepped.value().campaign_switch);
+        frame_.campaign_switch = campaign_switch_pub_;
         frame_.summary_hold = session_->battle_summary_hold();
         frame_.summary_closed = summary_closed_; frame_.summary_closed_seat = summary_closed_seat_;
         // Presentation may be slower than the real-time parent pacer.
@@ -1216,7 +1352,7 @@ public:
                 paused = battle_paused_;
             }
             const auto ready = [&] {
-                return stopping_ || !order_inbox_.empty() || !command_inbox_.empty()
+                return stopping_ || settle_switch_ || !order_inbox_.empty() || !command_inbox_.empty()
                     || (paused && (std::any_of(orders.begin(), orders.end(), due_order)
                         || std::any_of(commands.begin(), commands.end(), due_command)))
                     || (!paused && options_.pacing == Pacing::driven && target_ > tick);
@@ -1224,6 +1360,12 @@ public:
             if (paused || options_.pacing == Pacing::driven) wake_.wait(lock, ready);
             else wake_.wait_until(lock, schedule.next_due(), ready);
             if (stopping_) return false;
+            if (settle_switch_) { // WST-95: the host refused the campaign switch; this thread owns the session
+                settle_switch_ = false;
+                static_cast<void>(session_->settle_campaign_switch());
+                campaign_switch_pub_.reset();
+                frame_.campaign_switch.reset();
+            }
             battle_rate = battle_rate_;
             std::move(order_inbox_.begin(), order_inbox_.end(), std::back_inserter(orders));
             std::move(command_inbox_.begin(), command_inbox_.end(), std::back_inserter(commands));
@@ -1257,6 +1399,17 @@ public:
         const auto found = save_requests_.find(saved.event.value);
         if (found == save_requests_.end() || found->second.seat != saved.event.producer) return;
         const auto token = found->first; auto request = std::move(found->second); save_requests_.erase(found);
+        // A barrier that overlapped a delay or roster change saved nothing and failed nothing: ask again (the same token
+        // keeps the outcome "requested", so the player sees no error), a bounded number of times.
+        constexpr std::uint32_t max_save_retries = 16;
+        if (saved.failure && saved.retry && request.attempts < max_save_retries && !stopping_ && !ended_) {
+            ++request.attempts;
+            order_inbox_.push_back({request.seat, galactic::SaveRequest{static_cast<std::int64_t>(token),
+                request.quick, request.autosave, request.prebattle}, {}});
+            save_requests_.emplace(token, std::move(request));
+            wake_.notify_all();
+            return;
+        }
         auto& outcome = save_outcomes_.at(token); outcome.completed_tick = saved.completed_tick;
         if (saved.failure) { outcome.phase = LiveSavePhase::failed; outcome.diagnostic = std::move(saved.failure); return; }
         auto container = checkpoint::parse_checkpoint(saved.bytes);
@@ -1538,6 +1691,7 @@ public:
                     } else {
                         auto stepped = core::Result<campaign::GameTick>::success(std::move(*driven.value()));
                         rejected.insert(rejected.end(), stepped.value().diagnostics.begin(), stepped.value().diagnostics.end());
+                        if (!stepped.value().diagnostics.empty()) record_script_faults(stepped.value().diagnostics);
                         if (options_.tick_diagnostics && !stepped.value().diagnostics.empty()) options_.tick_diagnostics(stepped.value().diagnostics);
                         std::unique_lock lock(mutex_);
                         for (const auto seat : options_.step_driver->clock_refusals()) battle_pause_requests_.erase(seat);
@@ -1663,15 +1817,22 @@ public:
                 (due ? due_orders : kept_orders).push_back(std::move(order));
             }
             orders = std::move(kept_orders);
-            if (stepping && !in_battle) request_prebattle_autosave(tick, due_orders, orders);
+            if (stepping && !in_battle) {
+                const gc_profile::Scope autosave_scope(gc_profile::Phase::tick_autosave_request);
+                request_prebattle_autosave(tick, due_orders, orders);
+            }
             {
                 const std::lock_guard state_lock(state_mutex_);
                 { const std::lock_guard lock(mutex_); if (stopping_) return; }
-                submit_pending_input(tick, due_commands, command_order, due_orders, reject, accepted);
+                {
+                    const gc_profile::Scope submit_scope(gc_profile::Phase::tick_submit_input);
+                    submit_pending_input(tick, due_commands, command_order, due_orders, reject, accepted);
+                }
                 if (accepted || paced) {
                     if (!in_battle) {
                         for (const auto& entry : options_.entries) {
                             if (entry.tick != tick) continue;
+                            const gc_profile::Scope stage_scope(gc_profile::Phase::tick_stage_battle);
                             if (auto staged = session_->stage_battle(entry.conflict, entry.content, entry.script_requirement); !staged) {
                                 const std::lock_guard lock(mutex_);
                                 failure_ = staged.error();
@@ -1680,6 +1841,7 @@ public:
                         }
                     }
                     auto stepped = session_->step(executor);
+                    if (stepped && !stepped.value().diagnostics.empty()) record_script_faults(stepped.value().diagnostics);
                     if (stepped && options_.tick_diagnostics && !stepped.value().diagnostics.empty()) options_.tick_diagnostics(stepped.value().diagnostics);
                     const auto step_done = Clock::now();
                     std::unique_lock lock(mutex_);
@@ -1712,6 +1874,10 @@ public:
     Options options_;
     mutable std::mutex mutex_;
     mutable std::mutex state_mutex_;
+    // Counts the script faults a completed step published in the degradation ledger (observation only: nothing reads it
+    // back). Runs on the simulation thread after the step, never inside a worker's tick.
+    void record_script_faults(const std::span<const core::Diagnostic> rows) { script_faults_.record(rows); }
+    ScriptFaultLedger script_faults_;
     std::mutex join_mutex_;
     std::mutex source_mutex_;
     mutable std::condition_variable published_;
@@ -1740,8 +1906,7 @@ public:
     LiveEventLog battle_events_{LiveEventLog::Bounds{}};
     std::uint64_t galactic_cursor_{};
     std::deque<LiveGalacticEvent> galactic_events_;
-    std::uint64_t story_cursor_{};
-    std::deque<LiveStoryPresentation> story_presentation_;
+    LiveStoryFeed story_feed_;
     std::uint64_t click_revision_{};
     std::shared_ptr<const std::vector<std::string>> click_listeners_; // upper-cased, sorted; guarded by mutex_
     std::vector<galactic::GalacticFeedbackNotice> pending_feedback_; // simulation thread only
@@ -1768,6 +1933,8 @@ public:
     bool stopping_{};
     bool ended_{};
     bool presentation_ready_{};
+    bool settle_switch_{};                                                 // the host refused a campaign switch (WST-95)
+    std::shared_ptr<const campaign::CampaignSwitchRequest> campaign_switch_pub_; // the request frame() publishes until settled
     std::thread thread_;
     struct DiskSave { std::uint64_t token{}; LiveSaveRequest request; std::vector<std::uint8_t> bytes; };
     std::thread disk_thread_;
@@ -2110,6 +2277,7 @@ core::Result<std::unique_ptr<LiveGameSession>> LiveGameSession::start(
     if (options.load_note_sink && !prepared->impl_->space_load_notes.empty())
         options.load_note_sink(prepared->impl_->space_load_notes);
     if (!options.services) options.services = prepared->impl_->services;
+    if (!options.fault_files) options.fault_files = prepared->impl_->files;
     if (!options.saves.campaign) options.saves.campaign = std::move(prepared->impl_->saved_campaign);
     return start(std::move(prepared->impl_->root), std::move(options));
 }
@@ -2266,13 +2434,61 @@ void LiveGameSession::submit(LiveGameOrder order) {
     { const std::lock_guard lock(impl_->mutex_); if (impl_->stopping_ || impl_->ended_) return; impl_->order_inbox_.push_back(std::move(order)); }
     impl_->wake_.notify_all();
 }
+void LiveGameSession::submit_batch(std::vector<LiveGameOrder> orders) {
+    if (orders.empty()) return;
+    { const std::lock_guard lock(impl_->mutex_); if (impl_->stopping_ || impl_->ended_) return;
+      std::move(orders.begin(), orders.end(), std::back_inserter(impl_->order_inbox_)); }
+    impl_->wake_.notify_all();
+}
 void LiveGameSession::submit(galactic::GameCommand command) {
     { const std::lock_guard lock(impl_->mutex_); if (impl_->stopping_ || impl_->ended_) return; impl_->command_inbox_.push_back(std::move(command)); }
+    impl_->wake_.notify_all();
+}
+void LiveGameSession::settle_campaign_switch() {
+    { const std::lock_guard lock(impl_->mutex_); impl_->settle_switch_ = true; }
     impl_->wake_.notify_all();
 }
 void LiveGameSession::advance_to(const std::uint64_t tick) {
     { const std::lock_guard lock(impl_->mutex_); impl_->target_ = std::max(impl_->target_, tick); }
     impl_->wake_.notify_all();
+}
+
+UnattendedAdvance advance_unattended(LiveGameSession& live, const std::uint64_t tick, const std::chrono::milliseconds timeout,
+    sim::EntityId& answered_conflict, const bool fight, const std::chrono::milliseconds stall_limit) {
+    using Clock = std::chrono::steady_clock;
+    UnattendedAdvance out;
+    live.advance_to(tick);
+    const auto began = Clock::now();
+    auto moved_at = began;
+    auto last_tick = live.frame().session_tick;
+    while (!(out.reached = live.wait_for(tick, std::chrono::milliseconds(200)))) {
+        const auto now = Clock::now();
+        if (now - began >= timeout) { out.timed_out = true; return out; }
+        const auto frame = live.frame();
+        if (frame.session_tick != last_tick) { last_tick = frame.session_tick; moved_at = now; }
+        const auto waiting = awaited_input(frame);
+        if (!waiting) { moved_at = now; continue; } // running, or an auto-resolve in progress steps the paused galaxy itself
+        if (waiting->kind == LiveAwaitedInput::Kind::conflict_choice && waiting->conflict != answered_conflict && frame.latest) {
+            const auto answer = [&](const bool tactical) {
+                for (const auto& seat : frame.latest->seats()) {
+                    if (const auto order = battle_choice_order(frame, seat.seat_id, waiting->conflict, tactical)) {
+                        live.submit(*order);
+                        answered_conflict = waiting->conflict;
+                        ++out.answered;
+                        moved_at = now;
+                        return true;
+                    }
+                }
+                return false;
+            };
+            // The asked answer first. Resolve is refused for a forced-tactical conflict, a single-button alert and a queued
+            // campaign conflict (resolve_admitted): that is answered with Fight instead of stalling the run (#7003). A refused
+            // Fight is not retried as Resolve.
+            if (answer(fight) || (!fight && answer(true))) continue; // otherwise an unadmitted choice falls through to the named stall below
+        }
+        if (now - moved_at >= stall_limit) { out.stalled = waiting; return out; }
+    }
+    return out;
 }
 bool LiveGameSession::wait_for(const std::uint64_t tick, const std::chrono::milliseconds timeout) const {
     std::unique_lock lock(impl_->mutex_);
@@ -2365,14 +2581,9 @@ LiveGalacticEvents LiveGameSession::galactic_events_after(const std::uint64_t cu
 }
 LiveStoryPresentations LiveGameSession::story_presentation_after(const std::uint64_t cursor, const galactic::SeatId seat) const {
     const std::lock_guard lock(impl_->mutex_);
-    LiveStoryPresentations result; result.through = impl_->story_cursor_;
-    result.incomplete = !impl_->story_presentation_.empty() && cursor < impl_->story_presentation_.front().cursor - 1;
     const auto view = impl_->view_frames_.find(seat);
-    if (view == impl_->view_frames_.end() || !view->second.latest) return result;
-    const auto player = view->second.latest->view_player();
-    for (const auto& row : impl_->story_presentation_)
-        if (row.cursor > cursor && row.event.owner == player) result.events.push_back(row);
-    return result;
+    if (view == impl_->view_frames_.end() || !view->second.latest) return impl_->story_feed_.after(cursor, std::nullopt);
+    return impl_->story_feed_.after(cursor, view->second.latest->view_player());
 }
 bool LiveGameSession::story_listens_for_click(const std::string_view component) const {
     std::string wanted(component);

@@ -48,6 +48,13 @@ void MapMode::State::write_report_scene(std::ostream& output) const {
         << ", \"model_sha256\": " << json(skydome_model_hash)
         << ", \"status\": " << json(skydome_status)
         << ", \"drawn\": " << (skydome_drawn ? "true" : "false")
+        << ", \"dome_surfaces\": " << skydome_dome_surfaces
+        << ", \"sun_surfaces\": " << skydome_sun_surfaces
+        << ", \"skipped\": [";
+    for (std::size_t index = 0; index < skydome_skipped.size(); ++index) {
+        output << (index == 0 ? "" : ", ") << json(skydome_skipped[index]);
+    }
+    output << "]"
         << ", \"effect_program\": \"Skydome.fx\", \"effect_technique\": \"sph_t2\""
         << ", \"effect_pass\": \"sph_t2_p0\", \"legacy_route_supported\": false},\n"
         << "  \"water\": {\"records\": " << water_records

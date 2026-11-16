@@ -4,6 +4,7 @@
 set(EAWR_CAMPAIGN_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_runtime.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_story_scripts.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_object_perception.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_stock_runtime.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_usability.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_services.cpp"
@@ -22,6 +23,7 @@ set(EAWR_CAMPAIGN_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/live_setup.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/mp_agreement.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/mp_lobby_catalog.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/campaign_switch.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/live_conflict.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/story_plots.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/story_rewards_live.cpp"

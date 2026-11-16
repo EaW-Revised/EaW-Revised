@@ -223,6 +223,48 @@ end
 }
 
 
+// #6702: the plan-side object search visits every unit of the view whatever its filters keep, and is charged by the units
+// visited: a loop of searches that find nothing in a 2,000-unit view ends at the budget after a few thousand calls, not
+// after the hundred thousand its own steps would allow.
+void plan_scan_is_charged() {
+    World world;
+    auto unit = world.view->units.front();
+    for (std::uint64_t id = 100; id < 2100; ++id) { unit.id = id; world.view->units.push_back(unit); }
+    auth::ModuleManifest manifest;
+    expect(manifest.add("SCAN.LUA", "function Run() while true do Scan_Count() Find_All_Objects_Of_Type('FIGHTER') end end").has_value(),
+        "scan fixture loads");
+    auth::SessionConfig config;
+    auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+    if (!scripts) { expect(false, "scan scheduler starts"); return; }
+    std::uint64_t calls = 0;
+    expect(scripts.value().register_binding("Scan_Count", [&](auth::BindingContext&, const auth::ValueList&) {
+        ++calls;
+        return eawr::core::Result<auth::ValueList>::success({});
+    }).has_value(), "scan counter registers");
+    std::vector<eawr::core::Diagnostic> errors;
+    foc::detail::register_plan_bindings(scripts.value(), world.host, errors);
+    expect(errors.empty() && scripts.value().create_instance(1, "SCAN.LUA").has_value(), "plan bindings register");
+    auth::ScriptEvent event;
+    event.key = {1, auth::first_simulation_producer, 1, 0};
+    event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Run";
+    expect(scripts.value().submit_event(std::move(event)).has_value(), "scan call queues");
+    const eawr::sim::InlineExecutor executor;
+    const auto begin = std::chrono::steady_clock::now();
+    const auto report = scripts.value().service(executor);
+    const auto elapsed = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - begin).count();
+    const auto units = world.view->units.size();
+    // The measurement behind the plan scan's weight (ctest -V): wall time per unit of the view visited.
+    std::cout << "host-work-bench: plan object search: " << calls << " searches over " << units << " units, "
+              << elapsed / static_cast<double>(std::max<std::uint64_t>(calls * units, 1)) << " ns per unit visited\n";
+    expect(report && std::any_of(report.value().diagnostics.begin(), report.value().diagnostics.end(),
+            [](const auto& row) { return row.code == auth::codes::instruction_budget; }),
+        "a loop of searches ends at the instruction budget");
+    // Each call is charged at least one unit per unit of the view, so the 4,000,000-unit budget allows at most
+    // budget / units calls; the script's own steps alone would allow far more.
+    expect(calls >= 1 && calls <= 4'000'000 / units + 2,
+        "the search is charged by the units it visits: " + std::to_string(calls) + " calls over " + std::to_string(units) + " units");
+}
+
 void capture_target_application() {
     World world;
     auto nonpad = world.host->setup.content.types.front();
@@ -682,6 +724,109 @@ void collect_free_categories() {
     }
 }
 
+
+// PL-46: TaskForce.Test_Target_Contrast(boolean), the method stock and mod AI plans call after a conquest. It switches the contrast
+// test of the plan's goal on or off; the wrong number or type of parameters is a script error; no goal only warns.
+void test_target_contrast_binding() {
+    struct Case { std::string call; std::vector<auth::Value> arguments; bool valid; std::optional<bool> disabled; bool goal{true}; };
+    const std::array<Case, 6> cases{{
+        {"Check1", {auth::Value{false}}, true, true},
+        {"Check1", {auth::Value{true}}, true, false},
+        {"Check0", {}, false, std::nullopt},
+        {"Check2", {auth::Value{false}}, false, std::nullopt},
+        {"Check1", {auth::Value::text("no")}, false, std::nullopt},
+        {"Check1", {auth::Value{false}}, true, std::nullopt, false},
+    }};
+    for (const auto& test : cases) for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        World world;
+        ai::Engine engine(world.host, {}, {});
+        world.host->engine = &engine;
+        auto& player = ai::EngineContractAccess::collect_fixture(engine);
+        if (test.goal) {
+            ai::Goal goal; goal.id = 1; goal.plan = 1; goal.active = true; goal.potential.emplace();
+            player.active.push_back(std::move(goal));
+        }
+        auth::ModuleManifest manifest;
+        expect(manifest.add("CONTRAST.LUA", "function Check0(tf) tf.Test_Target_Contrast() end\n"
+            "function Check1(tf, v) tf.Test_Target_Contrast(v) end\n"
+            "function Check2(tf, v) tf.Test_Target_Contrast(v, v) end\n").has_value(), "PL-46: contrast module loads");
+        auth::SessionConfig config;
+        config.tick_duration = {1, 30};
+        auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+        if (!scripts) { expect(false, "PL-46: scheduler starts"); return; }
+        std::vector<eawr::core::Diagnostic> errors;
+        foc::detail::register_plan_bindings(scripts.value(), world.host, errors);
+        expect(errors.empty() && scripts.value().create_instance(1, "CONTRAST.LUA").has_value(), "PL-46: production bindings register");
+        auth::ScriptEvent event;
+        event.key = {1, auth::first_simulation_producer, 1, 0};
+        event.target = 1;
+        event.kind = auth::ScriptEvent::Kind::call;
+        event.name = test.call;
+        event.arguments = {auth::Value{auth::Handle{ai::handle_taskforce, 1}}};
+        for (const auto& argument : test.arguments) event.arguments.push_back(argument);
+        expect(scripts.value().submit_event(std::move(event)).has_value(), "PL-46: the call queues");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto report = scripts.value().service(executor);
+        if (!report) { expect(false, "PL-46: service succeeds"); return; }
+        expect(report.value().diagnostics.empty() == test.valid, "PL-46: only one boolean parameter is accepted: " + test.call);
+        if (!test.valid) { expect(report.value().commands.empty(), "PL-46: a rejected call stages nothing"); continue; }
+        expect(engine.after_service(report.value()).has_value(), "PL-46: the staged operation applies");
+        if (test.goal) {
+            const auto& potential = player.active.front().potential;
+            expect(potential && potential->target_contrast_disabled == test.disabled.value(),
+                "PL-46: the boolean switches the potential plan's contrast test (false disables it)");
+        }
+    }
+}
+
+void goal_type_name_binding() {
+    // PL-47: the TaskForce method returns the authored name of the goal its plan serves, "" when the goal is gone.
+    struct Case { std::string expected; bool goal; bool result; };
+    const std::array<Case, 4> cases{{
+        {"Corrupt_Planet", true, true},
+        {"Sabotage_Planet", true, false},
+        {"corrupt_planet", true, false}, // the name keeps its authored case
+        {"", false, true},
+    }};
+    for (const auto& test : cases) for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        World world;
+        ai::Engine engine(world.host, {}, {});
+        world.host->engine = &engine;
+        auto& player = ai::EngineContractAccess::collect_fixture(engine);
+        ai::GoalType type;
+        type.name = "Corrupt_Planet";
+        if (test.goal) {
+            player.functions.push_back({&type, "CORRUPT_PLANET", nullptr, {}});
+            ai::Goal goal; goal.id = 1; goal.plan = 1; goal.active = true; goal.function = player.functions.size() - 1;
+            player.active.push_back(std::move(goal));
+        }
+        auth::ModuleManifest manifest;
+        expect(manifest.add("GOALNAME.LUA", "function Name(tf, expected) tf.Set_Plan_Result(tf.Get_Goal_Type_Name() == expected) end\n").has_value(),
+            "PL-47: goal-name module loads");
+        auth::SessionConfig config;
+        config.tick_duration = {1, 30};
+        auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+        if (!scripts) { expect(false, "PL-47: scheduler starts"); return; }
+        std::vector<eawr::core::Diagnostic> errors;
+        foc::detail::register_plan_bindings(scripts.value(), world.host, errors);
+        expect(errors.empty() && scripts.value().create_instance(1, "GOALNAME.LUA").has_value(), "PL-47: production bindings register");
+        auth::ScriptEvent event;
+        event.key = {1, auth::first_simulation_producer, 1, 0};
+        event.target = 1;
+        event.kind = auth::ScriptEvent::Kind::call;
+        event.name = "Name";
+        event.arguments = {auth::Value{auth::Handle{ai::handle_taskforce, 1}}, auth::Value::text(test.expected)};
+        expect(scripts.value().submit_event(std::move(event)).has_value(), "PL-47: the call queues");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto report = scripts.value().service(executor);
+        if (!report) { expect(false, "PL-47: service succeeds"); return; }
+        expect(report.value().diagnostics.empty(), "PL-47: Get_Goal_Type_Name is a bound TaskForce method: " + test.expected);
+        if (!report.value().diagnostics.empty()) continue;
+        expect(engine.after_service(report.value()).has_value(), "PL-47: the staged plan result applies");
+        const auto* plan = engine.plan(1);
+        expect(plan && plan->result == test.result, "PL-47: the name equals the goal type's authored name (empty without a goal): " + test.expected);
+    }
+}
 
 void order_destinations() {
     struct Case {
@@ -1538,6 +1683,7 @@ void mod_ai_calls() {
             allied_after_name = object.Get_Owner().Is_Ally(player)
         end
         function Unblock(tf) tf.Unblock_Goal_Proposal() end
+        function TeamQuery(player) team_value = player.Get_Team() end
         function SkippedOverride(object)
             skipped_no_result = object.Set_Targeting_Priorities('Custom_Set') == nil
             continued = true
@@ -1704,6 +1850,13 @@ void mod_ai_calls() {
     const auto same_order = scripts.value().read_global(1, "same_order");
     expect(same_order && same_order.value() && std::get<bool>(same_order.value()->data),
         "RGC-112/113: either argument order returns the same objects in manager traversal order");
+    // RGC-210: a player's team number is the match's team for that player, shared by allies; an unknown player is -1.
+    for (const auto& [id, expected] : {std::pair{1U, 1}, {2U, 2}, {3U, 2}, {99U, -1}}) {
+        invoke(1, "TeamQuery", {player_handle(id)});
+        const auto team = scripts.value().read_global(1, "team_value");
+        expect(team && team.value() && std::get<Real>(team.value()->data) == ai::real(expected),
+            "RGC-210: Get_Team answers the player's team, and -1 for a player the match does not know");
+    }
     std::uint64_t invalid_instance = 3;
     extra.id = 14; extra.owner = 2; extra.type = 3; world.view->units.push_back(extra);
     extra.id = 15; extra.type = 4; world.view->units.push_back(extra);

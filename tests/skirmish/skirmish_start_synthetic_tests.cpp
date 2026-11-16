@@ -215,10 +215,17 @@ void synthetic_roster_gate() {
     {
         eawr::units::UnitTables tables;
         auto rejected = unit_type("Rejected_Unit", UnitKind::ship, "Empire", 100);
+        eawr::units::Ability misplaced;
+        misplaced.type = "HARMONIC_BOMB";
+        misplaced.target_position_z_offset = whole(1);
+        rejected.abilities.push_back(misplaced); // A spawn offset the project cannot place (U-10): rejected by the ability loader.
+        tables.units.push_back(rejected);
+        // #5704 (WHE-79): a replenish row with no team type is not a rejection; the lenient load drops the row and keeps the type.
+        auto bare_replenish = unit_type("Bare_Replenish_Unit", UnitKind::ship, "Empire", 100);
         eawr::units::Ability replenish;
         replenish.type = "REPLENISH_WINGMEN";
-        rejected.abilities.push_back(replenish); // No replenishment team: rejected by the ability loader.
-        tables.units.push_back(rejected);
+        bare_replenish.abilities.push_back(replenish);
+        tables.units.push_back(bare_replenish);
         auto retained = unit_type("Warning_Unit", UnitKind::ship, "Empire", 100);
         eawr::units::Ability bomb;
         bomb.type = "HARMONIC_BOMB";
@@ -230,8 +237,8 @@ void synthetic_roster_gate() {
             eawr::units::ContentErrors::skip_object, &diagnostics);
         expect(content && skirmish::skipped_type_ids(diagnostics) == std::vector<std::string>{"Rejected_Unit"},
             "#5064: only the actually rejected type enters the skip set");
-        expect(skirmish::content_load_summary(diagnostics) == "1 unit type skipped, 1 unit with content warnings",
-            "#5064: rejected and retained warning types have separate counts");
+        expect(skirmish::content_load_summary(diagnostics) == "1 unit type skipped, 2 units with content warnings",
+            "#5064: rejected and retained warning types (a dropped replenish row included) have separate counts");
         if (content) {
             const auto* kept = content.value().find(eawr::assets::object_type_crc("Warning_Unit"));
             expect(kept && kept->abilities.size() == 1 && kept->abilities[0].unresolved_spawn
@@ -414,6 +421,59 @@ void synthetic_start() {
         expect(std::any_of(pads.value().units.begin(), pads.value().units.end(), [](const auto& unit) {
             return unit.record == 6 && unit.role == skirmish::UnitRole::map_object;
         }), "neutral pad remains a live map object");
+
+        // #6144: the land static composition keeps no placement the start removed. Records 40 and 41 are removed, record 6 is
+        // the neutral control; each placement is fully drawable before the strip (asset, transform, a supported surface).
+        eawr::scene::Scene land_scene;
+        for (const std::uint32_t record : {40U, 41U, 6U}) {
+            eawr::scene::Placement placement;
+            placement.scene_ordinal = land_scene.placements.size();
+            placement.record_ordinal = record;
+            placement.object_id = "Static_" + std::to_string(record);
+            placement.model_path = "data/art/models/static.alo";
+            placement.asset_id = 1;
+            placement.transform.emplace();
+            eawr::scene::Surface surface;
+            surface.supported = true;
+            placement.surfaces.push_back(surface);
+            placement.effects.push_back({"proxy", "data/art/models/effect.alo", 0, false});
+            land_scene.placements.push_back(std::move(placement));
+        }
+        expect(std::all_of(land_scene.placements.begin(), land_scene.placements.end(),
+            [](const auto& placement) { return placement.drawable(); }), "land placements start drawable");
+        expect(view::strip_removed_placements(land_scene, nullptr) == 0, "no start strips nothing");
+        expect(view::strip_removed_placements(land_scene, &pads.value()) == 2, "the two removed records are stripped");
+        for (const auto& placement : land_scene.placements) {
+            const bool removed = placement.record_ordinal != 6U;
+            expect(placement.drawable() == !removed, "a removed record is not composed; the neutral one still is");
+            expect(!removed || (placement.model_path.empty() && placement.surfaces.empty() && placement.effects.empty()
+                && placement.asset_id == 0), "a removed record keeps no model, asset, surface or attached effect");
+        }
+        expect(land_scene.drawable_count() == 1, "only the neutral control is drawable");
+    }
+
+    // #6992: the map marker records of the structures the land session draws (pads, pre-built structures) leave the static
+    // composition; any other record, including a start unit the session does not draw, keeps its map placement.
+    {
+        namespace view = eawr::presentation::godot_backend;
+        eawr::scene::Scene owned_scene;
+        for (const std::uint32_t record : {50U, 51U, 52U}) {
+            eawr::scene::Placement placement;
+            placement.scene_ordinal = owned_scene.placements.size();
+            placement.record_ordinal = record;
+            placement.object_id = "Marker_" + std::to_string(record);
+            placement.model_path = "data/art/models/static.alo";
+            placement.asset_id = 1;
+            placement.transform.emplace();
+            eawr::scene::Surface surface;
+            surface.supported = true;
+            placement.surfaces.push_back(surface);
+            owned_scene.placements.push_back(std::move(placement));
+        }
+        expect(view::strip_session_owned_placements(owned_scene, {}) == 0, "no drawn structure strips nothing");
+        expect(view::strip_session_owned_placements(owned_scene, {50U, 50U, 99U}) == 1, "only the drawn structure's record is stripped");
+        for (const auto& placement : owned_scene.placements)
+            expect(placement.drawable() == (placement.record_ordinal != 50U), "a drawn structure's marker is not composed; others are");
     }
 
     // MPS-6: domains can be extended by GC; order and worker scheduling are irrelevant.

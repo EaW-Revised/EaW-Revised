@@ -37,7 +37,10 @@ struct GalacticSelectionContent {
     std::optional<Real> technology_weight;
     std::optional<bool> population_check;
     std::map<tactical::PlayerId, sim::galactic::TypeId> initial_starbase_types; // WGA-481 sourced first-base lookup
-    std::vector<std::string> unresolved_names; // CGS-07: names that resolve to no bound type, skipped as null references
+    std::vector<std::string> unresolved_names; // CGS-07: names that resolve to no bound type or category, left out
+    // CGS-22: the type names (sorted, once each) that stock content names and that cannot be loaded at all (their variant base
+    // resolves to nothing): null references, skipped. A name that loads but is not in the galactic type table is not one.
+    std::vector<std::string> null_references;
 };
 struct GalacticHeroSelection {
     Real target_weight{}, escort_weight{}, minimum_cost{}, maximum_cost{};
@@ -83,9 +86,22 @@ private:
 // WGA-489: a hero candidate takes the hero stage when it is a named hero, a special weapon or authors an object script
 // (its own, or for a company one of its member units'); a generic hero without one is an ordinary unit.
 [[nodiscard]] bool galactic_hero_stage_applies(bool authored_hero, bool named_hero, bool special_weapon, bool authors_script) noexcept;
+// #7056: the selector input of a (player, target, goal type, plan) is a pure function of the completed snapshot, the completed
+// world input and the content, except for the free-store copy and the hero weights, which read live owners. The cache keeps
+// the pure part for as long as both completed inputs are the same objects (any write that matters publishes new ones), the
+// free-store copy is taken afresh on every call, and an input that needed a hero weight is never kept.
+class SelectionInputCache;
+[[nodiscard]] std::shared_ptr<SelectionInputCache> make_selection_input_cache();
 [[nodiscard]] GalacticSelectionProvider stock_selection_provider(
     std::shared_ptr<const GalacticSelectionContent>, std::shared_ptr<const galactic_goals::MaterializedPlanCatalog>,
     std::shared_ptr<const GalacticWorld>, std::shared_ptr<const Engine>,
     std::function<std::shared_ptr<const sim::galactic::GalacticSnapshot>()>, GalacticHeroSelectionProvider = {},
-    GalacticFreestoreSelectionProvider = {});
+    GalacticFreestoreSelectionProvider = {}, std::shared_ptr<SelectionInputCache> = {});
+// #7056: what the execution service reads of that input: the free-store rows. The full input also reads the target contrast
+// (cached enemy-force reads that publish the world's perception cache and visibility rows), so this reader makes the same
+// contrast reads when the input would reach them, discards them, and builds nothing else. The rows and every write the input
+// makes to the world are the same as those of the full input.
+[[nodiscard]] GalacticFreestoreSelectionProvider stock_freestore_reader(
+    std::shared_ptr<const galactic_goals::MaterializedPlanCatalog>, std::shared_ptr<const GalacticWorld>,
+    std::shared_ptr<const Engine>, GalacticFreestoreSelectionProvider);
 } // namespace eawr::script::foc::ai

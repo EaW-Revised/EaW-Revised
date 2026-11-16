@@ -2,6 +2,7 @@
 #include "land_battle_camera.hpp"
 #include "land_battle_scene.hpp"
 #include "battle_effects.hpp"
+#include "frame_timer.hpp"
 #include <godot_cpp/classes/viewport.hpp>
 #include <algorithm>
 #include <cstdio>
@@ -23,8 +24,8 @@ void write_land_move_trace(const sim::tactical::LandMoveTrace& event) {
 
 void MapMode::State::install_land_move_trace_log() { sim::tactical::set_land_move_trace_sink(&write_land_move_trace); }
 
-bool MapMode::State::ready_land_live(Node3D& host, const assets::Map& map,
-    std::vector<sim::RenderInstance>& instances, sim::AssetId& next_asset, sim::EntityId& next_entity) {
+bool MapMode::State::ready_land_session(Node3D& host, const assets::Map& map) {
+    if (live_session) return true;
     live_options.land = true;
     live_options.real_time = options.interactive;
     live_options.warmup_frames = options.warmup_frames;
@@ -38,6 +39,13 @@ bool MapMode::State::ready_land_live(Node3D& host, const assets::Map& map,
     if (!live_session->prepare(*filesystem, *catalog, options.map_path, error) || !live_session->start(error))
         return fail_ready(error);
     load_report(presentation::ui::load_stage_session, 1, 1);
+    return true;
+}
+
+bool MapMode::State::ready_land_live(Node3D& host, const assets::Map& map,
+    std::vector<sim::RenderInstance>& instances, sim::AssetId& next_asset, sim::EntityId& next_entity) {
+    if (!ready_land_session(host, map)) return false;
+    std::string error;
     if (options.interactive && !map_camera) {
         if (!map.terrain || !tactical || !live_session->start_data())
             return fail_ready("interactive land battle needs terrain and tactical camera constants");
@@ -93,6 +101,10 @@ bool MapMode::State::ready_land_live(Node3D& host, const assets::Map& map,
         return fail_ready(core::format_diagnostic(detail.error()));
     battle_effects->collect_axis_diagnostics(!options.report_path.empty());
     battle_effects->prepare(*live_session->tables(), *live_session->effects_combat());
+    // The land session feeds the projectile observer (fog and visibility of each shot) and the model projectile pool
+    // the way a space session does: without this call no land shot ever gets a visibility entry, so every flying shot
+    // is counted hidden and only its ground impact is drawn (#5835 PR2, 11-15 capture: 4560 hidden, 0 drawn).
+    live_session->attach_projectile_models(*battle_effects);
     SpacePopulation::Options population;
     population.map_sha256 = map_hash; population.catalog = &*catalog;
     population.policy = policy; population.shadows = shadows;
@@ -113,12 +125,13 @@ bool MapMode::State::ready_land_live(Node3D& host, const assets::Map& map,
     land_static_instances = instances;
     instances.insert(instances.end(), land_population->instances().begin(), land_population->instances().end());
     land_overlay = std::make_unique<LandOverlayView>(host);
+    land_deploy_zones = std::make_unique<LandDeployZoneView>(host);
     install_land_move_trace_log();
     battle = std::make_unique<BattleInput>(host);
     battle->prepare(*filesystem, *catalog, *live_session, options.shaders);
     host.set_process_input(true); host.set_process_unhandled_input(true);
-    // Retail land and space share one tactical shell. Land fills its selection cards from the squad roster;
-    // the reinforcement pane, garrison timer and minimap stay inert until their tickets.
+    // Retail land and space share one tactical shell. Land fills its selection cards from the squad roster and, since
+    // #7190, its reinforcement pane from the pool; the garrison timer and minimap stay inert until their tickets.
     load_report(presentation::ui::load_stage_interface, 0, 1);
     if (!build_hud(host, map.context_name)) return fail_ready(failure);
     load_report(presentation::ui::load_stage_interface, 1, 1);
@@ -132,7 +145,7 @@ bool MapMode::State::ready_land_live(Node3D& host, const assets::Map& map,
     return true;
 }
 
-std::optional<int> MapMode::State::process_land_live(double delta) {
+std::optional<int> MapMode::State::process_land_live(double delta, const core::tick_profile::Recording& ui_recording) {
     // finish() already ran (or the session never started): a later frame must not touch the closed session.
     if (completed || !live_session) return std::nullopt;
     auto update = live_session->frame(*land_population, *renderer, delta);
@@ -141,7 +154,9 @@ std::optional<int> MapMode::State::process_land_live(double delta) {
         live_session->finish(); status = "failed"; (void)write_report(); return 2;
     }
     const auto& state = update.value();
+    if (perf_trace) land_submit_ms = 0.0;  // draw_map_frame adds the renderer submit to this frame's snapshot copy
     if (state.instances) {
+        FrameTimer copy_timer(perf_trace ? &land_submit_ms : nullptr, true);
         auto instances = land_static_instances;
         instances.insert(instances.end(), state.instances->begin(), state.instances->end());
         snapshot = std::make_shared<const sim::RenderSnapshot>(frame, std::move(instances));
@@ -162,20 +177,18 @@ std::optional<int> MapMode::State::process_land_live(double delta) {
         }
     }
     if (const auto failed = draw_map_frame(delta)) return failed;
-    if (perf_trace) {
-        PerfTrace::Frame trace;
-        trace.frame_ms = delta * 1000.0;
-        trace.presented_tick = static_cast<std::uint64_t>(std::max(0.0, live_session->presented_tick()));
-        trace.units = live_session->visible_units().size();
-        trace.tick_wait_ms = live_session->tick_wait_ms();
-        trace.live_frame_ms = live_session->live_frame_ms();
-        trace.session_tail_ms = live_session->session_tail_ms();
-        trace.clip_pose_ms = live_session->clip_pose_ms();
-        trace.pose_ms = live_session->pose_ms();
-        trace.bookkeeping_ms = live_session->bookkeeping_ms();
-        perf_trace->frame(trace);
-    }
+    // The shared writer (space calls it too): sim tick phases, session and pose timings, effects, submit cost.
+    record_frame_trace(delta, ui_recording);
     const auto tick = static_cast<std::uint64_t>(live_session->presented_tick());
+    if (!options.report_path.empty() && land_clip_tick != tick) {
+        land_clip_tick = tick;
+        for (const auto& unit : live_session->visible_units()) {
+            const auto clip = live_session->land_animation_type(unit.entity);
+            if (!clip) continue;
+            if (*clip == eawr::presentation::animation::clip_types::attack) ++land_attack_samples;
+            else if (*clip == eawr::presentation::animation::clip_types::attack_idle) ++land_attack_idle_samples;
+        }
+    }
     if (!options.report_path.empty() && land_trace_tick != tick && land_pose_trace.size() < 8192) {
         land_trace_tick = tick;
         for (const auto& unit : live_session->visible_units()) {
@@ -207,6 +220,29 @@ std::optional<int> MapMode::State::process_land_live(double delta) {
     }
     LandBattleCamera view(camera, map_camera.get());
     battle->frame(*live_session, *land_population, view);
+    // #7190: the drag of a pool entry asks the simulation about the point under the cursor (the cursor shows its verdict) and
+    // draws the ground the company may land on. Read-only; the drop itself is a Reinforce command.
+    live_session->placement_preview(battle->placing(), battle->placement_point());
+    if (land_deploy_zones) {
+        // The list is built when a drag starts and again once a second of game time (an allied point can change hands), not
+        // every frame.
+        const bool dragging = battle->placing().has_value();
+        const auto now = static_cast<std::uint64_t>(std::max(0.0, live_session->presented_tick()));
+        if (!dragging) {
+            land_deploy_cache.clear();
+            land_deploy_dragging = false;
+        } else if (!land_deploy_dragging || now >= land_deploy_cache_tick + sim::tactical::logical_frames_per_second) {
+            land_deploy_dragging = true;
+            land_deploy_cache_tick = now;
+            land_deploy_cache.clear();
+            for (const auto& ring : live_session->land_deploy_rings()) land_deploy_cache.push_back({ring.x, ring.y, ring.radius});
+        }
+        land_deploy_zones->frame(land_deploy_cache, *live_session->land_terrain());
+        if (!land_deploy_cache.empty()) {
+            ++land_deploy_zone_frames;
+            land_deploy_zone_rings = std::max(land_deploy_zone_rings, land_deploy_cache.size());
+        }
+    }
     battle->cursor_frame(*live_session, view, delta, !options.capture_path.empty());
     live_session->retire_clones(*land_population, *renderer);
     if (hud) { sync_battle_hud(); sync_cards(); sync_production(); }

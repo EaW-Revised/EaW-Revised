@@ -47,6 +47,38 @@ void authored_policy() {
         expect(!take(campaign::build_raid_inputs(types, absent, bindings, factions)),
             "all five raid tags absent produce an empty RaidSetup without failure");
     }
+    {
+        // CGS-25: a blank required faction (the loader publishes it empty) admits any owner, and the other four tags still
+        // build the policy. Blank masks with caps present never admit a raid, but the setup must not refuse them.
+        eawr::data::galactic::GalacticData blank;
+        blank.constants = {{"Raid_Force_Required_Faction", "", {}}, {"Raid_Force_Free_Object_Category_Mask", "", {}},
+            {"Raid_Force_Limited_Object_Category_Mask", "", {}}, {"Raid_Force_Max_Heros", "1", f(1)},
+            {"Raid_Force_Max_Limited_Objects", "1", f(1)}};
+        const auto fotr_like = campaign::build_raid_inputs(types, blank, bindings, factions);
+        expect(bool(fotr_like) && fotr_like.value() && fotr_like.value()->rules.required_faction == 0
+            && fotr_like.value()->rules.max_heroes == 1 && fotr_like.value()->rules.max_limited == 1
+            && fotr_like.value()->types[0].categories == 0,
+            "a blank required faction with blank masks and authored caps builds a policy that admits any faction");
+        blank.constants[2].text = "ModGround";
+        const auto any_owner = campaign::build_raid_inputs(types, blank, bindings, factions);
+        expect(bool(any_owner) && any_owner.value() && any_owner.value()->rules.required_faction == 0
+            && any_owner.value()->types[0].categories == any_owner.value()->rules.limited_categories,
+            "a blank required faction beside a limited mask admits any owner");
+        blank.constants.pop_back(); // a missing cap is still an incomplete policy
+        expect(!campaign::build_raid_inputs(types, blank, bindings, factions), "a missing cap still refuses");
+    }
+    {
+        // The loader publishes a blank (or omitted) required faction and blank masks as empty constants; with no caps authored
+        // that is the all-absent state: an empty RaidSetup, not an incomplete policy.
+        eawr::data::galactic::GalacticData blank_without_caps;
+        blank_without_caps.constants = {{"Raid_Force_Required_Faction", "", {}}, {"Raid_Force_Free_Object_Category_Mask", "", {}},
+            {"Raid_Force_Limited_Object_Category_Mask", "", {}}};
+        const auto none = campaign::build_raid_inputs(types, blank_without_caps, bindings, factions);
+        expect(bool(none) && !none.value(), "blank faction and blank masks without caps produce an empty RaidSetup, not 'incomplete'");
+        // A named faction with nothing else authored stays an incomplete policy.
+        blank_without_caps.constants[0].text = "ModSide";
+        expect(!campaign::build_raid_inputs(types, blank_without_caps, bindings, factions), "a named faction without caps is incomplete");
+    }
     for (const auto& [text, expected] : std::array<std::pair<std::string_view, std::int32_t>, 4>{{
             {"-1.9", -1}, {"2.9", 2}, {"text", 0}, {"9999999999999999999", INT32_MAX}}}) {
         auto numeric = data; numeric.constants[3].text = text; numeric.constants[4].text = text;
@@ -86,6 +118,10 @@ void qualification_and_input() {
     const auto game = take(gc::GalacticSession::create(setup));
     const auto snapshot = game.snapshot();
     const auto& fleet = snapshot->fleets().front();
+    expect(gc::fleet_raid_capable(fleet, *snapshot->movement(), 1, {}), "fleet-only raid capability flattens current transport payloads");
+    expect(!gc::fleet_raid_capable(fleet, *snapshot->movement(), 2, {}), "fleet-only capability applies the authored required faction");
+    auto empty = fleet; empty.members.clear();
+    expect(!gc::fleet_raid_capable(empty, *snapshot->movement(), 1, {}), "fleet-only capability refuses an empty fleet");
     const auto qualifies = [&](auto movement, auto control, std::span<const gc::CensusObject> actors = {}, const gc::PlanetAccessState* access = nullptr) {
         return gc::qualifies_raid(fleet, 2, movement, control, actors, access);
     };

@@ -7,6 +7,7 @@ eawr_add_test_case(
     TESTS galactic_control_contracts
 )
 add_test(NAME galactic_control_protection COMMAND galactic_control_tests --protection)
+add_test(NAME galactic_control_host_work_bench COMMAND galactic_control_tests --host-work-bench)
 
 add_test(NAME galactic_control_stock COMMAND galactic_control_tests --installed)
 set_tests_properties(galactic_control_stock PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")

@@ -68,6 +68,7 @@ void test_canonical_encoder_oracle(const std::string& fixtures) {
         unit.state.purchase_type = index + 20;
         unit.state.purchase_token = index + 30;
         unit.state.order.through_hazards = true;
+        if (index % 3 != 0) unit.state.order.final_yaw = math::Fixed::from_raw(static_cast<std::int64_t>(index) * 1013);
         unit.motion.emplace();
         unit.roll = math::Fixed::from_raw(17);
         unit.durability.emplace();
@@ -95,6 +96,11 @@ void test_canonical_encoder_oracle(const std::string& fixtures) {
         unit.nebula.emplace();
         unit.corrupt.emplace();
         unit.waypoints.emplace();
+        if (index % 2 == 0) {
+            tactical::MovePayload leg;
+            leg.final_yaw = math::Fixed::from_raw(static_cast<std::int64_t>(index) * 29);
+            unit.waypoints->points.push_back({leg, {}, false});
+        }
         unit.garrison_unit = true;
         unit.script_invulnerable = index % 2 == 0;
         unit.sighting.emplace();
@@ -213,6 +219,7 @@ void test_canonical_encoder_oracle(const std::string& fixtures) {
     block([&](auto& bytes) { state.append_canonical_mc30_state(bytes, live); }, "mc30_state");
     block([&](auto& bytes) { state.append_canonical_ion_stuns_state(bytes, live); }, "ion_stuns_state");
     block([&](auto& bytes) { state.append_canonical_hazard_moves_state(bytes, live); }, "hazard_moves_state");
+    block([&](auto& bytes) { state.append_canonical_final_facing_state(bytes, live); }, "final_facing_state");
     block([&](auto& bytes) { state.append_canonical_asteroids_state(bytes, live); }, "asteroids_state");
     block([&](auto& bytes) { state.append_canonical_engine_disable_state(bytes, live); }, "engine_disable_state");
     block([&](auto& bytes) { state.append_canonical_nebula_state(bytes, live); }, "nebula_state");

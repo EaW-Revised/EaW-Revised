@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <limits>
 #include <set>
+#include <string>
 #include <tuple>
 
 namespace eawr::sim::galactic {
@@ -189,12 +190,27 @@ core::Result<void> validate_observer(const GalacticSetup& setup) {
     std::set<EntityId> landed_ids;
     for (std::size_t i = 0; i < o.planets.size(); ++i) {
         const auto& p = o.planets[i];
-        if (p.planet != setup.planets[i].id || !listed(p.allegiance) || !listed(p.target_owner)
-            || !listed(p.current_owner) || !listed(p.current_controller)
+        // WGM-66: a planet no queue, base, starbase or landed force controls has no controller; the restore path admits the same none
+        // (no owner) for these fields, so the initial table must not be stricter than the one it later restores into.
+        const auto listed_or_none = [&](PlayerId id) { return id == 0 || listed(id); };
+        if (p.planet != setup.planets[i].id || !listed_or_none(p.allegiance) || !listed_or_none(p.target_owner)
+            || !listed_or_none(p.current_owner) || !listed_or_none(p.current_controller)
             || (p.space_owner && !listed(p.space_owner)) || (p.ground_owner && !listed(p.ground_owner))
             || p.space_level < 0 || p.ground_level < 0 || p.landed_transports.size() > galactic_max_objects
-            || p.political_control.raw() % math::Fixed::scale != 0)
-            return invalid("invalid observer planet facts");
+            || p.political_control.raw() % math::Fixed::scale != 0) {
+            // Name the row and the failed fact (the bare message hid which of 12 checks tripped on a 77-planet mod campaign).
+            std::string why = "invalid observer planet facts: row " + std::to_string(i) + " planet " + std::to_string(p.planet);
+            if (p.planet != setup.planets[i].id) why += " (setup row has planet " + std::to_string(setup.planets[i].id) + ")";
+            const auto check = [&](const char* name, const PlayerId id, const bool optional) {
+                if (!(optional && !id) && !listed(id)) why += std::string(" ") + name + "=" + std::to_string(id) + " not listed";
+            };
+            check("allegiance", p.allegiance, true); check("target_owner", p.target_owner, true);
+            check("current_owner", p.current_owner, true); check("current_controller", p.current_controller, true);
+            check("space_owner", p.space_owner, true); check("ground_owner", p.ground_owner, true);
+            if (p.space_level < 0 || p.ground_level < 0) why += " negative level";
+            if (p.political_control.raw() % math::Fixed::scale != 0) why += " fractional political control";
+            return invalid(std::move(why));
+        }
         for (const auto& t : p.landed_transports) if (t.id && (!listed(t.owner)
             || t.id == std::numeric_limits<EntityId>::max() || !landed_ids.insert(t.id).second)) return invalid("invalid landed transport reference");
     }
@@ -230,6 +246,8 @@ void project_ground_layout(std::vector<ObservedPlanet>& observed, const Politica
 std::vector<ObservedPlanet> observed_planets(const ObserverSetup& inputs, const std::span<const Fleet> fleets,
     const ObserverViewContext view, const MovementSetup* movement, const std::span<const CensusObject> actors) {
     const auto table = observer_detail::presence(inputs, fleets, movement, actors);
+    // The none (a planet nothing owns or controls) is an empty optional, never a stored raw 0 (#6985).
+    const auto some_player = [](const PlayerId player) { return player ? std::optional<PlayerId>(player) : std::nullopt; };
     std::vector<ObservedPlanet> result; result.reserve(view.player ? inputs.planets.size() : inputs.records.size());
     for (std::size_t i = 0; i < inputs.records.size(); ++i) {
         const auto& record = inputs.records[i];
@@ -238,7 +256,7 @@ std::vector<ObservedPlanet> observed_planets(const ObserverSetup& inputs, const 
         const auto& planet = inputs.planets[i % inputs.planets.size()];
         ObservedPlanet row; row.player = record.player; row.planet = record.planet; row.discovered = record.discovered;
         row.knowledge = planet_knowledge(observer_detail::context(inputs, view, player, planet, record, table));
-        if (row.knowledge.ownership) { row.known_owner = planet.current_owner; row.known_allegiance = planet.allegiance; }
+        if (row.knowledge.ownership) { row.known_owner = some_player(planet.current_owner); row.known_allegiance = some_player(planet.allegiance); }
         if (row.knowledge.political_control) row.known_political_control = planet.political_control;
         row.apparent_owner = row.known_owner;
         if (!row.apparent_owner && record.apparent_owner > 0) row.apparent_owner = static_cast<PlayerId>(record.apparent_owner);
@@ -246,7 +264,8 @@ std::vector<ObservedPlanet> observed_planets(const ObserverSetup& inputs, const 
         // WGUI-100: the apparent allegiance getter has a distinct orbit branch.
         if (row.knowledge.political_control || (own_orbit && (!player.canonical_empire || planet.political_control < math::Fixed::from_raw(math::Fixed::scale)))) {
             row.apparent_political_control = planet.political_control;
-            row.apparent_allegiance_owner = planet.current_controller;
+            row.apparent_allegiance_owner = some_player(planet.current_controller);
+            row.apparent_allegiance_none = !row.apparent_allegiance_owner; // read live: no controller is known, not hidden
         } else if (own_orbit) {
             row.apparent_political_control = {};
             row.apparent_allegiance_owner.reset(); // canonical Empire at control >= 1 returns 0/-1

@@ -256,6 +256,70 @@ class AttachedGraphicalContract(unittest.TestCase):
             self.assertEqual(result["map_particles"]["live_rids_after_release"], 0)
 
 
+@unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST"),
+                     "set EAWR_GODOT_VIEWER_RUNTIME_TEST for graphical MapMode checks")
+class SpaceAttachedDropContract(unittest.TestCase):
+    """A populated space map drops an attached effect it cannot prepare (project
+    rule, retail behaviour unverified); the map still composes and the report
+    says so. An engine resource refusal still fails the run."""
+
+    def run_space(self, root, report, *args):
+        import space_attached_fixture as space_fixture
+
+        completed = subprocess.run(
+            [os.environ["EAWR_GODOT_EXECUTABLE"], "--path", str(ROOT / "apps/viewer/project"), "--",
+             "--eawr-map", space_fixture.MAP_LOGICAL_PATH,
+             "--eawr-game-root", str(root), "--eawr-report", str(report),
+             "--eawr-capture", str(report.with_suffix(".png")), "--eawr-populate",
+             "--eawr-map-particle-capacity", "256", *space_fixture.SELECTION, *args],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=120, check=False)
+        self.assertTrue(report.is_file(), completed.stdout)
+        return completed.returncode, json.loads(report.read_text(encoding="utf-8"))
+
+    def test_unpreparable_attached_effect_is_dropped_not_fatal(self):
+        import space_attached_fixture as space_fixture
+
+        with tempfile.TemporaryDirectory(prefix="eawr-space-attached-") as temporary:
+            directory = pathlib.Path(temporary)
+            good = space_fixture.write_fixture_root(directory / "good")
+            code, result = self.run_space(good, directory / "good.json")
+            self.assertEqual(code, 0, result.get("failure"))
+            self.assertEqual(result["populate"]["attached_effects"]["dropped"], 0)
+            self.assertEqual(result["map_particles"]["placements"][0]["status"], "drawn")
+            # The same map with an effect texture that never resolves: the
+            # admitted record is dropped with its cause, and the run still passes.
+            bad = space_fixture.write_fixture_root(directory / "bad", effect_texture="p_eawr_missing_space.tga")
+            code, result = self.run_space(bad, directory / "bad.json")
+            self.assertEqual(code, 0, result.get("failure"))
+            self.assertEqual(result["status"], "space_environment_rendered")
+            attached = result["populate"]["attached_effects"]
+            self.assertEqual((attached["admitted"], attached["dropped"]), (1, 1))
+            placement = result["map_particles"]["placements"][0]
+            self.assertEqual(placement["status"], "dropped")
+            self.assertEqual(len(placement["causes"]), 1)
+            self.assertIn("p_eawr_missing_space.tga", placement["causes"][0])
+            self.assertEqual(result["map_particles"]["live_rids_after_release"], 0)
+            self.assertEqual(result["map_particles"]["live_resources_after_release"], 0)
+            self.assertEqual(placement["causes"][0].count("backend could not create"), 1)
+
+    def test_engine_resource_refusal_still_fails_the_run(self):
+        import space_attached_fixture as space_fixture
+
+        with tempfile.TemporaryDirectory(prefix="eawr-space-attached-resource-") as temporary:
+            directory = pathlib.Path(temporary)
+            good = space_fixture.write_fixture_root(directory / "good")
+            # Every emitter creation refuses as an engine resource refusal: the
+            # drop rule is for data, so the run fails and names the cause.
+            code, result = self.run_space(good, directory / "refused.json",
+                                          "--eawr-map-particle-reject-resource-test")
+            self.assertNotEqual(code, 0)
+            self.assertEqual(result["status"], "failed")
+            placement = result["map_particles"]["placements"][0]
+            self.assertEqual(placement["status"], "failed")
+            self.assertIn("injected particle resource refusal", placement["causes"][0])
+
+
 IDLE = ("--eawr-map-effect-alt", "0", "--eawr-map-effect-lod", "0",
         "--eawr-map-particle-capacity", "512", "--eawr-map-attached-capacity", "128")
 

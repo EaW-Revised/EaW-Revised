@@ -1,11 +1,14 @@
 #include "eawr/scene/scene.hpp"
 #include "space_environment_internal.hpp"
 #include "space_removed_records.hpp"
+#include "environment_texture.hpp"
 #include "shader_activation_owner.hpp"
 #include "startup_trace.hpp"
 #include "menu_timeline.hpp"
 #include "settings_store.hpp"
 
+#include <algorithm>
+#include <cassert>
 #include <cstring>
 #include <fstream>
 #include "eawr/core/load_profile.hpp"
@@ -148,6 +151,46 @@ bool EnvironmentView::prepare_ready(Node3D& host, const assets::Map& map, const 
     return true;
 }
 
+// --eawr-space-sweep deg_per_frame,frames[,row0,row1] (evidence only, #6972).
+bool EnvironmentView::parse_sweep() {
+    std::vector<double> numbers;
+    std::stringstream stream(options_.sweep);
+    for (std::string part; std::getline(stream, part, ',');) {
+        char* end = nullptr;
+        const double value = std::strtod(part.c_str(), &end);
+        if (part.empty() || end != part.c_str() + part.size() || !std::isfinite(value)) {
+            return fail("--eawr-space-sweep expects deg_per_frame,frames[,row0,row1]");
+        }
+        numbers.push_back(value);
+    }
+    if (numbers.size() != 2 && numbers.size() != 4) return fail("--eawr-space-sweep expects deg_per_frame,frames[,row0,row1]");
+    if (numbers[1] < 1.0 || numbers[1] > 100000.0 || std::abs(numbers[0]) > 90.0) {
+        return fail("--eawr-space-sweep needs 1..100000 frames and |deg_per_frame| <= 90");
+    }
+    Sweep sweep;
+    sweep.degrees_per_frame = numbers[0];
+    sweep.frames = static_cast<std::uint32_t>(numbers[1]);
+    sweep.row0 = 0;
+    sweep.row1 = camera_.height;
+    if (numbers.size() == 4) {
+        if (numbers[2] < 0.0 || numbers[3] <= numbers[2] || numbers[3] > static_cast<double>(camera_.height)) {
+            return fail("--eawr-space-sweep rows must satisfy 0 <= row0 < row1 <= the capture height");
+        }
+        sweep.row0 = static_cast<std::uint32_t>(numbers[2]);
+        sweep.row1 = static_cast<std::uint32_t>(numbers[3]);
+    }
+    if (options_.camera.empty() || options_.capture_path.empty() || options_.map_camera) {
+        return fail("--eawr-space-sweep needs the fixed --eawr-space-camera and --eawr-capture");
+    }
+    if (options_.timed_frames < sweep_hold_frames + sweep.frames) {
+        return fail("--eawr-space-sweep needs --eawr-map-timed-frames >= frames + "
+                    + std::to_string(sweep_hold_frames));
+    }
+    sweep.base = camera_;
+    sweep_ = std::move(sweep);
+    return true;
+}
+
 bool EnvironmentView::prepare_head(Node3D& host, const assets::Map& map, const vfs::Vfs& filesystem,
                                    const std::string& catalog_failure) {
     filesystem_ = &filesystem;
@@ -259,6 +302,7 @@ bool EnvironmentView::prepare_head(Node3D& host, const assets::Map& map, const v
         locked_view_ = true;
     }
     camera_ = space::environment_view_camera(camera_);
+    if (!options_.sweep.empty() && !parse_sweep()) return false;
     if (!options_.capture_path.empty()) {
         // Every camera source above has the capture identity's size; the
         // root viewport is drawn at exactly that size whatever the OS window.
@@ -273,9 +317,9 @@ bool EnvironmentView::prepare_head(Node3D& host, const assets::Map& map, const v
 
 void EnvironmentView::prepare_renderer(Node3D& host, const vfs::Vfs& filesystem) {
     renderer_ = std::make_unique<GodotRenderer>(host, options_.shaders);
-    install_mod_shaders(*renderer_, options_.shader_generation, options_.shader_filesystem);
+    install_mod_shaders(*renderer_, options_.shader_generation, options_.shader_filesystem, true);
     renderer_->set_texture_loader([&filesystem](const assets::Source& source) -> std::optional<assets::Texture> {
-        auto loaded = assets::load_texture(filesystem, source.logical_path);
+        auto loaded = load_environment_texture(filesystem, source.logical_path);
         if (!loaded) return std::nullopt;
         return std::move(loaded.value());
     });
@@ -298,7 +342,7 @@ void EnvironmentView::prepare_renderer(Node3D& host, const vfs::Vfs& filesystem)
 void EnvironmentView::prepare_sky(const bool secondary, const assets::Map& map, const vfs::Vfs& filesystem,
                                  const assets::ObjectTypeCatalog& catalog, const bool catalog_loaded,
                                  ReadyScratch& scratch) {
-    // Skies: camera-centred, scaled to the environment sky radius, oriented by
+    // Skies: camera-centred, scaled by their effective object type, oriented by
     // R-SKY-02 through the object rule.
     const assets::EnvironmentDescriptor& environment = map.environments.front();
     std::map<std::string, assets::Model>& sky_models = scratch.sky_models;
@@ -339,13 +383,24 @@ void EnvironmentView::prepare_sky(const bool secondary, const assets::Map& map, 
             }, renderer_->shader_translation_enabled()
                 ? std::function<bool(const assets::Submesh&)>{[this](const assets::Submesh& value) { return renderer_->usable_shader(value); }}
                 : std::function<bool(const assets::Submesh&)>{});
-        const float radius = space::surface_radius(surfaces);
+        if (options_.catalog == nullptr) {
+            missing.cause = "sky object scale: effective catalog unavailable";
+            items_.push_back(std::move(missing));
+            return;
+        }
+        const auto object = options_.catalog->resolve(name, data::Category::game_object);
+        const auto scale = object ? space::sky_object_scale(object.value()) : std::nullopt;
+        if (!scale) {
+            missing.cause = "sky object scale is invalid or object cannot be resolved";
+            items_.push_back(std::move(missing));
+            return;
+        }
         Placed placed;
         placed.role = role;
         placed.object = name;
         placed.model_path = *path;
         placed.model = &slot->second;
-        placed.scale = radius > 0.0F ? space::environment_sky_radius / radius : 1.0F;
+        placed.scale = *scale;
         placed.transform = space::object_transform(eye_source_, space::sky_orientation_degrees(environment, secondary),
                                                    placed.scale);
         compose_object(placed, surfaces);
@@ -464,6 +519,36 @@ bool EnvironmentView::populate_ready(const assets::Map& map, const EnqueueLoadSt
     return true;
 }
 
+std::shared_ptr<const sim::RenderSnapshot> EnvironmentView::make_snapshot() const {
+    if (hidden_instances_.empty()) return std::make_shared<const sim::RenderSnapshot>(0, instances_);
+    // Only environment instances (the range before the populated ones) can be hidden: filter that range and append the
+    // live instances in bulk, so a live unit costs no set lookup per frame.
+    const std::size_t environment = std::min(populate_first_, instances_.size());
+    std::vector<sim::RenderInstance> shown;
+    shown.reserve(instances_.size());
+    for (std::size_t index = 0; index < environment; ++index) {
+        if (!hidden_instances_.contains(index)) shown.push_back(instances_[index]);
+    }
+    shown.insert(shown.end(), instances_.begin() + static_cast<std::ptrdiff_t>(environment), instances_.end());
+    return std::make_shared<const sim::RenderSnapshot>(0, std::move(shown));
+}
+
+bool EnvironmentView::hide_records(const std::span<const std::uint32_t> records) {
+    bool changed = false;
+    for (const std::uint32_t record : records) {
+        const auto found = record_instances_.find(record);
+        if (found == record_instances_.end()) continue;
+        for (const std::size_t index : found->second) {
+            // The recorded indices belong to the environment, placed before the populated instances; one at or past
+            // populate_first_ would be a live instance that the next resize replaces, so it is never hidden.
+            assert(index < populate_first_);
+            if (index >= populate_first_) continue;
+            changed = hidden_instances_.insert(index).second || changed;
+        }
+    }
+    return changed;
+}
+
 bool EnvironmentView::finish_ready() {
     const bool sky_drawn = std::any_of(items_.begin(), items_.end(), [](const Item& item) {
         return item.role == "primary_sky" && item.status == "drawn";
@@ -474,7 +559,7 @@ bool EnvironmentView::finish_ready() {
         not_rendered_.push_back("primary sky drew no surface; continuing without a primary sky");
         UtilityFunctions::push_warning("the primary sky drew no surface; continuing without a primary sky");
     }
-    snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
+    snapshot_ = make_snapshot();
     if (!initialize_idle()) return false;
     return true;
 }
@@ -697,7 +782,7 @@ void EnvironmentView::movie(const bool on, const std::array<float, 3>& target) {
         }
     }
     movie_ = on && bridge_ && bridge_->active();
-    if (!movie_) movie_fov_.reset();
+    if (!movie_) { movie_fov_.reset(); movie_clip_.reset(); }
     movie_target_ = target;
 }
 
@@ -813,6 +898,7 @@ std::optional<int> EnvironmentView::process(const double delta) {
             frame.target = movie_target_;
             frame.up = {0.0F, 1.0F, 0.0F};
             if (movie_fov_) frame.vertical_fov_degrees = *movie_fov_;
+            if (movie_clip_) { frame.near_plane = movie_clip_->first; frame.far_plane = movie_clip_->second; }
         }
         camera_ = space::environment_view_camera(fixed_camera(frame));
         renderer_->set_camera(camera_);
@@ -828,12 +914,27 @@ std::optional<int> EnvironmentView::process(const double delta) {
         }
         if (rebuild_snapshot) {
             const auto sky_start = SubmitClock::now();
-            snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
+            snapshot_ = make_snapshot();
             submit_since(sky_start);
         }
         return std::nullopt;
     };
     if (const auto failed = present_camera(true, true)) return failed;
+    if (sweep_ && frame_ + 1U > options_.warmup_frames) {
+        // Evidence only (#6972): after the hold the fixed camera turns about its own eye every frame.
+        const std::uint32_t shown = frame_ + 1U - options_.warmup_frames;
+        const std::uint32_t turned = shown > sweep_hold_frames ? shown - sweep_hold_frames : 0U;
+        const double yaw = sweep_->degrees_per_frame * static_cast<double>(turned) * 3.14159265358979323846 / 180.0;
+        const double sine = std::sin(yaw);
+        const double cosine = std::cos(yaw);
+        const FixedCamera& base = sweep_->base;
+        const double dx = static_cast<double>(base.target[0]) - base.eye[0];
+        const double dz = static_cast<double>(base.target[2]) - base.eye[2];
+        camera_ = base;
+        camera_.target[0] = static_cast<float>(base.eye[0] + dx * cosine + dz * sine);
+        camera_.target[2] = static_cast<float>(base.eye[2] - dx * sine + dz * cosine);
+        renderer_->set_camera(camera_);
+    }
     if (attract_pose_pending_) {
         // The attract's camera moved: the same view at the new eye. The skies are camera-centred,
         // so they follow the eye as a map camera's do.
@@ -850,7 +951,7 @@ std::optional<int> EnvironmentView::process(const double delta) {
             }
             instances_[index].fixed_transform = *matrix;
         }
-        snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
+        snapshot_ = make_snapshot();
     }
     const bool admitted_clock = populate_result_ && populate_result_->render_clock;
     std::uint32_t tick = admitted_clock ? 0U
@@ -908,13 +1009,16 @@ std::optional<int> EnvironmentView::process(const double delta) {
         if (finalize_camera_ && finalize_camera_()) {
             if (const auto failed = present_camera(false, !live.instances)) return failed;
         }
+        const bool hid = hide_records(live.hidden_environment_records);
         if (live.instances) {
             const auto instances_start = SubmitClock::now();
             instances_.resize(populate_first_);
             instances_.insert(instances_.end(), live.instances->begin(), live.instances->end());
             populated_ = live.instances->size();
-            snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
+            snapshot_ = make_snapshot();
             submit_since(instances_start);
+        } else if (hid) {
+            snapshot_ = make_snapshot();
         }
     }
     if (admitted_clock) {
@@ -936,6 +1040,68 @@ std::optional<int> EnvironmentView::process(const double delta) {
             completed_ = true;
             static_cast<void>(fail("live population: " + core::format_diagnostic(finished.error())));
             return 2;
+        }
+    }
+    if (sweep_ && frame_ > options_.warmup_frames + sweep_hold_frames
+        && frame_ <= options_.warmup_frames + sweep_hold_frames + sweep_->frames) {
+        // Every frame after the hold, as drawn: the rows kept as <stem>.sNNN.png (the read-back lag of the
+        // previous frames is a constant offset the analysis fits).
+        const std::uint32_t index = frame_ - options_.warmup_frames - sweep_hold_frames - 1U;
+        if (index == 0U) sweep_->start = std::chrono::steady_clock::now();
+        auto capture = renderer_->capture(camera_);
+        if (!capture || capture.value().png_bytes.empty()) {
+            completed_ = true;
+            static_cast<void>(fail(capture ? std::string("sweep capture is empty") : core::format_diagnostic(capture.error())));
+            return 2;
+        }
+        PackedByteArray encoded;
+        encoded.resize(static_cast<int64_t>(capture.value().png_bytes.size()));
+        std::memcpy(encoded.ptrw(), capture.value().png_bytes.data(), capture.value().png_bytes.size());
+        Ref<Image> image;
+        image.instantiate();
+        if (image->load_png_from_buffer(encoded) != OK || image->is_empty()
+            || static_cast<std::uint32_t>(image->get_height()) < sweep_->row1) {
+            completed_ = true;
+            static_cast<void>(fail("sweep capture cannot be decoded or is smaller than the requested rows"));
+            return 2;
+        }
+        const Ref<Image> rows = image->get_region(Rect2i(0, static_cast<int32_t>(sweep_->row0), image->get_width(),
+            static_cast<int32_t>(sweep_->row1 - sweep_->row0)));
+        const PackedByteArray png = rows->save_png_to_buffer();
+        std::ostringstream suffix;
+        suffix << ".s" << std::setw(4) << std::setfill('0') << index;
+        std::filesystem::path path = options_.capture_path;
+        path.replace_filename(ViewerPath{ViewerPath::utf8(path.stem()) + suffix.str()
+            + ViewerPath::utf8(path.extension())}.native());
+        if (const std::string problem = write_file(path, std::span<const std::byte>(
+                reinterpret_cast<const std::byte*>(png.ptr()), static_cast<std::size_t>(png.size())));
+            !problem.empty()) {
+            completed_ = true;
+            static_cast<void>(fail("sweep frame " + ViewerPath::utf8(path) + " " + problem));
+            return 2;
+        }
+        sweep_->samples.emplace_back(sweep_->degrees_per_frame * static_cast<double>(index + 1U),
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sweep_->start).count());
+        if (index + 1U == sweep_->frames) {
+            std::ostringstream json;
+            json << "{\"schema\": \"eawr-space-sweep-v1\", \"degrees_per_frame\": " << sweep_->degrees_per_frame
+                 << ", \"hold_frames\": " << sweep_hold_frames << ", \"frames\": " << sweep_->frames
+                 << ", \"row0\": " << sweep_->row0 << ", \"row1\": " << sweep_->row1
+                 << ", \"width\": " << camera_.width << ", \"height\": " << camera_.height
+                 << ", \"vertical_fov_degrees\": " << camera_.vertical_fov_degrees << ", \"samples\": [";
+            for (std::size_t at = 0; at < sweep_->samples.size(); ++at) {
+                json << (at ? ", " : "") << "[" << sweep_->samples[at].first << ", " << sweep_->samples[at].second << "]";
+            }
+            json << "]}\n";
+            const std::string text = json.str();
+            std::filesystem::path sidecar = options_.capture_path;
+            sidecar.replace_extension(std::filesystem::path(".sweep.json"));
+            if (const std::string problem = write_file(sidecar, std::span<const std::byte>(
+                    reinterpret_cast<const std::byte*>(text.data()), text.size())); !problem.empty()) {
+                completed_ = true;
+                static_cast<void>(fail("sweep sidecar " + ViewerPath::utf8(sidecar) + " " + problem));
+                return 2;
+            }
         }
     }
     if (live.capture_suffix && !options_.capture_path.empty()) {
@@ -1066,6 +1232,9 @@ void SpaceEnvironment::live_camera_movie_eye(const std::array<float, 3>& eye) {
 }
 void SpaceEnvironment::live_camera_movie_fov(const std::optional<float> fov) {
     if (state_->view) state_->view->movie_fov(fov);
+}
+void SpaceEnvironment::live_camera_movie_clip(const std::optional<std::pair<float, float>> clip) {
+    if (state_->view) state_->view->movie_clip(clip);
 }
 
 bool SpaceEnvironment::battlecam_key(const viewer::camera_input::RawEvent& event) const {

@@ -129,15 +129,10 @@ void session_detail::Tick::track_victory_change(const UnitState* before, const U
         const bool lost_leader = std::binary_search(rules.campaign_leaders.begin(), rules.campaign_leaders.end(), before->entity_id)
             || std::any_of(before->contained.begin(), before->contained.end(), [&](const auto& object) { return leader(leader, object); });
         if (lost_leader || before->entity_id == rules.campaign_station) {
-            const auto winner = std::find_if(rules.contenders.begin(), rules.contenders.end(), [&](const auto player) {
-                return impl_->teams.at(player) != impl_->teams.at(before->owner);
-            });
-            if (winner != rules.contenders.end()) {
-                const auto condition = lost_leader ? VictoryCondition::enemy_leader_destroyed : VictoryCondition::campaign_station_destroyed;
-                pending_outcome_ = BattleOutcome{condition, *winner, impl_->teams.at(*winner), tick, before->entity_id,
-                    tick + victory_countdown_frames};
-                pending_victory_event_ = Event{tick, EventKind::victory, *winner, 0, before->entity_id};
-            }
+            const auto kind = lost_leader ? TswDeferredKind::leader : TswDeferredKind::station;
+            // TSW-09: while a super weapon sequence holds the victory tests, record this one for the release.
+            if (tsw_world_.victory_hold > 0) tsw_defer_victory(TswDeferredVictory{kind, before->owner, before->entity_id});
+            else victory_leader_test(before->owner, before->entity_id, kind);
         }
     }
     const auto& types = rules.condition == VictoryCondition::all_enemy_units_destroyed ? rules.relevant_types : rules.starbase_types;
@@ -188,38 +183,72 @@ void session_detail::Tick::track_victory_change(const UnitState* before, const U
         }
     }
     if (pending_outcome_ || !evaluate || !before || (!all_units && !lost_base)) return;
+    // TSW-09: while a super weapon sequence holds the victory tests, record this one for the release.
+    if (tsw_world_.victory_hold > 0) { tsw_defer_victory(TswDeferredVictory{TswDeferredKind::unit, before->owner, before->entity_id}); return; }
+    victory_unit_test(before->owner, before->entity_id);
+}
+
+void session_detail::Tick::tsw_defer_victory(const TswDeferredVictory& test) {
+    // Nothing is ever dropped, and the list stays small without a cap. A unit test reads only the loser's owner and the
+    // state at the release, so a second unit entry for the same owner repeats the first one's answer: one per owner is
+    // the same decision, and the first entry names the deciding unit as the full list would. Leader and station
+    // entries are one per destroyed leader or station (each entity is destroyed once) and are all kept.
+    if (test.kind == TswDeferredKind::unit
+        && std::any_of(tsw_world_.deferred.begin(), tsw_world_.deferred.end(), [&](const TswDeferredVictory& held) {
+               return held.kind == TswDeferredKind::unit && held.owner == test.owner;
+           }))
+        return;
+    tsw_world_.deferred.push_back(test);
+}
+
+void session_detail::Tick::victory_leader_test(const PlayerId owner, const EntityId unit, const TswDeferredKind kind) {
+    if (pending_outcome_) return;
+    const auto& rules = impl_->victory;
+    const auto winner = std::find_if(rules.contenders.begin(), rules.contenders.end(), [&](const auto player) {
+        return impl_->teams.at(player) != impl_->teams.at(owner);
+    });
+    if (winner == rules.contenders.end()) return;
+    const auto condition = kind == TswDeferredKind::leader ? VictoryCondition::enemy_leader_destroyed : VictoryCondition::campaign_station_destroyed;
+    pending_outcome_ = BattleOutcome{condition, *winner, impl_->teams.at(*winner), tick, unit, tick + victory_countdown_frames};
+    pending_victory_event_ = Event{tick, EventKind::victory, *winner, 0, unit};
+}
+
+void session_detail::Tick::victory_unit_test(const PlayerId owner, const EntityId unit) {
+    if (pending_outcome_) return;
+    const auto& rules = impl_->victory;
+    const bool all_units = rules.condition == VictoryCondition::all_enemy_units_destroyed;
     std::optional<PlayerId> winner;
     if (all_units) {
         std::array<OwnerUnitCount, max_players> counts{};
         for (std::size_t index = 0; index < impl_->setup.players.size(); ++index) {
             counts[index] = {impl_->setup.players[index].player_id, victory_counts_[index]};
         }
-        winner = all_units_destroyed_winner(rules, impl_->setup.players, before->owner,
+        winner = all_units_destroyed_winner(rules, impl_->setup.players, owner,
             std::span<const OwnerUnitCount>{counts.data(), impl_->setup.players.size()});
     } else if (rules.condition == VictoryCondition::enemy_hq_destroyed
         || rules.condition == VictoryCondition::enemy_base_components_destroyed) {
         const auto lost = std::find_if(impl_->setup.players.begin(), impl_->setup.players.end(),
-            [&](const Player& player) { return player.player_id == before->owner; });
+            [&](const Player& player) { return player.player_id == owner; });
         if (lost != impl_->setup.players.end()) for (const auto candidate : rules.contenders) {
             const auto player = std::find_if(impl_->setup.players.begin(), impl_->setup.players.end(),
                 [&](const Player& entry) { return entry.player_id == candidate; });
             if (player == impl_->setup.players.end() || !players_hostile(impl_->snapshot_players, candidate, lost->player_id)
                 || (!rules.installed_players.empty() && !std::binary_search(rules.installed_players.begin(), rules.installed_players.end(), candidate))) continue;
             const bool enemy = std::any_of(pending_starbases_.begin(), pending_starbases_.end(), [&](const StarbaseEntry& base) {
-                const auto owner = std::find_if(impl_->setup.players.begin(), impl_->setup.players.end(),
+                const auto holder = std::find_if(impl_->setup.players.begin(), impl_->setup.players.end(),
                     [&](const Player& entry) { return entry.player_id == base.owner; });
-                return owner != impl_->setup.players.end()
-                    && players_hostile(impl_->snapshot_players, candidate, owner->player_id);
+                return holder != impl_->setup.players.end()
+                    && players_hostile(impl_->snapshot_players, candidate, holder->player_id);
             });
             if (!enemy) { winner = candidate; break; }
         }
     } else {
-        winner = starbase_destroyed_winner(rules, impl_->setup.players, before->owner, pending_starbases_);
+        winner = starbase_destroyed_winner(rules, impl_->setup.players, owner, pending_starbases_);
     }
     if (winner) {
         pending_outcome_ = BattleOutcome{rules.condition, *winner, impl_->teams.at(*winner), tick,
-            before->entity_id, tick + rules.countdown_frames};
-        pending_victory_event_ = Event{tick, EventKind::victory, *winner, 0, before->entity_id};
+            unit, tick + rules.countdown_frames};
+        pending_victory_event_ = Event{tick, EventKind::victory, *winner, 0, unit};
     }
 }
 
@@ -714,6 +743,8 @@ core::Result<void> session_detail::Tick::commit() {
     impl_->manual_clocks = std::move(manual_clocks_);
     impl_->special_weapons = std::move(special_weapons_);
     impl_->special_disabled_by_hardpoint = std::move(special_disabled_by_hardpoint_);
+    impl_->tsw_states = std::move(tsw_);
+    impl_->tsw_world = std::move(tsw_world_);
     impl_->named_ability_locks = std::move(named_ability_locks_);
     if (radar_roster_) impl_->radar_roster = std::move(*radar_roster_);
     impl_->snapshot_players = std::move(finalized_->players.value());
@@ -816,11 +847,12 @@ core::Result<TacticalTick> session_detail::Tick::finish() {
         }
     }
     std::optional<core::tick_profile::Scope> snapshot_scope("serial.tactical.finish.snapshot");
+    auto tsw_rows = impl_->tsw_views(instances);
     impl_->current_snapshot = std::make_shared<const TacticalSnapshot>(impl_->completed_tick, impl_->snapshot_players,
         std::move(instances), std::move(events), std::move(combat_events), impl_->projectiles, impl_->outcome,
         std::move(spinning), std::move(squadron_targets), impl_->squadrons,
         impl_->economy_views(impl_->ledgers, impl_->shares), impl_->pad_views(), impl_->quits, impl_->losses, impl_->productions,
-        impl_->manual_clock_views(), impl_->economy_cues, impl_->ability_spawns, session_.retreat_views(), impl_->garrison_timer_views(), impl_->beacons, impl_->setup.controllers);
+        impl_->manual_clock_views(), impl_->economy_cues, impl_->ability_spawns, session_.retreat_views(), impl_->garrison_timer_views(), impl_->beacons, impl_->setup.controllers, std::move(tsw_rows));
     snapshot_scope.reset();
     std::vector<std::pair<EntityId, PlayerId>> deaths;
     if (impl_->setup.first_free_entity_id) {

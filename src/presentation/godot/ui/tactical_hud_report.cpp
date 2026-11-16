@@ -88,6 +88,41 @@ void TacticalHud::State::run_probe() {
     probed = true;
 }
 
+void TacticalHud::State::run_switch_probe() {
+    Viewport* viewport = hud->get_viewport();
+    if (viewport == nullptr || ds_button == nullptr || !ds_button->is_visible_in_tree()) { probed = true; return; }
+    const Rect2 hit(ds_button->get_global_position() + ds_button->hit_rect().position, ds_button->hit_rect().size);
+    const float inset = 1.5F;
+    const float rim = 3.0F; // outside the hit rect: the world's
+    const std::vector<std::pair<std::string, Vector2>> points{
+        {"panel_centre", hit.get_center()},
+        {"panel_top_left", hit.position + Vector2(inset, inset)},
+        {"panel_bottom_right", hit.position + hit.size - Vector2(inset, inset)},
+        {"panel_top_right", hit.position + Vector2(hit.size.x - inset, inset)},
+        {"panel_bottom_left", hit.position + Vector2(inset, hit.size.y - inset)},
+        {"outside_left", hit.position + Vector2(-rim, hit.size.y * 0.5F)},
+        {"outside_above", hit.position + Vector2(hit.size.x * 0.5F, -rim)}};
+    for (const auto& [name, at] : points) {
+        const int before = ds_button->presses();
+        Ref<InputEventMouseMotion> motion;
+        motion.instantiate();
+        motion->set_position(at);
+        motion->set_global_position(at);
+        viewport->push_input(motion, true);
+        for (const bool pressed : {true, false}) {
+            Ref<InputEventMouseButton> click;
+            click.instantiate();
+            click->set_button_index(MOUSE_BUTTON_LEFT);
+            click->set_pressed(pressed);
+            click->set_button_mask(pressed ? BitField<MouseButtonMask>(MOUSE_BUTTON_MASK_LEFT) : BitField<MouseButtonMask>(0));
+            click->set_position(at);
+            click->set_global_position(at);
+            viewport->push_input(click, true);
+        }
+        ds_probes.push_back({name, at, ds_button->presses() - before});
+    }
+    probed = true;
+}
 
 std::string TacticalHud::report_json() const {
     const State& state = *state_;
@@ -107,7 +142,11 @@ std::string TacticalHud::report_json() const {
         output << (i ? ", " : "") << "{\"seat\": " << state.gift_recipients[i].seat.value
             << ", \"name\": " << json(state.gift_recipients[i].name) << "}";
     output << "]}, ";
-    output << "\"movie_camera\": {\"active\": " << (state.movie ? "true" : "false")
+    output << "\"movie_camera\": {\"active\": " << (state.bands.movie() ? "true" : "false")
+           << ", \"script_letterbox\": " << (state.bands.script() ? "true" : "false")
+           << ", \"bands_progress\": " << state.bands.progress()
+           << ", \"gui_hidden\": " << (state.bands.wanted() ? "true" : "false")
+           << ", \"button\": " << (state.movie_button ? "true" : "false")
            << ", \"presses\": " << (state.movie_button ? state.movie_button->presses() : 0)
            << ", \"letterbox_height\": ";
     if (state.movie_height) output << *state.movie_height;
@@ -126,6 +165,50 @@ std::string TacticalHud::report_json() const {
     if (state.retreat_button != nullptr && state.retreat_button->is_visible_in_tree()) {
         const Rect2 hit(state.retreat_button->get_global_position() + state.retreat_button->hit_rect().position,
             state.retreat_button->hit_rect().size);
+        output << ", \"hit_rect\": " << rect_json(hit);
+    }
+    output << "}, ";
+    // HCB-46/63: report the independently bound holder and target switch.
+    output << "\"sl_switch\": {\"present\": " << (state.sl_button ? "true" : "false")
+           << ", \"shown\": " << (state.sl_view.visible ? "true" : "false")
+           << ", \"enabled\": " << (state.sl_view.enabled ? "true" : "false")
+           << ", \"unit\": " << state.sl_view.unit
+           << ", \"card_slot\": " << (state.sl_view.card_slot ? "true" : "false")
+           << ", \"recharge\": " << state.sl_view.recharge << "}, ";
+    // HCB-47: the Death Star switch and its readout.
+    output << "\"deathstar_switch\": {\"present\": " << (state.ds_button ? "true" : "false")
+           << ", \"shown\": " << (state.ds_button && state.ds_button->is_visible_in_tree() ? "true" : "false")
+           << ", \"presses\": " << (state.ds_button ? state.ds_button->presses() : 0)
+           << ", \"enabled\": " << (state.ds_view.enabled ? "true" : "false")
+           << ", \"icon_frame\": " << state.ds_view.icon_frame
+           << ", \"tooltip\": " << json(state.ds_button ? state.ds_button->get_tooltip_text().utf8().get_data() : "")
+           << ", \"countdown_shown\": " << (state.ds_readout && state.ds_readout->is_visible_in_tree() ? "true" : "false")
+           << ", \"countdown_text\": " << json(state.ds_view.countdown_text)
+           << ", \"countdown_dial_rect\": " << rect_json(state.ds_dial_rect)
+           << ", \"countdown_text_rect\": " << rect_json(state.ds_text_rect)
+           << ", \"countdown_pixels\": " << state.ds_pixels
+           << ", \"countdown_anchored\": " << (state.shell.deathstar_countdown_anchored ? "true" : "false");
+    if (state.ds_label && state.fonts) {
+        const auto& look = state.ds_label->style();
+        const auto face = state.fonts->resolve({look.text.face, look.text.point_size}, state.options.language);
+        const auto& ink = look.text.colour;
+        output << ", \"countdown_face\": " << json(face.face)
+               << ", \"countdown_face_source\": " << json(model::to_string(face.source))
+               << ", \"countdown_colour\": [" << static_cast<unsigned>(ink.r) << ", " << static_cast<unsigned>(ink.g)
+               << ", " << static_cast<unsigned>(ink.b) << ", " << static_cast<unsigned>(ink.a) << "]";
+    }
+    output << ", \"clicks\": {\"none\": " << state.ds_feedback[0] << ", \"press\": " << state.ds_feedback[1]
+           << ", \"negative\": " << state.ds_feedback[2] << "}, \"probe\": [";
+    for (std::size_t index = 0; index < state.ds_probes.size(); ++index) {
+        const auto& probe = state.ds_probes[index];
+        output << (index == 0 ? "" : ", ") << "{\"name\": " << json(probe.name) << ", \"point\": [" << probe.point.x << ", "
+               << probe.point.y << "], \"presses\": " << probe.presses << "}";
+    }
+    output << "], \"overlay\": " << json(state.ds_button ? state.ds_button->overlay_name() : "none")
+           << ", \"state\": " << json(state.ds_button ? state.ds_button->visual_state() : "none");
+    if (state.ds_button != nullptr && state.ds_button->is_visible_in_tree()) {
+        const Rect2 hit(state.ds_button->get_global_position() + state.ds_button->hit_rect().position,
+            state.ds_button->hit_rect().size);
         output << ", \"hit_rect\": " << rect_json(hit);
     }
     output << "}, ";

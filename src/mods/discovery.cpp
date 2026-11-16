@@ -237,6 +237,22 @@ std::string manual_key(const fs::path& folder) {
     return "path:" + core::sha256_hex(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
 }
 
+std::string folder_mod_id(const fs::path& folder) {
+    fs::path absolute = absolute_folder(folder);
+    if (absolute.filename().empty()) absolute = absolute.parent_path(); // a trailing separator
+    // Component names, outermost last: <item id>, <app id>, "content", "workshop".
+    std::vector<std::string> names;
+    for (fs::path at = absolute; !at.empty() && names.size() < 4; at = at.parent_path()) {
+        const std::string name = path_to_utf8(at.filename());
+        if (name.empty()) break;
+        names.push_back(lower_ascii(name));
+        if (at == at.parent_path()) break;
+    }
+    if (names.size() == 4 && is_workshop_id(names[0]) && names[1] == kWorkshopAppId && names[2] == "content" && names[3] == "workshop")
+        return "workshop:" + names[0];
+    return manual_key(folder);
+}
+
 void discover_manual(const DiscoveryInput& input, Catalog& catalog) {
     for (const fs::path& given : input.manual_folders) {
         const fs::path folder = absolute_folder(given);

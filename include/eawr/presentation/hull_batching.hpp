@@ -122,6 +122,19 @@ public:
         return std::exchange(changes_, {});
     }
 
+    // Why a piece is not in a group (census only; no behaviour depends on it).
+    enum class State : std::uint8_t { absent, grouped, no_key, blocked, maturing, alone };
+    [[nodiscard]] State state_of(Entity entity, std::uint64_t serial) const {
+        const auto found = entries_.find(entity);
+        if (found == entries_.end()) return State::absent;
+        const Entry& entry = found->second;
+        if (entry.group != 0) return State::grouped;
+        if (!entry.key) return State::no_key;
+        if (serial < entry.blocked_until) return State::blocked;
+        if (serial < entry.since + config_.join_after) return State::maturing;
+        return State::alone;
+    }
+
     [[nodiscard]] std::uint32_t group_of(Entity entity) const {
         const auto found = entries_.find(entity);
         return found == entries_.end() ? 0 : found->second.group;

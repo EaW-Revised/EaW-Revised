@@ -276,6 +276,7 @@ int main() {
     test_land_pan_is_halved_space_is_not();
     test_ctrl_orbit_through_the_bridge();
     test_plain_middle_drag_translates();
+    test_middle_drag_is_frame_rate_independent();
     test_middle_click_resets_the_view();
     test_host_and_free_tables_keep_pixel_units();
     test_land_click_reset_keeps_the_target_height();

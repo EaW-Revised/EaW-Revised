@@ -26,3 +26,9 @@ description = "Vendored xxHash header, AVX-512 lines data_key_lo/data_key_hi = _
 condition = "AND"
 paths = ['''third_party/xxhash/xxhash\.h''']
 regexes = ['''^_mm512_srli_epi64$''']
+
+[[allowlists]]
+description = "Synthetic ability-stage metadata key in the galactic drag test; never a credential."
+condition = "AND"
+paths = ['''tests/presentation/renderer/test_viewer_galactic_stock_ability_drag_runtime\.py''']
+regexes = ['''^eawr_ability_stage2$''']

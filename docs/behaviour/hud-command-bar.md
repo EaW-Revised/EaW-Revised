@@ -11,17 +11,21 @@
   command-bar XML (X), existing consumers in `hud_shell.cpp` and
   `tactical_hud_build.cpp`, and HCB-19/31/64's presentation scope.
 
-- **HCB-66:** A galactic command-bar button's artwork and hit rectangle both follow the
-  authored `Scale`, applied about the shell bone origin together with `Icon_Offset`. The
-  art is the normal texture size times `Scale`, centred on the origin plus the offset; the
-  hit rectangle is the shell mesh rectangle scaled about the same origin and moved by the
-  offset. A component without `Scale` uses 1.0, so the stock buttons keep their rectangles.
-  The two composite tabs (`b_space_tab`, `b_planet_tab`) are the exception: their art
-  overlaps and carries an offset, so their hit area stays the authored shell mesh
-  rectangle. Mods that author another `Scale` get it without a name list. The rectangles
-  are computed once per button in the HUD placement update. Evidence: effective
-  command-bar XML (X), synthetic scale and composite-tab contracts in
-  `galactic_planet_hud_contracts`.
+- **HCB-66 (legacy EAWR-6757):** A galactic command-bar button's authored `Scale` resizes
+  its artwork only: the art is the normal texture size times `Scale`, centred on the shell bone
+  origin plus `Icon_Offset`. The hit rectangle is the shell mesh rectangle moved by the same
+  offset and is never scaled. A component without `Scale` uses 1.0, so the stock buttons keep
+  their rectangles (stock authors only 1.0). A mod that ships hi-res textures authors a small
+  `Scale` to bring them back to the mesh size (Remake 4.0 authors 0.125 on its four map-filter
+  buttons), so a scaled mesh rectangle left the click area at about 0.45 of the drawn button
+  on the filters and about a quarter on the clock buttons; the mesh size is the authored
+  button size in both cases. The two composite tabs (`b_space_tab`, `b_planet_tab`) keep their
+  mesh rectangle where it is, as their art overlaps and carries an offset. **Unverified:** how
+  the original sizes the hit area of a button whose `Scale` is not 1.0 (stock never authors
+  one); the least-visible choice applies. Evidence: effective command-bar XML (X), the Remake
+  4.0 command-bar XML (Scale 0.125 on `b_filters0..3`), viewer reports of the drawn and hit
+  rectangles at 1920x1080 (stock hit/art 1.00, Remake filters 0.45 before the change), the
+  synthetic contracts in `galactic_planet_hud_contracts`.
 
 - **HCB-67:** The galactic command bar also builds mod-authored filter buttons: a
   `Button` component in a `Filter_*` group other than `Filter_Tab_*`. The control is placed
@@ -83,6 +87,152 @@
   runs; the production filtering the scripts do with these clicks (TRIGGER_AI flags, `Check_Story_Flag`, `Story_Event`) is
   the story bridge of WST-49/55/56. Evidence: synthetic contracts `galactic_story_engine_contracts` and
   `galactic_planet_hud_contracts`.
+- **HCB-69 (legacy EAWR-236):** Story-driven HUD state for the plot owner's seat (WST-49/75), generic over any component
+  name. `FLASH_GUI` (parameter 1 the component name, case-insensitive; optional parameter 2 an auxiliary string that
+  the HUD does not read) pulses the named control: its brightness follows a raised cosine, three pulses of 0.5 s (debug
+  build, story HUD walk 2026-11-11: a finite flash of 0.5 s, three times, not perpetual; medium confidence on period
+  versus duration; the original also places a tutorial arrow beside a non-shell component, not drawn here), then the control returns to its resting look; a new request for the same component
+  restarts its pulse and the active list is bounded at 64. `LOCK_CONTROLS` (parameter 1 an integer, nonzero locks, zero
+  unlocks) makes the human's command-bar presses do nothing while locked; a forced press still runs. `SCROLL_LOCK`
+  (same parameter) stops the keyboard and edge-scroll pan of the map camera. All three are local presentation: the
+  session publishes a presentation request, nothing is saved, hashed or replayed. **A load does not recreate the lock
+  or flash state** (local presentation state, not saved; what the original does on a load is unread). **A lock never gets stuck:** the session remembers which plot set `LOCK_CONTROLS` or `SCROLL_LOCK`
+  and publishes the release (parameter 0) once when that sub-plot stops being active; an explicit unlock from any plot
+  clears the claim; a new or loaded session starts with nothing locked. A battle leaves the galactic lock state as it
+  is (the galactic HUD is not active in battle); that this matches the original is unverified. A reward without a component or without an integer is
+  refused with its reason, a flash naming a control the HUD does not have is warned about once per name, and nothing
+  aborts the match. **Walked scope not yet covered (debug build, story HUD walk 2026-11-11):** the original's
+  `LOCK_CONTROLS` drops every mouse event on the command bar and on the play field (no clicks, drags, orders or radar
+  clicks; a wait pointer; drags in progress are cleaned up), locks while the options dialog is open, and gates the
+  battle-camera hotkey; it hides nothing, and other hotkeys and the keyboard scroll are not gated by it. Here the lock
+  covers only the human's command-bar presses; the rest is a follow-up, as is the lock while the options dialog is open.
+  Unread: wheel zoom and edge scroll under the lock, and whether the original's lock survives a load. The walk also
+  describes `DUAL_FLASH`, `HIGHLIGHT_OBJECT`, `HIDE_TUTORIAL_CURSOR`, `HIDE_CURSOR_ON_CLICK`, `SHOW_COMMAND_BAR` and
+  `START_CINEMATIC_MODE`/`STOP_CINEMATIC_MODE`; they are not implemented yet and stay declined with a once-per-type note. The state is one Godot-free class, `StoryHudState`. Evidence: synthetic contracts
+  `galactic_story_hud_state_contracts` and `galactic_story_engine_contracts`; stock plots use `FLASH_GUI` 16, `LOCK_CONTROLS` 18
+  and `SCROLL_LOCK` 11 times (count of plot files naming the reward in the installed data).
+- **HCB-70 (legacy EAWR-236):** Story objectives and screen text on the HUD (WST-47/48/65/66/67), for the plot owner's seat.
+  **Objectives:** `ADD_OBJECTIVE` (parameter 1 the text id, trimmed; an empty id is refused with its reason) appends an
+  incomplete objective numbered from the owner's objective counter, which then increments and is never rewound by a
+  removal; duplicate ids are admitted. `OBJECTIVE_COMPLETE`, `OBJECTIVE_FAILED`, `REMOVE_OBJECTIVE` act on the first entry
+  with that exact id and change nothing when none matches (even when already in that status). `UPDATE_OBJECTIVE` (1 old
+  id, 2 new id) renames the first match in place, resets it to incomplete and keeps its number, suggestion and position.
+  `REMOVE_ALL_OBJECTIVES` clears the list. `ENABLE_OBJECTIVE_DISPLAY`: empty shows, integer zero hides, any other integer
+  shows. The list, its numbers, the display flag and the counter are story state: they ride the checkpoint (campaign
+  owner format 7), stay outside the state digest like the holocron goals, are applied in a native replay too, and a loaded
+  game republishes the restored list to the HUD. **Screen text:** `SCREEN_TEXT` (1 text id; 2 seconds, default 5, -1 until
+  removed; 4 any text removes the line with that id instead of showing it; 5 teletype, 6 colour, 7 style word) is a
+  local request: the HUD keeps at most 16 lines, resolves the id through the text database and shows a missing id as
+  itself. **Unverified (debug build not read, WST-U10):** the objective counter's start value (1 is used), the display
+  text frozen at add time (the HUD resolves the id when it draws, so a language change shows at once), whether a removal
+  with several lines of one id removes the first (used) or all, the variable fill of parameter 3, and the look of the
+  teletype, colour and style words, none of which are drawn. **Placeholder chrome:** the objectives sit in the top-right
+  corner and the lines top-centre; the retail placement and font are not sourced. `SET_ADVISOR`, `MULTIMEDIA` and
+  `SET_SANDBOX_OBJECTIVES` stay declined. The pure state is `StoryTextState`. Evidence: synthetic contracts
+  `galactic_story_goals_contracts`, `galactic_story_hud_state_contracts` and `galactic_story_engine_contracts`; stock plots
+  use `ADD_OBJECTIVE` in 72 and `SCREEN_TEXT` in 90 plot files (count of files naming the reward in the installed data).
+- **HCB-71 (legacy EAWR-6681):** The story summary window behind the story-arc button (H088, WST-58/68/70, WGUI-36), built on the
+  authored story summary dialog (545 by 572 dialog units, centred like the other centred dialogs): the title, the Active
+  and Completed radio tabs (push-like), the goal list, the "incoming transmission" header, the recap list, the hint and
+  Close; the abandon button is hidden because no goal can be abandoned (WST-58). Every string comes from the text database
+  (the dialog's own keys, the goal's chapter title key as the header, the chapter's text keys as rows); none is authored
+  in code. **Goals:** the list is newest first (WST-68: an insertion prepends, an update of a known tag keeps its place);
+  the Active tab lists goals not yet completed and the Completed tab the others. A goal's name is its chapter's first
+  text line (read from the original capture; the file grammar names no title for a goal). Choosing a tab selects its first
+  goal, selecting a row shows that goal's chapter. **Recap:** every `TEXT` line of the chapter is a row word-wrapped to the
+  list, in the colour of the last `TEXTCOLOR r g b a` before it (the colour stays until the next one; none before the
+  first means the list's own colour), and `NEWLINE n` adds n blank rows; leading spaces are kept (the victory conditions
+  are indented). Timing (`WAIT`), `SFX`, `MOVIE`, speech and `EXTRA_TEXT` are not read. **Opening:** the popup form opens
+  at the goal's tab and chapter; the quiet form flashes the button instead (WST-70, the flash itself is unwired); the
+  button opens the goal last shown, else the newest. The button is disabled while no non-hidden goal exists (WGUI-36).
+  **Wheel:** while the window is open it is modal and the wheel never reaches the map: over a list it scrolls the list, and a list
+  already at either end keeps the detent rather than handing it on (a scroll area under the pointer consumes the wheel).
+  Keys follow the same rule: the window is a modal layer, so world keys (camera pan, stop) are dropped while it is open, as for
+  every other modal window of the map. **Unverified:** whether the original also drops world keys while its story window is up.
+  **Viewed (named deviation):** reading a goal's chapter marks it viewed, and closing the window drops the goals that are
+  viewed and remove-after-viewed (WST-68), but both facts are local presentation state: the session's goal rows are not
+  changed, and a loaded game starts with every goal unviewed. **Rewards:** `STORY_GOAL_COMPLETED` (parameter 1 the goal
+  tag, trimmed) marks the first goal with that exact tag completed and keeps it, `REMOVE_STORY_GOAL` deletes it; a tag
+  that matches nothing changes nothing and an empty tag is refused with its reason (WST-47/58/68, newest-first search).
+  Both are story state like the objectives: they ride the checkpoint (the goal rows were already in the owner tail), stay
+  outside the state digest and are applied in a native replay; a loaded game republishes its goal rows (oldest first) to
+  the window without a summary request. A reader that fell behind the bounded feed rebuilds the list from the owner's
+  published goals. **Unverified:** the order of goals the original shows (its list box is flagged as sorted in the
+  dialog resource, so an alphabetical order is possible), the Completed tab's title text, whether closing keeps the
+  selection, the sounds, and the exact placement of the hint. The pure model is `StorySummary`, the chapter reader
+  `story_dialog_chapter`. Evidence: the `ui_model_contracts` story summary tests, `galactic_story_engine_contracts`
+  `story_goal_rewards`, and the viewer capture against `gc-close_objectives` of the original.
+- **HCB-72 (legacy EAWR-6634):** Story-script letterbox on the galaxy HUD (HCB-11c, BCAM-04). `Letter_Box_In(seconds)` and
+  `Letter_Box_Out(seconds)` (stock scripts pass 0, an instant change, and 2) called by a story script of the galactic
+  campaign slide the two opaque black bands in or out over `seconds`; each band is the authored
+  `Camera_FX_Manager_Letterbox_Height` of the screen height (validated; with an unreadable value no bands are drawn and one
+  warning is logged). The game GUI is hidden while the letterbox is on (it follows the target at once, the bands follow the
+  slide) and returns when it is off. The call is staged like `Story_Event`, committed in the service's command order and
+  becomes a local presentation request for the owner of the calling script's plot (the same channel as `FLASH_GUI` and
+  `LOCK_CONTROLS`): unhashed, unsaved, not made in a replay, cleared with a new or loaded session; it changes nothing the
+  simulation hashes. A call without exactly one finite, non-negative number is a named fault of that script thread
+  (`EAWR-SCRIPT` diagnostic), never a match abort. **Not reached from the galactic scripts:** the stock galactic story scripts call none of the 267 stock call sites; the tactical ones are HCB-75. `LINK_TACTICAL`'s `Reward_Param11` ("start the scene letterboxed") has no route because the story engine refuses story-launched battles (`land_battle_refusal`). Pure state: `StoryHudState`; drawing: `story_letterbox.cpp`. Evidence:
+  `galactic_story_letterbox_contracts` (script call to presentation request, faults, equal digests at 1/2/4/8 workers),
+  `galactic_story_hud_state_contracts` (slide, instant, refusals). Not covered by a test: drawing the bands and hiding the GUI (`story_letterbox.cpp`); an eye check follows. A call that faults releases the plot's control locks, as any other thread failure of a story script does. If the band height cannot be read the bands are not built and the GUI stays shown.
+
+- **HCB-75 (legacy EAWR-6634):** Letter_Box_In / Letter_Box_Out from a tactical script (an object script of a space or land battle; the
+  tactical plot scripts as soon as the story engine runs them there). **Evidence.** The debug build registers the four letterbox
+  commands (`Letter_Box_In`, `Letter_Box_Out`, `Letter_Box_On`, `Letter_Box_Off`) among the engine's global script commands, which
+  every script context shares, so a tactical script calls them exactly as a story script does (debug build, string and registration
+  sweep). The installed FoC scripts call `Letter_Box_In` 126 times and `Letter_Box_Out` 141 times (none call `_On` or `_Off`): 16 calls in
+  3 object scripts (the two demo controllers and the Underworld mission script) and 251 in 62 tactical story scripts (space and land
+  missions, corruption missions); the seconds are 0 (188 calls), 2 (33), 0.5 (26), 1 (20). The Battle for the Core mod (GCW 1.1) ships the
+  same three object scripts (16 calls) and no tactical story override; the Remake 4.0 chain has no loose script that calls them; four other
+  installed workshop mods call 3, 26, 70 and 161 times. **Simulation effect of registering the calls.** Before this rule the tactical
+  script host had no such function: a call was a script error that ended the calling thread at that call and rolled back what that
+  resume had staged. The three object scripts therefore never ran past their first call. The Underworld mission script opens its
+  cinematic with `Lock_Controls`, `Letter_Box_In(0)`, `Start_Cinematic_Camera`, fades and a sleep, then `End_Cinematic_Camera`,
+  `Letter_Box_Out`, `Lock_Controls(0)` and `Suspend_AI(0)`, and the two demo controllers follow the same pattern. With the calls
+  registered those scripts run on, so this IS a simulation change for a battle that runs one of them (the world hash differs from the
+  old behaviour; running on past the call is the retail behaviour, by the debug-build registration in the evidence above). A battle whose scripts make no letterbox call is unchanged. **Rule.** A call stages one presentation command; the tactical script host
+  validates it with the story host's binding (one finite, non-negative number of seconds, else a named script fault of that thread, never
+  a match abort), and the session hands it to the viewer in script order, after the tick's world step. It never becomes a world command:
+  nothing is recorded in the replay, saved, or hashed, a headless replay makes none, a restored battle starts without one. The request itself
+  moves no world hash: a script that makes the call and a test binding that records the statement in its place give the same world hashes, equal at
+  1/2/4/8 workers, and the statement after each call runs (`foc_ai_contract_tests`, `letter_box_contracts`; the simulation effect
+  above comes from the script running on, not from the request). The viewer drives the battle camera's own two bands (HCB-11c: authored `Camera_FX_Manager_Letterbox_Height` of the height each,
+  opaque black) and hides the tactical GUI (command bar, radar, overlay) while the letterbox is wanted, as BCAM-04's camera does; there is
+  no second band path. `Letter_Box_In(s)` slides the bands in over `s` seconds and hides the GUI at once, `Letter_Box_Out(s)` gives the GUI
+  back at once and slides the bands out over `s` seconds, 0 is instant (`CinematicBands`, tests/ui `hud_shell_tests`). **Overlap with the
+  battle camera (unverified in the debug build, least visible reading):** the bands and the hidden GUI are on while the camera OR a script
+  asks for them. A script's Out during a camera shot leaves the bands up until the shot ends; the camera's end (also its immediate end
+  when the game stops playing) leaves a script's letterbox up; the owner whose request changes whether the bands are wanted sets the slide
+  time (0.5 s for the camera). All scripts of the battle share the one letterbox, as the engine's global command does; whether the
+  original keeps one counter or two for the camera and scripts is open, so it is a fidelity-list line, not a claim. **Bands are not saved; after a load they start down (unverified in the debug build).**
+  The viewer builds the battle HUD, and with it the one set of bands, again for every battle or restored battle (the bands belong to that
+  HUD, so nothing a call did in one battle carries into the next), so a restored script that calls `Letter_Box_Out` later has no bands to lower for the rest of that
+  cinematic, and one that is mid-cinematic when saved shows the GUI until its next `Letter_Box_In`. Whether the original keeps the
+  letterbox across a load is not checked. **Not reached:** the
+  campaign's retained child battle (its feed does not carry the requests: the stock tactical plots are not run there either, HCB-72), the
+  tactical plot scripts (the story engine does not run them in a battle), and `Letter_Box_On` / `Letter_Box_Off` (no stock or BFC caller;
+  the scripts that name them fault as an unknown function). **Evidence of the viewer part:** `test_tactical_script_letterbox` (GPU case: the calls are injected at a tick of the script service with `--eawr-live-letterbox <tick>:<in|out>:<seconds>`, through the same request path a script's call takes after the host; it checks the bands, the GUI hidden and restored, a slow slide, the overlap with the battle camera and an unchanged world hash). Not covered by a GPU case: an installed unit's object script making the call in a running skirmish (the contract test runs the script host directly).
+- **HCB-73 (legacy EAWR-6759):** Galactic pause (H102). Source: a rig capture of the original (galactic conquest, 1280 by 720), not the
+  debug build. **Button:** the pause button of the clock panel is a toggle (`Toggle` in the command bar data); it is drawn lit,
+  with its selected art, for as long as the game is paused and dim while it runs (two captures 33 s apart both lit, one running
+  capture dim: a steady state, not a flash; the tactical time panel flashes instead, TM-08). **Banner:** while paused a
+  yellow-framed panel at the top centre of the screen reads the text-database entry `TEXT_GAME_PAUSED` ("Game Paused") in the
+  pending-message red, with a button under it reading `TEXT_BUTTON_RESUME_GAME`; pressing that button plays again, and the
+  banner goes. It is drawn like the tactical pause banner (TM-09: the same pause shell, component fonts and colour); the map has no
+  Quit Game button under it (the tactical one is a project addition, TP-07). It is a presentation of the host's paused
+  flag: nothing is saved, hashed or replayed, and Resume Game is admitted exactly as the clock button is (where the button is disabled, e.g. a
+  closed clock, it takes no press and is drawn grey: a project choice, the original's look there is unverified) and asks for the same pause change (multiplayer
+  gating unchanged). **Not the pause key:** in the original the Space key toggles the cinematic view (HUD hidden, letterbox
+  bars), not pause; the remake's earlier Space-pauses binding is replaced by the tour (HCB-74) unless the player turns on Options > Tweaks > Space pauses the galactic game (default off, DEV-13), which gives Space back to pausing. **Unverified:** the banner over the
+  planetary view (a pending battle prompt occupied the same slot in the only capture; it is drawn as on the galaxy view) and the
+  banner while a modal window is up. Evidence: `test_viewer_galactic_pause_banner_runtime.py` (button lit, banner text and place,
+  Resume Game and the button both play again; Resume Game refused where the button is).
+
+- **HCB-74 (legacy EAWR-6291):** The galaxy map's camera button `b_camera_g` and the Space key start the galactic cinematic tour
+  (docs/behaviour/walks/gc-cinematic-tour.md, GCT-01..12): a looping, shuffled fly-by of the planets, the letterbox bands in
+  (the bands of HCB-72 and HCB-11c), the game GUI hidden, the game running; any mouse press (or a pointer move of a twentieth of the
+  screen or more) ends it, the click consumed. Space acts on its release and no longer pauses (the debug build has no pause key; the
+  pause control is the clock panel's button, HCB-73); the opt-in Options > Tweaks switch "Space pauses the galactic game" (default off, DEV-13) gives Space back to pausing, and then Space does not start the tour (the camera button still does). The button was inert
+  with a diagnostic before. **Unverified:** the speed profile and distances, the selected planet, Escape, the pointer, the Tab hold.
 
 Audit dated 2026-10-09, against `f58f8f3d6b09f71f74de1c0a4305800f2f8a815c`.
 The effective `CommandBarComponents.xml` contains 846 named components. This is an
@@ -188,7 +338,7 @@ Paths in this table are relative to `src/presentation/ui/`,
 |---|---|---|
 | HCB-11a | The movie-camera button activates automatic close-up shots of live battle objects. The tactical HUD and world selection markers disappear while letterbox bands are drawn; the battle continues. This is a local presentation mode, separate from tactical overview and pause. | R4; debug build, movie-mode initialization and letterbox activation |
 | HCB-11b | Escape leaves movie mode and restores the tactical HUD and camera. A Space press in the observed movie mode leaves the mode active; it must not be treated as an exit command on that evidence. | R4 |
-| HCB-11c | `Camera_FX_Manager_Letterbox_Height` controls each band's fraction of the screen height. Letterbox activation disables the game-mode GUI; the stock value is `0.085f`. The movie button can reset a tactical camera that differs from its defaults before attempting movie activation. | debug build, letterbox activation and camera button; effective constants XML |
+| HCB-11c | `Camera_FX_Manager_Letterbox_Height` controls each band's fraction of the screen height. Letterbox activation disables the game-mode GUI; the stock value is `0.085f`. The bands belong to the cinematic camera, not to the movie button: the project reads the height once for the whole HUD, so a command bar without `b_camera_t` still gets the bands when the camera starts from its key. They slide in and out over half a second (BCAM-04); retail capture of the steady state shows opaque black bands of 0.085 of the screen height each, the HUD fully hidden and the scene running under the band edge. The movie button can reset a tactical camera that differs from its defaults before attempting movie activation. | debug build, letterbox activation and camera button; effective constants XML; retail rig capture of the steady battle camera |
 | HCB-11d | Project presentation-only fallback: follow the first own visible object, or the first visible object when none is own, with a gentle orbit. Radius is half the tactical camera's planar offset, bounded below by four near-plane lengths; height is one fifth of that radius and yaw advances 0.1 radians per second. Freeze and retain the tactical frame, cancel held inputs, hide tactical controls/world marks, and consume Escape to restore it. End the mode when its subject disappears. Retail interesting-object selection, shot cuts and reset-before-movie remain fidelity follow-ups; this is not a reconstructed retail director. | project policy, permitted presentation-only fallback; HCB-11a..11c |
 | HCB-15a | No retreat action is offered in the observed stock standalone space skirmish: the button is disabled and its click has no effect. This observation does not qualify campaign retreat, a multiplayer surrender flow or every authored scenario. | R4 |
 | HCB-15b | The space command-bar update enables `b_retreat` when the tutorial permits retreat, the local player is a conflict participant with a playable faction, the battle is not multiplayer tactical and no victory is pending; during the opening lockout it is disabled and its build dial shows one minus the remaining share of `Space_Retreat_Allowed_Countdown_Seconds`, otherwise the dial is full. Its press toggles: a local retreat underway is cancelled, otherwise retreat starts directly or through the retreat dialog (WAR-65). Starting blinks the button; the blink stops when no retreat is underway. A local forced countdown keeps the enabled blink, but its press queues neither cancellation nor a new start: the cancellation request returns without an event for a forced retreat (WR-74). A press while disabled plays the GUI negative-feedback event; a refused start plays the faction's not-allowed or reason event. Prevention and superweapon refusals therefore leave the button enabled. Project choices: the blink uses the selected art with the pause button's additive half-second flash, and our escape phase disables the button. Retail appearance of a campaign countdown remains a capture qualification (GHUD-C14). | debug build, tactical space command-bar update, retreat eligibility, retreat toggle, cancellation request and start; X |
@@ -260,8 +410,9 @@ rules reject with reason 20. No beacon-specific event kind is required.
 | HCB-45 | `generic_collision` | implemented: nonvisual hit fallback | Existing shared shell alpha/component hit mask consumes anonymous HUD-art hits (UI-I2); this empty Icon template is an input sentinel, not collision feedback art | X, D1, HCB-63 |
 | HCB-45 | `generic_flytext` | partial | Shared XML readout presenter, logical-age view and gallery probe; real bounty awards await their accounting/caller feature | X, D1, HCB-64 |
 | HCB-45 | `bribed_icon`, `surface_mod_icon`, `remote_bomb_icon` | not-in-space-skirmish | Bracket predicates are shared, but stock activation comes from land bribe, terrain surface effects and saboteur bombs | X, D1, HCB-63 |
-| HCB-46 | `pb_switch`, `pb_switch_recharge`, `sl_switch`, `sl_switch_recharge` | not-in-space-skirmish | Bombardment requires land mode; super laser requires space without tactical production (campaign) | X, D1, HCB-63 |
-| HCB-47 | `deathstar_switch`, `DS_Countdown_Timer` | not-in-space-skirmish | Campaign superweapon controls, not ordinary space skirmish content; no presenter | X tooltip keys; campaign retail activation not exercised |
+| HCB-46 | `pb_switch`, `pb_switch_recharge` | not-in-space-skirmish | Bombardment requires land mode | X, D1, HCB-63 |
+| HCB-46 | `sl_switch`, `sl_switch_recharge` | implemented: GC space | Independent local SUPER_LASER holder lookup without selection; tactical production hides the controls in skirmish | X, D1, HCB-63; (legacy EAWR-7230) |
+| HCB-47 | `deathstar_switch`, `DS_Countdown_Timer` | partial | `superweapon_switch.hpp` (engine-free presenter from the snapshot's TSW-13 rows), `hud_shell.cpp`, `tactical_hud_build.cpp`, `battle_input_special.cpp`, `command_sink.cpp` (verb `tactical_superweapon`), `battle_audio_prepare.cpp`. The switch keeps its authored shell slot and shows while any super weapon object exists, whoever owns it; it is enabled only for the owner of a ready object (first alternate icon), shows the base icon otherwise, and a press sends the TSW-07 power-up request, plays the object's own press event on accept and the generic negative-feedback event on a refusal (the gate and phase are the simulation's own admission, TSW-07). An accepted press plays the five alternates once at Anim_FPS and the lever stays down (never reset). The readout (the dial art and font of `DS_Countdown_Timer`, text `' %03d.%03d'` seconds and thousandths, green approaching, red ready, hidden once fired) is placed by the shell's bone of the component's name (a bone without a mesh, like the hero health bars): the dial art keeps its texel size (220 x 97 in the atlas) around the bone, scaled by the shell placement, and the left-justified text starts at the bone plus `Text_Offset` (-46, 0) in the component's point size on the HUD reference height, with the shared command text-button bold request, full hinting and integer advances (GHUD-S66), and a one-device-pixel black outline (four stroke units in the pinned font renderer); a shell without the bone puts the dial at the top centre of the viewport (unverified). Unverified and marked: which tooltip key shows when (too far while not ready, the ready text while ready and once fired, since the played run showed the same text before and after the click, TSW-C3), the approach tint (retained light green until an approach capture exists; ready uses opaque red sampled from TSW-C2), the command bar's own conditions (space mode, the evil-faction name, no hide counter: none is wired, so the switch shows for any faction and mode), whether the second field is thousandths, whether the switch resets after the sequence, the shell anchor's 8-unit lift. The TSW-C2 ready reference puts the outer digits over the balance wedges, so the authored position and size are retained rather than shifting the dial. The ready and not-ready lever textures differ by the lamp; both keep the handle up, and only the click animation pulls it down. Deviations from the walked code, on owner feedback from a played run: a pull of the lever on an owned switch that is not ready (still approaching) answers with the generic negative-feedback event and sends nothing, where retail takes no click at all; once the sequence has run the lever is down and a pull stays silent; the pointer's rect is the whole lever panel (the shell's mesh slot and the drawn art, plus a 6-unit rim) rather than the mesh slot alone. Deviation: retail latches the fired flag on any click, even a refused one; here the lever goes down on the first snapshot that shows the sequence running (a click only queues a request), so a request the simulation refuses leaves the switch usable. Not wired: the `destroy planet` key command | X; debug build TSW-W7/W8, played runs TSW-C2/C3 (space-tactical-superweapon-walks.md), TSW-13; tooltip mapping and the attacker-case look not captured |
 | HCB-48 | `lt_weather_icon`, `tooltip_icon_land` | not-in-space-skirmish | Land weather/land tooltip art; no space consumer | X |
 
 | HCB-56 | `cs_ability_button`, `cs_ability_text` | missing | No generic world ability button/caption component presenter; space activation unverified | X; debug admission/capture required |
@@ -456,7 +607,7 @@ these code gates.
 | `surface_mod_icon` | land-only | Uses the combatant's nonempty terrain modifier icon, falling back to the first team member that has one. Replaces the template's placeholder art with `Surface_Settings/Status_Icon_Name`; stock terrain surface events/holders are land-only and space units author no `SurfaceFX_Name`. D1; effective surface and unit XML. |
 | `remote_bomb_icon` | land-only | Shows on an admitted bracket with a remote bomb attached. The stock placement holders are Underworld Saboteur and its team/demo variants, all land content; no stock space placement holder. D1; effective ability-holder XML. |
 | `pb_switch` + `pb_switch_recharge` | land-only | Visible only with valid local-player planetary bombardment in land mode. Ready uses alternate switch art and enables it; waiting uses ordinary art, disables it and displays progress to next bombardment. D1, X. |
-| `sl_switch` + `sl_switch_recharge` | GC-only (space tactical) | Requires space mode **and no tactical production**, then a local SUPER_LASER holder (Eclipse or Death Star II). Ready uses alternate art/enables the switch; active/recharging disables it, and active forces recharge progress to zero. Death Star presence relocates this action to the first selected-card slot with the ability icon/dial. Hidden in stock space skirmish. D1; effective superweapon unit XML. |
+| `sl_switch` + `sl_switch_recharge` | GC-only (space tactical) | Requires space mode **and no tactical production**, then a local SUPER_LASER holder (Eclipse or Death Star II). Ready uses alternate art/enables the switch; active/recharging disables it, and active forces recharge progress to zero. Death Star presence relocates this action to the first selected-card slot with the ability icon/dial. Hidden in stock space skirmish. Implemented by `superlaser_switch.hpp`, the shell adapter and the existing targeted ability request path (legacy EAWR-7230). D1; effective superweapon unit XML. |
 
 - **HCB-64:** `generic_flytext` is local tactical bounty feedback. A positive
   bounty awarded to the local player produces a signed credit amount at the
@@ -560,3 +711,24 @@ Command admission is exempt from partitioned tick work: its stable member scan r
 Retail shows the HCB-30 tactical research dock in space 1v1, team skirmishes and land battles. This viewer adapter currently wires the dock into space battles only; the neutral ledger seam supports land, but land-battle wiring remains a follow-up (legacy EAWR-4419). It forms a single column flush to the right edge, about 60 reference units below the top at reference height 768. It shows local and allied pending research with percentage complete, retains completed research without a percentage, and removes a completed starbase level-up when its authored completion flag is false. Completed rows appear first, in observed completion order, with pending rows in observed start order; cancelling through the production queue removes its pending row. Completed-row hover uses the usual encyclopedia panel, while left and right clicks are inert. WPR-70 through WPR-77 record the retail capture observations; the initial view opened mid-battle seeds a deterministic ledger order because the snapshot has no historical start timestamp.
 
 The captured anchor and 38-reference-unit vertical pitch are presentation policy. The component `Offset` (-19,309) and `Default_Offset` (50,-38) consumer is unknown and these fields are not applied by this dock; identifying that consumer remains follow-up work. Existing authored textures, `Scale`, `Size` icon scale, font and text styling remain changeable through the component catalog.
+
+**HCB-63 implementation (legacy EAWR-7230).** Effective `spaceunitssupers.xml:146-148` gives Death Star II
+`DUMMY_STARSHIP`, galactic `SELECTABLE`, and space `TACTICAL_SUPER_WEAPON, IDLE,
+ABILITY_COUNTDOWN, TARGETING`: there is no tactical SELECTABLE behaviour. It remains
+unselectable. Lines 151-158 declare SUPER_LASER and its 60-second recharge and
+10-second expiration; lines 173-180 declare User_Input, Capital/Frigate targets,
+and range 0..20000. These values remain in the ability data path, never in the HUD.
+The debug-build command-bar audit (D1) establishes that the independent switch finds
+a local countdown holder without selection only in space without tactical production.
+The presenter discovers holders from published ability rows; the existing ability-state
+adapter supplies readiness and pending-command admission. Ready uses alternate art;
+active forces recharge progress to zero. The ordinary switch and horizontal bar move
+8 shell units up; when the planet-destruction switch exists the action uses the first
+card slot shifted 5 units left, the SUPER_LASER icon and the card's recharge dial.
+A click arms a targeted activation for that holder through the same world-targeting,
+command scheduler and simulation validation as a selected ability. Selection stays intact.
+The planet-destruction lever and its irreversible sequence are a separate control (HCB-47).
+`pb_switch` remains land-only; no bombardment handler is added here. The super-laser
+component's animation metadata is retained in the catalog but does not drive a click
+animation: the audited update chooses ready/base art directly. Synthetic presenter and
+shell contracts cover this path; no retail visual capture was available for this change.

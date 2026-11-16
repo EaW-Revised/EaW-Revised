@@ -36,6 +36,22 @@ headless replay hashes do not change.
 - **UA-04 Firing.** The weapon behaviours request `ATTACK` (blend 0.1 s) or `ATTACKIDLE` only when
   the model has frames for that type. Hardpoint weapons of a capital ship request no clip.
   (UC-E6, UC-E7)
+  Retail timing, read from the debug build (11-15, research notes only, no code copied): when a weapon fires, the
+  unit requests `ATTACK` once (not looped), the variant drawn at random, blended over 0.1 s when it is already in an
+  attack clip or a finished one and over a global attack blend time otherwise; an `Attack_Animation_Is_Overlay` type
+  plays it as an overlay instead. A unit whose model has `ATTACKIDLE` frames does not fire while its clip is idle,
+  move or walk: the targeting service first puts it into `ATTACKIDLE` (looped, blend drawn from 0.2 to 0.75 s) and
+  the weapon fires from there. How the stance ends is not read here.
+  **On land (viewer):** the view reads each member's `weapon_fired` events and, for a member that stands
+  still, plays `ATTACK` (variant 00; once per shot, restarted by the next shot, first blend 0.4 s, retail's initial
+  value) and then holds `ATTACKIDLE` for 90 ticks after its last shot, then blends back to idle over the stance
+  blend. **The 90-tick hold is a seam, unverified:** retail ends the stance with the target, and the land
+  snapshot does not publish a member's target, so the view cannot follow that. A model without `ATTACKIDLE` (the
+  walkers) shows `ATTACK` then idle. A member that moves keeps its movement clip. Not reproduced: the stance end
+  with the target (the 90-tick hold above), the idle-to-stance step before the first shot (the simulation fires at
+  once), the random variant among several `ATTACK` clips (variant 00 only), the overlay form, and the stance blend
+  drawn from the synchronized generator (a fixed spread by entity here). Presentation only.
+
 - **UA-05 Turret turn.** The turret behaviour requests only `POWERDOWN` and `POWERUP`. Aiming turns
   the turret and barrel bones procedurally from the `Turret_*` tags; it is not a clip. (UC-E8)
   Ordinary space objects declaring `TURRET` reject desired angles outside the authored yaw/pitch
@@ -67,6 +83,16 @@ headless replay hashes do not change.
   frame that mirrors the current clip's remaining frames. Attacking does not move the S-foils.
   `DEPLOY` folds the S-foils shut from the open bind pose and `UNDEPLOY` opens them; the live view
   plays both from the snapshot since the space ability implementation work ([space abilities](space-abilities.md) AB-31). (UC-E5)
+- **UA-12 Super laser attack clip.** A unit whose `SUPER_LASER` handler selects an `Attack_Anim_Sub_Index` plays
+  `<model stem>_attack_NN.ala` (NN that index in two digits, the model's own stem, resolved by number, so a gap in the numbering never changes the clip; the same file the fire stage times by,
+  [abilities](walks/abilities.md) WSPL-08) from the tick its aiming turn ends, once, at the clip's own rate, held at
+  its last playable frame; the shown frame is the one the beam's Fire_Frame waits for. The clip runs while the use
+  does, the continuation included; at the use's end the unit shows its idle pose again without a blend (seam, no
+  retail evidence of a blend). The view reads the phase and the clip start tick from the snapshot, which publishes
+  them from the use state the fire stage already keeps: presentation only, never a hash input. The beam is drawn from
+  the fire stage on, not from the lock (WSPL-09). The clip plays over the model's idle clip: the idle stays bound and
+  plays whenever the attack clip is not posed (unlike a death or S-foil clip, which replace it, UA-06); if the attack
+  clip does not bind, the unit keeps its idle.
 - **UA-07 Death clone.** A destroyed unit whose type lists a `Death_Clone` is replaced by an
   object of the clone type. Retail picks the clone by the killing blow's damage type, then the
   `Damage_Misc` entry, then the unit's own type. The clone appears at the unit's position and

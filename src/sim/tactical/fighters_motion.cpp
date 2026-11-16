@@ -400,8 +400,19 @@ private:
         const Fixed leader_distance = std::max(whole(1),
             length_xy(calc_.sub(leader().position.x, hold.x), calc_.sub(leader().position.y, hold.y)));
         Vec3 target = hold;
+        if (frame_.guard) {
+            // FM-20 (#6966, debug build): a guard of a unit is a move to it. The craft fly at their
+            // own maximum speed (no Min_Speed floor); inside the near zone they fly at most twice
+            // the guarded unit's maximum speed. This speed also holds inside the 90-unit circle
+            // below, where the idle ratio would otherwise slow the leader to about half a unit per
+            // frame. Whether a guard keeps the circle geometry is unverified (plan Q1).
+            speed = leader_distance < frame_.guard->near_radius
+                ? std::min(profile_.max_speed, frame_.guard->speed_cap) : profile_.max_speed;
+        }
         if (leader_distance < whole(90)) {
-            speed = calc_.mul(calc_.div(own_distance, leader_distance), Fixed::from_raw(Fixed::scale / 2));
+            if (!frame_.guard) {
+                speed = calc_.mul(calc_.div(own_distance, leader_distance), Fixed::from_raw(Fixed::scale / 2));
+            }
             if (leading()) {
                 // Ten over the distance in radians, as a turn. FM-20 (#664, debug build): over the
                 // distance itself, which is never zero (a zero offset became a whole unit above, and

@@ -93,6 +93,23 @@ void TacticalSession::Impl::append_canonical_hazard_moves_state(std::vector<std:
         }
 }
 
+void TacticalSession::Impl::append_canonical_final_facing_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts) const {
+        // MV-40: the final facing (raw Q24 degrees) of each live unit whose order carries one, ascending ID;
+        // absent while none does, so battles without a facing move keep their bytes.
+        const auto facings = (counts ? counts->final_facings : static_cast<std::uint64_t>(std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
+            return unit.state.order.final_yaw.has_value();
+        })));
+        if (facings != 0) {
+            bytes.insert(bytes.end(), final_facing_tag.begin(), final_facing_tag.end());
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(facings));
+            for (const auto& unit : units) {
+                if (!unit.state.order.final_yaw) continue;
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                sim::detail::append_i64(bytes, unit.state.order.final_yaw->raw());
+            }
+        }
+}
+
 void TacticalSession::Impl::append_canonical_waypoints_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts) const {
         const auto waypoint_count = (counts ? counts->waypoint_count : static_cast<std::uint64_t>(std::count_if(units.begin(), units.end(), [](const auto& unit) {
             return unit.waypoints.has_value();
@@ -117,7 +134,10 @@ void TacticalSession::Impl::append_canonical_waypoints_state(std::vector<std::ui
                 sim::detail::append_u32(bytes, static_cast<std::uint32_t>(unit.waypoints->points.size()));
                 for (const auto& point : unit.waypoints->points) {
                     append_vec3(bytes, point.move.destination);
-                    sim::detail::append_u32(bytes, (point.move.through_hazards ? 1U : 0U) | (point.repeat ? 2U : 0U));
+                    // MV-40: bit 2 (value 4) marks a leg with a final facing, whose raw Q24 degrees follow the flag word.
+                    sim::detail::append_u32(bytes, (point.move.through_hazards ? 1U : 0U) | (point.repeat ? 2U : 0U)
+                        | (point.move.final_yaw ? 4U : 0U));
+                    if (point.move.final_yaw) sim::detail::append_i64(bytes, point.move.final_yaw->raw());
                     sim::detail::append_u32(bytes, point.key.player_id);
                     sim::detail::append_u64(bytes, point.key.tick);
                     sim::detail::append_u64(bytes, point.key.sequence);

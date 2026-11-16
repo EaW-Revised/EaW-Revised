@@ -573,9 +573,11 @@ private:
     // selected (campaign) start does it after formation (form_space_entry).
     core::Result<void> place_tactical_super_weapons() {
         using Void = core::Result<void>;
+        bool any = false;
         for (auto& unit : start_.units) {
             const auto* type = type_selection_->find(unit.type);
             if (type == nullptr || !type->tactical_super_weapon) continue;
+            any = true;
             // Enemy-owned only: a target owned by the object's own faction is skipped. Skirmish has no defender (both
             // sides arrive the same way), so every start uses the start distance.
             const auto owner = std::find_if(start_.players.begin(), start_.players.end(), [&](const StartPlayer& p) { return p.player.player_id == unit.state.owner; });
@@ -589,6 +591,8 @@ private:
             unit.state.rotation = rotation.value();
             unit.yaw_degrees = started.value().yaw_degrees;
         }
+        // TSW-03: the sim's own target list; a skirmish has no parent conflict, so the gate input stays absent.
+        if (any) start_.setup.tsw = tactical_super_weapon_setup(inputs_.placements);
         return Void::success();
     }
 
@@ -686,7 +690,27 @@ private:
         const auto neutral_faction = std::find_if(factions.begin(), factions.end(),
             [](const StartFaction& faction) { return faction.neutral; });
 
+        // WGT-57 (interim): a destroyed planet's battle starts without the planet backdrop. A backdrop is a SpaceProp,
+        // which is no simulation object (is_map_object_placement), so the record is only reported as removed: that is
+        // what the viewer reads to leave it out.
+        std::optional<std::uint32_t> destroyed_backdrop;
+        if (inputs_.destroyed_planet_backdrop) {
+            auto record = battle::destroyed_backdrop_record(inputs_.placements);
+            if (!record) return Void::failure(record.error());
+            destroyed_backdrop = record.value();
+            if (destroyed_backdrop) for (const auto& placement : inputs_.placements) if (placement.record == *destroyed_backdrop) {
+                start_.removed.push_back({placement.record, placement.type, placement.owner_faction, Removal::destroyed_planet});
+                // WGT-57: the target's Death_By_TSW_Replacements stand where it was, at its position and facing.
+                if (placement.position && placement.orientation_degrees) {
+                    start_.props = replace_target_prop(placement, placement.death_by_tsw_replacements, *placement.position,
+                        *placement.orientation_degrees, battle::replacement_prop_record_base);
+                }
+                break;
+            }
+        }
+
         for (const auto& placement : inputs_.placements) {
+            if (destroyed_backdrop && placement.record == *destroyed_backdrop) continue;
             if (!is_map_object_placement(placement) || invalid_squadron(placement.type)) continue;
             if (!placement.owner_index || *placement.owner_index < 0) {
                 return Void::failure(fixture_error("map object record " + std::to_string(placement.record) + " ("

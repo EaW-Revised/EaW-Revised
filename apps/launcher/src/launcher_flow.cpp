@@ -269,6 +269,8 @@ Options parse_command_line(const std::vector<std::wstring>& args) {
             }
         } else if (argument == L"--allow-unknown-build") {
             options.allow_unknown_build = true;
+        } else if (argument == L"--no-fog") {
+            options.no_fog = true;
         } else if (argument == L"--render-thread") {
             if (index + 1 >= args.size() || (args[index + 1] != L"safe" && args[index + 1] != L"separate")) {
                 options.error = "--render-thread needs safe or separate.";
@@ -471,6 +473,7 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
     inputs.project = project;
     inputs.game_root = game_root;
     inputs.allow_unknown_build = options.allow_unknown_build;
+    inputs.no_fog = options.no_fog;
     inputs.engine_unverified = engine_unverified;
     inputs.report = state_dir / "front-end-report.json";
     inputs.safe_render_thread = options.safe_render_thread;
@@ -532,13 +535,26 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
         if (!render || (*render != "safe" && *render != "separate")) return false;
         inputs.mod_profile = profile;
         inputs.render_thread = widen_ascii(*render);
+        // launch.no_fog is the profile's own option; the command line's --no-fog stays on for every profile.
+        const auto* fog = launch->member("no_fog");
+        inputs.no_fog = options.no_fog || (fog && fog->kind == JsonValue::Kind::boolean && fog->boolean);
         LauncherState state = load_state(options.user_data);
         state.last_profile = *id;
         std::string save_error;
         if (!save_state(options.user_data, state, save_error)) log.line("could not remember the profile: " + save_error);
         return true;
     };
-    const auto select_profile = [&](const JsonValue& action) { return select_profile_id(action.string_member("profile")); };
+    const auto select_profile = [&](const JsonValue& action) {
+        if (!select_profile_id(action.string_member("profile"))) return false;
+        // Screen is a launch-time hint, never a saved profile or video setting.
+        inputs.launcher_screen.reset();
+        if (const auto* screen = action.member("screen"); screen && screen->kind == JsonValue::Kind::number
+            && screen->number >= 0 && screen->number <= std::numeric_limits<int>::max()
+            && std::floor(screen->number) == screen->number) {
+            inputs.launcher_screen = static_cast<int>(screen->number);
+        }
+        return true;
+    };
     // Instance n >= 2: the game's user:// follows APPDATA, set only for the game child (never the manager).
     const auto game_environment = [&](bool on) {
         runner.set_appdata(on && multi ? std::optional<fs::path>(instance_appdata_dir(options.user_data, instance)) : std::nullopt);

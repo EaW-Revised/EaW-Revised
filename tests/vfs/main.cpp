@@ -205,6 +205,23 @@ void vfs_mod_chain() {
     auto invalid = mod_chain_roots(std::filesystem::path("leaf;;parent;"));
     expect(invalid.size() == 4 && invalid[1].second.empty() && invalid[3].second.empty(),
         "empty chain entries are invalid roots, never the working directory");
+    const auto folders = mod_chain_folders(std::filesystem::path("leaf;;parent;"));
+    expect(folders.size() == 4 && folders[0] == "leaf" && folders[1].empty() && folders[2] == "parent" && folders[3].empty(),
+        "chain folders keep every segment in order, empty ones empty");
+    const auto one_folder = mod_chain_folders(semicolon);
+    expect(one_folder.size() == 1 && one_folder[0] == semicolon && mod_chain_folders({}).empty(),
+        "chain folders: a directory named with ';' is one folder, an empty chain has none");
+    // A leading ';' makes an empty first segment, and a drive-letter chain splits only at ';' (never at the ':' or the
+    // separators of a drive path), on every platform.
+    const auto leading = mod_chain_folders(std::filesystem::path(";a"));
+    expect(leading.size() == 2 && leading[0].empty() && leading[1] == "a",
+        "chain folders: a leading ';' gives an empty first segment, then the folder");
+    const auto drives = mod_chain_folders(std::filesystem::path("C:/mods/leaf;D:/mods/parent"));
+    expect(drives.size() == 2 && drives[0].generic_string() == "C:/mods/leaf" && drives[1].generic_string() == "D:/mods/parent",
+        "chain folders: a drive-letter chain splits at ';' only");
+    const auto drive_roots = mod_chain_roots(std::filesystem::path("C:/mods/leaf;D:/mods/parent"));
+    expect(drive_roots.size() == 2 && drive_roots[0].first == "mod" && drive_roots[1].first == "mod-parent-1",
+        "chain roots: a drive-letter chain names its layers in order");
 }
 
 } // namespace

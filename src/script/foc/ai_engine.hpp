@@ -30,6 +30,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include "eawr/script/foc/galactic_ai_write_probe.hpp"
 
 namespace eawr::script::foc::galactic_ai { class NativeActions; }
 namespace eawr::script::foc::tactical_ai_detail { class ScriptEvaluators; }
@@ -431,7 +432,7 @@ struct BuildTask {
 
 // A blocking object a plan script waits on (EX-20).
 struct Block {
-    enum class Kind : std::uint8_t { produce, move, ambush, reinforce, galactic_land, galactic_launch, galactic_form, galactic_invade } kind{Kind::move};
+    enum class Kind : std::uint8_t { produce, move, ambush, reinforce, galactic_land, galactic_launch, galactic_form, galactic_invade, galactic_starbase } kind{Kind::move};
     std::uint64_t id{};
     std::uint64_t instance{};
     std::uint64_t taskforce{};
@@ -815,9 +816,12 @@ public:
         std::string_view content_identity, authoritative::ScriptScheduler&) const;
     [[nodiscard]] core::Result<void> restore_tactical_native(std::span<const std::uint8_t>,
         std::string_view content_identity, authoritative::ScriptScheduler&);
+    // Observer only: counts native state writes outside the async window body (the step 2 exit counter).
+    void bind_write_probe(std::shared_ptr<GalacticAiWriteProbe> probe) noexcept { write_probe_ = std::move(probe); }
     // Continuation mutations, including synchronized draws, invalidate goals.
     // A player turn stages the bump in its effects (the commit applies the count); anything else bumps now.
     void mark_native_state_changed() noexcept {
+        if (write_probe_) write_probe_->note(GalacticAiWriteProbe::Writer::engine);
         if (auto* effects = staged()) { ++effects->revisions; return; }
         if (++native_revision_ == 0) std::terminate();
         native_record_header_dirty_ = true;
@@ -861,8 +865,18 @@ public:
         authoritative::ScriptScheduler&, std::uint64_t& sequence, std::span<const galactic_ai::PlayerSelection>,
         const sim::PartitionExecutor* executor = nullptr);
     [[nodiscard]] core::Result<void> apply_galactic_policy(tactical::PlayerId, const galactic_ai::TemplatePolicy&);
+    // #6917 (the control-switch reward): whether the galactic players exist yet (the first barrier creates them from the selection).
+    [[nodiscard]] bool galactic_players_ready() const noexcept { return initialized_; }
+    // Replaces one galactic player's AI with a fresh instance of `type` at the given difficulty level, as a new controller would
+    // start: the running plans are abandoned (task forces, reservations, claims and refunds released, their scripts removed), the
+    // goals, learning tables and template policy start empty, the goal functions and difficulty come from the new type, and the
+    // player's free store script instance and queued events are dropped (the lifecycle starts the new type's own). Only between
+    // windows. An unknown type or player refuses and changes nothing.
+    [[nodiscard]] core::Result<void> replace_galactic_player_type(tactical::PlayerId, std::string_view type, std::string_view level,
+        authoritative::ScriptScheduler&);
     void set_galactic_funding(std::shared_ptr<galactic_ai::Funding>);
     void set_galactic_selection(GalacticSelectionProvider provider) { galactic_selection_ = std::move(provider); }
+    void set_galactic_freestore(GalacticFreestoreReader reader) { galactic_freestore_ = std::move(reader); }
     void set_galactic_stage_catalog(std::shared_ptr<const galactic_goals::MaterializedPlanCatalog> catalog) { galactic_stage_catalog_ = std::move(catalog); }
     using GalacticStageUsability = std::function<core::Result<bool>(tactical::PlayerId, const sim::galactic::GalacticSnapshot&, sim::galactic::PlanetId)>;
     void set_galactic_stage_usability(GalacticStageUsability reader) { galactic_stage_usability_ = std::move(reader); }
@@ -987,7 +1001,12 @@ public:
     void attach_script_evaluators(std::shared_ptr<tactical_ai_detail::ScriptEvaluators> evaluators) noexcept {
         script_evaluators_ = std::move(evaluators);
     }
-    [[nodiscard]] tactical_ai_detail::ScriptEvaluators* script_evaluators() const noexcept { return script_evaluators_.get(); }
+    void set_script_evaluator_reader(std::function<tactical_ai_detail::ScriptEvaluators*()> reader) {
+        script_evaluator_reader_ = std::move(reader);
+    }
+    [[nodiscard]] tactical_ai_detail::ScriptEvaluators* script_evaluators() const {
+        return script_evaluator_reader_ ? script_evaluator_reader_() : script_evaluators_.get();
+    }
     [[nodiscard]] std::optional<Real> evaluate(std::string_view equation, tactical::PlayerId player,
         const Target* target) const;
     // FT-05/06: selected manager owns object liveness and positions.
@@ -997,6 +1016,8 @@ public:
     [[nodiscard]] const TaskForce* taskforce(std::uint64_t id) const;
     [[nodiscard]] const Plan* plan_of_instance(std::uint64_t instance) const;
     [[nodiscard]] const Plan* plan(std::uint64_t id) const;
+    // PL-47: the authored name of the goal type the plan serves; empty when the plan or its goal is gone.
+    [[nodiscard]] std::string goal_type_name(std::uint64_t plan_id) const;
     [[nodiscard]] const Block* block(std::uint64_t id) const;
     [[nodiscard]] std::optional<galactic_ai::MovementReach> galactic_movement_reach(std::uint64_t plan) const;
     [[nodiscard]] std::vector<std::uint64_t> galactic_movement_requests() const;
@@ -1097,6 +1118,52 @@ private:
     void report_inputs() const noexcept;
     void report_effects() const noexcept;
     using PadReservation = ai::PadReservation;
+
+    // Which service asks for the selector input, for the trace only (#7056): 1 goals, 2 execution. Kept per thread
+    // (`gc_profile::selection_origin`), so no engine member is written from two threads.
+    class SelectionOrigin {
+    public:
+        explicit SelectionOrigin(unsigned origin) noexcept : previous_(gc_profile::selection_origin) { gc_profile::selection_origin = origin; }
+        SelectionOrigin(const SelectionOrigin&) = delete;
+        SelectionOrigin& operator=(const SelectionOrigin&) = delete;
+        ~SelectionOrigin() { gc_profile::selection_origin = previous_; }
+    private:
+        unsigned previous_;
+    };
+
+    // ---- Selector input window (#7056) ----
+    // Inside one goal evaluation (the unit selection, the production-time check and the funding check of the same goal,
+    // or the same checks when a goal is revalidated) the selector input of a (player, target, goal type, plan) is a pure
+    // function of state that does not change in between, so it is built once instead of once per check. The window state is
+    // per thread (a thread_local that records the engine it belongs to): the window nests, only the engine that opened it
+    // reads or fills it, and the outermost one closing drops every kept input. No engine member is written, so a second
+    // thread entering the engine can neither race on the depth nor clear another thread's inputs.
+    struct SelectionWindowState {
+        const Engine* engine{};
+        unsigned depth{};
+        std::map<std::tuple<std::uint64_t, std::uint64_t, const GoalType*, const PlanDef*>,
+            std::shared_ptr<const GalacticSelectionInput>> inputs;
+    };
+    [[nodiscard]] static SelectionWindowState& selection_window() noexcept {
+        static thread_local SelectionWindowState state;
+        return state;
+    }
+    class SelectionWindow {
+    public:
+        explicit SelectionWindow(const Engine& engine) noexcept : state_(selection_window()) {
+            if (state_.depth == 0) state_.engine = &engine;
+            ++state_.depth;
+        }
+        SelectionWindow(const SelectionWindow&) = delete;
+        SelectionWindow& operator=(const SelectionWindow&) = delete;
+        ~SelectionWindow() {
+            if (--state_.depth != 0) return;
+            state_.inputs.clear();
+            state_.engine = nullptr;
+        }
+    private:
+        SelectionWindowState& state_;
+    };
 
     // ---- Player effects (S-T3b) ----
     // One player's turn: its writes to engine-wide state stage in player.effects while the scope is
@@ -1220,6 +1287,8 @@ private:
     [[nodiscard]] bool select_units(PlayerAi& player, const Goal& goal, PotentialPlan& potential);
     [[nodiscard]] bool select_galactic_units(PlayerAi&, const Goal&, PotentialPlan&);
     [[nodiscard]] std::shared_ptr<const GalacticSelectionInput> galactic_selection(const PlayerAi&, const Goal&, const PlanDef&) const;
+    // The free-store rows of that input, without building the rest of it (the reader is absent: the whole input).
+    [[nodiscard]] std::vector<GalacticSelectionObject> galactic_freestore(const PlayerAi&, const Goal&, const PlanDef&) const;
     [[nodiscard]] galactic_goals::ProductionEstimate galactic_estimate(const PlayerAi&, const Goal&, const PotentialPlan&, bool linear) const;
     [[nodiscard]] sim::galactic::funding::GoalRequest galactic_funding_request(const PlayerAi&, const Goal&) const;
     [[nodiscard]] bool galactic_fundable(const PlayerAi&, const Goal&, bool activation) const;
@@ -1269,6 +1338,7 @@ private:
     [[nodiscard]] std::optional<math::Vec3> ambush_point(const Block& block, const Plan& plan) const;
     void order_ambush(Block& block, const TaskForce& taskforce, const Plan& plan, bool fresh);
     void remove_member(TaskForce& taskforce, sim::EntityId unit);
+    void fail_galactic_assembly_members(const TaskForce&, std::optional<sim::EntityId>);
     void return_galactic_actor(const TaskForce&, sim::EntityId);
     [[nodiscard]] bool defines_function(std::uint64_t instance, const std::string& name) const;
     void record(const Plan* plan, tactical::PlayerId player, std::string event, std::string detail = {});
@@ -1332,12 +1402,14 @@ private:
     std::array<std::uint64_t, 34> native_record_work_{};
     std::uint64_t native_record_inspections_{}; // candidate encodes + retained rows reconciled, never saved/hashed
     std::uint64_t native_revision_{1};
+    std::shared_ptr<GalacticAiWriteProbe> write_probe_; // observer only (async step 2 exit counter)
     std::uint64_t galactic_tasks_revision_{1}; // derived publication invalidation, not saved state
     mutable std::shared_ptr<const std::vector<GalacticBudgetBuild>> galactic_build_cache_;
     mutable std::array<std::uint64_t, 3> galactic_build_cache_key_{};
     mutable tactical::PlayerId galactic_build_cache_reader_{};
     std::shared_ptr<Host> host_;
     std::shared_ptr<tactical_ai_detail::ScriptEvaluators> script_evaluators_;
+    std::function<tactical_ai_detail::ScriptEvaluators*()> script_evaluator_reader_;
     mutable bool producers_prepared_{};
     mutable std::map<std::pair<tactical::PlayerId, tactical::TypeId>, std::vector<sim::EntityId>> producers_;
     mutable ProducerWork producer_work_{};
@@ -1346,6 +1418,7 @@ private:
     bool galactic_deferred_{}; // S9a: galactic turns' effects wait for commit_galactic_events
     const sim::PartitionExecutor* perception_executor_{};
     GalacticSelectionProvider galactic_selection_;
+    GalacticFreestoreReader galactic_freestore_;
     std::shared_ptr<const galactic_goals::MaterializedPlanCatalog> galactic_stage_catalog_;
     GalacticStageUsability galactic_stage_usability_;
     GalacticStageObjectReader galactic_stage_garrison_, galactic_stage_combat_skip_;

@@ -39,9 +39,12 @@ namespace detail { struct ModelRecipeProbe; struct RecipeMemoryProbe; }
 // A full cache falls back to ordinary resource ownership, without eviction.
 class GodotShaderCache final {
 public:
-    static constexpr std::size_t entry_limit = 64;
-    static constexpr std::size_t source_byte_limit = 1024 * 1024;
-    struct Stats final { std::size_t entries{}, source_bytes{}; };
+    // Sized for one Galactic Conquest session: the galaxy layers and every battle it starts share one
+    // cache, which holds the distinct program texts of all of them (a few dozen to ~100 on a large mod).
+    static constexpr std::size_t entry_limit = 256;
+    static constexpr std::size_t source_byte_limit = 2 * 1024 * 1024;
+    // `refused_full` counts programs that fell back to resource ownership because a limit was reached.
+    struct Stats final { std::size_t entries{}, source_bytes{}, refused_full{}; };
     GodotShaderCache();
     ~GodotShaderCache();
     [[nodiscard]] Stats stats() const noexcept;
@@ -55,6 +58,11 @@ namespace fog_diagnostic_codes {
 // A declared fog consumer is not a supported fog-stub-v1 material.
 inline constexpr std::string_view unsupported_consumer = "EAWR-FOG-0006";
 } // namespace fog_diagnostic_codes
+
+// Why an idle placement was reported by GodotRenderer::take_idle_skin_disturbance (counted per cause).
+enum class IdleDisturbance : std::uint8_t {
+    missing_instance, bind_failed, asset_mismatch, billboard, other_bind, cleared, copied, removed, replaced
+};
 
 // Godot owns the window, graphics device, swapchain, resize dispatch and final
 // presentation. This adapter owns only RenderingServer resources attached to
@@ -270,6 +278,8 @@ public:
     };
     [[nodiscard]] static PreparedSkinPose prepare_skin_pose(std::span<const animation::BonePose> bones,
         SkinPoseWork* work = nullptr);
+    // True when both are valid and would upload byte-identical palettes. Pure: safe on workers.
+    [[nodiscard]] static bool same_skin_pose(const PreparedSkinPose& left, const PreparedSkinPose& right) noexcept;
     // Main-thread publication; preserves request order and retains ordinary diff uploads.
     [[nodiscard]] core::Result<void> set_prepared_skin_pose(sim::EntityId entity_id,
         sim::AssetId asset_id, const PreparedSkinPose& pose, std::uint64_t shared_idle_group = 0);
@@ -280,6 +290,14 @@ public:
     // Main-thread only, during an idle skin batch; group matches the later prepared bind.
     void prepare_shared_idle_surface(std::uint64_t group, sim::EntityId entity_id, sim::AssetId asset_id);
     [[nodiscard]] SkinPoseWork end_skin_batch();
+    // Main thread. Appends, then forgets, every idle placement (the shared_idle_group a prepared bind used)
+    // whose instances may no longer all hold the palette last uploaded for it: a live pose, clear, copy,
+    // replacement or retirement touched one, or one idle bind did not land. A caller that skips an unchanged
+    // placement's upload must upload the placements reported here again (and any placement it has not
+    // uploaded since the instances were created, which it already knows).
+    void take_idle_skin_disturbance(std::vector<std::uint64_t>& groups);
+    // Cumulative counts behind those reports, indexed by IdleDisturbance.
+    [[nodiscard]] std::array<std::uint64_t, 9> idle_skin_disturbance_reasons() const;
     // Ends the entity's stored pose; a live skinned instance returns to its
     // rest palette. A pose survives the entity's absence from a snapshot (a
     // caller may pose once and resubmit later), so the renderer cannot tell
@@ -380,6 +398,8 @@ public:
         std::size_t assets{};
         std::size_t instances{};
         std::size_t skeletons{};
+        // Pieces that draw without an engine skeleton (their bone is folded into the instance transform).
+        std::size_t skeleton_free{};
         // Stored poses, bound to an instance or pending one. A pose survives
         // its entity's absence from a snapshot and ends with its asset's
         // release, clear_skin_pose, or a replacing set_skin_pose.
@@ -492,6 +512,12 @@ public:
     // final release subtracts its resource.
     [[nodiscard]] std::size_t shadow_receiving_materials() const noexcept;
     [[nodiscard]] std::size_t shadow_variant_failures() const noexcept;
+
+    // During play (a mid-battle append) an upload must not wait on this thread's behalf: the kept CPU snapshots of its
+    // textures and model are not re-read and released after the upload (they stay resident), and the upload-identity
+    // hashing never blocks on the worker pool's admission budget. Presentation only; the identity values are the same.
+    void set_play_uploads(bool enabled) noexcept;
+    [[nodiscard]] bool play_uploads() const noexcept;
 
     // Synthetic fog-stub-v1 binding (P1-07, #28/#32): harness policy, not retail
     // fog semantics. It is off by default. Until enable_fog() no fog resource

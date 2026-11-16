@@ -312,11 +312,8 @@ core::Result<void> GodotRenderer::set_translated_parameters(const sim::EntityId 
     }
     const std::string uploaded = stored_output::backend_source(shader_source);
     if (shader_cache_) {
-        const auto found = shader_cache_->impl_->entries.find(uploaded);
-        if (found != shader_cache_->impl_->entries.end()) {
-            target.shared_shader = found->second;
-            target.shader = target.shared_shader->shader;
-        }
+        target.shared_shader = shader_cache_->impl_->find(uploaded);
+        if (target.shared_shader) target.shader = target.shared_shader->shader;
     }
     std::vector<std::string> new_tokens;
     std::vector<ReflectedUniform> new_uniforms;
@@ -358,17 +355,12 @@ core::Result<void> GodotRenderer::set_translated_parameters(const sim::EntityId 
         return MaterialUpload::refused;
     }
     if (shader_cache_ && !target.shared_shader) {
-        auto& cache = *shader_cache_->impl_;
-        if (cache.entries.size() < GodotShaderCache::entry_limit
-            && uploaded.size() <= GodotShaderCache::source_byte_limit - cache.source_bytes) {
-            auto accepted = std::make_shared<CachedShader>();
-            accepted->shader = target.shader;
-            accepted->uniforms = std::move(new_uniforms);
-            accepted->tokens = std::move(new_tokens);
-            cache.entries.emplace(uploaded, accepted);
-            cache.source_bytes += uploaded.size();
-            target.shared_shader = std::move(accepted);
-        }
+        auto accepted = std::make_shared<CachedShader>();
+        accepted->shader = target.shader;
+        accepted->uniforms = std::move(new_uniforms);
+        accepted->tokens = std::move(new_tokens);
+        if (auto admitted = shader_cache_->impl_->admit(uploaded, accepted)) target.shared_shader = std::move(admitted);
+        else accepted->shader = RID(); // Refused: the resource keeps owning its RID, the temporary must not free it.
     }
     target.material = rendering.material_create();
     rendering.material_set_shader(target.material, target.shader);

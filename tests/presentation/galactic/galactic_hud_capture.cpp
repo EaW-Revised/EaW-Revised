@@ -2,6 +2,7 @@
 #include "galactic/galactic_hud_fixture.hpp"
 #include "galactic/live_battle_bounty.hpp"
 #include "eawr/core/diagnostic.hpp"
+#include "eawr/data/galactic/galactic_data.hpp"
 #include "eawr/platform/campaign_end_inputs.hpp"
 #include "eawr/platform/campaign_scoring.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
@@ -25,6 +26,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <utility>
 
@@ -102,11 +104,18 @@ public:
     bool run_score_ledger(GalacticMode::State& state) override;
 private:
     void stage_steal(GalacticMode::State& state);
+    void stage_ability(GalacticMode::State& state);
     std::string name_;
     bool synthetic_{};
     sim::galactic::PlanetId steal_target_{};
     bool steal_published_{};
+    int ability_stage_{};
+    sim::galactic::PlanetId ability_target_{};
     double corruption_fixture_seconds{};
+    std::weak_ptr<const void> corruption_fixture_owner_;
+    bool corruption_fixture_owner_seen_{};
+    bool corruption_fixture_loaded_{};
+    bool corruption_fixture_repaused_{};
     galactic_view::BattleDialogView battle_dialog_fixture;
     bool score_ledger_script{};
     std::unique_ptr<ClockCapturePair> clock_pair_;
@@ -117,9 +126,9 @@ bool CaptureHudFixture::enabled(Feature feature) const {
     switch (feature) {
     case Feature::fleet_visibility: return galactic_view::fleet_hud_fixture(name_);
     case Feature::ground_placement: return galactic_view::ground_fixture(name_);
-    case Feature::intelligence: return name_ == "known" || name_ == "masked" || name_ == "known-zero" || name_ == "discovered-only";
+    case Feature::intelligence: return name_ == "known" || name_ == "masked" || name_ == "known-zero" || name_ == "discovered-only" || name_ == "known-none";
     case Feature::unaligned_planets: return name_ == "orbit-placement-yavin-overview-before";
-    case Feature::driven_transit: return name_ == "fleet-transit";
+    case Feature::driven_transit: return name_ == "fleet-transit" || name_ == "fleet-transit-plain";
     case Feature::battle_dialog: return name_.starts_with("battle-");
     case Feature::corruption_overview: return name_.starts_with("corruption-spread");
     }
@@ -139,6 +148,26 @@ bool CaptureHudFixture::configure_scene(GalacticMode::State& state, galactic_vie
     auto& options = state.options;
     auto& galaxy_setup = state.galaxy_setup;
     auto& map_input = state.map_input;
+    if (!synthetic_ && name_ == "cache-corruption-load") {
+        // Prepare the real campaign owner with an explicitly clean fixture.
+        // Changing galaxy_setup later cannot affect its already initialized root.
+        if (!state.filesystem) { state.failure = "Corruption load fixture needs installed data"; return false; }
+        auto catalog = state.audio_catalog;
+        if (!catalog) {
+            auto loaded = data::load_catalog_strict(*state.filesystem, state.profile == "remake" ? data::Profile::remake
+                : (state.profile == "foc" ? data::Profile::foc : data::Profile::eaw));
+            if (!loaded) { state.failure = core::format_diagnostic(loaded.error()); return false; }
+            catalog = std::make_shared<const data::Catalog>(std::move(loaded).value().catalog);
+        }
+        auto tables = data::galactic::load_galactic_data(*state.filesystem, *catalog);
+        if (!tables) { state.failure = core::format_diagnostic(tables.error()); return false; }
+        data::ValueOverride clean{options.campaign, "Corruption_Level_Override", {}};
+        for (const auto& planet : tables.value().planets) clean.values.push_back(planet.name + " 0");
+        const std::array overrides{std::move(clean)};
+        auto overridden = data::with_overrides(*catalog, overrides);
+        if (!overridden) { state.failure = core::format_diagnostic(overridden.error()); return false; }
+        state.audio_catalog = std::make_shared<const data::Catalog>(std::move(overridden).value());
+    }
     if (options.campaign == galactic_view::synthetic_campaign)
         galactic_view::configure_orbit_scene_fixture(snapshot, options.hud_fixture);
     if (options.campaign == galactic_view::synthetic_campaign && (options.hud_fixture == "radar-locked"
@@ -146,6 +175,12 @@ bool CaptureHudFixture::configure_scene(GalacticMode::State& state, galactic_vie
         map_input.gates.tutorial_locked = true; // Explicit runtime fixture, never live campaign permissions.
     if (options.campaign == galactic_view::synthetic_campaign && !options.synthetic_battle && !options.hud_fixture.empty())
         galactic_view::configure_synthetic_hud_clock(galaxy_setup);
+
+    // #6756: the planets' weather icon is a stock command-bar atlas entry (atlas) or a standalone stock texture that is
+    // not an atlas entry, like a mod's loading picture (loadscreen); the planet card and the opened map must only draw the first.
+    if (synthetic_ && (name_ == "ground-weather-atlas" || name_ == "ground-weather-loadscreen"))
+        for (auto& planet : snapshot.planets)
+            planet.weather.icon = name_ == "ground-weather-atlas" ? "i_pa_weather_sun.tga" : "load_weather_sun.tga";
 
     if (synthetic_ && name_.starts_with("clock-mp-")) {
         const bool coop = name_ == "clock-mp-coop";
@@ -256,9 +291,19 @@ bool CaptureHudFixture::configure_setup(GalacticMode::State& state) {
     if (options.campaign == galactic_view::synthetic_campaign && galactic_view::ground_fixture(options.hud_fixture))
         galactic_view::configure_ground_fixture(galaxy_setup,galaxy->local.player,options.hud_fixture,
             fleet_display_traits,fleet_visibility,production_names);
+    // GPD-02/14/22: the land-tray fixture gives synthetic planet 101 a stock land map, so the advanced map has unit pads.
+    // Synthetic content carries no planet art; the map name is the stock one for Coruscant.
+    if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture == "ground-tray" && content)
+        content->art[101].land_tactical_map = "_Land_Planet_Coruscant_02.ted";
     if (options.campaign == galactic_view::synthetic_campaign && galactic_view::weapon_action_live_fixture(options.hud_fixture))
         galactic_view::configure_weapon_action_live_fixture(galaxy_setup, galaxy->local.player,
             fleet_display_traits, fleet_visibility, production_names, options.hud_fixture);
+    if (synthetic_ && name_ == "destruction-live-effects-missing-model") {
+        // A refused ordinary upload must not hide the valid, preloaded destroyed-state model after ruins.
+        constexpr auto missing = "Data/Art/Models/Synthetic_Missing_Planet.alo";
+        for (auto& planet : state.metadata.planets) if (planet.id == 101) planet.model = missing;
+        for (auto& planet : galaxy->planets) if (planet.id == 101) planet.model = missing;
+    }
     if (options.campaign == galactic_view::synthetic_campaign
         && (options.hud_fixture == "production" || options.hud_fixture == "production-unlocks")) {
         galactic_view::configure_synthetic_hud_production(galaxy_setup, galaxy->local.player);
@@ -493,8 +538,101 @@ void CaptureHudFixture::stage_steal(GalacticMode::State& state) {
     }
 }
 
+// "ability-stock:<member type>[:<enemy faction>[:<planet name>[:panel]]]" on a named campaign (#6909): nothing is staged but the
+// report of where the drag starts. The hero named by the fixture (placed by the test's own data overlay or bought with the
+// purchase hook) is found among the published actors. The drop target is the named planet, else the nearest planet held by
+// another non-neutral player (of the second part's faction, if given). Once the hero's own stack icon is on screen the driver
+// is told the target planet and the icon to press (and again, as a second stage, when the hero stands over the target); the
+// drag, the tile, the release and the menu are real input, like the owner's. A fourth part "panel" drags the hero's own cell in the
+// selected planet's fleet panel instead of its stack icon. `eawr_ability_why` names what is still missing.
+void CaptureHudFixture::stage_ability(GalacticMode::State& state) {
+    if (ability_stage_ >= 2 || !state.game || !state.galaxy || !state.published_snapshot || !state.content) return;
+    const auto why = [](const char* text) { Engine::get_singleton()->set_meta("eawr_ability_why", String(text)); };
+    const auto& snapshot = *state.published_snapshot;
+    const auto player = state.galaxy->local.player;
+    std::string member = name_.substr(std::string_view("ability-stock:").size()), enemy, hint;
+    bool panel = false;
+    if (const auto colon = member.find(':'); colon != std::string::npos) { enemy = member.substr(colon + 1); member.resize(colon); }
+    if (const auto colon = enemy.find(':'); colon != std::string::npos) { hint = enemy.substr(colon + 1); enemy.resize(colon); }
+    if (const auto colon = hint.find(':'); colon != std::string::npos) { panel = hint.substr(colon + 1) == "panel"; hint.resize(colon); }
+    const auto bearer = std::find_if(state.production_names.begin(), state.production_names.end(),
+        [&](const auto& row) { return row.second == member; });
+    if (bearer == state.production_names.end()) return why("no type of that name");
+    const auto place = eawr::testing::galactic::find_hero_place(snapshot, player, bearer->first);
+    if (!place) return why("the hero is not on the map yet");
+    if (place->transit || !place->fleet) return why("the hero is in transit or not in a fleet");
+    // The second stage: the hero stands over the drop planet after its travel, for a drop on the planet it is parked at.
+    if (ability_stage_ == 1 && place->planet != ability_target_) return why("waiting for the hero to reach the target");
+    const auto* control = snapshot.control();
+    if (!control) return why("no control service");
+    if (ability_stage_ == 0) {
+        const auto planets = state.input_planets();
+        if (!hint.empty()) {
+            for (const auto& planet : state.galaxy->planets) {
+                const bool same = planet.name.size() == hint.size() && std::equal(hint.begin(), hint.end(), planet.name.begin(),
+                    [](char left, char right) { return std::tolower(static_cast<unsigned char>(left)) == std::tolower(static_cast<unsigned char>(right)); });
+                if (same) ability_target_ = planet.id;
+            }
+        } else {
+            std::size_t length{};
+            for (const auto& planet : snapshot.planets()) {
+                const auto owner = std::find_if(control->players.begin(), control->players.end(),
+                    [&](const auto& row) { return row.player == planet.owner; });
+                if (!planet.owner || planet.owner == player || owner == control->players.end() || owner->neutral) continue;
+                if (!enemy.empty()) {
+                    const auto held = std::find_if(state.content->snapshot.players.begin(), state.content->snapshot.players.end(),
+                        [&](const auto& row) { return row.id == planet.owner; });
+                    if (held == state.content->snapshot.players.end() || held->faction != enemy) continue;
+                }
+                const auto path = galactic_view::destination_path(snapshot, player, place->planet, planet.id, planets);
+                if (path && (!ability_target_ || path->size() < length)) { ability_target_ = planet.id; length = path->size(); }
+            }
+        }
+        if (!ability_target_) return why("no drop planet");
+    }
+    if (panel) {
+        // The planet panel's own cell for the hero: select the planet, then find the cell of the group that is the hero's fleet.
+        if (state.selected_planet != place->planet) {
+            state.apply_selection(state.map_input.select(state.selection_planets(), place->planet, state.seat_flight().state()));
+            return why("selecting the hero's planet");
+        }
+        for (std::size_t index = 0; index < state.shown_panel_cards.size(); ++index) {
+            const auto* card = state.shown_panel_cards[index];
+            if (!card) continue;
+            const auto& owners = state.fleet_cell_layouts[index].owners;
+            for (std::size_t cell = 0; cell < owners.size() && cell < state.fleet_group_buttons[index].size(); ++cell) {
+                if (!owners[cell] || *owners[cell] >= card->groups.size() || card->groups[*owners[cell]].fleet != place->dragged) continue;
+                const auto button = state.fleet_buttons.find(state.fleet_group_buttons[index][cell]);
+                if (button == state.fleet_buttons.end() || !button->second || !button->second->is_visible_in_tree()) continue;
+                Engine::get_singleton()->set_meta(ability_stage_ == 0 ? "eawr_ability_stage" : "eawr_ability_stage2",
+                    String::num_uint64(ability_target_) + " " + String::num_uint64(place->planet) + " " + String(button->second->get_name()));
+                ++ability_stage_;
+                return;
+            }
+        }
+        return why("no visible panel cell for the hero's fleet");
+    }
+    // The hero's own stack icon (a shared icon when it stands in an ordinary slot): the one whose fleet it is, else the
+    // icon of its orbit slot, which is what the player presses.
+    const auto fleets = snapshot.fleets();
+    const auto fleet = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) { return row.id == place->dragged; });
+    if (fleet == fleets.end()) return why("the hero's fleet is not published");
+    const godot::TextureButton* chosen = nullptr;
+    for (const auto& [key, badge] : state.fleet_badges) {
+        if (key.first != place->planet || !badge.button || badge.owner != player || !badge.button->is_visible_in_tree()) continue;
+        if (badge.fleet == place->dragged) { chosen = badge.button; break; }
+        if (!chosen && state.stack_icon_slot(place->planet, key.second) == fleet->orbit_slot) chosen = badge.button;
+    }
+    if (!chosen) return why("no visible stack icon for the hero");
+    Engine::get_singleton()->set_meta(ability_stage_ == 0 ? "eawr_ability_stage" : "eawr_ability_stage2",
+        String::num_uint64(ability_target_) + " " + String::num_uint64(place->planet) + " " + String(chosen->get_name()));
+    ++ability_stage_;
+}
+
 bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
-    if (!synthetic_ && name_ == "steal-stock") return true; // A stock campaign stays stock: no stub HUD facts.
+    // The load qualification preserves the real campaign's HUD publications.
+    if (!synthetic_ && name_ == "cache-corruption-load") return true;
+    if (!synthetic_ && (name_ == "steal-stock" || name_.starts_with("ability-stock:"))) return true; // A stock campaign stays stock: no stub HUD facts.
     if (synthetic_ && name_ == "hero-map-respawn") return true; // Uses actual owner publications, not stub HUD facts.
     auto& options = state.options;
     auto& failure = state.failure;
@@ -510,13 +648,14 @@ bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
                 && options.hud_fixture != "objectives-audio"
                 && options.hud_fixture != "audio-mixer"
                 && options.hud_fixture != "known" && options.hud_fixture != "masked" && options.hud_fixture != "history"
-                && options.hud_fixture != "known-zero" && options.hud_fixture != "discovered-only"
+                && options.hud_fixture != "known-zero" && options.hud_fixture != "discovered-only" && options.hud_fixture != "known-none"
                 && options.hud_fixture != "production" && options.hud_fixture != "production-unlocks"
                 && options.hud_fixture != "capture-live" && !options.hud_fixture.starts_with("clock-mp-") && !galactic_view::fleet_hud_fixture(options.hud_fixture)
                 && options.hud_fixture != "radar-locked"
                 && options.hud_fixture != "corruption" && options.hud_fixture != "corruption-clean"
                 && !options.hud_fixture.starts_with("corruption-spread")
                 && options.hud_fixture != "corruption-gaps" && options.hud_fixture != "corruption-locked"
+                && options.hud_fixture != "corruption-no-mission-service"
                 && options.hud_fixture != "theft" && options.hud_fixture != "theft-single" && options.hud_fixture != "theft-many"
                 && options.hud_fixture != "neutralization" && options.hud_fixture != "hack" && options.hud_fixture != "hack-poor"
                 && options.hud_fixture != "hack-fractional"
@@ -540,7 +679,7 @@ bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
         map_input.selected = fact.planet;
         if (options.hud_fixture == "production" || options.hud_fixture == "production-unlocks") selected_hud.space_tab = true;
         base_levels_visible = options.hud_fixture == "known" || options.hud_fixture == "masked"
-            || options.hud_fixture == "known-zero" || options.hud_fixture == "discovered-only";
+            || options.hud_fixture == "known-zero" || options.hud_fixture == "discovered-only" || options.hud_fixture == "known-none";
         // A synthetic command-admission fixture, not the unverified profile map.
         fast_forward_factor = sim::math::Fixed::from_raw(2 * sim::math::Fixed::scale);
     }
@@ -553,7 +692,32 @@ void CaptureHudFixture::update_hud(GalacticMode::State& state) {
     auto& audio = state.audio;
     auto& command_catalog = state.command_catalog;
     auto& hud_updates = state.hud_updates;
+    if (!synthetic_ && name_ == "cache-corruption-load" && state.game && corruption_fixture_owner_seen_
+        && !corruption_fixture_repaused_
+        && (corruption_fixture_owner_.owner_before(state.owner_lifetime)
+            || state.owner_lifetime.owner_before(corruption_fixture_owner_))) {
+        // Player-load deliberately drops saved pause tokens. Reapply an ordinary
+        // seat pause before animation so the pixel witness keeps its held clock;
+        // no camera/settings/visibility invalidation may clear the old picture.
+        auto frame = state.game->frame();
+        state.paused = frame.latest && frame.latest->clock().pause_depth != 0;
+        if (!state.paused) {
+            const auto target = frame.session_tick + 1;
+            state.request_pause(true);
+            // Restore opens this barrier after update_hud returns. The fixture
+            // queues its pause first, then opens it before waiting for that input.
+            state.game->presentation_ready();
+            if (!state.game->wait_for(target, std::chrono::seconds(5))) {
+                state.failure = "Corruption load fixture could not pause the restored owner"; return;
+            }
+            frame = state.game->frame();
+            state.paused = frame.latest && frame.latest->clock().pause_depth != 0;
+        }
+        if (!state.paused) { state.failure = "Corruption load fixture restored owner is not paused"; return; }
+        corruption_fixture_repaused_ = true;
+    }
     if (!synthetic_ && name_ == "steal-stock") stage_steal(state);
+    if (!synthetic_ && name_.starts_with("ability-stock:")) stage_ability(state);
     if (synthetic_ && name_ == "audio-mixer" && audio) {
         if (hud_updates == 5) audio->ui_sound("GUI_Dial_Switch_SFX");
         if (hud_updates == 10) audio->ui_sound("Unit_Fleet_Move_Star_Destroyer");
@@ -576,7 +740,9 @@ void CaptureHudFixture::observation(GalacticMode::State& state, sim::galactic::O
     auto& options = state.options;
     // Deliberately populated secret payloads also enter the masked
     // fixture: the same admission adapter must remove them entirely.
-    const bool known = options.hud_fixture == "known" || options.hud_fixture == "known-zero";
+    // known-none (#6985): every discovered planet has no owner and no controller, and the seat can see that (control visible).
+    const bool none = options.hud_fixture == "known-none";
+    const bool known = options.hud_fixture == "known" || options.hud_fixture == "known-zero" || none;
     observation.discovered = planet != 103;
     observation.knowledge.ownership = known;
     observation.knowledge.ground_level = known;
@@ -586,8 +752,9 @@ void CaptureHudFixture::observation(GalacticMode::State& state, sim::galactic::O
     observation.knowledge.income = known;
     basic_income = 75.0;
     actual_income = options.hud_fixture == "known-zero" ? 0.0 : 190.0;
-    observation.known_owner = 1;
-    if (known || options.hud_fixture == "discovered-only") {
+    if (!none) observation.known_owner = 1;
+    if (none) observation.apparent_allegiance_none = true;
+    else if (known || options.hud_fixture == "discovered-only") {
         observation.apparent_owner = 1;
         observation.apparent_allegiance_owner = 1;
     }
@@ -705,6 +872,56 @@ void CaptureHudFixture::corruption_frame(GalacticMode::State& state, double elap
     auto& galaxy = state.galaxy;
     auto& content = state.content;
     auto& publication = state.corruption_frame_publication;
+    if (!synthetic_ && name_ == "cache-corruption-load") {
+        if (!state.game) return; // Scene construction samples animation before starting the native owner.
+        // Visual qualification only: never alter the native game/checkpoint.
+        // The driver first captures a clean paused layer, then requests clouds
+        // and lines, and finally loads that clean game through the real UI.
+        if (!corruption_fixture_owner_seen_) {
+            corruption_fixture_owner_ = state.owner_lifetime;
+            corruption_fixture_owner_seen_ = true;
+        }
+        corruption_fixture_loaded_ = corruption_fixture_loaded_
+            || corruption_fixture_owner_.owner_before(state.owner_lifetime)
+            || state.owner_lifetime.owner_before(corruption_fixture_owner_);
+        state.host->set_meta("eawr_cache_fixture_loaded", corruption_fixture_loaded_);
+        state.host->set_meta("eawr_cache_fixture_native_corrupted", static_cast<std::int64_t>(
+            std::count_if(publication.planets.begin(), publication.planets.end(),
+                [](const auto& fact) { return fact.corrupted || fact.transitioning; })));
+        const auto native = state.game->frame();
+        state.host->set_meta("eawr_cache_fixture_native_pause_depth", static_cast<std::int64_t>(
+            native.latest ? native.latest->clock().pause_depth : 0));
+        if (corruption_fixture_loaded_ || !bool(state.host->get_meta("eawr_cache_fixture_corruption", false))) return;
+        publication.planets.clear();
+        publication.seat = galaxy->local.seat;
+        for (const auto& planet : galaxy->planets) {
+            galactic_view::CorruptionPlanetFact fact;
+            fact.planet = planet.id; fact.corrupted = true;
+            fact.particle_type = content->corruption_particle;
+            fact.source_nonempty = fact.target_nonempty = true;
+            publication.planets.push_back(std::move(fact));
+        }
+        // Warm only the injected effects while the native animation clock is
+        // held. An animated background must not accidentally clear stale pixels.
+        constexpr double visual_step = 1.0 / 30.0;
+        corruption_fixture_seconds += visual_step;
+        if (state.audio_catalog) {
+            for (std::size_t layer = 0; layer < state.corruption_particles.size(); ++layer)
+                if (auto& particles = state.corruption_particles[layer])
+                    if (!particles->service(state.corruption_visuals, *state.audio_catalog, *content,
+                            layer, state.camera, visual_step, state.failure)) return;
+            if (state.corruption_lines && content->corruption_line_system)
+                if (!state.corruption_lines->service_lines(state.corruption_visuals, *galaxy,
+                        content->corruption_style, *content->corruption_line_system,
+                        static_cast<std::uint64_t>(corruption_fixture_seconds * sim::galactic::galactic_frames_per_second),
+                        state.camera, visual_step, state.failure)) return;
+        }
+        std::uint64_t particles = 0;
+        for (const auto& owner : state.corruption_particles) if (owner) particles += owner->particle_count();
+        state.host->set_meta("eawr_cache_fixture_particles", particles);
+        state.host->set_meta("eawr_cache_fixture_lines", state.corruption_lines ? state.corruption_lines->particle_count() : 0);
+        return;
+    }
     if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture == "corruption") {
         publication.seat = galaxy->local.seat;
         galactic_view::CorruptionPlanetFact fact;
@@ -749,7 +966,7 @@ void CaptureHudFixture::corruption_frame(GalacticMode::State& state, double elap
 }
 
 std::optional<std::uint64_t> CaptureHudFixture::corruption_display_frame() const {
-    if (!enabled(Feature::corruption_overview)) return {};
+    if (name_ != "cache-corruption-load" && !enabled(Feature::corruption_overview)) return {};
     return static_cast<std::uint64_t>(corruption_fixture_seconds*sim::galactic::galactic_frames_per_second);
 }
 

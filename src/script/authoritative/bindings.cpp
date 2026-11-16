@@ -7,6 +7,8 @@
 
 #include "scheduler_internal.hpp"
 
+#include "eawr/script/numeric/decimal.hpp"
+
 #include <algorithm>
 #include <string>
 #include <type_traits>
@@ -38,6 +40,20 @@ int finish(lua_State* state, Instance& instance, int result) {
     if (instance.sandbox->fault() != sf::SandboxFault::none) instance.sandbox->raise_fault(state, instance.sandbox->fault());
     if (result == error_raised) return lua_error(state);
     return result;
+}
+
+// Host-side work of a value that crosses the binding boundary, in deterministic units charged to the instance's
+// budget: one per value plus one per byte of a string, lists adding their entries'. The same on every target.
+::std::uint64_t list_units(const ValueList& values) noexcept;
+::std::uint64_t value_units(const Value& value) noexcept {
+    if (const auto* text = ::std::get_if<::std::string>(&value.data)) return 1 + text->size();
+    if (const auto* list = ::std::get_if<ValueList>(&value.data)) return 1 + list_units(*list);
+    return 1;
+}
+::std::uint64_t list_units(const ValueList& values) noexcept {
+    ::std::uint64_t total = 0;
+    for (const Value& value : values) total += value_units(value);
+    return total;
 }
 
 bool read_value(Instance& instance, lua_State* state, int index, int depth, Value& out, ::std::string& error) {
@@ -138,22 +154,49 @@ public:
     void request_exit() noexcept override { instance_.exit_requested = true; }
     [[nodiscard]] ::std::uint64_t command_sequence() const noexcept override { return instance_.command_sequence; }
 
+    void charge_host_work(const ::std::uint64_t units) noexcept override { instance_.sandbox->charge_host_work(units); }
+
     void issue_command(::std::string verb, ValueList arguments) override {
+        if (instance_.staging.commands.size() >= instance_.shared->config.quotas.staged_commands) {
+            quota_exhausted = true;
+            return;
+        }
+        instance_.sandbox->charge_host_work(1 + verb.size() + list_units(arguments));
         instance_.staging.commands.push_back(ScriptCommand{
             instance_.tick, instance_.id, instance_.command_sequence++, ::std::move(verb), ::std::move(arguments)});
+    }
+
+    [[nodiscard]] ::std::optional<::std::optional<Value>> staged_global_value(const ::std::string_view name) const override {
+        for (auto at = instance_.staging.commands.rbegin(); at != instance_.staging.commands.rend(); ++at) {
+            if (at->verb != global_value_command || at->arguments.empty()) continue;
+            const auto* key = ::std::get_if<::std::string>(&at->arguments[0].data);
+            if (!key || *key != name) continue;
+            if (at->arguments.size() != 2) continue; // a refused table write stages the name alone: the registry stays as it was
+            if (::std::holds_alternative<::std::monostate>(at->arguments[1].data)) return ::std::optional<Value>{};
+            return ::std::optional<Value>{at->arguments[1]};
+        }
+        return ::std::nullopt;
     }
 
     core::Result<ValueList> apply_immediate(::std::string_view action, const ValueList& arguments) override {
         if (!instance_.immediate) return core::Result<ValueList>::failure(
             make_error(codes::missing_api, "immediate effects require an ordered native shadow"));
-        // Action-local copy also protects pcall-caught errors and a provider
-        // that returns failure after changing several native dependencies.
-        auto next = instance_.immediate->clone();
-        if (!next) throw ::std::runtime_error("immediate effect clone is null");
-        auto result = next->apply(action, arguments);
+        // The first action takes this service's one private copy of the shadow; later actions apply in place. A
+        // refused action may have changed several native dependencies before it failed (and a pcall can catch it),
+        // so the working state is then rebuilt from the logged actions before it; each copy is charged by what it
+        // copies and each replay by one unit (Instance::rebuild_immediate).
+        if (instance_.immediate == instance_.immediate_base) {
+            instance_.sandbox->charge_host_work(instance_.immediate->clone_units());
+            auto own = instance_.immediate->clone();
+            if (!own) throw ::std::runtime_error("immediate effect clone is null");
+            instance_.immediate = ::std::move(own);
+        }
+        auto result = instance_.immediate->apply(action, arguments);
         if (result) {
-            instance_.immediate = ::std::move(next);
+            instance_.immediate_log.push_back({::std::string(action), arguments});
             instance_.immediate_changed = true;
+        } else {
+            instance_.rebuild_immediate(instance_.immediate_log.size());
         }
         return result;
     }
@@ -161,12 +204,24 @@ public:
     core::Result<ValueList> query_immediate(::std::string_view name, const ValueList& arguments) const override {
         if (!instance_.immediate) return core::Result<ValueList>::failure(
             make_error(codes::missing_api, "immediate queries require an ordered native shadow"));
-        return instance_.immediate->query(name, arguments);
+        auto result = instance_.immediate->query(name, arguments);
+        // A query that scans host state pays for what it scanned, beside what it returns.
+        if (const auto scanned = instance_.immediate->take_query_work(); scanned != 0) instance_.sandbox->charge_host_work(scanned);
+        return result;
     }
 
     core::Result<void> post_event(ScriptEvent event) override {
         if (event.kind == ScriptEvent::Kind::thread_signal && event.thread < 0) {
             return core::Result<void>::failure(make_error(codes::invalid_request, "thread signal needs a thread slot"));
+        }
+        if (instance_.staging.posts.size() >= instance_.shared->config.quotas.staged_posts) {
+            quota_exhausted = true;
+            return core::Result<void>::success();
+        }
+        {
+            ::std::uint64_t units = 1 + event.name.size() + list_units(event.arguments);
+            if (event.parameter) units += value_units(*event.parameter);
+            instance_.sandbox->charge_host_work(units);
         }
         event.key = EventKey{instance_.tick + 1, producer_script_post, instance_.id, instance_.post_sequence++};
         instance_.staging.posts.push_back(::std::move(event));
@@ -196,6 +251,11 @@ public:
     }
 
     void report(::std::string_view code, ::std::string message) override {
+        if (instance_.staging.diagnostics.size() >= instance_.shared->config.quotas.staged_diagnostics) {
+            quota_exhausted = true;
+            return;
+        }
+        instance_.sandbox->charge_host_work(1 + code.size() + message.size());
         add_diagnostic(instance_, code, ::std::move(message));
     }
 
@@ -320,9 +380,13 @@ int generic_body(lua_State* state, bool drop_self, bool bound = false) {
             return error_raised;
         }
     }
+    // The copy just made is host work too: charged before the binding runs, so a stream of large calls ends at the
+    // budget, and so do the results a binding hands back.
+    instance.sandbox->charge_host_work(list_units(arguments));
     InstanceContext context(instance, state, local_handler);
     auto results = entry.binding(context, arguments);
     if (context.quota_exhausted) return quota_raised;
+    if (results) instance.sandbox->charge_host_work(list_units(results.value()));
     if (!results) {
         const ::std::string message = results.error().code + ": " + entry.name + ": " + results.error().message;
         lua_pushlstring(state, message.data(), message.size());
@@ -615,6 +679,76 @@ int thread_value_reset(lua_State* state) {
     return 0;
 }
 
+// ---- print (policy v4) ----
+
+// print(...): the arguments' text goes to the script log (ServiceReport::log) and nowhere else. It never calls
+// `tostring' (that would assign object identities), never creates a Lua value (so it moves neither the logical memory
+// account nor any saved state), and never faults: past the per-service cap or the flood guard the line is dropped.
+// References print as their type name. The text costs one budget unit per byte, and a call is staged with the
+// service, so a rolled-back call drops its output.
+constexpr ::std::size_t max_print_line = 512;
+constexpr ::std::size_t max_print_sites = 256;
+
+void append_print_text(::std::string& line, ::std::uint64_t& bytes, const char* text, ::std::size_t length) {
+    bytes += length;
+    if (line.size() < max_print_line) line.append(text, ::std::min(length, max_print_line - line.size()));
+}
+
+void log_print(Instance& instance, ::std::string line) {
+    if (instance.staging.log.size() >= instance.shared->config.quotas.staged_diagnostics) return;
+    ::std::string key = line;
+    const bool overflow = instance.print_sites.size() >= max_print_sites && !instance.print_sites.contains(key);
+    if (overflow) key = "\x01overflow"; // a control-character prefix: no printed line can take this key
+    const auto count = ++instance.print_sites[key];
+    if (count > 3 && (count & (count - 1)) != 0) return;
+    // The overflow bucket counts distinct lines together, so its count says nothing about this line.
+    if (count > 1 && !overflow) line += " (occurrence " + ::std::to_string(count) + ")";
+    instance.staging.log.push_back(
+        ScriptDiagnostic{::std::string(codes::script_log), ::std::move(line), instance.tick, instance.id, instance.current_thread});
+}
+
+// Builds the line; no Lua call that can raise runs while its objects are alive.
+void print_body(Instance& instance, lua_State* state) {
+    const int count = lua_gettop(state);
+    ::std::string line;
+    ::std::uint64_t bytes = 1;
+    for (int index = 1; index <= count; ++index) {
+        if (index > 1) append_print_text(line, bytes, "\t", 1);
+        switch (lua_type(state, index)) {
+        case LUA_TNIL:
+            append_print_text(line, bytes, "nil", 3);
+            break;
+        case LUA_TBOOLEAN:
+            if (lua_toboolean(state, index) != 0) append_print_text(line, bytes, "true", 4);
+            else append_print_text(line, bytes, "false", 5);
+            break;
+        case LUA_TNUMBER: {
+            const ::std::string number = numeric::decimal::format_lua_number(lua_tonumber(state, index).repr);
+            append_print_text(line, bytes, number.data(), number.size());
+            break;
+        }
+        case LUA_TSTRING:
+            append_print_text(line, bytes, lua_tostring(state, index), lua_strlen(state, index));
+            break;
+        default: {
+            const char* type = lua_typename(state, lua_type(state, index));
+            append_print_text(line, bytes, type, ::std::char_traits<char>::length(type));
+            break;
+        }
+        }
+    }
+    if (bytes - 1 > line.size()) line += "...";
+    instance.sandbox->charge_host_work(bytes);
+    log_print(instance, ::std::move(line));
+}
+
+int print_to_log(lua_State* state) {
+    Instance& instance = instance_of(state);
+    print_body(instance, state);
+    // Only the budget can fault here: raised once the line's objects are gone.
+    return finish(state, instance, 0);
+}
+
 // ---- Time ----
 
 int get_current_time(lua_State* state) {
@@ -793,6 +927,7 @@ int get_current_time_call(lua_State* state) {
         ObjectSpec{"Register_Event", register_event, -1, {}},
         ObjectSpec{"Cancel_Event", cancel_event, -1, {}},
         ObjectSpec{"require", require_module, -1, {}},
+        ObjectSpec{"print", print_to_log, -1, {}},
     };
 }
 
@@ -837,6 +972,7 @@ bool can_extend_infrastructure(::std::string_view name) {
         {"host.Register_Event", register_event, UpvalueShape::none},
         {"host.Cancel_Event", cancel_event, UpvalueShape::none},
         {"host.require", require_module, UpvalueShape::none},
+        {"host.print", print_to_log, UpvalueShape::none},
         {"host.binding", generic_call, UpvalueShape::binding_index},
         {"host.binding_object", generic_call_object, UpvalueShape::binding_index},
         {"host.object_not_callable", object_not_callable, UpvalueShape::name},
@@ -932,7 +1068,21 @@ void add_diagnostic(Instance& instance, ::std::string_view code, ::std::string m
 void add_lua_error(Instance& instance, ::std::string_view code, ::std::string message) {
     // Owner policy: only an uncaught Lua failure retires the GC provider.
     // BindingContext::report can diagnose a sourced fallback and continue.
-    if (instance.shared->config.galactic_clock) instance.outcome = InstanceOutcome::faulted;
+    // Story and object scripts do not retire: the failing thread or call has ended and rolled back.
+    const auto& config = instance.shared->config;
+    const bool keeps_instance = config.galactic_clock && !config.retire_on_lua_error;
+    if (config.galactic_clock && config.retire_on_lua_error) instance.outcome = InstanceOutcome::faulted;
+    if (instance.current_thread >= 0) instance.thread_failed = true;
+    if (keeps_instance) {
+        // Flood guard: a failing call that repeats (an event or timer every tick) reports its first three occurrences,
+        // then each power-of-two occurrence with its count, instead of one diagnostic per call.
+        constexpr ::std::size_t max_sites = 256;
+        auto key = ::std::string(code) + '\n' + message;
+        if (instance.failure_sites.size() >= max_sites && !instance.failure_sites.contains(key)) key = "other";
+        const auto count = ++instance.failure_sites[key];
+        if (count > 3 && (count & (count - 1)) != 0) return;
+        if (count > 1) message += " (occurrence " + ::std::to_string(count) + ")";
+    }
     add_diagnostic(instance, code, ::std::move(message));
 }
 
@@ -962,8 +1112,12 @@ core::Diagnostic global_value_error(::std::string message) {
 }
 core::Result<void> register_shared_global_values(ScriptScheduler& scripts, GlobalValueReader reader) {
     if (auto added = scripts.register_binding("GlobalValue.Get", [reader = ::std::move(reader)](
-            BindingContext&, const ValueList& args) {
+            BindingContext& context, const ValueList& args) {
         const auto* key = args.empty() ? nullptr : ::std::get_if<::std::string>(&args[0].data);
+        // The instance's own staged write wins over the committed registry (#7188: the stock attack-continuation check
+        // sets its baseline and reads it back in one call).
+        if (key) if (const auto own = context.staged_global_value(*key))
+            return core::Result<ValueList>::success(*own ? ValueList{**own} : ValueList{});
         const auto found = key && reader ? reader(*key) : ::std::nullopt;
         return core::Result<ValueList>::success(found ? ValueList{*found} : ValueList{});
     }); !added) return added;

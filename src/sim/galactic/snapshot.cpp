@@ -145,10 +145,11 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
             const auto row = std::lower_bound(economy_forecast->planets.begin(), economy_forecast->planets.end(),
                 observation.planet, [](const auto& value, PlanetId id) { return value.planet < id; });
             if (row == economy_forecast->planets.end() || row->planet != observation.planet) continue;
-            admitted.push_back({row->planet, row->basic, {}, {}, {}});
+            admitted.push_back({row->planet, row->basic, {}, {}, {}, {}});
             auto& value = admitted.back();
             if (observation.knowledge.income || observation.knowledge.income_breakdown) value.actual = row->actual;
             if (observation.knowledge.income_breakdown) { value.trade = row->trade; value.modifiers = row->modifiers; }
+            value.siphoned = row->siphoned; // WGSI-11: the view player's own siphon, not an income-knowledge fact
         }
         // Observer input order is unconstrained; readers use binary lookup.
         std::sort(admitted.begin(), admitted.end(), [](const auto& a, const auto& b) { return a.planet < b.planet; });

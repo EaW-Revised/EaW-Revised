@@ -79,6 +79,19 @@ int main(int argc, char* argv[]) {
         CHECK(cap_roundtrip.profile && cap_roundtrip.profile->launch.frame_rate_limit == cap);
         CHECK(create.profile->launch.frame_rate_limit.value_or(cap) == cap);
     }
+    // launch.no_fog (the launcher's "Fog of war: off"): off when absent, written only when on, strictly boolean.
+    CHECK(create.profile && !create.profile->launch.no_fog);
+    CHECK(profile_to_json(*create.profile).find("no_fog") == std::string::npos);
+    auto fog_off = *create.profile;
+    fog_off.launch.no_fog = true;
+    const auto fog_json = profile_to_json(fog_off);
+    CHECK(fog_json.find("\"no_fog\":true") != std::string::npos);
+    const auto fog_roundtrip = profile_from_json(fog_json);
+    CHECK(fog_roundtrip.profile && fog_roundtrip.profile->launch.no_fog && *fog_roundtrip.profile == fog_off);
+    const auto fog_explicit = profile_from_json(R"({"id":"x","name":"x","layers":[],"launch":{"no_fog":false}})");
+    CHECK(fog_explicit.profile && !fog_explicit.profile->launch.no_fog);
+    CHECK(code(profile_from_json(R"({"id":"x","name":"x","layers":[],"launch":{"no_fog":1}})"), codes::profile_launch));
+    CHECK(code(profile_from_json(R"({"id":"x","name":"x","layers":[],"launch":{"no_fog":"true"}})"), codes::profile_launch));
     CHECK(code(profile_from_json("{"), codes::profile_json));
     CHECK(code(profile_from_json(R"({"version":2})"), codes::profile_version));
     CHECK(code(profile_from_json(R"({"id":"../escape","name":"x","layers":[]})"), codes::profile_id));

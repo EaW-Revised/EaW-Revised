@@ -69,7 +69,7 @@ Defaults apply per record (R-DEC-07).
 | `0x17` | 3×float | (0.5, 0.5, 0.5) | Copied into the scene together with the lighting: the environment loader passes it to the scene's shadow-colour setter (IS-15). Retail shadowed/lit pixel ratios on FoC Naboo follow it per channel, in stored values, so it is the shadow colour (Forward+ shadow tuning, [shadows](../rendering.md#shadows)). The viewer's shadow floor (per-channel shadow floor) |
 | `0x19` | string | empty | Primary sky object name (R-SKY-01) |
 | `0x1a` | string | empty | Secondary sky object name (R-SKY-01) |
-| `0x1b`, `0x1c` | float | 1.0 | Stored with the primary and secondary sky. Consumer not followed |
+| `0x1b`, `0x1c` | float | 1.0 | Stored with the primary and secondary sky; effect on drawing unverified (R-SKY-04). |
 | `0x1d`, `0x1e` | float, degrees | 0 | First orientation component of the primary and secondary sky (R-SKY-02) |
 | `0x1f`, `0x20` | float, degrees | 0 | Third orientation component of the primary and secondary sky (R-SKY-02) |
 | `0x21` | float | 0 | Lightning scalar; 0 disables lightning (R-LIT-08) |
@@ -140,6 +140,8 @@ correlations. The engine itself only compares the integers.
 | R-SKY-01 | On map activation, each non-empty sky name (`0x19`, then `0x1a`) is looked up as an XML game-object type. An unknown name clears that sky's name and parameters (R-DEC-11), and nothing is spawned. A known name spawns one object of that type at a point derived from the map bounds (the exact point is gate G-SKY-01). |
 | R-SKY-02 | The spawned sky object's orientation triple is (first component, 0, third component) = (`0x1d`, 0, `0x1f`) for the primary sky and (`0x1e`, 0, `0x20`) for the secondary sky, already converted to radians (R-DEC-10). |
 | R-SKY-03 | The generic object transform (R-ROT-01) converts its orientation triple from degrees to radians **again**. If nothing intervenes, a sky authored with third component 128 turns by about 2.2°, not 128°. This double conversion is a static reading only. It needs a runtime check before anyone reproduces it (gate G-SKY-02). |
+| R-SKY-04 | The space sky creation path reads the names and angles but does not read either stored scale. The named scale getters have direct callers in environment saving, while loading and merging write the values. This does not exclude an indirect reader elsewhere; their effect on drawing remains unverified. |
+| R-SKY-05 | The generic object transform uses the effective XML `Scale_Factor` (default 1) for its model unless dynamic scale overrides it. The model applies that scale to its renderable transform. Sky creation uses the ordinary object path (R-SKY-01); the viewer applies each sky type's authored scale. Its camera-centred placement remains a project policy. |
 
 ### G. Object orientation composition
 

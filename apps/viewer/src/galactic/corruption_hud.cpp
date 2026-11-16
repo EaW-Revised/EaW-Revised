@@ -17,7 +17,7 @@ std::string first(const data::ui::CommandBarComponent& component, data::ui::Fiel
     return values.empty() ? std::string{} : values.front();
 }
 bool admitted(const sim::galactic::ObservedCorruptionChoice& row) {
-    return row.affordable && row.units_satisfied && row.missions_satisfied && row.planets_satisfied;
+    return row.affordable && row.units_satisfied && row.missions_satisfied && row.planets_satisfied && row.mission_available;
 }
 bool same_menu(const sim::galactic::CorruptionMenu& a, const sim::galactic::CorruptionMenu& b) {
     if (a.player != b.player || a.actor != b.actor || a.planet != b.planet || a.ability != b.ability
@@ -27,6 +27,7 @@ bool same_menu(const sim::galactic::CorruptionMenu& a, const sim::galactic::Corr
         const auto& r = p.requirements; const auto& s = q.requirements;
         return x.slot == y.slot && x.affordable == y.affordable && x.units_satisfied == y.units_satisfied
             && x.missions_satisfied == y.missions_satisfied && x.planets_satisfied == y.planets_satisfied
+            && x.mission_available == y.mission_available
             && p.type == q.type && p.briefing == q.briefing && p.map == q.map && p.script == q.script
             && p.credits == q.credits && p.mode == q.mode && r.unit_types == s.unit_types
             && r.planet_types == s.planet_types && r.unit_count == s.unit_count
@@ -331,7 +332,8 @@ void GalacticMode::State::write_corruption_report(std::ostream& output) const {
         output << (comma ? ", " : "") << "{\"slot\": " << row.slot << ", \"type\": " << static_cast<unsigned>(choice.type)
             << ", \"briefing\": " << choice.briefing << ", \"credits_raw\": " << choice.credits.raw()
             << ", \"affordable\": " << (row.affordable ? "true" : "false") << ", \"units_satisfied\": " << (row.units_satisfied ? "true" : "false")
-            << ", \"missions_satisfied\": " << (row.missions_satisfied ? "true" : "false") << ", \"planets_satisfied\": " << (row.planets_satisfied ? "true" : "false") << "}";
+            << ", \"missions_satisfied\": " << (row.missions_satisfied ? "true" : "false") << ", \"planets_satisfied\": " << (row.planets_satisfied ? "true" : "false")
+            << ", \"mission_available\": " << (row.mission_available ? "true" : "false") << "}";
         comma = true;
     }
     output << "], \"labels\": ["; comma = false;

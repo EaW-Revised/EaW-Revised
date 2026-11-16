@@ -42,6 +42,8 @@
 #include "eawr/presentation/ui/team_dock.hpp"
 #include "eawr/presentation/ui/world_ui.hpp"
 #include "eawr/presentation/ui/retreat_button.hpp"
+#include "eawr/presentation/ui/superweapon_switch.hpp"
+#include "eawr/presentation/ui/superlaser_switch.hpp"
 #include "eawr/presentation/ui/special_weapon.hpp"
 #include "eawr/vfs/vfs_fwd.hpp"
 #include "bink_movie.hpp"
@@ -131,6 +133,10 @@ public:
     // The shell's alternate index: meshes with an _ALT<n> suffix show only when n matches (none when unset).
     // `alpha` tints those meshes (the unseen-contents dimming of the focused diorama).
     void set_alternate(std::optional<std::uint32_t> index, float alpha = 1.0F);
+    // A caller's placement of its own shell-unit controls: run now and after every relayout with the placement and the
+    // reference space (the Death Star readout, which has no button of its own).
+    using LayoutHook = std::function<void(const presentation::ui::ShellPlacement&, const presentation::ui::ReferenceSpace&)>;
+    void set_layout_hook(LayoutHook hook);
 
 protected:
     static void _bind_methods() {}
@@ -151,6 +157,7 @@ private:
     float alternate_alpha_{1.0F};
     std::function<void()> probe_;
     std::function<bool()> movie_warmup_;
+    LayoutHook layout_hook_;
 };
 
 // Owns the HUD: loads the shell, its textures, fonts and the planet name from
@@ -276,6 +283,8 @@ public:
     void set_beacon(bool enabled, bool targeting);
     void set_movie_mode(bool on, bool immediate = false);
     void advance_movie_bands(double delta);
+    // legacy #6634 (HCB-75): Letter_Box_In (on) / Letter_Box_Out (off) of a tactical script over `seconds` (0 = at once).
+    void set_script_letterbox(bool on, double seconds);
     void set_order_mode(std::string_view active);
     void set_order_shortcut(std::string_view order, std::string_view caption);
     void set_special_weapon_handler(std::function<void()> handler);
@@ -284,6 +293,20 @@ public:
     void set_retreat_handler(std::function<void()> handler);
     void set_retreat(const presentation::ui::RetreatButtonView& view);
     [[nodiscard]] const presentation::ui::RetreatButtonView& retreat() const noexcept;
+    // HCB-47: the authored deathstar_switch slot and its countdown readout. The view is the presenter's
+    // (presentation/ui/superweapon_switch.hpp); the press runs the handler, which owns the sound and the command.
+    void set_superlaser_handler(std::function<void()> handler);
+    void set_superlaser_switch(const presentation::ui::SuperlaserSwitchView& view);
+    void set_superweapon_handler(std::function<void()> handler);
+    // Counts the answer a click on the switch earned (the report's `clicks`), for the handler that runs the click.
+    void note_superweapon_click(presentation::ui::SuperweaponSwitchFeedback feedback);
+    // Arms a one-shot pointer probe over the lever panel (centre, corners just inside the hit rect and the rim just outside
+    // it), run on the first frame after the layout; the report lists the presses it caused.
+    void probe_superweapon_switch();
+    void set_superweapon_switch(const presentation::ui::SuperweaponSwitchView& view);
+    [[nodiscard]] const presentation::ui::SuperweaponSwitchView& superweapon_switch() const noexcept;
+    // The component's alternates count and Anim_FPS, for the click animation (both from the data).
+    [[nodiscard]] presentation::ui::SuperweaponSwitchArt superweapon_art() const noexcept;
     // The panel's state each frame (TM-05, TM-06, TM-08, TM-09).
     struct TimeView final {
         bool paused{};
@@ -318,6 +341,7 @@ public:
     [[nodiscard]] std::string report_json() const;
 
 private:
+    void refresh_cinematic();
     struct State;
     std::unique_ptr<State> state_;
 };

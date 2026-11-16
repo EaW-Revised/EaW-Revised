@@ -21,7 +21,15 @@ EawrTacticalHud::~EawrTacticalHud() {
 void EawrTacticalHud::setup(Setup setup, TextureButton* options) {
     setup_ = std::move(setup);
     RenderingServer* rendering = RenderingServer::get_singleton();
-    for (const Mesh& mesh : setup_.meshes) {
+    for (Mesh& mesh : setup_.meshes) {
+        if (mesh.blend == model::ShellBlend::opaque && mesh.texture.is_valid()) {
+            // The texture's alpha is a gloss mask, not transparency: keep the colour alone.
+            Ref<Image> image = mesh.texture->get_image();
+            if (image.is_valid() && !image->is_empty()) {
+                image->convert(Image::FORMAT_RGB8);
+                mesh.texture = ImageTexture::create_from_image(image);
+            }
+        }
         const RID item = rendering->canvas_item_create();
         rendering->canvas_item_set_parent(item, get_canvas_item());
         // Faceplate UVs repeat (UI-L2); the shell is scaled, so sample linearly.
@@ -46,6 +54,11 @@ void EawrTacticalHud::setup(Setup setup, TextureButton* options) {
     for (const Setup::Placed& placed : setup_.time_buttons) add_child(placed.button);
     laid_out_ = Vector2(-1.0F, -1.0F);
     relayout();
+}
+
+void EawrTacticalHud::set_layout_hook(LayoutHook hook) {
+    layout_hook_ = std::move(hook);
+    if (layout_hook_ && laid_out_.x > 0.0F) layout_hook_(placement(), space());
 }
 
 void EawrTacticalHud::set_alternate(const std::optional<std::uint32_t> index, const float alpha) {
@@ -170,6 +183,7 @@ void EawrTacticalHud::relayout() {
         planet_.draw(*this, style, setup_.planet_text, planet_rect_, HORIZONTAL_ALIGNMENT_CENTER, true, false,
                      static_cast<float>(shell.scale), 1.0F);
     }
+    if (layout_hook_) layout_hook_(shell, reference);
 }
 
 

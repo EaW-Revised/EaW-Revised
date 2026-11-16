@@ -72,6 +72,16 @@ struct SpecialAbilityProfile {
     // WHE-57..60: nested ranges override ordinary targeting only when positive.
     math::Fixed beam_min_range{}, beam_max_range{}, damage_per_frame{};
     std::uint32_t fire_delay_frames{}; // WSPL-03: SUPER_LASER, trunc(Fire_Delay x 30)
+    // WSPL-03/04/08: SUPER_LASER aiming and firing controls with the retail constructor defaults.
+    bool laser_face_target{};            // Face_Target (default off)
+    bool laser_can_turn{};               // the unit has the tactical-super-weapon behaviour, the only carrier of the turn
+    math::Fixed laser_turn_rate{math::Fixed::from_raw(10 * math::Fixed::scale)};    // Turn_Rate, degrees per frame; zero or less: the unit's own rate
+    math::Fixed laser_firing_cone{math::Fixed::from_raw(45 * math::Fixed::scale)};  // Firing_Cone, degrees
+    math::Fixed laser_fire_frame{};      // Fire_Frame, attack-clip frames
+    std::uint32_t laser_anim_sub_index{}; // Attack_Anim_Sub_Index: which attack clip
+    std::uint32_t laser_continuation_frames{}; // Fire_Continuation, trunc(seconds x 30)
+    std::uint32_t attack_clip_frames{};  // the selected attack clip's stored frames; zero: the model has none
+    math::Fixed attack_clip_fps{};       // that clip's frames per second
     std::uint64_t doubled_speed_categories{}; // nonhero Corvette exception, resolved from content
     std::string beam_owner_particle{}, beam_owner_bone{};
     // WST-12: the cloak fade's length in seconds and its end tint (bytes); presentation only.
@@ -138,6 +148,11 @@ struct SpecialAbilitySlot {
     std::uint64_t next_service_frame{};
     std::optional<SpecialActivationContext> context{};
     std::vector<EntityId> targets{}; // sorted, unique tracked recipients
+    // WSPL-03/04/08: SUPER_LASER use state. `laser_face` and its target outlive the use (the turn is
+    // switched off only when the firing cone is reached).
+    bool laser_face{}, laser_anim_started{}, laser_fired{}, laser_ending{};
+    EntityId laser_face_target{};
+    std::uint64_t laser_fire_start{}, laser_anim_tick{}, laser_end_tick{};
     friend bool operator==(const SpecialAbilitySlot&, const SpecialAbilitySlot&) = default;
 };
 struct SpecialAbilityState {
@@ -316,6 +331,9 @@ struct AbilityProfile {
     TypeId replenish_team{}; // WHE-63: authored Create_Team_Type
     std::string replenish_particle{}; // Particle_Effect, presentation only
     std::optional<BuzzDroidsProfile> buzz{}; // WAB-70: BUZZ_DROIDS only
+    // WAB-77: a craft's own BUZZ_DROIDS entry, kept last. Only a craft that is its own whole container (a solo
+    // ship, WHE-SQ-02) may use it; a craft some squadron lists as a member never has one.
+    bool solo_only{};
     std::optional<LureProfile> lure{}; // WLU-01: LURE only
     std::optional<ChargedBlastProfile> charged_blast{}; // named nested BLAST handler
     math::Fixed expiration_seconds{}; // WST-03: STEALTH only, Expiration_Seconds as authored for the cloak's own count
@@ -329,6 +347,8 @@ struct AbilityProfile {
     // Session content, bound by content identity rather than replay/checkpoint slots.
     std::optional<std::string> unresolved_spawn{};
     std::optional<math::Fixed> targeting_max_attack_distance{}; // WRA-03: positive active override
+    // WLAB-15 (land STIM_PACK only): the share of the unit's maximum health a switch-on takes from it; zero deals nothing.
+    math::Fixed activation_damage{};
     bool market_purchase_required{}; // WGEP-145
     bool nested_market_purchase_required{};
     std::string nested_market_name{};
@@ -367,8 +387,9 @@ using NamedAbilityLocks = std::map<std::tuple<PlayerId, TypeId, std::string>, bo
     const SpecialAbilityProfile&);
 [[nodiscard]] bool named_ability_enabled(const NamedAbilityLocks&, PlayerId, TypeId,
     std::string_view canonical_name, bool initially_enabled);
-// PU-08: nonautomatic trigger dispatch remains a seam (legacy #6266).
+// PU-08: the three tactical event styles are dispatched by income_triggers (legacy #6266).
 [[nodiscard]] bool automatic_ability_style(std::string_view, BattleDomain, bool multiplayer);
+[[nodiscard]] IncomeEventStyle income_event_style(std::string_view) noexcept;
 [[nodiscard]] bool automatic_ability_style(SpecialActivationStyle, BattleDomain, bool multiplayer);
 
 // An empty table binds no abilities, as before #76. `humans` are the players a person commands:

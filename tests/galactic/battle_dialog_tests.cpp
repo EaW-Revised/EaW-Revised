@@ -117,4 +117,55 @@ int main() {
             assert(lines.back().key == std::string("TEXT_AR_LAND_") + (winner == 1 ? "WIN_" : "LOSS_") + band);
         }
     }
+    {
+        // WAR-64 / WGUI-120: galactic advisor admission of one auto-resolved battle.
+        const std::vector<CampaignRecordEntry> fight{{"hero", 2}, {"ship", 2}, {"ship", 3}};
+        const auto faction = [](std::uint32_t player) { return "F" + std::to_string(player); };
+        const auto hero = [](auto type) { return type == "hero"; };
+        const auto name = [](auto type) { return "N:" + std::string(type); };
+        // Involved local loser: its own side counts, its faction names the line.
+        auto involved = auto_resolve_notices(fight, 2, 2, 3, 3, false, false, faction, "P", hero, name);
+        assert(involved.size() == 2 && involved[0].key == "TEXT_AR_HERO_LOSS");
+        assert((involved[0].tokens == std::vector<std::string>{"N:hero", "P"}));
+        assert(involved[1].key == "TEXT_AR_SPACE_LOSS_REGULAR");
+        assert((involved[1].tokens == std::vector<std::string>{"F2", "P", "2"}));
+        // Uninvolved observer without presence: hero losses only, no result line.
+        auto hidden = auto_resolve_notices(fight, 1, 2, 3, 3, true, false, faction, "P", hero, name);
+        assert(hidden.size() == 1 && hidden[0].key == "TEXT_AR_HERO_LOSS");
+        // Uninvolved observer with known presence: the winner's side names the result.
+        auto seen = auto_resolve_notices(fight, 1, 2, 3, 3, true, true, faction, "P", hero, name);
+        assert(seen.size() == 2 && seen[1].key == "TEXT_AR_LAND_WIN_REGULAR");
+        assert((seen[1].tokens == std::vector<std::string>{"F3", "P", "1"}));
+        // No local player (all-AI view) is never a participant.
+        assert(auto_resolve_notices(fight, 0, 0, 3, 3, false, false, faction, "P", hero, name).size() == 1);
+    }
+    {
+        // Stock Text_ID values are padded (" TEXT_FACTION_EMPIRE "); the text database matches keys exactly.
+        const auto text = [](std::string_view key) {
+            return key == "TEXT_FACTION_EMPIRE" ? std::string("Galactic Empire") : std::string(key);
+        };
+        assert(authored_display_text(" TEXT_FACTION_EMPIRE ", "EMPIRE", text) == "Galactic Empire");
+        assert(authored_display_text("\r\n\tTEXT_FACTION_EMPIRE\r\n", "EMPIRE", text) == "Galactic Empire");
+        assert(authored_display_text(" TEXT_MISSING ", "EMPIRE", text) == "EMPIRE");
+        assert(authored_display_text("  ", "EMPIRE", text) == "EMPIRE");
+        assert(authored_display_text("TEXT_FACTION_EMPIRE", "EMPIRE", {}) == "EMPIRE");
+    }
+    {
+        // WAR-64: one announcement per battle. Battle 5 is shown on the first look (already announced), then battle 6
+        // arrives; a load restores battle 5's saved summary (re-primed: not announced again), then the restored game
+        // fights a new battle that reuses id 6 and is announced.
+        AdvisedOutcome advised;
+        assert(!advise_outcome(advised, 5));
+        assert(!advise_outcome(advised, 5));
+        assert(advise_outcome(advised, 6));
+        assert(!advise_outcome(advised, 6)); // the same battle republished (a new outcome object) is not repeated
+        assert(!advise_outcome(advised, std::nullopt));
+        advised = {}; // an in-game load
+        assert(!advise_outcome(advised, 5));
+        assert(advise_outcome(advised, 6));
+        // A first look with no battle shown announces the first battle that arrives.
+        AdvisedOutcome fresh;
+        assert(!advise_outcome(fresh, std::nullopt));
+        assert(advise_outcome(fresh, 1));
+    }
 }

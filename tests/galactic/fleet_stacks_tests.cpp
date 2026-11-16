@@ -180,6 +180,40 @@ int case_galactic_fleet_stacks_tests() {
         assert(icons[0].best == eawr::sim::galactic::TypeId{1003}); // no hero in the fleet: the health winner
     }
     {
+        // #6745: a hero the observer card publishes as carried (`overview_hero_type`) joins the visible groups' heroes, on a
+        // local card and on a foreign one (the original's helper has no owner branch); the bit clear changes nothing.
+        const std::map<eawr::sim::galactic::TypeId, std::int64_t> ranks{{1002, 7}, {1000, 3}};
+        StackHeroPreference prefer{true, [&](const eawr::sim::galactic::TypeId type) -> std::optional<std::int64_t> {
+            const auto found = ranks.find(type);
+            return found == ranks.end() ? std::nullopt : std::optional<std::int64_t>(found->second);
+        }};
+        std::vector<ObservedFleet> cards;
+        cards.push_back(local_card(601, 0, {group(2, 1003, 601)})); // a big ship only; a hero rides inside it
+        cards[0].overview_hero_type = eawr::sim::galactic::TypeId{1002};
+        auto icons = fleet_stack_icons(view(cards), health, textures, std::nullopt, {});
+        assert(icons[0].best == eawr::sim::galactic::TypeId{1003}); // bit clear: the greatest hull
+        icons = fleet_stack_icons(view(cards), health, textures, std::nullopt, prefer);
+        assert(icons[0].best == eawr::sim::galactic::TypeId{1002}); // bit set: the carried hero wins
+        cards[0] = local_card(601, 0, {group(2, 1003, 601), group(1, 1000, 601)}); // a visible hero of lower rank number
+        cards[0].overview_hero_type = eawr::sim::galactic::TypeId{1002};
+        icons = fleet_stack_icons(view(cards), health, textures, std::nullopt, prefer);
+        assert(icons[0].best == eawr::sim::galactic::TypeId{1000}); // the lowest ranking wins between group and carried hero
+        cards[0] = local_card(601, 0, {group(2, 1003, 601), group(1, 1002, 601)});
+        cards[0].overview_hero_type = eawr::sim::galactic::TypeId{1000};
+        icons = fleet_stack_icons(view(cards), health, textures, std::nullopt, prefer);
+        assert(icons[0].best == eawr::sim::galactic::TypeId{1000}); // the carried hero outranks the visible one
+        // A foreign card: the health-ranked overview image, or its hero with the bit set.
+        ObservedFleet enemy;
+        enemy.planet = 101; enemy.owner = 2; enemy.count = 5;
+        enemy.overview_type = eawr::sim::galactic::TypeId{1003};
+        enemy.overview_hero_type = eawr::sim::galactic::TypeId{1002};
+        std::vector<ObservedFleet> foreign{enemy};
+        icons = fleet_stack_icons(view(foreign), health, textures, std::nullopt, {});
+        assert(icons.size() == 1 && icons[0].best == eawr::sim::galactic::TypeId{1003});
+        icons = fleet_stack_icons(view(foreign), health, textures, std::nullopt, prefer);
+        assert(icons.size() == 1 && icons[0].best == eawr::sim::galactic::TypeId{1002});
+    }
+    {
         // WGUI-92: an icon shows the stealth overlay only when every fleet it merges is all-stealth.
         std::vector<ObservedFleet> cards;
         cards.push_back(local_card(601, 0, {group(1, 1000, 601)}));

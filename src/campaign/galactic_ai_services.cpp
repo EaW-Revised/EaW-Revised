@@ -98,6 +98,9 @@ core::Result<void> publish_restored_copy(const std::function<core::Result<void>(
 } // namespace
 ComposedGalacticAiState::ComposedGalacticAiState(std::array<Contributor, 6> owners)
     : owners_(std::move(owners)), verify_hash_(verification_requested()) {}
+bool ComposedGalacticAiState::oracle_capture_due(const std::uint64_t completed_tick) const noexcept {
+    return !owners_[0] || owners_[0]->oracle_capture_due(completed_tick);
+}
 core::Result<std::shared_ptr<ComposedGalacticAiState>> ComposedGalacticAiState::create(GalacticAiContributors owners) {
     using Result = core::Result<std::shared_ptr<ComposedGalacticAiState>>;
     if (!owners.lifecycle || !owners.perception || !owners.goals || !owners.funding || !owners.execution || !owners.production)

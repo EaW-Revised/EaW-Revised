@@ -194,8 +194,7 @@ core::Result<void> GalacticSession::Impl::execute_planet_ruins(const RuinsPlan& 
     population_stale = true;
     ++income_control_generation; // the ruined flag selects the base value read by cached contributions
     invalidate_observer_projection();
-    const auto events = snapshot->events();
-    snapshot = make_snapshot(std::vector<GalacticEvent>(events.begin(), events.end()));
+    refresh_snapshot();
     auto delivered = deliver_actor_changes();
     if (!delivered) failed = true;
     return delivered;

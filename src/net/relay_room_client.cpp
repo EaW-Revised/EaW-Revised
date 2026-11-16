@@ -20,7 +20,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr std::size_t room_signal_limit = 65536;
 // Hostnames in a room credential's TURN list become numeric addresses on the worker thread, as for Paired.
-Bytes numeric_room_turn(Bytes bytes, std::stop_token stop) {
+Bytes numeric_room_turn(Bytes bytes, GnsTurnProvider provider, const TurnLog& log, TurnOrder& order, std::stop_token stop) {
     if (bytes.size() < 2 || bytes[0] != 2) return bytes;
     const auto kind = static_cast<Kind>(bytes[1]);
     if (kind != Kind::room_opened && kind != Kind::room_attached && kind != Kind::renewed) return bytes;
@@ -31,11 +31,14 @@ Bytes numeric_room_turn(Bytes bytes, std::stop_token stop) {
         const auto uri = reader.string(512), username = reader.string(256), password = reader.string(256);
         const auto lifetime = reader.u32();
         if (!reader.done() || uri.empty() || !turn_uri_list_valid(uri)) return bytes;
-        const auto numeric = numeric_turn_uris(uri, {}, std::chrono::seconds(5), stop);
-        if (numeric == uri) return bytes;
-        u32(result, remaining); u32(result, hard); string(result, numeric);
-        string(result, numeric.empty() ? "" : username); string(result, numeric.empty() ? "" : password);
-        u32(result, numeric.empty() ? 0 : lifetime);
+        const TurnStrings listed{uri, username, password};
+        // A renewal measures again: it replaces the credentials later dials use, and the nearer provider may have changed.
+        const auto numeric = numeric_turn_credentials(listed, provider, {}, std::chrono::seconds(5), stop, stun_rtt, &order);
+        log_turn_order(order, log);
+        if (numeric == listed) return bytes;
+        u32(result, remaining); u32(result, hard); string(result, numeric.uri);
+        string(result, numeric.uri.empty() ? "" : numeric.username); string(result, numeric.uri.empty() ? "" : numeric.password);
+        u32(result, numeric.uri.empty() ? 0 : lifetime);
         return result;
     }
     const auto slot = reader.u32();
@@ -43,11 +46,14 @@ Bytes numeric_room_turn(Bytes bytes, std::stop_token stop) {
     const auto uri = reader.string(512), username = reader.string(256), password = reader.string(256);
     const auto lifetime = reader.u32(), remaining = reader.u32(), hard = reader.u32();
     if (!reader.done() || uri.empty() || !turn_uri_list_valid(uri)) return bytes;
-    const auto numeric = numeric_turn_uris(uri, {}, std::chrono::seconds(5), stop);
-    if (numeric == uri) return bytes;
-    u32(result, slot); string(result, capability); string(result, identity); string(result, alias); string(result, numeric);
-    string(result, numeric.empty() ? "" : username); string(result, numeric.empty() ? "" : password);
-    u32(result, numeric.empty() ? 0 : lifetime); u32(result, remaining); u32(result, hard);
+    const TurnStrings listed{uri, username, password};
+    // The order is chosen from a fresh measurement for every credential set (attach, open and renewal; a few ms of worker time).
+    const auto numeric = numeric_turn_credentials(listed, provider, {}, std::chrono::seconds(5), stop, stun_rtt, &order);
+    log_turn_order(order, log);
+    if (numeric == listed) return bytes;
+    u32(result, slot); string(result, capability); string(result, identity); string(result, alias); string(result, numeric.uri);
+    string(result, numeric.uri.empty() ? "" : numeric.username); string(result, numeric.uri.empty() ? "" : numeric.password);
+    u32(result, numeric.uri.empty() ? 0 : lifetime); u32(result, remaining); u32(result, hard);
     return result;
 }
 core::Result<std::shared_ptr<NetworkGnsRoom>> room_failure(core::Diagnostic diagnostic) {
@@ -69,6 +75,7 @@ struct NetworkGnsRoom::Impl {
     std::string capability, alias;
     GnsRoomRoster roster;
     std::optional<GnsTurnCredentials> turn;
+    std::optional<std::string> own_turn; // the operator's own entries of the last rewritten credentials (labels the route)
     GnsRoomLease lease;
     Clock::time_point hard_ends{};
     bool renewable{true};
@@ -263,7 +270,12 @@ struct NetworkGnsRoom::Impl {
         auto heartbeat = Clock::now();
         while (!stop.stop_requested()) {
             stream.pump();
-            if (auto bytes = stream.receive()) response(numeric_room_turn(std::move(*bytes), stop));
+            if (auto bytes = stream.receive()) {
+                TurnOrder order;
+                auto frame = numeric_room_turn(std::move(*bytes), options.turn_provider, options.log, order, stop);
+                if (order.classified) { std::lock_guard lock(mutex); own_turn = order.own_uris; }
+                response(std::move(frame));
+            }
             {
                 std::lock_guard lock(mutex);
                 if (failure || finished || repair_requested > repair_inflight) return;
@@ -345,6 +357,7 @@ std::string NetworkGnsRoom::capability() const { std::lock_guard lock(impl_->mut
 PeerIndex NetworkGnsRoom::local_slot() const { std::lock_guard lock(impl_->mutex); return impl_->slot; }
 GnsRoomRoster NetworkGnsRoom::roster() const { std::lock_guard lock(impl_->mutex); return impl_->roster; }
 std::optional<GnsTurnCredentials> NetworkGnsRoom::turn_credentials() const { std::lock_guard lock(impl_->mutex); return impl_->turn; }
+std::optional<std::string> NetworkGnsRoom::own_turn_uris() const { std::lock_guard lock(impl_->mutex); return impl_->own_turn; }
 GnsRoomLease NetworkGnsRoom::lease() const { std::lock_guard lock(impl_->mutex); return impl_->lease; }
 core::Result<void> NetworkGnsRoom::status() const {
     std::lock_guard lock(impl_->mutex);

@@ -293,7 +293,13 @@ std::string lifetime_contracts(unsigned workers) {
     refusing->reject=true; must(rejected.set_immediate_effect_host(refusing, 32));
     auth::ScriptEvent drop; drop.key={rejected.completed_tick()+1, auth::first_simulation_producer, 7, 0};
     drop.target=7; drop.kind=auth::ScriptEvent::Kind::call; drop.name="Drop"; must(rejected.submit_event(std::move(drop)));
-    expect(!rejected.service(executor) && world->markup()->encode() == before_rejected, "failed publication never releases live native contributions");
+    const auto rejected_report = rejected.service(executor);
+    // The only write of this service is the census's release of the dropped handle, and no instance contributed an
+    // action: the refused publication drops that release (it is retried by a later census), retires nobody and does not
+    // fail the service, and the live contribution stays.
+    expect(rejected_report && rejected.retired_instances().empty() && rejected_report.value().managed_handles.released == 0
+        && rejected_report.value().managed_releases.empty() && world->markup()->encode() == before_rejected,
+        "failed publication never releases live native contributions, retires no instance that did not write, and does not fail the service");
     // A fixed cadence is in the completed-invocation domain. Save immediately
     // before its boundary, with both an orphaned local and a dropped global.
     constexpr std::uint64_t interval = 64;

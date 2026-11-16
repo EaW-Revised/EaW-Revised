@@ -27,7 +27,7 @@ enum class TacticalVerb : std::uint8_t {
     stop = 0,
     move = 1,
     attack = 2,
-    face = 3,    // turn to face a point; not in tactical rules v1
+    face = 3,    // turn in place towards a point (MV-20; the facing-only right drag, O-2)
     ability = 4, // a unit ability (#76); a targeted special ability has no command yet
     attack_move = 5, // #452: move to a point, engaging what comes into range
     guard = 6,       // #452: follow and escort a unit, or hold a point
@@ -43,6 +43,7 @@ enum class TacticalVerb : std::uint8_t {
     special_fire = 14, // WSW-31: one source and a player-admitted object target
     beacon = 15, // HCB-12: player-owned point placement, no selection.
     gift = 16, // ADR-020: selected mobile controller transfer.
+    tactical_superweapon = 17, // HCB-47: the Death Star switch; one unit, `tsw_stage`.
 };
 
 // Where an intent came from. Presentation-only: it never enters a command, so a HUD button and
@@ -80,6 +81,9 @@ struct TacticalIntent {
     std::uint64_t reinforcement_token{}; // WGM-48: published persistent reserve identity
     bool append{}; // HCB-57: queued point movement.
     sim::SeatId gift_recipient{};
+    // tactical_superweapon (HCB-47, TSW-07): the stage the click asks for; the sim checks it again at execution.
+    sim::tactical::TswStage tsw_stage{sim::tactical::TswStage::start_power_up};
+    std::optional<sim::math::Fixed> final_yaw{}; // O-6: space compass move, one heading for the group.
     friend bool operator==(const TacticalIntent&, const TacticalIntent&) = default;
 };
 
@@ -88,7 +92,7 @@ inline constexpr std::string_view invalid_intent = "EAWR-UI-0751";     // no uni
 inline constexpr std::string_view unsupported_intent = "EAWR-UI-0752"; // the verb has no sim command yet
 } // namespace diagnostic_codes
 
-// Maps an intent to the sim payload it becomes. Fails for face, and for an ability intent without a
+// Maps an intent to the sim payload it becomes. Fails for an ability intent without a
 // modelled unit ability, until the tactical rules gain those commands; the caller then shows "cannot" feedback and records nothing.
 [[nodiscard]] core::Result<sim::tactical::CommandPayload> command_payload(const TacticalIntent& intent);
 
@@ -256,6 +260,17 @@ struct OrderModifiers {
     bool through_hazards{};
 };
 
+// O-2: a right drag that ended past MinimumDragDistance. Between the drag limits it orders a move at the
+// press point (`press_point`), and when the press was on a selected ship (`face_toward` set) the ships turn
+// in place towards that point instead; at MinimumDragSelectDistance or more (`cancel`) a move is cancelled
+// and nothing is sent. Attacks and guards the release point decides are not affected.
+struct RightDrag {
+    sim::math::Vec3 press_point{};
+    bool cancel{};
+    std::optional<sim::math::Vec3> face_toward{};
+    std::optional<sim::math::Fixed> final_yaw{};
+};
+
 class OrderInput final {
 public:
     explicit OrderInput(CommandSink& sink) noexcept : sink_(&sink) {}
@@ -278,9 +293,10 @@ public:
     // Move mode: always a move. Attack mode: only a hostile unit gives a command; anything else
     // gives none and keeps the mode. Attack-move and guard modes act as their modifiers do. An
     // issued command disarms the mode, except Waypoint remains armed for another point. With no selection nothing is issued. Returns whether an
-    // intent was issued.
+    // intent was issued. A `drag` (O-2) changes only a point move (a move or an attack-move): it moves
+    // at the drag's press point, turns in place, or is cancelled (nothing issued, the mode stays).
     [[nodiscard]] core::Result<bool> world_command(const WorldPick& pick, CommandOrigin origin = CommandOrigin::world_click,
-        OrderModifiers modifiers = {});
+        OrderModifiers modifiers = {}, const RightDrag* drag = nullptr);
 
 private:
     [[nodiscard]] core::Result<void> send(TacticalIntent intent);

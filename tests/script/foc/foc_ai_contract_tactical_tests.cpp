@@ -2158,6 +2158,61 @@ void threat_decay_constant() {
     const auto misspelled = load("<Root><AI_SpaceThreatDecay>0.05</AI_SpaceThreatDecay></Root>");
     expect(misspelled && misspelled.value().constants.threat_decay_step == ai::real(1),
         "DT-02: the engine default is 1 when the tag is absent");
+
+    // TCFA-11 / SK-45: load the authored policy, then exercise the qualified object query.
+    for (const auto* flag : {"False", "True", "0", "1", "TBD"}) {
+        const auto loaded = load(std::string("<Root><AIUsesFogOfWarSpace>") + flag
+            + "</AIUsesFogOfWarSpace></Root>");
+        expect(loaded.has_value(), "TCFA-11: the AI fog policy loads from XML");
+        if (!loaded) continue;
+        const bool uses_fog = std::string_view(flag) == "True" || std::string_view(flag) == "1";
+        expect(loaded.value().constants.uses_fog_space == uses_fog, "TCFA-11: retail booleans retain the authored policy");
+        World world;
+        world.view->units.front().visible_to = 2; // hidden from player one
+        ai::ThreatGrid grid;
+        grid.partition({-1000, 1000, 1000, -1000}, 5, 5, loaded.value().constants);
+        grid.service(*world.view, *world.host, 0);
+        expect(grid.force_visibility(*world.host, *world.view, 2, 1) == (uses_fog ? Real{} : ai::real(1)),
+            "TCFA-11: True respects hidden objects; stock False bypasses object fog");
+        expect(grid.force(*world.host, *world.view, {-1000, -1000, 2000, 2000}, 2, 1, false, Real{}, 0)
+            == (uses_fog ? Real{} : ai::real(1440)), "TCFA-11: the same policy filters regional threat queries");
+        world.view->units.front().visible_to = 3;
+        expect(grid.force_visibility(*world.host, *world.view, 2, 1) == ai::real(1),
+            "TCFA-11: a revealed object is visible under either policy");
+        world.view->units.front().visible_to = 2;
+        world.host->setup.players.front().ai = false;
+        expect(grid.force_visibility(*world.host, *world.view, 2, 1) == Real{},
+            "TCFA-11: the space AI override never grants a human visibility");
+        world.host->setup.players.front().ai = true;
+        world.host->setup.domain = tactical::BattleDomain::land;
+        expect(grid.force_visibility(*world.host, *world.view, 2, 1) == ai::real(1),
+            "TCFA-11: the space flag does not change the land policy");
+        world.host->setup.domain = tactical::BattleDomain::space;
+        ai::Engine engine(world.host, loaded.value(), {});
+        ai::EngineContractAccess::grid(engine).partition({-1000, 1000, 1000, -1000}, 5, 5, loaded.value().constants);
+        ai::EngineContractAccess::grid(engine).service(*world.view, *world.host, 0);
+        auto scripts = auth::ScriptScheduler::create({}, {});
+        expect(scripts.has_value(), "TCFA-11: fog continuation scheduler creates");
+        if (!scripts) continue;
+        const std::string identity(64, 'a');
+        const auto saved = engine.save_tactical_native(identity, scripts.value());
+        expect(saved.has_value(), "TCFA-11: fog policy continuation saves");
+        if (!saved) { std::cerr << saved.error().message << '\n'; continue; }
+        ai::Engine restored(world.host, loaded.value(), {});
+        const auto resumed = restored.restore_tactical_native(saved.value(), identity, scripts.value());
+        expect(resumed.has_value(), "TCFA-11: fog policy continuation restores");
+        if (!resumed) { std::cerr << resumed.error().message << '\n'; continue; }
+        expect(ai::EngineContractAccess::grid(restored).force_visibility(*world.host, *world.view, 2, 1)
+            == (uses_fog ? Real{} : ai::real(1)), "TCFA-11: restored object queries retain the authored fog policy");
+        expect(restored.save_tactical_native(identity, scripts.value()).value() == saved.value(),
+            "TCFA-11: fog continuation round trips canonically");
+        auto opposite = loaded.value(); opposite.constants.uses_fog_space = !uses_fog;
+        ai::Engine mismatched(world.host, std::move(opposite), {});
+        expect(!mismatched.restore_tactical_native(saved.value(), identity, scripts.value()),
+            "TCFA-11: a continuation refuses the opposite effective fog configuration");
+    }
+    expect(misspelled && !misspelled.value().constants.uses_fog_space,
+        "TCFA-11: omitted space AI fog retains the stock False fallback");
 }
 
 } // namespace foc_contract

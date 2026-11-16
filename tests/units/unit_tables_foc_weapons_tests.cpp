@@ -3,6 +3,8 @@
 #include "eawr/skirmish/roster_gate.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
+#include "eawr/presentation/ui/unit_cards.hpp"
+#include "../support/temp_dir.hpp"
 
 #include <algorithm>
 #include <array>
@@ -304,6 +306,21 @@ void foc_super_capitals(eawr::units::LoadInput input) {
                 const auto* profile = abilities.value().find(eawr::assets::object_type_crc(name));
                 expect(profile && tactical::ability_slot(*profile, tactical::AbilityKind::super_laser).has_value(),
                     std::string("WSPL-01: stock super-laser ability is available: ") + name);
+                // WSPL-08: the stock controls and the attack clip each model resolves (91 and 161 frames at 30 fps).
+                if (!profile) continue;
+                const auto handler = std::find_if(profile->special.begin(), profile->special.end(), [](const auto& special) {
+                    return special.kind == tactical::SpecialAbilityKind::super_laser;
+                });
+                if (handler == profile->special.end()) continue;
+                const bool death_star = std::string_view(name) == "Death_Star_II";
+                const auto whole = [](const std::int64_t value) { return math::Fixed::from_raw(value * math::Fixed::scale); };
+                expect(handler->laser_face_target == death_star && handler->laser_can_turn == death_star,
+                    std::string("WSPL-08: only the Death Star turns to face: ") + name);
+                expect(handler->laser_fire_frame == whole(death_star ? 60 : 106)
+                    && handler->laser_anim_sub_index == (death_star ? 1U : 0U),
+                    std::string("WSPL-08: stock Fire_Frame and clip index: ") + name);
+                expect(handler->attack_clip_frames == (death_star ? 91U : 161U) && handler->attack_clip_fps == whole(30),
+                    std::string("WSPL-08: the attack clip resolves from the model: ") + name);
             }
             auto altered = stock.value();
             for (auto& unit : altered.units)
@@ -687,6 +704,90 @@ void foc_self_destruct(eawr::units::LoadInput input) {
                 && spawned->shield_damage && spawned->hitpoint_damage,
             std::string("WSD-06: ") + want.unit + "'s blast object binds with its area damage and radius");
     }
+}
+
+// #7323 (nit of #7258): the pointer's target filter reads the loaded stock Piett handler and a mod override of the
+// same handler through the real data chain. Stock lists fighters and bombers, so they are aimable; a mod layer that
+// replaces the file with a category list that leaves them out refuses them under the pointer, with the same predicate
+// the sim admits orders through.
+namespace {
+
+struct PiettFilterAnswer {
+    bool loaded{};
+    bool fighter{};
+    bool frigate{};
+};
+
+PiettFilterAnswer piett_filter_answer(eawr::units::LoadInput input) {
+    input.types = {"Accuser_Star_Destroyer", "TIE_Fighter", "Nebulon_B_Frigate"};
+    input.obstacles.clear();
+    PiettFilterAnswer answer;
+    const auto loaded = eawr::units::load_unit_tables(input);
+    if (!loaded) return answer;
+    const auto combat = eawr::units::combat_table(loaded.value());
+    const auto* piett = loaded.value().find("Accuser_Star_Destroyer");
+    if (!combat || piett == nullptr) return answer;
+    const auto fighter = eawr::assets::object_type_crc("TIE_Fighter");
+    const auto frigate = eawr::assets::object_type_crc("Nebulon_B_Frigate");
+    const auto* fighter_profile = combat.value().find(fighter);
+    const auto* frigate_profile = combat.value().find(frigate);
+    if (fighter_profile == nullptr || frigate_profile == nullptr) return answer;
+    const std::uint32_t energy_weapon = eawr::presentation::ui::ability_index("ENERGY_WEAPON");
+    answer.loaded = true;
+    answer.fighter = eawr::presentation::ui::ability_target_admitted(piett->special_abilities, energy_weapon, fighter,
+        fighter_profile->category_bits);
+    answer.frigate = eawr::presentation::ui::ability_target_admitted(piett->special_abilities, energy_weapon, frigate,
+        frigate_profile->category_bits);
+    return answer;
+}
+
+} // namespace
+
+void foc_piett_filter(const eawr::units::LoadInput& input, const std::vector<eawr::vfs::MountSpec>& stock_mounts) {
+    const auto stock = piett_filter_answer(input);
+    expect(stock.loaded, "7323: the stock Piett ship loads with a fighter and a frigate");
+    if (!stock.loaded) return;
+    expect(stock.fighter, "7323: stock Piett's energy weapon lists fighters, so the pointer admits one");
+    expect(stock.frigate, "7323: stock Piett's energy weapon admits a frigate");
+
+    // The mod layer carries only the stock file with Piett's energy-weapon category list changed.
+    auto bytes = input.filesystem->open("data/xml/uniqueunits.xml");
+    expect(static_cast<bool>(bytes), "7323: the stock unique units file reads");
+    if (!bytes) return;
+    std::string text;
+    text.reserve(bytes.value().size());
+    for (const std::byte value : bytes.value()) text.push_back(static_cast<char>(value));
+    const std::string handler = "Name=\"Piet_Energy_Weapon_Attack_Ability\"";
+    const std::string open = "<Applicable_Unit_Categories>";
+    const auto handler_at = text.find(handler);
+    const auto list_at = handler_at == std::string::npos ? handler_at : text.find(open, handler_at);
+    const auto list_end = list_at == std::string::npos ? list_at : text.find("</", list_at);
+    expect(list_end != std::string::npos, "7323: the stock Piett energy-weapon category list is found");
+    if (list_end == std::string::npos) return;
+    text.replace(list_at + open.size(), list_end - list_at - open.size(), "Capital | Corvette | Frigate | Transport");
+
+    struct Tree final {
+        std::filesystem::path root = std::filesystem::temp_directory_path() /
+            ("eawr-piett-mod-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        ~Tree() { eawr::testing::remove_temp_directory(root); }
+    } tree;
+    write(tree.root / "XML" / "uniqueunits.xml", text);
+    std::vector<eawr::vfs::MountSpec> mounts{{"mod", tree.root, "data", {}}};
+    mounts.insert(mounts.end(), stock_mounts.begin(), stock_mounts.end());
+    auto filesystem = eawr::vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(filesystem), "7323: the mod layer mounts over the stock layers");
+    if (!filesystem) return;
+    auto catalog = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
+    expect(static_cast<bool>(catalog), "7323: the catalog loads with the mod layer");
+    if (!catalog) return;
+    auto modded = input;
+    modded.catalog = &catalog.value().catalog;
+    modded.filesystem = &filesystem.value();
+    const auto overridden = piett_filter_answer(modded);
+    expect(overridden.loaded, "7323: the mod-overridden Piett ship loads");
+    if (!overridden.loaded) return;
+    expect(!overridden.fighter, "7323: a mod that drops fighters from Piett's energy weapon refuses one under the pointer");
+    expect(overridden.frigate, "7323: the mod override still admits a listed frigate");
 }
 
 void foc_peacebringer_blast(eawr::units::LoadInput input) {

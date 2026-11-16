@@ -38,6 +38,9 @@ std::vector<tactical::SeatBinding> bindings(std::uint32_t peers);
 std::uint64_t batch_tick(std::span<const std::uint8_t> frame);
 std::string adaptive_agreement(std::size_t workers, std::uint32_t peers, bool skewed);
 void adaptive_policy_and_refusals();
+void adaptive_high_rtt_recovers();
+void adaptive_save_load_sweep();
+void adaptive_hold_on_expiry();
 std::string agreement(std::uint32_t peers, std::uint64_t delay, std::size_t workers, const std::string& fault,
     std::optional<eawr::testing::WanProfile> wan);
 void missing_and_faults();

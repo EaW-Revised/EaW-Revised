@@ -87,6 +87,9 @@ struct EmitterRenderPlan final {
     float kite_speed_limit{};
     bool drawable{};
     std::string cause;
+    // The backend refused the emitter because the device or engine would not give a resource (a
+    // program, material, mesh, instance or texture handle), not because of the emitter's data.
+    bool backend_resource_failure{};
 };
 
 // Resolves one emitter to a plan. A plan that is not drawable carries a cause
@@ -204,6 +207,9 @@ public:
     virtual void destroy_emitter(std::uint64_t resource) = 0;
     // Why the most recent create_emitter returned zero, for the per-emitter cause.
     [[nodiscard]] virtual std::string failure_cause() const { return {}; }
+    // True when the most recent refusal was a resource the platform would not give, not a data
+    // problem of the emitter (missing or invalid texture, unsupported plan).
+    [[nodiscard]] virtual bool failure_is_resource() const { return false; }
     // Snapshotted on the caller thread, then read without backend calls by workers.
     [[nodiscard]] virtual CullingFrame culling_frame() const { return {}; }
     virtual void set_emitter_visible(std::uint64_t, bool) {}
@@ -411,6 +417,9 @@ public:
     // Test hook (PF lane-serial (c)): the most slices a batch is cut into, clamped to 1 .. StepExecutor::max_ordered
     // (the default). Output is the same for any value; the contracts check 7, 64 and 256.
     static void set_slice_cap_default(std::size_t slices) noexcept;
+    // PF ablation ladder (measurement hook, process-local, off by default): with this on, every advance and present
+    // call, batched or scalar, steps, culls, builds and uploads nothing and answers success with empty statistics.
+    static void set_diagnostic_inert(bool on) noexcept;
     [[nodiscard]] static bool catchup_folding_default() noexcept;
     // Whether a frame with `due` samples presented and `samples` already processed runs several passes whose
     // intermediate uploads nobody sees: two or more samples due. Its owners open a defer_uploads scope then,

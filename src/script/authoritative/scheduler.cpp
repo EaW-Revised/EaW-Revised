@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <set>
 #include <span>
 #include <stdexcept>
@@ -201,7 +202,7 @@ void pump_threads(Instance& instance) {
         bool live = false;
         if (status != 0) {
             const ::std::string text = error_text(thread);
-            add_lua_error(instance, error_code(text), text);
+            add_lua_error(instance, error_code(text), "thread " + ::std::to_string(index) + ": " + text);
             instance.rollback(mark);
         } else {
             lua_Debug activation;
@@ -256,6 +257,27 @@ void service_instance(Instance& instance, ::std::uint64_t tick, bool host_paced,
     if (instance.outcome == InstanceOutcome::faulted) return;
     if (!host_paced) pump_threads(instance);
     if (instance.outcome == InstanceOutcome::running && instance.exit_requested) instance.outcome = InstanceOutcome::exited;
+}
+
+// A C++ exception out of a binding (or anything else the instance's service
+// runs on the host) fails that instance with a diagnostic, like an uncaught
+// Lua error would; it never reaches the session. The instance's Lua state may
+// be mid-call after the unwind, so it is not run again.
+void service_instance_guarded(Instance& instance, ::std::uint64_t tick, bool host_paced, ::std::uint64_t time_tick) {
+    ::std::string failure;
+    try {
+        service_instance(instance, tick, host_paced, time_tick);
+        return;
+    } catch (const ::std::exception& error) {
+        failure = error.what();
+    } catch (...) {
+        failure = "unknown exception";
+    }
+    instance.outcome = InstanceOutcome::faulted;
+    if (!instance.fault_diagnostic) instance.fault_diagnostic = instance.staging.diagnostics.size();
+    instance.staging.diagnostics.push_back(ScriptDiagnostic{::std::string(codes::script_error),
+        "a binding failed on the host: " + (failure.empty() ? ::std::string("exception") : failure),
+        instance.tick, instance.id, instance.current_thread});
 }
 
 // At the end of an instance's service: the memory measurement when due, and
@@ -344,9 +366,63 @@ int abort_session(lua_State* state) {
         ::std::string(codes::session_abort) + ": unprotected Lua error: " + (message != nullptr ? message : "(no message)"));
 }
 
+namespace {
+::std::mutex& peaks_mutex() { static ::std::mutex mutex; return mutex; }
+::std::map<::std::string, HostWorkPeaks>& peaks_table() { static ::std::map<::std::string, HostWorkPeaks> table; return table; }
+} // namespace
+
+void note_host_work(const Instance& instance, const ::std::int64_t instructions) {
+    const auto& label = instance.shared->config.label;
+    if (label.empty()) return;
+    const ::std::lock_guard lock(peaks_mutex());
+    auto& peak = peaks_table()[label];
+    peak.commands = ::std::max<::std::uint64_t>(peak.commands, instance.staging.commands.size());
+    peak.posts = ::std::max<::std::uint64_t>(peak.posts, instance.staging.posts.size());
+    peak.diagnostics = ::std::max<::std::uint64_t>(peak.diagnostics, instance.staging.diagnostics.size());
+    peak.host_units = ::std::max<::std::uint64_t>(peak.host_units, instance.sandbox->host_work());
+    peak.instructions = ::std::max<::std::int64_t>(peak.instructions, instructions);
+    ++peak.services;
+}
+
 Mark Instance::mark() const noexcept {
     return Mark{staging.commands.size(), staging.posts.size(), staging.timers.size(), random.draws(),
-                command_sequence,        post_sequence,        timer_sequence, immediate, immediate_changed};
+                command_sequence,        post_sequence,        timer_sequence, immediate_log.size(), immediate_changed,
+                staging.log.size()};
+}
+
+void Instance::begin_immediate(::std::shared_ptr<ImmediateEffectState> shadow) {
+    immediate = shadow;
+    immediate_base = ::std::move(shadow);
+    immediate_changed = false;
+    immediate_log.clear();
+}
+
+void Instance::end_immediate() noexcept {
+    immediate.reset();
+    immediate_base.reset();
+    immediate_changed = false;
+    immediate_log.clear();
+}
+
+// The working state after the first `actions` logged actions: the base itself for none, else a private copy of it
+// with those actions replayed (they were admitted once, so they apply again to the same result). The rebuild is host
+// work of this instance, charged like any other: the copy by what it copies, each replay by `host_replay_units`, none for
+// the base itself.
+void Instance::rebuild_immediate(const ::std::size_t actions) {
+    if (actions == 0) {
+        immediate = immediate_base;
+        immediate_log.clear();
+        return;
+    }
+    sandbox->charge_host_work(immediate_base->clone_units() + actions * host_replay_units);
+    auto rebuilt = immediate_base->clone();
+    if (!rebuilt) throw ::std::runtime_error("immediate effect clone is null");
+    for (::std::size_t index = 0; index < actions; ++index) {
+        auto replayed = rebuilt->apply(immediate_log[index].action, immediate_log[index].arguments);
+        if (!replayed) throw ::std::runtime_error("replay of an admitted immediate action failed: " + replayed.error().message);
+    }
+    immediate_log.resize(actions);
+    immediate = ::std::move(rebuilt);
 }
 
 void Instance::rollback(const Mark& mark) {
@@ -355,11 +431,12 @@ void Instance::rollback(const Mark& mark) {
     staging.commands.resize(mark.commands);
     staging.posts.resize(mark.posts);
     staging.timers.resize(mark.timers);
+    staging.log.resize(mark.log);
     random = RandomStream(shared->config.seed, tick | random_domain, id, mark.draws);
     command_sequence = mark.command_sequence;
     post_sequence = mark.post_sequence;
     timer_sequence = mark.timer_sequence;
-    immediate = mark.immediate;
+    if (immediate_log.size() > mark.immediate_actions) rebuild_immediate(mark.immediate_actions);
     immediate_changed = mark.immediate_changed;
 }
 
@@ -419,6 +496,11 @@ const ::std::string* ModuleManifest::find(::std::string_view logical_path) const
         listing.append(reinterpret_cast<const char*>(hash.data()), hash.size());
     }
     return core::sha256_hex(::std::span(reinterpret_cast<const ::std::uint8_t*>(listing.data()), listing.size()));
+}
+
+::std::vector<::std::pair<::std::string, HostWorkPeaks>> host_work_peaks() {
+    const ::std::lock_guard lock(detail::peaks_mutex());
+    return {detail::peaks_table().begin(), detail::peaks_table().end()};
 }
 
 // ---- ScriptScheduler ----
@@ -597,7 +679,7 @@ core::Result<void> ScriptScheduler::create_instance(const ::std::uint64_t id, ::
             auto shadow = impl_->immediate_host->capture();
             if (!shadow) return core::Result<void>::failure(shadow.error());
             if (!shadow.value()) throw ::std::runtime_error("immediate effect capture is null");
-            instance->immediate = ::std::move(shadow).value();
+            instance->begin_immediate(::std::move(shadow).value());
         }
         detail::InstanceScope scope(*instance);
         detail::install_bindings(*instance);
@@ -645,16 +727,26 @@ core::Result<void> ScriptScheduler::create_instance(const ::std::uint64_t id, ::
         if (instance->immediate_changed) {
             auto publication = instance->immediate->clone();
             if (!publication) throw ::std::runtime_error("immediate effect clone is null");
-            if (auto published = impl_->immediate_host->publish(::std::move(publication)); !published)
-                return core::Result<void>::failure(published.error());
+            // The catch below is for what happens before the world is touched (the clone): the creation then fails and
+            // nothing was published. An exception while the host publishes may follow world changes, so it is terminal.
+            auto published = [&]() -> core::Result<void> {
+                try {
+                    return impl_->immediate_host->publish(::std::move(publication));
+                } catch (const ::std::exception& error) {
+                    impl_->aborted = true;
+                    return core::Result<void>::failure(detail::make_error(codes::session_abort, error.what()));
+                }
+            }();
+            if (!published) return core::Result<void>::failure(published.error());
         }
-        instance->immediate.reset();
-        instance->immediate_changed = false;
+        instance->end_immediate();
     } catch (const ::std::exception& error) {
-        impl_->aborted = true;
-        return core::Result<void>::failure(detail::make_error(codes::session_abort, error.what()));
+        // The instance was never registered and its effects were never published: the creation fails, the session goes on.
+        return core::Result<void>::failure(detail::make_error(codes::script_error,
+            ::std::string("the instance could not be created on the host: ") + error.what()));
     }
     impl_->instances.emplace(id, ::std::move(instance));
+    ++impl_->instance_revision;
     return core::Result<void>::success();
 }
 
@@ -679,15 +771,25 @@ core::Result<::std::vector<ScriptDiagnostic>> ScriptScheduler::reconcile_objects
     for (auto iterator = impl_->objects.begin(); iterator != impl_->objects.end();) {
         const auto desired = ::std::lower_bound(objects.begin(), objects.end(), iterator->first,
             [](const auto& object, ::std::uint64_t id) { return object.instance < id; });
-        if (desired != objects.end() && *desired == iterator->second) { ++iterator; continue; }
+        if (desired != objects.end() && desired->instance == iterator->second.instance
+            && desired->object == iterator->second.object && desired->generation == iterator->second.generation
+            && desired->module == iterator->second.module) { ++iterator; continue; }
         if (impl_->instances.contains(iterator->first)) {
             if (auto removed = remove_instance(iterator->first); !removed) return Result::failure(removed.error());
         }
         iterator = impl_->objects.erase(iterator);
     }
     ::std::vector<ScriptDiagnostic> diagnostics;
-    for (const auto& object : objects) {
+    ::std::uint64_t registration = 0;
+    if (impl_->shared->config.galactic_clock)
+        for (const auto& [id, object] : impl_->objects) { (void)id; registration = ::std::max(registration, object.registration); }
+    for (auto object : objects) {
         if (impl_->objects.contains(object.instance)) continue;
+        if (impl_->shared->config.galactic_clock) {
+            if (registration == ::std::numeric_limits<::std::uint64_t>::max())
+                return Result::failure(detail::make_error(codes::invalid_request, "object registration sequence exhausted"));
+            object.registration = ++registration;
+        }
         impl_->objects.emplace(object.instance, object);
         if (auto created = create_instance(object.instance, object.module); !created) {
             diagnostics.push_back({created.error().code, object.module + ": " + created.error().message,
@@ -841,7 +943,7 @@ core::Result<ServiceReport> ScriptScheduler::service(
             }
             for (::std::size_t index = range.begin; index < range.end; ++index) {
                 core::tick_profile::JobScope instance_job_scope("job.script-instance", ordered[index]->id);
-                detail::service_instance(*ordered[index], tick, paced[index] != 0, time_tick);
+                detail::service_instance_guarded(*ordered[index], tick, paced[index] != 0, time_tick);
                 // GC policy: report() diagnoses and continues, irrespective of
                 // code; only an uncaught Lua failure retires the provider.
                 if (!config.galactic_clock && impl_->objects.contains(ordered[index]->id) && ::std::any_of(
@@ -850,7 +952,8 @@ core::Result<ServiceReport> ScriptScheduler::service(
                             && diagnostic.code != codes::script_warning; })) {
                     ordered[index]->outcome = InstanceOutcome::faulted;
                 }
-                used[index] = impl_->shared->config.quotas.instructions_per_service - ordered[index]->sandbox->budget();
+                used[index] = impl_->shared->config.quotas.instructions_per_service - ordered[index]->sandbox->budget()
+                    - static_cast<::std::int64_t>(ordered[index]->sandbox->host_work());
                 detail::settle_memory(*ordered[index]);
             }
         } catch (const ::std::exception& error) {
@@ -874,7 +977,15 @@ core::Result<ServiceReport> ScriptScheduler::service(
                 const auto key = options.chain_of ? options.chain_of(ordered[index]->id) : 0;
                 order.emplace_back(key == 0 ? unowned_key : key, index);
             }
-            ::std::sort(order.begin(), order.end());
+            const bool object_order = impl_->shared->config.galactic_clock && !options.chain_of && !order.empty()
+                && ::std::all_of(ordered.begin(), ordered.end(), [&](const auto* instance) { return impl_->objects.contains(instance->id); });
+            if (object_order) {
+                ::std::sort(order.begin(), order.end(), [&](const auto& a, const auto& b) {
+                    const auto& left = impl_->objects.at(ordered[a.second]->id);
+                    const auto& right = impl_->objects.at(ordered[b.second]->id);
+                    return left.registration != right.registration ? left.registration > right.registration : left.instance < right.instance;
+                });
+            } else ::std::sort(order.begin(), order.end());
             const auto owners_end = static_cast<::std::size_t>(::std::find_if(order.begin(), order.end(),
                 [](const auto& row) { return row.first == unowned_key; }) - order.begin());
             const bool tail = owners_end < order.size() || impl_->managed_handles || order.empty();
@@ -882,6 +993,46 @@ core::Result<ServiceReport> ScriptScheduler::service(
             ::std::shared_ptr<void> chain_scope;
             bool changed = false;
             bool recapture = true;
+            // A publication the host refuses, or any exception while publishing, fails the instances of that chain
+            // (the batch is dropped, each instance is retired with a diagnostic) and the session goes on. The host's
+            // own limits are admitted per action, so a refusal here is the exception, never the way a limit ends.
+            // A host that says its publication may have changed the world (the session-abort code) or throws while
+            // publishing stays terminal, as before: the world is no longer the one the replay journal describes.
+            const auto publish_shadow = [&](ImmediateEffectState& state) -> ::std::string {
+                ::std::unique_ptr<ImmediateEffectState> publication;
+                try {
+                    publication = state.clone();
+                } catch (const ::std::exception& error) {
+                    return error.what()[0] ? ::std::string(error.what()) : ::std::string("exception");
+                }
+                if (!publication) return "immediate effect clone is null";
+                auto published = impl_->immediate_host->publish(::std::move(publication));
+                if (published) return {};
+                if (published.error().code == codes::session_abort) throw ::std::runtime_error(published.error().message);
+                return published.error().message.empty() ? ::std::string("publication refused") : published.error().message;
+            };
+            // The chain shares one shadow: every instance after a contributor ran against its effects, so its
+            // output and query answers describe a world that is never published. When a batch with contributors is
+            // dropped the whole chain is retired (each instance with a diagnostic), not only the contributors. A
+            // refused publication with no contributor (the census release alone) is not any instance's doing and
+            // retires nobody.
+            ::std::vector<char> contributed(order.size(), 0);
+            const auto fault_chain = [&](::std::size_t first, ::std::size_t past, const ::std::string& why) {
+                bool any = false;
+                for (auto row = first; row < past; ++row) any = any || contributed[row] != 0;
+                for (auto row = first; row < past; ++row) {
+                    auto& instance = *ordered[order[row].second];
+                    instance.end_immediate();
+                    if (!any || instance.outcome == InstanceOutcome::faulted) continue;
+                    instance.outcome = InstanceOutcome::faulted;
+                    instance.fault_diagnostic = instance.staging.diagnostics.size();
+                    instance.staging.diagnostics.push_back(ScriptDiagnostic{::std::string(codes::script_error),
+                        contributed[row] ? "immediate effects could not be published: " + why
+                                         : "its chain's immediate effects could not be published (" + why + "); the chain is retired",
+                        instance.tick, instance.id, -1});
+                }
+            };
+            ::std::size_t last_begin = 0, last_end = 0;
             for (::std::size_t begin = 0;;) {
                 const bool owned = begin < owners_end;
                 ::std::size_t end = begin;
@@ -910,36 +1061,40 @@ core::Result<ServiceReport> ScriptScheduler::service(
                 for (auto row = begin; row < end; ++row) {
                     const auto index = order[row].second;
                     auto& instance = *ordered[index];
-                    instance.immediate = shadow;
-                    instance.immediate_changed = false;
-                    detail::service_instance(instance, tick, paced[index] != 0, time_tick);
-                    used[index] = impl_->shared->config.quotas.instructions_per_service - instance.sandbox->budget();
+                    instance.begin_immediate(shadow);
+                    detail::service_instance_guarded(instance, tick, paced[index] != 0, time_tick);
+                    used[index] = impl_->shared->config.quotas.instructions_per_service - instance.sandbox->budget()
+                        - static_cast<::std::int64_t>(instance.sandbox->host_work());
                     detail::settle_memory(instance);
                     if (instance.outcome != InstanceOutcome::faulted) {
                         shadow = instance.immediate;
                         changed = changed || instance.immediate_changed;
+                        if (instance.immediate_changed) contributed[row] = 1;
                     }
-                    instance.immediate.reset();
-                    instance.immediate_changed = false;
+                    instance.end_immediate();
                 }
+                last_begin = begin; last_end = end;
                 if (last) break;
                 // A finished chain publishes before the next one captures; the last chain publishes after the census.
                 recapture = changed;
                 if (changed) {
-                    auto publication = shadow->clone();
-                    if (!publication) throw ::std::runtime_error("immediate effect clone is null");
-                    auto published = impl_->immediate_host->publish(::std::move(publication));
-                    if (!published) throw ::std::runtime_error(published.error().message);
+                    if (const auto failure = publish_shadow(*shadow); !failure.empty()) {
+                        fault_chain(begin, end, failure);
+                        shadow.reset();
+                        recapture = true;
+                    }
                     changed = false;
                 }
                 begin = end;
             }
             // WGA-471/472: census the prospective completed state, then release
             // within this same shadow. No callback runs during VM destruction.
+            // A failure of the census (it only reads and edits this chain's own shadow) costs the last chain's
+            // instances, never the session; nothing of that shadow is published.
             const bool clean = impl_->managed_handles && ::std::all_of(ordered.begin(), ordered.end(), [](const auto* instance) {
                 return instance->outcome != InstanceOutcome::faulted && !instance->rolled_back;
             });
-            if (impl_->managed_handles && clean && tick % impl_->managed_handles->interval == 0) {
+            if (impl_->managed_handles && clean && tick % impl_->managed_handles->interval == 0) try {
                 const sim::tactical::DiagnosticTimer census_timer;
                 const auto& policy = *impl_->managed_handles;
                 auto inventory = shadow->query(policy.inventory_query, {});
@@ -999,16 +1154,22 @@ core::Result<ServiceReport> ScriptScheduler::service(
                     }
                 }
                 managed_work.nanoseconds = census_timer.elapsed_nanoseconds();
+            } catch (const ::std::exception& error) {
+                fault_chain(last_begin, last_end, error.what());
+                release_order.clear();
+                managed_work.released = 0;
+                changed = false;
             }
             if (changed) {
-                auto publication = shadow->clone();
-                if (!publication) throw ::std::runtime_error("immediate effect clone is null");
-                auto published = impl_->immediate_host->publish(::std::move(publication));
-                if (!published) throw ::std::runtime_error(published.error().message);
+                if (const auto failure = publish_shadow(*shadow); !failure.empty()) {
+                    fault_chain(last_begin, last_end, failure);
+                    release_order.clear();
+                    managed_work.released = 0;
+                }
             }
         } catch (const ::std::exception& error) {
             impl_->aborted = true;
-            for (auto* instance : ordered) { instance->immediate.reset(); instance->immediate_changed = false; }
+            for (auto* instance : ordered) instance->end_immediate();
             return core::Result<ServiceReport>::failure(detail::make_error(codes::session_abort, error.what()));
         }
     } else {
@@ -1033,9 +1194,12 @@ core::Result<ServiceReport> ScriptScheduler::service(
     report.tick = tick;
     for (::std::size_t index = 0; index < ordered.size(); ++index) {
         report.loads.push_back(InstanceLoad{ordered[index]->id, ::std::max<::std::int64_t>(used[index], 0)});
+        detail::note_host_work(*ordered[index], used[index]);
     }
     for (detail::Instance* instance : ordered) {
         detail::Staging& staging = instance->staging;
+        if (instance->thread_failed) report.thread_failures.push_back(instance->id);
+        instance->thread_failed = false;
         if (config.galactic_clock && instance->outcome == InstanceOutcome::faulted) {
             impl_->retired.insert(instance->id);
             core::LoadNote note;
@@ -1053,6 +1217,7 @@ core::Result<ServiceReport> ScriptScheduler::service(
         }
         for (ScriptDiagnostic& diagnostic : staging.diagnostics) report.diagnostics.push_back(::std::move(diagnostic));
         if (instance->outcome != InstanceOutcome::faulted) {
+            for (ScriptDiagnostic& line : staging.log) report.log.push_back(::std::move(line));
             for (ScriptCommand& command : staging.commands) report.commands.push_back(::std::move(command));
             for (ScriptEvent& event : staging.posts) impl_->pending.emplace(event.key, ::std::move(event));
             for (ScriptEvent& event : staging.timers) impl_->pending.emplace(event.key, ::std::move(event));
@@ -1065,6 +1230,7 @@ core::Result<ServiceReport> ScriptScheduler::service(
         if (instance->outcome == InstanceOutcome::running && !object_finished) continue;
         report.removed_instances.push_back(instance->id);
         impl_->instances.erase(instance->id);
+        ++impl_->instance_revision;
     }
     // Events and timers addressed to removed instances are dropped.
     for (auto iterator = impl_->pending.begin(); iterator != impl_->pending.end();) {
@@ -1129,13 +1295,14 @@ core::Result<ServiceReport> ScriptScheduler::service_turn(
         try {
             for (::std::size_t index = range.begin; index < range.end; ++index) {
                 core::tick_profile::JobScope instance_job_scope("job.object-instance", ordered[index]->id);
-                detail::service_instance(*ordered[index], tick, true, time_tick);
+                detail::service_instance_guarded(*ordered[index], tick, true, time_tick);
                 if (::std::any_of(ordered[index]->staging.diagnostics.begin(), ordered[index]->staging.diagnostics.end(),
                         [](const auto& diagnostic) { return diagnostic.code != codes::unsupported_api
                             && diagnostic.code != codes::script_warning; })) {
                     ordered[index]->outcome = InstanceOutcome::faulted;
                 }
-                used[index] = config.quotas.instructions_per_service - ordered[index]->sandbox->budget();
+                used[index] = config.quotas.instructions_per_service - ordered[index]->sandbox->budget()
+                    - static_cast<::std::int64_t>(ordered[index]->sandbox->host_work());
                 detail::settle_memory(*ordered[index]);
             }
         } catch (const ::std::exception& error) {
@@ -1160,11 +1327,15 @@ core::Result<ServiceReport> ScriptScheduler::service_turn(
     report.tick = tick;
     for (::std::size_t index = 0; index < ordered.size(); ++index) {
         report.loads.push_back(InstanceLoad{ordered[index]->id, ::std::max<::std::int64_t>(used[index], 0)});
+        detail::note_host_work(*ordered[index], used[index]);
     }
     for (detail::Instance* instance : ordered) {
         detail::Staging& staging = instance->staging;
+        if (instance->thread_failed) report.thread_failures.push_back(instance->id);
+        instance->thread_failed = false;
         for (ScriptDiagnostic& diagnostic : staging.diagnostics) report.diagnostics.push_back(::std::move(diagnostic));
         if (instance->outcome != InstanceOutcome::faulted) {
+            for (ScriptDiagnostic& line : staging.log) report.log.push_back(::std::move(line));
             for (ScriptCommand& command : staging.commands) report.commands.push_back(::std::move(command));
             for (ScriptEvent& event : staging.posts) impl_->pending.emplace(event.key, ::std::move(event));
             for (ScriptEvent& event : staging.timers) impl_->pending.emplace(event.key, ::std::move(event));
@@ -1180,6 +1351,7 @@ core::Result<ServiceReport> ScriptScheduler::service_turn(
         if (instance->outcome == InstanceOutcome::running && !object_finished) continue;
         report.removed_instances.push_back(instance->id);
         impl_->instances.erase(instance->id);
+        ++impl_->instance_revision;
     }
     // Events and timers addressed to removed instances are dropped; completed_tick stays.
     for (auto iterator = impl_->pending.begin(); iterator != impl_->pending.end();) {
@@ -1225,6 +1397,25 @@ core::Result<::std::optional<Value>> ScriptScheduler::read_global(
     }
     lua_settop(state, top);
     return ReadResult::success(::std::move(value));
+}
+
+core::Result<void> ScriptScheduler::stamp_galactic_object_service(::std::uint64_t instance, bool first,
+    numeric::LuaNumber rate, numeric::LuaNumber now) {
+    if (auto usable = impl_->check_usable(); !usable) return usable;
+    const auto found = impl_->instances.find(instance);
+    if (!impl_->shared->config.galactic_clock || found == impl_->instances.end() || !impl_->objects.contains(instance))
+        return core::Result<void>::failure(detail::make_error(codes::invalid_request, "object service stamp requires a live galactic attachment"));
+    auto& target = *found->second;
+    detail::InstanceScope scope(target);
+    auto stamp = now;
+    if (first) {
+        const auto draw = static_cast<::std::uint32_t>(target.random.next_word() >> 49U);
+        stamp = -(rate * (numeric::LuaNumber(draw) / numeric::LuaNumber(32767)));
+    }
+    ScriptEvent event; event.name = "LastService"; event.parameter = Value::number(stamp);
+    detail::assign_global(target, event);
+    target.sync_graph_dirty = true;
+    return core::Result<void>::success();
 }
 
 namespace {
@@ -1281,6 +1472,7 @@ core::Result<void> ScriptScheduler::set_galactic_frame(const ::std::uint64_t fra
     for (const auto& [id, instance] : impl_->instances) ids.push_back(id);
     return ids;
 }
+::std::uint64_t ScriptScheduler::instance_revision() const noexcept { return impl_->instance_revision; }
 
 core::Result<::std::vector<bool>> ScriptScheduler::thread_slots(const ::std::uint64_t instance) const {
     using SlotsResult = core::Result<::std::vector<bool>>;
@@ -1303,6 +1495,7 @@ core::Result<void> ScriptScheduler::remove_instance(const ::std::uint64_t instan
     if (impl_->instances.erase(instance) == 0) {
         return core::Result<void>::failure(detail::make_error(codes::invalid_request, "no such instance"));
     }
+    ++impl_->instance_revision;
     for (auto iterator = impl_->pending.begin(); iterator != impl_->pending.end();) {
         iterator = iterator->second.target == instance ? impl_->pending.erase(iterator) : ::std::next(iterator);
     }

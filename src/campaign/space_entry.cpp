@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <tuple>
@@ -232,15 +233,18 @@ core::Result<void> SpaceEntryPreparation::validate_and_select_markers() {
     std::erase_if(attackers, [](const auto* p) { return !complete(*p); });
     // WGT-18/42: ordinary closest-defender branch. The prevention-source qualification
     // is retained explicitly; no ground-scene lookup is guessed from galactic structures.
-    attack = attackers.empty() ? nullptr : attackers.front();
-    if (attack && !defenders.empty()) {
-        auto nearest = distance(*attack->position, *defenders.front()->position);
-        if (!nearest) { attack = nullptr; return core::Result<void>::success(); }
+    // A marker whose distance cannot be computed is not a candidate. If none can be, entry is refused
+    // (never a silent retain of the whole invader side).
+    attack = nullptr;
+    if (!attackers.empty() && defenders.empty()) attack = attackers.front();
+    if (!attackers.empty() && !defenders.empty()) {
+        std::optional<Fixed> nearest;
         for (const auto* p : attackers) {
             auto d = distance(*p->position, *defenders.front()->position);
             if (!d) continue;
-            if (d.value() < nearest.value()) { nearest = d; attack = p; }
+            if (!nearest || d.value() < *nearest) { nearest = d.value(); attack = p; }
         }
+        if (!nearest) return fail<void>("no attacker entry marker has a computable distance to the first defender marker");
     }
     return core::Result<void>::success();
 }
@@ -440,6 +444,7 @@ core::Result<void> SpaceEntryPreparation::deploy_initial_forces() {
                 const auto death_star = markers(input.map, "Death_Star_Position");
                 if (death_star.empty() || !complete(*death_star.front())) {
                     auto retained = std::find_if(plan.conflict.forces.begin(), plan.conflict.forces.end(), [id](const auto& f) { return f.id == id; });
+                    if (retained == plan.conflict.forces.end()) return fail<void>("initial force is absent from the planned roster");
                     retained->role = ForceRole::retained;
                     continue;
                 }
@@ -1005,6 +1010,18 @@ core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart& scene,
     }
     auto positioned = position_tactical_super_weapons(staged, input, plan, math);
     if (!positioned) return Result::failure(positioned.error());
+    // TSW-03/04: a battle with a tactical super weapon object carries the sim's target list and the conflict gate.
+    if (std::any_of(staged.begin(), staged.end(), [&](const auto& unit) {
+            const auto* type = input.map.tables->find(unit.type);
+            return type != nullptr && type->tactical_super_weapon.has_value();
+        })) {
+        auto tsw = battle::tactical_super_weapon_setup(plan.map.placements);
+        // WGT-100: the gate's planet facts come from the conflict record (the type's Planet_Is_Destroyable_By_TSW, absent =
+        // destroyable, and the planet's destroyed flag), copied at entry.
+        tsw.conflict = sim::tactical::TswConflictSetup{plan.conflict.defender, plan.conflict.planet_destroyable_by_tsw,
+            plan.conflict.planet_destroyed};
+        scene.setup.tsw = std::move(tsw);
+    }
     if (math.error) return Result::failure(*math.error);
     scene.units = std::move(staged);
     result.attacker_cinematic_admitted = attacker && invader_target.has_value();

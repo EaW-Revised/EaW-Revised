@@ -22,9 +22,11 @@ template <typename Read, typename Resolve>
 [[nodiscard]] inline bool playing(const sim::tactical::AbilityStatus& status,
                                   const std::uint64_t tick, const std::uint32_t fire_delay) noexcept {
     if (!status.active || !supported(status.kind) || status.target == sim::invalid_entity_id) return false;
-    // WSPL-04: this snapshot's existing fire-delay seam begins the superlaser loop at firing.
+    // WSPL-04/08: the superlaser loop begins at firing: after Fire_Delay, and once the aiming turn and the attack clip
+    // let the fire stage run (#6554: the snapshot's published phase).
     return status.kind != AbilityKind::super_laser
-        || (tick >= status.started_tick && tick - status.started_tick >= fire_delay);
+        || (status.laser_phase == sim::tactical::LaserPhase::fired
+            && tick >= status.started_tick && tick - status.started_tick >= fire_delay);
 }
 // One retained request per endpoint, even when admission declines a start.
 template <typename ActiveMap, typename DesiredMap, typename Start, typename Stop>

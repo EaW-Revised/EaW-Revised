@@ -71,6 +71,23 @@ std::int64_t TacticalSession::Impl::land_company_count(const PlayerId owner, con
     return whole;
 }
 
+// #7190: the verdict of a drop at `point`, asked by the player's preview and drop check. The same two refusals the Reinforce
+// command applies after the pool check (cap room, then the whole-company admission), against the completed world; the pool
+// entry itself is the caller's to check. Nothing is written.
+core::Result<bool> TacticalSession::Impl::land_reinforcement_point(const PlayerId player, const TypeId type,
+    const math::Vec3& point) const {
+    using Valid = core::Result<bool>;
+    const auto& rules = land->content.reinforcement;
+    const auto* binding = company_binding(land->content, type);
+    const auto* account = economy.player(player);
+    if (!rules.enabled || binding == nullptr || account == nullptr) return Valid::success(false);
+    UnitStage staged(sorted_live());
+    const std::int64_t population = binding->company.population_value.value_or(0);
+    if (population > land_company_cap(player, land_capacity(player, staged)) - land_company_count(player, shares, staged))
+        return Valid::success(false);
+    return land_company_admission(*binding, player, math::Vec3{point.x, point.y, Fixed{}}, account->reinforcement_yaw, staged);
+}
+
 // LC-42..51: Reinforce on land. Refusals mirror the retail order: pool, cap, placement. The company itself exists from the
 // landing's finalize frame (LC-51); until then it is a charge against the cap and a record in the land section.
 core::Result<void> TacticalSession::Impl::execute_land_reinforcement(const PlayerCommand& command, const std::uint64_t tick,
@@ -128,6 +145,16 @@ core::Result<void> TacticalSession::Impl::execute_land_reinforcement(const Playe
     landing.owner = issuer; landing.company = reinforce.type; landing.position = point; landing.yaw = yaw;
     landing.created_frame = tick; landing.pool_token = pool_token;
     landing.seat = command.origin == CommandOrigin::seat ? command.issuing_seat : SeatId{};
+    // LC-105 (G-14): landing a company of a type the player's free garrison still has pending takes that entry and makes the
+    // landed objects part of the free garrison. The pool entry the refill timer added is the one consumed here (LG-FREEREF).
+    for (auto& garrison : free_garrisons) {
+        if (garrison.setup.player != issuer) continue;
+        const auto pending = std::find(garrison.pending.begin(), garrison.pending.end(), reinforce.type);
+        if (pending == garrison.pending.end()) break;
+        garrison.pending.erase(pending);
+        landing.garrison = true;
+        break;
+    }
     // Waiting (delay), the landing clip, then one unload step per spawn call and a last one that finalizes.
     landing.finalize_frame = tick + rules.delay_frames + rules.landing_frames + rules.unload_frames * (steps + 1);
     land->landings.push_back(landing);
@@ -234,6 +261,9 @@ core::Result<void> session_detail::Tick::land_reinforcements(std::vector<LiveUni
                 ++account->pool_additions;
                 account->pool_addition_frame = tick;
             }
+            // LC-105: a garrison landing that fails gives its pending entry back with the pool entry.
+            if (landing.garrison) for (auto& garrison : impl_->free_garrisons) if (garrison.setup.player == landing.owner)
+                garrison.pending.insert(garrison.pending.begin(), landing.company);
             Event rejected{tick, EventKind::order_rejected, landing.owner, landing.sequence};
             rejected.reason = why;
             events.push_back(rejected);
@@ -258,7 +288,7 @@ core::Result<void> session_detail::Tick::land_reinforcements(std::vector<LiveUni
         if (added.empty()) { refuse("created no member", RejectReason::invalid_position); continue; }
         if (live.size() + added.size() > max_units) { refuse("exceeds the unit budget", RejectReason::no_population_room); continue; }
         std::sort(moving.members.begin(), moving.members.end(), [](const auto& a, const auto& b) { return a.object < b.object; });
-        auto movement = LandMovement::from_checkpoint(std::move(moving));
+        auto movement = LandMovement::from_checkpoint(std::move(moving), land.movement.pads()); // LE-OCCUPY: the pad bodies stay
         if (!movement) { refuse("produced an invalid roster", RejectReason::invalid_position); continue; }
         land.movement = std::move(*movement);
         // LC-02/48: each created member carries the company population divided by the company's member count.
@@ -274,6 +304,13 @@ core::Result<void> session_detail::Tick::land_reinforcements(std::vector<LiveUni
         }
         for (const auto& member : land.movement.members())
             if (member.object >= first && share > 0) shares.emplace(member.object, PopulationShare{landing.owner, share});
+        // LC-105 (G-11): the objects of a garrison landing register as free garrison, by object, in ascending id.
+        if (landing.garrison) for (auto& garrison : impl_->free_garrisons) if (garrison.setup.player == landing.owner)
+            for (const auto& member : land.movement.members()) {
+                if (member.object < first) continue;
+                garrison.registered.insert(std::upper_bound(garrison.registered.begin(), garrison.registered.end(), member.object),
+                    member.object);
+            }
         live.insert(live.end(), std::make_move_iterator(added.begin()), std::make_move_iterator(added.end()));
         std::sort(live.begin(), live.end(), [](const LiveUnit& a, const LiveUnit& b) { return a.state.entity_id < b.state.entity_id; });
         events.push_back(Event{tick, EventKind::reinforcement_unloaded, landing.owner, landing.sequence, first});

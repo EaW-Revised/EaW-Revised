@@ -71,8 +71,11 @@ constexpr int total_ticks = 30;
 bool trace_attempts = false;
 // State hash of the persistence scenario after the last tick, the same on every
 // target (docs/lua-persistence.md): a change means the encoding or the script
-// semantics changed.
-constexpr std::string_view golden_final_hash = "46be48e271773f638988dd2308495d63ca848504578d0426810f7c6d9c325fc7";
+// semantics changed. Policy v4 moved it without a semantic change: the saved bytes hold the policy identity, the
+// manifest digest, every instance's memory baseline (the new globals count toward the logical memory the save
+// records), the protected-name list and the saved globals (print, gcinfo and loadstring are plain C functions
+// now, newproxy is gone). No script of this scenario calls any of those names.
+constexpr std::string_view golden_final_hash = "0f21293b833d720a54c4ea686d91f1352a106f1e02198b30b30f7587f93349fe";
 
 auth::SessionConfig persistence_config() {
     auth::SessionConfig config = default_config();
@@ -712,7 +715,7 @@ void run_rejects() {
         Session other = persistence_session(config);
         expect_rejected(other, patched, "identity count or quota", "identity quota");
     }
-    // An aborted session refuses to save.
+    // A host exception in a binding fails only its instance (#6703): the service reports it and the session still saves.
     {
         Session session = script_session("function Main() Test_Throw() end\nCreate_Thread(\"Main\")");
         static_cast<void>(session.scheduler->register_binding("Test_Throw", [](auth::BindingContext&, const auth::ValueList& arguments) {
@@ -720,7 +723,23 @@ void run_rejects() {
             return eawr::core::Result<auth::ValueList>::success({});
         }));
         expect(session.scheduler->create_instance(1, "Main.lua").has_value(), "create throwing instance");
-        expect(!session.scheduler->service(inline_executor).has_value(), "host exception aborts the session");
+        expect(session.scheduler->service(inline_executor).has_value(), "a host exception fails the instance, not the service");
+        expect(session.scheduler->save().has_value(), "the session still saves after an instance failed");
+    }
+    // A session whose partition phase fails is aborted and refuses to save.
+    {
+        struct FailingExecutor final : eawr::sim::PartitionExecutor {
+            std::size_t worker_count() const noexcept override { return 1; }
+            eawr::core::Result<void> execute(std::size_t, const std::function<void(std::size_t)>&) const override {
+                eawr::core::Diagnostic reason; reason.code = auth::codes::invalid_request; reason.message = "phase failed";
+                return eawr::core::Result<void>::failure(std::move(reason));
+            }
+            eawr::core::Result<void> execute_phase(std::string_view, std::size_t count,
+                const std::function<void(std::size_t)>& partition) const override { return execute(count, partition); }
+        };
+        Session session = script_session("function Main() end\nCreate_Thread(\"Main\")");
+        expect(session.scheduler->create_instance(1, "Main.lua").has_value(), "create instance for the failing phase");
+        expect(!session.scheduler->service(FailingExecutor{}).has_value(), "a failed partition phase aborts the session");
         auto saved = session.scheduler->save();
         expect(!saved && saved.error().code == auth::codes::session_abort, "an aborted session does not save");
     }

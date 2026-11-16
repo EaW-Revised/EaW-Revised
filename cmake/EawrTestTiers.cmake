@@ -111,9 +111,12 @@ set(EAWR_GPU_TESTS
 # Tests whose selected CTest command requires a host mod installation.
 set(EAWR_MOD_DATA_TESTS
     galactic_remake_save_probe
+    galactic_story_installed_type_names
     tactical_deploy_squad_mod
     unit_remake_combat_guard
     unit_remake_ally_shipyard
+    unit_tables_name_index_mod
+    unit_tables_name_index_gc_mod
     animation_real_unit_samples
     hull_asset_shadow_probe_contracts
     python_presentation_renderer_effect_mode

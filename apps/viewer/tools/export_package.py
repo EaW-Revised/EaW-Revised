@@ -41,7 +41,6 @@ PINNED_GODOT_IDENTITY = f"4.7.2.stable.eawr.{PINNED_GODOT_FORK_COMMIT}"
 OFFICIAL_GODOT_IDENTITY = f"4.7.2.stable.official.{PINNED_GODOT_BUILD}"
 ACCEPTED_GODOT_IDENTITIES = (PINNED_GODOT_IDENTITY, OFFICIAL_GODOT_IDENTITY)
 GODOT_VERSION_TIMEOUT_SECONDS = 10
-GODOT_RUNNER_VERSION_TIMEOUT_SECONDS = 120
 MAX_GODOT_VERSION_OUTPUT = 4096
 
 PLATFORMS: dict[str, dict[str, str]] = {
@@ -85,6 +84,9 @@ REQUIRED_PCK_ENTRIES = {
     "config/map-camera-free.xml",
     "config/map-camera.xml",
     "config/naboo-map-camera.xml",
+    # Project-authored audio data (SK #6864: distance-gain floor for the hyperspace arrival/exit cues), packed by the
+    # preset's config/*.xml include filter.
+    "config/project-audio.xml",
     "config/space-live-camera-bindings.json",
     "config/space-map-camera-bindings.json",
     "config/space-map-camera.xml",
@@ -139,9 +141,8 @@ def _version_from_identity(identity: str) -> str:
 
 
 def godot_command(godot: Path, *args: str) -> list[str]:
-    """Run the exact requested executable, optionally through a host runner."""
-    runner = os.environ.get("EAWR_GODOT_RUNNER")
-    return ([runner] if runner else []) + [str(godot), *args]
+    """Run the exact requested executable."""
+    return [str(godot), *args]
 
 
 def validate_godot_identity(godot: Path) -> tuple[str, str]:
@@ -154,7 +155,7 @@ def validate_godot_identity(godot: Path) -> tuple[str, str]:
             text=True,
             capture_output=True,
             check=False,
-            timeout=GODOT_RUNNER_VERSION_TIMEOUT_SECONDS if os.environ.get("EAWR_GODOT_RUNNER") else GODOT_VERSION_TIMEOUT_SECONDS,
+            timeout=GODOT_VERSION_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ValueError(f"Godot --version probe failed for {godot}: {error}") from error

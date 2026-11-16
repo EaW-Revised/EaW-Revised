@@ -20,9 +20,10 @@ ISteamNetworkingSockets& GnsTransport::Mesh::sockets() const { return *Impl::Run
 bool GnsTransport::Mesh::host() const { return self == 0; }
 
 GnsPairDiagnostic GnsTransport::Mesh::diagnostic(GnsPairPhase phase, unsigned code, bool relay_offered, bool relay_failed,
-    GnsRoute route) {
+    GnsRoute route, GnsRelayProvider relay_provider, bool route_lossy) {
     GnsPairDiagnostic value;
     value.phase = phase; value.code = code; value.relay_offered = relay_offered; value.relay_failed = relay_failed; value.route = route;
+    value.relay_provider = relay_provider; value.route_lossy = route_lossy;
     return value;
 }
 
@@ -53,17 +54,14 @@ std::unique_ptr<GnsTransport::Impl> GnsTransport::Mesh::make_link(PeerIndex remo
     link->pair_ok = !link->needs_secret;
     link->granted = !link->needs_secret;
     link->turn = locked ? turn : room->turn_credentials();
+    link->own_turn = locked ? own_turn : room->own_turn_uris();
     if (!locked && ((link->turn && !turn_valid(*link->turn)) || (options.turn_only && !link->turn))) {
         log_turn_refused(static_cast<int>(self), link->turn);
         fail_pair(remote, 1762, "No valid relay credentials for a fresh ICE attempt");
         return {};
     }
     if (link->turn) {
-        const auto count = static_cast<std::size_t>(std::count(link->turn->uri.begin(), link->turn->uri.end(), ',')) + 1;
-        for (std::size_t i = 0; i < count; ++i) {
-            link->turn_users += (i ? "," : "") + link->turn->username;
-            link->turn_passwords += (i ? "," : "") + link->turn->password;
-        }
+        gns_turn_lists(*link->turn, link->turn_users, link->turn_passwords);
     }
     link->signalling_state = std::make_shared<SignallingState>();
     link->signalling_state->room = room; link->signalling_state->destination = remote;
@@ -160,7 +158,7 @@ void GnsTransport::Mesh::harvest(bool deaths) {
         auto& s = slot[remote];
         if (!deaths && link.state == LinkState::open && !link.published) {
             link.published = true; ++s.generation;
-            s.was_open = true; s.reported = false; s.diag = diagnostic(GnsPairPhase::open, 0, turn.has_value(), false, link.route);
+            s.was_open = true; s.reported = false; s.diag = diagnostic(GnsPairPhase::open, 0, turn.has_value(), false, link.route, link.relay_provider, link.loss_hint.active());
             emit(GnsMeshEventKind::pair_open, remote);
             if (host() && !locked) {
                 add(present, remote);
@@ -251,16 +249,12 @@ core::Result<bool> GnsTransport::Mesh::refresh_attachment() {
         return refreshed;
     }
     if (!refreshed.value()) return refreshed;
-    turn = room->turn_credentials(); turn_users.clear(); turn_passwords.clear();
+    turn = room->turn_credentials(); own_turn = room->own_turn_uris(); turn_users.clear(); turn_passwords.clear();
     if ((turn && !turn_valid(*turn)) || (options.turn_only && !turn)) {
         refresh_failed = true; return core::Result<bool>::failure(error(1791, "Invalid fresh TURN credentials"));
     }
     if (turn) {
-        const auto count = static_cast<std::size_t>(std::count(turn->uri.begin(), turn->uri.end(), ',')) + 1;
-        for (std::size_t i = 0; i < count; ++i) {
-            turn_users += (i ? "," : "") + turn->username;
-            turn_passwords += (i ? "," : "") + turn->password;
-        }
+        gns_turn_lists(*turn, turn_users, turn_passwords);
     }
     attachment_ready = true; attachment_pending = false; attachment_epoch = repair_auth->epoch;
     note(-1, "repair attachment ready for epoch " + std::to_string(attachment_epoch) + (turn ? " with fresh relay credentials" : ""));
@@ -352,7 +346,7 @@ GnsPairDiagnostic GnsTransport::Mesh::pair(PeerIndex remote) const {
         return diagnostic(attachment_ready ? GnsPairPhase::repairing : GnsPairPhase::refreshing, 0, turn.has_value(), false);
     if (!links[remote]) return s.diag.phase == GnsPairPhase::absent && s.gone ? diagnostic(GnsPairPhase::closed, 0, false, false) : s.diag;
     const auto& l = *links[remote];
-    if (l.state == LinkState::open) return diagnostic(GnsPairPhase::open, 0, turn.has_value(), false, l.route);
+    if (l.state == LinkState::open) return diagnostic(GnsPairPhase::open, 0, turn.has_value(), false, l.route, l.relay_provider, l.loss_hint.active());
     if (l.dead()) return s.diag;
     if (l.proof && !l.authenticated()) return diagnostic(l.accepted ? GnsPairPhase::authenticating : GnsPairPhase::repairing,
         0, l.turn.has_value(), false);

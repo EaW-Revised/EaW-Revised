@@ -31,8 +31,9 @@ struct SessionStoreEconomy {
     std::vector<PlayerEconomy> ledgers;             // #530: per economy player, ascending ID
     std::map<EntityId, ArrivalState> arrivals;      // #530: arriving units (PU-35)
     std::map<EntityId, PopulationShare> shares;     // #530: reinforced units' population (PU-21)
-    std::vector<std::pair<EntityId, PlayerId>> earners; // #530: live income stations, ascending ID
+    std::vector<std::pair<EntityId, PlayerId>> earners; // #530: live income sources, creation order; a triggered event stream appends (WIS-01)
     std::vector<IncomePayment> income_payments; // retained partition outputs, never canonical state
+    std::vector<std::pair<PlayerId, TypeId>> income_upgrade_sources; // retained per-frame scratch: held income upgrades
     std::map<EntityId, RespawnBatch> respawns; // due frame -> creation requests, in death order
 };
 

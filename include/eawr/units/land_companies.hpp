@@ -1,6 +1,8 @@
 #pragma once
 
+#include "eawr/units/unit_tables_abilities.hpp"
 #include "eawr/units/unit_tables_common.hpp"
+#include "eawr/units/unit_tables_galactic.hpp"
 #include "eawr/core/text.hpp"
 
 #include <cstdint>
@@ -56,10 +58,15 @@ struct LandRevealInputs final {
     bool operator==(const LandRevealInputs&) const = default;
 };
 
+enum class LandCollisionGroup : std::uint8_t;
+
 // WLPA-61..66: authored geometry and selected model collision data.
 struct LandStaticObject final {
     std::string id, xml_type, proxy_type;
     LandRevealInputs fog; // LC-86: read for every placed static candidate, obstacle or not
+    // LE-OCCUPY (WLPA-66): the authored UnitCollisionClass of a placed static candidate (absent: none authored). A build pad's
+    // hard footprint (fog.custom_hard_x/y) is a dynamic collision body of this class.
+    std::optional<LandCollisionGroup> collision_class;
     bool land_obstacle{};
     bool hq_victory_relevant{};
     bool victory_relevant{}, land_victory_relevant{};
@@ -174,8 +181,15 @@ struct LandCompany final {
     std::vector<LandLocomotionData> locomotion; // member order; separate from live member identity
     // LC-48/50: Population_Value of the company object (the tactical population its reinforcement charges); absent = 0.
     std::optional<std::uint32_t> population_value;
+    // LR4-05/06 (#6993): what a producer's menu charges for the company: Tactical_Build_Cost_Multiplayer, Tactical_Build_Time_Seconds,
+    // Tactical_Production_Queue, the Build_Limit_* rows and Tactical_Build_Prerequisites. Only these fields are read for a company
+    // (it offers no menu of its own to the land economy); an absent tag stays absent.
+    Production production;
     LandGarrisonData team_garrison;
     std::vector<LandGarrisonData> member_garrisons; // same order as members
+    // WLAB-01, WLAB-03 (#3238): the Unit_Abilities_Data of the company object and of its team container, authored order.
+    // The container is the object a SPREAD_OUT or a team ability acts on; a kind both author takes the container's row.
+    std::vector<Ability> abilities, team_abilities;
     bool operator==(const LandCompany&) const = default;
 };
 

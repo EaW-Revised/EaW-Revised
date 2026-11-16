@@ -29,10 +29,12 @@ public:
     void fact(const std::string& key, const std::string& value) { facts_.emplace_back(key, value); }
 
     void live_failure(const std::optional<eawr::core::Diagnostic>& failure, const bool reached,
-        const bool timed_out, const std::uint64_t requested, const std::uint64_t completed) {
+        const bool timed_out, const std::uint64_t requested, const std::uint64_t completed, const std::string& awaiting = {}) {
         const auto progress = "tick " + std::to_string(requested) + " (at " + std::to_string(completed) + ")";
         if (failure) note("live-run", false, "the live session failed before " + progress + ": "
             + eawr::core::format_diagnostic(*failure));
+        else if (!awaiting.empty()) note("live-run", false, "the live session waits for input no headless run can give before "
+            + progress + ": " + awaiting);
         else if (!reached) note("live-run", false, (timed_out ? "timed out waiting for live session "
             : "the live session ended before ") + progress);
         else note("live-run", false, "the live session reached " + progress + " without a published snapshot");

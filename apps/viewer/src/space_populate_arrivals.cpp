@@ -14,6 +14,7 @@
 #include "eawr/scene/texture_prefetch.hpp"
 
 #include "eawr/assets/assets.hpp"
+#include "eawr/assets/asset_name_resolver.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/presentation/animation/unit_clips.hpp"
@@ -23,12 +24,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <limits>
 #include <map>
 #include <new>
 #include <memory>
+#include <exception>
 #include <set>
 #include <sstream>
 #include <span>
@@ -254,7 +257,9 @@ bool SpacePopulation::classify_arrival(ComposeContext& context, const std::size_
     source.orientation_status = assets::OrientationStatus::yaw_only;
     placed_map.placements.push_back(std::move(source));
     scene::BuildInput placed_input = input;
+    placed_input.extra_placements = nullptr; // a one-ship scene: the remains props belong to the map's scene only
     placed_input.map = &placed_map;
+    placed_input.live_objects = live;
     scene::Scene placed_scene = scene::build(placed_input);
     if (placed_scene.placements.size() == 1) {
         // MM-17: no model path is a known model-free placement. A model that
@@ -263,7 +268,7 @@ bool SpacePopulation::classify_arrival(ComposeContext& context, const std::size_
     }
     if (placed_scene.placements.size() != 1
         || (!placed_scene.placements.front().drawable()
-            && !((ship.projectile_slot || ship.ability_proxy_owner)
+            && !((ship.projectile_slot || ship.ability_proxy_owner || placed_scene.placements.front().particle_root)
                 && scene::drawable_projectile_effects(placed_scene.placements.front())))) {
         if (live) {
             (ship.projectile_slot ? projectile_slots_undrawn_ : ship.launch_slot ? launch_slots_undrawn_ : live_undrawn_).push_back(live_name + ": no drawable FoC model");
@@ -408,6 +413,25 @@ const SpacePopulation::SurfaceUpload* SpacePopulation::upload_composed_surface(C
     return found->second ? &*found->second : nullptr;
 }
 
+const SpacePopulation::SurfaceUpload* SpacePopulation::upload_composed_planet_surface(ComposeContext& context,
+    ComposeBatch& batch, const std::string& path, std::uint32_t mesh_index, std::uint32_t submesh_index,
+    const std::span<const scene::TextureBinding> resolved, std::string& skipped) {
+    auto& [renderer, map, filesystem, camera, environment_records, cache, input, resolve] = context;
+    auto& uploads = batch.uploads;
+    // The same key as upload_composed_surface: a surface is one or the other, so the two never share an entry.
+    const auto key = std::make_tuple(path, mesh_index, submesh_index, TeamColour{});
+    auto found = uploads.find(key);
+    if (found == uploads.end()) {
+        auto uploaded = upload_planet_surface(renderer, filesystem, cache, batch.textures, batch.next_asset, path,
+            mesh_index, submesh_index, resolved,
+            path + " mesh " + std::to_string(mesh_index) + " submesh " + std::to_string(submesh_index), skipped);
+        // A refused plan is not cached: it is cheap to repeat and its reason belongs to every surface that asks.
+        if (!uploaded && !skipped.empty()) return nullptr;
+        found = uploads.emplace(key, std::move(uploaded)).first;
+    }
+    return found->second ? &*found->second : nullptr;
+}
+
 void SpacePopulation::start_texture_prefetch(ComposeContext& context, ComposeBatch& batch) {
     if (!scene_) return;
     scene::TexturePrefetchOptions prefetch_options;
@@ -434,15 +458,22 @@ void SpacePopulation::start_texture_prefetch(ComposeContext& context, ComposeBat
                 if (ieq(binding.parameter, "BaseTexture")) texture_path = binding.resolved;
             }
             const scene::LegacySelector* const selector = scene::material_selector(surface);
-            const scene::TextureProcessing processing =
-                selector != nullptr ? texture_processing_for(*selector) : scene::TextureProcessing::none;
+            // The planet material's textures take the plain colour chain, as every environment texture does.
+            const scene::TextureProcessing processing = surface.planet_effect ? scene::TextureProcessing::colour_mip_chain
+                : selector != nullptr ? space_base_processing_for(*selector) : scene::TextureProcessing::none;
             batch.prefetch->offer(texture_path, decision_index, processing);
-            // The same material's normal maps (the family's flat-normal bindings), asked for by upload_surface as family textures.
-            if (selector != nullptr && processing != scene::TextureProcessing::none) {
-                for (const std::string_view slot : normal_binding_names(*selector)) {
+            if (surface.planet_effect) {
+                for (const scene::TextureBinding& binding : surface.textures)
+                    if (!ieq(binding.parameter, "BaseTexture") && !binding.resolved.empty())
+                        batch.prefetch->offer(binding.resolved, decision_index, scene::TextureProcessing::colour_mip_chain);
+            }
+            // The same material's other sampled bindings (normal maps, gloss, specular, wave, distortion, cloud), asked for
+            // by upload_surface as family textures.
+            if (selector != nullptr) {
+                for (const SampledBinding& slot : sampled_bindings(*selector)) {
                     for (const scene::TextureBinding& binding : surface.textures)
-                        if (ieq(binding.parameter, slot) && !binding.resolved.empty())
-                            batch.prefetch->offer(binding.resolved, decision_index, scene::TextureProcessing::normal_mip_chain);
+                        if (ieq(binding.parameter, slot.name) && !binding.resolved.empty())
+                            batch.prefetch->offer(binding.resolved, decision_index, binding_processing_for(slot.normal));
                 }
             }
         }
@@ -462,7 +493,7 @@ void SpacePopulation::prewarm_composed_texture(ComposeContext& context, ComposeB
     if (!cache.shared_model(path)) return;
     core::load_profile::Scope scope(core::load_profile::Phase::surface_texture_prepare);
     if (MenuTimeline::enabled()) MenuTimeline::detail_add("prewarm texture " + texture_path);
-    const scene::TextureProcessing processing = texture_processing_for(selector);
+    const scene::TextureProcessing processing = space_base_processing_for(selector);
     static_cast<void>(batch.textures.get(ComposeTextureCache::key(texture_path, processing), [&]() -> std::optional<assets::Texture> {
         auto decoded = batch.textures.decode(filesystem, texture_path, processing);
         return decoded ? std::move(decoded.value()) : placeholder_texture();
@@ -536,8 +567,12 @@ void SpacePopulation::compose_hull_pieces(ComposeContext& context, ComposeBatch&
         for (const scene::TextureBinding& binding : surface.textures) {
             if (ieq(binding.parameter, "BaseTexture")) texture_path = binding.resolved;
         }
-        const SurfaceUpload* upload = upload_composed_surface(context, batch, placement.model_path, surface.mesh_index,
-            surface.submesh_index, *scene::material_selector(surface), texture_path);
+        std::string planet_skipped;
+        const SurfaceUpload* upload = surface.planet_effect
+            ? upload_composed_planet_surface(context, batch, placement.model_path, surface.mesh_index,
+                  surface.submesh_index, surface.textures, planet_skipped)
+            : upload_composed_surface(context, batch, placement.model_path, surface.mesh_index,
+                  surface.submesh_index, *scene::material_selector(surface), texture_path);
         if (upload != nullptr) {
             pieces.push_back({upload, placement.transform->matrix, std::nullopt, gate, live_ship,
                               sim::math::identity_matrix()});
@@ -557,6 +592,13 @@ void SpacePopulation::compose_hull_pieces(ComposeContext& context, ComposeBatch&
                 if (alternate) live_alternate_counts_[*live_ship] = std::max(live_alternate_counts_[*live_ship], *alternate);
             }
         }
+        else if (!planet_skipped.empty()) {
+            // The environment planet adapter refused this surface (an unexpected field, vertex format or texture): it
+            // stays undrawn and reported, like any surface the scene has no material for. A mod's planet-shaded unit
+            // must not stop the battle from loading.
+            decision.missing.push_back("placement " + std::to_string(decision.scene_ordinal) + " (" + decision.object_id
+                + ") surface " + std::to_string(index) + " planet_material_skipped " + planet_skipped);
+        }
         else {
             const std::string where = "placement " + std::to_string(decision.scene_ordinal) + " ("
                 + decision.object_id + ") surface " + std::to_string(index);
@@ -573,6 +615,8 @@ void SpacePopulation::compose_hull_pieces(ComposeContext& context, ComposeBatch&
         for (const scene::TextureBinding& binding : surface.textures) {
             if (ieq(binding.parameter, "BaseTexture")) texture_path = binding.resolved;
         }
+        // The planet material's textures are decoded by its own upload (the read-ahead already holds them).
+        if (surface.planet_effect) return;
         prewarm_composed_texture(context, batch, placement.model_path, surface.mesh_index, surface.submesh_index,
             *scene::material_selector(surface), texture_path);
     };
@@ -665,7 +709,7 @@ void SpacePopulation::compose_shell_pieces(ComposeContext& context, ComposeBatch
             if (found == shell_uploads.end()) {
                 std::string cause;
                 found = shell_uploads.emplace(std::pair{placement.model_path, submesh},
-                                              upload_shell(renderer, filesystem, cache, next_asset, placement.model_path, *shield, submesh, cause)).first;
+                                              upload_shell(renderer, filesystem, cache, batch.textures, next_asset, placement.model_path, *shield, submesh, cause)).first;
                 if (!found->second) status = cause;
             }
             if (!found->second) continue;
@@ -692,7 +736,7 @@ void SpacePopulation::compose_shell_pieces(ComposeContext& context, ComposeBatch
             if (found == shell_uploads.end()) {
                 std::string cause;
                 found = shell_uploads.emplace(std::pair{placement.model_path, ((*cloak + 1U) << 16U) | submesh},
-                                              upload_shell(renderer, filesystem, cache, next_asset, placement.model_path, *cloak, submesh, cause, true)).first;
+                                              upload_shell(renderer, filesystem, cache, batch.textures, next_asset, placement.model_path, *cloak, submesh, cause, true)).first;
                 if (!found->second || !cause.empty()) status = cause;
             }
             if (!found->second) continue;
@@ -714,7 +758,9 @@ void SpacePopulation::compose_piece_animation(ComposeContext& context, ComposeBa
     if (std::any_of(pieces.begin() + static_cast<std::ptrdiff_t>(first_piece), pieces.end(),
             [](const Piece& piece) { return piece.upload->pose.has_value(); })) {
         const std::string live_clip_path = live_ship ? options_.placed_ships[*live_ship].clip : std::string{};
-        const auto clip = live_clip_path.empty() ? bind_composed_idle(context, batch, placement, *model) : std::nullopt;
+        // #6554: a SUPER_LASER's attack clip plays over the model's idle clip, which both stay bound.
+        const bool clip_over_idle = live_ship && !live_clip_path.empty() && options_.placed_ships[*live_ship].clip_over_idle;
+        const auto clip = live_clip_path.empty() || clip_over_idle ? bind_composed_idle(context, batch, placement, *model) : std::nullopt;
         if (live_ship && options_.placed_ships[*live_ship].land_motion) {
             auto& land = land_clips_[*live_ship];
             land[animation::clip_types::idle] = clip;
@@ -724,7 +770,13 @@ void SpacePopulation::compose_piece_animation(ComposeContext& context, ComposeBa
             const std::string override_name = override_tag
                 ? std::string(core::trim_view(override_tag->value.raw_text, core::xml_whitespace)) : std::string{};
             const auto exists = [&](const std::string& path) { return static_cast<bool>(context.filesystem.stat(path)); };
-            constexpr std::array<std::size_t, 18> types{2, 3, 4, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 66, 67};
+            // WLAN-03..05, 10, 11: every clip type the land presenter can select, as named in clip_types.
+            namespace clips = animation::clip_types;
+            constexpr std::array<std::size_t, 20> types{clips::move, clips::turn_left, clips::turn_right, clips::turn_left_begin,
+                clips::turn_left_end, clips::turn_right_begin, clips::turn_right_end, clips::move_start, clips::move_end_first,
+                clips::move_end_first + 1, clips::move_end_first + 2, clips::move_end_last, clips::turn_left_half,
+                clips::turn_left_quarter, clips::turn_right_half, clips::turn_right_quarter, clips::walk_move, clips::crouch_move,
+                clips::attack, clips::attack_idle};
             for (const auto type : types) {
                 const auto paths = animation::model_clip_paths(placement.model_path, type, exists, override_name);
                 if (paths.empty()) continue;
@@ -742,24 +794,30 @@ void SpacePopulation::compose_piece_animation(ComposeContext& context, ComposeBa
             }
             for (std::size_t index = first_piece; index < pieces.size(); ++index)
                 if (pieces[index].upload->pose) pieces[index].live_clip = true;
-        } else if (!live_clip_path.empty()) {
-            if (const auto bound = bind_composed_clip(context, placement, *model, live_clip_path)) {
-                live_clips_[*live_ship] = *bound;
-                if (const std::string& alternate = options_.placed_ships[*live_ship].alternate_clip; !alternate.empty()) {
-                    live_alternate_clips_[*live_ship] = bind_composed_clip(context, placement, *model, alternate);
-                }
+        } else {
+            // The idle placement of a unit that plays its idle clip: always when no live clip is bound, and beside a
+            // SUPER_LASER's attack clip. If that clip does not bind, the unit keeps its idle (#6554 review F1).
+            const auto bind_idle = [&] {
+                ++animated_placements_;
+                const std::size_t idle = idle_placements_.size();
+                idle_placements_.push_back(composed_idle_placement(context, placement, *clip));
+                if (live_ship) idle_live_ships_.emplace(idle, *live_ship);
                 for (std::size_t index = first_piece; index < pieces.size(); ++index) {
-                    if (pieces[index].upload->pose) pieces[index].live_clip = true;
+                    if (pieces[index].upload->pose) pieces[index].idle = idle;
+                }
+            };
+            if (!live_clip_path.empty()) {
+                if (const auto bound = bind_composed_clip(context, placement, *model, live_clip_path)) {
+                    live_clips_[*live_ship] = *bound;
+                    if (const std::string& alternate = options_.placed_ships[*live_ship].alternate_clip; !alternate.empty()) {
+                        live_alternate_clips_[*live_ship] = bind_composed_clip(context, placement, *model, alternate);
+                    }
+                    for (std::size_t index = first_piece; index < pieces.size(); ++index) {
+                        if (pieces[index].upload->pose) pieces[index].live_clip = true;
+                    }
                 }
             }
-        } else if (clip) {
-            ++animated_placements_;
-            const std::size_t idle = idle_placements_.size();
-            idle_placements_.push_back(composed_idle_placement(context, placement, *clip));
-            if (live_ship) idle_live_ships_.emplace(idle, *live_ship);
-            for (std::size_t index = first_piece; index < pieces.size(); ++index) {
-                if (pieces[index].upload->pose) pieces[index].idle = idle;
-            }
+            if (clip && (live_clip_path.empty() || clip_over_idle)) bind_idle();
         }
     }
 
@@ -804,15 +862,17 @@ void SpacePopulation::compose_piece_animation(ComposeContext& context, ComposeBa
 void SpacePopulation::compose_hardpoint_pieces(ComposeContext& context, ComposeBatch& batch,
     scene::SpacePlacementDecision& decision, std::size_t decision_index, const scene::Placement& placement,
     const assets::Model* model, const std::optional<std::size_t>& live_ship,
-    const std::optional<std::array<std::uint8_t, 3>>& colour, bool cloak_ship) {
+    const std::optional<std::array<std::uint8_t, 3>>& colour, bool cloak_ship,
+    const std::size_t first_hardpoint, const std::size_t end_hardpoint) {
     auto& [renderer, map, filesystem, camera, environment_records, cache, input, resolve] = context;
     auto& pieces = batch.pieces;
     auto& bind_poses = batch.bind_poses;
     auto& failed_placements = batch.failed_placements;
     // Model_To_Attach at the owner's Attachment_Bone in its bind pose,
     // drawn while the hardpoint's state shows it. Anything that cannot
-    // attach is listed, not guessed.
-    for (std::size_t hardpoint_index = 0; hardpoint_index < decision.hardpoints.size(); ++hardpoint_index) {
+    // attach is listed, not guessed. [first_hardpoint, end_hardpoint) lets a live append run one hardpoint per step.
+    const std::size_t last_hardpoint = std::min(end_hardpoint, decision.hardpoints.size());
+    for (std::size_t hardpoint_index = first_hardpoint; hardpoint_index < last_hardpoint; ++hardpoint_index) {
         const scene::HardpointAttachment& hardpoint = decision.hardpoints[hardpoint_index];
         const std::string who = "hardpoint " + hardpoint.hardpoint + ": ";
         if (!hardpoint.resolved) {
@@ -1136,18 +1196,31 @@ float SpacePopulation::commit_composed_pieces(ComposeContext& context, ComposeBa
 }
 
 bool SpacePopulation::finish_composed_range(ComposeContext& context, bool appending, sim::AssetId next_asset,
-    sim::EntityId next_entity, std::size_t receiving_before, std::size_t variant_failures_before, float debug_farthest) {
+    sim::EntityId next_entity, std::size_t receiving_before, std::size_t variant_failures_before, float debug_farthest,
+    const std::size_t first_piece, const std::size_t first_clip) {
     auto& renderer = context.renderer;
     const auto& camera = context.camera;
-    rebuild_piece_index();
-    attachment_marks_.configure(hardpoint_states_);
+    std::optional<core::load_profile::DetailScope> finish_phase; // detail only: the parts of the closing pass
+    finish_phase.emplace(core::load_profile::Phase::finish_piece_index);
+    if (appending) {
+        // An appended ship adds rows and changes no earlier ship's pieces, clips or marks (what append_model_proxies relies
+        // on too): the index is extended, not rebuilt over every piece composed so far for each arriving slot.
+        append_piece_index(first_piece, first_clip);
+        attachment_marks_.extend(hardpoint_states_);
+    } else {
+        rebuild_piece_index();
+        attachment_marks_.configure(hardpoint_states_);
+    }
     instances_.reserve(pieces_.size());
+    finish_phase.emplace(core::load_profile::Phase::finish_refresh_instances);
     refresh_instances();
+    finish_phase.reset();
     if (appending) {
         next_arrival_asset_ = next_asset;
         next_arrival_piece_ = next_entity;
         schedule_arrival_sample();
     }
+    finish_phase.emplace(core::load_profile::Phase::finish_lighting);
     shadow_receiving_ += renderer.shadow_receiving_materials() - receiving_before;
     shadow_variant_failures_ += renderer.shadow_variant_failures() - variant_failures_before;
     if (options_.policy != lighting::Policy::off) {
@@ -1161,10 +1234,12 @@ bool SpacePopulation::finish_composed_range(ComposeContext& context, bool append
     }
     // The first attached-effect plan: every placement, the debug ship
     // included, with every hardpoint intact (#136).
+    finish_phase.emplace(core::load_profile::Phase::finish_attached_effects);
     if (options_.attached_effects && !options_.attached_effects(*this)) {
         failure_ = "space attached effect preparation failed";
         return false;
     }
+    finish_phase.reset();
     composed_ = true;
     // The debug ship's states then go through the hook #72 drives, so each
     // one starts or stops emitters as a live change would, before the first
@@ -1184,12 +1259,21 @@ bool SpacePopulation::finish_composed_range(ComposeContext& context, bool append
 }
 
 bool SpacePopulation::enqueue_compose_range(std::shared_ptr<ComposeOwner> owner,
-    const sim::AssetId first_asset_id, const sim::EntityId first_entity_id, const EnqueueLoadStep& enqueue) {
+    const sim::AssetId first_asset_id, const sim::EntityId first_entity_id, const EnqueueLoadStep& enqueue,
+    const AppendRange* append_range, ComposeBatch* shared_batch) {
+    // #5097 PR 2: the same steps also run a live append (`append_range`), spread over the frames of a battle. It adds ships
+    // after the first_ship / first_decision it names, has no load progress, texture budget, read-ahead start or pin release,
+    // and closes with the appending form of the finish pass. `shared_batch` is the append's own batch (its texture cache
+    // already points at the read-ahead of its ticket).
+    const bool appending = append_range != nullptr;
     struct Range final {
         std::shared_ptr<ComposeOwner> owner;
-        ComposeBatch batch;
+        ComposeBatch own_batch;
+        ComposeBatch& batch;
         std::size_t receiving_before{};
         std::size_t variant_failures_before{};
+        AppendRange append{};
+        explicit Range(ComposeBatch* shared) : batch(shared ? *shared : own_batch) {}
     };
     struct Cursor final {
         TeamColour colour{};
@@ -1199,48 +1283,71 @@ bool SpacePopulation::enqueue_compose_range(std::shared_ptr<ComposeOwner> owner,
         bool cloak_ship{};
         bool drawn{};
     };
-    auto range = std::make_shared<Range>();
+    auto range = std::make_shared<Range>(shared_batch);
     range->owner = std::move(owner);
-    prepare_compose_slots(false);
+    if (appending) range->append = *append_range;
+    prepare_compose_slots(appending);
     // The classification is one step per ship and a closing pass; the rest of the set-up and the per-decision steps
     // follow in a step of their own, which queues them behind the classification. Same order and results as inline.
-    for (std::size_t ship_index = 0; ship_index < options_.placed_ships.size(); ++ship_index) {
-        enqueue([this, range, ship_index] {
+    for (std::size_t ship_index = appending ? range->append.first_ship : 0; ship_index < options_.placed_ships.size(); ++ship_index) {
+        enqueue([this, range, ship_index, appending] {
             core::load_profile::Scope scope(core::load_profile::Phase::compose_classify);
-            return classify_arrival(range->owner->context, ship_index);
+            const auto decisions_before = decisions_.size();
+            const bool ok = classify_arrival(range->owner->context, ship_index);
+            if (appending) {
+                // A proxy copy appended between steps pushes its own hardpoint states at the end: keep them aligned with
+                // the decisions, and size this ship's now (its attachment marks are taken from them).
+                hardpoint_states_.resize(decisions_.size());
+                for (std::size_t decision = decisions_before; decision < decisions_.size(); ++decision)
+                    hardpoint_states_[decision].assign(decisions_[decision].hardpoints.size(), scene::HardpointState::intact);
+            }
+            return ok;
         });
     }
-    enqueue([this, range] {
+    enqueue([this, range, appending] {
         core::load_profile::Scope scope(core::load_profile::Phase::compose_classify);
-        return finish_classify(range->owner->context, 0);
+        return finish_classify(range->owner->context, appending ? range->append.first_decision : 0);
     });
-    enqueue([this, range, first_asset_id, first_entity_id, enqueue] {
+    enqueue([this, range, first_asset_id, first_entity_id, enqueue, appending] {
         auto& initial_context = range->owner->context;
         auto& initial_renderer = initial_context.renderer;
         range->receiving_before = initial_renderer.shadow_receiving_materials();
         range->variant_failures_before = initial_renderer.shadow_variant_failures();
-        if (options_.policy != lighting::Policy::off) {
+        // A live append keeps the lighting the scene already has: resetting it here would widen the shadow distance to the far
+        // plane for every frame between this step and the closing one (the whole compose), about 1.4 times the draw calls.
+        if (!appending && options_.policy != lighting::Policy::off) {
             lighting_ = space_populate_detail::lighting_state(options_, initial_context.camera.far_plane);
             initial_renderer.set_lighting(lighting_);
         }
         range->batch.next_asset = std::max(first_asset, first_asset_id);
-        range->batch.textures.set_budget(options_.compose_texture_budget_bytes);
-        if (options_.texture_prefetch) start_texture_prefetch(range->owner->context, range->batch);
+        if (!appending) {
+            range->batch.textures.set_budget(options_.compose_texture_budget_bytes);
+            if (options_.texture_prefetch) start_texture_prefetch(range->owner->context, range->batch);
+        }
         hardpoint_states_.resize(decisions_.size());
         MenuTimeline::mark("attract_load_population_classified");
-        for (std::size_t decision_index = 0; decision_index < decisions_.size(); ++decision_index) {
+        // The decisions to compose: all of them for the load; for an append only its own ships' (a proxy copy appended since
+        // the classification has decisions after them that are already composed).
+        std::vector<std::size_t> to_compose;
+        if (appending) {
+            for (std::size_t ship = range->append.first_ship; ship < range->append.first_ship + range->append.ship_count; ++ship)
+                if (ship < live_decisions_.size() && live_decisions_[ship]) to_compose.push_back(*live_decisions_[ship]);
+        } else {
+            for (std::size_t decision = 0; decision < decisions_.size(); ++decision) to_compose.push_back(decision);
+        }
+        for (const std::size_t decision_index : to_compose) {
             auto cursor = std::make_shared<Cursor>();
-            enqueue([this, range, cursor, decision_index, enqueue] {
+            enqueue([this, range, cursor, decision_index, enqueue, appending] {
                 auto& context = range->owner->context;
                 auto& batch = range->batch;
                 auto& cache = context.cache;
                 auto& bind_poses = batch.bind_poses;
                 auto& pieces = batch.pieces;
-                if (options_.progress) options_.progress(decision_index, decisions_.size());
+                if (!appending && options_.progress) options_.progress(decision_index, decisions_.size());
                 // Hints for the decisions before this one that nobody asked for (stealth meshes, skipped surfaces) are dead.
                 if (batch.prefetch) batch.prefetch->advance(decision_index);
                 // The previous decision's steps (hull units, shell) are done: drop its pins (and, first time, the scene build's).
-                if (options_.release_compose_pins) static_cast<void>(cache.release_raw_pins());
+                if (!appending && options_.release_compose_pins) static_cast<void>(cache.release_raw_pins());
                 scene::SpacePlacementDecision& decision = decisions_[decision_index];
                 if (decision.role != scene::SpaceRole::drawn) return true;
                 hardpoint_states_[decision_index].assign(decision.hardpoints.size(), scene::HardpointState::intact);
@@ -1316,35 +1423,46 @@ bool SpacePopulation::enqueue_compose_range(std::shared_ptr<ComposeOwner> owner,
                 MenuTimeline::mark("attract_load_animation");
                 return true;
             });
-            enqueue([this, range, cursor, decision_index] {
-                if (!cursor->drawn) return true;
+            // The hardpoints: one step for the load; a live append runs one step per hardpoint (a capital ship has dozens, each
+            // attached model with its surfaces) and then the closing step, so no one step holds the frame for all of them.
+            const auto hardpoint_pass = [this, range, cursor, decision_index](const std::size_t first, const std::size_t end) {
                 auto& context = range->owner->context;
                 auto& batch = range->batch;
                 auto& decision = decisions_[decision_index];
                 const auto& placement = scene_->placements[decision.scene_ordinal];
-                const auto* model = cursor->model;
-                const auto live_ship = cursor->live_ship;
-                const bool cloak_ship = cursor->cloak_ship;
-                const auto first_piece = cursor->first_piece;
-                const auto& colour = cursor->colour;
+                core::load_profile::Scope scope(core::load_profile::Phase::compose_hardpoints);
+                compose_hardpoint_pieces(context, batch, decision, decision_index, placement, cursor->model, cursor->live_ship,
+                    cursor->colour, cursor->cloak_ship, first, end);
+            };
+            const auto hardpoint_close = [this, range, cursor, decision_index] {
+                auto& batch = range->batch;
+                auto& decision = decisions_[decision_index];
                 auto& pieces = batch.pieces;
                 auto& debug_piece_range = batch.debug_piece_range;
-                {
-                    core::load_profile::Scope scope(core::load_profile::Phase::compose_hardpoints);
-                    compose_hardpoint_pieces(context, batch, decision, decision_index, placement, model, live_ship, colour, cloak_ship);
-                }
                 // One line per distinct reason.
                 std::sort(decision.missing.begin(), decision.missing.end());
                 decision.missing.erase(std::unique(decision.missing.begin(), decision.missing.end()), decision.missing.end());
                 if (options_.debug_ship && decision.scene_ordinal == scene_->placements.size() - 1)
-                    debug_piece_range = std::pair{first_piece, pieces.size()};
+                    debug_piece_range = std::pair{cursor->first_piece, pieces.size()};
                 MenuTimeline::mark("attract_load_hardpoints");
+            };
+            enqueue([this, range, cursor, decision_index, appending, enqueue, hardpoint_pass, hardpoint_close] {
+                if (!cursor->drawn) return true;
+                if (!appending) {
+                    hardpoint_pass(0, static_cast<std::size_t>(-1));
+                    hardpoint_close();
+                    return true;
+                }
+                const std::size_t count = decisions_[decision_index].hardpoints.size();
+                for (std::size_t index = 0; index < count; ++index)
+                    enqueue([hardpoint_pass, index] { hardpoint_pass(index, index + 1); return true; });
+                enqueue([hardpoint_close] { hardpoint_close(); return true; });
                 return true;
             });
         }
-        enqueue([this, range] {
-            if (options_.release_compose_pins) static_cast<void>(range->owner->context.cache.release_raw_pins());
-            if (options_.progress) options_.progress(decisions_.size(), decisions_.size());
+        enqueue([this, range, appending] {
+            if (!appending && options_.release_compose_pins) static_cast<void>(range->owner->context.cache.release_raw_pins());
+            if (!appending && options_.progress) options_.progress(decisions_.size(), decisions_.size());
             if (auto& prefetch = range->batch.prefetch) {
                 prefetch->finish();
                 report_texture_prefetch(prefetch->stats());
@@ -1354,22 +1472,36 @@ bool SpacePopulation::enqueue_compose_range(std::shared_ptr<ComposeOwner> owner,
             MenuTimeline::mark("attract_load_draw_pieces");
             return true;
         });
-        enqueue([this, range, first_entity_id] {
+        enqueue([this, range, first_entity_id, appending] {
             auto& context = range->owner->context;
             auto& batch = range->batch;
             if (!batch.failed_placements.empty()) {
+                if (appending) {
+                    next_arrival_asset_ = batch.next_asset;
+                    batch.textures.set_prefetch(nullptr);
+                }
                 failure_ = std::to_string(batch.failed_placements.size()) + " supported surface placement uploads failed";
                 for (const auto& where : batch.failed_placements) failure_ += "; " + where;
                 for (const auto& detail : upload_failures_) failure_ += "; " + detail;
                 return false;
             }
-            sim::EntityId next_entity = std::max(first_entity, first_entity_id);
+            // An append takes its entity ids and piece range now, after any proxy copies appended while it composed.
+            if (appending) {
+                range->append.first_piece = pieces_.size();
+                range->append.first_clip = live_clip_instances_.size();
+            }
+            sim::EntityId next_entity = appending ? std::max(first_entity, next_arrival_piece_) : std::max(first_entity, first_entity_id);
             float debug_farthest = 0.0F;
             {
                 core::load_profile::Scope scope(core::load_profile::Phase::compose_commit);
                 debug_farthest = commit_composed_pieces(context, batch, next_entity);
             }
             core::load_profile::Scope scope(core::load_profile::Phase::compose_finish);
+            if (appending) {
+                batch.textures.set_prefetch(nullptr);
+                return finish_composed_range(context, true, batch.next_asset, next_entity, range->receiving_before,
+                    range->variant_failures_before, debug_farthest, range->append.first_piece, range->append.first_clip);
+            }
             report_compose_textures(batch.textures.stats());
             report_compose_models(context.cache.model_stats(), options_.release_compose_pins);
             const bool ready = finish_composed_range(context, false, batch.next_asset, next_entity,
@@ -1387,6 +1519,8 @@ bool SpacePopulation::compose_range(ComposeContext& context, const std::size_t f
     auto& renderer = context.renderer;
     const auto& camera = context.camera;
     const bool appending = composed_;
+    const auto first_piece = pieces_.size();
+    const auto first_clip = live_clip_instances_.size();
     prepare_compose_slots(appending);
     {
         core::load_profile::Scope scope(core::load_profile::Phase::compose_classify);
@@ -1408,6 +1542,8 @@ bool SpacePopulation::compose_range(ComposeContext& context, const std::size_t f
     // The initial compose gets the texture read-ahead as well (decode, and the mip chains of #5989, on reader threads);
     // an arrival never does, so no step during the battle waits for or grows by a chain.
     if (!appending && options_.texture_prefetch) start_texture_prefetch(context, batch);
+    // #5097: an arrival whose textures were read ahead takes them from the session's read-ahead (not owned by the batch).
+    else if (appending && ahead_in_use_ != nullptr) batch.textures.set_prefetch(ahead_in_use_);
     compose_draw_pieces(context, batch, first_decision, appending);
     if (auto& prefetch = batch.prefetch) {
         prefetch->finish();
@@ -1437,10 +1573,15 @@ bool SpacePopulation::compose_range(ComposeContext& context, const std::size_t f
         report_compose_models(context.cache.model_stats(), options_.release_compose_pins);
     }
     return finish_composed_range(context, appending, next_asset, next_entity, receiving_before,
-        variant_failures_before, debug_farthest);
+        variant_failures_before, debug_farthest, first_piece, first_clip);
 }
 GodotRenderer::ProxyResult SpacePopulation::append_model_proxies(GodotRenderer& renderer,
     const std::size_t recipe_ship, const std::span<const Options::PlacedShip> ships) {
+    // Copies interleave with a pending live append (their entities, pieces and ships come after its own); only a vector
+    // move under the pending steps' references forces it to finish first.
+    if (pending_append_ && (scene_->placements.capacity() < scene_->placements.size() + ships.size()
+            || decisions_.capacity() < decisions_.size() + ships.size()))
+        complete_live_append();
     using Outcome = GodotRenderer::ProxyOutcome;
     if (ships.empty()) return {};
     if (!composed_ || !scene_ || recipe_ship >= live_decisions_.size() || !live_decisions_[recipe_ship]
@@ -1485,6 +1626,9 @@ GodotRenderer::ProxyResult SpacePopulation::append_model_proxies(GodotRenderer& 
         decisions_.resize(first_decision);
         hardpoint_states_.resize(first_decision);
         idle_placements_.resize(first_idle);
+        // Index-keyed idle upload state must not carry over to a placement appended at a reused index.
+        if (idle_clean_.size() > first_idle) idle_clean_.resize(first_idle);
+        if (idle_last_palette_.size() > first_idle) idle_last_palette_.resize(first_idle);
         clips_.resize(first_player);
         std::erase_if(idle_live_ships_, [&](const auto& entry) { return entry.first >= first_idle; });
         scene_->placements.resize(first_placement);
@@ -1621,9 +1765,142 @@ std::optional<std::uint64_t> SpacePopulation::live_copy_bytes(const GodotRendere
     return renderer.model_copy_bytes(assets);
 }
 
+// ---- #5097 PR 2: a live append spread over frames ---------------------------------------------------------------------
+namespace {
+// Placements and decisions kept free for appends that interleave with a pending live append.
+constexpr std::size_t append_reserve = 4096;
+} // namespace
+
+struct SpacePopulation::PendingAppend final {
+    // Declared in the order the pieces depend on each other: the steps (last) are dropped first, the batch before the
+    // owner whose cache and map it borrows.
+    assets::Map map;
+    std::shared_ptr<ComposeOwner> owner;
+    ComposeBatch batch;
+    std::deque<LoadStep> steps;
+    std::size_t inserted{};
+    bool running{};
+};
+
+SpacePopulation::SpacePopulation(Options options) : options_(std::move(options)) {}
+
+SpacePopulation::~SpacePopulation() = default;
+
+bool SpacePopulation::begin_live_append(GodotRenderer& renderer, const vfs::Vfs& filesystem,
+    const std::span<const Options::PlacedShip> ships, const std::uint64_t ticket) {
+    if (ships.empty()) return true;
+    if (!composed_ || !scene_ || !options_.catalog) {
+        failure_ = "arrival slots require a composed population";
+        return false;
+    }
+    complete_live_append();
+    failure_.clear();
+    auto pending = std::make_unique<PendingAppend>();
+    AppendRange range;
+    range.first_ship = options_.placed_ships.size();
+    range.ship_count = ships.size();
+    range.first_decision = decisions_.size();
+    range.first_piece = pieces_.size();
+    range.first_clip = live_clip_instances_.size();
+    options_.placed_ships.insert(options_.placed_ships.end(), ships.begin(), ships.end());
+    pending->map.source = compose_source_;
+    pending->map.kind = domain() == sim::tactical::BattleDomain::land ? assets::MapKind::land : assets::MapKind::space;
+    pending->owner = std::make_shared<ComposeOwner>(renderer, pending->map, filesystem, compose_camera_,
+        std::span<const std::uint32_t>{}, *options_.catalog, options_.map_sha256);
+    if (ticket != 0 && ahead_prefetch_ && ahead_tickets_.contains(ticket)) pending->batch.textures.set_prefetch(ahead_prefetch_.get());
+    // The steps hold references into these two vectors across frames, so a proxy copy appended meanwhile must not move
+    // them: room is reserved here (append_model_proxies finishes the pending append first when it would run out).
+    scene_->placements.reserve(scene_->placements.size() + append_reserve);
+    decisions_.reserve(decisions_.size() + append_reserve);
+    PendingAppend* const raw = pending.get();
+    // Child steps run before the caller's continuation, like LoadJob::append.
+    const EnqueueLoadStep enqueue = [raw](LoadStep step) {
+        if (raw->running) {
+            raw->steps.insert(raw->steps.begin() + static_cast<std::ptrdiff_t>(raw->inserted), std::move(step));
+            ++raw->inserted;
+        } else {
+            raw->steps.push_back(std::move(step));
+        }
+    };
+    pending_append_ = std::move(pending);
+    last_append_ = AppendState::pending;
+    if (!enqueue_compose_range(raw->owner, next_arrival_asset_, next_arrival_piece_, enqueue, &range, &raw->batch)) {
+        pending_append_.reset();
+        last_append_ = AppendState::failed;
+        return false;
+    }
+    return true;
+}
+
+BattleScene::AppendState SpacePopulation::step_live_append(const double budget_ms) {
+    if (!pending_append_) return last_append_;
+    PendingAppend& pending = *pending_append_;
+    const auto started = std::chrono::steady_clock::now();
+    const auto fail = [&](const char* why) {
+        if (failure_.empty()) failure_ = why;
+        pending_append_.reset();
+        last_append_ = AppendState::failed;
+        return last_append_;
+    };
+    while (!pending.steps.empty()) {
+        LoadStep step = std::move(pending.steps.front());
+        pending.steps.pop_front();
+        pending.inserted = 0;
+        pending.running = true;
+        bool ok = false;
+        // Trace only (the viewer gives the pump a phase recording): a step over the hitch line says which phases it ran.
+        core::load_profile::Recording* const recording = core::load_profile::active;
+        std::array<core::load_profile::Cost, core::load_profile::names.size()> before{};
+        if (recording != nullptr) before = recording->costs;
+        const auto step_started = std::chrono::steady_clock::now();
+        try {
+            ok = step();
+        } catch (...) {
+            pending.running = false;
+            return fail("a live append step failed");
+        }
+        pending.running = false;
+        if (recording != nullptr) {
+            const double step_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - step_started).count();
+            if (step_ms >= 30.0) {
+                std::vector<std::pair<double, std::size_t>> top;
+                for (std::size_t phase = 0; phase < before.size(); ++phase) {
+                    const double spent = recording->costs[phase].exclusive_ms - before[phase].exclusive_ms;
+                    if (spent >= 3.0) top.emplace_back(spent, phase);
+                }
+                std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                std::string line;
+                for (std::size_t i = 0; i < top.size() && i < 4; ++i)
+                    line += std::string(core::load_profile::names[top[i].second]) + "=" + std::to_string(static_cast<long>(top[i].first)) + "ms ";
+                godot::UtilityFunctions::print("EAWR live append slow step: ms=", step_ms, " left=",
+                    static_cast<std::int64_t>(pending.steps.size()), " ", godot::String::utf8(line.c_str()));
+            }
+        }
+        if (!ok) return fail("a live append step refused");
+        if (budget_ms >= 0.0 && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count() >= budget_ms)
+            break;
+    }
+    if (!pending.steps.empty()) return AppendState::pending;
+    pending_append_.reset();
+    last_append_ = AppendState::done;
+    return last_append_;
+}
+
+void SpacePopulation::complete_live_append() {
+    if (!pending_append_) return;
+    // Another append (a projectile pool's copies, a launch growth) needs the scene: the pending steps run now, in this frame.
+    const auto left = pending_append_->steps.size();
+    const auto started = std::chrono::steady_clock::now();
+    static_cast<void>(step_live_append(-1.0));
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    if (ms >= 20.0)
+        godot::UtilityFunctions::print("EAWR live append flushed: ms=", ms, " steps=", static_cast<std::int64_t>(left));
+}
+
 bool SpacePopulation::append_live_ships(GodotRenderer& renderer, const vfs::Vfs& filesystem,
     const std::span<const Options::PlacedShip> ships) {
     if (ships.empty()) return true;
+    complete_live_append();
     // The initial compose establishes the scene and stable ship/decision indices.
     if (!composed_ || !scene_ || !options_.catalog) {
         failure_ = "arrival slots require a composed population";
@@ -1636,8 +1913,11 @@ bool SpacePopulation::append_live_ships(GodotRenderer& renderer, const vfs::Vfs&
     assets::Map map;
     map.source = compose_source_;
     map.kind = domain() == sim::tactical::BattleDomain::land ? assets::MapKind::land : assets::MapKind::space;
+    std::optional<core::load_profile::DetailScope> cache_phase; // detail only
+    cache_phase.emplace(core::load_profile::Phase::append_cache_setup);
     scene::VfsAssetCache cache(filesystem);
     admit_scene_shaders(cache, renderer);
+    cache_phase.reset();
     scene::BuildInput input{&map, options_.map_sha256, options_.catalog, cache.access()};
     const scene::ObjectResolver resolve = [&](const std::string_view id, const data::Category category)
         -> std::optional<data::EffectiveObject> {
@@ -1646,6 +1926,192 @@ bool SpacePopulation::append_live_ships(GodotRenderer& renderer, const vfs::Vfs&
     };
     ComposeContext context{renderer, map, filesystem, compose_camera_, {}, cache, input, resolve};
     return compose_range(context, first_ship, first_decision, next_arrival_asset_, next_arrival_piece_);
+}
+
+// ---- #5097: the arrival read-ahead ------------------------------------------------------------------------------
+namespace {
+// Decoded textures of the arrival read-ahead that no append has taken yet. One session-long cap; a hull's textures
+// (a few dozen MiB, up to ~250 MiB for the largest modded model) are read in the free time of a queued purchase.
+constexpr std::uint64_t arrival_ahead_window_bytes = 640ULL << 20U;
+} // namespace
+
+std::uint64_t SpacePopulation::arrival_ahead_begin(const vfs::Vfs& filesystem, const std::span<const Options::PlacedShip> placed) {
+    // Safe render thread, the read-ahead off switch and a population that is not a composed live battle: no ticket.
+    if (!composed_ || !options_.catalog || !options_.texture_prefetch || placed.empty()) return 0;
+    if (!ahead_prefetch_) {
+        scene::TexturePrefetchOptions prefetch_options;
+        prefetch_options.fixed_readers = options_.texture_prefetch_readers;
+        prefetch_options.solid_state = options_.texture_prefetch_solid_state;
+        prefetch_options.window_bytes = arrival_ahead_window_bytes;
+        prefetch_options.reoffer_taken = true;
+        ahead_prefetch_ = std::make_unique<scene::TexturePrefetch>(filesystem, prefetch_options);
+    }
+    const std::uint64_t ticket = next_ahead_ticket_++;
+    // Everything the worker reads is copied here: it runs while the main thread keeps composing and posing.
+    auto job = [filesystem = &filesystem, catalog = options_.catalog, source = compose_source_,
+                land = domain() == sim::tactical::BattleDomain::land, sha = options_.map_sha256,
+                first_record = map_placements_,
+                ships = std::vector<Options::PlacedShip>(placed.begin(), placed.end())]() -> AheadPlan {
+        const auto started = std::chrono::steady_clock::now();
+        AheadPlan plan;
+        try {
+            // No renderer here: the shader admission test stays out, so this plan names every surface the
+            // renderer might draw (a superset); a surface only a translated shader draws is read by the append itself.
+            plan.pin = std::make_shared<scene::VfsAssetCache>(*filesystem);
+            auto& cache = *plan.pin;
+            const scene::ObjectResolver resolve = [catalog](const std::string_view id, const data::Category category)
+                -> std::optional<data::EffectiveObject> {
+                auto object = catalog->resolve(id, category);
+                return object ? std::optional(std::move(object).value()) : std::nullopt;
+            };
+            std::set<std::string> seen;
+            const auto offer = [&](const std::string& path, const scene::TextureProcessing processing) {
+                if (path.empty()) return;
+                if (seen.insert(ComposeTextureCache::key(path, processing)).second) plan.textures.emplace_back(path, processing);
+            };
+            for (const auto& ship : ships) {
+                const data::Definition* definition = catalog->find(ship.object_id, data::Category::game_object);
+                auto effective = catalog->resolve(ship.object_id, data::Category::game_object);
+                if (definition == nullptr || !effective) continue;
+                assets::Map placed_map;
+                placed_map.source = source;
+                placed_map.kind = land ? assets::MapKind::land : assets::MapKind::space;
+                assets::Placement origin;
+                origin.key = {source, static_cast<std::uint32_t>(first_record)};
+                origin.type_crc = 0U;
+                origin.type_resolution = assets::TypeResolution::unique;
+                origin.type_candidates.push_back({.logical_name = definition->id, .source = definition->root.source,
+                    .model_name = {}, .land_model_name = {}, .space_model_name = {}});
+                origin.position = ship.position;
+                origin.orientation_degrees = assets::SourceVec3{0.0F, 0.0F, ship.yaw_degrees};
+                origin.orientation_status = assets::OrientationStatus::yaw_only;
+                placed_map.placements.push_back(std::move(origin));
+                scene::BuildInput input{&placed_map, sha, catalog, cache.access()};
+                input.live_objects = ship.live_entity != 0;
+                scene::Scene built = scene::build(input);
+                if (built.placements.size() != 1 || !built.placements.front().drawable()) continue;
+                scene::Placement placed_unit = std::move(built.placements.front());
+                if (ship.construction) placed_unit.surfaces = scene::construction_surfaces(cache.access(), placed_unit.model_path);
+                placed_unit.scene_ordinal = 0;
+                placed_unit.entity_id = 1;
+                const auto decision = classify_composed_unit(placed_unit, effective.value(), resolve, ship.ability_proxy_owner);
+                if (decision.role != scene::SpaceRole::drawn) continue;
+                plan.drawn = true;
+                // The surfaces the append draws, in its order: drawn surfaces, then the hidden damage decals.
+                std::vector<std::size_t> surfaces = decision.drawn_surfaces;
+                for (const auto& decal : decision.damage_decals) surfaces.push_back(decal.surface);
+                for (const std::size_t index : surfaces) {
+                    if (index >= placed_unit.surfaces.size()) continue;
+                    const scene::Surface& surface = placed_unit.surfaces[index];
+                    if (surface.effect_missing) continue;
+                    if (ship.stealth_shell && ieq(surface.mesh_name, stealth_mesh_name)) continue;
+                    std::string texture_path;
+                    for (const scene::TextureBinding& binding : surface.textures)
+                        if (ieq(binding.parameter, "BaseTexture")) texture_path = binding.resolved;
+                    const scene::LegacySelector* const selector = scene::material_selector(surface);
+                    offer(texture_path, selector != nullptr ? space_base_processing_for(*selector) : scene::TextureProcessing::none);
+                    if (selector == nullptr) continue;
+                    for (const SampledBinding& slot : sampled_bindings(*selector))
+                        for (const scene::TextureBinding& binding : surface.textures)
+                            if (ieq(binding.parameter, slot.name) && !binding.resolved.empty())
+                                offer(binding.resolved, binding_processing_for(slot.normal));
+                }
+                // Attached hardpoint models are decoded now (pinned by `plan.pin` until the append used them).
+                for (const auto& hardpoint : decision.hardpoints) {
+                    if (hardpoint.model.empty()) continue;
+                    const std::string path = assets::resolve_model(*filesystem, hardpoint.model, "arrival read-ahead");
+                    const assets::Model* attached = path.empty() ? nullptr : cache.model(path);
+                    if (attached == nullptr) continue;
+                    plan.models.push_back(path);
+                    // The textures the append reads for the attached model's surfaces (compose_hardpoint_pieces), so
+                    // that no step decodes them (and builds their mip chains) on the main thread.
+                    for (const assets::Mesh& mesh : attached->meshes) {
+                        if (!mesh.visible) continue;
+                        for (const assets::Submesh& submesh : mesh.submeshes) {
+                            if (scene::is_shadow_volume_shader(submesh.shader)) continue;
+                            const bool missing = scene::missing_material_effect(cache.access(), submesh.shader);
+                            if (missing) continue;
+                            const scene::LegacySelector* selector = scene::material_selector(submesh.shader, missing, false);
+                            if (selector == nullptr) continue;
+                            for (const assets::MaterialParameter& parameter : submesh.parameters) {
+                                const auto* name = std::get_if<std::string>(&parameter.value);
+                                if (name == nullptr || name->empty()) continue;
+                                if (ieq(parameter.name, "BaseTexture")) {
+                                    offer(assets::resolve_texture(*filesystem, *name, "arrival read-ahead"), space_base_processing_for(*selector));
+                                    continue;
+                                }
+                                for (const SampledBinding& slot : sampled_bindings(*selector))
+                                    if (ieq(parameter.name, slot.name))
+                                        offer(assets::resolve_texture(*filesystem, *name, "arrival read-ahead"), binding_processing_for(slot.normal));
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (const std::exception&) {
+            plan.drawn = false; // the append decodes everything itself, as before
+        }
+        plan.milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        return plan;
+    };
+    AheadTicket entry;
+    entry.plan = std::async(std::launch::async, std::move(job));
+    ahead_tickets_.emplace(ticket, std::move(entry));
+    return ticket;
+}
+
+BattleScene::AheadState SpacePopulation::arrival_ahead_poll(const std::uint64_t ticket) {
+    const auto found = ahead_tickets_.find(ticket);
+    if (found == ahead_tickets_.end() || !ahead_prefetch_) return AheadState::failed;
+    AheadTicket& entry = found->second;
+    if (entry.state != AheadState::pending) return entry.state;
+    if (!entry.offered) {
+        // One ticket reads its textures at a time, the oldest first: "nothing pending" then means this ticket is done.
+        if (found != ahead_tickets_.begin()) return AheadState::pending;
+        if (entry.plan.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return AheadState::pending;
+        try {
+            entry.result = entry.plan.get();
+        } catch (const std::exception&) {
+            entry.state = AheadState::failed;
+            return entry.state;
+        }
+        ahead_preflight_ms_ += entry.result.milliseconds;
+        if (!entry.result.drawn) {
+            entry.state = AheadState::failed;
+            return entry.state;
+        }
+        for (const auto& [path, processing] : entry.result.textures) ahead_prefetch_->offer(path, found->first, processing);
+        entry.offered = true;
+    }
+    if (ahead_prefetch_->pending_count() == 0) entry.state = AheadState::ready;
+    return entry.state;
+}
+
+void SpacePopulation::arrival_ahead_use(const std::uint64_t ticket, const bool on) {
+    ahead_in_use_ = on && ahead_prefetch_ && ahead_tickets_.contains(ticket) ? ahead_prefetch_.get() : nullptr;
+}
+
+void SpacePopulation::arrival_ahead_release(const std::uint64_t ticket) {
+    ahead_in_use_ = nullptr;
+    const auto found = ahead_tickets_.find(ticket);
+    if (found == ahead_tickets_.end()) return;
+    // Whatever this ticket offered and the append did not ask for (hidden or unsupported surfaces) is dropped.
+    if (ahead_prefetch_) ahead_prefetch_->advance(ticket + 1U);
+    // A ticket still pending its worker: the future's destructor waits for it; keep nothing past this call.
+    ahead_tickets_.erase(found);
+}
+
+BattleScene::AheadStats SpacePopulation::arrival_ahead_stats() const {
+    AheadStats result;
+    result.preflight_ms = ahead_preflight_ms_;
+    if (ahead_prefetch_) {
+        const auto stats = ahead_prefetch_->stats();
+        result.planned = stats.planned;
+        result.decoded = stats.decoded;
+        result.unplanned = stats.unplanned;
+        result.held_bytes_peak = stats.held_bytes_peak;
+    }
+    return result;
 }
 
 } // namespace eawr::presentation::godot_backend

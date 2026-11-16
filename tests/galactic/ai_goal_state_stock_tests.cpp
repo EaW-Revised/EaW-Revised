@@ -111,6 +111,20 @@ std::string fixture_identity() { return eawr::core::sha256_hex(std::span<const s
 namespace eawr::script::foc::ai {
 // Supporting synthetic continuation inventory, not installed AI behavior.
 struct EngineContractAccess {
+    static void phase_base_wait(Engine& e, bool erase) {
+        const auto write = e.native_record_scope();
+        auto& player = e.players_.front();
+        e.native_records_changed(player.player, {23}); e.mark_native_state_changed();
+        const auto at = std::find_if(player.blocks.begin(), player.blocks.end(),
+            [](const auto& row) { return row.second.kind == Block::Kind::galactic_starbase; });
+        if (at == player.blocks.end()) throw std::runtime_error("starbase wait fixture missing");
+        if (erase) {
+            e.runtime_index_.blocks.erase(at->first); player.blocks.erase(at);
+        } else {
+            at->second.side = 2; at->second.destination_object = 10;
+            at->second.ready = true; at->second.finished = true; at->second.result = false;
+        }
+    }
     static void phase_global(Engine& e, int value) {
         const auto write = e.native_record_scope();
         e.native_records_changed(0, {27, 31}); e.mark_native_state_changed();
@@ -137,6 +151,10 @@ struct EngineContractAccess {
         Block b; b.id = block; b.instance = plan.instance; b.taskforce = tf.id; b.kind = Block::Kind::produce;
         b.destination_object = 61; b.movers = {51}; b.ordered_tick[51] = 99; b.distance = real(5); b.waiting_on = 0;
         e.players_.front().blocks[block] = b;
+        // GAR-03: a global base wait belongs to the plan instance, without a TaskForce.
+        Block base_wait; base_wait.id = block_id(plan.instance, 18); base_wait.instance = plan.instance;
+        base_wait.kind = Block::Kind::galactic_starbase; base_wait.destination_object = 20; base_wait.side = 4;
+        e.players_.front().blocks[base_wait.id] = base_wait;
         BuildTask task; task.taskforce = tf.id; task.block = block; task.type = 100; task.object = 51;
         task.source = 2; task.producer = 10; task.issued = 41; task.generic_cost = real(2); p.tasks = {task};
         p.active.clear(); p.active.push_back(retained); p.activations[{"GOAL", retained.target}].entries = {{true, -1}, {false, 600}};
@@ -464,6 +482,44 @@ void movement_delivery_contracts() {
 }
 
 namespace {
+// #7188: retail writes a GlobalValue at once, so a script that sets a name and reads it back in the same call sees its own write.
+// The stock attack-continuation check does exactly that on its first call. The committed registry stays as it was until the
+// service ends: another instance, and a read of a name this instance has not written, still see the committed value only.
+void own_global_value_write_is_read_back() {
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auth::SessionConfig config; config.galactic_clock = true;
+        auth::ModuleManifest manifest;
+        must(manifest.add("own.lua", R"LUA(
+SawNumber = false; SawDeleted = false; SawText = false; SawOther = false; SawCommitted = false; Ran = false
+function main()
+    GlobalValue.Set('own', 7)
+    SawNumber = (GlobalValue.Get('own') == 7)
+    GlobalValue.Set('own', nil)
+    SawDeleted = (GlobalValue.Get('own') == nil)
+    GlobalValue.Set('own', 'again')
+    SawText = (GlobalValue.Get('own') == 'again')
+    SawOther = (GlobalValue.Get('never_written') == nil)
+    SawCommitted = (GlobalValue.Get('committed') == 'old')
+    Ran = true
+end
+Create_Thread('main')
+)LUA"));
+        auto scripts = must(auth::ScriptScheduler::create(config, std::move(manifest)));
+        must(auth::register_shared_global_values(scripts, [](const std::string& key) -> std::optional<auth::Value> {
+            if (key == "committed") return auth::Value::text("old");
+            return std::nullopt;
+        }));
+        must(scripts.create_instance(1, "own.lua"));
+        const auto report = must(scripts.service(executor));
+        expect(report.diagnostics.empty(), "own GlobalValue write: no script fault");
+        for (const auto name : {"Ran", "SawNumber", "SawDeleted", "SawText", "SawOther", "SawCommitted"}) {
+            const auto value = must(scripts.read_global(1, name));
+            expect(value && std::holds_alternative<bool>(value->data) && std::get<bool>(value->data),
+                std::string("own GlobalValue write is read back in the same call: ") + name);
+        }
+    }
+}
 void shared_global_value_contracts() {
     std::string reference;
     const std::vector<lifecycle::PlayerSelection> selected{{1, "FIXTURE", "NORMAL", {}, {}}, {2, "FIXTURE", "NORMAL", {}, {}}};
@@ -791,6 +847,7 @@ void global_value_admission_contracts() {
 } // namespace
 
 void goal_state_contracts() {
+    own_global_value_write_is_read_back();
     shared_global_value_contracts();
     global_value_admission_contracts();
     std::string reference;
@@ -812,6 +869,26 @@ void goal_state_contracts() {
         ai::EngineContractAccess::running(*control.engine, first->goal);
         ai::GoalStateContributor saved(control.engine, fixture_identity());
         const auto bytes = must(saved.capture()); const auto hash = must(saved.state_hash());
+        const auto block_sync = must(saved.record_sync_hash());
+        for (const bool erase : {false, true}) {
+            auto phase = must(saved.begin_phase());
+            ai::EngineContractAccess::phase_base_wait(*control.engine, erase);
+            const auto changed_sync = must(saved.record_sync_hash());
+            expect(changed_sync != block_sync && changed_sync == must(saved.record_sync_hash(true)),
+                "GAR-03 player-scoped global block mutation/deletion publishes the exact cold records");
+            const auto changed = must(saved.capture());
+            Owner fresh(fixture_setup(), fixture_data(), fixture_plans(), selections);
+            must(fresh.world->bind(fixture_snapshot(), {}, executor, 0, 1000));
+            ai::GoalStateContributor rebuilt(fresh.engine, fixture_identity());
+            must(rebuilt.restore(changed));
+            expect(must(rebuilt.capture()).components == changed.components
+                && must(rebuilt.record_sync_hash()) == changed_sync && must(rebuilt.record_sync_hash(true)) == changed_sync,
+                "GAR-03 TaskForce-free block fields and deletion reconstruct in a fresh owner");
+            must(phase->rollback());
+            expect(must(saved.capture()).components == bytes.components
+                && must(saved.record_sync_hash()) == block_sync && must(saved.record_sync_hash(true)) == block_sync,
+                "GAR-03 global block rollback restores its player ownership and all fields");
+        }
         const auto report_count = control.engine->records().size();
         for (const bool throws : {false, true}) for (const bool after_mutation : {false, true}) {
             auto phase = must(saved.begin_phase());

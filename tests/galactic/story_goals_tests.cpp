@@ -15,27 +15,48 @@ void expect(bool ok, const char* label) {
 }
 void objectives() {
     st::Goals goals(1); st::FakePresentationSink sink;
-    const auto apply = [&](st::ObjectiveAction action, std::string key = {}, st::Objective value = {}) {
-        return goals.apply(st::ObjectiveReward{action, std::move(key), std::move(value), false}, sink);
+    const auto apply = [&](st::ObjectiveAction action, std::string key = {}, st::Objective value = {}, std::int64_t index = -1) {
+        st::ObjectiveReward reward{action, std::move(key), std::move(value), false};
+        reward.index = index;
+        return goals.apply(reward, sink);
     };
-    expect(apply(st::ObjectiveAction::add, {}, {"first", "suggestion", 7}), "WST-47 add");
-    expect(apply(st::ObjectiveAction::add, {}, {"second", {}, 9}), "WST-47 second add");
-    expect(apply(st::ObjectiveAction::add, {}, {"first", "updated", 8}), "policy duplicate update");
-    expect(goals.state().objectives.size() == 2 && goals.state().objectives[0].suggestion == "updated", "policy stable duplicate slot");
+    const auto ids = [&] { std::vector<std::string> out; for (const auto& o : goals.state().objectives) out.push_back(o.text_id); return out; };
+    using Ids = std::vector<std::string>;
+    // WST-65: an empty identity does nothing; an add takes the counter's number and increments it, status incomplete.
+    expect(!apply(st::ObjectiveAction::add, {}, {}) && goals.state().objectives.empty() && sink.events.empty(), "WST-65 empty identity does nothing");
+    expect(apply(st::ObjectiveAction::add, {}, {"first", true, 99}) && apply(st::ObjectiveAction::add, {}, {"second", false, 99}), "WST-65 add");
+    expect(goals.state().objectives[0].number == 1 && goals.state().objectives[1].number == 2 && goals.state().objectives[0].suggestion
+        && goals.state().next_number == 3, "WST-65 numbers come from the counter, the suggestion flag is stored");
+    // Duplicates are admitted; an index from 0 to the size inserts there, anything else appends.
+    expect(apply(st::ObjectiveAction::add, {}, {"first"}) && ids() == Ids{"first", "second", "first"}, "WST-65 duplicate identities are admitted");
+    expect(apply(st::ObjectiveAction::add, {}, {"front"}, 0) && ids() == Ids{"front", "first", "second", "first"}, "WST-65 index 0 inserts at the head");
+    expect(apply(st::ObjectiveAction::add, {}, {"tail"}, 99) && apply(st::ObjectiveAction::add, {}, {"neg"}, -3)
+        && ids() == Ids{"front", "first", "second", "first", "tail", "neg"}, "WST-65 an out-of-range index appends");
+    // WST-66: first exact match; a missing match changes nothing.
     const auto count = sink.events.size();
-    expect(!apply(st::ObjectiveAction::replace, "first", {"second", {}, 0}), "policy conflicting identity rejected");
-    expect(!apply(st::ObjectiveAction::complete, "missing") && sink.events.size() == count, "unknown identity is inert");
-    expect(apply(st::ObjectiveAction::replace, "first", {"replacement", "new", 3}), "WST-47 replace");
-    expect(apply(st::ObjectiveAction::complete, "replacement") && apply(st::ObjectiveAction::fail, "second"), "WST-47 resolve");
+    expect(!apply(st::ObjectiveAction::complete, "missing") && !apply(st::ObjectiveAction::complete, "First") && sink.events.size() == count, "WST-66 no match is inert, case is exact");
+    expect(apply(st::ObjectiveAction::complete, "first") && goals.state().objectives[1].status == st::ObjectiveStatus::complete
+        && goals.state().objectives[3].status == st::ObjectiveStatus::incomplete, "WST-66 complete hits the first match only");
+    expect(apply(st::ObjectiveAction::complete, "first") && sink.events.size() == count + 2, "WST-66 completing again still gives feedback");
+    expect(apply(st::ObjectiveAction::fail, "second") && goals.state().objectives[2].status == st::ObjectiveStatus::failed, "WST-66 fail");
+    // Replace: both identities nonempty; keeps number, suggestion and position, resets status, admits a duplicate identity.
+    const auto before = goals.state().objectives[1];
+    expect(!apply(st::ObjectiveAction::replace, "first", {}) && !apply(st::ObjectiveAction::replace, {}, {"x"}) && !apply(st::ObjectiveAction::replace, "gone", {"x"}), "WST-66 replace needs both identities and a match");
+    expect(apply(st::ObjectiveAction::replace, "first", {"second"}) && goals.state().objectives[1].text_id == "second"
+        && goals.state().objectives[1].number == before.number && goals.state().objectives[1].suggestion == before.suggestion
+        && goals.state().objectives[1].status == st::ObjectiveStatus::incomplete, "WST-66 replace keeps number/suggestion/position, resets status, admits a duplicate");
+    // Remove deletes the first match and never rewinds the counter.
+    const auto next = goals.state().next_number;
+    expect(apply(st::ObjectiveAction::remove, "tail") && apply(st::ObjectiveAction::remove, "neg") && goals.state().next_number == next, "WST-66 removal does not rewind the counter");
+    expect(apply(st::ObjectiveAction::add, {}, {"after"}) && goals.state().objectives.back().number == next, "the counter goes on after a removal");
     st::Goals restored(1, goals.state());
-    expect(restored.state().objectives == goals.state().objectives, "WST-60 fixture restore text/status/suggestion/number/order");
-    expect(apply(st::ObjectiveAction::display) && !goals.state().objectives_visible, "WST-47 hide display");
-    expect(apply(st::ObjectiveAction::remove, "replacement") && goals.state().objectives.front().text_id == "second", "WST-47 remove preserves survivors");
-    expect(apply(st::ObjectiveAction::remove_all) && goals.state().objectives.empty(), "WST-47 remove all");
-    auto invalid = restored.state(); invalid.objectives.push_back(invalid.objectives.front());
+    expect(restored.state().objectives == goals.state().objectives && restored.state().next_number == goals.state().next_number, "WST-67 restore keeps order, duplicates, numbers and the counter");
+    expect(apply(st::ObjectiveAction::display) && !goals.state().objectives_visible, "WST-66 hide display");
+    expect(apply(st::ObjectiveAction::remove_all) && goals.state().objectives.empty() && goals.state().next_number > next, "WST-66 remove all keeps the counter");
+    auto invalid = restored.state(); invalid.objectives.front().number = invalid.next_number;
     bool rejected{};
     try { st::Goals bad(1, invalid); } catch (const std::invalid_argument&) { rejected = true; }
-    expect(rejected, "fixture rejects duplicate snapshot identity");
+    expect(rejected, "fixture rejects a number beyond the counter");
 }
 void dialogs() {
     st::Goals goals(1); st::FakePresentationSink sink;

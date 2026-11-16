@@ -32,6 +32,7 @@ public:
     static constexpr bool reading = false;
     bool fire_range_bonuses = false;
     bool script_invulnerable = false; // TL-03: domains 19 and 20
+    bool final_facing = false; // MV-40: domains 33 to 36, each order and queued leg then carries its final facing
     std::vector<std::uint8_t> bytes;
     template <class... T> void operator()(const T&... values) { (value(values), ...); }
     template <std::integral T> void value(T input) {
@@ -70,6 +71,7 @@ public:
     static constexpr bool reading = true;
     bool fire_range_bonuses = false;
     bool script_invulnerable = false; // TL-03: domains 19 and 20
+    bool final_facing = false; // MV-40: domains 33 to 36, each order and queued leg then carries its final facing
     explicit Reader(std::span<const std::uint8_t> bytes) : bytes_(bytes) { if (bytes.size() > byte_limit) throw Invalid("state exceeds byte budget"); }
     template <class... T> void operator()(T&... values) { (value(values), ...); }
     [[nodiscard]] std::size_t remaining() const { return bytes_.size() - cursor_; }

@@ -127,9 +127,13 @@ class FontModeGraphical(unittest.TestCase):
         unicode_face = result["system"]["unicode_face"]
         after_missing = ("Arial Unicode MS", "system") if unicode_face else \
             ("EmpireAtWar-Medium", "cache") if cached else ("", "engine_default")
+        # UI-F5: a Latin system face that is absent is Arial where the host has it (after the Unicode face), so the
+        # missing English face is the last resort only on a host with neither. Russian and Japanese never get Arial.
+        after_missing_latin = ("Arial Unicode MS", "system") if unicode_face else \
+            ("Arial", "system") if result["system"]["arial_face"] else after_missing
         by_request = {(sample["requested"], sample["language"]): sample for sample in samples(result, "fallback")}
         missing = by_request[("Missing Face", "ENGLISH")]
-        self.assertEqual((missing["resolved"], missing["source"]), after_missing, missing)
+        self.assertEqual((missing["resolved"], missing["source"]), after_missing_latin, missing)
         self.assertTrue(missing["substituted"])
         russian = by_request[("EmpireAtWar-Bold", "RUSSIAN")]
         self.assertEqual((russian["resolved"], russian["source"]), after_missing, russian)

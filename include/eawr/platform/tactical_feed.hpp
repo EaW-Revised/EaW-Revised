@@ -59,6 +59,9 @@ public:
         diagnostics::MemoryCapacity result; result.complete = false; return result;
     }
     [[nodiscard]] virtual LiveScriptReport script_report() const = 0;
+    // legacy #6634: tactical scripts' letterbox requests since the last call. A feed whose scripts the view cannot hear
+    // (the campaign's retained child battle) has none.
+    [[nodiscard]] virtual std::vector<LiveLetterboxRequest> take_letterbox_requests() { return {}; }
     virtual void stop() = 0;
     [[nodiscard]] virtual std::vector<std::string> tick_hashes() const = 0;
     [[nodiscard]] virtual sim::tactical::TacticalReplay record() const = 0;
@@ -107,6 +110,7 @@ public:
     std::size_t worker_count() const noexcept override { return session_->worker_count(); }
     diagnostics::MemoryCapacity memory_capacity() const override { return session_->memory_capacity(); }
     LiveScriptReport script_report() const override { return session_->script_report(); }
+    std::vector<LiveLetterboxRequest> take_letterbox_requests() override { return session_->take_letterbox_requests(); }
     void stop() override { session_->stop(); }
     bool request_save(LiveSession::SaveSink sink) override { session_->request_save(std::move(sink)); return true; }
     std::vector<std::string> tick_hashes() const override { return session_->tick_hashes(); }

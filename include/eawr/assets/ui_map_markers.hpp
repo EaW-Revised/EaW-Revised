@@ -45,9 +45,14 @@ inline void prioritize_in_base_markers(std::vector<UiMapMarker>& markers) {
     return count(count, map.chunks);
 }
 
-// GPD-05..10: only uniquely resolved eligible records enter the table. Invalid map dimensions
+// GPD-05..10: only uniquely resolved eligible records enter the table. A marker position is measured from the map's corner
+// (installed Coruscant: every position lies between 0 and the declared size), so the normalised coordinate is position over size. Invalid map dimensions
 // or positions do not produce guessed positions. The preview orientation still needs capture.
-[[nodiscard]] inline std::vector<UiMapMarker> ui_map_markers(const Map& map, const data::Catalog& catalog) {
+// A position outside [0, declared size] on either axis has no place in the window: it is skipped and counted in `notes`
+// (one line), never clamped and never an error.
+[[nodiscard]] inline std::vector<UiMapMarker> ui_map_markers(const Map& map, const data::Catalog& catalog,
+    std::vector<std::string>* notes = nullptr) {
+    std::size_t refused = 0;
     std::vector<UiMapMarker> inside, outside, defenders, specific, reinforcements, bunkers, pads;
     if (!map.declared_extents || !(map.declared_extents->first > 0) || !(map.declared_extents->second > 0)) return {};
     for (const auto& placement : map.placements) {
@@ -69,8 +74,12 @@ inline void prioritize_in_base_markers(std::vector<UiMapMarker>& markers) {
         else if (name == "GARRISON_BUNKER_CAPTURABLE") kind = UiMarkerKind::bunker;
         else if (name == "SKIRMISH_BUILD_PAD") kind = UiMarkerKind::build_pad;
         else continue;
+        if (pos.x < 0 || pos.y < 0 || pos.x > map.declared_extents->first || pos.y > map.declared_extents->second) {
+            ++refused;
+            continue;
+        }
         UiMapMarker marker{placement.key.record_ordinal, kind, pos,
-            pos.x / map.declared_extents->first + 0.5F, pos.y / map.declared_extents->second + 0.5F, targets,
+            pos.x / map.declared_extents->first, pos.y / map.declared_extents->second, targets,
             map.declared_extents->first, map.declared_extents->second};
         switch (kind) {
         case UiMarkerKind::in_base: inside.push_back(marker); break;
@@ -82,6 +91,8 @@ inline void prioritize_in_base_markers(std::vector<UiMapMarker>& markers) {
         case UiMarkerKind::build_pad: pads.push_back(marker); break;
         }
     }
+    if (notes && refused)
+        notes->push_back(std::to_string(refused) + " map marker position(s) lie outside the declared map size and were skipped");
     prioritize_in_base_markers(inside);
     std::vector<UiMapMarker> result;
     const auto append = [&](const auto& source, const std::size_t cap) {

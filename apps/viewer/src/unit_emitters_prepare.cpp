@@ -1,4 +1,5 @@
 #include "unit_emitters.hpp"
+#include "particle_texture_load.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/assets/geometry_stripped.hpp"
 
@@ -249,7 +250,7 @@ const assets::Texture* UnitEmitters::resolve_texture(const std::string_view auth
         for (const std::string& candidate : {"data/art/textures/" + name, "data/art/textures/" + stem + ".tga",
                                              "data/art/textures/" + stem + ".dds"}) {
             if (!filesystem_->stat(candidate)) continue;
-            if (auto loaded = assets::load_texture(*filesystem_, candidate)) {
+            if (auto loaded = load_particle_texture(*filesystem_, candidate)) {
                 decoded = std::move(loaded.value());
                 break;
             }
@@ -366,9 +367,9 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
                               const std::span<const scene::HardpointState> states, const Modes modes) {
     const assets::Model* model = nullptr;
     const ModelFrames* frames = model_frames(placement, model);
-    // BP-70: root particle projectiles have no mesh or proxy bone; their emitter
-    // uses the projectile's model transform, including Scale_Factor.
-    if (model == nullptr && view.projectile && cache_.particle_system(placement.model_path)) {
+    // BP-70: root particle projectiles and units have no mesh or proxy bone; their emitter
+    // uses the object's model transform, including Scale_Factor.
+    if (model == nullptr && (view.projectile || (!view.death_clone && &placement == view.placement)) && cache_.particle_system(placement.model_path)) {
         const EffectSystem& system = effect_system(placement.model_path);
         Wanted wanted{proxy_base, placement.model_declared, placement.model_path,
             attachment, static_cast<std::uint32_t>(plan_seed) + static_cast<std::uint32_t>(view.entity), system.capacity, {}, {}};

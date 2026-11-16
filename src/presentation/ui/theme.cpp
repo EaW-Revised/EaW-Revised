@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/theme.hpp"
+#include "eawr/assets/asset_name_resolver.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/core/text.hpp"
 
@@ -490,23 +491,13 @@ ThemeTexture resolve_ui_texture(const std::string_view texture, const assets::Me
     return result;
 }
 
-StandaloneTextures vfs_standalone_textures(const vfs::Vfs& filesystem) {
-    return [&filesystem](const std::string_view texture) -> std::optional<std::string> {
-        std::string_view stem = texture;
-        for (const std::string_view suffix : {".tga", ".dds"}) {
-            if (stem.size() > suffix.size() && ieq(stem.substr(stem.size() - suffix.size()), suffix)) {
-                stem.remove_suffix(suffix.size());
-                break;
-            }
-        }
-        for (const std::string_view suffix : {".tga", ".dds"}) {
-            std::string path = "Data/Art/Textures/" + std::string(stem) + std::string(suffix);
-            if (filesystem.stat(path)) return path;
-        }
-        // Mods also name other image files (the Remake's .jpg menu background).
-        std::string written = "Data/Art/Textures/" + std::string(texture);
-        if (filesystem.stat(written)) return written;
-        return std::nullopt;
+StandaloneTextures vfs_standalone_textures(const vfs::Vfs& filesystem, const bool report_misses) {
+    // The shared asset-name rule (ANR-01): the name as authored, then its stem with the sibling extensions.
+    return [&filesystem, report_misses](const std::string_view texture) -> std::optional<std::string> {
+        std::string path = report_misses ? assets::resolve_texture(filesystem, texture, "ui standalone texture")
+                                         : assets::probe_texture(filesystem, texture);
+        if (path.empty()) return std::nullopt;
+        return path;
     };
 }
 

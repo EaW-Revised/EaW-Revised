@@ -275,9 +275,9 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_replenis
     if (auto defaults = phase.impl_->request_creation_defaults(created, staged, stage, command_tick); !defaults)
         return core::Result<RejectReason>::failure(defaults.error());
     phase.sync_radar_creations(staged, first_added, next_id);
-    for (const auto& group : arrived_squadrons)
-        if (std::find(group.members.begin(), group.members.end(), leader_id) != group.members.end())
-            for (const auto member : group.members) phase.craft_prep_->craft_squadron.value()[member] = group.container;
+    for (const auto& arrived : arrived_squadrons)
+        if (std::find(arrived.members.begin(), arrived.members.end(), leader_id) != arrived.members.end())
+            for (const auto member : arrived.members) phase.craft_prep_->craft_squadron.value()[member] = arrived.container;
     return core::Result<RejectReason>::success(RejectReason::none);
     }
 
@@ -549,6 +549,13 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_buzz_dro
     const auto& ability = profile->abilities[*index];
     const auto& buzz = *ability.buzz;
     auto& slot = source.abilities->slots[*index];
+    // WAB-77: a craft's own entry works only for a craft that is its own whole container (a solo ship: its mind's
+    // roster is itself alone, WHE-SQ-02); a squadron's team container acts for its members instead (AB-60).
+    if (ability.solo_only) {
+        const auto own = minds.find(unit_id);
+        if (own == minds.end() || own->second.roster.size() != 1 || own->second.roster.front() != unit_id)
+            return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
+    }
     if (payload.action == AbilityAction::deactivate) return core::Result<RejectReason>::success(RejectReason::none);
     if (payload.action == AbilityAction::autofire_on || payload.action == AbilityAction::autofire_off) {
         if (!ability.supports_autofire) return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
@@ -674,7 +681,7 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ion_cann
         for (auto* slot : craft) slot->active = true;
         // AB-63: the squadron attacks the target.
         const CommandPayload attack = AttackPayload{payload.target, hardpoint};
-        container.state.order = order_for(attack, command_tick);
+        replace_order(container, attack, command_tick);
         apply_squadron_order(minds.at(mind->first), attack, container.state.position, squadron_table);
         break;
     }

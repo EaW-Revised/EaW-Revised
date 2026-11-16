@@ -54,6 +54,13 @@ public:
         if (!forced) effects.refresh();
     }
 
+    // #5922: the story click of a control whose own button action raises it (a production card, a queue slot, the help
+    // button: they are not built through the generic press path). The same rule as `press`: a human press raises it when a
+    // plot listens, a forced press (FORCE_CLICK_GUI, while the requests are drained) raises none (ControlStateRules).
+    void raise_from_action(const ControlStates& states, const std::string& name, Effects& effects) const {
+        if (states.rules().raises_story_click(busy_) && effects.story_listens(name)) effects.raise_click(name);
+    }
+
     // Why a request was not pressed. The caller reports each (component, reason) pair once.
     struct Drop {
         std::string component, reason;

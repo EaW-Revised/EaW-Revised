@@ -1,11 +1,14 @@
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
+#include "ability_fixture.hpp"
 #include "eawr/checkpoint/game.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/platform/live_game_session.hpp"
 #include "eawr/sim/galactic/offer_pool.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 #include "eawr/sim/galactic/observer.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "../../src/campaign/checkpoint_owner_internal.hpp"
 #include "../../src/platform/galactic/live_save_transport.hpp"
 #include "../../src/sim/galactic/session_impl.hpp"
@@ -358,6 +361,216 @@ cp::GameLoadOptions scripted_options() {
     options.galactic_scripts = [] { return eawr::core::Result<cp::GameLoadOptions::GalacticSchedulers>::success(
         {gc_scheduler(1), gc_scheduler(2)}); };
     options.configure_galactic = configure_gc; return options;
+}
+struct ObjectCheckpointEngine final : auth::GalacticObjectScriptEngine {
+    eawr::core::Result<auth::ServiceReport> service(const eawr::sim::PartitionExecutor& executor,
+        galactic::GalacticSession& world, auth::ScriptScheduler& scripts) override {
+        if (auto set = scripts.set_galactic_frame(world.clock().galactic_frame); !set)
+            return eawr::core::Result<auth::ServiceReport>::failure(set.error());
+        auth::ServiceOptions options; options.time_tick = world.clock().galactic_frame;
+        return scripts.service(executor, options);
+    }
+};
+struct NoObjectEffectsState final : auth::ImmediateEffectState {
+    std::unique_ptr<auth::ImmediateEffectState> clone() const override { return std::make_unique<NoObjectEffectsState>(); }
+    eawr::core::Result<auth::ValueList> apply(std::string_view, const auth::ValueList&) override {
+        eawr::core::Diagnostic diagnostic; diagnostic.code = "test.unexpected-effect"; diagnostic.message = "fixture has no effects";
+        return eawr::core::Result<auth::ValueList>::failure(std::move(diagnostic));
+    }
+    eawr::core::Result<auth::ValueList> query(std::string_view, const auth::ValueList&) const override {
+        eawr::core::Diagnostic diagnostic; diagnostic.code = "test.unexpected-query"; diagnostic.message = "fixture has no queries";
+        return eawr::core::Result<auth::ValueList>::failure(std::move(diagnostic));
+    }
+};
+struct NoObjectEffectsHost final : auth::ImmediateEffectHost {
+    eawr::core::Result<std::unique_ptr<auth::ImmediateEffectState>> capture() const override {
+        return eawr::core::Result<std::unique_ptr<auth::ImmediateEffectState>>::success(std::make_unique<NoObjectEffectsState>());
+    }
+    eawr::core::Result<void> publish(std::unique_ptr<auth::ImmediateEffectState>) override {
+        return eawr::core::Result<void>::success();
+    }
+};
+void object_script_checkpoint() {
+    auto config = setup(); config.seats.push_back({{99}, config.players.front().player_id, galactic::SeatKind::script, 0, true, 0});
+    const auto identities = cp::game_identities(config); const eawr::sim::InlineExecutor executor;
+    auto game = take(campaign::GameSession::create(config));
+    check(game.install_galactic_scripts(gc_scheduler(1), gc_scheduler(2), {}, gc_scheduler(3)));
+    check(configure_gc(*game.galactic_scripts()));
+    check(game.galactic_scripts()->set_object_engine(std::make_shared<ObjectCheckpointEngine>()));
+    for (int tick = 0; tick < 3; ++tick) (void)take(game.step(executor));
+    const auto saved = take(cp::save_game_checkpoint(game, identities));
+    auto options = scripted_options();
+    options.prepare_galactic = [] {
+        using Prepared = cp::GameLoadOptions::PreparedGalacticScripts;
+        Prepared out{{gc_scheduler(1), gc_scheduler(2)}, [](campaign::GameSession& session) {
+            return session.galactic_scripts()->set_object_engine(std::make_shared<ObjectCheckpointEngine>());
+        }, {}, {}, {}};
+        out.object_scheduler.emplace(gc_scheduler(3));
+        return eawr::core::Result<Prepared>::success(std::move(out));
+    };
+    auto restored = take(cp::load_game_checkpoint(saved, identities, options, executor));
+    expect(restored.session.galactic_scripts()->object_scheduler() != nullptr,
+        "checkpoint restores the distinct object scheduler");
+    expect(restored.session.state_sha256() == game.state_sha256()
+        && take(cp::save_game_checkpoint(restored.session, identities)) == saved,
+        "object scheduler checkpoint round-trips the graph and barrier hash");
+    expect(take(game.step(executor)).state_hash.get() == take(restored.session.step(executor)).state_hash.get(),
+        "object scripts continue equally after checkpoint restore");
+}
+void attached_object_script_checkpoint() {
+    auto config = ability_fixture::base_setup();
+    config.debug_commands = true;
+    config.seats.push_back({{99}, config.players.front().player_id, galactic::SeatKind::script, 0, true, 0});
+    const auto directory = std::filesystem::temp_directory_path() / "eawr-object-checkpoint" / "Data";
+    std::filesystem::create_directories(directory / "scripts" / "gameobject");
+    std::filesystem::create_directories(directory / "XML");
+    {
+        std::ofstream output(directory / "scripts" / "gameobject" / "probe.lua", std::ios::binary);
+        output << "function Base_Definitions() ServiceRate = 0 end\n"
+                  "function main() Count = 0; while true do Count = Count + 1; coroutine.yield(true) end end\n";
+    }
+    const auto write_xml = [&](std::string_view name, std::string_view text) {
+        std::ofstream output(directory / "XML" / name, std::ios::binary);
+        output << text;
+    };
+    write_xml("GameObjectFiles.xml", "<Game_Object_Files><File>Objects.xml</File></Game_Object_Files>");
+    write_xml("HardpointDataFiles.xml", "<Hard_Point_Files/>");
+    write_xml("FactionFiles.xml", "<Faction_Files/>");
+    write_xml("CampaignFiles.xml", "<Campaign_Files/>");
+    write_xml("SFXEventFiles.xml", "<SFXEvent_Files/>");
+    write_xml("TradeRouteFiles.xml", "<Trade_Route_Files/>");
+    write_xml("Objects.xml", R"XML(<Types>
+        <SpaceUnit Name="BaseProbe"><Behavior>DUMMY_STARSHIP</Behavior><Lua_Script>Probe</Lua_Script></SpaceUnit>
+        <SpaceUnit Name="ScriptedProbe"><Variant_Of_Existing_Type>BaseProbe</Variant_Of_Existing_Type></SpaceUnit>
+        </Types>)XML");
+    eawr::vfs::MountSpec mount; mount.layer_id = "object-checkpoint"; mount.data_root = directory;
+    const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+    const auto catalog = take(eawr::data::load_catalog(files, eawr::data::Profile::foc));
+    const std::vector<campaign::FleetTypeBinding> types{{1000, "ScriptedProbe"}};
+    const auto content = take(campaign::load_world_object_scripts(files, catalog.catalog, types));
+    expect(content->types().contains(1000), "stock-like variant inherits its authored Lua_Script");
+    auth::SessionConfig script_config; script_config.seed = 913; script_config.galactic_clock = true;
+    const campaign::GalacticObjectEffectsFactory effects = [](galactic::GalacticSession&,
+            const eawr::sim::PartitionExecutor&) {
+        return eawr::core::Result<std::shared_ptr<auth::ImmediateEffectHost>>::success(std::make_shared<NoObjectEffectsHost>());
+    };
+    const auto no_ai = [&] { return take(auth::ScriptScheduler::create(script_config, {})); };
+    const auto identities = cp::game_identities(config);
+    {
+        const eawr::sim::InlineExecutor executor;
+        auto world_only = take(campaign::GameSession::create(config));
+        check(campaign::install_world_object_scripts(world_only, content, script_config, {},
+            std::make_shared<campaign::GalacticStoryLink>(), effects));
+        (void)take(world_only.step(executor));
+        expect(world_only.galactic_scripts() && world_only.galactic_scripts()->object_scheduler()
+            && world_only.galactic_scripts()->object_scheduler()->object_scripts().size() == config.census->objects.size(),
+            "world setup creates and services object scripts with no existing AI or story scheduler");
+    }
+    std::string reference_hash;
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto game = take(campaign::GameSession::create(config));
+        check(game.install_galactic_scripts(no_ai(), gc_scheduler(2)));
+        check(configure_gc(*game.galactic_scripts()));
+        const auto link = std::make_shared<campaign::GalacticStoryLink>();
+        check(campaign::install_world_object_scripts(game, content, script_config, {}, link, effects));
+        for (int tick = 0; tick < 3; ++tick) (void)take(game.step(executor));
+        const auto* before = game.galactic_scripts()->object_scheduler();
+        expect(before && before->object_scripts().size() == config.census->objects.size(),
+            "authored Lua_Script attaches to the real type-bound world actors");
+        const auto saved = take(cp::save_game_checkpoint(game, identities));
+        auto options = scripted_options();
+        options.prepare_galactic = [&] {
+            using Prepared = cp::GameLoadOptions::PreparedGalacticScripts;
+            Prepared out{{no_ai(), gc_scheduler(2)}, {}, {}, {}, {}};
+            const auto restored_link = std::make_shared<campaign::GalacticStoryLink>();
+            auto scheduler = take(content->create_scheduler(script_config));
+            check(campaign::register_galactic_object_bindings(scheduler, {}, restored_link));
+            out.object_scheduler.emplace(std::move(scheduler));
+            out.configure_world_scripts = [content, restored_link, effects](campaign::GameSession& session) {
+                return campaign::configure_world_object_scripts(session, content, restored_link, effects);
+            };
+            return eawr::core::Result<Prepared>::success(std::move(out));
+        };
+        auto restored = take(cp::load_game_checkpoint(saved, identities, options, executor));
+        const auto* after = restored.session.galactic_scripts()->object_scheduler();
+        expect(after && before && after->object_scripts() == before->object_scripts(),
+            "prepared checkpoint restore retains the type-bound object attachments");
+        expect(take(cp::save_game_checkpoint(restored.session, identities)) == saved,
+            "type-bound object script checkpoint round-trips");
+        const auto live_hash = take(game.step(executor)).state_hash.get();
+        expect(live_hash == take(restored.session.step(executor)).state_hash.get(),
+            "type-bound object scripts continue identically after restore");
+        if (reference_hash.empty()) reference_hash = live_hash;
+        expect(live_hash == reference_hash, "type-bound object restore is equal across worker counts");
+    }
+}
+// The data's base library defines TestValid in Lua. Its load must succeed, and a module that does fail to load is
+// published with the step (one line for many instances) instead of leaving every script silently dead.
+void object_script_load_errors_are_published() {
+    for (const bool broken : {false, true}) {
+        auto config = ability_fixture::base_setup();
+        config.debug_commands = true;
+        config.seats.push_back({{99}, config.players.front().player_id, galactic::SeatKind::script, 0, true, 0});
+        const auto directory = std::filesystem::temp_directory_path() / (broken ? "eawr-object-diagnostics-broken" : "eawr-object-diagnostics") / "Data";
+        std::filesystem::create_directories(directory / "scripts" / "gameobject");
+        std::filesystem::create_directories(directory / "XML");
+        {
+            std::ofstream output(directory / "scripts" / "gameobject" / "probe.lua", std::ios::binary);
+            output << "function TestValid(wrapper)\n"
+                      "    if wrapper == nil then return false end\n"
+                      "    if wrapper.Is_Valid == nil then return false end\n"
+                      "    return wrapper.Is_Valid()\n"
+                      "end\n"
+                      "function Base_Definitions() ServiceRate = 0 end\n"
+                      "function main() while true do coroutine.yield(true) end end\n";
+            if (broken) output << "function Find_Object_Type() end\n";
+        }
+        const auto write_xml = [&](std::string_view name, std::string_view text) {
+            std::ofstream output(directory / "XML" / name, std::ios::binary);
+            output << text;
+        };
+        write_xml("GameObjectFiles.xml", "<Game_Object_Files><File>Objects.xml</File></Game_Object_Files>");
+        write_xml("HardpointDataFiles.xml", "<Hard_Point_Files/>");
+        write_xml("FactionFiles.xml", "<Faction_Files/>");
+        write_xml("CampaignFiles.xml", "<Campaign_Files/>");
+        write_xml("SFXEventFiles.xml", "<SFXEvent_Files/>");
+        write_xml("TradeRouteFiles.xml", "<Trade_Route_Files/>");
+        write_xml("Objects.xml", R"XML(<Types>
+            <SpaceUnit Name="ScriptedProbe"><Behavior>DUMMY_STARSHIP</Behavior><Lua_Script>Probe</Lua_Script></SpaceUnit>
+            </Types>)XML");
+        eawr::vfs::MountSpec mount; mount.layer_id = "object-diagnostics"; mount.data_root = directory;
+        const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+        const auto catalog = take(eawr::data::load_catalog(files, eawr::data::Profile::foc));
+        const std::vector<campaign::FleetTypeBinding> types{{1000, "ScriptedProbe"}};
+        const auto content = take(campaign::load_world_object_scripts(files, catalog.catalog, types));
+        auth::SessionConfig script_config; script_config.seed = 913; script_config.galactic_clock = true;
+        const campaign::GalacticObjectEffectsFactory effects = [](galactic::GalacticSession&,
+                const eawr::sim::PartitionExecutor&) {
+            return eawr::core::Result<std::shared_ptr<auth::ImmediateEffectHost>>::success(std::make_shared<NoObjectEffectsHost>());
+        };
+        const eawr::sim::InlineExecutor executor;
+        auto game = take(campaign::GameSession::create(config));
+        check(campaign::install_world_object_scripts(game, content, script_config, {},
+            std::make_shared<campaign::GalacticStoryLink>(), effects));
+        std::vector<std::string> published;
+        for (int tick = 0; tick < 3; ++tick) {
+            const auto stepped = take(game.step(executor));
+            for (const auto& note : stepped.diagnostics)
+                if (note.message.starts_with("object script: ")) published.push_back(note.message);
+        }
+        const auto* scheduler = game.galactic_scripts() ? game.galactic_scripts()->object_scheduler() : nullptr;
+        const auto attached = config.census->objects.size();
+        if (broken) {
+            expect(published.size() == 1 && published.front().find("protected binding") != std::string::npos
+                && published.front().find("(" + std::to_string(attached) + " instances)") != std::string::npos,
+                "a script module that fails to load is published once with its instance count");
+            expect(scheduler && scheduler->instances().empty(), "no instance runs from the module that failed to load");
+        } else {
+            expect(published.empty(), "a library defining TestValid in Lua loads without a published error");
+            expect(scheduler && scheduler->instances().size() == attached, "every attached object script is live");
+        }
+    }
 }
 void scripted_roundtrip() {
     auto config = setup(); config.seats.push_back({{99}, config.players.front().player_id, galactic::SeatKind::script, 0, true, 0});
@@ -1455,13 +1668,21 @@ void direct_child_refusals() {
     (void)take(galaxy.step(executor));
     auto state = take(galaxy.save_checkpoint_state());
     archive::Reader in(state); Bytes world; std::uint32_t owner_version{};
-    in(owner_version, world); expect(owner_version == 6, "crafted refusal fixture reads the current owner format");
+    in(owner_version, world); expect(owner_version == 7, "crafted refusal fixture reads the current owner format");
     const auto offset = state.size() - in.remaining();
     state[offset] = 2; // parent tick now ahead of the galaxy clock without a child
     auto fresh = take(campaign::GameSession::create(config));
     const auto result = fresh.load_checkpoint_state(state);
     expect(!result && result.error().message == "inconsistent direct game barrier",
         "galaxy-only direct import refuses a lagging world clock");
+    // legacy #236: an owner blob in the previous format (6) is refused, and the message names the format found and expected.
+    auto previous = take(galaxy.save_checkpoint_state());
+    expect(previous.size() > 4 && previous[0] == 7 && previous[1] == 0 && previous[2] == 0 && previous[3] == 0, "the owner blob starts with its format, little-endian");
+    previous[0] = 6;
+    auto refusing = take(campaign::GameSession::create(config));
+    const auto refused = refusing.load_checkpoint_state(previous);
+    expect(!refused && refused.error().message.find("unsupported campaign owner format 6") != std::string::npos
+        && refused.error().message.find("expected 7") != std::string::npos, "an owner blob in format 6 is refused with both formats named");
 }
 
 auth::ScriptScheduler child_scheduler(const campaign::ConflictRecord& conflict) {
@@ -2175,7 +2396,7 @@ int case_galactic_game_checkpoint_tests(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--pending-conflict") {
             pending_conflict_resave(); return failures == 0 ? 0 : 1;
         }
-        pending_actor_checkpoint_roundtrip(); mod_description_contracts(); resume_metadata_contracts(); nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); owner_journal_refusal(); owner_journal_after_rebase(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
+        pending_actor_checkpoint_roundtrip(); mod_description_contracts(); resume_metadata_contracts(); nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); owner_journal_refusal(); owner_journal_after_rebase(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); object_script_checkpoint(); attached_object_script_checkpoint(); object_script_load_errors_are_published(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
         admission_and_fixups(); prebattle_autosave_admission(); refusals(); child_roundtrip(); observer_load_clock(); child_return_and_future_input();
         scripted_child_barriers(); child_casualty_return();
         if (argc != 2) throw std::runtime_error("expected corpus directory");

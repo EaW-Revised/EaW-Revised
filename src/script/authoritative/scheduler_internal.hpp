@@ -53,6 +53,7 @@ struct Staging {
     std::vector<ScriptEvent> posts;
     std::vector<ScriptEvent> timers;
     std::vector<ScriptDiagnostic> diagnostics;
+    std::vector<ScriptDiagnostic> log; // print output; rolled back with the call that wrote it
 };
 
 // Host-side state a failed script call must not leave behind.
@@ -64,8 +65,9 @@ struct Mark {
     std::uint64_t command_sequence{};
     std::uint64_t post_sequence{};
     std::uint64_t timer_sequence{};
-    std::shared_ptr<ImmediateEffectState> immediate;
+    std::size_t immediate_actions{};
     bool immediate_changed{};
+    std::size_t log{};
 };
 
 struct Shared;
@@ -79,6 +81,13 @@ struct Instance {
     bool exit_requested{};
     InstanceOutcome outcome{InstanceOutcome::running};
     bool rolled_back{}; // invocation-local; not saved or hashed
+    bool thread_failed{}; // a thread ended in an uncaught error this service (ServiceReport::thread_failures); not saved
+    // Repeats of one failing call site, for the diagnostic flood guard of schedulers that keep an instance after an
+    // error; diagnostics are outside authoritative state, so this is neither saved nor hashed.
+    std::map<std::string, std::uint32_t> failure_sites;
+    // The same flood guard for `print` lines (first 3 of a line, then each power of two, at most 256 distinct lines);
+    // diagnostic only, neither saved nor hashed.
+    std::map<std::string, std::uint32_t> print_sites;
     std::optional<std::size_t> fault_diagnostic; // service-local first fault, not a diagnostic-only report
     bool tracking_initial_syntax{};
     std::string initial_syntax_message;
@@ -107,9 +116,19 @@ struct Instance {
 
     std::vector<ScriptEvent> inbox;
     Staging staging;
+    // The working native shadow of this service. It is the chain's shadow itself (`immediate_base`, never written)
+    // until the first action; that action takes one private copy, and every later action applies to it in place.
+    // `immediate_log` keeps the admitted actions in order, so a rollback or a refused action rebuilds the working
+    // state from the base by replaying the first n of them. A service of k actions is O(k): no copy per action.
     std::shared_ptr<ImmediateEffectState> immediate;
+    std::shared_ptr<ImmediateEffectState> immediate_base;
     bool immediate_changed{};
+    struct ImmediateAction { std::string action; ValueList arguments; };
+    std::vector<ImmediateAction> immediate_log;
 
+    void begin_immediate(std::shared_ptr<ImmediateEffectState> shadow);
+    void end_immediate() noexcept;
+    void rebuild_immediate(std::size_t actions);
     [[nodiscard]] Mark mark() const noexcept;
     void rollback(const Mark& mark);
 };
@@ -179,6 +198,7 @@ namespace eawr::script::authoritative {
 struct ScriptScheduler::Impl {
     std::unique_ptr<detail::Shared> shared;
     std::map<std::uint64_t, std::unique_ptr<detail::Instance>> instances;
+    std::uint64_t instance_revision{}; // bumped whenever the set of instance ids changes (create, remove, finish, load); never saved or hashed
     std::map<EventKey, ScriptEvent> pending;
     std::map<std::uint64_t, ObjectScript> objects; // instance order, includes completed attachments
     std::set<std::uint64_t> retired; // GC deterministic fault tombstones; never live simultaneously

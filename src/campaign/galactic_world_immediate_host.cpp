@@ -35,6 +35,7 @@ struct WorldBatch final : auth::ImmediateEffectState, GalacticWorldBatch {
     std::vector<std::pair<gc::NativeEffectKind, ga::economic_replay::Bytes>> effects;
     std::vector<gc::GalacticSession::CreditNotification> credits;
     std::vector<std::function<core::Result<void>(gc::GalacticSession&)>> publish_writes;
+    mutable std::uint64_t scanned{};
     WorldBatch(std::shared_ptr<const Shared> owner, gc::GalacticSession::NativeActionShadow shadow)
         : shared(std::move(owner)), batch(std::move(shadow)) {}
 
@@ -42,10 +43,18 @@ struct WorldBatch final : auth::ImmediateEffectState, GalacticWorldBatch {
     const gc::GalacticSession::NativeActionShadow& shadow() const noexcept override { return batch; }
     const gc::GalacticSession& world() const noexcept override { return *shared->world; }
     void on_publish(std::function<core::Result<void>(gc::GalacticSession&)> write) override { publish_writes.push_back(std::move(write)); }
+    void note_query_work(std::uint64_t records) const noexcept override { scanned += records; }
+    std::uint64_t take_query_work() noexcept override { return std::exchange(scanned, 0); }
     std::unique_ptr<auth::ImmediateEffectState> clone() const override { return std::make_unique<WorldBatch>(*this); }
+    // The rows a clone shares and then copies on its first write are those this batch already changed, beside the
+    // staged effects, notifications and publication writes it carries.
+    std::uint64_t clone_units() const noexcept override {
+        return 1 + 4 * (effects.size() + credits.size() + publish_writes.size() + batch.actor_changes().size());
+    }
 
     // The actor as this batch sees it: an existing actor of the world, or one the batch created.
     const gc::CensusObject* actor(std::uint64_t id) const {
+        if (batch.script_removed(id)) return nullptr;
         if (const auto* row = batch.actor(id)) return row;
         return batch.created_object(id);
     }
@@ -65,11 +74,32 @@ struct WorldBatch final : auth::ImmediateEffectState, GalacticWorldBatch {
         const auto* chosen = shared->rules.executor ? shared->rules.executor() : nullptr;
         const auto& executor = chosen ? *chosen : static_cast<const sim::PartitionExecutor&>(inline_executor);
         const auto& placement = shared->rules.placement;
+        const auto first_birth = batch.actor_changes().size();
+        // The creation writes into this batch before the refusals below can look at it; a refused spawn gives the batch back
+        // as it was (the shadow is copy-on-write, so the copy costs nothing until the creation writes).
+        const auto before_creation = batch;
         auto made = batch.create_force({request.player, request.target, request.type, {}}, [&](const auto& view, auto frontier) {
             return placement(request, view, frontier);
         }, executor);
         if (!made) return Values::failure(made.error());
-        effects.emplace_back(gc::NativeEffectKind::magic, ga::economic_replay::magic(request, made.value()));
+        // The AI reads these births' facts when the batch publishes; a type it cannot represent would fail that handler after
+        // the world began to change, so the spawn is refused here, on this private copy, as an error of the script.
+        if (shared->rules.birth_probe) {
+            const auto base = shared->world->snapshot();
+            if (auto probed = shared->rules.birth_probe(*base, batch, batch.actor_changes().subspan(first_birth), executor); !probed) {
+                batch = before_creation;
+                return refused<auth::ValueList>("Spawn_Unit: the AI cannot take this creation: " + probed.error().message);
+            }
+        }
+        auto payload = ga::economic_replay::magic(request, made.value());
+        // One journal entry carries at most this many bytes; a creation that returns more objects is refused here, on the
+        // batch's private copy, instead of failing after the world began to change at publication.
+        if (payload.size() > gc::galactic_replay_max_payload) {
+            batch = before_creation;
+            return refused<auth::ValueList>("Spawn_Unit creates more objects than one journal entry can carry");
+        }
+        batch.stage_script_journal(gc::NativeEffectKind::magic, payload);
+        effects.emplace_back(gc::NativeEffectKind::magic, std::move(payload));
         if (made.value().empty()) return Values::success({});
         if (!made.value().front()) return refused<auth::ValueList>("magic identity exceeds the Lua handle range");
         return Values::success({auth::Value{std::vector<auth::Value>{object_value(made.value().front())}}});
@@ -102,8 +132,9 @@ struct WorldBatch final : auth::ImmediateEffectState, GalacticWorldBatch {
         if (!player_id || !number) return refused<auth::ValueList>("Give_Money requires a player and numeric amount");
         if (*player_id > std::numeric_limits<gc::PlayerId>::max()) return refused<auth::ValueList>("cash player exceeds identity range");
         const auto player = static_cast<gc::PlayerId>(*player_id);
-        const auto multiplier = shared->rules.credit_multipliers.find(player);
-        if (multiplier == shared->rules.credit_multipliers.end()) return refused<auth::ValueList>("cash requires the player's selected multiplier");
+        const auto& table = shared->rules.live_credit_multipliers ? *shared->rules.live_credit_multipliers : shared->rules.credit_multipliers;
+        const auto multiplier = table.find(player);
+        if (multiplier == table.end()) return refused<auth::ValueList>("cash requires the player's selected multiplier");
         auto amount = script::numeric::to_fixed(*number);
         if (!amount) return Values::failure(amount.error());
         auto actual = batch.add_credits(player, amount.value(), multiplier->second);
@@ -111,14 +142,29 @@ struct WorldBatch final : auth::ImmediateEffectState, GalacticWorldBatch {
         const auto balance = batch.credits(player);
         if (!balance) return refused<auth::ValueList>("cash names a player without an account");
         credits.push_back({gc::GalacticSession::CreditNotification::Kind::windfall, player, *balance, actual.value(), {}});
-        effects.emplace_back(gc::NativeEffectKind::cash, ga::economic_replay::cash(player, amount.value(), multiplier->second, actual.value()));
+        auto payload = ga::economic_replay::cash(player, amount.value(), multiplier->second, actual.value());
+        batch.stage_script_journal(gc::NativeEffectKind::cash, payload);
+        effects.emplace_back(gc::NativeEffectKind::cash, std::move(payload));
         return Values::success({});
     }
 
+    // The command-journal entries publication will write: the batch's journal steps and removals, and one for each AI-usage
+    // write on an actor that survives the batch.
+    std::size_t journal_entries() const {
+        std::size_t entries = batch.script_journal_entries();
+        for (const auto& change : batch.actor_changes())
+            if (!batch.script_removed(change.actor) && (change.prevent_ai_usage || change.prefer_ground)) ++entries;
+        return entries;
+    }
+
     Values apply(std::string_view action, const auth::ValueList& args) override {
-        if (action == "galactic.spawn_unit") return spawn(args);
+        // Every action may add a command-journal entry. A full journal is a refusal of this action (a script error for
+        // the caller), checked here so that publication cannot be the place a limit is first met.
+        if (journal_entries() >= shared->world->native_journal_room())
+            return refused<auth::ValueList>("the galactic command journal is full");
         if (action == "galactic.story_prevent_ai_usage") return prevent(args);
         if (action == "galactic.prefer_ground") return prefer_ground(args);
+        if (action == "galactic.spawn_unit") return spawn(args);
         if (action == "galactic.give_money") return give_money(args);
         if (const auto extension = shared->rules.verbs.find(action); extension != shared->rules.verbs.end()) return extension->second(*this, args);
         return refused<auth::ValueList>("unknown world immediate action " + std::string(action), auth::codes::missing_api);
@@ -162,13 +208,30 @@ struct WorldHost final : auth::ImmediateEffectHost {
         const auto* batch = dynamic_cast<const WorldBatch*>(state.get());
         if (!batch || batch->shared != shared) return refused<void>("world immediate publication requires its own batch");
         auto& world = *shared->world;
+        // Publication below changes the world step by step: everything a script's data can make fail is settled before
+        // the first step. The journal is that: its bound, sequence and phase order for every entry the batch will write.
+        if (!world.native_journal_can_take(batch->journal_entries()))
+            return refused<void>("the galactic command journal cannot take this batch");
+        // From here the world changes step by step. What can still fail is a violated internal invariant of the world
+        // (a commit that disagrees with its own admission, a handler without its owner): not reachable from script data.
+        // Such a failure may leave the world half published, so it is reported with the session-abort code, which the
+        // scheduler keeps terminal. Only the refusal above fails a script instance.
+        auto result = publish_steps(world, batch);
+        if (!result) {
+            auto error = result.error();
+            error.code = std::string(auth::codes::session_abort);
+            return core::Result<void>::failure(std::move(error));
+        }
+        return result;
+    }
+    static core::Result<void> publish_steps(gc::GalacticSession& world, const WorldBatch* batch) {
         // Births reach the AI as ordinary actor-change notifications (not prepared here), with the staged AI-usage writes in
         // call order among them.
         if (auto committed = world.commit_native_actions(batch->batch, false, true); !committed) return committed;
-        for (const auto& [kind, payload] : batch->effects)
+        if (!batch->batch.has_script_removals()) for (const auto& [kind, payload] : batch->effects)
             if (auto recorded = world.append_native_effect(kind, payload); !recorded) return recorded;
         for (const auto& change : batch->batch.actor_changes()) {
-            if (change.prevent_ai_usage || change.prefer_ground)
+            if (!batch->batch.script_removed(change.actor) && (change.prevent_ai_usage || change.prefer_ground))
                 if (auto saved = world.set_story_ai_usage(change.actor, change.prevent_ai_usage, change.prefer_ground); !saved) return saved;
         }
         for (const auto& notice : batch->credits)

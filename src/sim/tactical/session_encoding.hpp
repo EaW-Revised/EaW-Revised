@@ -57,6 +57,8 @@ inline constexpr std::array<std::uint8_t, 4> ion_stun_tag{'I', 'O', 'N', 'S'};
 inline constexpr std::array<std::uint8_t, 4> corrupt_tag{'C', 'R', 'P', 'T'}; // coordinator-reserved
 inline constexpr std::array<std::uint8_t, 4> asteroid_tag{'A', 'S', 'T', 'D'}; // coordinator-reserved
 inline constexpr std::array<std::uint8_t, 4> hazard_move_tag{'M', 'V', 'H', 'Z'}; // coordinator-reserved
+// MV-40: coordinator-reserved; only while a live unit's order carries a final facing.
+inline constexpr std::array<std::uint8_t, 4> final_facing_tag{'M', 'V', 'Y', 'W'};
 // EN-08: coordinator-reserved, only while a unit has a temporary engine-disable deadline.
 inline constexpr std::array<std::uint8_t, 4> engine_disable_tag{'E', 'D', 'I', 'S'};
 inline constexpr std::array<std::uint8_t, 4> nebula_tag{'N', 'E', 'B', 'C'}; // coordinator-reserved

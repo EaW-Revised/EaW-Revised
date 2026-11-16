@@ -73,6 +73,8 @@ are checked against the bytes left before anything is allocated; the whole input
 
 Native effect kind **22** (`story_ai_usage`) records a world actor ID (`u64`) and two `u8` values for the prevent and ground-preference writes: 0 means absent, 1 means false, and 2 means true. At least one write is present. These world facts enter the census state hash and seed a pool created later.
 
+Native effect kind **23** (`object_despawn`) records one live actor ID (`u64`). Replay removes the actor through the scripted world-removal path without recording a battle death.
+
 Native effect kind **21** (`identity_reservation`, GFS-A22) reserves identity frontiers before
 a player's actual admissions. Its fixed 32-byte payload contains four uint64 values: entity
 expected/next, then invasion-request expected/next. An unused pair carries expected == next.

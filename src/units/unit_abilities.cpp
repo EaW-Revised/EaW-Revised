@@ -1,3 +1,4 @@
+#include "eawr/sim/tactical/land_abilities.hpp"
 #include "eawr/units/content_selection.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/core/text.hpp"
@@ -6,6 +7,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <optional>
+#include <span>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -93,6 +96,35 @@ void keep_last_of_each_kind(std::vector<tactical::AbilityProfile>& abilities, co
     notes->push_back(std::move(note));
 }
 
+// AB-26: an ability's Mod_Multiplier and Mod_Flag rows onto its profile.
+void apply_modifiers(tactical::AbilityProfile& entry, const Ability& ability) {
+    for (const auto& modifier : ability.modifiers) {
+        auto& m = entry.modifiers;
+        const auto& name = modifier.modifier;
+        if (iequals(name, "WEAPON_DELAY_MULTIPLIER")) m.weapon_delay = modifier.value;
+        else if (iequals(name, "SCATTER_RADIUS_MULTIPLIER")) m.scatter_radius = modifier.value;
+        else if (iequals(name, "FIRE_RATE_MULTIPLIER")) m.fire_rate = modifier.value;
+        else if (iequals(name, "SHIELD_REGEN_MULTIPLIER")) m.shield_regen = modifier.value;
+        else if (iequals(name, "SHIELD_REGEN_INTERVAL_MULTIPLIER")) m.shield_regen_interval = modifier.value;
+        else if (iequals(name, "ENERGY_REGEN_MULTIPLIER")) m.energy_regen = modifier.value;
+        else if (iequals(name, "ENERGY_REGEN_INTERVAL_MULTIPLIER")) m.energy_regen_interval = modifier.value;
+        else if (iequals(name, "SPEED_MULTIPLIER")) m.speed = modifier.value;
+        else if (iequals(name, "CAUSE_DAMAGE_MULTIPLIER")) m.cause_damage = modifier.value;
+        else if (iequals(name, "TAKE_DAMAGE_MULTIPLIER")) m.take_damage = modifier.value;
+        else if (iequals(name, "TARGET_SPEED_MULTIPLIER")) m.target_speed = modifier.value;
+        else if (iequals(name, "TARGET_TAKE_DAMAGE_MULTIPLIER")) m.target_take_damage = modifier.value;
+        // AB-26: an unknown name does not discard the ability or its other modifiers.
+    }
+    // AB-26: duplicate flags use the last authored value as an inferred host choice;
+    // retail duplicate precedence is unverified (see the ability fidelity unknowns).
+    for (const auto& flag : ability.modifier_flags) {
+        auto& m = entry.modifiers;
+        if (iequals(flag.modifier, "WEAPONS_ENABLED_FLAG")) m.weapons_enabled = flag.value;
+        else if (iequals(flag.modifier, "CAN_BE_SQUASHED")) m.can_be_squashed = flag.value;
+        else if (iequals(flag.modifier, "ALLOW_TARGET_DIMINISHING_FIREPOWER")) m.allow_target_diminishing_firepower = flag.value;
+    }
+}
+
 } // namespace
 
 bool runs_defend_script(const UnitType& type) noexcept {
@@ -124,6 +156,12 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
             return Result::failure(failure("Stealth_Detection_Time must be in [0, 3600] seconds (WST-09)"));
         detection_frames = frames(constant.value);
     }
+    // WAB-77: a craft that some squadron lists as a member never holds its own buzz entry (AB-60); only a craft
+    // no squadron lists can fly alone and be its own container (WHE-SQ-02).
+    std::vector<tactical::TypeId> squadron_member_craft;
+    for (const auto& unit : tables.units)
+        for (const auto& member : unit.members) squadron_member_craft.push_back(assets::object_type_crc(member.craft));
+    std::sort(squadron_member_craft.begin(), squadron_member_craft.end());
     // One type's rows, built whole before they are added (#4589: a type that fails adds nothing).
     const auto build_unit = [&](const UnitType& unit) -> std::optional<core::Diagnostic> {
         // AB-15: a squadron's own Unit_Abilities_Data is not the one that acts; its craft's is.
@@ -194,6 +232,7 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 profile.gravity_well_hardpoints.push_back(static_cast<std::uint32_t>(index));
         }
         for (const auto& ability : unit.abilities) {
+            if (tables.domain == tactical::BattleDomain::land) continue; // WLAB-01: land rows go through land_ability_table()
             if (allowed != nullptr && !allowed(unit.id, ability.type)) continue;
             if (unit.ability_team_dispatch && ability.active_by_default
                 && tactical::ability_kind(ability.type) == tactical::AbilityKind::interdict) {
@@ -216,10 +255,14 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
             }
             const auto kind = tactical::ability_kind(ability.type);
             if (kind == tactical::AbilityKind::none) continue; // AB-03: not modelled
-            // WAB-70: a squadron's buzz droids belong to its team container (AB-60), not each craft.
-            if (kind == tactical::AbilityKind::buzz_droids && (unit.kind == UnitKind::craft || !unit.buzz_droids)) continue;
+            // WAB-70: a squadron's buzz droids belong to its team container (AB-60), not each of its craft. A craft
+            // no squadron lists that authors its own nested data keeps a solo-only entry (WAB-77, WHE-SQ-02).
+            const bool listed_member = unit.kind == UnitKind::craft
+                && std::binary_search(squadron_member_craft.begin(), squadron_member_craft.end(), assets::object_type_crc(unit.id));
+            if (kind == tactical::AbilityKind::buzz_droids && (!unit.buzz_droids || listed_member)) continue;
             tactical::AbilityProfile entry;
             entry.kind = kind;
+            entry.solo_only = kind == tactical::AbilityKind::buzz_droids && unit.kind == UnitKind::craft;
             entry.market_purchase_required = ability.market_purchase_required;
             entry.gui_activated_ability_name = ability.gui_activated_ability_name;
             // WHD-01: a surviving point of the type, not a named beam bone.
@@ -280,7 +323,18 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 entry.lure = std::move(lure);
             }
             if (kind == tactical::AbilityKind::replenish_wingmen) {
-                if (unit.replenish_team.empty()) return failure(unit.id + " replenishment requires a team (WHE-63)");
+                if (unit.replenish_team.empty()) {
+                    // WHE-79 (legacy #5704): retail has no load check for REPLENISH_WINGMEN; an activation with no
+                    // authored team composition simply fails. A lenient load drops the row and keeps the type.
+                    if (policy == ContentErrors::strict) return failure(unit.id + " replenishment requires a team (WHE-63)");
+                    if (skipped != nullptr) {
+                        auto warning = failure("unit '" + unit.id + "' ability '" + ability.type
+                            + "' authors no Create_Team_Type: the row is inert and was dropped (WHE-79)");
+                        warning.severity = core::Severity::warning;
+                        skipped->push_back(std::move(warning));
+                    }
+                    continue;
+                }
                 entry.replenish_team = assets::object_type_crc(unit.replenish_team);
                 entry.replenish_particle = ability.replenish_particle;
             }
@@ -425,38 +479,21 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 entry.expiration_frames = handler->defence_duration_frames;
                 entry.recharge_at_activation = true;
             }
-            for (const auto& modifier : ability.modifiers) {
-                auto& m = entry.modifiers;
-                const auto& name = modifier.modifier;
-                if (iequals(name, "WEAPON_DELAY_MULTIPLIER")) m.weapon_delay = modifier.value;
-                else if (iequals(name, "SCATTER_RADIUS_MULTIPLIER")) m.scatter_radius = modifier.value;
-                else if (iequals(name, "FIRE_RATE_MULTIPLIER")) m.fire_rate = modifier.value;
-                else if (iequals(name, "SHIELD_REGEN_MULTIPLIER")) m.shield_regen = modifier.value;
-                else if (iequals(name, "SHIELD_REGEN_INTERVAL_MULTIPLIER")) m.shield_regen_interval = modifier.value;
-                else if (iequals(name, "ENERGY_REGEN_MULTIPLIER")) m.energy_regen = modifier.value;
-                else if (iequals(name, "ENERGY_REGEN_INTERVAL_MULTIPLIER")) m.energy_regen_interval = modifier.value;
-                else if (iequals(name, "SPEED_MULTIPLIER")) m.speed = modifier.value;
-                else if (iequals(name, "CAUSE_DAMAGE_MULTIPLIER")) m.cause_damage = modifier.value;
-                else if (iequals(name, "TAKE_DAMAGE_MULTIPLIER")) m.take_damage = modifier.value;
-                else if (iequals(name, "TARGET_SPEED_MULTIPLIER")) m.target_speed = modifier.value;
-                else if (iequals(name, "TARGET_TAKE_DAMAGE_MULTIPLIER")) m.target_take_damage = modifier.value;
-                // AB-26: an unknown name does not discard the ability or its other modifiers.
-            }
-            // AB-26: duplicate flags use the last authored value as an inferred host choice;
-            // retail duplicate precedence is unverified (see the ability fidelity unknowns).
-            for (const auto& flag : ability.modifier_flags) {
-                auto& m = entry.modifiers;
-                if (iequals(flag.modifier, "WEAPONS_ENABLED_FLAG")) m.weapons_enabled = flag.value;
-                else if (iequals(flag.modifier, "CAN_BE_SQUASHED")) m.can_be_squashed = flag.value;
-                else if (iequals(flag.modifier, "ALLOW_TARGET_DIMINISHING_FIREPOWER")) m.allow_target_diminishing_firepower = flag.value;
-            }
+            apply_modifiers(entry, ability);
             // WSD-01 (#5696): retail's SELF_DESTRUCT behaviour refuses to start without an authored Expiration_Seconds
             // above 0 (a company's bare stub row), so such a row is inert: drop the row, load the type.
+            // BARR-05 (legacy #5704): a bare BARRAGE row loads in retail and, once activated, runs without a time
+            // limit. The remake has no unlimited barrage, so a lenient load drops the row and keeps the type: a known
+            // deviation (the type loses its barrage), not an inert row.
             if (policy != ContentErrors::strict && entry.expiration_frames == 0
-                && kind == tactical::AbilityKind::self_destruct) {
+                && (kind == tactical::AbilityKind::self_destruct || kind == tactical::AbilityKind::barrage)) {
                 if (skipped != nullptr) {
+                    const bool barrage = kind == tactical::AbilityKind::barrage;
                     auto warning = failure("unit '" + unit.id + "' ability '" + ability.type
-                        + "' authors no Expiration_Seconds above 0: the row is inert and was dropped (WSD-01)");
+                        + "' authors no Expiration_Seconds above 0: "
+                        + (barrage ? "retail runs it without a time limit, the remake has no unlimited barrage, "
+                                     "so the row was dropped and the type keeps its other abilities (BARR-05)"
+                                   : "the row is inert and was dropped (WSD-01)"));
                     warning.severity = core::Severity::warning;
                     skipped->push_back(std::move(warning));
                 }
@@ -465,6 +502,9 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
             profile.abilities.push_back(entry);
         }
         keep_last_of_each_kind(profile.abilities, unit.id, skipped);
+        // WAB-77: the solo-only entry goes last, so the other entries keep their indices.
+        std::stable_partition(profile.abilities.begin(), profile.abilities.end(),
+            [](const auto& entry) { return !entry.solo_only; });
         if (profile.abilities.empty() && profile.special.empty() && !profile.force_sensitive
             && profile.income_defaults.empty() && profile.default_member_abilities.empty()) return std::nullopt;
         // AB-41: the DEFEND stand-in of the PowerToShields object script, for a type with DEFEND.
@@ -552,6 +592,102 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
     }
     auto valid = tactical::validate_abilities(table);
     if (!valid) return Result::failure(failure(valid.error().message));
+    return Result::success(std::move(table));
+}
+
+// WLAB-01, WLAB-03, WLAB-09 (#3238): the land ability table. One profile per land body or company that authors a kind of
+// the 75-name vocabulary. A company's profile holds its own rows and its container's (the container's row wins a kind both
+// author); a member keeps its own. Timers follow WLAB-09. A row the shared validation refuses (a kind whose nested handler,
+// spawned object or other data this build does not bind yet) is dropped on its own with a load note, so the type loads and
+// the kind fails closed: the unit simply does not have it.
+core::Result<tactical::AbilityTable> land_ability_table(const UnitTables& tables, const ContentErrors policy,
+    std::vector<core::Diagnostic>* const skipped) {
+    using Result = core::Result<tactical::AbilityTable>;
+    if (tables.domain != tactical::BattleDomain::land) return Result::failure(failure("land_ability_table needs a land unit table"));
+    tactical::AbilityTable table;
+    const auto note = [&](std::string message) {
+        if (skipped == nullptr) return;
+        auto diagnostic = failure(std::move(message));
+        diagnostic.severity = core::Severity::warning;
+        skipped->push_back(std::move(diagnostic));
+    };
+    const auto build = [&](const std::string& owner, const std::span<const Ability> rows) -> std::optional<tactical::UnitAbilityProfile> {
+        tactical::UnitAbilityProfile profile;
+        profile.type_id = assets::object_type_crc(owner);
+        for (const auto& ability : rows) {
+            const auto kind = tactical::land_ability_kind(ability.type);
+            if (kind == tactical::AbilityKind::none) {
+                note("unit '" + owner + "' authors Unit_Ability '" + ability.authored_type
+                    + "', which is not one of the 75 ability kinds: the row is ignored (WLAB-01)");
+                continue;
+            }
+            const auto& flags = tactical::ability_kind_flags(kind);
+            tactical::AbilityProfile entry;
+            entry.kind = kind;
+            entry.team = flags.team;
+            entry.gui_activated_ability_name = ability.gui_activated_ability_name;
+            entry.supports_autofire = ability.supports_autofire;
+            entry.market_purchase_required = ability.market_purchase_required;
+            entry.targeting_max_attack_distance = ability.targeting_max_attack_distance;
+            entry.disable_movement = ability.disable_movement;
+            entry.stop_when_activated = ability.stop_when_activated;
+            // WLAB-16: JET_PACK's Effective_Radius (a negative value is unlimited); an unauthored one is read as unlimited too.
+            if (kind == tactical::AbilityKind::jet_pack) entry.effective_radius = ability.effective_radius.value_or(Fixed::from_raw(-Fixed::scale));
+            if (kind == tactical::AbilityKind::stim_pack) entry.activation_damage = ability.damage_percent_when_activated.value_or(Fixed{}); // WLAB-15
+            const auto expiration = frames(ability.expiration_seconds);
+            switch (tactical::ability_timer(kind, expiration != 0)) {
+            case tactical::AbilityTimer::none: break; // WLAB-09: DEPLOY and SWAP_WEAPONS run no timer
+            case tactical::AbilityTimer::expiration:
+                entry.expiration_frames = expiration;
+                entry.recharge_frames = frames(ability.recharge_seconds);
+                break;
+            case tactical::AbilityTimer::recharge_at_switch:
+                entry.recharge_frames = frames(ability.recharge_seconds);
+                break;
+            }
+            // WSD-01 (#5702): a positive sub-frame SELF_DESTRUCT expiration keeps one frame, as the space loader does.
+            if (kind == tactical::AbilityKind::self_destruct && entry.expiration_frames == 0
+                && ability.expiration_seconds && ability.expiration_seconds->raw() > 0) entry.expiration_frames = 1;
+            apply_modifiers(entry, ability);
+            tactical::UnitAbilityProfile single;
+            single.type_id = profile.type_id;
+            single.abilities.push_back(entry);
+            if (auto valid = tactical::validate_ability_profile(single); !valid) {
+                note("unit '" + owner + "' ability " + std::string(tactical::to_string(kind))
+                    + " needs data this build does not bind on land yet; the kind is not available: " + valid.error().message);
+                continue;
+            }
+            profile.abilities.push_back(std::move(entry));
+        }
+        keep_last_of_each_kind(profile.abilities, owner, skipped);
+        if (profile.abilities.empty()) return std::nullopt;
+        return profile;
+    };
+    for (const auto& unit : tables.units) {
+        if (unit.abilities.empty()) continue;
+        if (auto profile = build(unit.id, unit.abilities)) table.profiles.push_back(std::move(*profile));
+    }
+    for (const auto& company : tables.land_companies) {
+        std::vector<Ability> rows = company.abilities;
+        rows.insert(rows.end(), company.team_abilities.begin(), company.team_abilities.end()); // the container's row wins (keep-last)
+        if (rows.empty()) continue;
+        auto profile = build(company.id, rows);
+        if (!profile) continue;
+        // A company that is also a member body already has a profile of that type: the container's rows are the ones used.
+        const auto existing = std::find_if(table.profiles.begin(), table.profiles.end(),
+            [&](const auto& row) { return row.type_id == profile->type_id; });
+        if (existing != table.profiles.end()) {
+            if (policy == ContentErrors::strict) return Result::failure(failure("land company '" + company.id + "' shares a type with a land body"));
+            note("land company '" + company.id + "' shares a type with a land body; the company's rows are used");
+            *existing = std::move(*profile);
+        } else table.profiles.push_back(std::move(*profile));
+    }
+    std::sort(table.profiles.begin(), table.profiles.end(),
+        [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
+    for (std::size_t index = 1; index < table.profiles.size(); ++index)
+        if (table.profiles[index].type_id == table.profiles[index - 1].type_id)
+            return Result::failure(failure("two land types share type ID " + std::to_string(table.profiles[index].type_id)));
+    if (auto valid = tactical::validate_abilities(table); !valid) return Result::failure(failure(valid.error().message));
     return Result::success(std::move(table));
 }
 

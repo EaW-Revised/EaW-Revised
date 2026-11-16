@@ -483,6 +483,12 @@ void test_event_log_bounds_a_high_event_rate() {
     expect(LiveEventLog::presented(special), "WSW-33: a special weapon pulse reaches the audio consumer");
     special.kind = tactical::EventKind::special_weapon_ready;
     expect(LiveEventLog::presented(special), "WSW-34: a special weapon ready notice reaches the audio consumer");
+    tactical::Event refused;
+    refused.kind = tactical::EventKind::order_rejected;
+    refused.order = tactical::OrderKind::reinforce;
+    expect(LiveEventLog::presented(refused), "#7190: a refused reinforcement reaches the reinforcement pane");
+    refused.order = tactical::OrderKind::move;
+    expect(!LiveEventLog::presented(refused), "a refused move is not presented");
     tactical::Event sale{1, tactical::EventKind::pad_structure_sold, 2, 7, 9};
     LiveEventLog sale_log({.ticks = 100, .bytes = 4096});
     sale_log.record(tactical::TacticalSnapshot(1, {}, {}, {sale}));

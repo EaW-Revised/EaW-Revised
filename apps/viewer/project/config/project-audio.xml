@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Project-side audio rules (not FoC data; deviations from the retail mix, docs/behaviour/battle-audio.md PA-01).
+     The floor is a decibel value of the 3D distance law; it never lowers a cue and does not touch
+     Max_Instances, priority or fog silence. Each Distance_Gain_Floor_Event names an SFX event (the data
+     is the only place that marks them; a mod that renames its hyperspace events lists the new names here). -->
+<Project_Audio>
+	<Distance_Gain_Floor_Db>-9</Distance_Gain_Floor_Db>
+	<Distance_Gain_Floor_Event>Unit_Ship_Hyperspace_Enter</Distance_Gain_Floor_Event>
+	<Distance_Gain_Floor_Event>Unit_Ship_Hyperspace_Exit</Distance_Gain_Floor_Event>
+</Project_Audio>

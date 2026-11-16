@@ -5,13 +5,16 @@
 // skin and atlas directory are read through the FoC VFS as well, and with
 // EAWR_MOD_HUD_ROOTS each listed mod's.
 
+#include "eawr/assets/asset_name_resolver.hpp"
 #include "eawr/data/ui/dialog_catalog.hpp"
 #include "eawr/data/ui/dialog_script.hpp"
+#include "eawr/presentation/ui/named_picture.hpp"
 #include "eawr/presentation/ui/theme.hpp"
 
 #include "ui_test_support.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <iostream>
 #include <map>
@@ -278,6 +281,15 @@ void texture_contracts(const Fixture& fixture) {
                && corner->rectangle == assets::AtlasRectangle{1U, 2U, 14U, 12U} && corner->has_alpha,
            "an atlas slot carries its MTD rectangle");
     expect(defaults.texture("Button_Left")->origin == model::TextureOrigin::atlas, "atlas names match without case");
+    // #6621: an icon spelled ".tga" meets a sheet entry spelled ".TGA" (and the reverse) in the shared lookup.
+    {
+        const assets::MegaTexture sheet = atlas_fixture();
+        const auto upper = model::resolve_ui_texture("i_button_l.tga", &sheet, {});
+        const auto lower = model::resolve_ui_texture("I_BUTTON_M.TGA", &sheet, {});
+        expect(upper.origin == model::TextureOrigin::atlas && upper.rectangle == assets::AtlasRectangle{40U, 2U, 14U, 12U}
+                && lower.origin == model::TextureOrigin::atlas && lower.rectangle == assets::AtlasRectangle{60U, 2U, 14U, 12U},
+               "#6621: an icon name matches its atlas entry whatever the case of either spelling");
+    }
     expect(defaults.texture("Button_Right")->texture == "i_button_r.tga", "a repeated slot keeps its first texture");
     const model::ThemeTexture* scan = defaults.texture("Scanlines");
     expect(scan != nullptr && scan->origin == model::TextureOrigin::standalone
@@ -392,9 +404,9 @@ void font_contracts_720(const Fixture& fixture) {
                && combo->level == data::OverrideLevel::default_set,
            "a role the Default set lacks takes Global_Default");
     const model::ThemeFont* list = defaults.font(data::FontRole::list_box);
-    expect(list->resolved.face == "EmpireAtWar-Medium" && list->resolved.substituted
+    expect(list->resolved.face == "Arial" && list->resolved.substituted
                && list->resolved.unavailable == std::vector<std::string>{"Arial Unicode MS"},
-           "a system face this machine lacks falls to EaW-Medium (UI-F3)");
+           "a system face this machine lacks, on a machine that has Arial, is Arial (UI-F5, legacy #6721)");
 
     const model::ThemeFont* dialog_text = theme.font("EawrUi__IDD_MENU", data::FontRole::l_text);
     expect(dialog_text != nullptr && dialog_text->level == data::OverrideLevel::dialog
@@ -430,16 +442,93 @@ void standalone_contracts() {
     test::ui::write_text(tree.root / "Art" / "Textures" / "i_both.tga", "tga");
     test::ui::write_text(tree.root / "Art" / "Textures" / "i_both.dds", "dds");
     test::ui::write_text(tree.root / "Art" / "Textures" / "menu_back.jpg", "jpg");
+    test::ui::write_text(tree.root / "Art" / "Textures" / "i_wrong.dds", "dds");
+    test::ui::write_text(tree.root / "Art" / "Textures" / "i_both_ext.jpg", "jpg");
+    test::ui::write_text(tree.root / "Art" / "Textures" / "i_both_ext.dds", "dds");
     const vfs::MountSpec mount{.layer_id = "fixture", .data_root = tree.root, .active_archives = {}};
     auto mounted = vfs::Vfs::mount(std::span<const vfs::MountSpec>(&mount, 1));
     expect(static_cast<bool>(mounted), "the standalone fixture mounts");
     if (!mounted) return;
     const model::StandaloneTextures probe = model::vfs_standalone_textures(mounted.value());
     const auto found = [&](const std::string_view name) { return probe(name).value_or("none"); };
-    expect(found("i_scan.tga") == "Data/Art/Textures/i_scan.dds", "a .tga reference finds the .dds file");
-    expect(found("I_BOTH") == "Data/Art/Textures/I_BOTH.tga", "the .tga file is tried first");
-    expect(found("menu_back.jpg") == "Data/Art/Textures/menu_back.jpg", "another image file is found as written");
+    // The shared asset-name resolver (ANR-01) answers with the folded logical path.
+    expect(found("i_scan.tga") == "data/art/textures/i_scan.dds", "a .tga reference finds the .dds file");
+    expect(found("I_BOTH") == "data/art/textures/i_both.tga", "the .tga file is tried first");
+    expect(found("menu_back.jpg") == "data/art/textures/menu_back.jpg", "another image file is found as written");
+    expect(found("i_both_ext.jpg") == "data/art/textures/i_both_ext.jpg", "the authored name is tried before its siblings");
     expect(found("i_absent.tga") == "none", "a texture no file holds is not found");
+
+    // Wrong-extension fixture (#6771): a name authored as another image file finds the shipped .dds, and a miss is
+    // one EAWR-ASSET-NAME-0001 line per name however often it is asked.
+    assets::reset_name_misses();
+    expect(found("i_wrong.jpg") == "data/art/textures/i_wrong.dds", "a .jpg name finds the shipped .dds");
+    expect(found("i_wrong.TGA") == "data/art/textures/i_wrong.dds", "a .tga name finds the shipped .dds");
+    expect(assets::name_miss_lines().empty(), "a resolved name is not reported");
+    expect(found("i_gone.jpg") == "none" && found("I_GONE.jpg") == "none" && found("i_gone.jpg") == "none",
+           "a name no file holds is not found");
+    const auto lines = assets::name_miss_lines();
+    expect(lines.size() == 1U && lines.front().starts_with("EAWR-ASSET-NAME-0001 texture 'i_gone.jpg' not found")
+               && lines.front().find("ui standalone texture") != std::string::npos,
+           "one missed name is one EAWR-ASSET-NAME-0001 line that carries the site");
+    assets::reset_name_misses();
+
+    // An optional probe (the fleet cell's big_ icon variant) finds what exists and stays out of the miss report.
+    const model::StandaloneTextures quiet = model::vfs_standalone_textures(mounted.value(), false);
+    expect(quiet("i_scan.tga").value_or("none") == "data/art/textures/i_scan.dds", "a quiet probe still resolves names");
+    expect(!quiet("big_i_gone.tga").has_value() && !quiet("big_i_gone.tga").has_value(), "a quiet probe misses an absent name");
+    expect(assets::name_miss_lines().empty(), "a quiet probe's miss is not an EAWR-ASSET-NAME-0001 line");
+    assets::reset_name_misses();
+}
+
+// A 2x1 uncompressed 32-bit TGA. The texture decoder picks the format from the content, so the fixture can keep it in
+// a `.dds` file: the point is which file a name finds, not the codec.
+std::string tiny_picture() {
+    const unsigned char bytes[] = {0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 32, 0x28,
+                                   10, 20, 30, 255, 40, 50, 60, 255};
+    return std::string(reinterpret_cast<const char*>(bytes), sizeof(bytes));
+}
+
+// The main-menu overlay and the credits logos (#6771 row 5): a picture the data names by file, whatever extension
+// the data writes, with the same one-line miss report as the other standalone textures.
+void named_picture_contracts() {
+    const test::ui::TempTree tree("theme-named-picture");
+    test::ui::write_text(tree.root / "Art" / "Textures" / "menu_overlay.dds", tiny_picture());
+    test::ui::write_text(tree.root / "Art" / "Textures" / "logo_wrong.dds", tiny_picture());
+    test::ui::write_text(tree.root / "Art" / "Textures" / "broken.dds", "not an image");
+    const vfs::MountSpec mount{.layer_id = "fixture", .data_root = tree.root, .active_archives = {}};
+    auto mounted = vfs::Vfs::mount(std::span<const vfs::MountSpec>(&mount, 1));
+    expect(static_cast<bool>(mounted), "the named-picture fixture mounts");
+    if (!mounted) return;
+    assets::reset_name_misses();
+    using Case = std::pair<std::string_view, std::string_view>;
+    const std::array<Case, 5> cases{Case{"Menu_Overlay.TGA", "main menu overlay"}, Case{"menu_overlay.jpg", "main menu overlay"},
+                                    Case{"Logo_Wrong.JPG", "credits logo"}, Case{"logo_wrong.tga", "credits logo"},
+                                    Case{"logo_wrong", "credits logo"}};
+    for (const auto& [name, site] : cases) {
+        const model::NamedPicture picture = model::load_named_picture(mounted.value(), name, site);
+        expect(picture.texture.has_value() && picture.texture->width == 2U && picture.texture->height == 1U
+                   && picture.logical_path.starts_with("data/art/textures/")
+                   && picture.logical_path.ends_with(".dds"),
+               std::string(name) + " finds the shipped .dds and decodes it");
+    }
+    expect(assets::name_miss_lines().empty(), "pictures that resolve are not reported");
+
+    for (const std::string_view site : {"main menu overlay", "credits logo"}) {
+        const model::NamedPicture gone = model::load_named_picture(mounted.value(), "no_such_picture.jpg", site);
+        expect(!gone.texture && gone.logical_path.empty() && gone.problem == "no_such_picture.jpg is not in the data",
+               "a picture no file holds is not found");
+        expect(!model::load_named_picture(mounted.value(), "No_Such_Picture.JPG", site).texture, "a repeated miss stays a miss");
+    }
+    const auto lines = assets::name_miss_lines();
+    expect(lines.size() == 1U && lines.front().starts_with("EAWR-ASSET-NAME-0001 texture 'no_such_picture.jpg' not found")
+               && lines.front().find("main menu overlay") != std::string::npos,
+           "one missed name is one EAWR-ASSET-NAME-0001 line, however many screens ask");
+
+    const model::NamedPicture broken = model::load_named_picture(mounted.value(), "broken.jpg", "credits logo");
+    expect(broken.logical_path == "data/art/textures/broken.dds" && !broken.texture && !broken.problem.empty(),
+           "a file that does not decode is a problem, not a missing name");
+    expect(assets::name_miss_lines().size() == 1U, "a decode failure is not a missing-name line");
+    assets::reset_name_misses();
 }
 
 // Read-only corpus: the retail skin and atlas directory build a complete theme.
@@ -649,6 +738,7 @@ void theme_contracts() {
     variation_contracts(fixture);
     font_contracts_720(fixture);
     standalone_contracts();
+    named_picture_contracts();
     corpus_contracts();
     mod_corpus_contracts();
 }

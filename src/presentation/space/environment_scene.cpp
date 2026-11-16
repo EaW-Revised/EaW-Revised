@@ -13,6 +13,19 @@
 #include <utility>
 
 namespace eawr::presentation::space {
+
+std::optional<float> sky_object_scale(const data::EffectiveObject& object) {
+    const auto value = object.single("Scale_Factor");
+    if (!value) return 1.0F;
+    const auto parsed = data::fixed_value(value->value);
+    if (!parsed) return std::nullopt;
+    const auto scale = static_cast<float>(static_cast<double>(parsed.value().raw())
+                                          / static_cast<double>(sim::math::Fixed::scale));
+    // Zero collapses the sky and a negative value mirrors it: neither is an authored scale, so the sky is
+    // reported missing like any other malformed value (legacy #6658).
+    if (!(scale > 0.0F)) return std::nullopt;
+    return scale;
+}
 namespace {
 
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) noexcept {

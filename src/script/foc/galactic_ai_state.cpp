@@ -119,7 +119,6 @@ f::Ledger ledger(Reader& in) {
     }
     row.dead_budget = in.amount(); row.last_interval = in.amount(); row.equations_changed = in.flag();
     row.last_service_income = in.amount();
-    if (row.last_service_income < sim::math::Fixed{}) in.bad = true;
     row.tactical.switched = in.flag(); row.tactical.saved = in.amount(); row.tactical.extra_released = in.amount();
     return row;
 }

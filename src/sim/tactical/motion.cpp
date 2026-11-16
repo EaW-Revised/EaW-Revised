@@ -734,8 +734,24 @@ core::Result<MotionState> plan_face(const MotionProfile& profile, const std::uin
     if (dx.raw() == 0 && dy.raw() == 0) {
         return core::Result<MotionState>::success(state);
     }
-    const Fixed start_yaw = clamp180(yaw);
     const Fixed head = clamp180(calc.atan2_deg(dy, dx));
+    if (!calc.ok()) {
+        return core::Result<MotionState>::failure(calc.error("turn plan"));
+    }
+    auto plan = plan_face_yaw(profile, tick, position, yaw, head);
+    if (plan) plan.value().target = target;
+    return plan;
+}
+
+core::Result<MotionState> plan_face_yaw(const MotionProfile& profile, const std::uint64_t tick, const Vec3 position,
+    const Fixed yaw, const Fixed final_yaw) {
+    MotionState state;
+    if (!within_coordinates(position) || !within(profile.rate_of_turn, min_turn_raw) || tick > max_ticks) {
+        return core::Result<MotionState>::success(state);
+    }
+    Calc calc;
+    const Fixed start_yaw = clamp180(yaw);
+    const Fixed head = clamp180(final_yaw);
     const Fixed turn = calc.abs(clamp180(calc.sub(head, start_yaw)));
     const Fixed start = whole(static_cast<std::int64_t>(tick));
     // MV-20: turning in place takes the turn over the rate of turn, times the layer's slowdown.
@@ -747,7 +763,7 @@ core::Result<MotionState> plan_face(const MotionProfile& profile, const std::uin
     state.start_tick = tick;
     state.start_position = position;
     state.start_yaw = start_yaw;
-    state.target = target;
+    state.target = position;
     state.nodes.push_back({start, position, start_yaw, Fixed{}});
     state.nodes.push_back({calc.add(start, duration), position, head, Fixed{}});
     if (!calc.ok()) {
@@ -924,6 +940,21 @@ core::Result<math::Quat> yaw_rotation(const Fixed yaw) {
     }
     return math::normalize(math::Quat{Fixed{}, Fixed{}, math::sin_turn(half), math::cos_turn(half)});
 }
+
+core::Result<Fixed> planar_bearing(const Vec3 from, const Vec3 to) {
+    Calc calc;
+    const Fixed dx = calc.sub(to.x, from.x);
+    const Fixed dy = calc.sub(to.y, from.y);
+    if (calc.ok() && dx.raw() == 0 && dy.raw() == 0) {
+        return core::Result<Fixed>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
+            "bearing between points with the same XY"));
+    }
+    const Fixed head = clamp180(calc.atan2_deg(dy, dx));
+    if (!calc.ok()) return core::Result<Fixed>::failure(calc.error("bearing"));
+    return core::Result<Fixed>::success(head);
+}
+
+Fixed wrap_degrees(const Fixed degrees) noexcept { return clamp180(degrees); }
 
 std::string_view to_string(const MotionKind kind) noexcept {
     switch (kind) {

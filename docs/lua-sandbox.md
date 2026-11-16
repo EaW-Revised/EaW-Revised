@@ -5,14 +5,23 @@ Contract for the Lua sandbox (legacy EAWR-247),
 scheduler of the authoritative Lua profile. It implements the
 [multiplayer readiness](multiplayer-readiness.md) policy with the amendments listed there,
 on the soft-float VM of the [numeric profile](lua-numeric-profile.md). The
-[P0 host](lua-runtime.md) is unchanged. Policy identity `eawr-lua-sandbox-v3` (v2 meters the
-table library and `string.rep`; v3 adds metered pattern matching and the memory quota), random
+[P0 host](lua-runtime.md) is unchanged. Policy identity `eawr-lua-sandbox-v4` (v2 meters the
+table library and `string.rep`; v3 adds metered pattern matching and the memory quota; v4 accepts
+`gcinfo`, `print` and `loadstring` as described under the library surface), random
 stream identity `eawr-script-rng-v1`; changing a rule below needs a new identity, and both
 belong to session identity, to saved state and to state hashes ([persistence](lua-persistence.md)).
 v2 (2026-09-27) charges the table library's size-driven loops and `string.rep` to the budget
 (Costs, below);
 a v1 save or session is rejected. v3 (2026-09-27) charges pattern matching steps and adds the
-memory quota (Costs, Memory quota); a v2 save or session is rejected.
+memory quota (Costs, Memory quota); a v2 save or session is rejected. v4 (2026-11-12)
+turns `gcinfo` into a constant, `print` into a log line and `loadstring` into a metered text
+compiler, and removes the `newproxy` stub; a v3 save or session is rejected, and a v3 peer is
+refused at the lobby (rules domain) and at a skirmish match (sandbox domain) (legacy EAWR-6803). Every v4
+state hash also differs from v3 without any script behaving differently: the saved bytes hold the policy
+identity, the manifest digest, each instance's logical-memory baseline (the new globals count toward it), the
+protected-name list and the saved globals (`print`, `gcinfo` and `loadstring` are plain C functions now,
+`newproxy` is gone), so golden hashes of scripts that call none of those names move once, identically on
+every v4 peer.
 
 Code: `src/script/sflua/sflua_sandbox.*` (inside the VM) and
 `include/eawr/script/authoritative/` with `src/script/authoritative/` (scheduler). The
@@ -44,14 +53,52 @@ same rules apply to original scripts and mods.
   charges added (costs, below): results and error messages are upstream's, which the
   `lua_limits_patterns` and `lua_limits_foc_patterns` tests check against the P0 runtime.
   FoC runs upstream Lua 5.0.2 semantics; the metering has no retail counterpart.
-- Forbidden, faulting with `EAWR-SCRIPT-0203` and the function's name: `print`, `gcinfo`,
-  `loadstring`, `loadfile`, `dofile`, `newproxy`, `setfenv`, `string.dump`. `io`, `os`,
-  `debug`, `math` and `package` do not exist. Retail FoC also opens the fork's `security`
-library (`crcstate`, `crc`, `dumpstrtable`, `md5`); no FoC script calls it, and it is absent
-here.
+  One bound is added to the matcher: nesting deeper than 200 levels raises the ordinary
+  error `pattern too complex` (the limit later Lua versions use), because each level is a
+  C frame and the instruction budget alone would allow far more levels than a worker
+  thread's stack holds. It is a count of levels, identical on every target and thread.
+- Forbidden, faulting with `EAWR-SCRIPT-0203` and the function's name: `loadfile`, `dofile`,
+  `setfenv`, `string.dump`. `io`, `os`, `debug`, `math` and `package` do not exist, and neither
+  does `newproxy` (retail's base library has none, so a stub would make `if newproxy then` differ;
+  calling it is the ordinary "attempt to call a nil value" error). Retail FoC also opens the fork's
+  `security` library (`crcstate`, `crc`, `dumpstrtable`, `md5`); no FoC script calls it, and it is
+  absent here.
 - `collectgarbage(limit)` accepts an optional number and does nothing; any other argument is
   the upstream argument error. FoC's `PGBaseDefinitions` calls `collectgarbage(256)` when it
   loads, and no FoC script uses another form; collection is unobservable here.
+- `gcinfo()` returns the constants `0, 0`. Retail returns two numbers, the heap use in KB and the
+  collector threshold, which differ per run and per peer, so a script must never see them; two
+  numbers keep `local used, limit = gcinfo()` working, and a loop that waits for the figure to
+  drop ends at once. (A logical-memory figure would be deterministic too, but would freeze the
+  quota's internals into script-visible behaviour.)
+- `print(...)` is accepted and discards its output into the script log (`ServiceReport::log`,
+  code `EAWR-SCRIPT-0218`), never a fault. Retail's `print` calls the global `tostring` on each
+  argument and writes the tab-separated text to standard output, which the shipped game does not
+  have, so scripts cannot depend on it. Ours never calls `tostring` (that would assign object
+  identities and run `__tostring` metamethods) and creates no Lua value, so it moves no identity,
+  no logical-memory account and no saved state. Numbers, strings, booleans and nil print as
+  `tostring` shows them; tables, functions, threads and userdata (host handles included) print
+  their type name. A line is cut at 512 bytes. The call costs one budget unit plus one per byte
+  of the full text, the same on every peer. The log is outside authoritative state: never saved,
+  hashed or replayed, and the lines of a call that rolls back, or of an instance that faults, are
+  dropped. A flood guard per instance reports a line's first 3 occurrences, then each power of
+  two with its count (at most 256 distinct lines; further ones share one counter and carry no count), and at most
+  `Quotas::staged_diagnostics` lines per instance in one service; surplus lines are dropped, not faulted.
+- `loadstring(text [, name])` compiles source text and returns the function, or nil and the
+  message, as the base library does. A binary chunk (one starting with the binary signature) faults
+  `EAWR-SCRIPT-0207` before the loader sees it, as `require` does: the loader does not verify
+  bytecode, so a crafted chunk could corrupt the VM differently on each peer. The compile is
+  charged one budget unit per source byte before it runs, so the same text exhausts the budget at
+  the same instruction on every peer and worker count (a 4 MB source exhausts the default service
+  budget of 4,000,000). The chunk runs in the sandbox's globals, where forbidden names are stubs
+  and protected names are read-only, so it sees what any script sees (the compiler's constant table is
+  a sandboxed table too, so source that spells `__mode` or `__gc` as a literal does not compile:
+  `loadstring` returns nil and the `EAWR-SCRIPT-0202` message). A function `loadstring`
+  made has no session module to be recompiled from: a save or state digest that still reaches one
+  is refused (the saver names the reason) instead of writing a chunk that cannot load. Scripts
+  that run the chunk and keep its result save as usual; keeping the function does not, and the
+  lockstep state hash (`sync_hash`) is then refused for the whole scheduler, that is for every
+  instance of the session and not only the one that keeps it.
 - Every global present before the first script runs (libraries and host bindings) is
   protected: writing it, raw or not, through `_G` or any alias, faults with
   `EAWR-SCRIPT-0201`. The `string`, `table` and `coroutine` tables and every binding
@@ -180,6 +227,29 @@ sourced policy binds it through `register_free_random`. A script reads the
 free stream only through `GameRandom.Free_Random`; the host that binds it decides when the call uses the game stream
 instead (the galactic story host: no-argument form always, every form in a multiplayer game, RGC-195/196).
 
+**Galactic story-script host: the scoring module's definitions (legacy EAWR-7073).** Whenever a story scheduler is made for a scripted campaign
+(`create_galactic_story_scheduler`, at a fresh start and again at a restore) the module named by the effective `Game_Scoring_Script_Name`
+runs its `Base_Definitions` in a throwaway instance, before any plot script exists (FS-44, WGS-140: a fresh attachment calls
+`Base_Definitions` first). `GalacticStoryScripts::load` pins the module and the `Data/Scripts/Miscellaneous/` modules it may require (part
+of the content identity). The run has the story host's API set and the campaign's object types (a mod derives its `MOD_ID` from a dummy
+type); its globals, tables and required modules never reach a plot's environment. What it sets through `GlobalValue.Set` becomes the
+story scripts' starting value for that key (`initial_globals()`): a plot reads it in its chunk, its `Base_Definitions` and its `main`. The
+starting values are never written into the registry, so the registry always wins: any key it holds (set by a script before a save, or
+restored from one) replaces the starting value, and a restore therefore cannot overwrite a value a plot changed; the restore recomputes the
+same starting values (deterministic in the content and the campaign's types) only because they are not part of the saved registry (retail
+runs the definitions once and its saved registry carries what they set). A key the registry lacks, never set or removed, answers the starting
+value again. A nil write by the definitions starts nothing. The stock module's stats reset sets `Allow_AI_Controlled_Fog_Reveal` to 1, so a
+stock campaign with scripted plots starts its story scripts with that value. An absent constant or an unauthored module changes nothing; a
+fault in the definitions is a named `scoring definitions:` note (`scoring_notes()`, added to the start notes), never an abort. The module's
+`main`/service is not started (legacy EAWR-7075), and the campaign end still mounts the module again in its own sandbox
+(`evaluate_campaign_scoring`), so the definitions run again there. AI and object scripts do not read these starting values yet.
+
+**Galactic story-script host: mode and human queries (legacy EAWR-7101, EAWR-7102).** `Get_Game_Mode()` answers `Galactic` (L-51; the story host only
+runs in the galactic mode, as in the object-script host). `Player.Is_Human()` on a registered player's wrapper answers whether that
+player's seat is human-controlled in the campaign setup (`story_player_human`, the rule the AI perception facts use); an unregistered
+player is a named script fault. The flag is fixed for the session: `SWITCH_CONTROL` never changes it (WGS-136), and a multiplayer seat
+that later drops to AI keeps its setup value (not modelled in the story host; SWITCH_SIDES likewise).
+
 **Galactic story-script host random calls.** The story scheduler of a scripted campaign
 (`create_galactic_story_scheduler`) binds the following random APIs separately from tactical AI:
 
@@ -265,6 +335,28 @@ threads; `Reset` takes no key, ignores any argument, clears every thread's value
 works outside threads (debug build, L-28; Focumentation: Lua Commands describes a one-key reset,
 which FoC does not do).
 
+**Uncaught errors in the GC profile.** An uncaught Lua error ends the thread or call that raised it, rolls back that
+transaction's output and leaves a diagnostic. For the AI providers it also retires the instance for the rest of the
+campaign (the owner's provider rule). Story and object scripts do not retire: their engine ends only the failing
+thread or call, so a handler that calls one unimplemented function costs that call, not every later one
+(`SessionConfig::retire_on_lua_error`, a host policy that is not saved). A budget or quota fault retires the
+instance either way. A story sub-plot whose script was retired, or had a thread end in an uncaught error, releases
+the control locks its plot set, since nothing will unlock them; a script that only finished keeps its plot's locks. The
+service reports the instances that had a thread fail (`ServiceReport::thread_failures`, ascending instance ID) so the host
+can do this.
+
+The diagnostic names the thread (`thread <slot>: <cause>`). A failing call that repeats (an event or timer every tick)
+reports its first three occurrences, then each power-of-two occurrence with `(occurrence N)`, at most 256 distinct
+sites per script; the counts are not saved or hashed. The main thread is an ordinary thread: when it errors and no
+other thread lives, the script keeps its handlers and is not retired, and the story host removes a script left with
+no live thread exactly as it removes one whose main thread returned.
+
+*Named assumption (story and object scripts do not retire).* The choice to end only the failing thread, not retire
+the script, comes from ticket (legacy EAWR-6705) and the script-host review; no retail capture of a story script that raises an
+error shows what the original engine does with the script afterwards. It is the least destructive reading
+(`retire_on_lua_error` flips it per host) and is revisited if a capture shows otherwise. Recordings made before this
+change in which a story or object script raised an error replay differently: the script used to be retired.
+
 **One service.** For tick T: serially route due events to their instances in key order;
 then service every instance (the inbox in order, then the thread pump); then serially commit
 in ascending instance ID: commands in (issuer, sequence) order, posted events and timers
@@ -283,8 +375,30 @@ timers; 65,536 registrations; 64 MiB of logical memory. Exhausting one is a faul
 instruction raises again, so `pcall` cannot absorb it), the instance stops at once, its
 whole tick output is dropped, the instance is removed, and a diagnostic names it. The same
 counts on every target, so every peer faults at the same instruction. An unprotected Lua
-error (allocation failure) or a C++ exception aborts the session (`EAWR-SCRIPT-0209`); the
-scheduler then refuses further work.
+error outside any protected call (the Lua state itself failing to allocate) aborts the session (`EAWR-SCRIPT-0209`); the
+scheduler then refuses further work. A C++ exception out of a binding does not: it fails that
+instance with a diagnostic (`EAWR-SCRIPT-0211`, "a binding failed on the host"), like an uncaught Lua error, on
+the partitioned and the ordered immediate service alike.
+
+**Host-side work.** A binding call does work the script's own steps do not show, so it is charged too, in
+deterministic units, to the same instruction budget: one unit per value and per byte of every argument crossing
+into the host, of every result handed back, of every staged command, posted event and diagnostic, and one unit per
+world record a query scans (the object search visits every actor on each call). A loop of large calls therefore
+ends at the budget (`EAWR-SCRIPT-0205`) after a bounded amount of host copying. Staging is capped by count as well,
+per instance and service: 4,096 commands, 4,096 posted events and 1,024 diagnostics (`Quotas::staged_*`); reaching
+one is the logical-quota fault (`EAWR-SCRIPT-0208`). The caps are fixed limits of the host and are not saved. An
+instance's immediate native actions apply in place on one private copy of the chain's shadow, kept in an action log:
+a refused action or a rolled-back call rebuilds that copy by replaying the log, so a service of k actions copies the
+shadow once, not k times. Every copy is charged by what the state reports it copies (`ImmediateEffectState::clone_units`,
+at least one unit; the first copy of a service, a rebuild after a refusal and a rebuild after a rollback alike) and every
+replayed action by one unit; a rebuild to the base itself is free. A binding that scans host records beyond what it returns
+charges them through `BindingContext::charge_host_work` (the plan-side object search charges the units of the view it
+visits). The units are counts, never wall time; the measured cost of a unit is recorded in the PR that set the weights.
+The budget is per instance and service, so a tick's total is at most the number of serviced instances times the budget.
+A service's reported load (`InstanceLoad`) stays the script's own steps: the host work charged beside them is left out,
+so costs recorded before the charges keep their meaning. `host_work_peaks()` (the largest commands, posts, diagnostics and
+host units one instance used in one service, per scheduler label) is a diagnostic table of the process: nothing in a
+simulation reads it, and it is neither saved nor hashed.
 
 **Memory quota.** Each instance's Lua objects are counted in logical bytes, owned by
 the simulation: fixed sizes that are the same on every target and do not depend on the
@@ -394,7 +508,7 @@ camera and HUD state cannot resume a script or draw from its random stream.
 | `EAWR-SCRIPT-0206` | table write inside a `table.sort` comparator |
 | `EAWR-SCRIPT-0207` | module not in the manifest, invalid path or precompiled chunk |
 | `EAWR-SCRIPT-0208` | thread, event, timer, registration or memory quota exhausted (fault) |
-| `EAWR-SCRIPT-0209` | session abort: unprotected Lua error or host exception |
+| `EAWR-SCRIPT-0209` | session abort: an unprotected Lua error, or a host failure after the world began to change (publication) |
 | `EAWR-SCRIPT-0210` | invalid host request (binding name, event, timer duration) |
 | `EAWR-SCRIPT-0211` | script error in a thread, handler or timer (rolled back) |
 | `EAWR-SCRIPT-0214` | script command not routable: no translator, failed translation or refused by the world |
@@ -448,8 +562,17 @@ discards the instance's entire service. Later instances see only successful
 earlier instances in canonical order.
 
 One atomic host publication follows successful native service, before the
-scheduler publishes staged commands. A host publication failure leaves native
-state unchanged and aborts the scheduler. Successful root chunks publish their
+scheduler publishes staged commands. A host that refuses a publication before changing anything
+(any failure code except the session-abort one) drops that chain's batch and retires, with a diagnostic, the
+whole chain: an instance after a contributor ran against the dropped effects and one before it shares the
+batch's chain. A refused publication with no contributor (a census release alone) retires nobody. The session goes on.
+A failure after the host began changing the world, or an exception while publishing (memory exhaustion in the
+host, an internal invariant of the world), stays terminal: the world is then no longer the one the replay journal
+describes. Failing to capture a shadow or to select a chain scope throws the same way: a capture fails only when the world
+has already failed or its bounds were invalid when the host was installed, and the chain selection is a seam with no
+production producer. The world host admits its own limits per
+action, so a script that would overfill the command journal gets an ordinary error for that action rather than
+meeting the limit at publication. Successful root chunks publish their
 effects at creation; a failed chunk publishes nothing. Shadows are ephemeral:
 save/load retains the runtime host, while the campaign owner saves and hashes
 the published native state. Providers must clone only private mutable state,
@@ -496,8 +619,11 @@ owner remain composition dependencies.
 - The memory quota is per instance; a session-wide total (many instances each near their
   quota) is not bounded.
 - Mod gap (LuaJIT evaluation scan): Fall of the Republic's EaWX cross-plot serialiser round-trips values
-  through `string.dump` and `loadstring`, which this sandbox forbids; that mod's feature fails
-  here until a safe equivalent exists (unverified whether its tactical scripts reach it).
+  through `string.dump` and `loadstring`. Since v4 `loadstring` of text works, so tables, strings
+  and numbers round-trip; a function value still faults at `string.dump`, which stays forbidden
+  because nothing could load its output (unverified whether the mod's tactical scripts store one).
+  Saving a function that `loadstring` made is the second gap, under the library surface. Neither is
+  widened without evidence from a sweep.
 
 ## Managed native handle ownership
 

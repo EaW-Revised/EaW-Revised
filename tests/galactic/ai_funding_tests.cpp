@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <optional>
 #include <string_view>
+#include <utility>
 #include "../support/check.hpp"
 #include "../support/result.hpp"
 #include "eawr/sim/galactic/ai_funding.hpp"
@@ -205,6 +206,45 @@ void fiscal_and_templates() {
     protected_l = must(f::begin_maintenance(protected_l));
     protected_l = must(f::fiscal(protected_l, n(100), n(0), n(10)));
     expect(protected_l.categories.at(1).cash == n(10) && protected_l.categories.at(2).cash == n(90), "WGA-15 dead obligations protected across template redistribution");
+    // #6842 / CGS-19: a negative total income debits the account; only the balance the owner hands in (floored at zero) is never
+    // negative. The ledger follows that balance turn after turn and never refuses the signed income.
+    auto negative = seeded();
+    const auto total_cash = [](const f::Ledger& ledger) {
+        f::Amount sum{};
+        for (const auto& [id, category] : ledger.categories) { (void)id; sum = must(eawr::sim::math::add(sum, category.cash)); }
+        return sum;
+    };
+    auto balance = total_cash(negative);
+    bool every_turn_accepted = true, floored = false;
+    for (int turn = 0; turn < 60; ++turn) {
+        const auto income = n(-7);
+        const auto debited = must(eawr::sim::math::add(balance, income));
+        balance = debited < n(0) ? n(0) : debited;
+        auto next = f::fiscal(negative, balance, income, n(10));
+        if (!next) { every_turn_accepted = false; break; }
+        negative = std::move(next).value();
+        if (total_cash(negative) != balance) every_turn_accepted = false;
+        floored = floored || balance == n(0);
+    }
+    expect(every_turn_accepted && floored && total_cash(negative) == n(0),
+        "negative income over many turns keeps the ledger valid and following the floored balance");
+    // Retail clamps a goal's per-cycle increment at zero: a negative income debits the category cash, a goal with reserved income
+    // never accumulates a negative amount, however many negative cycles follow.
+    auto goal = seeded();
+    goal.last_interval = n(10);
+    goal.categories.at(1).income = goal.categories.at(1).available_income = n(5);
+    goal = must(f::reserve(goal, request(1, n(100))));
+    const auto accumulated_before = goal.goals.at(1).accumulated;
+    bool never_negative = goal.goals.at(1).reserved_income > n(0);
+    auto goal_balance = total_cash(goal);
+    for (int turn = 0; turn < 20; ++turn) {
+        const auto income = n(-30);
+        const auto debited = must(eawr::sim::math::add(goal_balance, income));
+        goal_balance = debited < n(0) ? n(0) : debited;
+        goal = must(f::fiscal(goal, goal_balance, income, n(10)));
+        never_negative = never_negative && goal.goals.at(1).accumulated >= n(0) && goal.goals.at(1).accumulated >= accumulated_before;
+    }
+    expect(never_negative && total_cash(goal) == n(0), "a negative income never takes a goal's accumulated income below zero (retail clamps the increment)");
 }
 void tactical() {
     for (const auto allowance : {n(0), ratio(1, 2), n(2), n(-1)}) {

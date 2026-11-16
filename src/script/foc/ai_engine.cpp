@@ -307,6 +307,18 @@ Goal* Engine::find_goal(PlayerAi& player, std::uint64_t id) {
     return nullptr;
 }
 
+std::string Engine::goal_type_name(const std::uint64_t plan_id) const {
+    const Plan* served = plan(plan_id);
+    const PlayerAi* owner = served ? player_ai(served->player) : nullptr;
+    if (!owner) return {};
+    for (const Goal& goal : owner->active) {
+        if (goal.id != served->goal) continue;
+        return goal.function < owner->functions.size() && owner->functions[goal.function].goal
+            ? owner->functions[goal.function].goal->name : std::string{};
+    }
+    return {};
+}
+
 // FH-13 with EX-02: the AI player's own moving objects, except squadron members, star bases and
 // the units a TaskForce holds.
 bool Engine::in_freestore(const ViewUnit& unit, tactical::PlayerId player) const {

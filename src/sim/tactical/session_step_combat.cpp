@@ -43,6 +43,17 @@ namespace eawr::sim::tactical {
 
 void session_detail::Tick::record_damage_change(const LiveUnit& target, const math::Fixed before,
     const EntityId source, const UnitStage* const staged) {
+    // WIS-02: the damage routine's live branch (alive after a hull decrease) offers a Take_Damage stream to the
+    // manager together with the hit's damage-source object; the stream's handler admits only a hit with none, so a
+    // sourced hit is recorded here and refused in start_event_streams. This seam is not gated by the observer
+    // switch below.
+    if (target.durability && target.durability->hull > math::Fixed{} && target.durability->hull < before) {
+        const auto* stream = impl_->economy.empty() ? nullptr : impl_->economy.stream(target.state.type_id);
+        if (stream != nullptr && stream->event_style == IncomeEventStyle::take_damage) {
+            income_triggers_.push_back({target.state.entity_id, IncomeEventStyle::take_damage,
+                source != invalid_entity_id});
+        }
+    }
     if (!impl_->publish_damage_changes || !target.durability || target.durability->hull <= math::Fixed{}
         || target.durability->hull >= before) return;
     const auto* profile = impl_->health_profile(target);
@@ -198,7 +209,7 @@ core::Result<void> session_detail::Tick::ion_team() {
         }
         // AB-63: the squadron attacks the target.
         const CommandPayload attack = AttackPayload{target};
-        container.state.order = order_for(attack, tick);
+        replace_order(container, attack, tick);
         apply_squadron_order(mind, attack, container.state.position, squadron_table);
     };
     for (const auto& squadron : impl_->squadrons) {
@@ -1302,6 +1313,8 @@ core::Result<void> session_detail::Tick::late_impacts() {
             const auto& state = source.abilities->slots[*ability_slot(profile, beam_kind)];
             if (!state.active) continue;
             const auto& special = source.abilities->special.slots[static_cast<std::size_t>(nested - profile.special.data())];
+            // WSPL-08: after the target left the world the beam only continues; there is nothing to damage or release here.
+            if (beam_kind == AbilityKind::super_laser && special.laser_ending) continue;
             auto& service = beam_services[i];
             service.source = source.state.entity_id;
             service.target = state.target;
@@ -1309,7 +1322,9 @@ core::Result<void> session_detail::Tick::late_impacts() {
             service.release = target == staged.end() || !impl_->beam_target_valid(source, target->second, *nested)
                 || !impl_->beam_in_range(source, target->second, *nested)
                 || (state.target_hardpoint != no_hardpoint && !impl_->target_hardpoint_standing(target->second, state.target_hardpoint));
-            service.due = !service.release && tick >= special.next_service_frame;
+            // WSPL-08: the super laser deals damage only once its fire stage has run.
+            service.due = !service.release && tick >= special.next_service_frame
+                && (beam_kind != AbilityKind::super_laser || special.laser_fired);
         }
     });
     if (!prepared_beams) return prepared_beams;
@@ -1323,7 +1338,15 @@ core::Result<void> session_detail::Tick::late_impacts() {
         if (service.release || target == staged.end()
             || (source_slot.target_hardpoint != no_hardpoint
                 && !impl_->target_hardpoint_standing(target->second, source_slot.target_hardpoint))) {
-            impl_->release_beam(source->second, beam_kind, tick);
+            const auto* laser = impl_->beam_profile(source->second, beam_kind);
+            auto& special = source->second.abilities->special.slots[static_cast<std::size_t>(laser - source_profile.special.data())];
+            // WSPL-08: a fired super laser whose target died continues for Fire_Continuation instead of ending.
+            if (beam_kind == AbilityKind::super_laser && source_slot.active && special.laser_fired && !special.laser_ending
+                && laser->laser_continuation_frames > 0 && special.enabled && !special.cancelled
+                && (target == staged.end() || !target->second.durability || target->second.durability->hull.raw() <= 0))
+                impl_->detach_laser(source->second, *laser, special, tick);
+            else
+                impl_->release_beam(source->second, beam_kind, tick);
             continue;
         }
         if (!service.due || !damage_rules || !target->second.durability || damage_blocked()) continue;
@@ -1366,7 +1389,11 @@ core::Result<void> session_detail::Tick::late_impacts() {
             killed.push_back(target->second.state);
             impl_->adjust_owned(target->second.state, false);
             staged.erase(target);
-            impl_->release_beam(source->second, beam_kind, tick);
+            // WSPL-08: a fired super laser whose target this very hit destroyed continues for Fire_Continuation.
+            if (beam_kind == AbilityKind::super_laser && special.laser_fired && nested->laser_continuation_frames > 0)
+                impl_->detach_laser(source->second, *nested, special, tick);
+            else
+                impl_->release_beam(source->second, beam_kind, tick);
         }
     }
     }

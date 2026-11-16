@@ -13,6 +13,7 @@
 #include "galactic/planet_label_scale.hpp"
 #include "galactic/command_bar_scale.hpp"
 #include "galactic/hud_retained.hpp"
+#include "galactic/advisor_hints.hpp"
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -41,10 +42,15 @@ struct CatalogFixture {
         std::ofstream objects(root / "XML/Objects.xml");
         objects << R"xml(<GameObjectData>
           <GroundCompany Name="Fixture_Trooper"><Affiliation>Empire</Affiliation><Icon_Name>trooper.tga</Icon_Name>
+            <Icon_Name></Icon_Name>
             <Text_ID>TEXT_TROOPER</Text_ID><Encyclopedia_Unit_Class>TEXT_INFANTRY</Encyclopedia_Unit_Class>
             <Encyclopedia_Text>TEXT_DESCRIPTION</Encyclopedia_Text><Tech_Level>1</Tech_Level></GroundCompany>
           <SpaceUnit Name="Fixture_Ship"><Affiliation>Empire</Affiliation><Icon_Name>ship.tga</Icon_Name>
             <Text_ID>TEXT_SHIP</Text_ID><Tech_Level>2</Tech_Level><Build_Initially_Locked>Yes</Build_Initially_Locked></SpaceUnit>
+          <HeroCompany Name="Fixture_Hero"><Icon_Name>first.tga</Icon_Name><Icon_Name>hero.tga</Icon_Name>
+            <Icon_Name></Icon_Name><Icon_Name>TBD</Icon_Name></HeroCompany>
+          <HeroCompany Name="Fixture_Hero_Variant"><Variant_Of_Existing_Type>Fixture_Hero</Variant_Of_Existing_Type>
+            <Icon_Name> </Icon_Name><Icon_Name>TBD</Icon_Name></HeroCompany>
           <SpaceUnit Name="Fixture_Foreign"><Affiliation>Rebel</Affiliation><Icon_Name>foreign.tga</Icon_Name></SpaceUnit>
           <SpaceUnit Name="Renamed-Mod-Ship"><Affiliation>Empire</Affiliation><Icon_Name>renamed.tga</Icon_Name>
             <Text_ID>TEXT_RENAMED</Text_ID><Tech_Level>2</Tech_Level><Build_Initially_Locked>Yes</Build_Initially_Locked></SpaceUnit>
@@ -110,19 +116,29 @@ void populated_catalog() {
     require(!source.metadata("Missing"), "unresolved metadata stays absent instead of a cached default");
     require(source.metadata("Fixture_Mine")->mining_facility && source.metadata("Fixture_Mine")->icon.icon == "mine.tga",
         "mining classification and icon come from the owned data source");
+    const auto hero = source.metadata("Fixture_Hero"), inherited_hero = source.metadata("Fixture_Hero_Variant");
+    require(hero && inherited_hero && hero->icon.icon == "hero.tga" && inherited_hero->icon.icon == "hero.tga",
+        "ML-23/24: reference metadata keeps the last real icon through repeated and inherited placeholders");
     sim::ObserverSetup observer; observer.human_observers = {7}; observer.solo_reference_human = 7;
     sim::ObservedPlanet known; known.player = 7; known.planet = 1; known.discovered = true; known.known_owner = 7;
-    known.knowledge.ownership = known.knowledge.structures = true;
+    known.knowledge.ownership = known.knowledge.structures = known.knowledge.fleet_contents = true;
     auto observations = std::make_shared<std::vector<sim::ObservedPlanet>>(1, known);
     sim::ProductionSetup production; sim::PlanetProduction producer; producer.planet = 1; producer.starbase_type = 12;
     production.planets = {producer};
-    sim::GalacticSnapshot snapshot(1, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, production,
+    sim::Fleet hero_fleet; hero_fleet.id = 100; hero_fleet.owner = 7; hero_fleet.orbit = 1;
+    hero_fleet.members = {{101,13},{102,14}};
+    sim::GalacticSnapshot snapshot(1, {}, {}, {}, {}, {hero_fleet}, {}, {}, {}, {}, {}, {}, {}, production,
         {}, {}, {}, observer, {}, {}, {}, observations);
     page::PlanetHudFacts hud; hud.planet = 1; hud.discovered = true; hud.observed_owner = 7; hud.display_name = "Fixture";
-    std::map<std::uint64_t, page::ReferenceType> types{{12,*source.metadata("Fixture_Base")}};
+    std::map<std::uint64_t, page::ReferenceType> types{{12,*source.metadata("Fixture_Base")}, {13,*hero}, {14,*inherited_hero}};
+    types[13].gui_visibility_known = types[14].gui_visibility_known = true;
     std::map<page::ObjectId, page::ReferenceType> planets{{1,*source.metadata("Fixture_Planet")}};
     const auto rows = page::published_summary_planets(snapshot, 7, {{1,hud}}, types, planets);
     require(rows.size() == 1 && rows[0].capacity == 8 && rows[0].icon == "planet.tga", "loaded planet and producer metadata publish nonzero Summary capacity and planet icon");
+    const auto& portraits = rows[0].orbit[0];
+    require(portraits && portraits->size() == 2 && (*portraits)[0].icon == "hero.tga"
+        && (*portraits)[1].icon == "hero.tga",
+        "#7373: reference summary publication retains both hero portraits instead of skipping blank raw icons");
     require(!page::published_summary_planets(snapshot, 7, {{1,hud}}, types, {})[0].capacity,
         "missing planet metadata leaves Summary capacity unavailable");
     require(!page::published_summary_planets(snapshot, 7, {{1,hud}}, {}, planets)[0].capacity,
@@ -287,6 +303,27 @@ void history() {
     require(!page::history_view(facts, page::HistoryMetric::economy).available,
         "published archive unavailability is not reconstructed from the visible line");
 }
+void tree_dialog_choice() {
+    const std::map<std::string, bool> dialogs{{"IDD_TECH_TREE_REBEL", true}, {"IDD_TECH_TREE_REBEL_SPACE", true},
+        {"IDD_TECH_TREE_EMPIRE", true}, {"IDD_TECH_TREE_EMPIRE_SPACE", true}, {"IDD_TECH_TREE_BLACKMARKET", false},
+        {"IDD_TECH_TREE_BLACKMARKET_SPACE", true}, {"IDD_TECH_TREE_FIFTH", true}, {"IDD_TECH_TREE_FIFTH_SPACE", true},
+        {"IDD_TECH_TREE_FOURTH", true}, {"IDD_TECH_TREE_FOURTH_COMBINED", false}};
+    const auto exists = [&](std::string_view name) { return dialogs.contains(std::string(name)); };
+    const auto switch_of = [&](std::string_view name) { const auto found = dialogs.find(std::string(name)); return found != dialogs.end() && found->second; };
+    auto pick = [&](std::string_view name) { return page::choose_tree_dialogs(name, exists, switch_of); };
+    const auto empire = pick("IDD_TECH_TREE_EMPIRE");
+    require(empire.land == "IDD_TECH_TREE_EMPIRE" && empire.space == "IDD_TECH_TREE_EMPIRE_SPACE" && !empire.combined, "authored dialog with radios gets a _SPACE variant");
+    const auto combined = pick("IDD_TECH_TREE_BLACKMARKET");
+    require(combined.combined && combined.land == combined.space && combined.land == "IDD_TECH_TREE_BLACKMARKET", "dialog without radios is a combined diagram");
+    const auto fifth = pick("IDD_TECH_TREE_FIFTH");
+    require(fifth.land == "IDD_TECH_TREE_FIFTH" && fifth.space == "IDD_TECH_TREE_FIFTH_SPACE" && !fifth.combined,
+        "a synthetic fourth faction's authored name is used, not a faction-name branch");
+    const auto fourth = pick("IDD_TECH_TREE_FOURTH");
+    require(fourth.land == "IDD_TECH_TREE_FOURTH" && fourth.space == "IDD_TECH_TREE_REBEL_SPACE" && !fourth.combined,
+        "an authored dialog with radios but no Space sibling falls back to the Rebel Space dialog, never a blank tab");
+    require(pick("IDD_TECH_TREE_FOURTH_COMBINED").combined, "a synthetic combined diagram is read from the dialog, not the faction");
+    require(pick("").land == "IDD_TECH_TREE_REBEL" && pick("IDD_TECH_TREE_MISSING").space == "IDD_TECH_TREE_REBEL_SPACE", "missing or unauthored dialog falls back to Rebel");
+}
 void tree() {
     page::TreeFacts facts; facts.technology = 2;
     facts.land = {{"authored-a", {"a", "A", "encyclopedia", 10}, 2, true, false, false},
@@ -412,9 +449,68 @@ void legend() {
     require(page::legend_entries({"a.tga"}, {"T_A"}, {1, 2}, lookup).empty(), "GREF-19 incomplete RGB triplet drops the entry");
     require(page::legend_entries({}, {}, {}, lookup).empty(), "GREF-19 empty lists give an empty legend");
 }
+// WGUI-71/104, GFC-28, GFSC-21, WGP-122/125: the hint producer, the checkbox flags and the archive triplets.
+void advisor_hints() {
+    require(page::hint_interval_frames("300", 30) == 9000U, "GFC-28 stock interval: 300 s at 30 frames per second");
+    require(page::hint_interval_frames("0.05", 30) == 2U, "GFC-28 integer conversion adds one half");
+    require(!page::hint_interval_frames("", 30) && !page::hint_interval_frames("-1", 30) && !page::hint_interval_frames("5s", 30),
+        "GFC-28 a missing or invalid interval leaves no producer, never a default");
+    const auto keys = page::hint_keys("\n  TEXT_A,\n TEXT_B ,TEXT_C\tTEXT_D\r\n");
+    require(keys == std::vector<std::string>{"TEXT_A", "TEXT_B", "TEXT_C", "TEXT_D"}, "authored hint list order and separators");
+
+    page::HintEntry entry;
+    require(entry.enabled && entry.deadline == 90 && entry.index == 0, "WGUI-104 fresh entry: enabled, deadline 90, index 0");
+    require(!page::due_hint(entry, 89, 3, 2), "GFC-28 not due before the deadline");
+    require(page::due_hint(entry, 90, 3, 2) == 0U && entry.index == 1 && entry.deadline == 92, "GFSC-21 one hint, index advances, rearm from now");
+    require(!page::due_hint(entry, 91, 3, 2), "GFSC-21 the next turn before the new deadline is not due");
+    require(page::due_hint(entry, 92, 3, 2) == 1U && page::due_hint(entry, 94, 3, 2) == 2U, "WGUI-71 sequential, not random");
+    require(page::due_hint(entry, 96, 3, 2) == 0U, "WGUI-71 the index wraps at the list count");
+    entry.enabled = false;
+    require(!page::due_hint(entry, 200, 3, 2) && entry.deadline == 98 && entry.index == 1, "GFC-28 disabled keeps deadline and index");
+    entry.enabled = true;
+    require(page::due_hint(entry, 200, 3, 2) == 1U && entry.deadline == 202, "GFSC-21 re-enabled overdue entry attempts now and rearms from now");
+    require(!page::due_hint(entry, 500, 0, 2), "no authored hints, no hint");
+
+    {
+        // Load after hints: a session fired hints up to frame 9000 (interval 9000), then loads a save at frame 3000.
+        page::HintEntries session;
+        auto& galactic = session[0];
+        page::first_hint_frame(galactic, 0);
+        require(page::due_hint(galactic, 90, 3, 9000) == 0U && page::due_hint(galactic, 9090, 3, 9000) == 1U
+            && galactic.deadline == 18090 && galactic.index == 2, "the old timeline is ahead");
+        session[1].enabled = false;
+        page::restart_hint_timeline(session);
+        require(galactic.deadline == 90 && galactic.index == 0 && galactic.enabled && !session[1].enabled,
+            "a load restarts deadline and index and keeps the checkbox");
+        page::first_hint_frame(galactic, 3000);
+        require(galactic.deadline == 3090, "the loaded frame gets the restored-save delay, not the old deadline");
+        require(!page::due_hint(galactic, 3089, 3, 9000) && page::due_hint(galactic, 3090, 3, 9000) == 0U,
+            "the first hint after the load is 90 frames later, from the first key");
+        page::HintEntry fresh;
+        page::first_hint_frame(fresh, 0);
+        require(fresh.deadline == 90, "a new campaign keeps the fresh deadline");
+    }
+
+    page::HintEntries entries;
+    entries[0].enabled = false; entries[1].enabled = false; entries[2].deadline = 7; entries[2].index = 4;
+    require(page::any_hints_enabled(entries), "WGP-125 the checkbox is the OR of the three flags");
+    page::set_all_hints(entries, false);
+    require(!page::any_hints_enabled(entries) && entries[2].deadline == 7 && entries[2].index == 4,
+        "WGP-125 the checkbox sets all three flags and keeps deadline and index");
+
+    std::vector<page::ArchiveEntry> archive;
+    page::archive_submission(archive, "Day 3", {255, 0, 0, 255}, "Hint", {0, 193, 91, 255}, "____", {128, 128, 128, 255});
+    page::archive_submission(archive, "Day 3", {255, 0, 0, 255}, "Hint", {0, 193, 91, 255}, "____", {128, 128, 128, 255});
+    require(archive.size() == 6 && archive[0].text == "Day 3" && archive[1].colour[1] == 193 && archive[2].colour[0] == 128
+        && archive[3].text == "Day 3", "WGP-122 three entries per submission, no dedup of repeated cycles");
+    require(page::authored_rgba("255 0 0") == page::Rgba{255, 0, 0, 255} && page::authored_rgba("1 2 3 4") == page::Rgba{1, 2, 3, 4},
+        "authored date/separator colours");
+    require(!page::authored_rgba("255 0") && !page::authored_rgba("256 0 0") && !page::authored_rgba("1 2 x"),
+        "invalid authored colours are absent");
+}
 }
 int main() {
-    try { legend(); populated_catalog(); colliding_catalog_names(); mod_label_scale(); history(); tree(); summary(); publication(); }
+    try { advisor_hints(); legend(); populated_catalog(); colliding_catalog_names(); mod_label_scale(); history(); tree(); tree_dialog_choice(); summary(); publication(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     std::cout << "GREF reference page contracts passed\n";
 }

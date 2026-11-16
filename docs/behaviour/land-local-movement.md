@@ -192,6 +192,22 @@ Facing difference of at least a quarter turn selects the opposed escape
 admission; aligned and opposed options are retained distinctly. Recovery keeps
 its temporary tracker and speed roles until completion or invalidation.
 
+Every holding contact ends (WLPA-97), and every pair the sweep holds owns a contact
+row, also where the prediction (which stops at the next path node) misses it. A failed resolution attempt is
+remembered on the row until real progress (a body a cell pitch closer to its
+goal than at the last failure; a nudge is not enough); entering a deadlock keeps
+the failure and escapes at once (the first escape stays ordinary service), so the
+first escape that fails after an earlier failure takes the terminal rung. A terrain contact, or
+a mover against an idle body it cannot cut short, path around or push, ends that
+move where it stands: an idle body is never walked through. Every
+other pair takes no-action: no maneuver or speed role, the pair sweep stops
+holding the two bodies against each other while both move (an idle no-action
+pair stays held apart), and the soldiers steer as in repulsion until the pair no
+longer meets. A friendly or neutral soft pair keeps WLPA-57's repulsion
+fallthrough. A deadlock with several sources, which
+has no escape, counts one failed attempt per retry count; a failed escape and a
+released escape route keep the row deadlocked.
+
 Physical pair guards evaluate relative swept proposals in a partitioned phase,
 then stop blocked members and parent trackers in ordered commit. A current
 overlap may separate, but a new movement cannot deepen it or cross through the

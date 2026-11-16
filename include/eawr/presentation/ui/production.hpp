@@ -254,4 +254,22 @@ struct PoolSlot {
 [[nodiscard]] std::string credits_text(sim::math::Fixed credits);
 [[nodiscard]] std::string population_text(std::uint32_t population, std::uint32_t cap);
 
+// #7190: the plain label of a reason the simulation gave when it refused a land company's call-down. The reason is the
+// simulation's own (RejectReason); the words only name it. Empty for a reason a drop does not raise.
+[[nodiscard]] constexpr std::string_view reinforcement_refusal_label(sim::tactical::RejectReason reason) noexcept {
+    using sim::tactical::RejectReason;
+    switch (reason) {
+    case RejectReason::invalid_position: return "Cannot land there";
+    case RejectReason::no_population_room: return "No room for this company";
+    case RejectReason::not_in_pool: return "Company not available";
+    case RejectReason::cannot_produce: return "Company cannot be called down";
+    case RejectReason::battle_decided: return "The battle is decided";
+    default: break;
+    }
+    return {};
+}
+
+// How long a refusal stays on the pane, in logical frames (4 s).
+inline constexpr std::uint64_t reinforcement_refusal_frames = 120;
+
 } // namespace eawr::presentation::ui

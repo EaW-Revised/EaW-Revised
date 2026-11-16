@@ -24,7 +24,8 @@ Each resolved API has a status and source locations with call counts. Object
 receiver expressions are retained as evidence but do not become distinct API
 names. `bound` means shared scheduler infrastructure, `script` means a helper
 defined in every applicable root's dependency closure, `partial` means a
-standard-library call subject to sandbox policy, and `missing` means a
+standard-library call subject to sandbox policy or an adapter with narrower
+host coverage than the conservative closure, and `missing` means a
 registered engine API awaiting a galactic adapter (legacy EAWR-1991). Unregistered
 callables and dynamic calls remain `unresolved`. `forbidden` identifies the
 unsynchronized random capability prohibited by the authoritative sandbox; it
@@ -46,6 +47,9 @@ have narrower, observable runtime coverage:
 
 | API | Runtime behavior | Remaining gap |
 |---|---|---|
+| `Is_Corrupted` | AI game-object planet handles query committed corruption through the native owner (WGA-450..451). | Other script hosts are not established by this AI binding. |
+| `TaskForce.Is_Raid_Capable` / `TaskForce.Raid` | AI plans query retained fleet capability and issue ordinary goal movement with retained raid intent; native admission executes one hop toward the final target (GAR-01..02). | These are AI TaskForce methods, not general object or story-host bindings. |
+| `WaitForStarbase` | AI plans retain a global block until the planet's current starbase level reaches the requested level, validated in the range 0..5 before truncation (GAR-03). | Other script hosts are not established by this AI binding. |
 | `GlobalValue.Get` / `GlobalValue.Set` | Shared scalar registry across AI and story; unsupported table writes diagnose and preserve the prior value. | Cross-instance graph identity. |
 | `Budget.Flush_Category` | A per-plan budget wrapper, installed after `Base_Definitions`, stages the owning player's native category flush. WGA-24 zeros available category cash without a credit grant; a registered category with no ledger account is a no-op, while unknown names remain script errors. | Other budget methods remain separate work. |
 | `GiveDesireBonus` | Valid typed requests currently return nil and emit a runtime degradation LoadNote once per plan type. `BlockOnCommand(nil)` declines the unavailable operation, preserving the calling plan. No bonus is applied; invalid arguments remain script errors. | Timed goal bonus and blocking-result semantics (legacy EAWR-5494). This is an explicit capability stub, not a completed AI behavior binding. |

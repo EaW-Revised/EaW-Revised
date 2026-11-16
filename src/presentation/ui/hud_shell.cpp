@@ -140,6 +140,7 @@ constexpr std::string_view hero_bar_evil_stem = "hero_hb_evil";
 std::optional<ShellBlend> shell_blend(const std::string_view shader) {
     if (equal_name(shader, "MeshAdditive.fx")) return ShellBlend::additive;
     if (equal_name(shader, "MeshAlpha.fx") || equal_name(shader, "MeshAlphaGloss.fx")) return ShellBlend::alpha;
+    if (equal_name(shader, "MeshGloss.fx")) return ShellBlend::opaque;
     return std::nullopt;
 }
 
@@ -422,6 +423,46 @@ HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandB
             retreat.build = first_token(*component, data::ui::Field::build_texture_name);
             out.retreat = std::move(retreat);
         }
+    }
+    // HCB-46/63: retain the independent authored super-laser switch and recharge bar.
+    if (const auto* anchor = shell.find("sl_switch")) {
+        if (const auto* component = catalog.find("sl_switch")) {
+            HudAbilityButton laser;
+            laser.button = shell_button(*anchor, *component);
+            laser.blank = laser.button.blank;
+            out.superlaser_switch = std::move(laser);
+        }
+    }
+    if (const auto* component = catalog.find("sl_switch_recharge")) {
+        data::ui::ShellAnchor placed;
+        placed.name = "sl_switch_recharge";
+        if (const auto* anchor = shell.find(placed.name)) placed = *anchor;
+        else if (const auto* bone = shell.find_bone(placed.name)) placed.origin = bone->origin;
+        if (placed.origin || shell.find(placed.name)) out.superlaser_recharge = shell_bar(placed, *component, out.diagnostics);
+    }
+    // HCB-47: the switch keeps its authored slot; its tooltip keys are the component's three Tooltip_Text tokens.
+    if (const auto* anchor = shell.find("deathstar_switch")) {
+        if (const auto* component = catalog.find("deathstar_switch")) {
+            HudAbilityButton ds;
+            ds.button = shell_button(*anchor, *component);
+            const auto tooltips = component->list(data::ui::Field::tooltip_text);
+            ds.blank = ds.button.blank;
+            ds.anim_fps = static_cast<float>(component->integer(data::ui::Field::anim_fps).value_or(5));
+            out.deathstar_switch = std::move(ds);
+            out.deathstar_tooltips.assign(tooltips.begin(), tooltips.end());
+        }
+    }
+    // HCB-47: the readout is placed by the shell's bone of the component's name, art centred on it (a bone without a
+    // mesh, the hero health bars' case); a shell without the bone leaves the placement to the caller.
+    if (catalog.find("DS_Countdown_Timer") != nullptr) {
+        data::ui::ShellAnchor placed;
+        placed.name = "DS_Countdown_Timer";
+        const auto* mesh = shell.find("DS_Countdown_Timer");
+        const auto* bone = shell.find_bone("DS_Countdown_Timer");
+        if (mesh != nullptr && mesh->origin) placed = *mesh;
+        else if (bone != nullptr) placed.origin = bone->origin;
+        out.deathstar_countdown_anchored = placed.origin.has_value();
+        out.deathstar_countdown = hud_readout_style(catalog, "DS_Countdown_Timer", placed);
     }
     // BA-27: retain authored positions, including the waypoint slot.
     for (const auto name : tactical_order_buttons) {
@@ -945,6 +986,20 @@ UnitCardLooks ability_card_looks(const std::string_view type, const std::uint32_
     return ability_card_looks_bounded(type, ability, objects, text, 0);
 }
 
+std::string object_icon_name(const data::EffectiveObject& object, const data::Catalog& objects) {
+    const auto authored = [](const data::EffectiveObject& source) {
+        // ML-23/24: later blank or TBD occurrences leave the last real icon in place.
+        return source.single_text("Icon_Name");
+    };
+    if (std::string own = authored(object); !own.empty()) return own;
+    // A squadron that authors no icon of its own is shown through the team container it creates.
+    const std::string team = core::trim(object.single_text("Create_Team_Type"), core::xml_whitespace);
+    if (team.empty() || equal_name(team, object.object_id) || objects.find(team, data::Category::game_object) == nullptr)
+        return {};
+    const auto container = objects.resolve(team, data::Category::game_object);
+    return container ? authored(container.value()) : std::string();
+}
+
 UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* objects,
                               const data::ui::TextDatabase* text, const bool multiplayer) {
     UnitCardLooks out;
@@ -955,7 +1010,7 @@ UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* 
     const auto trimmed = [](const std::string& value) {
         return core::trim(value, core::xml_whitespace);
     };
-    if (const data::EffectiveValue* icon = resolved.value().value("Icon_Name")) out.icon = trimmed(icon->value.raw_text);
+    out.icon = object_icon_name(resolved.value(), *objects);
     const auto integer = [&](const std::string_view tag) {
         const auto* field = resolved.value().value(tag);
         if (!field) return std::int32_t{};
@@ -1013,7 +1068,7 @@ UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* 
             if (objects->find(name, data::Category::game_object)) {
                 auto target = objects->resolve(name, data::Category::game_object);
                 if (target) {
-                    if (const auto* value = target.value().value("Icon_Name")) icon = trimmed(value->value.raw_text);
+                    icon = object_icon_name(target.value(), *objects);
                 }
             }
             result.push_back(std::move(icon));

@@ -369,6 +369,129 @@ void reveal_all_contracts() {
 }
 
 
+// legacy #6634 (HCB-75): Letter_Box_In / Letter_Box_Out of a tactical script are presentation requests. They reach the tick's
+// presentation list in script order, never the world's input or the replay, and move no world hash (the run is compared with
+// one whose scripts make no call). A call without one finite, non-negative number is a named script fault. A valid call returns:
+// the statement after each call runs (a test binding `Mark` records it); a host without the function ends the thread at the call.
+void letter_box_contracts() {
+    namespace t = eawr::sim::tactical;
+    namespace m = eawr::sim::math;
+    const auto fixed = [](std::int64_t value) { return m::Fixed::from_integer(value).value(); };
+    t::TacticalSetup setup;
+    setup.players = {{1, 1, 100, 1}, {2, 2, 200, 1}};
+    setup.units = {{10, 100, 1, {fixed(50), fixed(-50), {}}}, {20, 200, 2, {fixed(450), fixed(-450), {}}}};
+    const t::FogRules rules{{}, {}, fixed(100), 6, 6};
+    using Request = std::pair<std::string, std::string>;
+    struct Run {
+        std::vector<std::string> hashes;
+        std::vector<std::pair<std::uint64_t, Request>> requests;
+        std::size_t recorded{}, dropped{}, diagnostics{};
+        std::string fault;
+        std::vector<int> marks; // statements that ran after a call, in order
+    };
+    const auto run = [&](const std::size_t workers, const bool calls, const std::string& bad) -> std::optional<Run> {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto made = t::TacticalSession::create(setup, {}, {}, {}, rules);
+        if (!made) { expect(false, "HCB-75: tactical world starts"); return std::nullopt; }
+        auto host = ai::make_tactical_host();
+        host->world = &made.value();
+        host->view = foc::detail::build_view(made.value(), *made.value().snapshot());
+        auth::ModuleManifest manifest;
+        // Mark(n) follows every call; the run without calls makes the same Mark calls, so the two differ only by the calls.
+        const std::string scene = calls
+            ? "function Scene(step)\n if step == 1 then Letter_Box_In(2) Mark(1) elseif step == 2 then Letter_Box_Out(0) Mark(2)\n"
+              " elseif step == 3 then Letter_Box_In(0.5) Mark(3) Letter_Box_Out(1.25) Mark(4) end\nend\n"
+            : "function Scene(step)\n if step == 1 then Mark(1) elseif step == 2 then Mark(2)\n"
+              " elseif step == 3 then Mark(3) Mark(4) end\nend\n";
+        expect(manifest.add("LB.LUA", scene + "function Bad() " + bad + " Mark(99) end\n").has_value(), "HCB-75: letterbox module loads");
+        auth::SessionConfig config;
+        config.tick_duration = {1, 30};
+        auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+        if (!scripts) { expect(false, "HCB-75: scheduler starts"); return std::nullopt; }
+        std::vector<eawr::core::Diagnostic> errors;
+        foc::tactical_ai_detail::register_globals(scripts.value(), host, errors);
+        Run out;
+        expect(scripts.value().register_binding("Mark", [&out](auth::BindingContext&, const auth::ValueList& args) -> eawr::core::Result<auth::ValueList> {
+            const auto* number = args.size() == 1 ? std::get_if<eawr::script::numeric::LuaNumber>(&args[0].data) : nullptr;
+            if (number != nullptr) out.marks.push_back(static_cast<int>(*number));
+            return eawr::core::Result<auth::ValueList>::success({});
+        }).has_value(), "HCB-75: the Mark test binding registers");
+        expect(errors.empty() && scripts.value().create_instance(1, "LB.LUA").has_value(), "HCB-75: bindings register");
+        for (const auto& [tick, step] : {std::pair{2U, 1}, std::pair{5U, 2}, std::pair{9U, 3}}) {
+            auth::ScriptEvent event;
+            event.key = {tick, auth::first_simulation_producer, 1, tick};
+            event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Scene";
+            event.arguments = {auth::Value::number(eawr::script::numeric::LuaNumber(static_cast<std::int64_t>(step)))};
+            expect(scripts.value().submit_event(std::move(event)).has_value(), "HCB-75: scene event queues");
+        }
+        if (!bad.empty()) {
+            auth::ScriptEvent event;
+            event.key = {11, auth::first_simulation_producer, 1, 11};
+            event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Bad";
+            expect(scripts.value().submit_event(std::move(event)).has_value(), "HCB-75: bad call queues");
+        }
+        auto linked = auth::ScriptedTacticalSession::create(std::move(made).value(), std::move(scripts).value());
+        if (!linked) { expect(false, "HCB-75: scripted world links"); return std::nullopt; }
+        auto& session = linked.value();
+        expect(session.register_presentation_verb(foc::verb_letter_box).has_value(), "HCB-75: the verb registers as presentation");
+        expect(!session.register_presentation_verb(foc::verb_letter_box).has_value(), "HCB-75: a verb registers once");
+        for (std::uint64_t tick = 0; tick < 16; ++tick) {
+            host->world = &session.world();
+            host->view = foc::detail::build_view(session.world(), *session.world().snapshot());
+            const auto stepped = session.step(executor);
+            if (!stepped) { expect(false, "HCB-75: letterbox world steps"); return std::nullopt; }
+            out.hashes.push_back(stepped.value().world.state_sha256);
+            for (const auto& input : stepped.value().script_input) if (!input.submitted) ++out.dropped;
+            out.diagnostics += stepped.value().scripts.diagnostics.size();
+            for (const auto& diagnostic : stepped.value().scripts.diagnostics) out.fault += diagnostic.message + "|";
+            for (const auto& command : stepped.value().presentation) {
+                expect(command.verb == foc::verb_letter_box && command.arguments.size() == 2, "HCB-75: presentation holds only the letterbox verb");
+                if (command.arguments.size() != 2) continue;
+                out.requests.push_back({stepped.value().world.completed_tick, {std::get<std::string>(command.arguments[0].data),
+                    std::get<std::string>(command.arguments[1].data)}});
+            }
+            expect(session.pending_script_commands() == 0, "HCB-75: a presentation request never becomes next tick's world input");
+        }
+        out.recorded = session.record().commands.size();
+        return out;
+    };
+    std::optional<Run> baseline;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const auto with = run(workers, true, "");
+        const auto without = run(workers, false, "");
+        if (!with || !without) return;
+        const std::vector<int> after_each_call{1, 2, 3, 4};
+        expect(with->marks == after_each_call, "HCB-75: the statement after each call runs (the script is not ended at the call)");
+        expect(without->marks == after_each_call, "HCB-75: the run without calls makes the same Mark calls");
+        expect(with->requests.size() == 4, "HCB-75: four calls make four requests");
+        if (with->requests.size() == 4) {
+            const auto& r = with->requests;
+            expect(r[0].second == Request{"in", "2"}, "HCB-75: Letter_Box_In(2) asks for the bands over 2 s");
+            expect(r[1].second == Request{"out", "0"}, "HCB-75: Letter_Box_Out(0) lowers them at once");
+            expect(r[2].second == Request{"in", "0.5"} && r[3].second == Request{"out", "1.25"} && r[2].first == r[3].first,
+                "HCB-75: two calls in one tick keep their script order");
+            expect(r[0].first < r[1].first && r[1].first < r[2].first, "HCB-75: requests come in tick order");
+        }
+        expect(with->recorded == 0 && without->recorded == 0, "HCB-75: the replay records no letterbox command");
+        expect(with->dropped == 0 && with->diagnostics == 0, "HCB-75: the call is neither dropped as unroutable nor a fault");
+        expect(without->requests.empty(), "HCB-75: no call, no request");
+        expect(with->hashes == without->hashes, "HCB-75: a letterbox call moves no world hash");
+        if (!baseline) baseline = with;
+        else expect(with->hashes == baseline->hashes && with->requests == baseline->requests, "HCB-75: equal at 1/2/4/8 workers");
+    }
+    for (const std::string bad : {"Letter_Box_In()", "Letter_Box_In('2')", "Letter_Box_Out(-1)", "Letter_Box_In(1, 2)",
+             "Letter_Box_In(0/0)", "Letter_Box_Out(1/0)", "Letter_Box_Out(-1/0)", "Letter_Box_In(nil)"}) {
+        const auto faulty = run(1, true, bad);
+        if (!faulty) return;
+        expect(faulty->requests.size() == 4, "HCB-75: a faulty call makes no request (" + bad + ")");
+        expect(faulty->marks == std::vector<int>({1, 2, 3, 4}),
+            "HCB-75: the valid calls run on and the faulty call ends only its own thread (" + bad + ")");
+        expect(faulty->diagnostics >= 1 && faulty->fault.find("Letter_Box") != std::string::npos,
+            "HCB-75: a faulty call is a named script fault (" + bad + ")");
+        expect(faulty->hashes.size() == 16, "HCB-75: a faulty call never aborts the match (" + bad + ")");
+    }
+}
+
 void faction_controller_inventory() {
     // WSS-35 / GS-02: assigning a faction's controller is insufficient unless
     // its definition and space function set also reach the goal engine.

@@ -35,7 +35,7 @@ core::Result<std::optional<gc::RaidSetup>> build_raid_inputs(const units::Galact
     const auto* limited = data.constant("Raid_Force_Limited_Object_Category_Mask");
     const auto* heroes = data.constant("Raid_Force_Max_Heros");
     const auto* count = data.constant("Raid_Force_Max_Limited_Objects");
-    if (!faction && (!free || (free->text.empty() && !free->number))
+    if ((!faction || faction->text.empty()) && (!free || (free->text.empty() && !free->number))
         && (!limited || (limited->text.empty() && !limited->number)) && !heroes && !count)
         return core::Result<Out>::success({});
     if (!faction || !free || !limited || !heroes || !count) return fail("incomplete raid policy");

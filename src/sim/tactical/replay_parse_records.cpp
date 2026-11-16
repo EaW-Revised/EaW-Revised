@@ -60,7 +60,18 @@ core::Result<void> parse_commands(
                 logical_path);
         }
         std::size_t roster_bytes{};
-        if (opcode == detail::opcode_land_garrison) {
+        if (opcode == detail::opcode_tactical_superweapon) {
+            TacticalSuperweaponPayload tsw;
+            std::uint32_t stage{}, admission{};
+            if (!reader.read_u32(stage) || !reader.read_u32(admission)
+                || (stage != static_cast<std::uint32_t>(TswStage::start_approach)
+                    && stage != static_cast<std::uint32_t>(TswStage::start_power_up))
+                || admission > static_cast<std::uint32_t>(TswAdmission::ai_object))
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid super weapon switch payload" + at, logical_path);
+            tsw.stage = static_cast<TswStage>(stage);
+            tsw.admission = static_cast<TswAdmission>(admission);
+            command.payload = tsw;
+        } else if (opcode == detail::opcode_land_garrison) {
             LandGarrisonPayload garrison;
             std::uint32_t garrison_reserved{};
             if (!reader.read_u64(garrison.host) || !reader.read_u32(garrison.bone)
@@ -133,11 +144,24 @@ core::Result<void> parse_commands(
             command.payload = StopPayload{};
         } else if (opcode == detail::opcode_intentional_quit) {
             command.payload = QuitPayload{};
-        } else if (opcode == 2 || opcode == detail::opcode_hazard_move) {
+        } else if (opcode == 2 || opcode == detail::opcode_hazard_move || opcode == detail::opcode_move_facing) {
             MovePayload move;
             move.through_hazards = opcode == detail::opcode_hazard_move;
             if (!read_vec3(reader, move.destination)) {
                 return fail<Parsed>(diagnostic_codes::malformed, "truncated move payload" + at, logical_path);
+            }
+            if (opcode == detail::opcode_move_facing) {
+                std::int64_t yaw{};
+                std::uint32_t move_flags{}, move_reserved{};
+                if (!reader.read_i64(yaw) || !reader.read_u32(move_flags) || !reader.read_u32(move_reserved)) {
+                    return fail<Parsed>(diagnostic_codes::malformed, "truncated move-facing payload" + at, logical_path);
+                }
+                if (move_reserved != 0 || move_flags > 3U) {
+                    return fail<Parsed>(diagnostic_codes::version, "unsupported move-facing flags or reserved field" + at, logical_path);
+                }
+                move.final_yaw = math::Fixed::from_raw(yaw);
+                move.through_hazards = (move_flags & 1U) != 0;
+                move.append = (move_flags & 2U) != 0;
             }
             command.payload = move;
         } else if (opcode == 3) {
@@ -460,7 +484,8 @@ core::Result<PlayerCommand> decode_command_body(const std::span<const std::uint8
     if (authenticated_player) command.key.player_id = *authenticated_player;
     if (std::holds_alternative<GiftPayload>(command.payload) && !setup.controllers)
         return fail<PlayerCommand>(diagnostic_codes::invalid_command, "gift requires a controller policy", {});
-    if (auto shape = detail::validate_command_shape(command, setup.players, "command body", {}); !shape)
+    if (auto shape = detail::validate_command_shape(command, setup.players, "command body", {},
+            setup.domain == BattleDomain::land); !shape)
         return core::Result<PlayerCommand>::failure(shape.error());
     if (command.origin != CommandOrigin::ordinary || std::holds_alternative<GiftPayload>(command.payload)) {
         if (auto valid = validate_command_provenance(command, setup); !valid)
@@ -472,7 +497,8 @@ core::Result<PlayerCommand> decode_command_body(const std::span<const std::uint8
     return core::Result<PlayerCommand>::success(std::move(command));
 }
 core::Result<std::vector<std::uint8_t>> encode_command_body(const PlayerCommand& command, const TacticalSetup& setup) {
-    if (auto shape = detail::validate_command_shape(command, setup.players, "command body", {}); !shape)
+    if (auto shape = detail::validate_command_shape(command, setup.players, "command body", {},
+            setup.domain == BattleDomain::land); !shape)
         return core::Result<std::vector<std::uint8_t>>::failure(shape.error());
     if (auto provenance = validate_command_provenance(command, setup); !provenance)
         return core::Result<std::vector<std::uint8_t>>::failure(provenance.error());

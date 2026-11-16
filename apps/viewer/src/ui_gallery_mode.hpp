@@ -42,6 +42,7 @@ public:
         std::string hud_cards;
         std::string hud_readouts; // HCB-61/62: bounded prepared-state presentation probes.
         std::string hud_flytext; // HCB-64: caller-prepared bounty feedback states.
+        std::string hud_switch; // HCB-47: the Death Star switch state: lit, approaching, fired or hidden.
         // MNU-42 `--eawr-message-box <none|one|two|three|small|quit>[-centred]`: the runtime message box and
         // its scripted clicks (ui_gallery_box.cpp).
         std::string message_box;

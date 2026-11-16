@@ -9,6 +9,8 @@
 
 namespace eawr::skirmish {
 
+class SetupMapFactsStore; // setup_facts.hpp
+
 // Presentation-independent setup contract (SC-01, R-SETUP-01). Team numbers
 // refer to authored start markers; the displayed number is team + 1.
 struct SetupTeam final {
@@ -107,13 +109,18 @@ void repair_setup_selection(SetupSelection& selection, const SetupMap& map, bool
 // Explicit worker count for deterministic comparisons; output order is unchanged.
 [[nodiscard]] core::Result<std::vector<SetupMap>> setup_maps(
     const vfs::Vfs& filesystem, const data::Catalog& catalog, const SetupMapQuery& query, unsigned workers);
+// With a facts store (setup_facts.hpp): a map whose header facts and finished entry are in the store, under this view's
+// fingerprint, is listed without opening or decoding its file. The list is the same either way. nullptr: no store.
+[[nodiscard]] core::Result<std::vector<SetupMap>> setup_maps(
+    const vfs::Vfs& filesystem, const data::Catalog& catalog, const SetupMapQuery& query, unsigned workers,
+    SetupMapFactsStore* facts);
 // #3776 L3: the setup screens' list. With `land` false (the release default of land_skirmish_enabled) this is
 // exactly setup_maps(query). With it true and a space query, the land maps (land_setup_maps with the same
 // filters) follow the space maps. Any other query kind is passed through unchanged. A failed land list keeps the
 // space maps; its diagnostic goes to `land_failure` for the caller to report (the sim side has no console).
 [[nodiscard]] core::Result<std::vector<SetupMap>> setup_domain_maps(
     const vfs::Vfs& filesystem, const data::Catalog& catalog, const SetupMapQuery& query, bool land,
-    std::string* land_failure = nullptr);
+    std::string* land_failure = nullptr, SetupMapFactsStore* facts = nullptr);
 
 
 // Owned by a loaded-content snapshot, shared by its setup and lobby screens.
@@ -131,7 +138,11 @@ public:
     [[nodiscard]] auto end() const { return maps_.end(); }
     // The last load's land-list diagnostic (empty when none); see setup_domain_maps.
     [[nodiscard]] const std::string& land_failure() const noexcept { return land_failure_; }
+    // The persistent facts store the next load() uses (nullptr: none). It is not part of what a list is keyed by: a list
+    // built with and without a store is the same list.
+    void set_facts_store(std::shared_ptr<SetupMapFactsStore> facts) { facts_ = std::move(facts); }
 private:
+    std::shared_ptr<SetupMapFactsStore> facts_;
     std::shared_ptr<const vfs::Vfs> filesystem_;
     std::shared_ptr<const data::Catalog> catalog_;
     std::uint64_t generation_{};

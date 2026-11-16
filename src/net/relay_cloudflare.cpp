@@ -1,4 +1,5 @@
 #include "relay_cloudflare.hpp"
+#include "relay_tls.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -231,6 +232,24 @@ core::Result<void> cloudflare_revoke(const CloudflareTurnConfig& config, const s
     return core::Result<void>::success();
 }
 
+GnsTurnCredentials with_fallback(const CloudflareTurnConfig& config, GnsTurnCredentials primary) {
+    if (config.fallback_uri.empty() || primary.uri.empty()) return primary;
+    auto own = turn_credentials(config.fallback_uri, config.fallback_secret, primary.lifetime);
+    if (!own || own.value().uri.empty() || !credential_text_valid(own.value().username) || !credential_text_valid(own.value().password))
+        return primary;
+    const auto cloudflare_servers = static_cast<std::size_t>(std::count(primary.uri.begin(), primary.uri.end(), ',')) + 1;
+    const auto repeat = [&](const std::string& value) {
+        std::string list;
+        for (std::size_t i = 0; i < cloudflare_servers; ++i) list += (i ? "," : "") + value;
+        return list;
+    };
+    GnsTurnCredentials merged{primary.uri + "," + own.value().uri, repeat(primary.username) + "," + own.value().username,
+        repeat(primary.password) + "," + own.value().password, primary.lifetime};
+    if (merged.uri.size() > 512 || merged.username.size() > 256 || merged.password.size() > 256 || !turn_uri_list_valid(merged.uri))
+        return primary;
+    return merged;
+}
+
 CloudflareTurnWorker::CloudflareTurnWorker(CloudflareTurnConfig config)
     : config_(std::move(config)), worker_([this](std::stop_token stop) { run(stop); }) {}
 CloudflareTurnWorker::~CloudflareTurnWorker() {
@@ -260,7 +279,7 @@ void CloudflareTurnWorker::run(std::stop_token stop) {
         Completed done{*job, {}, {}};
         if (job->kind == Kind::generate) {
             auto generated = cloudflare_generate(config_, job->ttl, stop);
-            if (generated) done.credentials = std::move(generated).value(); else done.failure = generated.error();
+            if (generated) done.credentials = with_fallback(config_, std::move(generated).value()); else done.failure = generated.error();
         } else {
             auto revoked = cloudflare_revoke(config_, job->username, stop);
             if (!revoked) done.failure = revoked.error();

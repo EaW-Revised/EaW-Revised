@@ -43,6 +43,9 @@ struct AgreedGameSave {
     std::uint64_t completed_tick{};
     std::vector<std::uint8_t> bytes;
     std::optional<core::Diagnostic> failure;
+    // The failure is transient (a timing or roster transition overlapped the capture): nothing was saved and the
+    // request should simply be issued again, not reported.
+    bool retry{};
 };
 
 class LiveGameStepDriver {

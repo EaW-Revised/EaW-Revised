@@ -471,7 +471,7 @@ land unit types read authored income abilities. The land table encoding ends wit
 tables. `LandContentInputs::content_errors` defaults to `skip_object`: a type with a bad combat row is left
 out and named in the binding notes. The land step reads the tables: Attack orders, target choice, weapon fire,
 projectiles, damage and death run from them (docs/behaviour/land-combat-slice.md), so this is a behaviour
-change; the `land-content` identity domain is version 3, the adapter fingerprint `land-content-adapter-v7` (the
+change; the `land-content` identity domain is version 3, the adapter fingerprint `land-content-adapter-v10` (the
 formation constants, stopped-pair overlap coefficient, container collision class and jiggle distance, and start clip
 clock bind into it; the company record is `land-companies-v5`, which adds `FormationGrouping`) and the land checkpoint
 section 18 is v14 (v9: a formation squad is one collision body; v14: the start clip clock; see the history comment in

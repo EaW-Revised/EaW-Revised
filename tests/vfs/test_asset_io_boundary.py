@@ -34,6 +34,8 @@ REVIEWED = {
     "src/core/host_probe.cpp": "volume seek-penalty query for the reader count, no asset read",
     # An opt-in diagnostic trace file written by the galactic AI barrier; it reads no asset.
     "src/campaign/game_session.cpp": "opt-in oracle trace output, no asset read",
+    # Write-only per-tick JSONL of the galactic live session (EAWR_GC_TICK_TRACE, #6933); it reads no file.
+    "include/eawr/core/gc_tick_trace.hpp": "opt-in write-only diagnostic trace, no asset read",
 }
 
 

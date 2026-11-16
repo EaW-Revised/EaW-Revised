@@ -18,6 +18,8 @@
 #include "eawr/presentation/ui/selection.hpp"
 #include "eawr/presentation/ui/settings.hpp"
 #include "eawr/presentation/ui/special_weapon.hpp"
+#include "eawr/presentation/ui/superweapon_switch.hpp"
+#include "eawr/presentation/ui/superlaser_switch.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
 
 #include <godot_cpp/classes/input_event.hpp>
@@ -37,6 +39,7 @@
 #include <vector>
 
 namespace eawr::presentation::godot_backend {
+class SpacePopulation;
 
 // #82 P2-19: the local player's hands on the live battle (--eawr-live-session). The world layer of
 // UI-07: it sees pointer and key events ahead of the space camera, picks and selects the units the
@@ -73,6 +76,8 @@ public:
     [[nodiscard]] std::optional<ui::BattleUnit> encyclopedia_unit() const;
     // Focus loss or the pointer leaving: a drag in progress ends without selecting.
     void cancel() noexcept;
+    // SK-ARR-05: the arrival cinematic clears the local selection.
+    void clear_selection() noexcept;
     // The report's "battle_input" member, followed by ",\n".
     void write_report(std::ostream& output, const BattleCamera& space) const;
     // Opt-in main-thread diagnostic at the existing paused/load or frame seam.
@@ -95,6 +100,8 @@ public:
         std::uint32_t hardpoint{sim::tactical::attack_hull};
         audio::CommandCue cue{audio::CommandCue::none};
         std::optional<sim::math::Vec3> destination;
+        // HCB-47: the Death Star switch's accepted press: the object type whose own press event plays.
+        std::optional<sim::tactical::TypeId> tsw_press;
     };
     [[nodiscard]] std::vector<Acknowledgement> take_acknowledgements();
     // BA-27: mouse and keyboard share the same mode transition and cue.
@@ -102,6 +109,12 @@ public:
     void negative_feedback();
     [[nodiscard]] ui::SpecialWeaponButton special_weapon_button(const LiveSessionView& live) const;
     bool special_weapon_click(LiveSessionView& live);
+    // HCB-47: the Death Star switch. The view is the presenter's for the local player; the click sends the command and
+    // queues the accepted press or the refused cue.
+    [[nodiscard]] ui::SuperweaponSwitchView superweapon_switch(const LiveSessionView& live, ui::SuperweaponSwitchArt art);
+    bool superweapon_click(LiveSessionView& live, ui::SuperweaponSwitchArt art);
+    [[nodiscard]] ui::SuperlaserSwitchView superlaser_switch(const LiveSessionView& live) const;
+    bool superlaser_click(LiveSessionView& live);
     bool beacon_click(LiveSessionView& live);
     [[nodiscard]] bool gift_enabled(const LiveSessionView& live) const;
     bool gift_click(sim::SeatId recipient, LiveSessionView& live);
@@ -233,6 +246,8 @@ private:
     // A scripted middle-button gesture: Ctrl key, button and motion events through the engine queue.
     void replay_middle(const LiveSessionView::ScriptedInput& scripted, const std::string& name);
     void draw();
+    void compass_frame(const LiveSessionView& live);
+    void hide_compass() noexcept;
     void note(std::string text);
     // #424: the unit or craft under the pointer, unless the pointer is over a squadron icon.
     void update_hover();
@@ -278,6 +293,17 @@ private:
     std::optional<sim::EntityId> production_station_;
     ui::PadPalette pad_palette_;
     std::vector<ui::BuildButton> build_buttons_;
+    // Per station menu entry (indexed like the menu, not like the buttons): why its button is enabled or not (report only).
+    struct BuildDiagnostic {
+        bool available{};
+        bool visible{};
+        bool enabled{};
+        std::uint8_t kind{};
+        std::uint8_t queue{};
+        std::array<std::int64_t, 4> limits{-1, -1, -1, -1}; // lifetime/current x player/allies; -1 unlimited
+        std::size_t prerequisites{};
+    };
+    std::vector<BuildDiagnostic> build_diagnostics_;
     std::uint64_t build_clicks_{};
     std::uint64_t buys_{};
     std::optional<sim::tactical::TypeId> placing_;
@@ -309,7 +335,11 @@ private:
     void cancel_ability_target(const char* why);
     void cancel_special_target(const char* why);
     [[nodiscard]] bool special_target_valid(sim::EntityId target, const LiveSessionView& live) const;
+    // #7186 (CU-09): the aimed object ability's authored target filter admits `target` (WHE-14). Hover and
+    // click share it; no handler or no data admits, the order stays the authority.
+    [[nodiscard]] bool ability_filter_admits(sim::EntityId target, const LiveSessionView& live) const;
     std::optional<sim::EntityId> special_target_source_;
+    ui::SuperweaponSwitchFired ds_fired_; // HCB-47: the local lever-down latch (never cleared)
     std::uint64_t special_fires_{}, special_cancels_{}, special_invalid_{};
     // CU-12: hover and click share the current simulation's world-point admission.
     [[nodiscard]] std::optional<sim::math::Vec3> ability_point(
@@ -319,6 +349,14 @@ private:
     std::optional<Drag> left_;
     std::optional<std::array<float, 2>> right_start_;
     bool right_double_click_{};
+    std::optional<ui::PickRay> right_press_ray_; // O-2: the camera ray through the right press
+    bool right_press_on_selected_{};             // O-2: the press was on a selected unit (facing-only drag)
+    double right_held_seconds_{};
+    bool right_press_allows_compass_{};
+    std::unique_ptr<GodotRenderer> compass_renderer_;
+    std::unique_ptr<SpacePopulation> compass_population_;
+    bool compass_drawn_{};
+    std::uint64_t compass_frames_{};
     // #424: the pointer, what it is over and the world UI drawn from it.
     std::optional<std::array<float, 2>> pointer_;
     std::optional<ui::Vec3f> hover_point_;

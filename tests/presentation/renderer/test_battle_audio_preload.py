@@ -315,6 +315,11 @@ int main() {
         assert(bind(kind, read, resolve) == 2);
         sim::tactical::AbilityStatus status{};
         status.kind = kind; status.active = true; status.target = 7; status.started_tick = 10;
+        status.laser_phase = sim::tactical::LaserPhase::fired;
+        if (kind == K::super_laser) {
+            sim::tactical::AbilityStatus clip = status; clip.laser_phase = sim::tactical::LaserPhase::clip;
+            assert(!playing(clip, 14, 4)); // #6554: no loop while the attack clip still plays
+        }
         assert(!playing(status, 9, 4) || kind != K::super_laser);
         assert(playing(status, 14, 4));
         if (kind == K::super_laser) assert(!playing(status, 13, 4));

@@ -355,6 +355,16 @@ The read-only evidence and identifier map remain in ignored research storage.
   control changes. These notify presentation; reinforcement-point contest
   announcements remain outside these placed space pads.
 
+- **WHZ-48** (**debug build**, EHZ-48) Capture completion chooses friendly
+  control cues from the local player's faction, using repeated
+  `SFXEvent_Tactical_Gain_Friendly_Control` or
+  `SFXEvent_Tactical_Lose_Friendly_Control` type/event pairs. The first exact
+  captured-object type match wins; an absent match is silent. An allied old
+  owner selects loss before the new-owner ally test selects gain. These cues
+  use non-positional playback and are separate from the build-pad HUD cues.
+  The checked reader also selects enemy-control cues; that interface remains
+  outside this friendly-control implementation.
+
 Stock capture profiles (**data**, EHZ-data):
 
 | Type | Capture radius | Transition seconds | Respawn seconds | Other relevant data |

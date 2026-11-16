@@ -195,6 +195,10 @@ struct MotionState {
 [[nodiscard]] core::Result<MotionState> plan_face(const MotionProfile& profile, std::uint64_t tick,
     math::Vec3 position, math::Fixed yaw, math::Vec3 target);
 
+// MV-40, MV-41: the same authored turn, with an exact degree heading instead of a target ray.
+[[nodiscard]] core::Result<MotionState> plan_face_yaw(const MotionProfile& profile, std::uint64_t tick,
+    math::Vec3 position, math::Fixed yaw, math::Fixed final_yaw);
+
 struct MotionSample {
     math::Vec3 position{};
     math::Fixed yaw{};   // degrees
@@ -223,6 +227,11 @@ struct MotionSample {
 // level rotation with that yaw (pitch and roll zero).
 [[nodiscard]] core::Result<math::Fixed> yaw_degrees(math::Quat rotation);
 [[nodiscard]] core::Result<math::Quat> yaw_rotation(math::Fixed yaw_degrees);
+
+// The planar bearing in degrees, [-180, 180), from one point toward another; fails when the points share their XY.
+[[nodiscard]] core::Result<math::Fixed> planar_bearing(math::Vec3 from, math::Vec3 to);
+// A yaw difference wrapped into [-180, 180).
+[[nodiscard]] math::Fixed wrap_degrees(math::Fixed degrees) noexcept;
 
 [[nodiscard]] std::string_view to_string(MotionKind kind) noexcept;
 

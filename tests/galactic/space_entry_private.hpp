@@ -62,5 +62,5 @@ void installed_layer_services(const vfs::Vfs& files, const data::Catalog& catalo
     data::galactic::GalacticData authored, const units::GalacticTypeTable& types,
     campaign::CampaignSetupOptions options, bool multiplayer_difficulty = false);
 void installed(bool garrison_only = false, bool population_only = false, bool commander_only = false, bool superweapon_only = false,
-    bool layers_only = false, bool multiplayer_difficulty = false, bool orphan_only = false);
+    bool layers_only = false, bool multiplayer_difficulty = false, bool orphan_only = false, bool facts_only = false);
 } // namespace space_entry_test

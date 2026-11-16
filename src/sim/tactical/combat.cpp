@@ -153,6 +153,16 @@ core::Result<void> validate_combat(const CombatTable& table) {
             || profile.planetary_weapon->pulse_delay_frames > 108000 || profile.weapons.size() != 1
             || profile.weapons.front().hardpoint != object_weapon))
             return invalid(name + "invalid planetary weapon profile");
+        if (profile.tactical_super_weapon) {
+            // TSW-01..05: distances, speeds and the sequence frame counts are non-negative and bounded like the other
+            // timings (an hour of frames, a coordinate-sized distance).
+            const auto& tsw = *profile.tactical_super_weapon;
+            if (tsw.attack_distance.raw() < 0 || !range_ok(tsw.attack_distance) || tsw.max_speed.raw() < 0
+                || tsw.max_thrust.raw() < 0 || !range_ok(tsw.max_speed) || !range_ok(tsw.max_thrust)
+                || tsw.power_up_frames > 108000 || tsw.attack_anim_frames > 108000 || tsw.debris_delay_frames > 108000
+                || tsw.post_destruction_wait_frames > 108000)
+                return invalid(name + "invalid tactical super weapon profile");
+        }
         for (const auto& weapon : profile.weapons) {
             if ((weapon.hardpoint != object_weapon && weapon.hardpoint >= max_hardpoints_per_type)
                 || !range_ok(weapon.range) || !cone_ok(weapon.cone_width) || !cone_ok(weapon.cone_height)

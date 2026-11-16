@@ -7,6 +7,7 @@
 #include "shutdown_trace.hpp"
 #include "frame_timer.hpp"
 #include "campaign_warm_arrivals.hpp"
+#include "hangar_warm_plan.hpp"
 #include "restored_roster_warm.hpp"
 #include "reserve_warm_plan.hpp"
 #include "eawr/presentation/godot/device_budget.hpp"
@@ -34,9 +35,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <exception>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <limits>
+#include <new>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -87,10 +91,10 @@ void LiveSessionView::add_launch_slot(const vfs::Vfs& filesystem, const data::Ca
     if (const auto* type = tables_->find(model); type && type->under_construction) {
         ship.construction = true;
         if (auto object = catalog.resolve(type->id, data::Category::game_object); object) {
-            const auto paths = animation::model_clip_paths(space_model_path(object.value()),
+            const auto paths = animation::model_clip_paths(battle_model_path(object.value(), options_.land),
                 *animation::clip_type_index("BUILD"),
                 [&](const std::string& path) { return static_cast<bool>(filesystem.stat(path)); },
-                tag_text(object.value(), "Space_Model_Anim_Override_Name"));
+                tag_text(object.value(), options_.land ? "Land_Model_Anim_Override_Name" : "Space_Model_Anim_Override_Name"));
             if (!paths.empty()) ship.clip = paths.front();
         }
     }
@@ -830,8 +834,25 @@ std::optional<std::size_t> LiveSessionView::ship_of(const sim::EntityId entity, 
     return std::nullopt;
 }
 
+namespace {
+// During play the renderer's uploads must not wait on the main thread's behalf (GodotRenderer::set_play_uploads); the
+// previous setting comes back when the scope ends, so nested scopes are safe.
+class PlayUploads final {
+public:
+    PlayUploads(GodotRenderer* renderer, const bool on) : renderer_(on ? renderer : nullptr) {
+        if (renderer_) { previous_ = renderer_->play_uploads(); renderer_->set_play_uploads(true); }
+    }
+    PlayUploads(const PlayUploads&) = delete;
+    PlayUploads& operator=(const PlayUploads&) = delete;
+    ~PlayUploads() { if (renderer_) renderer_->set_play_uploads(previous_); }
+private:
+    GodotRenderer* renderer_{};
+    bool previous_{};
+};
+} // namespace
+
 std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId entity,
-    const tactical::TypeId type, const tactical::PlayerId owner) {
+    const tactical::TypeId type, const tactical::PlayerId owner, const std::optional<std::uint64_t> stepped) {
     // Planned launches may outgrow the warm pool. Purchase provenance remains
     // necessary for other skirmish types; a shared menu entry alone is insufficient.
     const auto* team = squadron_of(entity);
@@ -839,13 +860,16 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
     // including after a purchase or tech change. The sim publishes launch provenance.
     const bool launch = launch_demanded(owner, type) || squadron_launched(entity)
         || (team && squadron_launched(team->container));
+    // #6992: a structure a land pad completes into appears after tick zero without a planned slot. Like a launch it is
+    // drawn in the frame it appears (a pad's owner is looking at it); only the load-time recipe note below stays launch-only.
+    const bool structure = options_.land && land_structure_types_.contains(type);
     // A launched craft must be drawn in the frame it launches: planned launches are exempt from the per-frame
     // arrival budget (their count is bounded by the plan's simultaneous maximum; warm_launches sets how many are
     // composed at load). Only purchases and reinforcement pools wait for the budget.
     if (!arrival_slots_.population || !arrival_slots_.renderer || !arrival_slots_.filesystem || !arrival_slots_.catalog
-        || (!launch && !arrival_slots_.remaining) || arrival_slots_.failed.contains({owner, type}) || !tables_ || !start_)
+        || (!launch && !structure && !arrival_slots_.remaining) || arrival_slots_.failed.contains({owner, type}) || !tables_ || !start_)
         return std::nullopt;
-    if (!(setup_ && setup_->campaign)
+    if (!(setup_ && setup_->campaign) && !structure
         && !launch && (!arrival_slots_.purchases.contains({owner, type}) || !arrivals_.contains(entity))) return std::nullopt;
     const units::UnitType* named = nullptr;
     if (const auto indexed = presentation_types_.find(type); indexed != presentation_types_.end()) named = indexed->second;
@@ -873,7 +897,9 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
         }
     } reads{arrival_slots_.launch_read_bytes, arrival_slots_.frame_launch_read_bytes, launch};
     FrameTimer growth_timer(trace_frames_ ? &arrival_slots_.growth_ms : nullptr, true);
-    if (!launch) --arrival_slots_.remaining; // deterministic work budget, independent of elapsed frame time
+    std::optional<core::load_profile::DetailScope> slot_phase; // detail only: which part of this step the time goes to
+    slot_phase.emplace(core::load_profile::Phase::slot_prologue);
+    if (!launch && !structure) --arrival_slots_.remaining; // deterministic work budget, independent of elapsed frame time
     // Projectile pools append model slots independently. Keep this metadata indexed by
     // the population's actual slots before adding a hull and its death clone.
     const auto composed = arrival_slots_.population->placed_units();
@@ -897,15 +923,18 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
             break;
         }
     }
+    slot_phase.emplace(core::load_profile::Phase::slot_launch_slot);
     add_launch_slot(*arrival_slots_.filesystem, *arrival_slots_.catalog, named->id, anchor,
         colour != start_->players.end() ? colour->colour : std::optional<battle::LobbyColour>{}, 0, proxy_owner,
         source_label(launch ? battle::ArrivalSource::launch : battle::ArrivalSource::purchase));
     core::load_profile::slot_grown(launch ? "launch" : "purchase");
     const auto slot_index = launch_slots_.size() - 1;
+    slot_phase.emplace(core::load_profile::Phase::slot_death_clone);
     if (auto clone = prepare_death_clone(*arrival_slots_.filesystem, *arrival_slots_.catalog, first_ship, entity)) {
         launch_slots_[slot_index].clone = launch_clones_.size();
         launch_clones_.push_back(std::move(*clone));
     }
+    slot_phase.emplace(core::load_profile::Phase::slot_ship_meta);
     const auto exists = [&](const std::string& path) { return static_cast<bool>(arrival_slots_.filesystem->stat(path)); };
     for (auto& ship : std::span(placed_ships_).subspan(first_ship)) {
         const auto* model = tables_->find(ship.object_id);
@@ -925,6 +954,23 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
         const auto undeploy = animation::model_clip_paths(path, animation::clip_types::undeploy, exists, override_name);
         if (!deploy.empty() && !undeploy.empty()) { ship.clip = deploy.front(); ship.alternate_clip = undeploy.front(); }
     }
+    slot_phase.emplace(core::load_profile::Phase::slot_append);
+    const PlayUploads play_uploads(arrival_slots_.renderer, phase_ == Phase::running);
+    if (stepped) {
+        // The compose runs as steps the warm pump spreads over frames; the slot is not usable until they are done.
+        if (!arrival_slots_.population->begin_live_append(*arrival_slots_.renderer, *arrival_slots_.filesystem,
+                std::span(placed_ships_).subspan(first_ship), *stepped)) {
+            launch_slots_[slot_index].bound = true;
+            launch_slots_[slot_index].shadow_bound = true;
+            arrival_slots_.failed.emplace(owner, type);
+            arrival_slots_.failure = arrival_slots_.population->failure();
+            if (arrival_slots_.failure.empty()) arrival_slots_.failure = "arrival type has no drawable model: " + named->id;
+            return std::nullopt;
+        }
+        launch_slots_[slot_index].bound = true;
+        launch_slots_[slot_index].shadow_bound = true;
+        return first_ship;
+    }
     if (!arrival_slots_.population->append_live_ships(*arrival_slots_.renderer, *arrival_slots_.filesystem,
             std::span(placed_ships_).subspan(first_ship)) || !arrival_slots_.population->live_ship_drawn(first_ship)) {
         // An undrawable authored type is reported once; retrying it each frame would allocate forever.
@@ -935,6 +981,7 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
         if (arrival_slots_.failure.empty()) arrival_slots_.failure = "arrival type has no drawable model: " + named->id;
         return std::nullopt;
     }
+    slot_phase.reset();
     ++arrival_slots_.grown;
     ++arrival_slots_.frame_grown;
     if (launch && trace_frames_) {
@@ -965,6 +1012,352 @@ const tactical::Squadron* LiveSessionView::squadron_of(const sim::EntityId craft
     if (container == squadron_of_.end()) return nullptr;
     const auto squadron = squadrons_.find(container->second);
     return squadron == squadrons_.end() ? nullptr : &squadron->second;
+}
+
+// ---- #5097 PR 2: warm the hangars of ships that are queued, pooled or called in --------------------------------------
+namespace {
+// Proxy copies one frame appends. A copy shares its recipe's textures and meshes (no read, no decode), so this bounds
+// only the renderer calls of a frame.
+constexpr std::size_t hangar_copies_per_frame = 6;
+// Frames a recipe commit waits for the read-ahead. A reinforcement delay is seconds (hundreds of frames); past this
+// the commit goes on and the append decodes what is still missing itself (counted as `late`).
+constexpr std::size_t hangar_wait_frames = 1800;
+// Recipe plans a worker builds at once. The textures themselves are read one plan at a time, oldest first.
+constexpr std::size_t hangar_plans_ahead = 3;
+// Main-thread time the compose steps of a recipe may take in one frame (a step itself is one surface upload).
+constexpr double hangar_step_budget_ms = 3.0;
+} // namespace
+
+std::optional<std::size_t> LiveSessionView::hangar_recipe_slot(const tactical::PlayerId owner, const std::string& craft) const {
+    for (std::size_t index = 0; index < launch_slots_.size(); ++index) {
+        const auto& slot = launch_slots_[index];
+        if (slot.required_station == 0 && slot.station_owner == owner && placed_ships_[slot.ship].object_id == craft) return index;
+    }
+    return std::nullopt;
+}
+
+bool LiveSessionView::append_recipe_copy(BattleScene& population, GodotRenderer& renderer, const std::size_t recipe_index) {
+    // One hull and its death clone, as the load-time warm pass makes them: the proxies share the recipe's immutable assets
+    // and own their mutable state, so nothing is read or decoded here. A hull that outlives a refused clone stays hidden.
+    const LaunchSlot recipe = launch_slots_[recipe_index];
+    const auto first = placed_ships_.size();
+    if (first >= std::numeric_limits<sim::EntityId>::max() / 4U) return false;
+    auto hull = placed_ships_[recipe.ship];
+    hull.live_entity = std::numeric_limits<sim::EntityId>::max() / 2U + first;
+    std::optional<DeathClone> clone;
+    std::optional<BattleScene::PlacedUnit> wreck;
+    if (recipe.clone) {
+        clone = launch_clones_[*recipe.clone];
+        wreck = placed_ships_[clone->ship];
+        wreck->live_entity = std::numeric_limits<sim::EntityId>::max() - hull.live_entity;
+        clone->ship = first + 1;
+    }
+    placed_ships_.reserve(first + (wreck ? 2U : 1U));
+    launch_slots_.reserve(launch_slots_.size() + 1);
+    launch_clones_.reserve(launch_clones_.size() + (clone ? 1U : 0U));
+    const auto appended = population.append_model_proxies(renderer, recipe.ship, std::span(&hull, 1));
+    if (appended.outcome != GodotRenderer::ProxyOutcome::reserved) return false;
+    arrival_slots_.hangar_proxy_bytes += appended.bytes;
+    placed_ships_.push_back(std::move(hull));
+    if (wreck) {
+        const auto added = population.append_model_proxies(renderer, launch_clones_[*recipe.clone].ship, std::span(&*wreck, 1));
+        if (added.outcome != GodotRenderer::ProxyOutcome::reserved) return false;
+        arrival_slots_.hangar_proxy_bytes += added.bytes;
+        placed_ships_.push_back(std::move(*wreck));
+    }
+    auto slot = recipe;
+    slot.ship = first;
+    slot.bound = slot.shadow_bound = false;
+    slot.clone.reset();
+    if (clone) {
+        slot.clone = launch_clones_.size();
+        launch_clones_.push_back(std::move(*clone));
+    }
+    launch_slots_.push_back(slot);
+    return true;
+}
+
+void LiveSessionView::plan_hangar_warm_for(const units::UnitType& type, const tactical::PlayerId owner, const std::uint32_t tech) {
+    // The hangar of a type at the owner's tech: the most any authored tier up to it starts a craft with (the tier the sim
+    // picks when the ship launches is one of them). Mixed and repeated squadron members and nested hangars expand.
+    const auto lookup = [this](const tactical::PlayerId who, const std::string& name,
+                               const std::uint32_t level) -> std::optional<CampaignWarmType> {
+        const auto id = battle::type_id(name);
+        bool complete = true;
+        const auto craft_of = [&](const tactical::SpawnerProfile& profile) {
+            RosterCraft craft;
+            for (const auto& entry : profile.entries) {
+                if (entry.starting <= 0) continue;
+                const auto squadron = hangar_names_.find(entry.squadron);
+                if (squadron == hangar_names_.end()) { complete = false; continue; }
+                const auto starting = static_cast<std::size_t>(entry.starting);
+                if (squadron->second->members.empty()) craft.emplace_back(squadron->second->id, starting);
+                for (const auto& member : squadron->second->members) craft.emplace_back(member.craft, starting);
+            }
+            return craft;
+        };
+        std::vector<RosterCraft> tiers;
+        if (const auto found = motion()->squadrons.tech_spawners.find(id); found != motion()->squadrons.tech_spawners.end()) {
+            // The last entry is the invalid tech.
+            for (std::size_t tier = 0; tier + 1U < found->second.size(); ++tier) tiers.push_back(craft_of(found->second[tier]));
+        } else if (const auto* profile = motion()->squadrons.find_spawner(id, who)) {
+            tiers.push_back(craft_of(*profile));
+        } else {
+            return std::nullopt;
+        }
+        return CampaignWarmType{who, name, largest_roster_up_to(tiers, level), complete};
+    };
+    std::map<std::pair<tactical::PlayerId, std::string>, std::size_t> existing;
+    for (const auto& slot : launch_slots_)
+        if (slot.required_station == 0) ++existing[{slot.station_owner, placed_ships_[slot.ship].object_id}];
+    auto plan = plan_hangar_warm({owner, type.id, tech}, lookup, existing);
+    // The ship's own hull, when no slot of it exists (an option a tech level unlocked after the load composed them).
+    const bool container = type.kind == units::UnitKind::squadron && !type.members.empty();
+    if (!container && !existing.contains({owner, type.id})) plan.wants.insert(plan.wants.begin(), HangarWarmWant{owner, type.id, 1, 0});
+    if (!plan.complete) note_preload_fallback(owner, type.id, "unknown_roster");
+    for (const auto& want : plan.wants) {
+        HangarWarmJob job;
+        job.owner = want.owner;
+        job.craft = want.craft;
+        job.slots = want.slots;
+        job.have = want.have;
+        // The launches (and any later purchase) of the craft are planned work from here on, not a fallback.
+        arrival_slots_.plan.add(want.owner, want.craft, want.slots - want.have, battle::ArrivalSource::launch, 0);
+        launch_demand_valid_ = false;
+        ++arrival_slots_.hangar_planned;
+        if (want.have == 0) {
+            // What the recipe will compose: the craft's hull and its death clone, as grow_launch_slot stages them.
+            BattleScene::PlacedUnit hull;
+            hull.object_id = want.craft;
+            hull.live_entity = std::numeric_limits<sim::EntityId>::max() / 4U + launch_slots_.size();
+            hull.launch_slot = true;
+            if (const auto* unit = tables_->find(want.craft)) {
+                hull.construction = unit->under_construction;
+                const auto has = [&](const std::string_view ability) {
+                    return std::any_of(unit->abilities.begin(), unit->abilities.end(),
+                        [&](const auto& row) { return row.type == ability; });
+                };
+                hull.defend_shell = has("DEFEND");
+                hull.stealth_shell = has("STEALTH");
+            }
+            job.staged.push_back(hull);
+            if (arrival_slots_.catalog) {
+                if (const auto object = arrival_slots_.catalog->resolve(want.craft, data::Category::game_object)) {
+                    std::vector<std::string> entries;
+                    for (const data::EffectiveValue& value : object.value().values) {
+                        const std::string_view name = value.value.name;
+                        constexpr std::string_view wanted = "Death_Clone";
+                        if (name.size() == wanted.size() && std::equal(name.begin(), name.end(), wanted.begin(), [](char a, char b) {
+                                return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+                            })) entries.push_back(value.value.raw_text);
+                    }
+                    if (const auto clone = animation::death_clone_type(entries)) {
+                        BattleScene::PlacedUnit wreck;
+                        wreck.object_id = *clone;
+                        wreck.live_entity = std::numeric_limits<sim::EntityId>::max() - hull.live_entity;
+                        wreck.death_clone = true;
+                        job.staged.push_back(std::move(wreck));
+                    }
+                }
+            }
+        }
+        hangar_warm_jobs_.push_back(std::move(job));
+    }
+}
+
+void LiveSessionView::pump_hangar_warm(BattleScene& population, GodotRenderer& renderer,
+                                       const tactical::TacticalSnapshot& snapshot) {
+    arrival_slots_.hangar_frame_ms = 0.0;
+    arrival_slots_.hangar_frame_slots = 0;
+    if (options_.land || phase_ == Phase::loading || phase_ == Phase::ready || !motion() || !tables_ || !start_
+        || !arrival_slots_.filesystem || !arrival_slots_.catalog) return;
+    // 1. Look at what every owner has queued, pooled or called in; plan each (type, owner, tech) once.
+    if (hangar_names_.empty()) for (const auto& type : tables_->units) hangar_names_.emplace(battle::type_id(type.id), &type);
+    const auto note = [&](const tactical::PlayerId owner, const tactical::TypeId type, const std::uint32_t tech) {
+        const auto* hero = economy_.hero(type);
+        const auto named = hangar_names_.find(hero ? hero->deployed : type);
+        if (named == hangar_names_.end() || !hangar_warm_seen_.note(owner, named->first, tech)) return;
+        plan_hangar_warm_for(*named->second, owner, tech);
+    };
+    try {
+        for (const auto& economy : snapshot.economy()) {
+            // Queue 0 holds the units; queue 1 the upgrades, which launch nothing.
+            for (const auto& entry : economy.queues[0]) note(economy.player, entry.type, economy.tech_level);
+            for (const auto type : economy.pool) note(economy.player, type, economy.tech_level);
+            for (const auto& reserve : economy.reserves)
+                if (!reserve.restricted) note(economy.player, reserve.type, economy.tech_level);
+        }
+    } catch (const std::bad_alloc&) {
+        // What is dropped must give its read-ahead back, or the scene's oldest ticket never finishes (see abandon_hangar_jobs).
+        abandon_hangar_jobs(hangar_warm_jobs_, [&](const std::uint64_t ticket) { population.arrival_ahead_release(ticket); });
+        return;
+    }
+    if (hangar_warm_jobs_.empty()) return;
+    FrameTimer timer(&arrival_slots_.hangar_frame_ms);
+    const auto finish = [&] {
+        timer.finish();
+        arrival_slots_.hangar_total_ms += arrival_slots_.hangar_frame_ms;
+        arrival_slots_.hangar_worst_ms = std::max(arrival_slots_.hangar_worst_ms, arrival_slots_.hangar_frame_ms);
+    };
+    // 2. Workers read the models and textures of the recipes still missing, a few plans at a time.
+    std::size_t running = 0;
+    for (auto& job : hangar_warm_jobs_) {
+        if (job.started && job.ticket != 0) ++running;
+    }
+    for (auto& job : hangar_warm_jobs_) {
+        if (job.started || running >= hangar_plans_ahead) continue;
+        job.started = true;
+        if (job.have == 0 && !hangar_recipe_slot(job.owner, job.craft)) {
+            job.ticket = population.arrival_ahead_begin(*arrival_slots_.filesystem, job.staged);
+            if (job.ticket != 0) ++running;
+        }
+    }
+    // 3. The oldest job takes one step on this thread: its recipe (a few compose steps a frame), or a few proxy copies.
+    HangarWarmJob& job = hangar_warm_jobs_.front();
+    if (!job.started) { finish(); return; }
+    // A ticket is the scene's oldest read-ahead until released: every way out of a job spends it.
+    const auto spend = [&] {
+        if (job.ticket != 0) population.arrival_ahead_release(job.ticket);
+        job.ticket = 0;
+    };
+    const auto drop = [&] {
+        spend();
+        hangar_warm_jobs_.pop_front();
+    };
+    // Trace only: which phases the compose steps spend their time in (the detailed load profile, on this thread).
+    struct PhaseRecording final {
+        core::load_profile::Recording* outer{core::load_profile::active};
+        explicit PhaseRecording(core::load_profile::Recording* now) { if (now) core::load_profile::active = now; }
+        PhaseRecording(const PhaseRecording&) = delete;
+        PhaseRecording& operator=(const PhaseRecording&) = delete;
+        ~PhaseRecording() { core::load_profile::active = outer; }
+    };
+    if (job.composing) {
+        const PlayUploads play_uploads(&renderer, true);
+        const auto reads_before = core::load_profile::asset_read_bytes;
+        const auto started = std::chrono::steady_clock::now();
+        BattleScene::AppendState state;
+        {
+            const PhaseRecording recording(job.phases.get());
+            state = population.step_live_append(hangar_step_budget_ms);
+        }
+        const double step_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        job.compose_ms += step_ms;
+        job.compose_worst_ms = std::max(job.compose_worst_ms, step_ms);
+        ++job.compose_steps_frames;
+        job.compose_read_bytes += core::load_profile::asset_read_bytes - reads_before;
+        if (state == BattleScene::AppendState::pending) { finish(); return; }
+        const bool drawn = state == BattleScene::AppendState::done && population.live_ship_drawn(job.first_ship);
+        if (!drawn) {
+            // An undrawable authored type is reported once; the slot stays reserved so nothing binds to it.
+            arrival_slots_.failed.emplace(job.owner, battle::type_id(job.craft));
+            arrival_slots_.failure = population.failure();
+            if (arrival_slots_.failure.empty()) arrival_slots_.failure = "arrival type has no drawable model: " + job.craft;
+            ++arrival_slots_.hangar_skipped;
+            drop();
+            finish();
+            return;
+        }
+        launch_slots_[job.slot_index].bound = false;
+        launch_slots_[job.slot_index].shadow_bound = false;
+        job.composing = false;
+        arrival_slots_.hangar_recipe_bytes += job.compose_read_bytes;
+        arrival_slots_.hangar_ahead = population.arrival_ahead_stats();
+        ++arrival_slots_.hangar_recipes;
+        ++job.added;
+        ++arrival_slots_.hangar_frame_slots;
+        spend();
+        if (trace_frames_) {
+            godot::UtilityFunctions::print("EAWR hangar recipe read: owner=", static_cast<std::int64_t>(job.owner),
+                " type=", godot::String::utf8(job.craft.c_str()), " ms=", job.compose_ms,
+                " frames=", static_cast<std::int64_t>(job.compose_steps_frames), " worst_frame_ms=", job.compose_worst_ms,
+                " bytes=", static_cast<std::int64_t>(job.compose_read_bytes));
+            if (job.phases) {
+                std::vector<std::pair<double, std::size_t>> top;
+                for (std::size_t phase = 0; phase < job.phases->costs.size(); ++phase)
+                    if (job.phases->costs[phase].exclusive_ms >= 5.0) top.emplace_back(job.phases->costs[phase].exclusive_ms, phase);
+                std::sort(top.begin(), top.end(), std::greater<>());
+                std::string line;
+                for (std::size_t i = 0; i < top.size() && i < 8; ++i) {
+                    const auto& cost = job.phases->costs[top[i].second];
+                    line += std::string(core::load_profile::names[top[i].second]) + "=" + std::to_string(static_cast<long>(cost.exclusive_ms))
+                        + "ms/" + std::to_string(cost.calls) + " ";
+                }
+                godot::UtilityFunctions::print("EAWR hangar recipe phases: type=", godot::String::utf8(job.craft.c_str()), " ", godot::String::utf8(line.c_str()));
+            }
+        }
+        finish();
+        return; // the copies follow in later frames
+    }
+    auto recipe = hangar_recipe_slot(job.owner, job.craft);
+    if (recipe) spend(); // another path made the recipe meanwhile: its read-ahead is not needed
+    if (!recipe) {
+        if (job.ticket == 0) { ++arrival_slots_.hangar_skipped; drop(); finish(); return; }
+        const auto state = population.arrival_ahead_poll(job.ticket);
+        if (state == BattleScene::AheadState::failed) {
+            ++arrival_slots_.hangar_skipped;
+            drop();
+            finish();
+            return;
+        }
+        if (state == BattleScene::AheadState::pending) {
+            if (++job.waited < hangar_wait_frames) { finish(); return; }
+            ++arrival_slots_.hangar_late;
+        }
+        // The slot growth below is planned work: keep it out of the unplanned-growth counters the launch gate reads.
+        const auto grown = arrival_slots_.grown, frame_grown = arrival_slots_.frame_grown;
+        const auto growth_ms = arrival_slots_.growth_ms;
+        const auto read_total = arrival_slots_.launch_read_bytes, read_frame = arrival_slots_.frame_launch_read_bytes;
+        population.arrival_ahead_use(job.ticket, true);
+        std::optional<std::size_t> made;
+        if (trace_frames_) {
+            job.phases = std::make_shared<core::load_profile::Recording>();
+            job.phases->detailed = true;
+        }
+        const auto started = std::chrono::steady_clock::now();
+        try {
+            struct RecipeRead final {
+                bool& flag;
+                explicit RecipeRead(bool& value) : flag(value) { flag = true; }
+                ~RecipeRead() { flag = false; }
+            } reading{warm_recipe_read_};
+            const PhaseRecording recording(job.phases.get());
+            made = grow_launch_slot(0, battle::type_id(job.craft), job.owner, job.ticket);
+        } catch (const std::bad_alloc&) {
+            made.reset();
+        }
+        population.arrival_ahead_use(job.ticket, false);
+        arrival_slots_.grown = grown;
+        arrival_slots_.frame_grown = frame_grown;
+        arrival_slots_.growth_ms = growth_ms;
+        arrival_slots_.launch_read_bytes = read_total;
+        arrival_slots_.frame_launch_read_bytes = read_frame;
+        if (!made) { ++arrival_slots_.hangar_skipped; drop(); finish(); return; }
+        // The ticket stays until the steps are done: they take their textures from its read-ahead.
+        job.composing = true;
+        job.first_ship = *made;
+        job.slot_index = launch_slots_.size() - 1;
+        job.compose_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        job.compose_worst_ms = job.compose_ms;
+        finish();
+        return; // the compose steps follow in later frames
+    }
+    std::size_t copies = 0;
+    while (job.have + job.added < job.slots && copies < hangar_copies_per_frame) {
+        bool appended = false;
+        try {
+            appended = append_recipe_copy(population, renderer, *recipe);
+        } catch (const std::bad_alloc&) {
+            appended = false;
+        }
+        if (!appended) { job.slots = job.have + job.added; break; } // refused or out of memory: what exists stands
+        ++job.added;
+        ++copies;
+        ++arrival_slots_.hangar_copies;
+        ++arrival_slots_.hangar_frame_slots;
+    }
+    if (job.have + job.added >= job.slots) drop();
+    finish();
 }
 
 } // namespace eawr::presentation::godot_backend

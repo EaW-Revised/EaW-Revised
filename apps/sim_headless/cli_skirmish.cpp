@@ -1,10 +1,12 @@
 #include "cli_internal.hpp"
+#include "eawr/core/degradation_ledger.hpp"
 #include "eawr/core/json_text.hpp"
 #include "eawr/platform/battle_scoring.hpp"
 #include "eawr/platform/live_ai.hpp"
 #include "eawr/platform/live_scripts.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 #include "eawr/skirmish/setup.hpp"
+#include "eawr/platform/model_facts.hpp"
 
 #include "eawr/assets/map.hpp"
 
@@ -158,6 +160,7 @@ int run_ai_battle(const Options& options, const LoadedTables& loaded,
         content.value().load_notes = collector.snapshot();
     }
     sk::drop_skipped_starts(start, skipped, &content.value().load_notes);
+    eawr::core::degradation::record_load_notes(content.value().load_notes);
     for (const auto& note : content.value().load_notes) std::cerr << eawr::core::format_diagnostic(eawr::core::load_note_diagnostic(note)) << '\n';
     const auto skipped_types = sk::skipped_type_ids(skipped);
     sk::bind_skipped_types(start, skipped_types);
@@ -348,12 +351,13 @@ int run_ai_battle(const Options& options, const LoadedTables& loaded,
     }
     loaded->catalog.emplace(std::move(catalog).value());
     eawr::scene::VfsAssetCache cache(*loaded->filesystem);
-    const auto access = cache.access();
+    eawr::platform::ModelFactsScope facts(*loaded->filesystem, cache, true); // EAWR_FACTS_CACHE_DIR names a store; none: plain decode
     eawr::units::LoadInput unit_input;
     unit_input.catalog = &loaded->catalog->catalog;
     unit_input.filesystem = &*loaded->filesystem;
-    unit_input.model = access.model;
+    unit_input.model = facts.lookup();
     auto tables = eawr::units::load_unit_tables(unit_input);
+    facts.finish();
     if (!tables) return LoadResult::failure(tables.error());
     loaded->tables.emplace(std::move(tables).value());
     return LoadResult::success(std::move(loaded));
@@ -460,15 +464,17 @@ int run_skirmish(const Options& options) {
     for (const auto& type : options.probe_carriers) missing.insert(type); // #5559
     if (!missing.empty()) {
         eawr::scene::VfsAssetCache cache(filesystem);
+        eawr::platform::ModelFactsScope facts(filesystem, cache, true);
         eawr::units::LoadInput unit_input;
         unit_input.catalog = &catalog;
         unit_input.filesystem = &filesystem;
-        unit_input.model = cache.access().model;
+        unit_input.model = facts.lookup();
         unit_input.space_map = fixture.map;
         for (const auto type : eawr::units::pinned_m2_types()) unit_input.types.emplace_back(type);
         unit_input.types.insert(unit_input.types.end(), missing.begin(), missing.end());
         for (const auto type : eawr::units::pinned_m2_obstacles()) unit_input.obstacles.emplace_back(type);
         auto extended = eawr::units::load_unit_tables(unit_input);
+        facts.finish();
         if (!extended) return fail(extended.error());
         tables = std::move(extended).value();
         inputs.value().tables = &tables;
@@ -518,6 +524,7 @@ int run_skirmish(const Options& options) {
             content.value().load_notes = collector.snapshot();
         }
         skirmish::drop_skipped_starts(start.value(), skipped, &content.value().load_notes);
+        eawr::core::degradation::record_load_notes(content.value().load_notes);
         for (const auto& note : content.value().load_notes)
             std::cerr << eawr::core::format_diagnostic(eawr::core::load_note_diagnostic(note)) << '\n';
         skirmish::bind_skipped_types(start.value(), skirmish::skipped_type_ids(skipped)); // recordings carry the skip set

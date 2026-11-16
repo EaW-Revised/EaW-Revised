@@ -9,6 +9,9 @@ struct ObservedCorruptionChoice {
     unsigned slot{}; // authored slot 1..3, including gaps
     corruption_actions::Prepared prepared;
     bool affordable{}, units_satisfied{}, missions_satisfied{}, planets_satisfied{};
+    // Remake route availability, not a retail requirement: false when the choice needs a mission battle that this
+    // host cannot start, so it is offered unavailable instead of refused after the debit.
+    bool mission_available{true};
     std::optional<PreparedAbility> live_prepared{};
     std::optional<CorruptionChoice> live_choice{};
 };

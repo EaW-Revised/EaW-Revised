@@ -3,9 +3,9 @@
 #include "ui/movie_player.hpp"
 #include "ui/theme_builder.hpp"
 
-#include "eawr/assets/assets.hpp"
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/data/xml.hpp"
+#include "eawr/presentation/ui/named_picture.hpp"
 
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/input_event_key.hpp>
@@ -29,7 +29,6 @@ namespace model = presentation::ui;
 // The 768-unit-high reference screen the font sizes are authored for (UI-L1).
 constexpr float reference_height = 768.0F;
 constexpr std::string_view constants_path = "data/xml/gameconstants.xml";
-constexpr std::string_view texture_directory = "Data/Art/Textures/";
 
 String godot_text(const std::string& value) {
     return String::utf8(value.c_str(), static_cast<int64_t>(value.size()));
@@ -55,7 +54,8 @@ bool EawrCreditsScreen::show(Node& parent, const CreditsContext& context) {
     fonts_ = context.fonts;
     language_ = context.language;
 
-    set_layer(layer_index);
+    set_layer(context.layer.value_or(layer_index));
+    input_skips_ = context.input_skips;
     set_name("Credits");
     canvas_ = memnew(Control);
     canvas_->set_position(Vector2());
@@ -158,13 +158,15 @@ void EawrCreditsScreen::load_logos(const CreditsContext& context) {
     for (std::size_t index = 0; index < model::credits_logo_count; ++index) {
         const model::CreditsLogoStyle& logo = style_->logos[index];
         if (logo.texture.empty()) continue;
-        auto texture = assets::load_texture(*context.filesystem, std::string(texture_directory) + logo.texture);
-        if (!texture) {
-            notes_.push_back(core::format_diagnostic(texture.error()));
+        // The shared asset-name rule: as authored, then its stem with the sibling extensions (EAWR-ASSET-NAME-0001
+        // on a miss).
+        const model::NamedPicture picture = model::load_named_picture(*context.filesystem, logo.texture, "credits logo");
+        if (!picture.texture) {
+            notes_.push_back("logo " + logo.texture + (picture.logical_path.empty() ? " is not in the data" : ": " + picture.problem));
             continue;
         }
         std::string failure;
-        const Ref<Image> image = texture_image(texture.value(), failure);
+        const Ref<Image> image = texture_image(*picture.texture, failure);
         if (image.is_null() || image->get_width() <= 0 || image->get_height() <= 0) {
             notes_.push_back("logo " + logo.texture + ": " + failure);
             continue;
@@ -245,7 +247,7 @@ void EawrCreditsScreen::_process(const double delta) {
 }
 
 void EawrCreditsScreen::_input(const Ref<InputEvent>& event) {
-    if (finished_) return;
+    if (finished_ || !input_skips_) return;
     bool skipped = false;
     if (const auto* key = Object::cast_to<InputEventKey>(event.ptr())) {
         skipped = key->is_pressed() && !key->is_echo() && key->get_keycode() == KEY_ESCAPE;

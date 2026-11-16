@@ -74,6 +74,14 @@ gc::GameCommand buy(std::uint64_t tick, std::uint64_t sequence) {
 void math_rules() {
     expect(take(gc::mining_income_bonus(f(100), f(2), {}, false, d("1.5"))) == f(200), "WGEP-10 two is plus 200 percent");
     expect(take(gc::mining_income_bonus(f(100), f(2), f(10), true, d("1.5"))) == f(315), "colony multiplies the whole bonus");
+    {   // CGS-16: setup no longer span-limits authored mining values, so every step that consumes them reports overflow as an error, never wraps.
+        const auto huge = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+        const auto tiny = Fixed::from_raw(std::numeric_limits<std::int64_t>::min());
+        expect(!gc::mining_income_bonus(f(100), huge, {}, false, f(1)), "an extreme percentage overflows the product with an error");
+        expect(!gc::mining_income_bonus(huge, f(1), huge, false, f(1)), "an extreme absolute overflows the sum with an error");
+        expect(!gc::mining_income_bonus({}, {}, tiny, true, tiny), "an extreme colony multiplier overflows with an error");
+        expect(static_cast<bool>(gc::mining_income_bonus(f(100), f(1), f(-70000), true, f(1))), "an upkeep of -70000 computes");
+    }
     const std::vector<gc::ProductionReduction> a{{1, 1, d("0.2")}, {2, 2, d("0.1")}};
     const std::vector<gc::ProductionReduction> b{{3, 1, d("0.4")}};
     expect(take(gc::production_reduction_multiplier(a, b, true)) == d("0.5"), "global/local category maximum then sum");
@@ -409,6 +417,26 @@ void filters() {
         && !combined.reductions[0].galaxy_wide && combined.reductions[1].galaxy_wide,
         "same-category duplicates retain maximum and distinct local/global footprints");
     auto admitted = setup(); admitted.income->types[0] = combined; take(gc::validate_income(admitted));
+    {   // CGS-16: a modded absolute income modifier beyond the old +-65536 setup span (upkeep of -70000) is admitted; checked arithmetic owns overflow.
+        auto upkeep = combined; upkeep.mining = gc::PlanetIncomeAbility{{}, f(-70000), f(1)};
+        auto wide = setup(); wide.income->types[0] = upkeep;
+        expect(static_cast<bool>(gc::validate_income(wide)), "a mining absolute modifier of -70000 is not refused at setup");
+        upkeep.mining = gc::PlanetIncomeAbility{{}, f(5), d("-1")};
+        wide.income->types[0] = upkeep;
+        expect(!gc::validate_income(wide), "a negative mining colony multiplier still refuses");
+        // CGS-27: absurd authored data refuses at the start, never as an income error mid-match.
+        upkeep.mining = gc::PlanetIncomeAbility{{}, f(1 << 25), f(1)};
+        wide.income->types[0] = upkeep;
+        expect(!gc::validate_income(wide), "a mining absolute modifier beyond 2^24 credits refuses at setup");
+        upkeep.mining = gc::PlanetIncomeAbility{f(1 << 11), {}, f(1)};
+        wide.income->types[0] = upkeep;
+        expect(!gc::validate_income(wide), "a mining percentage beyond 2^10 refuses at setup");
+        upkeep.mining = gc::PlanetIncomeAbility{f(1 << 10), f(-70000), f(1 << 10)};
+        wide.income->types[0] = upkeep;
+        expect(static_cast<bool>(gc::validate_income(wide)), "values at the span edge are admitted against ordinary base income");
+        wide.fiscal->planets[0].credits = Fixed::from_raw(std::int64_t{1} << 60);
+        expect(!gc::validate_income(wide), "a span-edge ability that would overflow against a huge base income refuses at setup");
+    }
     source.reductions.resize(1);
     source.reductions[0].price = false;
     expect(take(eawr::campaign::prepare_economic_type(source, 900, "Side", types, bindings)).reductions.size() == 4,

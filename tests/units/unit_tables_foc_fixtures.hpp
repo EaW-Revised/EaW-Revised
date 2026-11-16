@@ -27,6 +27,7 @@ void foc_lure(eawr::units::LoadInput input);
 void foc_full_salvo(eawr::units::LoadInput input);
 void foc_self_destruct(eawr::units::LoadInput input);
 void foc_peacebringer_blast(eawr::units::LoadInput input);
+void foc_piett_filter(const eawr::units::LoadInput& input, const std::vector<eawr::vfs::MountSpec>& stock_mounts);
 void foc_asymmetric_release_geometry(eawr::units::LoadInput input);
 void foc_special_without_blast(eawr::units::LoadInput input);
 void foc_corrupt_systems(eawr::units::LoadInput input);

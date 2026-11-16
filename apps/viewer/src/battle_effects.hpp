@@ -2,6 +2,7 @@
 
 #include "eawr/diagnostics/memory_capacity.hpp"
 
+#include "laser_point.hpp"
 #include "presentation_constants.hpp"
 
 #include "eawr/assets/assets.hpp"
@@ -30,6 +31,7 @@
 #include <memory>
 #include <optional>
 #include <ostream>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -98,6 +100,8 @@ public:
     [[nodiscard]] bool projectile_terminal_admitted(const sim::tactical::CombatEvent& event) const;
     [[nodiscard]] float projectile_model_opacity(std::size_t ship) const;
     [[nodiscard]] bool is_projectile_model(std::size_t ship) const { return model_ship_slot_.contains(ship); }
+    // The projectile-model ships pose_projectile_models appended to `live` this frame (cleared at its start).
+    [[nodiscard]] const std::vector<std::size_t>& posed_model_ships() const noexcept { return posed_ships_; }
 
     BattleEffects(godot::Node3D& host, const vfs::Vfs& filesystem, const data::Catalog& catalog);
     ~BattleEffects();
@@ -376,6 +380,14 @@ private:
     std::array<HeroBeamLook, 2> hero_beams_;
     std::map<sim::tactical::TypeId, HeroBeamLook> leech_beams_;
     std::map<sim::EntityId, particles::EffectHandle> leech_effects_;
+    // #6554 (WSPL-06, WSPL-09): the point a SUPER_LASER beam keeps for use after its target is gone, twice the
+    // owner-to-target offset from the owner. The sim keeps none (a presentation point), so the viewer computes it while
+    // the target lives and draws a continuing beam to it. A session restored mid-continuation has none, and that beam
+    // is not drawn.
+    std::map<sim::EntityId, laser_point::Stored> laser_endpoints_;
+    std::uint64_t laser_continuation_beams_{};  // drawn frames of continuing beams (a frame is not a sim tick)
+    std::set<std::uint64_t> laser_continuation_ticks_; // the distinct sim ticks a continuing beam was drawn on
+    std::uint64_t laser_beams_before_fire_{};   // SUPER_LASER beams drawn while aiming or playing the clip: stays zero (WSPL-04)
     std::uint64_t leech_beams_drawn_{};
     std::array<std::string, 4> move_particles_; // move, double click, attack move, guard
     float move_scale_{1.0F};
@@ -523,6 +535,7 @@ private:
     std::map<std::size_t, std::pair<std::string, std::size_t>> model_ship_slot_;
     std::map<std::uint64_t, double> model_births_;
     std::vector<std::uint64_t> modelled_now_;  // ascending
+    std::vector<std::size_t> posed_ships_;     // ships posed this frame, in `live` order
     std::uint64_t models_drawn_{};
     // #491: each model projectile's last posed tick (this frame's own draw or a catch-up sample,
     // whichever is later): a regression check that a trail runs to its projectile's true last

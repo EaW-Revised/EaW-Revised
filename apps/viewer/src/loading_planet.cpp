@@ -3,7 +3,9 @@
 #include "eawr/core/json_text.hpp"
 #include "eawr/core/text.hpp"
 #include "loading_planet.hpp"
+#include "loading_texture_names.hpp"
 #include "model_preview.hpp"
+#include "render_profile_viewport.hpp"
 #include "family_textures.hpp"
 #include "ui/kit.hpp"
 #include "eawr/data/retail_values.hpp"
@@ -50,14 +52,12 @@ std::string field(const data::EffectiveObject& definition, const char* tag) {
 }
 float number(sim::math::Fixed value) { return static_cast<float>(static_cast<double>(value.raw()) / sim::math::Fixed::scale); }
 std::optional<assets::Texture> texture(const vfs::Vfs& fs, std::string_view name) {
-    std::string logical = path(std::string(name), "data/art/textures/");
-    for (const auto& candidate : {logical, logical.substr(0, logical.find_last_of('.')) + ".dds",
-                                 logical.substr(0, logical.find_last_of('.')) + ".tga"}) {
-        auto loaded = assets::load_texture(fs, candidate);
-        if (!loaded) continue;
-        auto normalized = space::normalize_texture(loaded.value());
-        if (normalized) return std::move(normalized.value());
-    }
+    const std::string logical = loading_planet_texture_path(fs, name);
+    if (logical.empty()) return std::nullopt;
+    auto loaded = assets::load_texture(fs, logical);
+    if (!loaded) return std::nullopt;
+    auto normalized = space::normalize_texture(loaded.value());
+    if (normalized) return std::move(normalized.value());
     return std::nullopt;
 }
 }
@@ -157,7 +157,7 @@ bool LoadingPlanet::build(Control& parent, const Rect2& rect, const BattleConten
     camera.target = {transform[12],transform[13],transform[14]};
     camera.eye = {camera.target[0]+eye.x,camera.target[1]+eye.y,camera.target[2]+eye.z}; state.eye = camera.eye;
     if (extent_squared <= 0 || !std::isfinite(state.framing) || eye.x*eye.x + eye.y*eye.y + eye.z*eye.z <= 0) return fail("invalid loading planet framing");
-    // Budget: one gadget-sized LDR target, no MSAA/shadows or whole galaxy duplication.
+    // Budget: one gadget-sized LDR target (it takes the render profile's AA, below), no shadows or whole galaxy duplication.
     // WGP-32 fixes BOTH frustum axes at ±0.25, independently of the authored
     // gadget's aspect. Render square, then map it into that gadget viewport.
     const Rect2 picture_rect(rect.position + Vector2(rect.size.x * (*viewport)[0], rect.size.y * (*viewport)[3]),
@@ -171,6 +171,7 @@ bool LoadingPlanet::build(Control& parent, const Rect2& rect, const BattleConten
     state.viewport->set_world_3d(Ref<World3D>(memnew(World3D)));
     state.viewport->set_transparent_background(true);
     state.viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
+    register_render_viewport(*state.viewport); // the profile's MSAA / SMAA / anisotropy reach the planet
     parent.add_child(state.viewport);
     auto* host = memnew(Node3D); state.viewport->add_child(host);
     state.renderer = std::make_unique<GodotRenderer>(*host);
@@ -323,7 +324,7 @@ void LoadingPlanet::release() {
     auto& state = *state_;
     if (state.picture) { state.picture->set_texture(Ref<Texture2D>()); state.picture->queue_free(); state.picture = nullptr; }
     state.renderer.reset(); state.surfaces.clear();
-    if (state.viewport) { state.viewport->set_update_mode(SubViewport::UPDATE_DISABLED); state.viewport->queue_free(); state.viewport = nullptr; }
+    if (state.viewport) { unregister_render_viewport(*state.viewport); state.viewport->set_update_mode(SubViewport::UPDATE_DISABLED); state.viewport->queue_free(); state.viewport = nullptr; }
     state.released = true;
 }
 std::string LoadingPlanet::report_json() const {

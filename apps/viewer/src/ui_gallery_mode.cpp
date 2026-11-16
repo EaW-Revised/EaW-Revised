@@ -209,6 +209,7 @@ UiGalleryMode::Options UiGalleryMode::from_command_line() {
         else if (argument == "--eawr-ui-hud-cards") options.hud_cards = value;
         else if (argument == "--eawr-ui-hud-readouts") options.hud_readouts = value;
         else if (argument == "--eawr-ui-hud-flytext") options.hud_flytext = value;
+        else if (argument == "--eawr-ui-hud-switch") options.hud_switch = value;
         else if (argument == "--eawr-message-box") options.message_box = value;
         else if (argument == "--eawr-load-game") options.load_game = value;
         else if (argument == "--eawr-credits") options.credits = value;

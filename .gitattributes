@@ -51,3 +51,7 @@ tests/galactic/fixtures/production-corpus/*.eawr-gcreplay binary
 tools/viewer_hash/viewer-hook.patch text eol=lf
 # The mods service contract test compares its recorded transcripts byte for byte; the launcher repo copies them.
 tests/mods_service/transcripts/*.jsonl text eol=lf
+# systemd units and scheduler deploy files must stay LF (the host reads them as written).
+tools/sched/deploy/* text eol=lf
+# The degradation baseline is written by degradation_gate.py update; its tests compare the exact LF bytes.
+tests/degradation_baseline.json text eol=lf

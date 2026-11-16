@@ -12,6 +12,7 @@
 #include "eawr/presentation/ui/unit_cards.hpp"
 #include "eawr/presentation/ui/world_encyclopedia.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
+#include "eawr/presentation/ui/movie_letterbox.hpp"
 #include "eawr/presentation/ui/retreat_button.hpp"
 #include "ui_test_support.hpp"
 
@@ -19,6 +20,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -198,6 +200,59 @@ data::ui::CommandBarCatalog synthetic_catalog() {
     return catalog;
 }
 
+// HCB-47: the Death Star switch keeps its authored slot, art, animation rate and three tooltip keys; its countdown
+// readout carries the component's font, offset and dial art and is placed by the shell's bone of its name.
+void deathstar_switch() {
+    data::ui::ShellAnchors shell;
+    shell.add(anchor("radar", {14.5F, 10.5F, 175, 175}, "MeshAdditive.fx", "i_scan_lines.tga", false, 0));
+    shell.add(anchor("deathstar_switch", {350.04F, 20, 49.92F, 30}));
+    const std::string xml = R"(<CommandBarComponents>
+<CommandBarComponent Name="deathstar_switch"><Type>TextButton</Type>
+  <Icon_Texture_Name>ds_05.tga</Icon_Texture_Name>
+  <Icon_Alternate_Texture_Name>ds_00.tga ds_01.tga ds_02.tga ds_03.tga ds_04.tga</Icon_Alternate_Texture_Name>
+  <Mouse_Over_Texture_Name>ds_over.tga</Mouse_Over_Texture_Name>
+  <Tooltip_Text>TOO_FAR READY FIRED</Tooltip_Text><Can_Animate>True</Can_Animate><Anim_FPS>5</Anim_FPS><Loop_Anim>False</Loop_Anim>
+</CommandBarComponent>
+<CommandBarComponent Name="DS_Countdown_Timer"><Type>TextButton</Type><Icon_Texture_Name>ds_countdown.tga</Icon_Texture_Name>
+  <Font_Name>EmpireAtWar-light</Font_Name><Font_Point_Size>9</Font_Point_Size><Text_Offset>-46 0</Text_Offset>
+  <Text_Outline>True</Text_Outline><Left_Justified>True</Left_Justified><Text_Color>255 255 255 212</Text_Color>
+</CommandBarComponent></CommandBarComponents>)";
+    data::ui::CommandBarCatalog catalog;
+    std::vector<core::Diagnostic> diagnostics;
+    vfs::AssetRecord record;
+    record.canonical_path = "data/xml/commandbarcomponents.xml";
+    const auto parsed =
+        data::ui::parse_command_bar_components(std::as_bytes(std::span(xml.data(), xml.size())), record, catalog, diagnostics);
+    expect(parsed.has_value(), "HCB-47: the switch components parse");
+    const auto built = ui::hud_shell(shell, catalog, ui::HudFaction::empire);
+    const auto& look = built.deathstar_switch;
+    expect(look && near(look->button.rect.x, 350.04) && near(look->button.rect.width, 49.92) && look->button.normal == "ds_05.tga"
+            && look->button.mouse_over == "ds_over.tga" && look->button.alternates.size() == 5
+            && look->button.alternates.front() == "ds_00.tga" && look->button.alternates.back() == "ds_04.tga"
+            && look->anim_fps == 5.0F,
+        "HCB-47: the switch keeps its shell slot, base icon, five alternates, mouse-over art and animation rate");
+    expect(built.deathstar_tooltips == std::vector<std::string>({"TOO_FAR", "READY", "FIRED"}),
+        "HCB-47: the three tooltip keys keep their data order");
+    const auto& readout = built.deathstar_countdown;
+    expect(readout && readout->icon == "ds_countdown.tga" && readout->text.face == "EmpireAtWar-light" && readout->text.point_size == 9
+            && readout->text.outline && readout->left_justified && near(readout->text_offset.x, -46.0),
+        "HCB-47: the readout carries the component's dial art, font, outline and text offset");
+    expect(readout && !built.deathstar_countdown_anchored,
+        "HCB-47: a shell without the countdown bone leaves the readout's placement to the caller");
+    // The shell's bone of the component's name (no mesh) places the readout, matched without regard to case.
+    data::ui::ShellAnchors bone_shell = shell;
+    bone_shell.add_bone({"ds_countdown_timer", {255.5F, 41.0F}});
+    const auto placed = ui::hud_shell(bone_shell, catalog, ui::HudFaction::empire).deathstar_countdown;
+    expect(placed && ui::hud_shell(bone_shell, catalog, ui::HudFaction::empire).deathstar_countdown_anchored
+            && near(placed->origin.x, 255.5) && near(placed->origin.y, 41.0) && near(placed->text_offset.x, -46.0)
+            && near(placed->text_offset.y, 0.0) && near(placed->icon_offset.x, 0.0) && near(placed->icon_offset.y, 0.0),
+        "HCB-47: the readout's origin is the shell bone, the text offset and the icon offset keep the component's values");
+    data::ui::ShellAnchors without;
+    without.add(anchor("radar", {14.5F, 10.5F, 175, 175}, "MeshAdditive.fx", "i_scan_lines.tga", false, 0));
+    expect(!ui::hud_shell(without, catalog, ui::HudFaction::empire).deathstar_switch,
+        "HCB-47: a shell without the deathstar_switch anchor draws no switch");
+}
+
 // HCB-15 (#3078): b_retreat keeps its authored slot and art; its state follows the published view.
 void retreat_button() {
     const auto retreat = ui::hud_shell(synthetic_shell(), synthetic_catalog(), ui::HudFaction::underworld).retreat;
@@ -312,6 +367,8 @@ void shell_parts() {
     expect(ui::shell_blend("MeshAlphaGloss.fx") == ui::ShellBlend::alpha && ui::shell_blend("meshalpha.fx") == ui::ShellBlend::alpha
                && ui::shell_blend("MeshAdditive.fx") == ui::ShellBlend::additive && !ui::shell_blend("other.fx"),
            "a mod shell's MeshAlphaGloss panels blend by alpha like MeshAlpha; unknown shaders draw nothing");
+    expect(ui::shell_blend("MeshGloss.fx") == ui::ShellBlend::opaque && ui::shell_blend("meshgloss.fx") == ui::ShellBlend::opaque,
+           "a MeshGloss mesh (the advanced-map backdrop) draws opaque: its alpha is a gloss mask, not transparency");
     expect(rebel.meshes[1].texture == "face_rebel.tga" && rebel.meshes[1].triangles.size() == 2U,
            "a mesh keeps its texture and triangles");
     expect(rebel.minimap && *rebel.minimap == (data::ui::ReferenceRect{14.5F, 10.5F, 175, 175}), "the minimap is the radar rect");
@@ -878,6 +935,58 @@ void corpus() {
     std::cout << "CARD-20 stock world-hover audit: " << hover_types << " mouse-admitted types, "
               << admitted_types << " encyclopedia-admitted, " << excluded_types.size() << " excluded\n";
     for (const auto& type : excluded_types) std::cout << "CARD-20 excluded: " << type << '\n';
+    // ML-23/24 (#7373): independently read raw definitions in base-first/document order.
+    // Do not use the effective scalar accessor whose presentation use this audit checks.
+    const auto definition_text = [&](const data::EffectiveObject& object, std::string_view tag) {
+        std::string result;
+        for (auto layer = object.chain.rbegin(); layer != object.chain.rend(); ++layer) {
+            const auto* definition = objects.value().catalog.find(*layer, data::Category::game_object);
+            expect(definition != nullptr, "stock icon audit: every resolved layer has a raw definition");
+            if (!definition) continue;
+            for (const auto& node : definition->root.children) {
+                if (!core::iequals(node.name, tag)) continue;
+                const auto value = core::trim(node.raw_text, core::xml_whitespace);
+                if (!value.empty() && value != "TBD") result = value;
+            }
+        }
+        return result;
+    };
+    std::size_t own_icons{};
+    std::vector<std::string> icon_changes;
+    for (const auto& definition : objects.value().catalog.definitions()) {
+        if (!definition.namespace_winner || definition.category != data::Category::game_object) continue;
+        const auto effective = objects.value().catalog.resolve(definition.id, data::Category::game_object);
+        if (!effective) continue;
+        const auto* authored = effective.value().value("Icon_Name");
+        const std::string before = authored ? core::trim(authored->value.raw_text, core::xml_whitespace) : std::string();
+        const std::string after = ui::object_icon_name(effective.value(), objects.value().catalog);
+        std::string expected = definition_text(effective.value(), "Icon_Name");
+        if (expected.empty()) {
+            const auto team = definition_text(effective.value(), "Create_Team_Type");
+            if (!team.empty() && !core::iequals(team, definition.id)) {
+                const auto container = objects.value().catalog.resolve(team, data::Category::game_object);
+                if (container) expected = definition_text(container.value(), "Icon_Name");
+            }
+        }
+        expect(after == expected, ("ML-24: shared icon matches raw definition-chain selection for " + definition.id).c_str());
+        if (!before.empty()) ++own_icons;
+        if (before != after) icon_changes.push_back(definition.id + " [" + before + " -> " + after + "]");
+    }
+    std::vector<std::string> expected_changes{
+        "Han_Solo [ -> i_button_han_solo.tga]",
+        "Mara_Jade_Team [ -> i_button_mara_jade.tga]",
+        "Y_Wing_Squadron_Container [ -> i_button_y_wing.tga]",
+        "EM6_Prison_Wookies [ -> i_button_han_solo.tga]",
+        "MOV_Mothma [ -> i_button_han_solo.tga]",
+        "MOV_R2D3 [ -> i_button_han_solo.tga]",
+        "UMP_HanSolo [ -> i_button_han_solo.tga]",
+    };
+    std::sort(icon_changes.begin(), icon_changes.end());
+    std::sort(expected_changes.begin(), expected_changes.end());
+    std::cout << "#7373 stock icon audit: " << own_icons << " own icons, " << icon_changes.size() << " changed\n";
+    for (const auto& change : icon_changes) std::cout << "#7373 icon changed: " << change << '\n';
+    expect(own_icons > 0U && icon_changes == expected_changes,
+           "ML-24: exactly the seven reviewed stock placeholder icons change; team fallback adds no other changes");
     const auto reactor = ui::unit_card_looks("US_BlackMarket_Reactors_L1_Upgrade", &objects.value().catalog, &text.value());
     expect(reactor.icon == "i_multi_black_market_eng1.tga" && reactor.build_cost == 850,
            "stock same-name Underworld build card keeps its owning upgrade icon and price");
@@ -894,6 +1003,101 @@ void corpus() {
 }
 
 } // namespace
+
+// #6621: a squadron shows its own Icon_Name, else the icon of the team container it creates, else nothing
+// (the card then draws the L-7 fallback). The names are passed through as authored: the atlas lookup compares
+// them ASCII case-insensitively, so a container spelled ".tga" and a sheet entry spelled ".TGA" meet there.
+void squadron_icon_resolution() {
+    test::ui::TempTree tree("hud-squadron-icon");
+    const auto xml = tree.root / "XML";
+    test::ui::write_text(xml / "GameObjectFiles.xml", "<Game_Object_Files><File>units.xml</File></Game_Object_Files>");
+    for (const auto* registry : {"HardpointDataFiles.xml", "FactionFiles.xml", "CampaignFiles.xml", "SFXEventFiles.xml"})
+        test::ui::write_text(xml / registry, "<Files/>");
+    test::ui::write_text(xml / "units.xml", R"xml(<Units>
+<SpaceUnit Name="Test_Craft"><Icon_Name>I_BUTTON_TEST_CRAFT.TGA</Icon_Name></SpaceUnit>
+<SpaceUnit Name="Matchup_Craft"><Encyclopedia_Good_Against>Case_Squadron Bare_Squadron</Encyclopedia_Good_Against></SpaceUnit>
+<Squadron Name="Own_Icon_Squadron"><Icon_Name> i_button_own.tga </Icon_Name><Squadron_Units>Test_Craft, Test_Craft</Squadron_Units>
+<Create_Team_Type>Own_Icon_Container</Create_Team_Type></Squadron>
+<Container Name="Own_Icon_Container"><Icon_Name>i_button_container.tga</Icon_Name></Container>
+<Squadron Name="Case_Squadron"><!-- <Icon_Name>I_BUTTON_TEST_CRAFT.TGA</Icon_Name> --><Squadron_Units>Test_Craft</Squadron_Units>
+<Create_Team_Type>Case_Container</Create_Team_Type></Squadron>
+<Container Name="Case_Container"><Icon_Name>I_BUTTON_TEST_CRAFT.tga</Icon_Name></Container>
+<Squadron Name="Blank_Icon_Squadron"><Icon_Name /><Squadron_Units>Test_Craft</Squadron_Units>
+<Create_Team_Type>Case_Container</Create_Team_Type></Squadron>
+<Squadron Name="Bare_Squadron"><Squadron_Units>Test_Craft, Test_Craft</Squadron_Units></Squadron>
+<Squadron Name="Plain_Container_Squadron"><Squadron_Units>Test_Craft</Squadron_Units>
+<Create_Team_Type>Plain_Container</Create_Team_Type></Squadron>
+<Container Name="Plain_Container"><Behavior>TEAM</Behavior></Container>
+<Squadron Name="Missing_Container_Squadron"><Squadron_Units>Test_Craft</Squadron_Units>
+<Create_Team_Type>No_Such_Container</Create_Team_Type></Squadron>
+<Squadron Name="Self_Team_Squadron"><Squadron_Units>Test_Craft</Squadron_Units>
+<Create_Team_Type>Self_Team_Squadron</Create_Team_Type></Squadron>
+<Container Name="Chained_Container"><Create_Team_Type>Case_Container</Create_Team_Type></Container>
+<Squadron Name="Chained_Squadron"><Squadron_Units>Test_Craft</Squadron_Units>
+<Create_Team_Type>Chained_Container</Create_Team_Type></Squadron>
+<HeroCompany Name="Repeated_Empty"><Icon_Name>i_repeat.tga</Icon_Name><Icon_Name></Icon_Name></HeroCompany>
+<HeroCompany Name="Repeated_Whitespace"><Icon_Name>i_repeat.tga</Icon_Name><Icon_Name>
+    </Icon_Name></HeroCompany>
+<HeroCompany Name="Repeated_TBD"><Icon_Name>i_repeat.tga</Icon_Name><Icon_Name> TBD </Icon_Name></HeroCompany>
+<HeroCompany Name="Repeated_Real"><Icon_Name>i_first.tga</Icon_Name><Icon_Name> i_last.tga </Icon_Name>
+<Icon_Name/><Icon_Name>TBD</Icon_Name></HeroCompany>
+<HeroCompany Name="Inherited_Icon"><Variant_Of_Existing_Type>Repeated_Real</Variant_Of_Existing_Type>
+<Icon_Name> </Icon_Name><Icon_Name>TBD</Icon_Name></HeroCompany>
+<Squadron Name="Repeated_Own_Icon"><Squadron_Units>Test_Craft</Squadron_Units>
+<Icon_Name>i_repeat.tga</Icon_Name><Icon_Name/><Create_Team_Type>Case_Container</Create_Team_Type></Squadron>
+<Squadron Name="Repeated_Team_Icon"><Squadron_Units>Test_Craft</Squadron_Units>
+<Icon_Name>TBD</Icon_Name><Create_Team_Type>Repeated_Container</Create_Team_Type></Squadron>
+<Container Name="Repeated_Container"><Icon_Name>i_container.tga</Icon_Name><Icon_Name/></Container>
+<HeroCompany Name="Placeholder_Only"><Icon_Name/><Icon_Name> </Icon_Name><Icon_Name>TBD</Icon_Name></HeroCompany>
+<HeroCompany Name="Lowercase_Placeholder"><Icon_Name>i_first.tga</Icon_Name><Icon_Name>tbd</Icon_Name></HeroCompany>
+</Units>)xml");
+    const std::array mounts{vfs::MountSpec{"base", tree.root, "data", {}}};
+    auto mounted = vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(mounted), "squadron icon fixture mounts");
+    if (!mounted) return;
+    auto catalog = data::load_catalog(mounted.value(), data::Profile::foc);
+    expect(static_cast<bool>(catalog), "squadron icon fixture catalog loads");
+    if (!catalog) return;
+    const auto* objects = &catalog.value().catalog;
+    const auto icon = [&](const char* type) { return ui::unit_card_looks(type, objects, nullptr).icon; };
+    const auto world = [&](const char* type) {
+        const auto resolved = objects->resolve(type, data::Category::game_object);
+        return resolved ? ui::object_icon_name(resolved.value(), *objects) : std::string("<unresolved>");
+    };
+    expect(icon("Test_Craft") == "I_BUTTON_TEST_CRAFT.TGA", "a craft keeps its own icon, as authored");
+    expect(icon("Own_Icon_Squadron") == "i_button_own.tga",
+           "#6621: a squadron's own authored icon wins over its container's");
+    expect(icon("Case_Squadron") == "I_BUTTON_TEST_CRAFT.tga",
+           "#6621: a squadron with its tag commented out shows its container's icon, the spelling kept as authored");
+    expect(icon("Blank_Icon_Squadron") == "I_BUTTON_TEST_CRAFT.tga",
+           "#6621: a blank own Icon_Name falls through to the container's");
+    expect(icon("Bare_Squadron").empty(), "#6621: a squadron with no icon and no team type has none (the card draws the L-7 fallback)");
+    expect(icon("Plain_Container_Squadron").empty() && icon("Missing_Container_Squadron").empty(),
+           "#6621: a container without an icon, or one that does not exist, adds none");
+    expect(icon("Self_Team_Squadron").empty() && icon("Chained_Squadron").empty(),
+           "#6621: only the named container is read: its own team type is not followed, and a type naming itself ends");
+    // #7373: raw catalog provenance retains the final blank; presentation must use the ML-24 scalar reader.
+    const auto repeated = objects->resolve("Repeated_Empty", data::Category::game_object);
+    const auto* raw = repeated ? repeated.value().value("Icon_Name") : nullptr;
+    expect(raw && raw->value.raw_text.empty() && repeated.value().single_text("Icon_Name") == "i_repeat.tga",
+           "ML-24: a repeated empty tag retains the earlier scalar alongside raw authored provenance");
+    for (const char* type : {"Repeated_Empty", "Repeated_Whitespace", "Repeated_TBD", "Repeated_Own_Icon"})
+        expect(icon(type) == "i_repeat.tga", "#7373: trailing placeholders preserve the last real own icon before team fallback");
+    expect(icon("Repeated_Real") == "i_last.tga" && icon("Inherited_Icon") == "i_last.tga",
+           "ML-23/24: the last real occurrence wins and survives repeated inherited placeholders");
+    expect(icon("Repeated_Team_Icon") == "i_container.tga",
+           "#7373: a placeholder-only own icon falls through to the container's last real icon");
+    expect(icon("Placeholder_Only").empty() && icon("Lowercase_Placeholder") == "tbd",
+           "ML-24: only placeholders leave no icon, while lowercase tbd is an authored value");
+    for (const char* type : {"Test_Craft", "Own_Icon_Squadron", "Case_Squadron", "Blank_Icon_Squadron", "Bare_Squadron",
+                             "Plain_Container_Squadron", "Missing_Container_Squadron", "Self_Team_Squadron", "Chained_Squadron",
+                             "Repeated_Empty", "Repeated_Whitespace", "Repeated_TBD", "Repeated_Real", "Inherited_Icon",
+                             "Repeated_Own_Icon", "Repeated_Team_Icon", "Placeholder_Only", "Lowercase_Placeholder"})
+        expect(world(type) == icon(type), (std::string("#6621: the world icon and the card icon agree for ") + type).c_str());
+    const auto matchup = ui::unit_card_looks("Matchup_Craft", objects, nullptr);
+    expect(matchup.good_against_icons == std::vector<std::string>{"I_BUTTON_TEST_CRAFT.tga", ""},
+           "#6621: the encyclopedia's matchup icons read the same icon, a squadron without one stays blank");
+}
 
 void hud_shell_contracts() {
     const auto fly_style = ui::hud_flytext_style(synthetic_catalog());
@@ -973,6 +1177,85 @@ void hud_shell_contracts() {
             if (height && std::string_view(value) == "0.12")
                 expect(near(height.value(), 0.12), "HCB-11c: a mod's letterbox height reaches presentation");
         }
+    }
+    {
+        // BCAM-04: the bands slide in over half a second and out over half a second; each band is the
+        // authored height (a fraction of the screen height) scaled by that slide.
+        expect(near(ui::movie_letterbox_slide_seconds, 0.5, 1e-9), "BCAM-04: the letterbox slide lasts half a second");
+        float progress = 0.0F;
+        for (int frame = 0; frame < 15; ++frame) progress = ui::advance_movie_letterbox(progress, true, 1.0 / 60.0);
+        expect(near(progress, 0.5), "BCAM-04: a quarter of a second in, the bands are half out");
+        expect(near(ui::movie_letterbox_band_fraction(0.085F, progress), 0.0425), "HCB-11c: half out is half the authored height");
+        for (int frame = 0; frame < 15; ++frame) progress = ui::advance_movie_letterbox(progress, true, 1.0 / 60.0);
+        expect(near(progress, 1.0) && near(ui::movie_letterbox_band_fraction(0.085F, progress), 0.085),
+               "HCB-11c: fully in, each band is the authored fraction of the height");
+        progress = ui::advance_movie_letterbox(progress, true, 5.0);
+        expect(near(progress, 1.0), "BCAM-04: the slide stops at fully in");
+        progress = ui::advance_movie_letterbox(progress, false, 0.25);
+        expect(near(progress, 0.5), "BCAM-04: the slide out takes half a second too");
+        progress = ui::advance_movie_letterbox(progress, false, 1.0);
+        expect(progress == 0.0F && ui::movie_letterbox_band_fraction(0.12F, progress) == 0.0F,
+               "BCAM-04: out again, no band is left");
+        expect(ui::advance_movie_letterbox(0.3F, true, -1.0) == 0.3F, "a negative frame time never moves the bands");
+        expect(near(ui::movie_letterbox_band_fraction(0.12F, 0.5F), 0.06), "HCB-11c: a mod's height scales the same way");
+    }
+    {
+        // legacy #6634 (HCB-75): one set of bands, two owners. A tactical script's Letter_Box_In / Letter_Box_Out and the battle
+        // camera both ask for them; they are up (and the game GUI hidden) while either asks, and slide over the seconds of the
+        // owner whose request changed whether they are wanted.
+        const auto run = [](ui::CinematicBands& bands, const double seconds) {
+            for (int frame = 0; frame < static_cast<int>(seconds * 60.0 + 0.5); ++frame) bands.advance(1.0 / 60.0);
+        };
+        ui::CinematicBands script;
+        expect(!script.wanted() && !script.visible() && script.progress() == 0.0F, "HCB-75: no request, no bands");
+        script.request_script(true, 2.0);
+        expect(script.wanted() && script.script() && !script.movie(), "HCB-75: Letter_Box_In asks for the bands and the GUI is hidden at once");
+        run(script, 1.0);
+        expect(near(script.progress(), 0.5, 0.02), "HCB-75: Letter_Box_In(2) is half in after one second");
+        run(script, 1.5);
+        expect(near(script.progress(), 1.0), "HCB-75: Letter_Box_In(2) is fully in after two seconds");
+        script.request_script(false, 1.0);
+        expect(!script.wanted() && script.visible(), "HCB-75: Letter_Box_Out gives the GUI back at once while the bands still slide");
+        run(script, 0.5);
+        expect(near(script.progress(), 0.5, 0.02), "HCB-75: Letter_Box_Out(1) is half out after half a second");
+        run(script, 1.0);
+        expect(script.progress() == 0.0F && !script.visible(), "HCB-75: Letter_Box_Out(1) leaves no band after a second");
+        script.request_script(true, 0.0);
+        expect(script.progress() == 1.0F && script.wanted(), "HCB-75: Letter_Box_In(0) is fully in before the next frame");
+        script.request_script(false, 0.0);
+        expect(script.progress() == 0.0F && !script.visible(), "HCB-75: Letter_Box_Out(0) is fully out before the next frame");
+        script.request_script(true, -1.0);
+        script.request_script(true, std::numeric_limits<double>::quiet_NaN());
+        script.request_script(true, std::numeric_limits<double>::infinity());
+        expect(!script.wanted(), "HCB-75: a request with unusable seconds is ignored");
+
+        // The battle camera alone keeps its half-second slide, and Escape's immediate end drops the bands at once.
+        ui::CinematicBands camera;
+        camera.set_movie(true);
+        run(camera, 0.25);
+        expect(near(camera.progress(), 0.5, 0.02) && camera.movie() && camera.wanted(), "BCAM-04: the camera still slides in over half a second");
+        camera.set_movie(false, true);
+        expect(camera.progress() == 0.0F && !camera.visible(), "BCAM-04: an immediate end of the camera drops the bands at once");
+
+        // Overlap: a script lowers while the camera is running, and the camera ends while a script's letterbox is up.
+        ui::CinematicBands both;
+        both.set_movie(true);
+        run(both, 1.0);
+        both.request_script(true, 3.0);
+        expect(near(both.progress(), 1.0) && both.slide_seconds() == ui::movie_letterbox_slide_seconds,
+            "overlap: a script asking while the camera has the bands up changes nothing");
+        both.request_script(false, 0.0);
+        expect(both.progress() == 1.0F && both.wanted() && both.movie(), "overlap: Letter_Box_Out(0) during a camera shot leaves the bands and hides the GUI");
+        both.request_script(true, 0.0);
+        both.set_movie(false, true);
+        expect(both.progress() == 1.0F && both.wanted(), "overlap: the camera ending (even immediately) leaves a script's letterbox up");
+        both.set_movie(true);
+        both.set_movie(false);
+        expect(both.progress() == 1.0F && both.wanted() && both.script(), "overlap: a later camera shot does not take the script's letterbox away");
+        both.request_script(false, 0.5);
+        expect(!both.wanted() && both.visible() && both.slide_seconds() == 0.5, "overlap: the script's Out then lowers over the script's seconds");
+        run(both, 0.6);
+        expect(both.progress() == 0.0F, "overlap: and the bands are gone when it ends");
     }
     {
         test::ui::TempTree tree("beacon-delay");
@@ -1095,11 +1378,13 @@ void hud_shell_contracts() {
     expect(ui::special_weapon_icon(partial, ui::HudFaction::rebel).empty(),
            "WSW-28: absent HUD alternates stay absent");
     retreat_button();
+    deathstar_switch();
     shell_parts();
     organize_shell_alternates();
     allegiance_emblem_indices();
     shell_layout();
     planet_names();
+    squadron_icon_resolution();
     reinforcement_panes();
     corpus();
     organize_corpus();

@@ -154,6 +154,10 @@ public:
     [[nodiscard]] core::Result<void> dispatch_native_invasion(std::uint64_t request, EntityId conflict);
     [[nodiscard]] core::Result<void> finish_native_invasion(EntityId conflict, PlayerId actual_winner);
     [[nodiscard]] core::Result<void> retire_native_invasion(std::uint64_t request);
+    // Inside a native action phase only: release the reader of an invasion an earlier lane window decided (its slice not applied
+    // yet) that this phase's overlay refused, so no row exists to update. Records the ordered release intent alone; when the slice
+    // applies, the release finds the invasion if the world admitted it after all, or is a retained refusal if it did not.
+    [[nodiscard]] core::Result<void> retire_native_unadmitted_invasion(std::uint64_t request);
     // GCMP-04: the typed InvasionAccept session command is itself the journal entry, so these two run
     // the same admission and release without appending a native effect. Replaying the command stream then
     // reproduces them on every peer; a replayed native effect would apply the admission twice.
@@ -181,6 +185,11 @@ public:
     using CorruptionCompletionHandler = std::function<core::Result<void>(PlanetId, corruption_fixture::Type, corruption_fixture::Type, CorruptionCompletionPhase,
         std::span<const PlanetAbilityEntitlements>)>;
     void set_corruption_mission_handler(CorruptionMissionHandler);
+    // Pure routability probe for a human solo choice that would start a mission battle: no RNG, no state write.
+    // It runs before any debit and in the corruption menu. The request is the one an execution would allocate
+    // (nullopt in the menu). Unset means the mission handler alone decides.
+    using CorruptionMissionProbe = std::function<bool(const CorruptionChoice&, std::optional<std::uint64_t> request)>;
+    void set_corruption_mission_probe(CorruptionMissionProbe);
     void set_corruption_completion_handler(CorruptionCompletionHandler);
     using CorruptionResultHandler = std::function<core::Result<void>(const LiveCorruptionMission&)>;
     void set_corruption_result_handler(CorruptionResultHandler);
@@ -249,6 +258,8 @@ public:
     // A destroyed identity with no entry is credited to the missing-id sentinel.
     [[nodiscard]] core::Result<void> apply_battle_losses(std::span<const EntityId> destroyed,
         std::span<const BattleKiller> killers);
+    // Scripted removal uses the same world cleanup without recording a battle death.
+    [[nodiscard]] core::Result<void> despawn_script_object(EntityId);
     // WGP-97..103: the saved scoring counters, copied by the campaign end provider before shutdown.
     [[nodiscard]] const CampaignScoreLedger& score_ledger() const noexcept;
     // WGP-102/WGS-177: the forced-player-quit producer marks that player's score as zero.
@@ -307,6 +318,50 @@ public:
     // of how often an authored block polls. Runtime dependency, rebound on load.
     using NativeMovementListener = std::function<void(const GalacticEvent&)>;
     void set_native_movement_listener(NativeMovementListener);
+    // WST-31 / WGM-31/32: a fleet that linked to a planet's orbit at the end of a hyperspace jump (`arrived`), or was
+    // bounced off an inaccessible final destination (`bounced`). Delivered once per movement service, after the serial
+    // commit, sorted by (fleet id, kind), so the order never depends on the worker count. `types` are the sorted, unique
+    // original types of every member and of everything inside the members (heroes in transports); `direct_members` is the
+    // unflattened member count; `stealth` is the fleet-wide combat-skip predicate (WGM-38). Orbit links outside a jump
+    // (production, launch, orbit rechecks) are not announced: unverified (WST-U17).
+    struct FleetStoryNotice {
+        enum class Kind : std::uint8_t { arrived, bounced };
+        Kind kind{};
+        PlayerId owner{};
+        FleetId fleet{};
+        PlanetId planet{};
+        std::vector<TypeId> types;
+        std::size_t direct_members{};
+        bool stealth{};
+        bool cyclic{}; // the contents walk met a containment cycle (malformed data); it stopped at the repeat
+    };
+    using FleetStoryHandler = std::function<core::Result<void>(const FleetStoryNotice&)>;
+    void set_fleet_story_handler(FleetStoryHandler);
+    // WST-33 / WGEP-41: a completed production entry other than a technology: `built` for the object, and `base_level`
+    // beside it for a starbase (level = its base level). Collected during the production service's ordered commit and
+    // delivered after it, sorted by (planet, build, kind), so the order never depends on the worker count.
+    struct ConstructStoryNotice {
+        enum class Kind : std::uint8_t { built, base_level };
+        Kind kind{};
+        PlayerId owner{};
+        PlanetId planet{};
+        TypeId type{};
+        EntityId build{};
+        bool space{};
+        std::int64_t level{};
+    };
+    using ConstructStoryHandler = std::function<core::Result<void>(const ConstructStoryNotice&)>;
+    void set_construct_story_handler(ConstructStoryHandler);
+    // WST-34 / WGM-56: an object lost in a battle result (tactical return or auto-resolve), delivered at the end of the
+    // loss commit in ascending object id. `type` is the current type and `original_type` the type it was created as.
+    struct LossStoryNotice {
+        PlayerId owner{};
+        PlanetId planet{};
+        TypeId type{}, original_type{};
+        EntityId actor{};
+    };
+    using LossStoryHandler = std::function<core::Result<void>(const LossStoryNotice&)>;
+    void set_loss_story_handler(LossStoryHandler);
     // Reconstruction applies recorded effects without invoking AI decisions.
     // Typed owners retain validation and consume world-service notices in place.
     [[nodiscard]] core::Result<void> append_native_effect(NativeEffectKind, std::vector<std::uint8_t>,
@@ -416,6 +471,12 @@ public:
     // owners and must not invoke this explicit windfall path.
     [[nodiscard]] core::Result<math::Fixed> add_credits(PlayerId player,
         math::Fixed delta, math::Fixed positive_multiplier);
+    // WST-42 PLANET_FACTION at an ordered barrier: the planet's structures and starbase are cleared, the previous owner's
+    // forces are sent away, its political modifiers are removed and it goes to `new_owner` at full control. Returns false
+    // with nothing changed (the session stays healthy) when the planet or player is unknown, the planet has no control row,
+    // the galaxy has no political-control model, or a native barrier is open (its staged view has no owner change). The
+    // caller journals a request that returned true (native effect story_reward); this call is the shared apply and replay path.
+    [[nodiscard]] core::Result<bool> set_planet_faction(PlanetId planet, PlayerId new_owner);
     // WGA-23/24/99: trusted AI admission at an ordered native barrier. The
     // build identity lives in the ordinary queue; handlers are rebound on load.
     struct NativeProductionRequest { PlayerId player{}; PlanetId planet{}; TypeId type{}; std::optional<math::Fixed> mark_cost; };
@@ -552,6 +613,12 @@ public:
             const NativeProductionRequest&, const NativeShadowForceBuilder&, const PartitionExecutor&);
         [[nodiscard]] std::optional<math::Fixed> credits(PlayerId) const;
         [[nodiscard]] const CensusObject* created_object(EntityId) const;
+        [[nodiscard]] core::Result<void> stage_script_removal(EntityId);
+        [[nodiscard]] bool script_removed(EntityId) const noexcept;
+        [[nodiscard]] bool has_script_removals() const noexcept;
+        void stage_script_journal(NativeEffectKind, std::vector<std::uint8_t>);
+        // The command-journal entries this batch will add when published (journal steps and removals).
+        [[nodiscard]] std::size_t script_journal_entries() const noexcept;
         [[nodiscard]] std::span<const NativeActorChange> actor_changes() const noexcept;
         // #6378: a world script's AI-usage write on an actor of this batch's view (existing or created by it), staged as a
         // `changed` notification in call order among the batch's births. It changes no world row.
@@ -591,6 +658,16 @@ public:
         friend class GalacticSession;
     };
     [[nodiscard]] core::Result<void> set_story_ai_usage(EntityId, std::optional<bool> prevent, std::optional<bool> prefer_ground);
+    // Entries the command journal still takes before its bound: a script batch that needs more is refused up
+    // front, as a script error, instead of ending the session when it is published.
+    [[nodiscard]] std::size_t native_journal_room() const noexcept;
+    // True when append_native_effect would take `entries` barrier-phase entries one after another: a live ordered
+    // owner, the bound, the sequence range and the phase order. A publication that checks this first cannot fail on
+    // the journal after it has begun changing the world.
+    [[nodiscard]] bool native_journal_can_take(std::size_t entries) const noexcept;
+    // Lowers the journal's bound below galactic_max_commands (never raises it) for hosts with a smaller budget and
+    // for tests that need the bound reached without writing millions of entries. Not saved.
+    void set_command_journal_bound(std::uint64_t bound) noexcept;
     [[nodiscard]] core::Result<NativeActionShadow> begin_native_actions(std::size_t max_requests) const;
     [[nodiscard]] core::Result<NativeActionShadow> begin_native_actions(PlayerId, std::size_t max_requests) const;
     // Legacy immediate batches apply prepared placements and publish once;
@@ -799,6 +876,10 @@ public:
     // Landed contents are current numeric types, resolved by the action owner.
     [[nodiscard]] core::Result<bool> apply_planet_destruction_victory(PlayerId actor_owner,
         PlayerId current_controller, std::span<const TypeId> landed_current_types);
+    // WGT-102 / WGS-79: a tactical super weapon owned by `actor_owner` obliterated `planet`. Before its ruins, the
+    // leader-kill test reads the planet's current controller and the exact current types inside its landed transports,
+    // and additionally requires the condition's authored leader names (empty: any). True when a victory is pending.
+    [[nodiscard]] core::Result<bool> apply_tactical_obliteration_victory(PlayerId actor_owner, PlanetId planet);
     [[nodiscard]] EntityId next_entity_id() const noexcept;
     // GFS-A22: ordered commit reserves a player's identity block before replaying its actual admissions.
     // The expected frontier prevents stale or reordered reservations from mutating the session.
@@ -856,6 +937,10 @@ public:
     // Test-only negative control: build the memo key without fleet orbits, which a sensitive test must then detect.
     void set_population_memo_drop_orbit(bool drop) noexcept;
     [[nodiscard]] std::shared_ptr<const GalacticSnapshot> snapshot() const noexcept;
+    // A batch of state writes republishes the snapshot once instead of after each write (#6933): inside it a write only
+    // marks the snapshot stale, and the next read of it, or the end of the batch, rebuilds it. Reads are unchanged.
+    void begin_snapshot_batch() noexcept;
+    void end_snapshot_batch();
     // Owner-thread projection. The context never enters canonical state or AI inputs.
     [[nodiscard]] std::shared_ptr<const GalacticSnapshot> view_snapshot(ObserverViewContext) const;
     // WGA-256: trusted deterministic effects only; external story dispatch is WST-42's seam.
@@ -870,6 +955,8 @@ private:
     friend struct GalacticCheckpointTestAccess;
     [[nodiscard]] std::vector<std::uint8_t> canonical_bytes_with(OfferPool* pool) const;
     class Impl;
+    [[nodiscard]] std::vector<EntityId> script_removal_family(EntityId) const;
+    [[nodiscard]] core::Result<void> remove_actors(std::span<const EntityId>, std::span<const BattleKiller>, bool score, bool deliver = true);
     [[nodiscard]] core::Result<NativeTransportLandingReceipt> readmit_native_movement(const NativeActionShadow::IntentRecord&);
     // Async AI: an allocating intent whose identities lie in the lane range below the world counter is readmitted with
     // the counter rewound to its first identity (journaled identity reservations, replay-exact) and restored afterwards.

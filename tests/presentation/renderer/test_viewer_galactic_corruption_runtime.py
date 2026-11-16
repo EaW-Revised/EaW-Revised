@@ -195,6 +195,20 @@ class GalacticCorruptionHudRuntime(unittest.TestCase):
         self.assertEqual(accepted["corruption_hud"]["accepted_slot"], 1)
         self.assertEqual(accepted["map_input"]["selection_invalidations"], initial["map_input"]["selection_invalidations"])
 
+    def test_mission_choice_without_a_mission_service_is_unavailable(self):
+        # Remake-only gap: a choice that needs a mission battle this host cannot start is greyed, never refused
+        # after the debit. Every other requirement of slot 1 is still satisfied in this fixture.
+        initial, _ = self.capture("corruption-no-mission-service")
+        hud = initial["corruption_hud"]
+        first = hud["options"][0]
+        self.assertTrue(all(first[key] for key in ["affordable", "units_satisfied", "missions_satisfied", "planets_satisfied"]))
+        self.assertFalse(first["mission_available"])
+        controls = {row["name"]: row for row in hud["controls"]}
+        self.assertFalse(controls["corrupt_button_icon_a"]["enabled"])
+        clicked = self.click([self.point(initial, "corrupt_button_icon_a")], fixture="corruption-no-mission-service")
+        self.assertTrue(clicked["corruption_hud"]["active"])
+        self.assertEqual(clicked["corruption_hud"]["choices_accepted"], 0)
+
     def test_slot_gap_and_tutorial_gate(self):
         gap, _ = self.capture("corruption-gaps")
         self.assertEqual([row["slot"] for row in gap["corruption_hud"]["options"]], [1, 3])

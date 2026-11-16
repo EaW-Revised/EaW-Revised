@@ -340,6 +340,38 @@ int sandbox_collectgarbage(lua_State* state) {
     return 0;
 }
 
+// gcinfo(): the constants 0, 0 (two numbers, as the base library returns). The real heap figures differ per peer and
+// per run, so a script must never see them; a loop waiting for the figure to drop ends at once.
+int sandbox_gcinfo(lua_State* state) {
+    lua_pushnumber(state, static_cast<lua_Number>(0));
+    lua_pushnumber(state, static_cast<lua_Number>(0));
+    return 2;
+}
+
+// loadstring(text [, name]): compiles source text and returns the function, or nil and the message (the base
+// library's contract). Precompiled chunks are refused: the loader does not verify bytecode, so crafted opcodes
+// could corrupt the VM differently on each peer. The compile is charged to the instruction budget, one unit per
+// source byte, before it runs, so the same text exhausts the budget at the same point on every peer. The chunk runs
+// in the calling thread's globals, which are the sandbox's own: forbidden names are stubs there. Its prototypes are
+// not recorded, so a function still reachable at a save is refused by the saver, not saved as an unloadable chunk.
+int sandbox_loadstring(lua_State* state) {
+    Sandbox::Impl& sandbox = require_active(state);
+    ::std::size_t length = 0;
+    const char* text = luaL_checklstring(state, 1, &length);
+    const char* name = luaL_optstring(state, 2, text);
+    if (length != 0 && text[0] == '\x1b') {
+        return luaL_error(state, "EAWR-SCRIPT-0207: precompiled chunks are not accepted");
+    }
+    charge(sandbox, state, static_cast<sflua_metering::StepUnits>(length));
+    ++sandbox.identity_suspended;
+    const int status = luaL_loadbuffer(state, text, length, name);
+    --sandbox.identity_suspended;
+    if (status == 0) return 1;
+    lua_pushnil(state);
+    lua_insert(state, -2);
+    return 2;
+}
+
 int forbidden(lua_State* state) {
     return luaL_error(
         state, "EAWR-SCRIPT-0203: `%s' is not available in the authoritative sandbox",
@@ -396,6 +428,8 @@ void append_sandbox_functions(::std::vector<CFunctionEntry>& out) {
     out.push_back({"sandbox.rep", sandbox_rep, UpvalueShape::function});
     out.push_back({"sandbox.tostring", sandbox_tostring, UpvalueShape::none});
     out.push_back({"sandbox.collectgarbage", sandbox_collectgarbage, UpvalueShape::none});
+    out.push_back({"sandbox.gcinfo", sandbox_gcinfo, UpvalueShape::none});
+    out.push_back({"sandbox.loadstring", sandbox_loadstring, UpvalueShape::none});
     out.push_back({"sandbox.forbidden", forbidden, UpvalueShape::name});
 }
 

@@ -48,6 +48,7 @@ session_detail::Tick::Tick(TacticalSession& session, Impl* impl, const Partition
       pending_rng_(impl->rng_state),
       manual_clocks_(impl->manual_clocks), special_weapons_(impl->special_weapons),
       special_disabled_by_hardpoint_(impl->special_disabled_by_hardpoint),
+      tsw_(impl->tsw_states), tsw_world_(impl->tsw_world),
       named_ability_locks_(impl->named_ability_locks),
       projectile_defence_order_(impl->projectile_defence_order) {
     // FC-R02 / WR-58: one active-mode prefix sample; save-only/paused parent barriers never call step().
@@ -174,6 +175,7 @@ core::Result<TacticalTick> session_detail::Tick::run() {
     if (const auto phase = timed("serial.tactical.retaliation", [&] { return retaliation(); }); !phase) return phase_failure("retaliation", phase.error());
     if (const auto phase = timed("serial.tactical.commands", [&] { return commands(); }); !phase) return phase_failure("commands", phase.error());
     if (const auto phase = timed("serial.tactical.special_weapons", [&] { return special_weapons(); }); !phase) return phase_failure("special_weapons", phase.error());
+    if (const auto phase = timed("serial.tactical.tsw", [&] { return tsw_service(); }); !phase) return phase_failure("tsw", phase.error());
     if (const auto phase = timed("serial.tactical.systems", [&] { return systems(); }); !phase) return phase_failure("systems", phase.error());
     if (const auto phase = timed("serial.tactical.commit_survivors", [&] { return commit_survivors(); }); !phase) return phase_failure("commit_survivors", phase.error());
     if (const auto phase = timed("serial.tactical.retreat_service", [&] { return retreat_service(); }); !phase) return phase_failure("retreat_service", phase.error());

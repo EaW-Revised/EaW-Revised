@@ -2,6 +2,7 @@
 #include "eawr/vfs/vfs.hpp"
 #include "setup_map_reference.hpp"
 #include "setup_map_golden.hpp"
+#include "setup_facts_memory.hpp"
 #include "../../src/skirmish/setup_workers.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/data/tag_trace.hpp"
@@ -27,7 +28,9 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -194,6 +197,50 @@ void setup_contract(const std::filesystem::path& fixtures) {
         }
     }
     {
+        // The records round-trip every field (a field added to SetupMap or MapLobbyMetadata without a codec change fails the
+        // designated initializers below under -Werror, and then this comparison).
+        eawr::skirmish::SetupMap entry{
+            .path = "data/art/maps/a.ted", .name = "(4) Name",
+            .teams = {{0, {"Rebel", "Empire"}, 3U}, {1, {"Empire"}, std::nullopt}},
+            .unavailable = "reason", .preview_path = {},
+            .embedded_preview = {std::byte{1}, std::byte{0}, std::byte{255}},
+            .metadata = {.capacity = 4U, .levels = 2U, .owner = 1U, .terrain = 5U, .game_types = std::string("Space"),
+                         .custom = false, .new_markers = true,
+                         .start_positions = std::vector<eawr::assets::Vec2f>{{-50.0F, 1.5F}, {50.0F, -0.25F}}},
+            .display_name = "Name", .context_name = std::string("Kuat"),
+            .domain = eawr::sim::tactical::BattleDomain::land, .legacy_factions = {"Rebel", "Empire", "Underworld"}};
+        const auto bytes = eawr::skirmish::encode_setup_entry(entry);
+        const auto back = eawr::skirmish::decode_setup_entry(bytes);
+        expect(back && back->path == entry.path && back->name == entry.name && back->unavailable == entry.unavailable
+            && back->embedded_preview == entry.embedded_preview && back->display_name == entry.display_name
+            && back->context_name == entry.context_name && back->domain == entry.domain
+            && back->legacy_factions == entry.legacy_factions && back->teams.size() == 2
+            && back->teams[0].factions == entry.teams[0].factions && back->teams[0].spawn_capacity == 3U
+            && back->teams[1].spawn_capacity == std::nullopt
+            && back->metadata.capacity == 4U && back->metadata.levels == 2U && back->metadata.owner == 1U
+            && back->metadata.terrain == 5U && back->metadata.game_types == "Space" && back->metadata.custom == false
+            && back->metadata.new_markers == true && back->metadata.start_positions && back->metadata.start_positions->size() == 2
+            && (*back->metadata.start_positions)[0].x == -50.0F && (*back->metadata.start_positions)[1].y == -0.25F,
+            "a setup entry round-trips through its stored record");
+        expect(eawr::skirmish::encode_setup_entry(*back) == bytes, "a decoded entry encodes to the same bytes");
+        for (std::size_t cut = 0; cut + 1 < bytes.size(); cut += 7)
+            expect(!eawr::skirmish::decode_setup_entry(std::span(bytes.data(), cut)), "a truncated entry record is refused");
+        auto padded = bytes; padded.push_back(0);
+        expect(!eawr::skirmish::decode_setup_entry(padded), "an entry record with trailing bytes is refused");
+        auto wrong = bytes; wrong[0] = 99;
+        expect(!eawr::skirmish::decode_setup_entry(wrong), "an entry record of another format is refused");
+        eawr::assets::Map header;
+        header.kind = eawr::assets::MapKind::space;
+        header.lobby = entry.metadata;
+        const auto header_bytes = eawr::skirmish::encode_setup_header_facts(header);
+        const auto header_back = eawr::skirmish::decode_setup_header_facts(header_bytes);
+        expect(header_back && header_back->kind == header.kind && header_back->lobby.capacity == 4U
+            && header_back->lobby.game_types == "Space" && header_back->lobby.start_positions
+            && header_back->lobby.start_positions->size() == 2, "header facts round-trip");
+        for (std::size_t cut = 0; cut + 1 < header_bytes.size(); cut += 5)
+            expect(!eawr::skirmish::decode_setup_header_facts(std::span(header_bytes.data(), cut)), "a truncated header record is refused");
+    }
+    {
         const auto directory = std::filesystem::temp_directory_path()
             / ("eawr-setup-team-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         setup_map_golden::write_team_corpus(directory);
@@ -229,6 +276,71 @@ void setup_contract(const std::filesystem::path& fixtures) {
                             && map.teams[0].spawn_capacity==1U && map.teams[1].spawn_capacity==1U
                             && map.teams[0].factions==std::vector<std::string>{"Rebel","Empire"},
                             "synthetic station/spawn records expose both supported authored teams");
+                    }
+                }
+            }
+            // #6948: the setup list's persistent facts. A list built with a store is the list built without one; a second list
+            // is served from the store (no map opened or decoded: it puts nothing and every lookup hits); a changed map
+            // file or changed catalog content is a miss; a record this build cannot read is a miss.
+            if (catalog) {
+                const auto& selected = catalog.value().catalog;
+                const auto golden = setup_map_golden::read(fixtures / "setup-map-eager-team.sha256");
+                const auto list = golden.find("@maps");
+                const auto digest_of = [&](const std::vector<eawr::skirmish::SetupMap>& maps) { return setup_map_golden::map_digest(maps); };
+                setup_facts_test::MemoryFacts store;
+                const auto cold = skirmish::setup_maps(fs.value(), selected, {}, 4, &store);
+                expect(cold && list != golden.end() && digest_of(cold.value()) == list->second.map,
+                    "a list built with an empty facts store is the frozen pre-change list");
+                expect(store.puts["map-header"] == 1 && store.puts["space-entry"] == 1 && store.flushes == 1,
+                    "the cold list stores the map's header facts and its entry, and flushes once");
+                const auto puts_after_cold = store.total_puts();
+                const auto warm = skirmish::setup_maps(fs.value(), selected, {}, 4, &store);
+                expect(warm && cold && digest_of(warm.value()) == digest_of(cold.value()), "the stored list is the cold list");
+                expect(store.total_puts() == puts_after_cold && store.hits["map-header"] == 1 && store.hits["space-entry"] == 1,
+                    "the second list is served from the store: nothing is put and every lookup hits");
+                // A different worker count and a query the header rejects still give the same list / the same exclusion.
+                const auto single = skirmish::setup_maps(fs.value(), selected, {}, 1, &store);
+                expect(single && cold && digest_of(single.value()) == digest_of(cold.value()), "one worker serves the same stored list");
+                skirmish::SetupMapQuery too_many;
+                too_many.minimum_capacity = 99;
+                const auto none = skirmish::setup_maps(fs.value(), selected, too_many, 2, &store);
+                expect(none && none.value().empty() && store.total_puts() == puts_after_cold,
+                    "an ineligible query is answered from the stored header facts alone");
+                // A record that cannot be decoded is a miss: the list is built again, the same.
+                store.corrupt = true;
+                const auto healed = skirmish::setup_maps(fs.value(), selected, {}, 2, &store);
+                store.corrupt = false;
+                expect(healed && cold && digest_of(healed.value()) == digest_of(cold.value()) && store.puts["space-entry"] == 2,
+                    "an unreadable stored entry is rebuilt and stored again");
+                // The map file changes (its modification time): that map misses, the list is the same.
+                const auto map_file = directory / "art/maps/team_contract.ted";
+                std::filesystem::last_write_time(map_file, std::filesystem::last_write_time(map_file) + std::chrono::hours(1));
+                {
+                    auto remounted = eawr::vfs::Vfs::mount(std::span(&mount, 1));
+                    auto reloaded = eawr::data::load_catalog(remounted.value(), eawr::data::Profile::foc);
+                    expect(remounted && reloaded, "the touched corpus mounts again");
+                    if (remounted && reloaded) {
+                        const auto before = store.puts["space-entry"];
+                        const auto touched = skirmish::setup_maps(remounted.value(), reloaded.value().catalog, {}, 2, &store);
+                        expect(touched && cold && digest_of(touched.value()) == digest_of(cold.value())
+                            && store.puts["space-entry"] == before + 1 && store.puts["map-header"] == 2,
+                            "a map file with another modification time is read and stored again");
+                    }
+                }
+                // The catalog's content changes (an XML file's modification time): the view's context differs, so the entry misses
+                // while the map's own header facts still hit.
+                const auto xml_file = directory / "xml/markers.xml";
+                std::filesystem::last_write_time(xml_file, std::filesystem::last_write_time(xml_file) + std::chrono::hours(1));
+                {
+                    auto remounted = eawr::vfs::Vfs::mount(std::span(&mount, 1));
+                    auto reloaded = eawr::data::load_catalog(remounted.value(), eawr::data::Profile::foc);
+                    expect(remounted && reloaded, "the corpus mounts again after an XML change");
+                    if (remounted && reloaded) {
+                        const auto entries = store.puts["space-entry"], headers = store.puts["map-header"];
+                        const auto changed = skirmish::setup_maps(remounted.value(), reloaded.value().catalog, {}, 2, &store);
+                        expect(changed && cold && digest_of(changed.value()) == digest_of(cold.value())
+                            && store.puts["space-entry"] == entries + 1 && store.puts["map-header"] == headers,
+                            "changed catalog content misses the entry and keeps the header facts");
                     }
                 }
             }
@@ -430,6 +542,31 @@ void setup_contract(const std::filesystem::path& fixtures) {
         }
         selection.slots.push_back({10, "Empire", 1, false, {}});
         expect(!skirmish::setup_options(selection, maps), "local start rejects an unauthored tenth seat");
+        const auto tenth = skirmish::setup_options(selection, maps);
+        expect(!tenth && tenth.error().message.find("at most 9 players") != std::string::npos
+                && tenth.error().message.find("authored capacity 9") != std::string::npos
+                && tenth.error().message.find("10 were selected") != std::string::npos,
+            "#6737: the over-capacity refusal names the usable rows, the authored capacity and the seat count");
+    }
+    // #6737: a campaign-battle map (authored capacity 1, as mods ship them under stock multiplayer names)
+    // refuses a two-player start and says why.
+    {
+        skirmish::SetupMap map;
+        map.path = "data/art/maps/synthetic_single_player.ted";
+        map.metadata.capacity = 1;
+        map.metadata.new_markers = true;
+        map.metadata.start_positions = std::vector<eawr::assets::Vec2f>(2);
+        map.teams = {{0, {"Rebel"}}, {1, {"Empire"}}};
+        skirmish::SetupSelection selection;
+        selection.map = map.path;
+        selection.slots.clear();
+        selection.slots.push_back({1, "Rebel", 0, true, {}});
+        selection.slots.push_back({2, "Empire", 1, false, {}});
+        const std::array maps{map};
+        const auto options = skirmish::setup_options(selection, maps);
+        expect(!options && options.error().message.find("authored player capacity is 1") != std::string::npos
+                && options.error().message.find("at least 2 players") != std::string::npos,
+            "#6737: a capacity-1 map refuses a skirmish start and names its authored capacity");
     }
     // WSS-54: six-player capacity is independent of three spawn markers per team.
     {
@@ -1039,6 +1176,52 @@ void setup_contract(const std::filesystem::path& fixtures) {
         }
         std::filesystem::remove_all(directory);
     }
+    // WSS-13: the setup combo lists EVERY playable faction in effective load order, however many there are
+    // (the retail popup shows five rows at once; the list behind them is not cut), and a mod layer that
+    // replaces the faction file re-orders them.
+    {
+        const auto stamp = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        const auto directory = std::filesystem::temp_directory_path() / ("eawr-setup-many-" + stamp);
+        const auto overlay = std::filesystem::temp_directory_path() / ("eawr-setup-many-overlay-" + stamp);
+        setup_map_golden::write_team_corpus(directory);
+        std::filesystem::create_directories(overlay / "xml");
+        const auto write_factions = [](const std::filesystem::path& file, const std::vector<std::string>& names) {
+            std::ofstream out(file);
+            out << "<Factions>";
+            for (const auto& name : names) out << "<Faction Name=\"" << name << "\"><Is_Playable>Yes</Is_Playable></Faction>";
+            out << "<Faction Name=\"Pirates\"><Is_Playable>No</Is_Playable></Faction></Factions>";
+        };
+        std::ofstream(directory / "xml/factionfiles.xml") << "<Faction_Files><File>factions.xml</File></Faction_Files>";
+        const std::vector<std::string> base_order{"Rebel", "Empire", "Underworld", "Cis", "Republic", "Dummy_1", "Sith"};
+        const std::vector<std::string> mod_order{"Sith", "Rebel", "Empire", "Underworld", "Cis", "Republic", "Dummy_1"};
+        write_factions(directory / "xml/factions.xml", base_order);
+        write_factions(overlay / "xml/factions.xml", mod_order);
+        const auto check = [&](const std::vector<eawr::vfs::MountSpec>& mounts, const std::vector<std::string>& expected,
+                               const std::string& label) {
+            auto filesystem = eawr::vfs::Vfs::mount(mounts);
+            auto loaded = filesystem ? eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc)
+                                     : eawr::core::Result<eawr::data::LoadResult>::failure(filesystem.error());
+            expect(static_cast<bool>(loaded), label + ": synthetic seven-faction catalog loads");
+            if (!loaded) return;
+            std::vector<std::string> names;
+            for (const auto& entry : skirmish::setup_factions(loaded.value().catalog)) names.push_back(entry.name);
+            expect(names == expected, label + ": all seven playable factions are offered, in effective load order");
+            skirmish::FixtureOptions selection;
+            selection.map = "data/art/maps/team_contract.ted";
+            selection.slots = skirmish::m2_fixture().slots;
+            selection.slots->front().faction = expected.back();
+            expect(static_cast<bool>(skirmish::fixture_from_options(selection, filesystem.value(), loaded.value().catalog)),
+                label + ": the seventh playable faction is admitted as a side");
+        };
+        const eawr::vfs::MountSpec base{.layer_id = "many-base", .data_root = directory,
+            .loose_logical_prefix = "data", .active_archives = {}};
+        const eawr::vfs::MountSpec mod{.layer_id = "many-mod", .data_root = overlay,
+            .loose_logical_prefix = "data", .active_archives = {}};
+        check({base}, base_order, "base order");
+        check({mod, base}, mod_order, "mod override re-orders");
+        std::filesystem::remove_all(directory);
+        std::filesystem::remove_all(overlay);
+    }
     {
         const auto directory = std::filesystem::temp_directory_path()
             / ("eawr-playable-candidates-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -1390,6 +1573,48 @@ void setup_contract(const std::filesystem::path& fixtures) {
         auto rules = skirmish::economy_rules(policy_start.value(), policy_inputs, policy_tables);
         expect(static_cast<bool>(rules), "shared policy catalog binds");
         if (!rules) { std::cerr << rules.error().message << '\n'; continue; }
+        if (allowed) for (const int limit : {5, 12, 0, -1}) {
+            auto queue_tables = policy_tables;
+            if (limit != 5) queue_tables.constants.scalars.push_back({"Max_Build_Queue", whole(limit), std::to_string(limit)});
+            const auto queue_rules = skirmish::economy_rules(policy_start.value(), policy_inputs, queue_tables);
+            const auto expected = static_cast<std::uint32_t>(std::max(0, limit));
+            expect(queue_rules && queue_rules.value().max_queue == expected,
+                "PU-14: an omitted limit defaults to five; authored signed limits bind human queue admission");
+            if (!queue_rules) continue;
+            std::vector<std::string> reference;
+            for (const auto workers : {1U, 2U, 4U, 8U}) {
+                auto queued = tactical::TacticalSession::create(policy_start.value().setup, {}, {}, {}, std::nullopt,
+                    {}, {}, {}, queue_rules.value());
+                expect(queued.has_value(), "PU-14: queue override session creates, including zero/negative limits");
+                if (!queued) continue;
+                for (const auto& player : queue_rules.value().players) {
+                    const auto station = std::find_if(policy_start.value().units.begin(), policy_start.value().units.end(),
+                        [&](const auto& unit) { return unit.role == skirmish::UnitRole::station && unit.state.owner == player.player; });
+                    expect(station != policy_start.value().units.end(), "PU-14: each buyer has a producer");
+                    if (station == policy_start.value().units.end()) continue;
+                    for (std::uint64_t index = 0; index < 14; ++index)
+                        expect(queued.value().submit({{0, player.player, index}, {station->state.entity_id},
+                            tactical::BuyPayload{skirmish::type_id("Fighter_Squadron")}}).has_value(), "PU-14: buy submits");
+                }
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                const auto stepped = queued.value().step(executor);
+                expect(stepped.has_value(), "PU-14: queue override tick completes");
+                if (!stepped) continue;
+                for (const auto& player : queue_rules.value().players) {
+                    std::uint32_t accepted = 0;
+                    std::uint32_t full = 0;
+                    for (const auto& event : queued.value().snapshot()->events()) if (event.player == player.player) {
+                        if (event.kind == tactical::EventKind::order_accepted && event.order == tactical::OrderKind::buy) ++accepted;
+                        if (event.kind == tactical::EventKind::order_rejected && event.reason == tactical::RejectReason::queue_full) ++full;
+                    }
+                    expect(accepted == (player.ai ? 14U : expected) && full == (player.ai ? 0U : 14U - expected),
+                        "PU-14: authored limit controls human purchases, AI queues remain unlimited");
+                }
+                const std::vector<std::string> hashes{stepped.value().state_sha256};
+                if (reference.empty()) reference = hashes;
+                expect(hashes == reference, "PU-14: queue admission stays equal on 1/2/4/8 workers");
+            }
+        }
         expect(std::any_of(rules.value().players.begin(), rules.value().players.end(), [](const auto& player) { return player.ai; })
             && std::any_of(rules.value().players.begin(), rules.value().players.end(), [](const auto& player) { return !player.ai; }),
             "WSW-07: the production contract covers an AI and a human player");
@@ -1398,6 +1623,69 @@ void setup_contract(const std::filesystem::path& fixtures) {
                 && player.start_tech == static_cast<std::uint32_t>(defaults.start_tech)
                 && player.max_tech == static_cast<std::uint32_t>(defaults.max_tech);
         }), "WSS-52/WPR-02: selected cash and tech bind every player independently of default constants");
+        if (allowed) {
+            // Legacy #6809: an upgrade whose authored effect the project cannot apply yet is switched off with a
+            // stated reason, so its card shows the disabled state instead of looking buyable and refusing. An
+            // automatic income stream is applied (#6863): that upgrade is buyable.
+            auto gate_tables = policy_tables;
+            const auto income_upgrade = [&](const std::string_view name, const std::string_view style, const std::string_view previous = {}) {
+                auto type = unit_type(std::string(name), UnitKind::ship, "Rebel, Empire", 0);
+                type.production.upgrade_object = true;
+                type.production.income = {{"Gate_Stream", whole(500), whole(60), true, true}};
+                type.production.income.front().activation_style = std::string(style);
+                type.production.removes_previous = std::string(previous);
+                type.inactive_abilities = {"Income_Stream_Ability Gate_Stream"}; // the loader lists every authored node
+                type.hull = whole(100);
+                type.production.build_cost_multiplayer = whole(100);
+                type.production.build_time_seconds = whole(1);
+                return type;
+            };
+            gate_tables.units.push_back(income_upgrade("Income_Gate_Upgrade", "Event_Triggered"));
+            gate_tables.units.push_back(income_upgrade("Income_Open_Upgrade", ""));
+            gate_tables.units.push_back(income_upgrade("Income_Open_Upgrade_2", "", "Income_Open_Upgrade"));
+            // The loader keeps one stream per source type: an upgrade authoring two streams stays gated.
+            auto two_streams = income_upgrade("Income_Two_Streams_Upgrade", "");
+            two_streams.production.income.push_back(two_streams.production.income.front());
+            two_streams.production.income.back().name = "Gate_Stream_B";
+            two_streams.inactive_abilities.push_back("Income_Stream_Ability Gate_Stream_B");
+            gate_tables.units.push_back(std::move(two_streams));
+            for (auto& type : gate_tables.units) {
+                if (type.kind != UnitKind::station) continue;
+                for (auto& group : type.production.buildable) {
+                    group.types.push_back("Income_Gate_Upgrade");
+                    group.types.push_back("Income_Open_Upgrade");
+                    group.types.push_back("Income_Open_Upgrade_2");
+                    group.types.push_back("Income_Two_Streams_Upgrade");
+                }
+            }
+            const auto gate_rules = skirmish::economy_rules(policy_start.value(), policy_inputs, gate_tables);
+            expect(static_cast<bool>(gate_rules), "WPR-22/33: the income-upgrade gate fixture binds");
+            if (gate_rules) {
+                bool checked = false;
+                for (const auto& unit : policy_start.value().units) {
+                    if (unit.role != skirmish::UnitRole::station) continue;
+                    const auto* menu = gate_rules.value().menu(unit.state.type_id,
+                        policy_start.value().setup.players[unit.state.owner - 1].faction_id);
+                    const auto* gated = menu ? menu->find(skirmish::type_id("Income_Gate_Upgrade")) : nullptr;
+                    const auto* income = menu ? menu->find(skirmish::type_id("Income_Open_Upgrade")) : nullptr;
+                    const auto* income_two = menu ? menu->find(skirmish::type_id("Income_Open_Upgrade_2")) : nullptr;
+                    const auto* two = menu ? menu->find(skirmish::type_id("Income_Two_Streams_Upgrade")) : nullptr;
+                    const auto* open = menu ? menu->find(skirmish::type_id("Policy_Upgrade")) : nullptr;
+                    expect(two && !two->available && !two->disabled_reason.empty(),
+                        "WPR-15/16: an upgrade authoring two income streams stays gated with a reason (one stream per source type)");
+                    expect(income_two && income_two->available && income_two->disabled_reason.empty(),
+                        "WPR-22: the next income level, which removes the lower one, is buyable too");
+                    expect(gated && !gated->available && !gated->disabled_reason.empty(),
+                        "legacy #6809: an upgrade switched off by the unsupported-effect gate states why");
+                    expect(income && income->available && income->disabled_reason.empty(),
+                        "WPR-15/16: an upgrade whose only effect is an automatic income stream is buyable");
+                    expect(open && open->available && open->disabled_reason.empty(),
+                        "legacy #6809: an upgrade with a supported effect stays available without a reason");
+                    checked = checked || gated != nullptr;
+                }
+                expect(checked, "legacy #6809: the gate fixture is listed in a station menu");
+            }
+        }
         auto missing_difficulty = policy_tables;
         missing_difficulty.ai_credit_multiplier.reset();
         auto defaulted_economy = skirmish::economy_rules(policy_start.value(), policy_inputs, missing_difficulty);

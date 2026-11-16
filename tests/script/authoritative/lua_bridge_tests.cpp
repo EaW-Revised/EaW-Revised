@@ -34,8 +34,11 @@ constexpr int total_ticks = 60;
 
 // Combined state hash after the last tick, the same on every target and worker
 // count: a change means the world rules, the script semantics, the numeric
-// profile or an encoding changed.
-constexpr std::string_view golden_final_hash = "7e6922dddb5868a1d5caeb4ecd37b5da092eedc5b9347ad072d1d74e7387c306";
+// profile or an encoding changed. Policy v4 moved it without a semantic change: the script half of the hash holds the
+// policy identity, the manifest digest, every instance's memory baseline (the new globals count toward the logical
+// memory the save records), the protected-name list and the saved globals (print, gcinfo and loadstring are plain C
+// functions now, newproxy is gone). No script of this battle calls any of those names.
+constexpr std::string_view golden_final_hash = "35f62d6ce08f6024854648db750e7a3137c324269405cf24059eeb432c03821a";
 
 // Each instance commands the player with its ID. Numbers go through parsing,
 // formatting and division before they reach the Q24 boundary.

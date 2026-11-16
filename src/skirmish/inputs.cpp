@@ -42,7 +42,8 @@ sim::MatchIdentity match_identity(const StartInputs& inputs, const std::span<con
     identity.domains = {
         sim::identity_domain("rules", rules),
         sim::identity_domain("numeric-abi", std::string(abi.name) + ":" + std::to_string(abi.version)),
-        sim::identity_domain("sandbox", script::authoritative::sandbox_policy_identity),
+        sim::identity_domain("sandbox", inputs.sandbox_policy.empty() ? script::authoritative::sandbox_policy_identity
+                                                                       : std::string_view(inputs.sandbox_policy)),
         sim::IdentityDomain{"units", 1, content},
         sim::identity_domain("map-path", path ? path.value() : inputs.map),
         sim::identity_domain("map-digest", inputs.map_sha256),
@@ -251,6 +252,7 @@ constexpr std::string_view colour_prefix = "MP_Color_";
         if (detail::iequals(tag, "Behavior") && detail::iequals(behavior, "MARKER")) placement.marker_behavior = true;
     }
     placement.victory_relevant = detail::boolean(text_of(object, "Victory_Relevant")).value_or(false);
+    if (placement.tactical_super_weapon_target) placement.death_by_tsw_replacements = detail::tokens(text_of(object, "Death_By_TSW_Replacements"));
     placement.hull = detail::number(text_of(object, "Tactical_Health"));
     placement.decoration = detail::retail_flag(text_of(object, "Is_Decoration"), false);
     placement.discardable = detail::retail_flag(text_of(object, "Is_Discardable"), true);
@@ -738,7 +740,7 @@ core::Result<Fixture> fixture_from_options(
     if (map.value().kind != assets::MapKind::space) return Result::failure(detail::error(diagnostic_codes::fixture,
         "skirmish map must be a space map"));
     if (auto valid = validate_setup_slots(fixture.slots, map.value().lobby, false); !valid)
-        return Result::failure(valid.error());
+        return Result::failure(detail::error(diagnostic_codes::fixture, fixture.map + ": " + valid.error().message));
     if (map.value().lobby.new_markers != true) {
         if (auto valid = detail::validate_legacy_setup(fixture.slots, scene::faction_order(catalog), fixture.map); !valid)
             return Result::failure(valid.error());

@@ -285,6 +285,25 @@ void diagnostic_contract() {
     log.emit("test", "none", 1);
 }
 
+// The product wiring of the input-delay mode (MP-05): only an online (relayed) skirmish gets the host-proposed adaptive
+// delay; TCP LAN keeps the offered fixed delay, and a galactic (co-op campaign) room never gets it here.
+void input_timing_wiring_contract() {
+    stage = "input timing wiring";
+    using Mode = net::LobbyGameMode;
+    struct Row { bool online; Mode mode; bool adaptive; const char* what; };
+    for (const Row& row : {Row{true, Mode::skirmish, true, "online skirmish"}, Row{false, Mode::skirmish, false, "TCP LAN skirmish"},
+            Row{true, Mode::galactic, false, "online co-op campaign"}, Row{false, Mode::galactic, false, "LAN co-op campaign"}}) {
+        net::SessionOptions options;
+        viewer::lan_detail::configure_input_timing(options, row.online, row.mode);
+        expect(options.adaptive_timing.has_value() == row.adaptive && options.non_lan == row.adaptive,
+            std::string(row.what) + (row.adaptive ? " gets adaptive timing and is non-LAN" : " keeps the fixed delay"));
+        if (!row.adaptive) continue;
+        expect(options.adaptive_timing->host == 0 && options.adaptive_timing->broadband && options.adaptive_timing->hold_on_expiry
+            && options.adaptive_timing->max_deferrals > 0 && !options.adaptive_timing->rtt_ms,
+            "online skirmish: host 0 proposes from the transport's measured RTT with a bounded hold");
+    }
+}
+
 void recovery_presentation_contract() {
     stage = "recovery presentation table";
     struct Row { const char* state; viewer::LanRecovery recovery; const char* message; bool gameplay; };
@@ -1133,7 +1152,7 @@ int main(int argc, char** argv) {
         nine_seat_staging({1, 2});
         staging_ingress_bounds();
         multiplayer_pause_contracts();
-        diagnostic_contract(); player_row_parser(); refused_rosters();
+        diagnostic_contract(); input_timing_wiring_contract(); player_row_parser(); refused_rosters();
         for (const auto count : {3U, 4U, 9U}) separate_mesh(count, false);
         for (const auto workers : {1U, 2U, 4U, 8U}) separate_mesh(8, false, false, workers);
         separate_mesh(4, true);

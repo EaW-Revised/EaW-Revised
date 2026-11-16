@@ -32,7 +32,7 @@ namespace {
 
 } // namespace
 
-SpacePopulation::SpacePopulation(Options options) : options_(std::move(options)) {}
+// SpacePopulation::SpacePopulation and ~SpacePopulation are in space_populate_arrivals.cpp, where PendingAppend is complete.
 
 std::optional<lighting::Environment> SpacePopulation::environment(
     const assets::Map& map, const std::string_view choice, std::string& failure) {

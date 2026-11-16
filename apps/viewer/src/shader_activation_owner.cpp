@@ -1,4 +1,5 @@
 #include "shader_activation_owner.hpp"
+#include "environment_texture.hpp"
 #include "shader_prewarm_diagnostics.hpp"
 #include "viewer_path.hpp"
 #include "eawr/core/sha256.hpp"
@@ -31,11 +32,12 @@ std::string hex(const shader_runtime::Digest& value) {
     return result;
 }
 std::string utf8(const godot::String& value) { return value.utf8().get_data(); }
-std::optional<std::pair<std::string, assets::Texture>> resolve_shader_texture(const vfs::Vfs& mounted, std::string_view declared) {
+std::optional<std::pair<std::string, assets::Texture>> resolve_shader_texture(const vfs::Vfs& mounted, std::string_view declared,
+                                                                              const bool environment_texture) {
     auto path = assets::resolve_texture_name("data/art/textures/", declared,
         [&](std::string_view name) { return bool(mounted.stat(name)); });
     if (path.empty()) return {};
-    auto loaded = assets::load_texture(mounted, path);
+    auto loaded = environment_texture ? load_environment_texture(mounted, path) : assets::load_texture(mounted, path);
     if (!loaded) return {};
     return std::pair{std::move(path), std::move(loaded).value()};
 }
@@ -184,18 +186,18 @@ core::Result<void> begin_mod_shaders(ShaderActivationOwner& owner, const vfs::Vf
     return owner.begin(true, mounted, std::move(chain), policies, host, std::move(shaders));
 }
 void install_mod_shaders(GodotRenderer& renderer, std::shared_ptr<const shader_activation::Generation> generation,
-    std::shared_ptr<const vfs::Vfs> mounted) {
+    std::shared_ptr<const vfs::Vfs> mounted, const bool environment_textures) {
     if (!generation || !mounted) return;
     renderer.set_shader_generation(std::move(generation),
-        [mounted = std::move(mounted)](std::string_view declared) -> std::optional<std::pair<std::string, assets::Texture>> {
-            return resolve_shader_texture(*mounted, declared);
+        [mounted = std::move(mounted), environment_textures](std::string_view declared) -> std::optional<std::pair<std::string, assets::Texture>> {
+            return resolve_shader_texture(*mounted, declared, environment_textures);
         });
 }
 void install_mod_shaders(GodotRenderer& renderer, std::shared_ptr<const shader_activation::Generation> generation,
-    const vfs::Vfs& mounted) {
+    const vfs::Vfs& mounted, const bool environment_textures) {
     if (!generation) return;
     renderer.set_shader_generation(std::move(generation),
-        [&mounted](std::string_view declared) { return resolve_shader_texture(mounted, declared); });
+        [&mounted, environment_textures](std::string_view declared) { return resolve_shader_texture(mounted, declared, environment_textures); });
 }
 void admit_scene_shaders(scene::VfsAssetCache& cache, GodotRenderer& renderer) {
     if (renderer.shader_translation_enabled()) cache.set_admitted_shaders(

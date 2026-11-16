@@ -36,9 +36,9 @@ struct OverviewUi final {
                       .unit_brackets = false, .world_markers = true, .distance_fog = false};
 }
 
-// Cinematic mode hides the shell but does not revoke the reinforcement pane's state.
-[[nodiscard]] constexpr bool reinforcement_available(bool allowed, bool tactical_shell, bool movie, bool land) noexcept {
-    return allowed && (tactical_shell || movie) && !land;
+// Cinematic mode hides the shell but does not revoke the reinforcement pane's state. A land battle uses the same pane (#7190).
+[[nodiscard]] constexpr bool reinforcement_available(bool allowed, bool tactical_shell, bool movie) noexcept {
+    return allowed && (tactical_shell || movie);
 }
 
 // V-5g: the fade's fixed steps, per drawn frame: opacity 1 - n x 0.025 / 0.25 on the n-th frame after

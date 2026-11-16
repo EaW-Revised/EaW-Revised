@@ -25,20 +25,25 @@ using Clock = std::chrono::steady_clock;
 bool valid(const NetworkIntroductionOptions& o, bool token_optional) { return client_options_valid(o, token_optional); }
 // GNS takes numeric TURN addresses only. A Paired message that lists hostnames (Cloudflare) is rewritten
 // here on the endpoint worker thread, never the game thread; numeric lists (coturn) pass through byte for byte.
-// When no hostname resolves the message keeps its rendezvous and carries no relay credentials.
-Bytes numeric_turn(Bytes bytes, std::stop_token stop) {
+// When no hostname resolves the message keeps its rendezvous and carries no relay credentials. A service that issues
+// several providers sends one user and password per server: each keeps its own through the rewrite, and `provider`
+// drops the servers of the other provider first (EAWR docs/deploy/coturn-fallback.md).
+Bytes numeric_turn(Bytes bytes, GnsTurnProvider provider, const TurnLog& log, TurnOrder& order, std::stop_token stop) {
     if (bytes.size() < 2 || bytes[0] != 2 || static_cast<Kind>(bytes[1]) != Kind::paired) return bytes;
     Reader reader{std::span(bytes).subspan(2)};
     const auto session = reader.string(32), local = reader.string(gns_identity_max_bytes), remote = reader.string(gns_identity_max_bytes);
     const auto uri = reader.string(512), username = reader.string(256), password = reader.string(256);
     const auto lifetime = reader.u32();
     if (!reader.done() || uri.empty() || !turn_uri_list_valid(uri)) return bytes;
-    const auto numeric = numeric_turn_uris(uri, {}, std::chrono::seconds(5), stop);
-    if (numeric == uri) return bytes;
+    const TurnStrings listed{uri, username, password};
+    const auto numeric = numeric_turn_credentials(listed, provider, {}, std::chrono::seconds(5), stop, stun_rtt, &order);
+    log_turn_order(order, log);
+    if (numeric == listed) return bytes;
     auto result = message(Kind::paired);
     string(result, session); string(result, local); string(result, remote);
-    string(result, numeric); string(result, numeric.empty() ? "" : username); string(result, numeric.empty() ? "" : password);
-    u32(result, numeric.empty() ? 0 : lifetime);
+    string(result, numeric.uri); string(result, numeric.uri.empty() ? "" : numeric.username);
+    string(result, numeric.uri.empty() ? "" : numeric.password);
+    u32(result, numeric.uri.empty() ? 0 : lifetime);
     return result;
 }
 class NetworkEndpoint final : public GnsSignallingEndpoint {
@@ -69,6 +74,7 @@ public:
     Clock::time_point expires() const { std::lock_guard lock(mutex_); return expires_; }
     GnsRendezvous rendezvous() const override { std::lock_guard lock(mutex_); return rendezvous_; }
     std::optional<GnsTurnCredentials> turn_credentials() const override { std::lock_guard lock(mutex_); return turn_; }
+    std::optional<std::string> own_turn_uris() const override { std::lock_guard lock(mutex_); return own_turn_; }
     std::optional<GnsSessionLease> lease() const override { std::lock_guard lock(mutex_); return lease_; }
     std::optional<GnsTurnCredentials> take_refreshed_turn_credentials() override {
         std::lock_guard lock(mutex_); auto result = std::move(refreshed_); refreshed_.reset(); return result;
@@ -113,6 +119,7 @@ private:
     std::condition_variable condition_;
     GnsRendezvous rendezvous_;
     std::optional<GnsTurnCredentials> turn_, refreshed_;
+    std::optional<std::string> own_turn_; // the operator's own entries of the last rewritten credentials (labels the route)
     std::optional<GnsSessionLease> lease_;
     bool renew_wanted_{};
     unsigned renew_attempts_{};
@@ -213,7 +220,12 @@ private:
         auto heartbeat = Clock::now();
         while (!stop.stop_requested()) {
             stream.pump();
-            if (auto bytes = stream.receive()) response(numeric_turn(std::move(*bytes), stop));
+            if (auto bytes = stream.receive()) {
+                TurnOrder order;
+                auto frame = numeric_turn(std::move(*bytes), options_.turn_provider, options_.log, order, stop);
+                if (order.classified) { std::lock_guard lock(mutex_); own_turn_ = order.own_uris; }
+                response(std::move(frame));
+            }
             {
                 std::lock_guard lock(mutex_);
                 if (failure_ || publication_closed_) return;

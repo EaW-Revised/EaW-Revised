@@ -128,11 +128,13 @@ bool write_atomically(const fs::path& target, const std::string& text) {
             return false;
         }
     }
-    if (!detail::replace_profile_file(temporary, target)) {
-        fs::remove(temporary, error);
-        return false;
+    // Another process may be reading the target right now (Windows refuses to replace an open file): try a few times.
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        if (detail::replace_profile_file(temporary, target)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    return true;
+    fs::remove(temporary, error);
+    return false;
 }
 
 std::optional<std::string> read_whole(const fs::path& cache_path) {
@@ -149,6 +151,7 @@ struct PartialFile {
     std::uint64_t size = 0;
     std::string mtime;   // decimal ticks; kept as text, a double does not hold a 100 ns tick count exactly
     std::string sha256;
+    bool adopted = false;   // came from the partial file after this job started (another process hashed it)
 };
 
 } // namespace
@@ -169,8 +172,10 @@ struct ContentDigests::Job {
     std::uint64_t tree_files = 0;
     std::atomic<bool> cancel{false};
     std::atomic<std::uint64_t> files_done{0}, bytes_done{0}, files_total{0}, bytes_total{0};
-    std::atomic<std::uint64_t> files_hashed{0}, files_reused{0}, bytes_read{0};
+    std::atomic<std::uint64_t> files_hashed{0}, files_reused{0}, files_adopted{0}, bytes_read{0};
     std::atomic<bool> paused{false}, adopted{false};
+    std::atomic<std::size_t> workers{0};
+    std::atomic<int> media{0};   // 0 unknown, 1 ssd, 2 hdd
     // Guarded by ContentDigests::mutex_.
     bool finished = false;
     ContentDigest result;
@@ -339,7 +344,10 @@ ContentJobStats ContentDigests::stats(const std::string& key) const {
     out.bytes_total = job.bytes_total;
     out.files_hashed = job.files_hashed;
     out.files_reused = job.files_reused;
+    out.files_adopted = job.files_adopted;
     out.bytes_read = job.bytes_read;
+    out.workers = job.workers;
+    out.media = job.media == 2 ? "hdd" : job.media == 1 ? "ssd" : "unknown";
     out.paused = job.paused;
     out.adopted = job.adopted;
     return out;
@@ -449,33 +457,81 @@ void ContentDigests::run(Job& job) {
     job.files_total = listing.files.size();
     job.bytes_total = total;
 
-    // Per-file hashes from an earlier, interrupted run. Only a file with the same size and mtime counts.
-    std::unordered_map<std::string, PartialFile> earlier;
+    // Per-file hashes another run or process left in the partial file. Only a file with the same size and mtime counts.
     const fs::path partial_path = cache_file(job.key, true);
     std::error_code cache_error;
     const fs::path complete_path = cache_file(job.key, false);
     const bool corrupt_complete = !complete_path.empty() && fs::exists(complete_path, cache_error) && !read_whole(complete_path);
-    if (!partial_path.empty() && !corrupt_complete) {
-        if (const auto text = read_whole(partial_path)) {
-            const auto parsed = steam::parse_json(*text);
-            const std::string* format = parsed ? parsed->string_member("format") : nullptr;
-            const std::string* key = parsed ? parsed->string_member("key") : nullptr;
-            const std::string* stored_root = parsed ? parsed->string_member("root") : nullptr;
-            const steam::JsonValue* version = parsed ? parsed->member("version") : nullptr;
-            const steam::JsonValue* list = parsed ? parsed->member("files") : nullptr;
-            if (format && *format == kPartialFormat && key && *key == job.key && stored_root && *stored_root == job.root && version && version->kind == steam::JsonValue::Kind::number && version->number == kCacheVersion
-                && list && list->kind == steam::JsonValue::Kind::array) {
-                for (const steam::JsonValue& item : list->array) {
-                    if (item.kind != steam::JsonValue::Kind::array || item.array.size() != 4) { earlier.clear(); break; }
-                    const auto& a = item.array;
-                    if (a[0].kind != steam::JsonValue::Kind::string || a[1].kind != steam::JsonValue::Kind::number
-                        || a[2].kind != steam::JsonValue::Kind::string || a[3].kind != steam::JsonValue::Kind::string
-                        || !is_hex(a[3].string, 32) || !(a[1].number >= 0 && a[1].number <= 9007199254740992.0)) { earlier.clear(); break; }
-                    if (!earlier.emplace(a[0].string, PartialFile{static_cast<std::uint64_t>(a[1].number), a[2].string, a[3].string}).second) { earlier.clear(); break; }
-                }
-            }
+    std::unordered_map<std::string, std::size_t> listed;   // relative path -> listing index
+    listed.reserve(listing.files.size());
+    for (std::size_t i = 0; i < listing.files.size(); ++i) listed.emplace(listing.files[i].relative, i);
+    const auto read_partial = [&]() -> std::vector<std::pair<std::string, PartialFile>> {
+        std::vector<std::pair<std::string, PartialFile>> out;
+        if (partial_path.empty() || corrupt_complete) return out;
+        const auto text = read_whole(partial_path);
+        if (!text) return out;
+        const auto parsed = steam::parse_json(*text);
+        const std::string* format = parsed ? parsed->string_member("format") : nullptr;
+        const std::string* key = parsed ? parsed->string_member("key") : nullptr;
+        const std::string* stored_root = parsed ? parsed->string_member("root") : nullptr;
+        const steam::JsonValue* version = parsed ? parsed->member("version") : nullptr;
+        const steam::JsonValue* list = parsed ? parsed->member("files") : nullptr;
+        if (!(format && *format == kPartialFormat && key && *key == job.key && stored_root && *stored_root == job.root && version
+              && version->kind == steam::JsonValue::Kind::number && version->number == kCacheVersion
+              && list && list->kind == steam::JsonValue::Kind::array)) return out;
+        for (const steam::JsonValue& item : list->array) {
+            if (item.kind != steam::JsonValue::Kind::array || item.array.size() != 4) return {};
+            const auto& a = item.array;
+            if (a[0].kind != steam::JsonValue::Kind::string || a[1].kind != steam::JsonValue::Kind::number
+                || a[2].kind != steam::JsonValue::Kind::string || a[3].kind != steam::JsonValue::Kind::string
+                || !is_hex(a[3].string, 32) || !(a[1].number >= 0 && a[1].number <= 9007199254740992.0)) return {};
+            const auto at = listed.find(a[0].string);
+            if (at == listed.end()) continue;
+            const TreeFile& file = listing.files[at->second];
+            const auto size = static_cast<std::uint64_t>(a[1].number);
+            if (size != file.size || a[2].string != std::to_string(file.mtime)) continue;   // not the bytes this job lists
+            out.emplace_back(a[0].string, PartialFile{size, a[2].string, a[3].string, false});
         }
-    }
+        return out;
+    };
+    // Guarded by earlier_mutex: entries valid for this listing, from the partial file (at start and again while the job runs).
+    std::mutex earlier_mutex;
+    std::unordered_map<std::string, PartialFile> earlier;
+    // Looks at the partial file again when its size or mtime changed (the other process saved), one thread at a time, at most every
+    // partial_refresh; `force` skips the interval (partial saves merge before they write). Entries only ever get added.
+    using Stamp = std::pair<std::uintmax_t, std::int64_t>;
+    constexpr Stamp kNoStamp{~std::uintmax_t{}, 0};
+    std::mutex refresh_mutex;
+    auto next_refresh = std::chrono::steady_clock::now() + options_.partial_refresh;
+    const auto stamp_of = [&]() -> Stamp {
+        std::error_code ec;
+        const fs::directory_entry entry(partial_path, ec);
+        if (ec) return kNoStamp;
+        const auto size = entry.file_size(ec);
+        if (ec) return kNoStamp;
+        const auto time = entry.last_write_time(ec);
+        if (ec) return kNoStamp;
+        return {size, static_cast<std::int64_t>(time.time_since_epoch().count())};
+    };
+    Stamp partial_stamp = partial_path.empty() ? kNoStamp : stamp_of();
+    for (auto& [name, entry] : read_partial()) earlier.emplace(std::move(name), std::move(entry));   // after the stamp: a save in between is seen again
+    const auto refresh_earlier = [&](bool force) {
+        if (partial_path.empty()) return;
+        std::unique_lock refresh_lock(refresh_mutex, std::try_to_lock);
+        if (!refresh_lock) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (!force && now < next_refresh) return;
+        next_refresh = now + options_.partial_refresh;
+        const Stamp stamp = stamp_of();
+        if (stamp == partial_stamp || stamp == kNoStamp) return;
+        partial_stamp = stamp;
+        auto fresh = read_partial();   // no lock held while reading
+        std::lock_guard lock(earlier_mutex);
+        for (auto& [name, entry] : fresh) {
+            entry.adopted = true;
+            earlier.emplace(std::move(name), std::move(entry));
+        }
+    };
 
     // Each slot belongs to one worker; canonical aggregation below always follows listing order.
     std::vector<std::string> hashes(listing.files.size());
@@ -491,16 +547,26 @@ void ContentDigests::run(Job& job) {
     auto last_partial = std::chrono::steady_clock::now();
     const auto save_partial = [&] {
         if (partial_path.empty()) return;
+        // Another process may have saved results since the last look: merge them in rather than replace them. The rename below is
+        // atomic; a save that lands between this read and the rename is lost to the later writer, never torn.
+        refresh_earlier(true);
         std::string text = "{\"format\": " + steam::json_quote(kPartialFormat) + ", \"version\": " + std::to_string(kCacheVersion)
             + ", \"key\": " + steam::json_quote(job.key) + ", \"root\": " + steam::json_quote(job.root) + ", \"files\": [";
         bool first = true;
+        std::lock_guard earlier_lock(earlier_mutex);
         for (std::size_t i = 0; i < hashes.size(); ++i) {
-            if (hashes[i].empty()) continue;
             const auto& file = listing.files[i];
+            const std::string* sha = hashes[i].empty() ? nullptr : &hashes[i];
+            if (!sha) {
+                // Not reached by this job yet, but another process finished it: keep that result in the file.
+                const auto other = earlier.find(file.relative);
+                if (other == earlier.end()) continue;
+                sha = &other->second.sha256;
+            }
             text += first ? "\n" : ",\n";
             first = false;
             text += "[" + steam::json_quote(file.relative) + ", " + std::to_string(file.size) + ", \"" + std::to_string(file.mtime)
-                + "\", \"" + hashes[i] + "\"]";
+                + "\", \"" + *sha + "\"]";
         }
         text += "\n]}\n";
         (void)write_atomically(partial_path, text);
@@ -536,6 +602,37 @@ void ContentDigests::run(Job& job) {
         job.paused = pause_state;
         return pause_state;
     };
+    // One reader on a rotational disk (see ContentDigestOptions::rotational_worker_count); everything else keeps the usual count.
+    platform::StorageMedia media = platform::StorageMedia::unknown;
+    if (options_.is_rotational) media = options_.is_rotational(root) ? platform::StorageMedia::rotational : platform::StorageMedia::solid_state;
+    else media = platform::storage_media_of(root);
+    const bool rotational = media == platform::StorageMedia::rotational;
+    job.media = rotational ? 2 : media == platform::StorageMedia::solid_state ? 1 : 0;
+    std::size_t base_count = options_.worker_count ? options_.worker_count : std::min(8u, std::max(1u, std::thread::hardware_concurrency()));
+    if (rotational && options_.rotational_worker_count) base_count = std::min(base_count, options_.rotational_worker_count);
+    const auto count = std::max<std::size_t>(1, std::min<std::size_t>({8, base_count, listing.files.size()}));
+    job.workers = count;
+    // On a rotational disk the files are read in on-disk order (ascending first extent, listing index breaks ties): one sweep of
+    // the disk instead of a seek per file. Files with no known position (0) come first. Never changes the digest, which is
+    // aggregated in sorted path order below.
+    std::vector<std::size_t> read_order;   // empty = listing order
+    if (rotational && options_.disk_order_on_rotational && listing.files.size() > 1) {
+        std::vector<std::pair<std::uint64_t, std::size_t>> positions(listing.files.size());
+        // The query opens each file (attributes only), so it obeys the same pause as the workers: no mod file is touched while
+        // pause_while holds, and a digest another process finishes meanwhile (adopt) makes the order unnecessary.
+        for (std::size_t i = 0; i < positions.size() && !adopt; ++i) {
+            while (!job.cancel && !adopt && paused()) std::this_thread::sleep_for(std::min(options_.pause_poll, std::chrono::milliseconds(250)));
+            if (job.cancel) return fail("cancelled");
+            if (adopt) break;
+            const fs::path path = root / steam::path_from_utf8(listing.files[i].relative);
+            positions[i] = {options_.physical_offset ? options_.physical_offset(path) : platform::first_physical_offset(path), i};
+        }
+        if (!adopt) {
+            std::sort(positions.begin(), positions.end());
+            read_order.reserve(positions.size());
+            for (const auto& entry : positions) read_order.push_back(entry.second);
+        }
+    }
     const auto work = [&] {
         bool background = false;
         const auto update_priority = [&] {
@@ -556,13 +653,20 @@ void ContentDigests::run(Job& job) {
                     std::this_thread::sleep_for(std::min(options_.pause_poll, std::chrono::milliseconds(250)));
                 if (job.cancel || failed || adopt) break;
                 update_priority();
-                const auto index = next.fetch_add(1);
-                if (index >= listing.files.size()) break;
+                refresh_earlier(false);
+                const auto slot = next.fetch_add(1);
+                if (slot >= listing.files.size()) break;
+                const auto index = read_order.empty() ? slot : read_order[slot];
                 const TreeFile& file = listing.files[index];
-                const auto hit = earlier.find(file.relative);
-                if (hit != earlier.end() && hit->second.size == file.size && hit->second.mtime == std::to_string(file.mtime)) {
-                    { std::lock_guard lock(hashes_mutex); hashes[index] = hit->second.sha256; }
+                std::optional<PartialFile> hit;
+                {
+                    std::lock_guard lock(earlier_mutex);
+                    if (const auto found = earlier.find(file.relative); found != earlier.end()) hit = found->second;
+                }
+                if (hit) {   // earlier entries are already checked against this listing's size and mtime
+                    { std::lock_guard lock(hashes_mutex); hashes[index] = hit->sha256; }
                     ++job.files_reused;
+                    if (hit->adopted) ++job.files_adopted;
                     job.bytes_done += file.size;
                 } else {
                     if (options_.on_open) { std::lock_guard lock(hook_mutex); options_.on_open(file.relative); }
@@ -614,7 +718,6 @@ void ContentDigests::run(Job& job) {
         } catch (const std::exception& error) { set_problem(std::string("internal error: ") + error.what()); }
           catch (...) { set_problem("internal error"); }
     };
-    const auto count = std::max<std::size_t>(1, std::min<std::size_t>({8, options_.worker_count ? options_.worker_count : std::min(8u, std::max(1u, std::thread::hardware_concurrency())), listing.files.size()}));
     std::mutex batch_mutex;
     std::condition_variable batch_done;
     std::size_t remaining = 0;

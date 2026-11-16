@@ -338,6 +338,13 @@ std::vector<std::string> describe_galactic_ai_goals(const GalacticAiRuntimeView&
     std::vector<std::string> lines;
     const auto engine = view.engine.lock(); const auto actions = view.actions.lock();
     if (!engine) return lines;
+    // Async step 2 exit counter: AI-state writes made outside the window body (observer only; zero is the exit).
+    if (const auto& probe = view.write_probe) {
+        using Writer = script::foc::GalacticAiWriteProbe::Writer;
+        lines.push_back(std::string("ai-state writes outside the window body: armed=") + (probe->armed() ? "1" : "0")
+            + " engine=" + std::to_string(probe->outside(Writer::engine)) + " actions=" + std::to_string(probe->outside(Writer::actions))
+            + " tracked=" + std::to_string(probe->outside(Writer::tracked)));
+    }
     const auto refusals = engine->galactic_refusals();
     for (const auto& selected : setup.lifecycle.players) {
         struct Row { std::size_t goals{}, active{}, planned{}, running{}; double largest{}; };
@@ -505,6 +512,15 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
                 actions.bind_planet_usability([usable, predicate_seat](const auto& snapshot, auto planet) {
                     return usable(predicate_seat, snapshot, planet);
                 });
+            // WGA-450 (#7188): committed corruption of the receiving planet, the same fact the ISCORRUPTED perception reads.
+            actions.bind_planet_corruption([](const auto& snapshot, auto planet) -> core::Result<bool> {
+                const auto* economy = snapshot.economy_corruption();
+                if (!economy) return absent<bool>("planet corruption state");
+                const auto found = std::find_if(economy->planets.begin(), economy->planets.end(),
+                    [&](const auto& row) { return row.planet == planet; });
+                if (found == economy->planets.end()) return core::Result<bool>::success(false);
+                return core::Result<bool>::success(found->corruption != sim::galactic::corruption_fixture::Type::none);
+            });
             actions.bind_freestore_births([content, members](auto& retained, const auto& snapshot, const auto& shadow,
                 auto changes, const auto& workers) {
                 return apply_galactic_ai_actor_changes(retained, changes,

@@ -29,7 +29,7 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::admit_native_
     GameCommand command; command.key = {impl.completed_tick, issuer->seat_id, 0}; command.payload = payload;
     std::vector<GalacticEvent> events(impl.snapshot->events().begin(), impl.snapshot->events().end());
     const auto first = events.size();
-    if (movement) impl.execute_movement(command, impl.completed_tick, events, pending_local_conflict);
+    if (movement) impl.execute_movement(command, impl.completed_tick, events, pending_local_conflict, {}, true);
     else impl.execute_fleet(command, impl.completed_tick, events, pending_local_conflict, false,
         impl.launch_leg ? session_detail::PausedKind::surface_deploy : session_detail::PausedKind::fleet_management);
     NativeFleetReceipt receipt;

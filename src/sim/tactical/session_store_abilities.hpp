@@ -60,6 +60,8 @@ struct SessionStoreSpecialWeapons {
     std::map<PlayerId, ManualPlayerClock> manual_clocks; // WAD-40: shared across stations
     std::map<EntityId, SpecialWeaponState> special_weapons; // WSW-14/19: persistent planetary sources.
     std::set<PlayerId> special_disabled_by_hardpoint; // WSW-48: absence is the default enabled permission
+    std::map<EntityId, TswState> tsw_states; // TSW-02: one record per tactical super weapon object; saved and hashed only with a TSW setup
+    TswWorld tsw_world; // TSW-09/10: the victory hold, the destroyed targets and the planet fact; saved and hashed with the records
     std::vector<EntityId> projectile_defence_order; // coordinator-reserved PDEF; empty implies static creation order
 };
 

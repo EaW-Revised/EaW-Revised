@@ -110,6 +110,31 @@ bool ability_targeted(const std::uint32_t ability) noexcept {
     return !name.empty() && std::find(targeted_abilities.begin(), targeted_abilities.end(), name) != targeted_abilities.end();
 }
 
+bool ability_target_admitted(const std::span<const sim::tactical::SpecialAbilityProfile> nested,
+    const std::uint32_t ability, const sim::tactical::TypeId victim_type, const std::uint64_t victim_categories) noexcept {
+    using Kind = sim::tactical::SpecialAbilityKind;
+    Kind expected = Kind::none;
+    switch (sim::tactical::ability_kind(ability_name(ability))) {
+    case sim::tactical::AbilityKind::energy_weapon: expected = Kind::energy_weapon; break;
+    case sim::tactical::AbilityKind::tractor_beam: expected = Kind::tractor_beam; break;
+    case sim::tactical::AbilityKind::leech_shields: expected = Kind::leech_shields; break;
+    case sim::tactical::AbilityKind::super_laser: expected = Kind::super_laser; break;
+    case sim::tactical::AbilityKind::concentrate_fire: expected = Kind::concentrate_fire; break;
+    case sim::tactical::AbilityKind::lucky_shot: expected = Kind::lucky_shot; break;
+    case sim::tactical::AbilityKind::ion_cannon_shot: expected = Kind::ion_cannon_shot; break;
+    default: return true;
+    }
+    // The sim picks one handler by the ability's gui name; this admits when any handler of the kind does, so with two
+    // same-kind handlers the pointer can show valid where the order is then refused, never the reverse.
+    bool any = false;
+    for (const auto& handler : nested) {
+        if (handler.kind != expected) continue;
+        any = true;
+        if (sim::tactical::special_type_matches(handler.filter, victim_type, victim_categories)) return true;
+    }
+    return !any;
+}
+
 AbilityBar ability_bar(const CardLayout& layout, const std::span<const CardUnit> units, const AbilityState& state,
                        const std::function<std::string_view(const CardUnit&, bool)>& icon) {
     AbilityBar bar;

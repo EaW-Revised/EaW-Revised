@@ -1,0 +1,30 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Selection_Controls>
+  <Selection_Advisor_Enabled>No</Selection_Advisor_Enabled>
+  <Selection_Action Name="SELECT_OWN_ALL">
+    <Default_Key>Ctrl+Q</Default_Key>
+    <Default_Faction_SFXEvent>Empire, Revised_Selection_Empire_allunits</Default_Faction_SFXEvent>
+    <Advisor_SFXEvent>EHD_Choose_Reinforcements, Revised_Selection_Empire_allunits</Advisor_SFXEvent>
+    <Default_Faction_SFXEvent>Rebel, Revised_Selection_Rebel_allunits</Default_Faction_SFXEvent>
+    <Advisor_SFXEvent>RHD_Choose_Reinforcements, Revised_Selection_Rebel_allunits</Advisor_SFXEvent>
+    <Default_Faction_SFXEvent>Underworld, Revised_Selection_Underworld_allunits</Default_Faction_SFXEvent>
+    <Advisor_SFXEvent>UHD_Choose_Reinforcements, Revised_Selection_Underworld_allunits</Advisor_SFXEvent>
+  </Selection_Action>
+  <Selection_Action Name="SELECT_OWN_SCREEN">
+    <Default_Key>Q</Default_Key>
+    <Default_Faction_SFXEvent>Empire, Revised_Selection_Empire_localunits</Default_Faction_SFXEvent>
+    <Advisor_SFXEvent>EHD_Choose_Reinforcements, Revised_Selection_Empire_localunits</Advisor_SFXEvent>
+    <Default_Faction_SFXEvent>Rebel, Revised_Selection_Rebel_localunits</Default_Faction_SFXEvent>
+    <Advisor_SFXEvent>RHD_Choose_Reinforcements, Revised_Selection_Rebel_localunits</Advisor_SFXEvent>
+    <Default_Faction_SFXEvent>Underworld, Revised_Selection_Underworld_localunits</Default_Faction_SFXEvent>
+    <Advisor_SFXEvent>UHD_Choose_Reinforcements, Revised_Selection_Underworld_localunits</Advisor_SFXEvent>
+  </Selection_Action>
+  <Selection_Action Name="GIFT_UNITS">
+    <Default_Faction_SFXEvent>Empire, Revised_Selection_Empire_gift</Default_Faction_SFXEvent>
+    <Advisor_SFXEvent>EHD_Choose_Reinforcements, Revised_Selection_Empire_gift</Advisor_SFXEvent>
+    <Default_Faction_SFXEvent>Rebel, Revised_Selection_Rebel_gift</Default_Faction_SFXEvent>
+    <Advisor_SFXEvent>RHD_Choose_Reinforcements, Revised_Selection_Rebel_gift</Advisor_SFXEvent>
+    <Default_Faction_SFXEvent>Underworld, Revised_Selection_Underworld_gift</Default_Faction_SFXEvent>
+    <Advisor_SFXEvent>UHD_Choose_Reinforcements, Revised_Selection_Underworld_gift</Advisor_SFXEvent>
+  </Selection_Action>
+</Selection_Controls>

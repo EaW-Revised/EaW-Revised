@@ -67,6 +67,19 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
         if (enabled == nullptr) return bad("malformed enabled flag");
         return OrderResult::success(make_order({unit->id}, tactical::ScriptInvulnerablePayload{*enabled}));
     }
+    if (command.verb == verb_tactical_superweapon) {
+        // TSW-07: the script call stages the shared switch command with the AI admission, never a human one.
+        if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer, unit and stage");
+        const auto* stage = std::get_if<LuaNumber>(&arguments[2].data);
+        if (stage == nullptr) return bad("malformed stage");
+        const auto value = numeric::to_exact_integer(*stage);
+        if (!value || (value.value() != static_cast<std::int64_t>(tactical::TswStage::start_approach)
+                && value.value() != static_cast<std::int64_t>(tactical::TswStage::start_power_up)))
+            return bad("invalid super weapon stage");
+        return OrderResult::success(make_order({unit->id}, tactical::TacticalSuperweaponPayload{
+            static_cast<tactical::TswStage>(value.value()), tactical::TswAdmission::ai_object}));
+    }
     if (command.verb == verb_special_fire) {
         if (arguments.size() != 4 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
             return bad("expects issuer, source, target and AI admission");

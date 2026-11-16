@@ -67,4 +67,9 @@ void discover_manual(const DiscoveryInput& input, Catalog& catalog);
 // case, so the same folder typed with other non-ASCII case gets another key.
 [[nodiscard]] std::string manual_key(const steam::fs::path& folder);
 
+// A stable id for a mod folder given by path (what a mod baseline or a degradation summary names it by): the Workshop key
+// `workshop:<id>` when the folder is `.../workshop/content/<app id>/<item id>`, so the same item has the same id wherever
+// the Steam library lives; the manual_key otherwise.
+[[nodiscard]] std::string folder_mod_id(const steam::fs::path& folder);
+
 } // namespace eawr::mods

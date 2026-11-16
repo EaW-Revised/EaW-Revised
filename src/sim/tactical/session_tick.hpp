@@ -22,6 +22,8 @@ public:
     Tick(const Tick&) = delete;
     Tick& operator=(const Tick&) = delete;
     core::Result<TacticalTick> run();
+    // MV-41: accepted replacement orders share arrival-turn cancellation, including abilities.
+    static void replace_order(LiveUnit& live, const CommandPayload& payload, std::uint64_t tick);
     core::Result<void> land_combat(std::vector<LiveUnit>& live,
         const std::vector<std::pair<EntityId, math::Vec3>>& starts,
         std::vector<Event>& events, std::vector<CombatEvent>& combat_events);
@@ -37,6 +39,8 @@ public:
         std::vector<Event>& events, std::vector<core::Diagnostic>& diagnostics);
     // LC-52/53: the shared capture service over the land objects with a capture profile (session_land_reinforce.cpp).
     core::Result<void> land_capture(std::vector<LiveUnit>& survivors, std::vector<Event>& events);
+    // LC-104..LC-107 (G-11..G-13): the free garrison's depletion check and refill timer in land (session_land_free_garrison.cpp).
+    core::Result<void> land_free_garrisons(const std::vector<LiveUnit>& live);
     // LC-51: finalize the companies whose landing has run its course.
     core::Result<void> land_reinforcements(std::vector<LiveUnit>& live, std::vector<Event>& events,
         std::vector<core::Diagnostic>& diagnostics);
@@ -48,6 +52,15 @@ private:
     void record_damage_change(const LiveUnit& target, math::Fixed before,
         EntityId source = invalid_entity_id, const UnitStage* staged = nullptr);
     std::vector<DamageChange> damage_changes_; // ordered commits only, not partition jobs
+    // WIS-01..03: units whose event-styled income stream an event this tick may start, in event order; the flag
+    // says the event carries a target object (a damage-source object), which the stream's handler refuses.
+    struct IncomeTrigger {
+        EntityId id{};
+        IncomeEventStyle style{IncomeEventStyle::none};
+        bool has_target_object{};
+    };
+    std::vector<IncomeTrigger> income_triggers_;
+    void start_event_streams(std::vector<std::pair<EntityId, PlayerId>>& earners);
     // FL-18: accepted activations feed the existing partitioned hangar/birth commit this tick.
     std::map<EntityId, std::uint64_t> deploy_squad_requests_;
     core::Result<RejectReason> deploy_squad(LiveUnit&, const AbilityPayload&, std::uint64_t tick);
@@ -148,6 +161,15 @@ private:
     core::Result<void> service_retreat_flight(UnitStage&, std::vector<Event>&, std::vector<UnitState>&);
     core::Result<void> retreat_service();
     core::Result<void> special_weapons();
+    core::Result<void> tsw_service();
+    core::Result<TswAction> tsw_step_sequence(EntityId id, PlayerId owner, TswState& state, const TswProfile& numbers);
+    core::Result<void> tsw_release_hold();
+    // TSW-09: the two victory tests the hold can defer; the destruction hook runs them at once, or records them
+    // while a hold is above zero and tsw_release_hold re-runs them in order.
+    void tsw_defer_victory(const TswDeferredVictory& test);
+    void victory_unit_test(PlayerId owner, EntityId unit);
+    void victory_leader_test(PlayerId owner, EntityId unit, TswDeferredKind kind);
+    core::Result<void> tsw_command(const PlayerCommand& command, const TacticalSuperweaponPayload& payload, PlayerId issuer);
     core::Result<void> systems();
     void service_asteroid_contact(LiveUnit& unit, std::size_t& index, const std::size_t& partition,
         const std::map<EntityId, ArrivalState>& arrivals, const DamageRules* const& damage_rules,
@@ -310,6 +332,8 @@ private:
     std::map<PlayerId, ManualPlayerClock> manual_clocks_; // transactional tick copy
     std::map<EntityId, SpecialWeaponState> special_weapons_;
     std::set<PlayerId> special_disabled_by_hardpoint_;
+    std::map<EntityId, TswState> tsw_; // transactional tick copy of the TSW records (TSW-02)
+    TswWorld tsw_world_; // transactional tick copy of the victory hold, destroyed targets and planet fact (TSW-09/10)
     NamedAbilityLocks named_ability_locks_;
     std::optional<Impl::RadarRoster> radar_roster_; // copied only on a radar lifecycle change
     bool radar_dirty_{};

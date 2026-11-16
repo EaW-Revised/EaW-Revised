@@ -178,6 +178,18 @@ struct LandRowsInput {
 // their depths. Returns slots (forward, side) in input order, or nullopt on overflow. Pure and deterministic.
 [[nodiscard]] std::optional<std::vector<math::Vec2>> land_rows_layout(std::span<const LandRowsInput> members);
 
+// LE-OCCUPY (WLPA-66): a non-obstacle build pad's authored hard footprint is a dynamic collision body, not a terrain raster.
+// Derived input, never saved: the session rebuilds the list from its static roots and the content each tick and on restore.
+// A pad is a body that never moves, never yields and is never pushed. `half_x`/`half_y` are the authored hard extents
+// (the same half-extent reading as a member's hard extents); `group` is the authored collision class.
+struct LandPadBody {
+    EntityId object{};
+    math::Vec2 position{};
+    math::Fixed facing{}, half_x{}, half_y{};
+    units::LandCollisionGroup group{units::LandCollisionGroup::build_pad};
+    friend bool operator==(const LandPadBody&, const LandPadBody&) = default;
+};
+
 // Land-only service seam beside L4, deliberately free of space containers and session bytes.
 // LR1-03/D5: caller runs ordinary motion once, before late contact/coordinator publication.
 class LandMovement final {
@@ -198,7 +210,15 @@ public:
         friend bool operator==(const Checkpoint&, const Checkpoint&) = default;
     };
     // Invalid IDs, squad indices, geometry, profiles or trackers are refused. Scratch is rebuilt.
-    [[nodiscard]] static std::optional<LandMovement> from_checkpoint(Checkpoint saved);
+    // `pads` (LE-OCCUPY) is derived input, strictly ascending by object id and disjoint from every squad and member id. A
+    // retained contact may still name one participant that is no longer a body (a pad that reached final lifetime since the
+    // last contact service, FD-82); the next service resolves that row. No pad bytes are saved.
+    [[nodiscard]] static std::optional<LandMovement> from_checkpoint(Checkpoint saved, std::span<const LandPadBody> pads = {});
+    // Replaces the pad list (same rules as from_checkpoint); false leaves it unchanged. An unchanged list costs a compare.
+    // A pad missing from the new list leaves discovery and the swept pair guard at once; rows already retained keep the
+    // pad as a participant until the next service_contacts resolves them (FD-82).
+    [[nodiscard]] bool set_pads(std::span<const LandPadBody> pads);
+    [[nodiscard]] std::span<const LandPadBody> pads() const noexcept { return pads_; }
     [[nodiscard]] Checkpoint checkpoint() const { return state_; }
     // Borrowed view for encoders that must not deep-copy the retained state each tick.
     [[nodiscard]] const Checkpoint& state() const noexcept { return state_; }
@@ -241,8 +261,12 @@ public:
     [[nodiscard]] bool set_animation_progress(EntityId member, math::Fixed transition_frame, math::Fixed deployment_frame);
     [[nodiscard]] bool configure_contacts(LandContactSettings settings);
     // LR1-09: invoke once in the late service, after ordinary motion. Does not move objects.
+    // `squad_sides` (empty, or one entry per squad in squad order) is each squad's side for the contact rules: the team of a
+    // non-neutral owner, or a negative value for none. Two squads on different non-negative sides are hostile (WHZ-51): a
+    // moving body never pushes a hostile idle body (WLPA-57). Derived by the session every tick, never saved.
     [[nodiscard]] core::Result<void> service_contacts(const LandOccupancy& occupancy,
-        const PartitionExecutor& executor, std::uint64_t synchronization_frame);
+        const PartitionExecutor& executor, std::uint64_t synchronization_frame,
+        std::span<const std::int64_t> squad_sides = {});
     [[nodiscard]] std::span<const LandContact> contacts() const noexcept { return state_.contacts; }
     // Preserves nonmember occupations. Dynamic members keep zero static restriction bits;
     // swept pair admission and the late retained-contact service own their local restrictions.
@@ -274,6 +298,9 @@ private:
         std::uint32_t rank{};
         std::uint64_t progress{};
         bool container{}, single{}, generic{}, active{}, moving{}, valid{true};
+        // LE-OCCUPY: a pad body has no squad and no member (both are no_body); `pad_slot` indexes pads_.
+        bool pad{};
+        std::size_t pad_slot{};
     };
     // Retail's categoriser calls two headings the same direction when their dot exceeds 0.5 (about 60 degrees); every other
     // pair is opposed or crossing. One threshold for soft_opposed, leads and the contact observation.
@@ -292,6 +319,8 @@ private:
     // WLPA-95 / stopped-pair overlap: the oriented-box intersection coefficient of two bodies (zero when separated).
     [[nodiscard]] static math::Fixed box_overlap(const Body& x, const Body& y);
     std::vector<Body> bodies_;
+    std::vector<LandPadBody> pads_;
+    [[nodiscard]] static bool valid_pads(std::span<const LandPadBody> pads) noexcept;
     std::vector<std::size_t> body_of_member_, body_of_squad_;
     void build_bodies();
     void refresh_bodies();
@@ -359,6 +388,9 @@ private:
     std::vector<std::size_t> contact_order_;
     std::vector<std::uint8_t> discovery_valid_;
     std::vector<std::uint8_t> pair_blocked_;
+    // WLPA-97: the body whose pair sweep held each body in the latest step (the lowest object id among its blockers, zero:
+    // none). Scratch of one tick, read by the late contact service of the same tick: every veto owns a contact row.
+    std::vector<EntityId> pair_blocker_;
     std::unique_ptr<LandPathArena> contact_arena_;
 };
 

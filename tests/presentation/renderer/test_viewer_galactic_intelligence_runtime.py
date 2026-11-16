@@ -67,6 +67,25 @@ class GalacticIntelligenceRuntime(unittest.TestCase):
                     self.assertIn("Political control: 3", facts[101]["hover"])
         self.assertEqual(len(set(captures[:3])), 3, "masked, known, and known zero must draw distinct states")
 
+    def test_a_visible_planet_with_no_controller_shows_the_neutral_badge_and_a_hidden_one_none(self):
+        # #6985: the none (no owner or controller) the seat can see is Neutral, as in retail; the same planets with the
+        # intelligence masked, or undiscovered, show no badge at all (no fog leak).
+        data, _ = self.capture("known-none")
+        facts = {row["planet"]: row for row in data["hud"]["intelligence"]}
+        seen = [row for row in facts.values() if row["discovered"]]
+        self.assertGreaterEqual(len(seen), 2, "the fixture discovers several planets")
+        for row in seen:
+            self.assertTrue(row["apparent_allegiance_none"], row)
+            self.assertIsNone(row["owner"], row)
+            self.assertIsNone(row["apparent_allegiance_owner"], row)
+            self.assertEqual(row["faction"], "Neutral", row)
+        self.assertEqual(facts[103]["faction"], "", "an undiscovered planet shows no badge")
+        self.assertFalse(facts[103]["apparent_allegiance_none"])
+        data, _ = self.capture("masked")
+        for row in data["hud"]["intelligence"]:
+            self.assertFalse(row["apparent_allegiance_none"], row)
+            self.assertEqual(row["faction"], "", row)
+
     def assert_shell_drawn(self, data):
         # The submitted instances, not the cached undiscovered list: a planet draws its grid shell exactly when it
         # is undiscovered and its model has an alternate-2 surface (a model without one keeps its normal draw).
@@ -149,6 +168,16 @@ class GalacticIntelligenceRuntime(unittest.TestCase):
                 self.assertEqual(blips[planet]["colour"], neutral, blips[planet])
                 self.assertEqual(blips[planet]["alpha"], 255, "discovered, so opaque")
                 self.assertIsNone(facts[planet]["apparent_owner"])
+                # #6985: a planet the seat cannot see is unknown, never the Neutral badge of a visible no-controller planet.
+                self.assertFalse(facts[planet]["apparent_allegiance_none"], facts[planet])
+                self.assertEqual(facts[planet]["faction"], "", facts[planet])
+        for row in facts.values():
+            if row["apparent_allegiance_none"]:
+                # A visible planet with no controller shows the Neutral badge, and only that case does.
+                self.assertTrue(row["discovered"] and row["apparent_allegiance_owner"] is None, row)
+                self.assertEqual(row["faction"], "Neutral", row)
+            elif row["apparent_allegiance_owner"] is None:
+                self.assertEqual(row["faction"], "", row)
         self.assertTrue(own)
         self.assertGreaterEqual(len(unknown), 2, "discovered enemy planets without ownership knowledge")
         self.assertTrue(all(planets[planet]["colour"] != neutral for planet in own))

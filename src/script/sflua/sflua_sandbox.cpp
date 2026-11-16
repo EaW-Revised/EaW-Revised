@@ -371,9 +371,17 @@ Sandbox::~Sandbox() {
     set_field_function(state, globals, "next", sandbox_next);
     set_field_function(state, globals, "tostring", sandbox_tostring);
     set_field_function(state, globals, "collectgarbage", sandbox_collectgarbage);
-    for (const char* name : {"print", "gcinfo", "loadstring", "loadfile", "dofile", "newproxy", "setfenv", "require"}) {
+    set_field_function(state, globals, "gcinfo", sandbox_gcinfo);
+    set_field_function(state, globals, "loadstring", sandbox_loadstring);
+    // `print' and `require' stay forbidden here: the scheduler installs its own before it seals the globals.
+    for (const char* name : {"print", "loadfile", "dofile", "setfenv", "require"}) {
         set_forbidden(state, globals, name, name);
     }
+    // Retail's base library has no `newproxy' (it is a later addition that luaopen_base installs as a C closure over a
+    // weak table), so it is removed rather than stubbed: scripts see nil, and no closure without a stable name remains.
+    lua_pushliteral(state, "newproxy");
+    lua_pushnil(state);
+    lua_rawset(state, globals);
     lua_pushliteral(state, "string");
     lua_rawget(state, globals);
     set_forbidden(state, lua_gettop(state), "dump", "string.dump");
@@ -427,9 +435,14 @@ Sandbox::Scope::Scope(Sandbox& sandbox) noexcept : previous_(active_sandbox) { a
 
 Sandbox::Scope::~Scope() { active_sandbox = previous_; }
 
-void Sandbox::set_budget(::std::int64_t instructions) noexcept { impl_->budget = instructions; }
+void Sandbox::set_budget(::std::int64_t instructions) noexcept {
+    impl_->budget = instructions;
+    impl_->host_units = 0;
+}
 
 ::std::int64_t Sandbox::budget() const noexcept { return impl_->budget; }
+
+::std::uint64_t Sandbox::host_work() const noexcept { return impl_->host_units; }
 
 SandboxFault Sandbox::fault() const noexcept { return impl_->fault; }
 
@@ -495,5 +508,13 @@ void Sandbox::settle_memory() {
 void Sandbox::begin_host_call() noexcept { ++impl_->host_calls; }
 
 void Sandbox::end_host_call() noexcept { --impl_->host_calls; }
+
+void Sandbox::charge_host_work(::std::uint64_t units) noexcept {
+    Impl& sandbox = *impl_;
+    if (sandbox.fault != SandboxFault::none) return;
+    sandbox.host_units = sflua_metering::saturating_add(sandbox.host_units, static_cast<sflua_metering::StepUnits>(units));
+    sandbox.budget = sflua_metering::charged_budget(sandbox.budget, static_cast<sflua_metering::StepUnits>(units));
+    if (sandbox.budget < 0) sandbox.fault = SandboxFault::instruction_budget;
+}
 
 } // namespace eawr::script::EAWR_SFLUA_NAMESPACE

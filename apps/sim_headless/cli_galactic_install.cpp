@@ -1,14 +1,19 @@
 #include "cli_galactic_install.hpp"
 #include "cli_galactic_install_report.hpp"
+#include "galactic_lobby_backend.hpp"
 
 #include "eawr/campaign/live_setup.hpp"
+#include "eawr/campaign/mp_lobby_catalog.hpp"
 #include "eawr/campaign/story_plots.hpp"
+#include "eawr/core/degradation_ledger.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/json_text.hpp"
+#include "eawr/core/sha256.hpp"
 #include "eawr/data/galactic/galactic_data.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/platform/live_game_session.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/vfs/vfs.hpp"
 
@@ -22,6 +27,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <filesystem>
 #include <iostream>
@@ -242,6 +248,89 @@ int run_installed_campaign(const InstalledCampaignRequest& request) {
         report.note("catalog", true, detail.str());
     }
 
+    if (request.lobby_prepare) {
+        namespace viewer = eawr::presentation::godot_backend;
+        namespace net = eawr::net;
+        using Clock = std::chrono::steady_clock;
+        const auto milliseconds = [](const Clock::duration elapsed) {
+            return std::to_string(std::chrono::duration<double, std::milli>(elapsed).count());
+        };
+        auto files = std::make_shared<const eawr::vfs::Vfs>(std::move(filesystem).value());
+        const auto load_started = Clock::now();
+        viewer::GalacticLobbyBackend backend([&]() {
+            return viewer::load_galactic_lobby_content(*files, catalog.value().catalog, files);
+        });
+        const auto& campaigns = backend.campaigns();
+        report.fact("lobby_content_ms", milliseconds(Clock::now() - load_started));
+        if (const auto error = backend.load_error()) return fail("lobby-content", *error);
+        const gc::MpLobbyCampaign* selected = nullptr;
+        std::size_t largest{};
+        std::string hostable; // every campaign a lobby could host, so a chain's big campaign can be named explicitly
+        for (const auto& campaign : campaigns) {
+            const auto options = net::default_galactic_lobby_options(campaign, "normal", request.seed);
+            if (!options || std::none_of(options.value().rows.begin(), options.value().rows.end(),
+                [](const auto& row) { return row.human; })) continue;
+            hostable += campaign.name + ":" + std::to_string(campaign.planet_points.size()) + ";";
+            if (request.campaign != "auto") {
+                if (cp::find_mp_lobby_campaign(campaigns, request.campaign) == &campaign) selected = &campaign;
+            } else {
+                // Catalog order breaks ties; selection uses authored size, never a stock campaign-name list.
+                const auto size = campaign.planet_points.size();
+                if (!selected || size > largest) { selected = &campaign; largest = size; }
+            }
+        }
+        report.fact("lobby_hostable", eawr::core::json_quote(hostable));
+        if (!selected) {
+            report.note("lobby-campaign", false, "no hostable lobby campaign matches the requested name");
+            return finish(3);
+        }
+        auto options = net::default_galactic_lobby_options(*selected, "normal", request.seed);
+        if (!options) return fail("lobby-options", options.error());
+        auto encoded = net::encode_galactic_lobby_game(options.value());
+        if (!encoded) return fail("lobby-options", encoded.error());
+        net::LobbySnapshot snapshot;
+        snapshot.game = std::move(encoded).value();
+        snapshot.phase = net::LobbyPhase::starting;
+        snapshot.frozen_revision = snapshot.revision;
+        snapshot.start_attempt[0] = 1;
+        std::vector<net::SetupSeat> seats;
+        std::uint32_t side{};
+        for (const auto& row : options.value().rows) {
+            if (!row.human) continue;
+            ++side;
+            const auto index = static_cast<std::uint32_t>(seats.size());
+            snapshot.seats.push_back({index, eawr::sim::SeatId{index + 1}, row.player,
+                {"timing" + std::to_string(side), row.faction, 0, side, row.player}, true});
+            seats.push_back({index, {index + 1}, row.player});
+        }
+        // Co-op entries have one human side: two peers share it, as the real co-op lobby permits.
+        if (seats.size() == 1) {
+            auto guest = snapshot.seats.front();
+            guest.peer = 1; guest.seat = {2};
+            guest.selection.name = "timing-guest"; // seat names are unique per room
+            snapshot.seats.push_back(guest);
+            seats.push_back({1, {2}, guest.player});
+        }
+        report.fact("lobby_campaign", quoted(selected->name));
+        report.fact("lobby_planets", std::to_string(selected->planet_points.size()));
+        report.fact("lobby_seats", std::to_string(seats.size()));
+        report.note("lobby-content", true, selected->name);
+        const auto prepare_started = Clock::now();
+        const auto inputs = backend.preparation_inputs(snapshot, seats);
+        if (!inputs) return fail("lobby-inputs", inputs.error());
+        const auto mounts = backend.preparation_mounts(snapshot, nullptr);
+        if (!mounts) return fail("lobby-mounts", mounts.error());
+        const auto offer = backend.offer(snapshot, seats);
+        report.fact("lobby_prepare_ms", milliseconds(Clock::now() - prepare_started));
+        if (!offer) return fail("lobby-prepare", offer.error());
+        const auto identify_started = Clock::now();
+        const auto identity = backend.identify(offer.value());
+        report.fact("lobby_identify_ms", milliseconds(Clock::now() - identify_started));
+        if (!identity) return fail("lobby-identify", identity.error());
+        report.note("lobby-prepare", true, "production preparation and local agreement completed; no gameplay ticks");
+        return finish(0);
+    }
+
     const auto data = eawr::data::galactic::load_galactic_data(filesystem.value(), catalog.value().catalog);
     if (!data) return fail("galactic-data", data.error());
     {
@@ -314,10 +403,13 @@ int run_installed_campaign(const InstalledCampaignRequest& request) {
 
     cp::CampaignSetupOptions options;
     options.seed = request.seed;
+    // The same entry rules and human faction the lobby applies: a multiplayer entry authors no starting faction.
+    options.rules_flavour = cp::campaign_rules_flavour(*source);
+    const auto human_faction = cp::local_start_faction(data.value(), *source);
     for (const auto& faction : data.value().factions) {
         const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
         options.players.push_back({{id, id, 0}, faction.name, true});
-        const bool local = faction.name == source->starting_active_player;
+        const bool local = !human_faction.empty() && faction.name == human_faction;
         if (local) options.solo_reference_human = id;
         if (!faction.is_neutral.value_or(false)) {
             options.seats.push_back({gc::SeatId{id}, id, local ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true,
@@ -372,6 +464,7 @@ int run_installed_campaign(const InstalledCampaignRequest& request) {
         const auto goal_reader = prepared.value()->native_ai_goal_reader();
         eawr::platform::LiveGameSession::Options live_options;
         live_options.load_note_sink = [](std::span<const eawr::core::LoadNote> notes) {
+            eawr::core::degradation::record_load_notes(notes);
             for (const auto& note : notes)
                 std::cerr << eawr::core::format_diagnostic(eawr::core::load_note_diagnostic(note)) << '\n';
         };
@@ -438,14 +531,25 @@ int run_installed_campaign(const InstalledCampaignRequest& request) {
             if (request.goals_every) next = std::min(next, (current / request.goals_every + 1) * request.goals_every);
             return next;
         };
+        // No presentation answers the human seat here: an AI invasion of its planets parks the paused galaxy on a ready
+        // conflict choice. Answer it once per conflict by resolving (fighting when the conflict refuses Resolve), and report any
+        // other wait by name.
+        eawr::sim::EntityId answered_conflict{};
+        std::optional<cp::CampaignSwitchRequest> campaign_switch; // WST-95: a LOAD_CAMPAIGN reward the plots reached
+        std::optional<eawr::platform::LiveAwaitedInput> stalled;
+        std::size_t answered_conflicts = 0;
         for (std::uint64_t target = next_sample(0); reached; target = next_sample(target)) {
-            live.value()->advance_to(target);
-            const auto waiting_since = std::chrono::steady_clock::now();
-            reached = live.value()->wait_for(target, timeout);
-            timed_out = std::chrono::steady_clock::now() - waiting_since >= timeout;
+            const auto advanced = eawr::platform::advance_unattended(*live.value(), target,
+                std::chrono::duration_cast<std::chrono::milliseconds>(timeout), answered_conflict);
+            reached = advanced.reached;
+            timed_out = advanced.timed_out;
+            answered_conflicts += advanced.answered;
+            stalled = advanced.stalled;
             if (!reached) break;
             memory_checkpoint(target);
-            if (const auto sampled = live.value()->frame(); sampled.latest)
+            const auto sampled = live.value()->frame();
+            if (sampled.campaign_switch) { campaign_switch = *sampled.campaign_switch; break; } // the host's cue to start the target
+            if (sampled.latest)
                 for (const auto& fleet : sampled.latest->fleets())
                     if (fleet.motion.transit && ever_travelling.insert(fleet.id).second) ++travelling_by_owner[fleet.owner];
             if (!eawr::diagnostics::GcMemory::enabled() && goal_reader && request.goals_every && (target % request.goals_every == 0 || target >= request.live_ticks))
@@ -460,8 +564,33 @@ int run_installed_campaign(const InstalledCampaignRequest& request) {
             const std::lock_guard lock(script_mutex);
             report.story_scripts(script_faults);
         }
+        // How close the story and object scripts came to the per-service limits (staged commands/posts/diagnostics
+        // against Quotas::staged_*, host work and script steps against the instruction budget).
+        for (const auto& [label, peak] : eawr::script::authoritative::host_work_peaks()) {
+            namespace auth = eawr::script::authoritative;
+            const auth::Quotas quotas;
+            report.note("script-host-peaks", true, label + " scripts, largest use by one instance in one service over "
+                + std::to_string(peak.services) + " services: commands " + std::to_string(peak.commands) + "/"
+                + std::to_string(quotas.staged_commands) + ", posts " + std::to_string(peak.posts) + "/"
+                + std::to_string(quotas.staged_posts) + ", diagnostics " + std::to_string(peak.diagnostics) + "/"
+                + std::to_string(quotas.staged_diagnostics) + ", host units " + std::to_string(peak.host_units)
+                + ", script steps " + std::to_string(peak.instructions) + " of " + std::to_string(quotas.instructions_per_service));
+        }
+        if (campaign_switch) {
+            // A headless run has no session to replace: it reports what the host would start (the same resolution the viewer
+            // makes) and ends; the next invocation starts that campaign.
+            const auto resolved = cp::resolve_campaign_switch(data.value(), *campaign_switch);
+            report.note("live-campaign-switch", true, resolved
+                ? "tick " + std::to_string(campaign_switch->tick) + ": LOAD_CAMPAIGN starts " + resolved.value().campaign + " as "
+                    + resolved.value().faction + " at " + resolved.value().difficulty
+                : cp::campaign_switch_warning(resolved.error().message));
+        }
+        if (answered_conflicts)
+            report.note("live-conflicts", true, "answered " + std::to_string(answered_conflicts)
+                + " conflict choice(s) of the human seat by resolving (no presentation to ask)");
         if (failure || !reached || !frame.latest) {
-            report.live_failure(failure, reached, timed_out, request.live_ticks, live.value()->completed_tick());
+            report.live_failure(failure, reached, timed_out, request.live_ticks, live.value()->completed_tick(),
+                stalled ? stalled->describe() : std::string{});
             return finish(3);
         }
         std::size_t moved_fleets = 0, new_fleets = 0, flipped_planets = 0;
@@ -484,6 +613,30 @@ int run_installed_campaign(const InstalledCampaignRequest& request) {
         for (const auto& [travelling_owner, count] : travelling_by_owner) detail << ' ' << travelling_owner << '=' << count;
         detail << ')';
         report.note("live-run", true, detail.str());
+        if (request.fingerprint) {
+            // A fingerprint of the end state of the live run, for A/B equality of two builds of the same campaign (#6933):
+            // tick, planet owners, fleets with their members, player credits and tech. Diagnostic only.
+            std::vector<std::uint8_t> bytes;
+            const auto put = [&bytes](const std::uint64_t value) {
+                for (unsigned shift = 0; shift < 64; shift += 8) bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+            };
+            put(frame.latest->completed_tick());
+            for (const auto& planet : frame.latest->planets()) { put(planet.id); put(planet.owner); }
+            for (const auto& fleet : frame.latest->fleets()) {
+                put(fleet.id); put(fleet.owner); put(fleet.orbit); put(fleet.motion.transit ? 1U : 0U); put(fleet.members.size());
+                for (const auto& member : fleet.members) { put(member.id); put(member.type); }
+            }
+            if (const auto& economy = frame.latest->player_economy(); economy)
+                for (const auto& account : economy->players) {
+                    put(account.player); put(static_cast<std::uint64_t>(account.credits.raw()));
+                    put(static_cast<std::uint64_t>(account.current_tech));
+                }
+            const auto digest = eawr::core::sha256(bytes);
+            static constexpr char hex[] = "0123456789abcdef";
+            std::string text;
+            for (const auto byte : digest) { text.push_back(hex[byte >> 4]); text.push_back(hex[byte & 15U]); }
+            report.note("live-fingerprint", true, "end-state sha256 " + text);
+        }
         return finish(0);
     }
     auto planned =cp::plan_live_campaign_setup(filesystem.value(), data.value(), types, request.campaign, options, difficulty);

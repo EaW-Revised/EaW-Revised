@@ -127,6 +127,9 @@ public:
     };
     [[nodiscard]] ReuseWork reuse_work() const noexcept;
     [[nodiscard]] std::string failure_cause() const override;
+    [[nodiscard]] bool failure_is_resource() const override;
+    // Test only: every emitter creation refuses as if the engine would not give a resource.
+    void set_reject_resource_for_test(bool reject) noexcept;
     [[nodiscard]] particles::CullingFrame culling_frame() const override;
     // Lane latches (L1.2). Main snapshots what a lane thread cannot read itself and sets it before the
     // frame's particle work; std::nullopt (the default, and the inline path) reads the live value.

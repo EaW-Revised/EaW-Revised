@@ -59,6 +59,9 @@ struct ConflictRecord {
     std::vector<ReturnedUpgrade> upgrades; // retained planet upgrades supplied to entry preparation
     sim::tactical::TacticalSetup tactical; // resolved placement and victory inputs belong to the entry builder
     std::uint64_t corruption_request{}; // live host request; zero for ordinary conflict
+    // WGT-100: facts of the conflict planet read at entry for the tactical superweapon gate: the planet type allows the
+    // superweapon to destroy it (Planet_Is_Destroyable_By_TSW), and the planet is already destroyed. False without a conflict.
+    bool planet_destroyable_by_tsw{}, planet_destroyed{};
     friend bool operator==(const ConflictRecord&, const ConflictRecord&) = default;
 };
 
@@ -101,6 +104,10 @@ struct BattleResult {
     std::uint32_t station_level{};
     bool superweapon_destroyed{};
     sim::galactic::PlayerId superweapon_killer{};
+    // TSW-10: the tactical super weapon destroyed the conflict planet during the battle (the planet_obliterated tick
+    // event). The galactic side commits the ruins when it consumes the event; this carries the same fact through the
+    // return and the save.
+    bool planet_destroyed{};
     std::optional<bool> corruption_success; // unknown until that mission's rule owner supplies it
     std::vector<ReturnedCredits> credits;
     std::vector<ReturnedUpgrade> upgrades;

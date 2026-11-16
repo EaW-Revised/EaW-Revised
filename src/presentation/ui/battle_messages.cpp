@@ -5,6 +5,7 @@
 
 #include <array>
 #include <charconv>
+#include <cstdio>
 #include <cstdlib>
 #include <optional>
 
@@ -87,8 +88,11 @@ BattleMessageLooks battle_message_looks(const data::XmlNode& root) {
         }
     }
     // RP-06: where the retreat countdown line starts, as shares of the screen.
-    const std::array<std::pair<std::string_view, double*>, 2> shares{
-        {{"GUI_Tactical_Countdown_Timers_Screen_X", &looks.countdown_x}, {"GUI_Tactical_Countdown_Timers_Screen_Y", &looks.countdown_y}}};
+    const std::array<std::pair<std::string_view, double*>, 5> shares{
+        {{"GUI_Tactical_Countdown_Timers_Screen_X", &looks.countdown_x}, {"GUI_Tactical_Countdown_Timers_Screen_Y", &looks.countdown_y},
+         {"GUI_Strategic_Countdown_Timers_Screen_X", &looks.strategic_countdown_x},
+         {"GUI_Strategic_Countdown_Timers_Screen_Y", &looks.strategic_countdown_y},
+         {"GUI_Strategic_Countdown_Timers_Screen_Spacing", &looks.strategic_countdown_spacing}}};
     for (const auto& [tag, target] : shares) {
         const data::XmlNode* node = last_child(root, tag);
         if (node == nullptr) {
@@ -102,6 +106,15 @@ BattleMessageLooks battle_message_looks(const data::XmlNode& root) {
         else *target = value;
     }
     return looks;
+}
+
+std::optional<data::ui::Rgba8> parse_countdown_colour(const std::string_view text) noexcept { return colour(text); }
+
+std::string production_countdown_line(const std::string_view label, const float remaining_seconds) {
+    const int whole = remaining_seconds > 0.0F ? static_cast<int>(remaining_seconds) : 0;
+    char digits[16];
+    std::snprintf(digits, sizeof digits, "%02d:%02d", whole / 60, whole % 60);
+    return std::string(label) + " " + digits;
 }
 
 BattleMessageLooks battle_message_looks(const vfs::Vfs& filesystem) {

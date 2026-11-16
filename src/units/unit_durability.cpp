@@ -150,13 +150,13 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
             : "trailing text after the hardpoint Health number is ignored; the leading number is used (HD-06, AU-82)";
         load.append(std::move(note));
     }
-    const auto fallback = [&](std::string_view tag, Fixed value, const char* message) {
+    const auto fallback = [&](std::string_view tag, Fixed value, const char* message, const char* rule = "LSA-P5") {
         const auto found = scalar(tag);
         if (found) return *found;
         core::LoadNote note;
         note.code = "EAWR-LOAD-0120";
         note.tag = std::string(tag);
-        note.retail = "LSA-P5";
+        note.retail = rule;
         note.diagnostic_code = "EAWR-UNITS-0003";
         note.message = message;
         core::LoadNoteBuffer temporary;
@@ -164,7 +164,8 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
         core::LoadNoteCollector collector;
         collector.merge(temporary);
         for (auto emitted : collector.snapshot()) {
-            emitted.classification = core::LoadCategory::retail_accepts;
+            emitted.classification = std::string_view(rule) == "LSA-P5"
+                ? core::LoadCategory::retail_accepts : core::LoadCategory::unknown_degrade;
             emitted.effective_value = fixed_decimal(Fixed::from_raw(effective));
             load.append(std::move(emitted));
         }
@@ -238,6 +239,19 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
     damage.asteroid_damage = scalar("Asteroid_Field_Damage").value_or(Fixed{});
     damage.asteroid_rate = scalar("Asteroid_Field_Damage_Rate").value_or(Fixed{});
     damage.ion_storm_disable_seconds = scalar("Ion_Storm_Shield_Disable_Time").value_or(Fixed{});
+    if (tables.domain == tactical::BattleDomain::space) {
+        for (const auto& unit : tables.units) {
+            if (unit.under_construction && type_selection.keeps(unit))
+                damage.under_construction_types.push_back(assets::object_type_crc(unit.id));
+        }
+        std::sort(damage.under_construction_types.begin(), damage.under_construction_types.end());
+        damage.under_construction_types.erase(
+            std::unique(damage.under_construction_types.begin(), damage.under_construction_types.end()),
+            damage.under_construction_types.end());
+        if (!damage.under_construction_types.empty())
+            damage.under_construction_multiplier = fallback("Under_Construction_Damage_Multiplier", raw(1),
+                "missing construction damage multiplier uses neutral scaling (WCC-41)", "WCC-41");
+    }
     damage.asteroid_damage_type = types.damage("");
     damage.default_damage_type = types.damage("");
     // DG-13, EN-02: trunc(interval x fps + 0.5) frames, the retail service interval.

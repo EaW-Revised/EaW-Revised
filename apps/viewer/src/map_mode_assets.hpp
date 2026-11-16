@@ -246,6 +246,12 @@ public:
     [[nodiscard]] std::size_t live_resources() const { return registry_->live_backend_resources(); }
     [[nodiscard]] std::uint32_t frames() const { return frames_; }
     [[nodiscard]] bool failed() const { return failed_; }
+    // Space maps: an attached effect that cannot be prepared is dropped, not
+    // a failure of the run (land maps keep the strict evidence contract).
+    void set_drop_unpreparable(const bool drop) { drop_unpreparable_ = drop; }
+    // Test only (--eawr-map-particle-reject-resource-test): the backend refuses every emitter as an
+    // engine resource refusal, which must stay a whole-run failure even when effects are dropped.
+    void set_reject_resource_for_test(const bool reject) { backend_->set_reject_resource_for_test(reject); }
     void capture_fog_evidence(const GodotRenderer& renderer, const FogMode& fog);
     [[nodiscard]] std::size_t active_count() const {
         return static_cast<std::size_t>(std::count_if(placements_.begin(), placements_.end(),
@@ -311,6 +317,7 @@ private:
     std::size_t live_capacity_limit_{};
     std::uint32_t frames_{};
     bool failed_{};
+    bool drop_unpreparable_{};
 };
 
 } // namespace map_mode_detail

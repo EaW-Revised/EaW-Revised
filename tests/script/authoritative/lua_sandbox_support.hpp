@@ -31,6 +31,8 @@ using namespace eawr::script::authoritative::test;
 
 
 void expect_runs(const std::string& script, const std::string& label, std::vector<std::string> expected_commands = {});
+void expect_create_error(const std::string& script, std::string_view code, const std::string& label);
+void run_policy();
 void run_scheduler();
 void run_workers();
 

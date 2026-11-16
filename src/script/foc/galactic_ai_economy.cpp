@@ -378,6 +378,27 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticQueryKey& 
         return read(GalacticQueryKey{key.player, key.enemy, key.human, planet, *slot.canonical, bindings, *slot.id}, mode);
     };
     PlanetSlot ownership_slot{{"VARIABLE_TARGET", "TARGETPLAYERID"}};
+    if (token == "SPACEDEFENDEDPLANETS" || token == "GROUNDDEFENDEDPLANETS") {
+        // GDT-01/02: selected-context ownership and force reads, with fresh bindings.
+        // A foreign player uses the evaluator's enemy force, even when allied.
+        std::optional<GalacticInternedKey> canonical;
+        if (mode == ReadMode::ordinary) { canonical = memo_key(key); canonical->planet = 0; }
+        if (canonical) if (const auto cached = memo.queries.find(*canonical); cached != memo.queries.end()) return cached->second;
+        PlanetSlot force_slot{{"VARIABLE_TARGET", owner == key.player ? "FRIENDLYFORCE" : "ENEMYFORCE",
+            token == "SPACEDEFENDEDPLANETS" ? "HASSPACEFORCE" : "HASGROUNDFORCE"}};
+        Real defended{}, controlled{};
+        for (const auto& row : bound().planets_) {
+            const auto target_owner = read_slot(ownership_slot, no_bindings, row.planet.id);
+            if (!target_owner || !finite(*target_owner) || *target_owner < real(std::numeric_limits<std::int32_t>::min())
+                || real(std::numeric_limits<std::int32_t>::max()) < *target_owner) return {};
+            if (static_cast<std::int32_t>(*target_owner) != static_cast<std::int64_t>(owner)) continue;
+            const auto present = read_slot(force_slot, no_bindings, row.planet.id); if (!present) return {};
+            defended += *present; controlled += real(1);
+        }
+        const auto value = defended == Real{} ? defended : defended / controlled;
+        if (canonical) memo.queries.emplace(*canonical, value);
+        return value;
+    }
     if (token == "PLANETSCONTROLLED" || token == "PLANETSCONTROLLEDUNNORMALIZED") {
         std::optional<GalacticInternedKey> canonical;
         if (mode == ReadMode::ordinary) { canonical = memo_key(key); canonical->planet = 0; }

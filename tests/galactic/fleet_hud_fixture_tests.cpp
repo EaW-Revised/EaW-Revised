@@ -8,6 +8,8 @@
 #include "galactic/galaxy_view.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
+#include <cstdlib>
+
 int main() {
     namespace gc = eawr::sim::galactic;
     namespace view = eawr::viewer::galactic;
@@ -185,6 +187,7 @@ int main() {
         using namespace eawr::sim::galactic;
         ObservedFleet one; one.planet = 3; one.local = true; one.orbit_slot = std::uint8_t{0};
         ObservedFleetGroup transport; transport.type = 7; transport.count = 2; transport.transport = true;
+        transport.representative = 70; transport.fleet = 5;
         ObservedFleetGroup ship; ship.type = 9; ship.count = 4;
         one.groups = {transport, ship};
         ObservedFleet two = one; two.orbit_slot = std::uint8_t{2}; two.groups = {transport}; two.groups[0].count = 1;
@@ -194,11 +197,12 @@ int main() {
         galactic_test::expect(tray.size() == 1 && tray[0].type == 7 && tray[0].count == 5 && !tray[0].enabled,
             "tray combines ground types, excludes ships and foreign fleets, and respects disabled state");
         galactic_test::expect(view::land_tray_entry(tray, 0) && !view::land_tray_entry(tray, 1), "unused tray slots hide");
+        galactic_test::expect(tray[0].representative == 70 && tray[0].fleet == 5,
+            "a tray entry names the disclosed unit and fleet that a drop lands");
         galactic_test::expect(!view::land_tray_enabled(true, 10, 10) && !view::land_tray_enabled(false, 1, 10)
             && !view::land_tray_enabled(true, {}, 10), "landed cap, view-only, and inaccessible count disable the tray");
         galactic_test::expect(view::land_tray_entries({one}, 4, true).empty(), "tray uses selected planet");
-        galactic_test::expect(view::land_tray_slot_name(3) == "land_fleet_03" && !view::land_tray_takes_pointer,
-            "tray slots remain read-only");
+        galactic_test::expect(view::land_tray_slot_name(3) == "land_fleet_03", "tray slot names");
     }
     {
         using view::PlanetDetailAccess;
@@ -250,6 +254,202 @@ int main() {
         structures[2].name = "Source"; structures[2].every_marker_type = "Tower";
         const auto every = view::planet_detail_layout(markers, structures, {});
         galactic_test::expect(every.builds[2].specific_type == "Tower", "every-marker target uses specific pad");
+    }
+    // GPD-22/23: a tray drop is checked as a whole before anything is submitted. The plan is the exact command
+    // list the viewer submits, so an empty plan means nothing was submitted.
+    {
+        namespace gc = eawr::sim::galactic;
+        using view::TrayDropResult;
+        auto base = view::synthetic_live_setup();
+        view::configure_synthetic_hud_clock(base);
+        std::vector<gc::FleetDisplayType> traits;
+        std::vector<gc::FleetDisplayVisibility> visibility;
+        std::map<gc::TypeId, std::string> names;
+        view::configure_ground_fixture(base, 1, "ground-launch-move", traits, visibility, names);
+        // Every transport member needs its explicit (empty) payload row, kept in container order.
+        const auto add_empty_transport = [](gc::GalacticSetup& setup, eawr::sim::EntityId id) {
+            setup.movement->contents.push_back({id, {}});
+            std::sort(setup.movement->contents.begin(), setup.movement->contents.end(),
+                [](const auto& a, const auto& b) { return a.container < b.container; });
+        };
+        const auto build = [&](const auto& mutate) {
+            auto copy = base;
+            mutate(copy);
+            auto created = gc::GalacticSession::create(copy);
+            if (!created) { std::cerr << "FAIL: tray fixture: " << created.error().message << '\n'; std::exit(1); }
+            auto session = std::move(created).value();
+            const eawr::platform::ThreadWorkerAdapter executor(1);
+            if (!session.step(executor)) { std::cerr << "FAIL: tray fixture step\n"; std::exit(1); }
+            return session;
+        };
+        const view::LandTrayEntry entry{.type = 1000, .count = 2, .enabled = true, .representative = 7001, .fleet = 601};
+        const auto pad_with = [](std::optional<eawr::sim::EntityId> occupant, std::uint32_t marker) {
+            view::DetailPad pad; pad.marker.record = marker; pad.object = occupant; pad.type = 1000; return pad;
+        };
+        const view::TrayDropFacts open{true, true, true};
+        const auto planet = [](const gc::GalacticSnapshot& snapshot) -> const gc::ControlPlanet& {
+            const auto& rows = snapshot.control()->planets;
+            return *std::find_if(rows.begin(), rows.end(), [](const auto& row) { return row.planet == 101; });
+        };
+        auto world = build([](auto&) {});
+        const auto snapshot = world.snapshot();
+        const auto occupied = view::plan_tray_landing(*snapshot, 1, 101, entry, pad_with(8001, 5), open);
+        galactic_test::expect(occupied.result == TrayDropResult::ok && occupied.commands.size() == 3
+            && std::get_if<gc::LaunchFromSurface>(&occupied.commands[0])
+            && std::get_if<gc::LandUnits>(&occupied.commands[1])
+            && std::get_if<gc::SetGroundLayout>(&occupied.commands[2]),
+            "a drop on an occupied pad is launch, land, marker in that order");
+        if (occupied.commands.size() == 3) {
+            const auto& launch = *std::get_if<gc::LaunchFromSurface>(&occupied.commands[0]);
+            const auto& land = *std::get_if<gc::LandUnits>(&occupied.commands[1]);
+            const auto& layout = *std::get_if<gc::SetGroundLayout>(&occupied.commands[2]);
+            galactic_test::expect(launch.units == std::vector<eawr::sim::EntityId>{8001} && launch.target == 0 && launch.slot == 0
+                && land.planet == 101 && land.units == std::vector<eawr::sim::EntityId>{7001}
+                && layout.planet == 101 && layout.entries.size() == 1 && layout.entries[0].object == 7001
+                && layout.entries[0].marker == 5U, "the plan names the occupant, the dropped unit and the pad marker");
+            // The simulation admits the whole list in one tick, in order.
+            std::uint64_t sequence{};
+            for (const auto& command : occupied.commands)
+                world.submit({{world.completed_tick(), gc::SeatId{1}, ++sequence}, command}).value();
+            const eawr::platform::ThreadWorkerAdapter executor(1);
+            const auto result = world.step(executor).value();
+            const auto& surface = planet(*result.snapshot);
+            const auto has = [&](eawr::sim::EntityId id) {
+                return std::any_of(surface.landed.begin(), surface.landed.end(), [id](const auto& row) { return row.id == id; });
+            };
+            galactic_test::expect(has(7001) && !has(8001) && surface.landed.size() == 3,
+                "the planned drop lands the unit and sends the occupant to orbit");
+            galactic_test::expect(std::any_of(surface.ground_layout.begin(), surface.ground_layout.end(),
+                [](const auto& row) { return row.object == 7001 && row.marker == 5; })
+                && !std::any_of(surface.ground_layout.begin(), surface.ground_layout.end(),
+                    [](const auto& row) { return row.object == 8001; }), "the dropped unit remembers the pad marker");
+            galactic_test::expect(std::any_of(result.snapshot->fleets().begin(), result.snapshot->fleets().end(),
+                [](const auto& fleet) { return fleet.orbit == 101 && std::any_of(fleet.members.begin(), fleet.members.end(),
+                    [](const auto& member) { return member.id == 8001; }); }), "the occupant joins an orbit fleet");
+        }
+        const auto free_pad = view::plan_tray_landing(*snapshot, 1, 101, entry, pad_with({}, 6), open);
+        galactic_test::expect(free_pad.result == TrayDropResult::ok && free_pad.commands.size() == 2
+            && std::get_if<gc::LandUnits>(&free_pad.commands[0]), "a drop on a free pad is land and marker only");
+        auto noncombat = build([](auto& setup) {
+            setup.control->ground_capability_types = {{1000, {}, true, false}, {1001, {}, false, true},
+                {1002, {}, false, false}, {1003, {}, false, false}};
+            for (auto& row : setup.movement->contents) if (row.container == 7001) row.children = {{9001, 1001}};
+        });
+        const auto noncombat_snapshot = noncombat.snapshot();
+        galactic_test::expect(!gc::has_ground_capability(*noncombat_snapshot->control(), {7001, 1000},
+                noncombat_snapshot->movement()).value(), "the tray regression carries a noncombat passenger");
+        const auto noncombat_plan = view::plan_tray_landing(*noncombat_snapshot, 1, 101, entry, pad_with({}, 6), open);
+        galactic_test::expect(noncombat_plan.result == TrayDropResult::ok,
+            "GGS-11: the advanced-map tray admits a transport with a stay-in-transport passenger");
+        std::uint64_t noncombat_sequence{};
+        for (const auto& command : noncombat_plan.commands)
+            noncombat.submit({{noncombat.completed_tick(), gc::SeatId{1}, ++noncombat_sequence}, command}).value();
+        const eawr::platform::ThreadWorkerAdapter noncombat_executor(1);
+        const auto noncombat_result = noncombat.step(noncombat_executor).value();
+        galactic_test::expect(std::any_of(planet(*noncombat_result.snapshot).landed.begin(),
+                planet(*noncombat_result.snapshot).landed.end(), [](const auto& row) { return row.id == 7001; }),
+            "the planned noncombat tray landing executes on the same admission rule");
+        const auto refused = [&](const view::TrayLanding& plan, TrayDropResult why, const char* message) {
+            galactic_test::expect(plan.result == why && plan.commands.empty(), message);
+        };
+        refused(view::plan_tray_landing(*snapshot, 1, 101, entry, pad_with(8001, 5), {false, true, true}),
+            TrayDropResult::view_only, "view-only submits nothing");
+        refused(view::plan_tray_landing(*snapshot, 1, 101, entry, pad_with(8001, 5), {true, false, true}),
+            TrayDropResult::paused, "a paused surface deploy submits nothing, not even the launch");
+        refused(view::plan_tray_landing(*snapshot, 1, 101, entry, pad_with(8001, 5), {true, true, false}),
+            TrayDropResult::paused, "a paused layout change submits nothing, not even the launch");
+        auto fixed = pad_with(8001, 5); fixed.fixed = true;
+        refused(view::plan_tray_landing(*snapshot, 1, 101, entry, fixed, open), TrayDropResult::fixed_pad, "a fixed pad is refused");
+        auto elsewhere = entry; elsewhere.fleet = 999;
+        refused(view::plan_tray_landing(*snapshot, 1, 101, elsewhere, pad_with(8001, 5), open),
+            TrayDropResult::not_in_orbit, "a unit that is not in a local orbit fleet is refused");
+        refused(view::plan_tray_landing(*snapshot, 1, 102, entry, pad_with(8001, 5), open),
+            TrayDropResult::not_in_orbit, "a unit orbiting another planet is refused");
+        auto cargo = entry; cargo.representative = 7003;
+        refused(view::plan_tray_landing(*snapshot, 1, 101, cargo, pad_with(8001, 5), open),
+            TrayDropResult::not_a_transport, "a member that cannot land is refused");
+        refused(view::plan_tray_landing(*snapshot, 1, 101, entry, pad_with(9999, 5), open),
+            TrayDropResult::occupant_missing, "a pad occupant that is not on the surface is refused before any launch");
+        refused(view::plan_tray_landing(*snapshot, 2, 101, entry, pad_with(8001, 5), open),
+            TrayDropResult::not_in_orbit, "another player's fleet is refused");
+        // The rest of the sim's refusals that a snapshot can answer: no unit, closed surface, planet not ours.
+        auto nameless = entry; nameless.representative = 0;
+        refused(view::plan_tray_landing(*snapshot, 1, 101, nameless, pad_with(8001, 5), open),
+            TrayDropResult::no_unit, "a tray entry with no disclosed unit is refused");
+        const auto closed = build([](auto& setup) {
+            for (auto& row : setup.control->planets) if (row.planet == 101) row.surface_accessible = false;
+        });
+        const auto closed_snapshot = closed.snapshot();
+        refused(view::plan_tray_landing(*closed_snapshot, 1, 101, entry, pad_with(8001, 5), open),
+            TrayDropResult::surface_closed, "an inaccessible surface is refused before any launch");
+        // The layout command needs the planet's owner: a landable unit orbiting a planet the local player does not own is refused.
+        const auto abroad = build([&](auto& setup) {
+            // Planet 107 belongs to player 2 in the synthetic galaxy.
+            setup.fleets.push_back({650, 1, 107, {{7050, 1000}}, 0});
+            add_empty_transport(setup, 7050);
+        });
+        const auto abroad_snapshot = abroad.snapshot();
+        const view::LandTrayEntry visiting{.type = 1000, .count = 1, .enabled = true, .representative = 7050, .fleet = 650};
+        refused(view::plan_tray_landing(*abroad_snapshot, 1, 107, visiting, pad_with({}, 6), open),
+            TrayDropResult::not_planet_owner, "a planet the local player does not own is refused (the layout command needs the owner)");
+        // A blockaded planet refuses the occupant's launch, so the whole drop is refused up front.
+        const auto blockaded = build([&](auto& setup) {
+            // The first fleet of the orbit list holds the blockade, so the enemy fleet goes in front of the local one.
+            // A warship (not an empty transport, which has no live breakdown and so holds no orbit).
+            setup.fleets.insert(setup.fleets.begin(), {599, 2, 101, {{7099, 1001}}, 0});
+        });
+        const auto blockaded_snapshot = blockaded.snapshot();
+        const auto& states = blockaded_snapshot->control()->state;
+        galactic_test::expect(std::any_of(states.begin(), states.end(), [](const auto& row) { return row.planet == 101 && row.blockaded; }),
+            "the fixture's enemy orbit fleet blockades planet 101");
+        refused(view::plan_tray_landing(*blockaded_snapshot, 1, 101, entry, pad_with(8001, 5), open),
+            TrayDropResult::blockaded, "a blockaded planet refuses a drop that would launch an occupant");
+        // The landing is refused when the ground owner is not allied, and the owner is read after the occupant has gone.
+        const auto enemy_base = build([](auto& setup) {
+            for (auto& row : setup.control->planets) if (row.planet == 101) row.ground_base = {2, 1};
+        });
+        const auto enemy_base_snapshot = enemy_base.snapshot();
+        refused(view::plan_tray_landing(*enemy_base_snapshot, 1, 101, entry, pad_with(8001, 5), open),
+            TrayDropResult::not_planet_owner, "an enemy ground base makes the planet theirs: nothing is launched or landed");
+        auto mixed = build([](auto& setup) {
+            for (auto& row : setup.control->planets) if (row.planet == 101) row.landed[1].owner = 2;
+        });
+        const auto mixed_snapshot = mixed.snapshot();
+        refused(view::plan_tray_landing(*mixed_snapshot, 1, 101, entry, pad_with(8001, 5), open),
+            TrayDropResult::alliance_blocked, "the ground owner after the launch (the next landed unit) decides, not the occupant");
+        galactic_test::expect(view::plan_tray_landing(*mixed_snapshot, 1, 101, entry, pad_with({}, 6), open).result == TrayDropResult::ok,
+            "with no occupant leaving, the same surface admits the drop");
+        // What the check prevents: the same three commands, submitted blind, launch the occupant and then lose the landing.
+        {
+            std::uint64_t sequence{};
+            for (const gc::CommandPayload& command : std::vector<gc::CommandPayload>{
+                    gc::LaunchFromSurface{{8001}, 0, 0}, gc::LandUnits{101, {7001}}, gc::SetGroundLayout{101, {{7001, 5}}}})
+                mixed.submit({{mixed.completed_tick(), gc::SeatId{1}, ++sequence}, command}).value();
+            const eawr::platform::ThreadWorkerAdapter blind_executor(1);
+            const auto blind = mixed.step(blind_executor).value();
+            const auto& surface = planet(*blind.snapshot);
+            const auto on_surface = [&](eawr::sim::EntityId id) {
+                return std::any_of(surface.landed.begin(), surface.landed.end(), [id](const auto& row) { return row.id == id; });
+            };
+            galactic_test::expect(!on_surface(8001) && !on_surface(7001),
+                "unchecked, the occupant is launched and the landing is refused: the half-apply the pre-check exists to stop");
+        }
+        // Capacity is counted after the occupant's launch: full surface refuses a free pad, accepts an occupied one.
+        const auto full = build([](auto& setup) { setup.control->max_ground_forces = 3; });
+        const auto full_snapshot = full.snapshot();
+        refused(view::plan_tray_landing(*full_snapshot, 1, 101, entry, pad_with({}, 6), open),
+            TrayDropResult::no_capacity, "a full surface refuses a drop on a free pad and submits nothing");
+        galactic_test::expect(view::plan_tray_landing(*full_snapshot, 1, 101, entry, pad_with(8001, 5), open).result == TrayDropResult::ok,
+            "the occupant's launch frees the slot the landing needs");
+        // A marker held by another object would refuse the third command after the launch; it is caught first.
+        const auto remembered = build([](auto& setup) {
+            for (auto& row : setup.control->planets) if (row.planet == 101) row.ground_layout = {{8002, 5}};
+        });
+        const auto remembered_snapshot = remembered.snapshot();
+        refused(view::plan_tray_landing(*remembered_snapshot, 1, 101, entry, pad_with(8001, 5), open),
+            TrayDropResult::marker_taken, "a marker kept by another object is refused before the launch");
+        galactic_test::expect(view::plan_tray_landing(*remembered_snapshot, 1, 101, entry, pad_with(8002, 5), open).result
+            == TrayDropResult::ok, "the occupant's own marker entry is replaced");
     }
     return galactic_test::failures ? 1 : 0;
 }

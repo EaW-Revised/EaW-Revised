@@ -759,9 +759,11 @@ void admitted_cycle() {
 }
 
 void preparation_contracts() {
-    {   // CGS-22: only a missing variant base is skippable; other resolve failures still refuse prepare.
+    {   // CGS-22: only a missing variant base or an undefined name is skippable; other resolve failures still refuse prepare.
         core::Diagnostic missing_base; missing_base.code = std::string(data::diagnostic_codes::variant_missing_base);
         expect(campaign::stock_name_skippable(missing_base), "CGS-22: an absent variant base is skipped with a load note");
+        core::Diagnostic undefined_name; undefined_name.code = std::string(data::diagnostic_codes::object_not_found);
+        expect(campaign::stock_name_skippable(undefined_name), "CGS-22: a name defined in no loaded object file is a null reference too");
         for (const auto code : {"EAWR-XML-0009", "EAWR-XML-0010", "EAWR-XML-0011", "EAWR-VFS-0002"}) {
             core::Diagnostic other; other.code = code;
             expect(!campaign::stock_name_skippable(other), "CGS-22 negative control: any other resolve failure still fails prepare");
@@ -851,6 +853,43 @@ void preparation_contracts() {
             if (missing_position) p.position.reset(); else p.orientation_degrees.reset();
         }
         expect(static_cast<bool>(campaign::build_space_entry(record, absent, 100, 17)), "incomplete station pose does not abort entry");
+    }
+    {
+        // WGT-57 (interim): the entry of a destroyed planet builds on the authored map and drops only the planet
+        // backdrop (a SpaceProp, so not a unit), whose record the start reports as removed; an intact planet's entry keeps it.
+        auto planet_input = input;
+        skirmish::MapPlacement planet; planet.record = 20; planet.type = "Pad"; planet.element = "SpaceProp";
+        planet.owner_index = 2; planet.position = Vec3{whole(900), {}, {}}; planet.orientation_degrees = Vec3{};
+        planet.tactical_super_weapon_target = true; planet.death_by_tsw_replacements = {"Rubble_A", "", "Rubble_B"};
+        planet_input.map.placements.push_back(planet);
+        const auto intact = take(campaign::build_space_entry(record, planet_input, 100, 17));
+        planet_input.map.destroyed_planet_backdrop = true;
+        const auto ruined = take(campaign::build_space_entry(record, planet_input, 100, 17));
+        const auto dropped = [](const auto& entry) {
+            return std::count_if(entry.start.removed.begin(), entry.start.removed.end(), [](const auto& row) {
+                return row.record == 20U && row.reason == skirmish::Removal::destroyed_planet; });
+        };
+        expect(dropped(intact) == 0 && dropped(ruined) == 1, "WGT-57: only a destroyed planet's entry reports the backdrop as removed");
+        expect(ruined.start.units.size() == intact.start.units.size(), "WGT-57: the backdrop is no simulation object, so no unit changes");
+        // b2: the destroyed planet's remains are presentation props at the backdrop's pose; the intact entry has none.
+        expect(intact.start.props.empty() && ruined.start.props.size() == 2 && ruined.start.props[0].type == "Rubble_A"
+            && ruined.start.props[1].type == "Rubble_B" && ruined.start.props[0].record == eawr::battle::replacement_prop_record_base
+            && ruined.start.props[1].record == eawr::battle::replacement_prop_record_base + 1U
+            && ruined.start.props[0].position == *planet.position && ruined.start.props[0].replaces == planet.record,
+            "WGT-57: a destroyed planet's replacement props stand at its pose, numbered apart from map records and ships");
+        // The props are presentation only: the same entry without any replacement list has the same conflict record (the saved
+        // and hashed part), the same units and the same removal; only `props` differs.
+        auto bare_input = planet_input;
+        for (auto& placement : bare_input.map.placements) if (placement.record == 20U) placement.death_by_tsw_replacements.clear();
+        const auto bare = take(campaign::build_space_entry(record, bare_input, 100, 17));
+        expect(bare.start.props.empty() && bare.conflict == ruined.conflict && bare.start.units.size() == ruined.start.units.size()
+            && bare.start.removed.size() == ruined.start.removed.size(),
+            "WGT-57: replacement props do not enter the conflict record or the start's units");
+        // Builder determinism (no save or reload happens here): building the same entry twice gives the same removal and props.
+        const auto rebuilt = take(campaign::build_space_entry(record, planet_input, 100, 17));
+        expect(rebuilt.start.removed.size() == ruined.start.removed.size() && rebuilt.start.props == ruined.start.props
+            && rebuilt.start.units.size() == ruined.start.units.size(),
+            "WGT-57: building a destroyed-planet entry twice from the same inputs gives the same removal and props");
     }
     for (const auto& orbital_angles : {Vec3{whole(2), {}, whole(30)}, Vec3{{}, whole(11), whole(45)}}) {
         auto tilted = input;
@@ -977,6 +1016,21 @@ void preparation_contracts() {
     expect(std::none_of(no_attack.start.units.begin(), no_attack.start.units.end(), [](const auto& u) { return u.state.owner == 1; })
         && std::none_of(no_attack.start.markers.begin(), no_attack.start.markers.end(), [](const auto& m) { return m.player == 1; }),
         "WGT-52: absent attacker markers skip initial objects and their facing update");
+    {
+        // An attacker marker whose distance to the first defender cannot be computed is skipped; entry is refused
+        // only when no attacker marker has a computable distance (never a silent retain of the whole side).
+        const auto huge = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+        auto far_one = input;
+        for (auto& p : far_one.map.placements) if (p.record == 1) p.position = sim::math::Vec3{Fixed::from_raw(-huge.raw()), {}, {}};
+        const auto far_plan = take(campaign::prepare_space_entry(record, far_one, 100, 17));
+        expect(std::any_of(far_plan.placements.begin(), far_plan.placements.end(), [](const auto& p) { return p.marker == 4; })
+            && std::none_of(far_plan.placements.begin(), far_plan.placements.end(), [](const auto& p) { return p.marker == 1; }),
+            "an attacker marker with an overflowing distance is skipped in favour of a computable one");
+        auto far_all = far_one;
+        for (auto& p : far_all.map.placements) if (p.record == 4) p.position = sim::math::Vec3{Fixed::from_raw(-huge.raw()), {}, {}};
+        expect(!campaign::prepare_space_entry(record, far_all, 100, 17),
+            "no computable attacker distance refuses entry instead of silently retaining the invaders");
+    }
     auto no_defender = input;
     std::erase_if(no_defender.map.placements, [](const auto& p) { return p.type == "Defending Forces Position"; });
     const auto no_defence = take(campaign::prepare_space_entry(record, no_defender, 100, 17));
@@ -1689,6 +1743,9 @@ void station_ship_spawn_scenario(const std::string& ship_name, const bool hypers
         if (first.size() != 1) return;
         for (unsigned tick = 0; tick < 160; ++tick) hashes.push_back(take(battle.step(executor)).state_sha256);
         expect(arriving_ships() == 0, ship_name + ": the arrival ends and the ship is an ordinary garrison unit");
+        // WU-37/39a (#6931): the mark is latched at birth, so the single ship keeps it after its hyperspace arrival
+        // ends; the viewer draws its bracket flag from it.
+        expect(garrison_ships() == first, ship_name + ": the station ship stays marked after its arrival ends");
         check(battle.submit({{battle.completed_tick(), 1, 77}, {first.front()}, tt::DamagePayload{whole(100000)}}));
         seen_arriving = false;
         for (unsigned tick = 0; tick < 200; ++tick) {

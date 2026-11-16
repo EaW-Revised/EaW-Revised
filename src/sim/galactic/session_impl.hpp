@@ -1,6 +1,7 @@
 #pragma once
 #include "encoding.hpp"
 #include "paused_admission.hpp"
+#include "snapshot_slot.hpp"
 #include "native_income_projection.hpp"
 #include "native_population_projection.hpp"
 
@@ -110,6 +111,9 @@ public:
     GroundAbilityStoryHandler ground_ability_story_handler;
     EntityId consuming_spy{}; // synchronous consumption guard; never survives a command barrier
     CorruptionMissionHandler corruption_mission_handler;
+    CorruptionMissionProbe corruption_mission_probe;
+    bool corruption_choice_tactical(const CorruptionChoice&, PlayerId owner) const;
+    bool corruption_mission_routable(const CorruptionChoice&, PlayerId owner, std::optional<std::uint64_t> request) const;
     CorruptionCompletionHandler corruption_completion_handler;
     CorruptionResultHandler corruption_result_handler;
     std::map<std::uint64_t, std::vector<PlanetId>> corruption_due;
@@ -118,9 +122,27 @@ public:
     std::shared_ptr<const CorruptionMenu> publish_corruption_menu(PlayerId, std::span<const ObservedPlanet>) const;
     core::Result<bool> begin_corruption(PlanetId, corruption_fixture::Type, math::Fixed);
     core::Result<void> finish_corruption_mission(std::uint64_t, CorruptionMissionState);
-    core::Result<void> service_corruption(const PartitionExecutor&, std::size_t preceding_events);
+    core::Result<void> service_corruption(const PartitionExecutor&, std::vector<GalacticEvent>& events);
+    // `revolt_events` is set only by a due completion (service_corruption): removing a corrupt-militia type then
+    // runs the revolt (WGCH-17) and appends its fleet departures there. Ruins cleanup and startup leave it null.
     core::Result<void> apply_corruption_completion(PlanetId, corruption_fixture::Type, corruption_fixture::Type,
-        std::optional<PlayerId> = {}, std::optional<std::size_t> preceding_events = {});
+        std::optional<PlayerId> = {}, std::optional<std::size_t> preceding_events = {},
+        std::vector<GalacticEvent>* revolt_events = nullptr);
+    // WGCH-17: structure cleanup, distinct-owner surface then orbital retreat, political modifiers, neutral allegiance.
+    core::Result<void> corruption_revolt(PlanetId, std::vector<GalacticEvent>& events);
+    // Structures, starbase and ground base level cleared (revolt and story planet reward).
+    void clear_planet_site(std::size_t planet_index);
+    // The retreat half of the revolt: every distinct owner's surface then orbital forces at the planet leave by the
+    // shared departure (WGM-61..63). `only_owner` limits it to one owner's forces (the story planet reward uses it).
+    core::Result<void> retreat_planet_forces(PlanetId, std::size_t planet_index, std::optional<PlayerId> only_owner,
+        std::vector<GalacticEvent>& events);
+    // WST-42 PLANET_FACTION: structures and starbase cleared, the previous owner's forces sent away, political
+    // modifiers cleared, then the planet goes to the named faction's player through the shared owner commit.
+    core::Result<void> story_planet_faction(PlanetId, PlayerId new_owner, std::uint64_t tick, std::vector<GalacticEvent>& events);
+    // The shared retreat departure (WGM-61..63/99), published by the caller.
+    core::Result<void> retreat_departure(PlayerId player, PlanetId source, PlanetId destination, bool surface,
+        std::span<const FleetId> orbital_fleets, std::span<const EntityId> confirmed_destroyed,
+        std::vector<GalacticEvent>& events);
     core::Result<void> initialize_corruption();
     // WGCH-67/140..142: the shared live ruins owner; native effect 17 journals the public request.
     PlanetRuinsStoryHandler planet_ruins_story_handler;
@@ -140,7 +162,8 @@ public:
     struct HackWeapon { EntityId id{}; TypeId type{}; PlayerId owner{}; };
     [[nodiscard]] std::optional<HackWeapon> find_hack_weapon(PlanetId) const;
     [[nodiscard]] bool plan_orbit_loss(PlanetId, std::span<const EntityId> excluded, std::vector<HeroDefeat>& losses);
-    [[nodiscard]] core::Result<void> force_planet_owner(PlanetId, PlayerId, std::uint64_t tick, std::vector<GalacticEvent>&);
+    [[nodiscard]] core::Result<void> force_planet_owner(PlanetId, PlayerId, std::uint64_t tick, std::vector<GalacticEvent>&,
+        math::Fixed control = {});
     void prepare_hack(const GameCommand&, const CensusObject&, const GalacticAbilityProfile&, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_hack(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
     // WGCH-58/113..115/155..158: strategic destruction; the supplied object is the original container.
@@ -148,7 +171,10 @@ public:
     [[nodiscard]] bool destruction_admitted(const CensusObject& bearer, PlanetId) const;
     void prepare_destruction(const GameCommand&, const CensusObject&, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_destruction(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
-    [[nodiscard]] core::Result<bool> planet_destruction_victory(PlayerId actor_owner, PlayerId current_controller, std::span<const TypeId> landed);
+    [[nodiscard]] core::Result<bool> planet_destruction_victory(PlayerId actor_owner, PlayerId current_controller,
+        std::span<const TypeId> landed, bool tactical = false);
+    // WGCH-114 / WGS-79: the exact current types inside the landed transports of the planet at `index` of control.
+    [[nodiscard]] std::vector<TypeId> landed_current_types(std::size_t index) const;
     void detach_observer_sources(std::span<const EntityId> sources);
     [[nodiscard]] math::Fixed planet_base_credits(std::size_t fiscal_index) const;
     // Async lane shell (refresh_lane): the live session's per-planet base credits at the refresh, so the shell never reads control/ability state.
@@ -317,8 +343,15 @@ public:
         std::vector<PlanetId> visible;
         std::vector<std::uint64_t> fleets;
         std::vector<ProductionReductionSource> reductions;
-        std::vector<std::uint8_t> admission;
+        std::vector<std::uint8_t> admission; // what every producer's rows share
+        // The visible producers (ascending planet) and, for each, the inputs only its own rows read (#6933).
+        std::vector<std::pair<PlanetId, std::vector<std::uint8_t>>> producers;
         friend bool operator==(const ProductionOfferInputs&, const ProductionOfferInputs&) = default;
+    };
+    // The previous publication of one view: a producer whose segment and the shared inputs are unchanged keeps its rows.
+    struct OfferReuse {
+        const ProductionOfferInputs* inputs{};
+        const std::vector<ObservedProductionOffer>* rows{};
     };
     // The reduction sources of the live income gather over the current planets: a pure function of the gather and of
     // the planets section, so it is kept until either generation moves (it was gathered and sorted on every tick).
@@ -328,7 +361,8 @@ public:
         std::span<const ObservedPlanet> observations, std::span<const Fleet> fleet_inputs,
         std::span<const Planet> planets, PlayerId) const;
     [[nodiscard]] std::vector<ObservedProductionOffer> observed_production_offers(const ProductionOfferInputs& inputs,
-        std::span<const Fleet> fleet_inputs, const PartitionExecutor& executor, PlayerId) const;
+        std::span<const Fleet> fleet_inputs, const PartitionExecutor& executor, PlayerId,
+        const OfferReuse* reuse = nullptr) const;
     [[nodiscard]] core::Result<void> service_production(const PartitionExecutor&, std::uint64_t,
         std::vector<GalacticEvent>&, bool pending_conflict);
     std::map<PlayerId, std::size_t> owned_planet_counts;
@@ -371,6 +405,9 @@ public:
     [[nodiscard]] core::Result<void> complete_undefended_invasion(NativeInvasion&, std::vector<GalacticEvent>&);
     [[nodiscard]] core::Result<void> replay_native_invasion(GalacticSession&, const NativeEffect&);
     NativeMovementListener native_movement_listener;
+    FleetStoryHandler fleet_story_handler; // WST-31: announces jump arrivals and bounces, in a fixed order
+    ConstructStoryHandler construct_story_handler; // WST-33: completed builds, in a fixed order
+    LossStoryHandler loss_story_handler;           // WST-34: battle losses, in ascending object id
     std::vector<NativeEffect> native_effects;
     std::vector<NativeEffect> native_replay;
     std::size_t native_replay_cursor{};
@@ -440,6 +477,8 @@ public:
     // #4058: history before the last save/load boundary is dropped from memory; the counts keep the
     // command-limit arithmetic and the absolute native sequence (native_sequence == native_dropped + journal + 1) unchanged.
     std::uint64_t executed_dropped{}, native_dropped{};
+    // The command-journal entries this session takes: galactic_max_commands unless a host lowered it.
+    std::uint64_t journal_bound{galactic_max_commands};
 
     std::shared_ptr<StateHasher> hasher;
     // Each section's digest as of its last change, and whether a commit changed it since.
@@ -450,7 +489,10 @@ public:
     bool verify_cached_hash{}; // test runtime option, never authoritative state
     [[nodiscard]] StateHash refresh_hash(GalacticTick::Work* work = nullptr);
     void verify_hash() const;
-    std::shared_ptr<const GalacticSnapshot> snapshot;
+    // The published snapshot; inside a batch a republication only marks it stale and the next read rebuilds it (#6933).
+    SnapshotSlot snapshot;
+    unsigned snapshot_batch_depth{}; // nested batches: the slot settles when the outermost one ends
+    std::vector<GalacticEvent> snapshot_pending_events;
     // Diagnostic ownership flag, never a simulation input or archive field.
     std::atomic<bool> native_barrier_active{};
     std::atomic<bool>* native_output_published{}; // borrowed from the phase token, never archived
@@ -517,7 +559,7 @@ public:
     void execute_landing(const GameCommand& command, std::uint64_t tick, std::vector<GalacticEvent>& events,
         bool pending_local_conflict);
     void execute_movement(const GameCommand& command, std::uint64_t tick, std::vector<GalacticEvent>& events,
-        bool pending_local_conflict, std::optional<PlayerId> returning_player = {});
+        bool pending_local_conflict, std::optional<PlayerId> returning_player = {}, bool single_hop_raid = false);
     // WGM-13/WGA-227 (#2880): the one surface-to-orbit launch owner. The native launch and the seat
     // command both gate their units here, hold the temporary detached link while `admit` runs the
     // ordinary fleet admission, and only then remove the surface link. `admission_ran` tells the
@@ -562,6 +604,14 @@ public:
     [[nodiscard]] std::shared_ptr<const GalacticSnapshot> publish_native_snapshot(std::vector<GalacticEvent> events) const;
     [[nodiscard]] std::shared_ptr<const GalacticSnapshot> make_snapshot(std::vector<GalacticEvent> events,
         const PartitionExecutor* executor = nullptr, ObserverViewContext view = {}) const;
+    // Republish the snapshot: immediately, or inside a batch (no partition executor, no player view) only mark the slot
+    // stale so a run of writes costs one rebuild. `refresh_snapshot` republishes with the events the snapshot carries now.
+    void publish_snapshot(std::vector<GalacticEvent> events, const PartitionExecutor* executor = nullptr, ObserverViewContext view = {});
+    void refresh_snapshot();
+    [[nodiscard]] std::vector<GalacticEvent> current_snapshot_events() const;
+    void rebuild_pending_snapshot();
+    void begin_snapshot_batch() noexcept { ++snapshot_batch_depth; }
+    void end_snapshot_batch();
 };
 
 } // namespace eawr::sim::galactic

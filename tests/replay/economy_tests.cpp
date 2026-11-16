@@ -966,6 +966,7 @@ int main(const int argc, char** argv) {
     test_roster_gate();
     test_arrival_table();
     test_income();
+    test_upgrade_income();
     test_credit_adjustments();
     test_team_production();
     test_buy();

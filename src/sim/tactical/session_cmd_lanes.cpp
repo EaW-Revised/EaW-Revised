@@ -163,7 +163,8 @@ core::Result<void> session_detail::Tick::PlanLanes::land(const PlanJob& job) {
         if (SpacePathService::exhausted(found->second.search)) {
             Impl::retain_path_failure(live, job.destination, frame, inputs.value().limits.max_speed);
         } else {
-            Impl::take_plan(live, std::move(plan).value());
+            if (auto taken = phase.impl_->take_plan(live, std::move(plan).value(), job.destination, frame); !taken)
+                return taken;
         }
     } else {
         CollisionWorld world;
@@ -904,7 +905,7 @@ core::Result<void> session_detail::Tick::PlanLanes::finish() {
             const auto& move = *hunt_moves[index];
             auto& live = staged.at(move.unit);
             const CommandPayload payload = AttackMovePayload{move.destination};
-            live.state.order = order_for(payload, phase.tick);
+            replace_order(live, payload, phase.tick);
             if (minds.find(move.unit) != minds.end()) {
                 apply_squadron_order(minds.at(move.unit), payload, live.state.position, squadron_table);
                 if (auto spread = spread_squadrons({move.unit}); !spread) return spread;
@@ -1010,7 +1011,7 @@ core::Result<void> session_detail::Tick::PlanLanes::finish() {
                 if (arrivals.contains(target_id) || mind == minds.end()
                     || (target.state.order.kind == OrderKind::attack && target.state.order.target == lurer)) continue;
                 const CommandPayload attack = AttackPayload{lurer};
-                target.state.order = order_for(attack, phase.tick);
+                replace_order(target, attack, phase.tick);
                 // WSQ-47: the team's destination names the luring craft's team.
                 apply_squadron_order(minds.at(target_id), AttackPayload{lurer_team}, target.state.position, squadron_table);
             }

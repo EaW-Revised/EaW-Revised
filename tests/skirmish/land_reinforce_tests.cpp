@@ -31,8 +31,9 @@ struct Mode {
     std::int64_t cap{3};               // the faction curve at the lobby's player count
     std::uint32_t population{2};       // Population_Value of the company
     std::uint32_t members{1};
-    std::uint32_t start_population{0}; // Population_Value of the company the start squads come from (LR-STARTPOP closed)
+    std::uint32_t start_population{0}; // Population_Value of the company the start squads come from (LR-STARTPOP)
     bool fight{false};                  // armed members, a victory condition, and a station and a squad for the second player
+    bool free_garrison{false};          // the start squads are the players' free garrison (free starting units on)
     bool second_start_last{false};      // one more start squad, of player 2, placed after every other id (it is the LAST start company)
 };
 struct Scene { TacticalSetup setup; TacticalContent content; };
@@ -102,6 +103,11 @@ Scene make_scene(const std::shared_ptr<const LandTerrain>& terrain, const Mode& 
     place(6, point_type, neutral_player, 700, 300);
     place(7, shield_type, 2, 300, 600);
     if (mode.second_start_last) place(9, start_company_type, 2, 900, 700);
+    if (mode.free_garrison) {
+        // LC-104: the start companies are the player's free garrison, registered by company id until the start creates members.
+        setup.free_garrisons = {{1, 600, {start_company_type, start_company_type}, {1, 3}},
+            {2, 600, {start_company_type}, mode.second_start_last ? std::vector<sim::EntityId>{2, 9} : std::vector<sim::EntityId>{2}}};
+    }
     if (mode.fight) {
         place(8, station_type, 2, 900, 100);
         // One shot kills a member (hull 4, damage 4); the range keeps every squad out of reach at the start.
@@ -352,7 +358,7 @@ void contracts() {
         };
         check_outcomes(run(scene, script, 330, serial, false), script, "LC-48: a fractional population count rounds up");
     }
-    // LC-02/48/50 (LR-STARTPOP closed): the start forces count against the cap. Two start squads of population 1 leave
+    // LC-02/48/50 (LR-STARTPOP): start companies outside a free garrison count against the cap. Two start squads of population 1 leave
     // room for 1 of the cap of 3, so the company of population 2 that fits beside free start forces is refused.
     {
         const std::vector<Reinforce> script = {{72, 100, 550, 300, RejectReason::none}};
@@ -360,7 +366,22 @@ void contracts() {
         Mode loaded; loaded.start_population = 1;
         const std::vector<Reinforce> refused = {{72, 100, 550, 300, RejectReason::no_population_room}};
         check_outcomes(run(make_scene(field.terrain, loaded), refused, 120, serial, false), refused,
-            "LC-50: the start forces' population shares count against the company cap");
+            "LC-50: start squads outside a free garrison count against the company cap");
+    }
+    // LC-50 (LR-STARTPOP, retail 0/9 at the start): the free starting forces never count. The same start squads of population 1
+    // as above, registered as the players' free garrison, leave the whole cap: the company of population 2 is admitted. A company
+    // bought and called down counts (assumed, landing unobserved in retail): a second one then no longer fits the cap of 3.
+    {
+        Mode free_loaded; free_loaded.start_population = 1; free_loaded.free_garrison = true; free_loaded.second_start_last = true;
+        const std::vector<Reinforce> admitted = {{72, 100, 550, 300, RejectReason::none}};
+        check_outcomes(run(make_scene(field.terrain, free_loaded), admitted, 120, serial, false), admitted,
+            "LC-50: free garrison start squads leave the whole cap to a landing");
+        const std::vector<Reinforce> then_full = {
+            {72, 100, 550, 300, RejectReason::none},
+            {240, 101, 550, 330, RejectReason::no_population_room},
+        };
+        check_outcomes(run(make_scene(field.terrain, free_loaded), then_full, 330, serial, false), then_full,
+            "LC-50: a landed company counts while the free start forces do not");
     }
     // LC-50: the start shares belong to the company that created each member, not to the last start company. Player 1 has two
     // start squads of population 1 (ids 1 and 3), player 2 two (ids 2 and 9, the last start company): player 1's count is 2, so
@@ -459,11 +480,184 @@ void contracts() {
         expect(refused && session.land_landings().empty(), "a land battle without reinforcement rules refuses the command by reason and lands nothing");
     }
 }
+
+// WLAI-21..23 (#3209): the landing position an AI reinforcement search offers in a land battle. The search is the ordinary
+// reinforcement search request; its result carries the chosen position, and the ordered command lands the company there.
+struct Offer {
+    bool found{}, valid{}, landed{};
+    sim::math::Vec3 position{};
+    std::uint32_t candidates{};
+    Bytes state, checkpoint;
+};
+
+Offer offer(const Scene& scene, const std::uint64_t tick, const sim::math::Vec3& target, const sim::PartitionExecutor& executor,
+    const bool restore = false) {
+    auto session = take(TacticalSession::create(scene.setup, scene.content));
+    must(session.submit({{0, 1, 1}, {4}, BuyPayload{company_type}}));
+    must(session.submit_reinforcement_search({{tick, 1, 300}, {}, ReinforcePayload{company_type, target}}, {7, 0}));
+    Offer out;
+    const auto identities = checkpoint::tactical_identities(scene.setup.content_identity);
+    for (std::uint64_t step = 0; step < tick + 4; ++step) {
+        take(session.step(executor));
+        if (restore && step + 1 == tick) { // the request is saved queued, before the tick that resolves it
+            const auto saved = checkpoint_bytes(session);
+            auto resumed = take(checkpoint::load_tactical_checkpoint(saved, identities, factory(scene.content), executor));
+            expect(checkpoint_bytes(resumed.session) == saved, "WLAI-23: a checkpoint taken mid-search (request queued, no result yet) restores byte for byte");
+            session = std::move(resumed.session);
+        }
+    }
+    if (const auto result = session.reinforcement_search_result(1, 7)) {
+        out.found = true; out.valid = result->valid; out.position = result->position; out.candidates = result->candidates;
+    }
+    out.landed = !session.land_landings().empty();
+    if (out.landed) out.valid = out.valid && session.land_landings().front().position.x == out.position.x
+        && session.land_landings().front().position.y == out.position.y;
+    out.state = session.canonical_state_bytes();
+    out.checkpoint = checkpoint_bytes(session);
+    return out;
+}
+
+// The recorded run of a search replays to the live state: a search with a position is an ordinary recorded reinforcement at the
+// chosen position; a search without one is no command, so the replay holds neither it nor a landing.
+bool replays_alike(const Scene& scene, const std::uint64_t tick, const sim::math::Vec3& target, const bool expect_landing) {
+    const sim::InlineExecutor serial;
+    auto session = take(TacticalSession::create(scene.setup, scene.content));
+    must(session.submit({{0, 1, 1}, {4}, BuyPayload{company_type}}));
+    must(session.submit_reinforcement_search({{tick, 1, 300}, {}, ReinforcePayload{company_type, target}}, {7, 0}));
+    for (std::uint64_t step = 0; step < tick + 4; ++step) take(session.step(serial));
+    auto replay = take(parse_replay(take(write_replay(session.record()))));
+    auto playback = take(TacticalSession::from_replay(replay, scene.content));
+    for (std::uint64_t step = 0; step < replay.final_tick_count; ++step) take(playback.step(serial));
+    return playback.canonical_state_bytes() == session.canonical_state_bytes()
+        && session.land_landings().empty() != expect_landing && playback.land_landings().empty() != expect_landing;
+}
+
+bool near(const sim::math::Vec3& position, const std::int64_t x, const std::int64_t y) {
+    constexpr std::int64_t tolerance = Fixed::scale / 50;
+    const auto close = [&](const Fixed value, const std::int64_t expected) {
+        const auto difference = value.raw() - expected * Fixed::scale;
+        return (difference < 0 ? -difference : difference) <= tolerance;
+    };
+    return close(position.x, x) && close(position.y, y);
+}
+
+void landing_search() {
+    auto field = make_field(std::vector<std::string>(40, std::string(48, '.')));
+    const sim::InlineExecutor serial;
+    const sim::math::Vec3 far_corner{whole(900), whole(700), {}};
+    // WLAI-21: with no allied point there is no candidate, so no landing and no position (never a landing at the target).
+    {
+        const auto result = offer(make_scene(field.terrain, Mode{}), 40, far_corner, serial);
+        expect(result.found && !result.valid && !result.landed, "WLAI-21: with no allied reinforcement point nothing lands");
+    }
+    // WLAI-22/23: the captured point (300, 300) has enabling radius 250; the ring is at half of it, first position on +X.
+    const auto single = make_scene(field.terrain, Mode{});
+    {
+        const auto result = offer(single, 72, far_corner, serial);
+        expect(result.found && result.valid && result.landed && near(result.position, 425, 300) && result.candidates == 1,
+            "WLAI-23: the first ring position is half the enabling radius from the point on the positive X direction");
+    }
+    // WLAI-22: two allied points rank by distance to the requested location (XY), the nearer one is tried first.
+    auto both = make_scene(field.terrain, Mode{});
+    both.setup.units.erase(both.setup.units.begin() + 1); // player 2's squad no longer contests the second point
+    {
+        const auto toward_second = offer(both, 72, far_corner, serial);
+        expect(toward_second.valid && near(toward_second.position, 825, 300),
+            "WLAI-22: the allied point nearer the target is tried first");
+        const auto toward_first = offer(both, 72, {whole(100), whole(300), {}}, serial);
+        expect(toward_first.valid && near(toward_first.position, 425, 300),
+            "WLAI-22: the ranking follows the requested location");
+    }
+    // WLAI-23: the first ring position (+X) and the 45 degree one lie inside an enemy prevention radius and are refused; the third
+    // (90 degrees) is the first admitted one and is offered: three admissions in all.
+    {
+        auto blocked = make_scene(field.terrain, Mode{});
+        UnitState source; source.entity_id = 10; source.type_id = shield_type; source.owner = 2;
+        source.position = {whole(425), whole(300), {}};
+        blocked.setup.units.push_back(source);
+        const auto result = offer(blocked, 72, far_corner, serial);
+        expect(result.valid && result.landed && near(result.position, 300, 425) && result.candidates == 3,
+            "WLAI-23: two refused ring positions are skipped and the third is offered (three admissions)");
+    }
+    // WLAI-22: equal distances keep every candidate; they are tried by ascending entity id (project choice), not by position.
+    {
+        const sim::math::Vec3 midway{whole(500), whole(700), {}}; // 200 east and 200 west of the two points, 400 south of both
+        const auto ordered = offer(both, 72, midway, serial);
+        expect(ordered.valid && near(ordered.position, 425, 300),
+            "WLAI-22: two points at equal distance: the lower entity id (the western point) is tried first");
+        auto swapped = both;
+        for (auto& unit : swapped.setup.units) {
+            if (unit.entity_id == 5) unit.position.x = whole(700);
+            if (unit.entity_id == 6) unit.position.x = whole(300);
+        }
+        const auto reversed = offer(swapped, 72, midway, serial);
+        expect(reversed.valid && near(reversed.position, 825, 300),
+            "WLAI-22: with the ids swapped between the two points the lower id (now the eastern point) is tried first");
+    }
+    // WLAI-21/LC-43: searches are resolved against the state the landing is admitted in, in command order: a second search
+    // of the same tick sees the first company already counted against the cap, and (cap permitting) the same ring position, as an
+    // in-flight company occupies no ground until it unloads. Neither case ends in a refused landing.
+    {
+        const auto count_pair = [&](const Mode& mode) {
+            auto scene = make_scene(field.terrain, mode);
+            auto session = take(TacticalSession::create(scene.setup, scene.content));
+            must(session.submit({{0, 1, 1}, {4}, BuyPayload{company_type}}));
+            must(session.submit({{1, 1, 2}, {4}, BuyPayload{company_type}}));
+            const sim::math::Vec3 target{whole(900), whole(700), {}};
+            must(session.submit_reinforcement_search({{72, 1, 300}, {}, ReinforcePayload{company_type, target}}, {7, 0}));
+            must(session.submit_reinforcement_search({{72, 1, 301}, {}, ReinforcePayload{company_type, target}}, {8, 0}));
+            bool rejected = false;
+            for (std::uint64_t step = 0; step < 76; ++step) {
+                const auto stepped = take(session.step(serial));
+                for (const auto& event : stepped.snapshot->events())
+                    if (event.kind == EventKind::order_rejected && event.player == 1 && event.sequence >= 300) rejected = true;
+            }
+            struct Pair { bool first{}, second{}, same{}, rejected{}; std::size_t landings{}; };
+            Pair out; out.rejected = rejected; out.landings = session.land_landings().size();
+            const auto one = session.reinforcement_search_result(1, 7), two = session.reinforcement_search_result(1, 8);
+            if (one && two) {
+                out.first = one->valid; out.second = two->valid;
+                out.same = one->position.x == two->position.x && one->position.y == two->position.y;
+            }
+            return out;
+        };
+        Mode roomy; roomy.cap = 4;
+        const auto both_fit = count_pair(roomy);
+        expect(both_fit.first && both_fit.second && both_fit.same && both_fit.landings == 2 && !both_fit.rejected,
+            "WLAI-21: two same-tick searches within the cap are both offered the same ring position and both land");
+        const auto cap_full = count_pair(Mode{});
+        expect(cap_full.first && !cap_full.second && cap_full.landings == 1 && !cap_full.rejected,
+            "WLAI-21: the second same-tick search sees the first company in the cap and is offered nothing, so no landing is refused");
+    }
+    // LC-44: without Use_Reinforcement_Points no point is needed, the target itself is the candidate (project choice).
+    {
+        Mode open; open.use_points = false;
+        const auto result = offer(make_scene(field.terrain, open), 72, far_corner, serial);
+        expect(result.valid && near(result.position, 900, 700), "the open-ground rule offers the target itself");
+    }
+    // Replay: the recorded command is the resolved one (landing at the offered position) or, with no position, absent.
+    expect(replays_alike(single, 72, far_corner, true), "WLAI-23: a search with a position replays to the live state and its landing");
+    expect(replays_alike(make_scene(field.terrain, Mode{}), 40, far_corner, false),
+        "WLAI-21: a search without a position leaves no command in the replay, which replays to the live state with no landing");
+    // Determinism: 1/2/4/8 workers, reversed partitions and a checkpoint after the search end in one state.
+    const auto baseline = offer(both, 72, far_corner, serial);
+    expect(offer(both, 72, far_corner, serial, true).state == baseline.state, "WLAI-23: a search restored mid-way ends in the straight run's state (result, position and landing alike)");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter threads(workers);
+        const auto parallel = offer(both, 72, far_corner, threads);
+        expect(parallel.state == baseline.state && parallel.checkpoint == baseline.checkpoint
+            && parallel.position.x == baseline.position.x && parallel.position.y == baseline.position.y,
+            "WLAI-23: the landing search gives one result at 1/2/4/8 workers");
+        test_support::ReverseOrderExecutor reverse(workers);
+        expect(offer(both, 72, far_corner, reverse).state == baseline.state, "WLAI-23: the landing search gives one result with reversed partitions");
+    }
+}
 }
 
 int main() {
     try {
         contracts();
+        landing_search();
         return checks.finish();
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

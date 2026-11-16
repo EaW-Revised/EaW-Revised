@@ -122,8 +122,60 @@ void legacy_live_window_regression() {
     std::cout << "#4418 regression: legacy rule falsely times out at 15000 ms; corrected rule stays live for 20000 ms\n";
 }
 }
+// ROUTE label: which relay provider carries a relayed pair, from GNS's TURN reply line and the issued credentials.
+void route_label() {
+    using namespace eawr::net;
+    expect(turn_server_from_spew("ICE: TURN server 203.0.113.9:3478 accepted a request (message 0x108)\n") == "203.0.113.9:3478",
+        "The accepting TURN server is read from the GNS line");
+    expect(turn_server_from_spew("ICE: TURN server  accepted a request").empty() && turn_server_from_spew("ICE: connected").empty()
+            && turn_server_from_spew("TURN server 1.2.3.4:3478 sent 401").empty(), "Other lines name no server");
+    const std::string all = "turn:203.0.113.9:3478,turn:141.101.90.1:3478,turn:141.101.90.1:443";
+    const std::optional<std::string> own{"turn:203.0.113.9:3478"}, none_own{std::string{}};
+    expect(classify_relay_provider(GnsRoute::direct, "203.0.113.9:3478", own, all) == GnsRelayProvider::none, "A direct pair has no relay provider");
+    expect(classify_relay_provider(GnsRoute::relayed, "203.0.113.9:3478", own, all) == GnsRelayProvider::own, "The operator's server is own");
+    expect(classify_relay_provider(GnsRoute::relayed, "141.101.90.1:3478", own, all) == GnsRelayProvider::cloudflare, "Another listed server is Cloudflare");
+    expect(classify_relay_provider(GnsRoute::relayed, "141.101.90.1:3478", none_own, all) == GnsRelayProvider::cloudflare, "No own entries: Cloudflare");
+    expect(classify_relay_provider(GnsRoute::relayed, "", own, all) == GnsRelayProvider::unknown, "No allocation line yet: unknown");
+    expect(classify_relay_provider(GnsRoute::relayed, "203.0.113.9:3478,141.101.90.1:3478", own, all) == GnsRelayProvider::unknown,
+        "Different allocations on different providers: a mixed pair is unknown");
+    expect(classify_relay_provider(GnsRoute::relayed, "141.101.90.1:3478,141.101.90.1:443", own, all) == GnsRelayProvider::cloudflare,
+        "Several Cloudflare servers are still Cloudflare");
+    expect(classify_relay_provider(GnsRoute::relayed, "198.51.100.5:3478", own, all) == GnsRelayProvider::unknown, "A server that is not listed: unknown");
+    expect(classify_relay_provider(GnsRoute::relayed, "203.0.113.9:3478", std::nullopt, all) == GnsRelayProvider::unknown, "An endpoint that does not classify: unknown");
+    expect(classify_relay_provider(GnsRoute::relayed, "203.0.113.9:3478", std::optional<std::string>{"turn:203.0.113.9:3478?transport=udp"}, all)
+        == GnsRelayProvider::own, "A transport query on the entry is ignored");
+    expect(route_text(GnsRoute::direct, GnsRelayProvider::none) == "direct" && route_text(GnsRoute::relayed, GnsRelayProvider::own) == "relay (own)"
+            && route_text(GnsRoute::relayed, GnsRelayProvider::cloudflare) == "relay (cloudflare)"
+            && route_text(GnsRoute::relayed, GnsRelayProvider::unknown) == "relay" && route_text(GnsRoute::unknown, GnsRelayProvider::none) == "unknown",
+        "The route text for the log and the overlay");
+}
+// The loss hint: sustained loss on a relayed pair only, with hysteresis; it costs nothing on a healthy pair.
+void loss_hint() {
+    using eawr::net::GnsLossHint;
+    using Clock = GnsLossHint::Clock;
+    const auto start = Clock::now();
+    GnsLossHint hint;
+    for (int s = 0; s < 120; ++s) expect(!hint.observe(start + std::chrono::seconds(s), true, 2.0) && !hint.active(), "A healthy relayed pair never raises it");
+    GnsLossHint high;
+    for (int s = 0; s < 20; ++s) expect(!high.observe(start + std::chrono::seconds(s), true, 18.0), "Under 20 s of high loss nothing is raised");
+    expect(high.observe(start + std::chrono::seconds(20), true, 18.0) && high.active() && high.peak_pct() == 18.0, "20 s of >= 15% loss raises it once");
+    expect(!high.observe(start + std::chrono::seconds(21), true, 30.0) && high.peak_pct() == 30.0, "The peak follows, no second change");
+    expect(!high.observe(start + std::chrono::seconds(22), true, 9.0) && high.active(), "Between 5% and 15% it stays raised (hysteresis)");
+    for (int s = 23; s < 33; ++s) expect(!high.observe(start + std::chrono::seconds(s), true, 1.0) && high.active(), "Calm below 5% clears only after 10 s");
+    expect(high.observe(start + std::chrono::seconds(33), true, 1.0) && !high.active(), "Cleared after 10 s below 5%");
+    GnsLossHint flap;
+    for (int s = 0; s < 60; ++s) flap.observe(start + std::chrono::seconds(s), true, s % 10 == 9 ? 2.0 : 40.0);
+    expect(!flap.active(), "Loss that dips every 10 s never reaches 20 s in a row");
+    GnsLossHint direct;
+    for (int s = 0; s < 60; ++s) expect(!direct.observe(start + std::chrono::seconds(s), false, 50.0) && !direct.active(), "A direct pair is not observed here");
+    GnsLossHint unknown;
+    for (int s = 0; s < 60; ++s) expect(!unknown.observe(start + std::chrono::seconds(s), true, std::nullopt), "Unmeasured loss raises nothing");
+    GnsLossHint left;
+    for (int s = 0; s <= 20; ++s) left.observe(start + std::chrono::seconds(s), true, 20.0);
+    expect(left.active() && left.observe(start + std::chrono::seconds(21), false, 20.0) && !left.active(), "Leaving the relay clears it");
+}
 int main() {
-    try { cadence(); smoothing(); long_pause_keeps_transport_live(); link_liveness(); legacy_live_window_regression();
+    try { loss_hint(); route_label(); cadence(); smoothing(); long_pause_keeps_transport_live(); link_liveness(); legacy_live_window_regression();
         std::cout << "GNS LinkStats contracts passed\n"; return 0; }
     catch (const std::exception& failure) { std::cerr << failure.what() << '\n'; return 1; }
 }

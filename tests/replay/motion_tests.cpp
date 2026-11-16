@@ -1133,6 +1133,362 @@ void test_waypoints() {
         "HCB-58: exactly 80 planar units appends an ordinary terminal point");
 }
 
+
+// --- MV-40: a move with an arrival turn --------------------------------------------------------------
+// Replay opcode 38 carries the heading; the ordinary path finishes before the authored rest turn.
+
+[[nodiscard]] tactical::MovePayload facing_move(const Vec3 destination, const Fixed final_yaw, const bool hazards = false,
+    const bool queued = false) {
+    tactical::MovePayload move{destination, hazards, queued};
+    move.final_yaw = final_yaw;
+    return move;
+}
+
+[[nodiscard]] std::uint32_t domain_of(const std::vector<std::uint8_t>& saved) {
+    return static_cast<std::uint32_t>(saved[0]) | static_cast<std::uint32_t>(saved[1]) << 8U
+        | static_cast<std::uint32_t>(saved[2]) << 16U | static_cast<std::uint32_t>(saved[3]) << 24U;
+}
+
+void test_final_facing() {
+    auto table = foc_table();
+    table.rules.max_waypoints = 6;
+    const auto yaw_a = decimal("123.4");
+    const auto yaw_b = decimal("271.8");
+    const auto one_ship = [] { return setup({{1, corvette_type, 1, at(0, 0, 0), yaw(0), {}}}); };
+    const auto make = [&](const std::vector<tactical::PlayerCommand>& commands, const std::uint64_t ticks) {
+        tactical::TacticalReplay replay;
+        replay.setup = one_ship();
+        replay.final_tick_count = ticks;
+        replay.commands = commands;
+        return replay;
+    };
+
+    // Exact degree goals avoid a second heading quantization through a synthetic target ray.
+    for (auto profile : {corvette(), acclamator()}) {
+        for (const auto slowdown : {decimal("0.5"), profile.turn_in_place_slowdown}) {
+            profile.turn_in_place_slowdown = slowdown;
+            const auto turn = tactical::plan_face_yaw(profile, 7, at(0, 0, -20), decimal("359.9"), decimal("0.1"));
+            const auto duration = math::multiply(math::divide(decimal("0.2"), profile.rate_of_turn).value(), slowdown).value();
+            expect(turn && near(turn.value().nodes.back().frame, math::add(units(7), duration).value(), 8),
+                "MV-40: the arrival turn uses the shortest heading delta and authored duration scale");
+            if (turn) {
+                const auto end = tactical::sample_motion(turn.value(), 100, at(0, 0, -20), decimal("359.9"));
+                expect(end && end.value().finished && end.value().yaw == decimal("0.1")
+                    && end.value().position == at(0, 0, -20) && end.value().speed == Fixed{},
+                    "MV-40: a wraparound turn stops exactly on the degree goal without translating");
+            }
+        }
+    }
+
+    // Replay: opcode 38 round trips with every flag combination; the old shapes keep their size.
+    const auto size_of = [&](const tactical::MovePayload& move) -> std::size_t {
+        const auto encoded = tactical::write_replay(make({command(0, 1, 0, 1, move)}, 10));
+        return encoded ? encoded.value().size() : 0U;
+    };
+    const auto plain = size_of(tactical::MovePayload{at(300, 0, 0)});
+    expect(plain != 0 && size_of(facing_move(at(300, 0, 0), yaw_a)) == plain + 16,
+        "MV-40: a move with a final facing adds the yaw and the flag word, nothing else");
+    expect(size_of(tactical::MovePayload{at(300, 0, 0), true}) == plain, "MV-40: a hazard move keeps its opcode 20 size");
+    expect(size_of(tactical::MovePayload{at(300, 0, 0), false, true}) == plain + 8, "MV-40: a queued move keeps its HCB-57 tail");
+    expect(size_of(facing_move(at(300, 0, 0), yaw_a, true, true)) == plain + 16,
+        "MV-40: the hazard and queued bits of a move with a facing ride in its flag word, no tail");
+    for (const auto hazards : {false, true}) {
+        for (const auto queued : {false, true}) {
+            const auto replay = make({command(0, 1, 0, 1, facing_move(at(300, 0, 0), yaw_a, hazards, queued))}, 10);
+            const auto encoded = tactical::write_replay(replay);
+            const auto parsed = encoded ? tactical::parse_replay(encoded.value(), "move-facing")
+                                        : eawr::core::Result<tactical::TacticalReplay>::failure(encoded.error());
+            expect(parsed && parsed.value().commands == replay.commands,
+                "MV-40: opcode 38 round trips the destination, the facing and the hazard and queued bits");
+        }
+    }
+    {
+        // Layout from the end: unit u64, list reserved u32, count u32, move reserved u32, flags u32.
+        const auto encoded = tactical::write_replay(make({command(0, 1, 0, 1, facing_move(at(300, 0, 0), yaw_a))}, 10));
+        expect(static_cast<bool>(encoded), "MV-40: the facing replay encodes");
+        if (encoded) {
+            auto reserved = encoded.value();
+            reserved[reserved.size() - 20] = 1;
+            expect(!tactical::parse_replay(reserved, "move-facing-reserved"), "MV-40: a nonzero reserved word is rejected");
+            auto flags = encoded.value();
+            flags[flags.size() - 24] = 4;
+            expect(!tactical::parse_replay(flags, "move-facing-flags"), "MV-40: unknown flag bits are rejected");
+        }
+        for (const auto bad : {Fixed::from_raw(-1), units(360), units(-10)}) {
+            const auto written = tactical::write_replay(make({command(0, 1, 0, 1, facing_move(at(300, 0, 0), bad))}, 10));
+            expect(!written || !tactical::parse_replay(written.value(), "move-facing-range"),
+                "MV-40: a facing outside [0, 360) is rejected");
+        }
+    }
+
+    // Session: the ordinary path and braking stay identical; only the stopped ship turns.
+    const auto move_replay = [&](const tactical::CommandPayload& first, const std::optional<tactical::CommandPayload>& second) {
+        std::vector<tactical::PlayerCommand> commands{command(0, 1, 0, 1, first)};
+        if (second) commands.push_back(command(60, 1, 1, 1, *second));
+        return make(commands, 500);
+    };
+    std::optional<Run> plain_run;
+    {
+        auto session = tactical::TacticalSession::from_replay(move_replay(tactical::MovePayload{at(300, 0, 0)}, std::nullopt), {}, {}, table);
+        plain_run = session ? run(std::move(session).value(), 500, 1, false) : std::nullopt;
+        expect(plain_run && !plain_run->units.back()[0].order.final_yaw, "MV-40: an ordinary move holds no facing");
+    }
+    std::size_t arrival = 0;
+    if (plain_run) {
+        for (std::size_t tick = 3; tick < plain_run->units.size(); ++tick) {
+            if (plain_run->units[tick][0].position == plain_run->units[tick - 1][0].position
+                && plain_run->units[tick - 1][0].position != plain_run->units.front()[0].position) {
+                arrival = tick;
+                break;
+            }
+        }
+    }
+    expect(arrival > 2 && arrival < 200, "MV-40: the control witnesses ordinary path completion");
+    std::optional<Run> facing_run;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto session = tactical::TacticalSession::from_replay(move_replay(facing_move(at(300, 0, 0), yaw_a), std::nullopt), {}, {}, table);
+        const auto result = session ? run(std::move(session).value(), 500, workers, true) : std::nullopt;
+        expect(result && result->units.back()[0].order.final_yaw == std::optional<Fixed>{yaw_a},
+            "MV-40: the accepted order keeps its final facing");
+        if (!result || !plain_run) continue;
+        bool same_positions = true;
+        bool same_approach = true;
+        for (std::size_t tick = 0; tick < result->units.size(); ++tick) {
+            same_positions = same_positions && result->units[tick][0].position == plain_run->units[tick][0].position;
+            if (tick <= arrival)
+                same_approach = same_approach && result->units[tick][0].rotation == plain_run->units[tick][0].rotation;
+        }
+        expect(same_positions && same_approach, "MV-40: the path and braking are unchanged before turning at rest");
+        const auto final = tactical::yaw_degrees(result->units.back()[0].rotation);
+        expect(final && near(tactical::wrap_degrees(math::subtract(final.value(), yaw_a).value()), Fixed{}, 512),
+            "MV-40: the ship finishes on the ordered heading");
+        if (arrival > 0 && arrival + 1 < result->units.size()) {
+            const auto before = tactical::yaw_degrees(result->units[arrival][0].rotation);
+            const auto after = tactical::yaw_degrees(result->units[arrival + 1][0].rotation);
+            expect(before && after && near(math::subtract(after.value(), before.value()).value(), decimal("0.75"), 512),
+                "MV-40: rotation starts one movement frame after arrival, at rate / slowdown");
+        }
+        expect(result->hashes.back() != plain_run->hashes.back() && result->hashes[0] != plain_run->hashes[0],
+            "MV-40: the held facing is part of the state hash");
+        if (facing_run) expect(result->hashes == facing_run->hashes && result->events == facing_run->events,
+            "MV-40: a move with a facing is identical on 1/2/4/8 workers and storage orders");
+        else facing_run = result;
+    }
+    for (const tactical::CommandPayload& replacement : std::vector<tactical::CommandPayload>{
+            tactical::MovePayload{at(-300, 0, 0)}, tactical::StopPayload{}, tactical::FacePayload{at(0, 300, 0)}}) {
+        auto session = tactical::TacticalSession::from_replay(move_replay(facing_move(at(300, 0, 0), yaw_a), replacement), {}, {}, table);
+        const auto result = session ? run(std::move(session).value(), 100, 1, false) : std::nullopt;
+        expect(result && result->units[50][0].order.final_yaw && !result->units.back()[0].order.final_yaw,
+            "MV-40: a later move, stop or face drops the facing");
+    }
+
+    // Interrupt an active arrival turn. MV-02 still gives the old plan its one movement frame;
+    // thereafter the new order owns movement, and the old yaw must never be resumed.
+    for (const tactical::CommandPayload& replacement : std::vector<tactical::CommandPayload>{
+            tactical::StopPayload{}, tactical::MovePayload{at(1200, 0, 0)}, tactical::AttackPayload{2},
+            tactical::FacePayload{at(1500, 0, 0)}, tactical::GuardPayload{at(1200, 0, 0)},
+            tactical::AttackMovePayload{at(1200, 0, 0)}}) {
+        std::optional<Run> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto replay = make({command(0, 1, 0, 1, facing_move(at(300, 0, 0), yaw_a)),
+                command(arrival + 10, 1, 1, 1, replacement)}, 600);
+            replay.setup.units.push_back({2, station_type, 2, at(1500, 0, 0), yaw(0), {}});
+            auto session = tactical::TacticalSession::from_replay(replay, {}, {}, table);
+            const auto result = session ? run(std::move(session).value(), replay.final_tick_count, workers, true) : std::nullopt;
+            expect(result && result->units[arrival + 10][0].order.final_yaw
+                && !result->units[arrival + 11][0].order.final_yaw && !result->units.back()[0].order.final_yaw,
+                "MV-41: stop, move, attack, face, guard and attack-move interrupt an active arrival turn");
+            if (result && std::holds_alternative<tactical::StopPayload>(replacement)) {
+                expect(result->units[arrival + 11][0].rotation == result->units.back()[0].rotation
+                    && result->units[arrival + 11][0].position == result->units.back()[0].position,
+                    "MV-40: stop freezes an interrupted turn and never resumes its old goal");
+            }
+            if (result && (std::holds_alternative<tactical::MovePayload>(replacement)
+                || std::holds_alternative<tactical::GuardPayload>(replacement)
+                || std::holds_alternative<tactical::AttackMovePayload>(replacement))) {
+                expect(result->units.back()[0].position.x > units(1000),
+                    "MV-41: a replacement move, guard or attack-move leaves the arrival point");
+            }
+            if (result && (std::holds_alternative<tactical::AttackPayload>(replacement)
+                || std::holds_alternative<tactical::FacePayload>(replacement))) {
+                const auto final = tactical::yaw_degrees(result->units.back()[0].rotation);
+                expect(final && !near(tactical::wrap_degrees(math::subtract(final.value(), yaw_a).value()), Fixed{}, 512),
+                    "MV-41: an attack or face cannot retain the replaced move's active turn");
+            }
+            if (result && reference) expect(result->hashes == reference->hashes && result->events == reference->events,
+                "MV-40: interrupted arrival turns agree on 1/2/4/8 workers");
+            else reference = result;
+        }
+    }
+
+    // Already complete moves turn once; unsupported motion endpoints and immobile types do not.
+    {
+        auto replay = make({command(0, 1, 0, 1, facing_move(at(0, 0, 0), units(90))),
+            command(0, 1, 1, 2, facing_move(at(0, 100, 0), units(90))),
+            command(0, 1, 2, 3, facing_move(at(tactical::max_motion_coordinate + 1, 0, 0), units(90)))}, 500);
+        replay.setup.units.push_back({2, station_type, 1, at(0, 100, 0), yaw(0), {}});
+        replay.setup.units.push_back({3, corvette_type, 1, at(0, 200, 0), yaw(0), {}});
+        auto session = tactical::TacticalSession::from_replay(replay, {}, {}, table);
+        const auto result = session ? run(std::move(session).value(), replay.final_tick_count, 4, true) : std::nullopt;
+        expect(result && result->units.back()[0].position == at(0, 0, 0)
+            && result->units.back()[0].rotation == yaw(90) && result->units.back()[1].rotation == yaw(0)
+            && result->units.back()[2].rotation == yaw(0),
+            "MV-40: a zero-distance arrival turns, while no-profile and invalid-destination orders do not");
+        if (result) expect(result->units[400][0].rotation == result->units.back()[0].rotation,
+            "MV-40: a completed turn remains on its goal heading");
+    }
+
+    // Real layer mapping and delayed/sliced planning: every member retains its slot and turns
+    // to the same goal, with its own authored speed and turn rate.
+    {
+        auto grouped_table = table;
+        grouped_table.avoidance = tactical::AvoidanceRules{units(24), decimal("0.2"), units(100), decimal("0.8"), units(15),
+            decimal("0.66"), decimal("1.2"), decimal("0.25"), decimal("1.7"), decimal("0.5"), decimal("0.5"), 3500, 6, 90, 45,
+            units(50)};
+        grouped_table.footprints = {
+            {corvette_type, tactical::SpaceLayer::corvette, units(10), units(20), units(20), false},
+            {acclamator_type, tactical::SpaceLayer::capital, units(20), units(40), units(40), false}};
+        auto grouped = make({{{0, 1, 0}, {1, 2, 3}, facing_move(at(600, 0, 0), units(90))}}, 1200);
+        grouped.setup = setup({{1, corvette_type, 1, at(-600, -150, -20), yaw(0), {}},
+            {2, corvette_type, 1, at(-600, 150, -20), yaw(0), {}},
+            {3, acclamator_type, 1, at(-900, 0, -110), yaw(0), {}}});
+        auto ordinary = grouped;
+        ordinary.commands.front().payload = tactical::MovePayload{at(600, 0, 0)};
+        auto control_session = tactical::TacticalSession::from_replay(ordinary, {}, {}, grouped_table);
+        const auto control = control_session ? run(std::move(control_session).value(), ordinary.final_tick_count, 1, false) : std::nullopt;
+        std::optional<Run> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto session = tactical::TacticalSession::from_replay(grouped, {}, {}, grouped_table);
+            const auto result = session ? run(std::move(session).value(), grouped.final_tick_count, workers, true) : std::nullopt;
+            expect(result && control, "MV-40: mapped formation arrival scenarios complete");
+            if (result && control) {
+                for (std::size_t index = 0; index < 3; ++index) {
+                    const auto& member = result->units.back()[index];
+                    const auto heading = tactical::yaw_degrees(member.rotation);
+                    expect(member.position == control->units.back()[index].position && heading && near(heading.value(), units(90), 512),
+                        "MV-40: each layered formation member keeps its unrotated slot and faces the common heading");
+                }
+            }
+            if (result && reference) expect(result->hashes == reference->hashes && result->events == reference->events,
+                "MV-40: layered formation arrival turns agree on 1/2/4/8 workers");
+            else reference = result;
+        }
+    }
+
+    // Already aligned facing legs must not add a zero-length turn before promoting a queue.
+    {
+        const auto aligned = make({command(0, 1, 0, 1, facing_move(at(300, 0, 0), Fixed{}, false, true)),
+            command(0, 1, 1, 1, tactical::MovePayload{at(600, 0, 0), false, true})}, 500);
+        auto plain_queue = aligned;
+        plain_queue.commands.front().payload = tactical::MovePayload{at(300, 0, 0), false, true};
+        auto a = tactical::TacticalSession::from_replay(aligned, {}, {}, table);
+        auto b = tactical::TacticalSession::from_replay(plain_queue, {}, {}, table);
+        const auto faced = a ? run(std::move(a).value(), aligned.final_tick_count, 4, true) : std::nullopt;
+        const auto plain_result = b ? run(std::move(b).value(), plain_queue.final_tick_count, 1, false) : std::nullopt;
+        bool equal = faced && plain_result;
+        if (equal) for (std::size_t tick = 0; tick < faced->units.size(); ++tick)
+            equal = equal && faced->units[tick][0].position == plain_result->units[tick][0].position
+                && faced->units[tick][0].rotation == plain_result->units[tick][0].rotation;
+        expect(equal, "MV-40: an already aligned final heading adds no waypoint delay");
+    }
+
+    // Queued legs keep their own facing and promote it with the leg.
+    {
+        const auto queued = make({command(0, 1, 0, 1, facing_move(at(300, 0, 0), yaw_a, false, true)),
+            command(0, 1, 1, 1, facing_move(at(600, 0, 0), yaw_b, false, true))}, 1800);
+        const auto encoded = tactical::write_replay(queued);
+        const auto parsed = encoded ? tactical::parse_replay(encoded.value(), "queued-facing")
+                                    : eawr::core::Result<tactical::TacticalReplay>::failure(encoded.error());
+        expect(parsed && parsed.value().commands == queued.commands, "MV-40: queued legs with a facing round trip");
+        std::optional<Run> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto session = tactical::TacticalSession::from_replay(queued, {}, {}, table);
+            const auto result = session ? run(std::move(session).value(), queued.final_tick_count, workers, true) : std::nullopt;
+            expect(result && near(result->units.back()[0].position.x, units(600), 16 * one)
+                && result->units.back()[0].order.final_yaw == std::optional<Fixed>{yaw_b},
+                "MV-40: the queued legs finish at the last destination holding the last leg's facing");
+            if (result) {
+                const auto final = tactical::yaw_degrees(result->units.back()[0].rotation);
+                expect(final && near(tactical::wrap_degrees(math::subtract(final.value(), yaw_b).value()), Fixed{}, 512),
+                    "MV-40: the last queued leg completes its own arrival turn");
+                const auto promoted = std::find_if(result->units.begin(), result->units.end(), [&](const auto& frame) {
+                    return frame[0].order.final_yaw == std::optional<Fixed>{yaw_b};
+                });
+                expect(promoted != result->units.end(), "MV-40: the second facing leg is promoted");
+                if (promoted != result->units.end()) {
+                    const auto heading = tactical::yaw_degrees((*promoted)[0].rotation);
+                    expect(heading && near(tactical::wrap_degrees(math::subtract(heading.value(), yaw_a).value()), Fixed{}, 512),
+                        "MV-40: a queued next leg waits for the current arrival turn");
+                }
+            }
+            if (result && reference) expect(result->hashes == reference->hashes, "MV-40: queued facing legs agree on 1/2/4/8 workers");
+            else reference = result;
+        }
+    }
+
+    // Checkpoint: a held facing (order or queued leg) selects domain 33 and restores to the same continuation;
+    // no facing keeps domain 29; a facing domain without a facing, and a domain beyond 36, are refused.
+    const auto checkpoint_case = [&](const std::vector<tactical::PlayerCommand>& commands, const std::string_view label,
+                                     const int save_tick = 100) {
+        const eawr::platform::ThreadWorkerAdapter executor(2);
+        auto first = tactical::TacticalSession::create(one_ship(), {}, {}, table);
+        expect(static_cast<bool>(first), std::string(label) + ": session creates");
+        if (!first) return;
+        auto session = std::move(first).value();
+        for (const auto& item : commands) expect(static_cast<bool>(session.submit(item)), std::string(label) + ": command admits");
+        for (int tick = 0; tick < save_tick; ++tick) expect(static_cast<bool>(session.step(executor)), std::string(label) + ": steps");
+        if (save_tick == 200) expect(session.motion_state(1) && session.motion_state(1)->kind == tactical::MotionKind::turn,
+            "MV-40: the checkpoint witnesses an active arrival turn");
+        const auto saved = session.save_checkpoint_state();
+        expect(static_cast<bool>(saved), std::string(label) + ": saves");
+        if (!saved) return;
+        expect(domain_of(saved.value()) == 33U, std::string(label) + ": a held facing selects domain 33");
+        auto second = tactical::TacticalSession::create(one_ship(), {}, {}, table);
+        expect(second && second.value().load_checkpoint_state(saved.value()), std::string(label) + ": restores");
+        if (!second) return;
+        auto restored = std::move(second).value();
+        expect(session.canonical_state_bytes() == restored.canonical_state_bytes(), std::string(label) + ": canonical state round trips");
+        for (int tick = 0; tick < 500; ++tick) {
+            const auto a = session.step(executor);
+            const auto b = restored.step(executor);
+            if (!a || !b) { expect(false, std::string(label) + ": continues"); return; }
+            if (a.value().state_sha256 != b.value().state_sha256) {
+                expect(false, std::string(label) + ": restored continuation matches the straight run at tick " + std::to_string(tick));
+                return;
+            }
+        }
+        expect(true, std::string(label) + ": restored continuation matches the straight run");
+        auto beyond = saved.value();
+        auto bare = tactical::TacticalSession::create(one_ship(), {}, {}, table);
+        beyond[0] = 37;
+        expect(bare && !bare.value().load_checkpoint_state(beyond), std::string(label) + ": domain 37 is refused");
+    };
+    checkpoint_case({command(0, 1, 0, 1, facing_move(at(300, 0, 0), yaw_a))}, "MV-40 order checkpoint");
+    checkpoint_case({command(0, 1, 0, 1, facing_move(at(300, 0, 0), yaw_a))}, "MV-40 mid-turn checkpoint", 200);
+    checkpoint_case({command(0, 1, 0, 1, tactical::MovePayload{at(300, 0, 0)}),
+        command(0, 1, 1, 1, facing_move(at(600, 0, 0), yaw_b, false, true))}, "MV-40 queued-leg checkpoint");
+    {
+        const eawr::platform::ThreadWorkerAdapter executor(1);
+        auto first = tactical::TacticalSession::create(one_ship(), {}, {}, table);
+        expect(static_cast<bool>(first), "MV-40: plain checkpoint session creates");
+        if (first) {
+            auto session = std::move(first).value();
+            expect(static_cast<bool>(session.submit(command(0, 1, 0, 1, tactical::MovePayload{at(300, 0, 0)}))),
+                "MV-40: plain move admits");
+            for (int tick = 0; tick < 50; ++tick) expect(static_cast<bool>(session.step(executor)), "MV-40: plain move steps");
+            const auto saved = session.save_checkpoint_state();
+            expect(saved && domain_of(saved.value()) == 29U, "MV-40: no facing keeps the domain and layout of before");
+            if (saved) {
+                auto padded = saved.value();
+                padded[0] = 33;
+                auto fresh = tactical::TacticalSession::create(one_ship(), {}, {}, table);
+                expect(fresh && !fresh.value().load_checkpoint_state(padded),
+                    "MV-40: a facing domain with no facing held is refused");
+            }
+        }
+    }
+}
+
 } // namespace
 
 int main(const int argc, char** argv) {
@@ -1142,6 +1498,7 @@ int main(const int argc, char** argv) {
         return 2;
     }
     test_waypoints();
+    test_final_facing();
     test_validation();
     test_motion_normalization();
     test_motion_boundaries();

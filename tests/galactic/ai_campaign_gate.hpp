@@ -306,6 +306,9 @@ struct Report {
     std::uint64_t encoder_free_samples{}, encoder_free_ns{}, same_payload_encoded_samples{};
     std::uint64_t mature_native_bytes{}, mature_goals{}, mature_originals{}, mature_purchases{}, mature_movements{};
     std::uint64_t freestore_move_refusals{};
+    // #6338: galactic AI providers retired by a script error (permanent for the campaign). Written only when non-zero, so a run
+    // where nothing retires keeps its digest exactly.
+    std::uint64_t provider_retirements{};
     std::map<gc::PlayerId, PlayerProgress> players;
     std::map<std::string, std::map<std::uint32_t, std::uint64_t>> boundaries;
     std::optional<gc::CampaignResult> terminal;
@@ -327,8 +330,9 @@ struct Report {
         json_string(output, stop_reason); output << ",\"failure\":"; json_string(output, failure);
         // WGA-309: a destination-found result can consume Lua's quota despite
         // a silent unbound native mover refusal. Keep that limitation visible.
-        output << ",\"freestore_move_refusals\":" << freestore_move_refusals
-            << ",\"battles\":" << battles << ",\"returns\":" << returns << ",\"terminal_result\":";
+        output << ",\"freestore_move_refusals\":" << freestore_move_refusals;
+        if (provider_retirements) output << ",\"provider_retirements\":" << provider_retirements;
+        output << ",\"battles\":" << battles << ",\"returns\":" << returns << ",\"terminal_result\":";
         if (terminal) output << "{\"winner\":" << terminal->condition.player << ",\"condition\":" << static_cast<unsigned>(terminal->condition.kind) << '}';
         else output << "null";
         output << ",\"blocked_invasion\":";
@@ -505,6 +509,7 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
             }
             const auto actions = view.actions.lock(); check(static_cast<bool>(actions), "campaign native action owner lifetime ended during gate");
             report.freestore_move_refusals = actions->freestore_move_refusals();
+            report.provider_retirements = cp::galactic_ai_provider_retirements(view);
             if (!report.freestore_hop) for (const auto& [request, movement] : actions->movements()) {
                 if (!movement.freestore_actor || !movement.actor || !movement.registered || movement.finished) continue;
                 const auto fleet = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(),

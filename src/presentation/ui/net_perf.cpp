@@ -25,6 +25,28 @@ namespace {
 
 } // namespace
 
+const char* net_route_name(const NetRoute route) {
+    switch (route) {
+    case NetRoute::direct: return "direct";
+    case NetRoute::relay: return "relay";
+    case NetRoute::relay_own: return "relay-own";
+    case NetRoute::relay_cloudflare: return "relay-cloudflare";
+    case NetRoute::unknown: break;
+    }
+    return "unknown";
+}
+
+const char* net_route_text(const NetRoute route) {
+    switch (route) {
+    case NetRoute::direct: return "direct";
+    case NetRoute::relay: return "relay";
+    case NetRoute::relay_own: return "relay (own)";
+    case NetRoute::relay_cloudflare: return "relay (cloudflare)";
+    case NetRoute::unknown: break;
+    }
+    return "unknown";
+}
+
 void NetStallLedger::observe(const std::uint64_t now_ms, const bool waiting, const std::uint32_t peer) {
     if (waiting && !waiting_) {
         waiting_ = true;
@@ -71,6 +93,17 @@ NetStallSnapshot NetStallLedger::snapshot(const std::uint64_t now_ms) const {
     return out;
 }
 
+std::string net_route_hint(const NetPerfReport& report) {
+    const NetPeerLink* worst = nullptr;
+    for (const NetPeerLink& peer : report.peers)
+        if (peer.route_lossy && (worst == nullptr || peer.loss_pct > worst->loss_pct)) worst = &peer;
+    if (worst == nullptr) return {};
+    const char* carried = "relay";
+    if (worst->route == NetRoute::relay_own) carried = "relay own";
+    else if (worst->route == NetRoute::relay_cloudflare) carried = "relay cloudflare";
+    return std::string("Network route degraded (") + carried + ", " + fixed("%.0f", worst->loss_pct) + "% loss)";
+}
+
 NetVerdict net_verdict(const NetPerfReport& report) {
     const NetStallSnapshot& stall = report.stall;
     NetVerdict out;
@@ -101,7 +134,7 @@ std::string net_summary_line(const NetPerfReport& report) {
     if (report.peers.empty()) out << '-';
     for (std::size_t index = 0; index < report.peers.size(); ++index) {
         const NetPeerLink& peer = report.peers[index];
-        out << (index == 0 ? "" : ";") << peer.peer << ':';
+        out << (index == 0 ? "" : ";") << peer.peer << ":route=" << net_route_name(peer.route) << (peer.route_lossy ? ",degraded" : "") << ',';
         if (!peer.measured) out << "unmeasured";
         else out << "rtt_ms=" << fixed("%.0f", peer.rtt_ms) << ",jitter_ms=" << fixed("%.0f", peer.jitter_ms)
                  << ",loss_pct=" << fixed("%.1f", peer.loss_pct);
@@ -123,7 +156,7 @@ std::string net_report_json(const NetPerfReport& report) {
         << ", \"sim_ms\": " << fixed("%.3f", report.sim_ms) << ", \"peers\": [";
     for (std::size_t index = 0; index < report.peers.size(); ++index) {
         const NetPeerLink& peer = report.peers[index];
-        out << (index == 0 ? "" : ", ") << "{\"peer\": " << peer.peer << ", \"measured\": " << (peer.measured ? "true" : "false")
+        out << (index == 0 ? "" : ", ") << "{\"peer\": " << peer.peer << ", \"route\": \"" << net_route_name(peer.route) << "\", \"route_lossy\": " << (peer.route_lossy ? "true" : "false") << ", \"measured\": " << (peer.measured ? "true" : "false")
             << ", \"rtt_ms\": " << fixed("%.1f", peer.rtt_ms) << ", \"jitter_ms\": " << fixed("%.1f", peer.jitter_ms)
             << ", \"loss_pct\": " << fixed("%.1f", peer.loss_pct) << "}";
     }

@@ -171,6 +171,13 @@ struct MipLevel final {
     std::uint32_t width{}, height{}, row_pitch{};
     std::vector<std::byte> bytes;
 };
+// The renderer's GPU-texture identity (see texture_digest.hpp): two independent digests of the format, size, level count and
+// stored mip bytes.
+struct TextureDigest final {
+    std::uint64_t key{}, check{};
+
+    friend bool operator==(const TextureDigest&, const TextureDigest&) = default;
+};
 struct Texture final {
     Source source;
     std::uint32_t width{}, height{};
@@ -179,6 +186,10 @@ struct Texture final {
     bool has_alpha{};
     std::vector<MipLevel> mips;
     std::vector<Notice> notices;
+    // compute_texture_digest(*this), when a reader thread already took it after the final mip chain (the digest is a
+    // pure function of the fields above, so this only saves the loader from hashing the pixels again). Anything that
+    // changes format, size or mips afterwards must reset it; extend_mip_chain does.
+    std::optional<TextureDigest> content_digest;
 };
 
 struct AtlasRectangle final {

@@ -357,12 +357,18 @@ struct GalacticHint {
     std::string planet, name;
     Real value{};
 };
+struct GalacticSpaceConflict {
+    tactical::PlayerId player{};
+    galactic::PlanetId planet{};
+    std::uint64_t frame{};
+};
 struct GalacticPerceptionState {
     // F archives these value records with its versioned manager state.
     std::vector<GalacticCachedValue> cache;
     std::vector<GalacticVisibility> visibility;
     std::vector<GalacticStoryFlag> flags;
     std::vector<GalacticHint> hints;
+    std::vector<GalacticSpaceConflict> space_conflicts;
 };
 struct GalacticPerceptionWork {
     std::uint64_t prepared_planets{}, prepared_objects{}, prepared_routes{}, producer_offers{};
@@ -377,7 +383,7 @@ class GalacticWorld final : public World, public galactic_ai::TrackedStateContri
 public:
     class PhaseSavepoint {
     public:
-        struct Work { std::size_t player_headers{}, cache_rows{}, visibility_rows{}, flag_rows{}, coefficient_graphs{}; };
+        struct Work { std::size_t player_headers{}, cache_rows{}, visibility_rows{}, flag_rows{}, conflict_rows{}, coefficient_graphs{}; };
         ~PhaseSavepoint();
         PhaseSavepoint(const PhaseSavepoint&) = delete;
         PhaseSavepoint& operator=(const PhaseSavepoint&) = delete;
@@ -693,6 +699,7 @@ public:
     [[nodiscard]] bool check_story_flag(tactical::PlayerId, galactic::PlanetId, std::string_view, bool clear);
     // WGA-65: refresh existing bindings on gain AND loss, before recording hidden.
     void visibility_changed(tactical::PlayerId, galactic::PlanetId, bool visible, std::uint32_t mask = 0);
+    void space_conflict_ended(galactic::PlanetId, std::uint64_t synchronized_frame);
 
     void memory_inventory(diagnostics::GcMemory&) const;
 
@@ -916,6 +923,7 @@ private:
         std::vector<GalacticVisibility> visibility;
         std::vector<GalacticStoryFlag> flags;
         std::vector<GalacticHint> hints;
+        std::vector<GalacticSpaceConflict> space_conflicts;
         std::map<std::tuple<tactical::PlayerId, galactic::PlanetId, std::uint32_t>, std::size_t> visibility_index;
         // Tokens first interned during a pass: the shared table below is only written while the world is loaded.
         std::map<std::vector<std::string>, std::uint64_t> late_token_ids;

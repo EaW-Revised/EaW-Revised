@@ -135,9 +135,11 @@ void settle_routeless(LandMovingSquad& s) {
     if (!s.generic_team && s.temporary_first == 0 && s.path.nodes.empty()
         && (s.order == LandMoveOrder::following || s.order == LandMoveOrder::recovering)) s.order = LandMoveOrder::reached;
 }
+} // namespace
+
 // Validate every crossed cell rectangle, including diagonal corner cells. This is conservative at
 // corners, like L4's no-corner-cut rule; it never tunnels through a blocked cell on a long step.
-bool admitted(const LandOccupancy& grid, Vec2 from, Vec2 to, Fixed radius, std::uint32_t mask) {
+bool land_segment_admitted(const LandOccupancy& grid, Vec2 from, Vec2 to, Fixed radius, std::uint32_t mask) {
     const auto pitch = grid.terrain().spacing();
     const auto footprint = land_footprint(radius, pitch);
     auto x = land_cell_of(from.x, pitch, grid.terrain().width());
@@ -167,6 +169,7 @@ bool admitted(const LandOccupancy& grid, Vec2 from, Vec2 to, Fixed radius, std::
     }
     return a.valid;
 }
+namespace {
 bool active(LandMoveOrder order) { return order == LandMoveOrder::following || order == LandMoveOrder::recovering; }
 // WLPA-85: the members of a reached non-generic squad keep finishing passive slot recovery after the container's move ended.
 bool follows(const LandMovingSquad& squad) {
@@ -280,8 +283,18 @@ Fixed land_member_desired_speed(Fixed parent, Fixed maximum, Fixed error, bool t
     return a.valid ? std::clamp(desired, zero, maximum) : zero;
 }
 
-std::optional<LandMovement> LandMovement::from_checkpoint(Checkpoint saved) {
+bool LandMovement::valid_pads(const std::span<const LandPadBody> pads) noexcept {
+    for (std::size_t i = 0; i < pads.size(); ++i) {
+        const auto& pad = pads[i];
+        if (!pad.object || (i && pads[i - 1].object >= pad.object) || pad.half_x <= zero || pad.half_y <= zero
+            || pad.group == units::LandCollisionGroup::none || pad.group > units::LandCollisionGroup::giant_vehicle) return false;
+    }
+    return true;
+}
+
+std::optional<LandMovement> LandMovement::from_checkpoint(Checkpoint saved, const std::span<const LandPadBody> pads) {
     LandMovement result;
+    if (!valid_pads(pads)) return std::nullopt;
     std::vector<EntityId> ids;
     for (const auto& squad : saved.squads) {
         if (!squad.object || squad.jiggle < zero || squad.assigned_speed < zero || squad.collision_speed < zero
@@ -312,6 +325,7 @@ std::optional<LandMovement> LandMovement::from_checkpoint(Checkpoint saved) {
     }
     std::sort(ids.begin(), ids.end());
     if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) return std::nullopt;
+    for (const auto& pad : pads) if (std::binary_search(ids.begin(), ids.end(), pad.object)) return std::nullopt;
     if (saved.contact_settings.prediction_seconds < zero || saved.contact_settings.minimum_prediction_distance < zero)
         return std::nullopt;
     // WLPA-82: a contact names collision bodies: a formation squad with a class (its object id) or a generic-team member.
@@ -327,11 +341,21 @@ std::optional<LandMovement> LandMovement::from_checkpoint(Checkpoint saved) {
         const auto group = squad.has_formation ? squad.collision_class : first_member[i]->profile.collision_class;
         if (group != units::LandCollisionGroup::none) body_ids.push_back(squad.object);
     }
+    for (const auto& pad : pads) body_ids.push_back(pad.object);
     std::sort(body_ids.begin(), body_ids.end());
     for (std::size_t i = 0; i < saved.contacts.size(); ++i) {
         const auto& c = saved.contacts[i];
         const auto body_exists = [&](EntityId id) { return std::binary_search(body_ids.begin(), body_ids.end(), id); };
-        if (!body_exists(c.first) || (c.second && (!body_exists(c.second) || c.second <= c.first))
+        // LE-OCCUPY / FD-82: a pad that reached final lifetime since the last service may still be named by one endpoint of a
+        // retained row; it is not a squad or member id, so it can only be a retired pad. The row resolves at the next service.
+        // Deliberate: pads are not saved, so a retired pad cannot be told from any other unknown id. One unknown endpoint beside
+        // a real body is accepted (the row resolves at the next service, harmless); a row with no body at either end is refused.
+        const auto retired = [&](EntityId id) {
+            return !body_exists(id) && !std::binary_search(ids.begin(), ids.end(), id);
+        };
+        const bool first_ok = body_exists(c.first) || (c.second && body_exists(c.second) && retired(c.first));
+        const bool second_ok = !c.second || body_exists(c.second) || (body_exists(c.first) && retired(c.second));
+        if (!first_ok || !second_ok || (c.second && c.second <= c.first)
             || ((c.kind == LandContactKind::terrain) != (c.second == 0))
             || c.kind > LandContactKind::moving_moving || c.state > LandContactState::recovery
             || c.route > LandContactRoute::escape_opposed
@@ -365,6 +389,7 @@ std::optional<LandMovement> LandMovement::from_checkpoint(Checkpoint saved) {
         if (s.temporary_first != c.first || s.temporary_second != c.second) return std::nullopt;
     }
     result.state_ = std::move(saved);
+    result.pads_.assign(pads.begin(), pads.end());
     result.proposals_.resize(result.state_.members.size());
     result.member_motion_inputs_.resize(result.state_.members.size());
     result.staged_slot_.resize(result.state_.members.size());
@@ -417,8 +442,16 @@ void LandMovement::build_bodies() {
         body.single = !s.has_formation;
         bodies_.push_back(body);
     }
+    // LE-OCCUPY: a pad is a body of its own: no squad, no member, never moving.
+    for (std::size_t i = 0; i < pads_.size(); ++i) {
+        Body body;
+        body.object = pads_[i].object; body.squad = no_body; body.member = no_body; body.holder = no_body;
+        body.pad = true; body.pad_slot = i;
+        bodies_.push_back(body);
+    }
     std::sort(bodies_.begin(), bodies_.end(), [](const Body& x, const Body& y) { return x.object < y.object; });
     for (std::size_t b = 0; b < bodies_.size(); ++b) {
+        if (bodies_[b].pad) continue;
         if (bodies_[b].container) body_of_squad_[bodies_[b].squad] = b;
         else body_of_member_[bodies_[b].member] = b;
     }
@@ -430,6 +463,7 @@ void LandMovement::build_bodies() {
     discovered_.assign(count, {});
     discovery_valid_.assign(count, 1);
     pair_blocked_.assign(count, 0);
+    pair_blocker_.assign(count, 0);
     body_proposed_.assign(count, {});
     refresh_bodies();
 }
@@ -440,11 +474,38 @@ std::size_t LandMovement::body_index(EntityId id) const {
     return at != bodies_.end() && at->object == id ? static_cast<std::size_t>(at - bodies_.begin()) : bodies_.size();
 }
 
+bool LandMovement::set_pads(const std::span<const LandPadBody> pads) {
+    if (!valid_pads(pads)) return false;
+    for (const auto& pad : pads) {
+        if (std::any_of(state_.squads.begin(), state_.squads.end(), [&](const auto& row) { return row.object == pad.object; })
+            || std::any_of(state_.members.begin(), state_.members.end(), [&](const auto& row) { return row.object == pad.object; }))
+            return false;
+    }
+    if (std::equal(pads.begin(), pads.end(), pads_.begin(), pads_.end())) return true;
+    pads_.assign(pads.begin(), pads.end());
+    build_bodies();
+    return true;
+}
+
 // WLPA-95: a formation squad's box is centred on the container, oriented by its facing, with half extents of half the
 // span of the members' base offsets widened by their hard extents, plus the container's jiggle distance. The radius is
 // the box diagonal. A member that authors no hard extent contributes its soft radius instead.
 void LandMovement::refresh_bodies() {
     for (auto& body : bodies_) {
+        if (body.pad) {
+            // LE-OCCUPY: the pad's hard footprint as one body. Like a container's box (WLPA-95) its disc radius is the box
+            // diagonal; the idle-pair test against a container uses the oriented boxes themselves.
+            const auto& pad = pads_[body.pad_slot];
+            Arithmetic a;
+            body.active = false; body.moving = false; body.valid = true;
+            body.position = pad.position; body.facing = pad.facing; body.speed = zero;
+            body.maximum_speed = zero; body.acceleration = zero; body.assigned_speed = zero; body.collision_speed = zero;
+            body.group = pad.group; body.rank = static_cast<std::uint32_t>(pad.group); body.progress = 0;
+            body.half_x = pad.half_x; body.half_y = pad.half_y;
+            body.radius = a.length({pad.half_x, pad.half_y});
+            body.valid = a.valid;
+            continue;
+        }
         const auto& s = state_.squads[body.squad];
         body.active = s.order == LandMoveOrder::following || s.order == LandMoveOrder::recovering;
         body.moving = moving_order(s);
@@ -559,7 +620,7 @@ std::optional<LandMovement::DetachedSquad> LandMovement::detach_squad(const Enti
         if (member.squad == index) detached.members.push_back(member);
     if (detached.members.empty()) return std::nullopt;
     // Apply to a copy so an invalid intermediate state cannot lose the original roster.
-    auto next = from_checkpoint(state_);
+    auto next = from_checkpoint(state_, pads_);
     if (!next) return std::nullopt;
     for (const auto& member : detached.members)
         if (!next->remove_member(member.object)) return std::nullopt;
@@ -594,7 +655,7 @@ bool LandMovement::restore_squad(DetachedSquad detached, const math::Vec2 positi
         saved.members.push_back(std::move(member));
     }
     std::sort(saved.members.begin(), saved.members.end(), [](const auto& a, const auto& b) { return a.object < b.object; });
-    auto rebuilt = from_checkpoint(std::move(saved));
+    auto rebuilt = from_checkpoint(std::move(saved), pads_);
     if (!rebuilt) return false;
     const bool reference = reference_pair_scans_, repulsion = straggler_repulsion_;
     *this = std::move(*rebuilt);
@@ -636,7 +697,7 @@ bool LandMovement::remove_member(const EntityId object) {
     }
     // Death is a sparse ordered lifecycle operation. Rebuild scratch once per removal;
     // ordinary per-member movement and occupancy preparation remain partitioned.
-    auto rebuilt = from_checkpoint(std::move(state_));
+    auto rebuilt = from_checkpoint(std::move(state_), pads_);
     if (!rebuilt) return false;
     const bool reference = reference_pair_scans_, repulsion = straggler_repulsion_;
     *this = std::move(*rebuilt);
@@ -893,14 +954,17 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
         for (auto k = adjacency_offset_[b]; k < adjacency_offset_[b + 1]; ++k) {
             const auto& contact = state_.contacts[adjacency_row_[k]];
             if (contact.second == 0) continue;
+            // WLPA-97: a pair that took the terminal no_action rung steers like a repulsion row while it passes.
             const bool qualifies = contact.kind == LandContactKind::moving_stopped
                 ? contact.state != LandContactState::resolved && contact.state != LandContactState::follower_speed
                     && contact.state != LandContactState::same_direction_speed
-                : contact.kind == LandContactKind::moving_moving && contact.state == LandContactState::repulsion;
+                : contact.kind == LandContactKind::moving_moving
+                    && (contact.state == LandContactState::repulsion || contact.state == LandContactState::no_action);
             if (!qualifies) continue;
             const auto other = body_index(contact.first == body.object ? contact.second : contact.first);
             if (other >= bodies) continue;
             const auto& peer = bodies_[other];
+            if (peer.pad) continue; // LE-OCCUPY: soldiers steer apart from soft bodies; a pad is never a steering peer
             if (peer.container) for (const auto member : squad_members_[peer.squad]) body_peers_[b].push_back(member);
             else body_peers_[b].push_back(peer.member);
         }
@@ -1107,7 +1171,7 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                 const auto travel = std::min(distance, remaining);
                 const auto next = travel == distance ? route.nodes[tracker]
                     : a.add(p.position, a.mul(delta, a.div(travel, distance)));
-                if (!a.valid || !admitted(context.grid, p.position, next, radius, common_mask)) {
+                if (!a.valid || !land_segment_admitted(context.grid, p.position, next, radius, common_mask)) {
                     p.terrain_blocked = true; p.terrain_target = next; break;
                 }
                 p.position = next;
@@ -1223,8 +1287,8 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                     const auto valid_side = [&](bool positive) {
                         const auto endpoint = positive ? a.add(other.position, lateral) : a.sub(other.position, lateral);
                         const auto forward_reach = a.mul(direction, reach);
-                        return admitted(context.grid, other.position, endpoint, m.profile.radius, m.mask)
-                            && admitted(context.grid, a.sub(endpoint, forward_reach), a.add(endpoint, forward_reach), m.profile.radius, m.mask);
+                        return land_segment_admitted(context.grid, other.position, endpoint, m.profile.radius, m.mask)
+                            && land_segment_admitted(context.grid, a.sub(endpoint, forward_reach), a.add(endpoint, forward_reach), m.profile.radius, m.mask);
                     };
                     const bool positive = dot(a, offset, side(direction)) < zero;
                     auto chosen = positive ? lateral : a.mul(lateral, Fixed::from_raw(-Fixed::scale));
@@ -1323,7 +1387,7 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                 // terrain veto (retail clips corners). A generic-team member and a single object (hero, bike, lone vehicle)
                 // keep their own occupancy test (WLPA-36/69); a single's refusal reaches its container at the commit.
                 if (!s.generic_team && s.has_formation) { if (a.valid) p.position = next; }
-                else if (a.valid && admitted(context.grid, m.position, next, m.profile.radius, m.mask)) p.position = next;
+                else if (a.valid && land_segment_admitted(context.grid, m.position, next, m.profile.radius, m.mask)) p.position = next;
                 else { p.speed = zero; p.state = LandWalkState::stopping; p.terrain_blocked = true; p.terrain_target = next; }
             }
             // LR13-24: the ordinary moving path consumes a turn budget.
@@ -1345,6 +1409,7 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
     if (!run) return run;
     // The body positions the pair sweep reads: the container's proposed position, or a generic member's own.
     const auto proposed_position = [this](const Body& body) {
+        if (body.pad) return body.position; // LE-OCCUPY: a pad never proposes a move
         return body.container ? squad_proposals_[body.squad].position : proposals_[body.member].position;
     };
     if (!reference_pair_scans_) {
@@ -1372,8 +1437,9 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
         for (auto b = range.begin; b < range.end; ++b) {
             const auto& body = bodies_[b];
             pair_blocked_[b] = 0;
+            pair_blocker_[b] = 0;
             pair_visits_[b] = 0;
-            if (body.radius <= zero) continue;
+            if (body.radius <= zero || body.pad) continue;
             Arithmetic a;
             const auto proposed = body_proposed_[b];
             auto& candidates = neighbour_candidates_[b];
@@ -1409,13 +1475,25 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                         && dot(a, offset, a.sub(proposed, body.position)) > zero) continue;
                     // WLPA-57/82: a moving soft body against an idle soft body is no hard pair either; the moving/stopped
                     // contact decides (repulsion, or truncate / path-around / push when the move ends on the idle body).
-                    if (straggler_repulsion_ && body.active && !other.active
+                    if (straggler_repulsion_ && body.active && !other.active && !other.pad
                         && state_.squads[other.squad].order != LandMoveOrder::yielded
                         && soft_group(body.group) && soft_group(other.group)) continue;
                     // Existing overlap may separate, but never deepen.
                     if (a.length(offset) < radius
                         && a.length(a.sub(proposed, other.position)) > a.length(offset)) continue;
-                    pair_blocked_[b] = 1; break;
+                    // WLPA-97: a pair whose contact took the terminal no_action rung is not held while both bodies move: no
+                    // veto is permanent, and an idle body is never walked through. The rows are the committed ones the
+                    // adjacency was built from before the proposals.
+                    bool released = false;
+                    for (auto k = adjacency_offset_[b]; body.moving && other.moving && k < adjacency_offset_[b + 1] && !released; ++k) {
+                        const auto& row = state_.contacts[adjacency_row_[k]];
+                        released = row.state == LandContactState::no_action
+                            && (row.first == other.object || row.second == other.object);
+                    }
+                    if (released) continue;
+                    // The blocker recorded for the contact service is the lowest object id, whatever the candidate order.
+                    pair_blocked_[b] = 1;
+                    if (!pair_blocker_[b] || other.object < pair_blocker_[b]) pair_blocker_[b] = other.object;
                 }
             }
             if (!a.valid) pair_blocked_[b] = 2;

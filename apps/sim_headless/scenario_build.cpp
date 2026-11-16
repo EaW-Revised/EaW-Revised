@@ -1,4 +1,5 @@
 #include "scenario_internal.hpp"
+#include "eawr/core/degradation_ledger.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/battle/start.hpp"
 
@@ -395,7 +396,9 @@ core::Result<ScenarioRun> build_scenario(const std::filesystem::path& scenario_p
     if (result) {
         core::LoadNoteCollector collector;
         collector.merge(load_notes);
-        for (const auto& note : collector.snapshot())
+        const auto snapshot = collector.snapshot();
+        core::degradation::record_load_notes(snapshot);
+        for (const auto& note : snapshot)
             result.value().warnings.push_back(core::format_diagnostic(core::load_note_diagnostic(note)));
     }
     return result;

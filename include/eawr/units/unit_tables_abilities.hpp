@@ -57,6 +57,7 @@ struct Ability final {
     bool disable_movement{}; // WIN-02, WMS-02: authored movement lock while deployed
     bool stop_when_activated{true}; // WSD-02: self-destruct's authored stop and lock
     std::optional<Fixed> targeting_max_attack_distance; // WRA-03: active targeting reach
+    std::optional<Fixed> damage_percent_when_activated; // WLAB-15: STIM_PACK's self-damage, a share of the maximum health
     bool market_purchase_required{}; // WGEP-145
     bool operator==(const Ability&) const = default;
 };

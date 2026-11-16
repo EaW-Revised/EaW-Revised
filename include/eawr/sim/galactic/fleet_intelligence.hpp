@@ -57,6 +57,10 @@ struct ObservedFleet {
     // card sets it only when every fleet it merges is all-stealth; an enemy all-stealth fleet is never
     // published (WGUI-28/29), so the flag stays false there.
     bool all_stealth{};
+    // GHUDL-16 / #6745: the lowest-ranked hero among the real members, a named hero carried inside another ship
+    // included (the original's best-ship helper asks each ship whether it holds a named hero). Same disclosure as
+    // `overview_type`: an image type only, no entity, fleet identity or contents group.
+    std::optional<TypeId> overview_hero_type{};
     friend bool operator==(const ObservedFleet&, const ObservedFleet&) = default;
 };
 // True when `fleet` is the card's first fleet or the fleet of one of its groups.
@@ -87,10 +91,37 @@ struct FleetDisplayVisibility {
 // explicit #1154/WGUI-U07 producer seams, separate from these filtered cards.
 // GHUD-S76: icon_rank is an integer preference key supplied by the presentation
 // data adapter. It never imports floating arithmetic into the simulation boundary.
+// hero_rank (#6745) is the presentation's category ranking of a type that can win the hero-first image (a named
+// hero, or a generic hero with an icon); the lowest rank wins, the first member on a tie.
 [[nodiscard]] FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
     PlayerId local_player, std::span<const FleetDisplayType> traits,
     std::size_t group_capacity, std::span<const FleetDisplayVisibility> visibility = {},
     const std::function<std::optional<std::uint32_t>(TypeId)>& icon_rank = {},
-    std::span<const std::pair<EntityId, std::int64_t>> presentation_indices = {});
+    std::span<const std::pair<EntityId, std::int64_t>> presentation_indices = {},
+    const std::function<std::optional<std::int64_t>(TypeId)>& hero_rank = {});
+
+// #4375 / WGSI-1..4: which named heroes the local player sees at a planet, for the overview's hero icons. A planet row
+// is listed only when a hero qualifies. `ally` is set by an allied hero, `foreign` by a foreign hero the player's
+// knowledge admits; `owners` lists the owner players (ascending, unique) of the qualifying heroes. A hero landed on
+// a surface sets its owner's faction whatever its own visibility, but only while ground contents, major-stealth or
+// force-sensitive knowledge applies. Presentation projection: it grants no entity or fleet identity and changes no
+// state.
+// `heroes` lists the named heroes the hover tooltip of those icons shows (WGSI-8/9, legacy #7177): every allied hero, and
+// every non-allied hero the player's knowledge admits, in the order found (orbiting fleets, then landed forces).
+struct ObservedPlanetHero {
+    PlayerId owner{};
+    TypeId type{};
+    bool allied{};
+    friend bool operator==(const ObservedPlanetHero&, const ObservedPlanetHero&) = default;
+};
+struct ObservedPlanetHeroes {
+    PlanetId planet{};
+    bool ally{}, foreign{};
+    std::vector<PlayerId> owners;
+    std::vector<ObservedPlanetHero> heroes;
+    friend bool operator==(const ObservedPlanetHeroes&, const ObservedPlanetHeroes&) = default;
+};
+[[nodiscard]] std::vector<ObservedPlanetHeroes> observed_planet_heroes(const GalacticSnapshot& snapshot,
+    PlayerId local_player, std::span<const FleetDisplayType> traits, std::span<const FleetDisplayVisibility> visibility);
 
 } // namespace eawr::sim::galactic

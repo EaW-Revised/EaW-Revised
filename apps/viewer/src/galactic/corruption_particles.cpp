@@ -1,4 +1,5 @@
 #include "corruption_particles.hpp"
+#include "particle_texture_load.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/core/diagnostic.hpp"
 
@@ -27,7 +28,7 @@ const assets::Texture* CorruptionParticles::texture(std::string_view name) {
     auto [entry, inserted] = textures_.try_emplace(path);
     if (inserted) {
         if (const auto resolved = galactic_detail::resolve_texture(*filesystem_, path))
-            if (auto loaded = assets::load_texture(*filesystem_, *resolved)) entry->second = std::move(loaded.value());
+            if (auto loaded = load_particle_texture(*filesystem_, *resolved)) entry->second = std::move(loaded.value());
     }
     return entry->second ? &*entry->second : nullptr;
 }

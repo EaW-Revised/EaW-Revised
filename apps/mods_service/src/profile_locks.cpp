@@ -27,7 +27,8 @@ struct StateRead {
 };
 
 // {"profile":"id","pid":N,"process_start_time":"ticks"}. A missing file is free. A state without the creation time
-// (older launchers) is judged by its PID alone.
+// is stale: the PID alone cannot tell the game from an unrelated process that reused it, and the creation time is
+// the only thing that could confirm it (#6613).
 StateRead read_state(const fs::path& file) {
     std::error_code error;
     if (!fs::exists(file, error)) return {};
@@ -47,12 +48,13 @@ StateRead read_state(const fs::path& file) {
     const JsonValue* pid = json->member("pid");
     if (pid == nullptr || pid->kind != JsonValue::Kind::number || !std::isfinite(pid->number) || pid->number < 1
         || pid->number > (std::numeric_limits<unsigned>::max)() || std::floor(pid->number) != pid->number) return unreadable;
-    std::optional<std::string> start;
+    std::optional<std::string> start;   // stays empty when the state does not record it
     if (const JsonValue* value = json->member("process_start_time")) {
         if (value->kind != JsonValue::Kind::string || value->string.empty()
             || !std::all_of(value->string.begin(), value->string.end(), [](char c) { return c >= '0' && c <= '9'; })) return unreadable;
         start = value->string;
     }
+    if (!start) return {};   // unverifiable identity: never let a possibly reused PID hold the profile
     // Only a provably gone process releases the profile.
     if (launcher::process_gone(static_cast<unsigned>(pid->number), start)) return {};
     return {State::locked, *profile};

@@ -508,6 +508,32 @@ void planning() {
         "multiplayer campaign authoring callers can still plan without seat control");
     opts = options(); opts.players.back().active = false;
     expect(!cp::plan_campaign_setup(data(), types(), "Ordinary", opts), "inactive neutral refuses");
+    {
+        // #6812 / CGS-24: a mod's further neutral factions are players too; the first neutral binding is the root neutral.
+        auto modded = data();
+        for (const char* name : {"NEUTRAL_TEAM_1", "NEUTRAL_TEAM_2"}) {
+            dg::Faction team; team.name = name; team.is_neutral = true; modded.factions.push_back(team);
+        }
+        opts = options();
+        opts.players.push_back({{5, 5, 0}, "NEUTRAL_TEAM_1", true});
+        opts.players.push_back({{6, 6, 0}, "NEUTRAL_TEAM_2", false});
+        const auto many = cp::plan_campaign_setup(modded, types(), "Ordinary", opts);
+        expect(bool(many) && many.value().galaxy().players.size() == 6, "several neutral factions are all bound as players");
+        if (many) {
+            const auto owned_by_root = std::count_if(many.value().galaxy().planets.begin(), many.value().galaxy().planets.end(),
+                [](const auto& planet) { return planet.owner == 4; });
+            const auto owned_by_extra = std::count_if(many.value().galaxy().planets.begin(), many.value().galaxy().planets.end(),
+                [](const auto& planet) { return planet.owner == 5 || planet.owner == 6; });
+            expect(owned_by_root > 0 && owned_by_extra == 0, "the first neutral owns the unowned planets; extra neutrals own nothing");
+        }
+        // The root is the first neutral binding: if it is inactive the start refuses, whatever follows it.
+        opts = options(); opts.players.back().active = false;
+        opts.players.push_back({{5, 5, 0}, "NEUTRAL_TEAM_1", true});
+        expect(!cp::plan_campaign_setup(modded, types(), "Ordinary", opts), "an inactive first neutral still refuses");
+        // No neutral player: nothing can own the unowned planets.
+        opts = options(); opts.players.pop_back();
+        expect(!cp::plan_campaign_setup(modded, types(), "Ordinary", opts), "no neutral player refuses");
+    }
     opts = options(); opts.types.push_back({9, "ship"});
     expect(!cp::plan_campaign_setup(data(), types(), "Ordinary", opts), "original type cannot get a second identity");
     opts = options(); opts.players[1].player.faction_id = opts.players[0].player.faction_id;

@@ -30,9 +30,12 @@ Real power_metric(const AiType* type) { return type == nullptr ? Real{} : type->
 // The company type of an object (PG-08): a squadron container's squadron type, else its own.
 const AiType* company_type(const Host& host, const ViewUnit& unit) { return host.type(unit.type); }
 
-bool fogged_for(const Host& host, const WorldView& view, const ViewUnit& unit, tactical::PlayerId player) {
-    // SK-45: an AI player sees everything (AIUsesFogOfWarSpace = False).
-    if (host.ai(player)) return false;
+bool fogged_for(const Host& host, const WorldView& view, const ViewUnit& unit, tactical::PlayerId player,
+    const Constants& constants) {
+    // SK-45 / TCFA-11: only unforced space AI object queries use this authored switch.
+    // Land retains its existing policy until its own mode-specific flag is qualified.
+    const bool uses_fog = host.setup.domain == tactical::BattleDomain::space && constants.uses_fog_space;
+    if (host.ai(player) && !uses_fog) return false;
     const detail::ViewPlayer* entry = view.player(player);
     return entry == nullptr || (unit.visible_to & (std::uint64_t{1} << entry->snapshot_index)) == 0;
 }
@@ -466,7 +469,7 @@ void ThreatGrid::baseline_fog(const Host& host) { sweep_fog(host, 0, false); }
 // player adds the ticks since its last fully-fogged stamp; the total is averaged over every touched
 // cell and converted to seconds. A never-seen fogged cell counts the whole game age; an unfogged
 // cell counts 0. The fog is the session's real fog grid for every player, an AI player included;
-// the AIUsesFogOfWarSpace setting (False in stock) is not read, so True is not modelled.
+// AIUsesFogOfWarSpace affects object queries, never the real cell-fog age.
 Real ThreatGrid::time_since_seen(const Host& host, const Rect& rect, const tactical::PlayerId player,
     const std::int64_t frame) const {
     if (!ready() || host.world == nullptr) return Real{};
@@ -547,7 +550,7 @@ Real ThreatGrid::force(const Host& host, const WorldView& view, const Rect& rect
                 }
                 const ViewUnit* unit = contribution ? contribution->unit : view.find(object);
                 if (unit == nullptr || object == excluded) continue;
-                if (fogged_for(host, view, *unit, player)) continue;
+                if (fogged_for(host, view, *unit, player, constants_)) continue;
                 if (!prepared) {
                     const AiType* company = company_type(host, *unit);
                     if (company == nullptr || (company->category_bits & category) == 0) continue;
@@ -598,7 +601,7 @@ Real ThreatGrid::concentration(const Host& host, const WorldView& view, const Re
                 if (base != cell_index) continue;
                 const auto* unit = view.find(object);
                 if (!unit || unit->owner == 0 || host.neutral(unit->owner)
-                    || host.allied(unit->owner, player) != friendly || fogged_for(host, view, *unit, player)) continue;
+                    || host.allied(unit->owner, player) != friendly || fogged_for(host, view, *unit, player, constants_)) continue;
                 const auto* company = company_type(host, *unit);
                 if (company && (company->category_bits & category) != 0)
                     cell = single(cell + power_metric(company));
@@ -664,7 +667,7 @@ Real ThreatGrid::force_visibility(const Host& host, const WorldView& view, std::
         const AiType* company = company_type(host, *unit);
         if (company == nullptr || (company->category_bits & category) == 0) continue;
         ++all;
-        if (!fogged_for(host, view, *unit, player)) ++seen;
+        if (!fogged_for(host, view, *unit, player, constants_)) ++seen;
     }
     if (all == 0) return real(1);
     return single(real(seen) / real(all));
@@ -1228,7 +1231,7 @@ struct TacticalWorld::Evaluator final : LookupResolver {
                 if (other == nullptr || other->owner != owner.id || (self_unit != nullptr && other->id == self_unit->id)) continue;
                 const AiType* type = host().type(other->type);
                 if (type == nullptr || (type->category_bits & parameters.category) == 0) continue;
-                if (fogged_for(host(), view(), *other, context.player)) continue;
+                if (fogged_for(host(), view(), *other, context.player, engine.data_.constants)) continue;
                 if (!types.empty() && std::find(types.begin(), types.end(), type) == types.end()) continue;
                 const Real dx = fixed(other->position.x) - sx;
                 const Real dy = fixed(other->position.y) - sy;

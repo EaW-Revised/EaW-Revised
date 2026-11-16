@@ -12,19 +12,23 @@ namespace eawr::presentation::godot_backend::detail {
 struct DeviceMemory final {
     std::uint64_t bytes{};
     std::string source;
+    std::uint64_t device_local_bytes{};
 };
 
-// One process-wide sample. Pending is distinct from a completed, unsupported probe:
+// A cached process-wide sample, refreshed explicitly before live target changes.
+// Pending is distinct from a completed, unsupported probe:
 // callers must not disable the adaptive budget while the render thread is sampling.
 class DeviceMemoryProbe final {
 public:
     using Clock = std::chrono::steady_clock;
     static constexpr auto pending_warning_delay = std::chrono::seconds{1};
 
-    [[nodiscard]] bool begin(const Clock::time_point now = Clock::now()) {
+    [[nodiscard]] bool begin(const Clock::time_point now = Clock::now(), const bool refresh = false) {
         std::lock_guard lock(mutex_);
-        if (requested_) return false;
+        if (requested_ && (!refresh || !memory_)) return false;
         requested_ = true;
+        memory_.reset();
+        pending_warned_ = false;
         requested_at_ = now;
         return true;
     }
@@ -55,8 +59,8 @@ private:
 template<class Dispatch, class Warn>
 [[nodiscard]] std::optional<DeviceMemory> request_device_memory(DeviceMemoryProbe& probe,
     Dispatch&& dispatch, Warn&& warn,
-    const DeviceMemoryProbe::Clock::time_point now = DeviceMemoryProbe::Clock::now()) {
-    if (probe.begin(now)) std::forward<Dispatch>(dispatch)();
+    const DeviceMemoryProbe::Clock::time_point now = DeviceMemoryProbe::Clock::now(), const bool refresh = false) {
+    if (probe.begin(now, refresh)) std::forward<Dispatch>(dispatch)();
     else if (probe.warn_pending_once(now)) std::forward<Warn>(warn)();
     return probe.memory();
 }

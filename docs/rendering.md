@@ -73,18 +73,111 @@ floor they use is set as described under [shadows](#shadows).
 ## Render profiles
 
 Owner decision D2 = B on graphics defaults and parity decisions: players get enhanced defaults, and every
-capture and test keeps the retail look. There is no player setting until M6
-(D1 = C). The host applies one profile to the root viewport before any mode
+capture and test keeps the retail look unless explicitly overridden. The host applies one profile to the root viewport before any mode
 starts (`apps/viewer/src/render_profile.hpp`):
 
 | Profile | MSAA | Screen-space AA | Anisotropic filtering | Default for |
 | --- | --- | --- | --- | --- |
 | retail | off | off | off | every run with a capture, report probe, self-test or window-resize test, and the fixed runs |
-| enhanced | 4x | SMAA | 16x | `--eawr-camera-interactive` without a capture, self-test or resize test |
+| enhanced | 4x | SMAA | 16x | a player's view: `--eawr-camera-interactive`, or the launcher's start (`--eawr-launcher-start`), without a capture, self-test or resize test |
 
-`--eawr-render-profile retail|enhanced` overrides the default for evidence
-runs; any other value fails the run before a mode starts. Mode reports record
-the root viewport's settings as `render_profile`.
+**Every scene uses the profile's own AA, space battles included (owner decision) (legacy EAWR-6972).** SMAA was switched
+off in space battles for a while because it smears the single-pixel, low-luma starfield dots (stars at luma 12 or
+more drop by about 40%, at 24 or more by about 75%); the owner restored it. One function decides,
+`render_settings(profile, scene)` in `render_profile.hpp`; it takes the scene (front end and attract, space battle)
+so a later per-scene rule has one place to go, and today returns the profile's settings for every scene. Every
+apply, re-apply (options screen, options mode) and report goes through `render_profile_viewport.hpp`, which
+recomputes profile, scene and the evidence override. Dots still blink while the camera turns (about a quarter of
+them per frame, with or without SMAA, because a one-pixel dot changes pixel phase).
+
+**A player's start.** The launcher always names a start report, and marks a start with `--eawr-launcher-start` when its
+extra arguments name no evidence or probe switch (`player_start_requested` in `launch_plan.cpp`: any `--eawr-*` switch
+beyond the few a player run takes keeps the start an evidence run). The report alone does not make that start
+evidence: it reads the player's saved settings (window, vsync, volumes, texture detail, render profile) like any
+player start. The profile is decided by `startup_render_profile` in `render_profile.hpp`: `--eawr-render-profile`
+wins, then the saved AA level, then the default above (a saved `automatic` is the default).
+Evidence runs (capture, probes, self-test, resize test, benchmark, perf trace) never read the saved settings.
+
+**3D SubViewports follow the profile.** MSAA, screen-space AA and anisotropy are per viewport, and the profile is
+applied to the root viewport. The SubViewports that draw 3D the profile smooths (the galactic world layer, and the
+planet on the loading screen) register with `register_render_viewport()`; every later apply (options screen, scene
+change) reaches them, and a freed one leaves the list (`unregister_render_viewport`, or pruned at the next apply).
+
+The galactic map draws its 3D as a chain of full-size layers (background, midground, midforeground, world), each
+layer's colour copied under the next as its canvas background, and the galaxy view composites the chain without
+drawing 3D itself. Only the world layer takes the profile, so MSAA, SMAA and supersampling resolve once over the
+composited picture; a middle layer takes it too when the galaxy's art authors models on it (`In_Midground` /
+`In_Midforeground`; FoC authors no models there). FoC does draw particles on the middle layers (the corruption
+particles on midground, the corruption lines on midforeground); particles alone do not make a layer take the profile,
+because soft billboards have no geometry edges for MSAA to smooth, and those layers stay plain. The
+background, middle layers without models and the galaxy view keep native, non-multisampled targets
+(`galactic_layer_takes_render_profile` in `render_profile.hpp`). Giving every layer the profile redid MSAA, SMAA and
+supersampling four times per frame.
+
+**Options AA levels.** The AA slider has four integer steps, saved as `video.render_profile`:
+
+| Level | Saved value | MSAA | SMAA | Anisotropy |
+| --- | --- | --- | --- | --- |
+| Off | off | off | off | off |
+| Low | low | 2x | off | 16x |
+| Medium | medium | 4x | on | 16x |
+| High | high | 8x | on | 16x |
+
+Supersampling is an independent Video option: Off (native resolution, default), 1.5x or 2x per axis,
+saved as `video.supersampling` step 0, 1 or 2. It works with every AA level, including Off, and
+uses 16x anisotropy when enabled. Higher settings use more GPU power and memory; the VRAM guard
+below can reduce the applied scale without changing the saved choice. The control is a slider in Video >
+Advanced. Cost figures are kept here only, never in the settings UI. On an RTX 2060 at 1440p, Medium
+(4x + SMAA) took 5.7 GPU ms, Medium + SS2 took 16.7 ms (about 3x), and High + SS2 (8x + SMAA + SS2) took
+25.6 ms. These figures describe that measured scene, not every scene or device.
+
+Explicit levels keep this AA table in every scene, including space battles. Old saved `retail` migrates
+to Medium with supersampling Off because launcher starts previously ignored that saved value.
+Old `high` and legacy `enhanced` migrate to Medium plus 2x supersampling; old `max` migrates to High plus 2x.
+The separate supersampling field identifies the new High (8x), so it round-trips without being mistaken
+for old High (4x plus SS2). An explicitly saved supersampling step wins regardless of line order.
+New explicit Off is stored as `off`, so it survives later starts without being mistaken for an old value.
+An absent or automatic AA choice uses Medium (4x MSAA, SMAA in every scene), controlled by the single
+`player_default_render_profile` constant. Options leaves an automatic choice unchanged until the AA
+slider is touched. Supersampling defaults to Off independently of AA.
+Shadow budgets retain the enhanced settings for each enabled level.
+
+`--eawr-render-profile retail|enhanced|low|medium|high` forces an AA profile (`max` is accepted as an alias for High with 2x supersampling). `--eawr-aa msaa=8,ss=2,smaa=1`
+is a run-local override for both players and evidence; any subset is accepted. MSAA accepts 0/2/4/8,
+SS accepts 1/1.5/2 (also 1.0/2.0), and SMAA accepts 0/1. Unknown keys, duplicates, missing fields and invalid
+values fail startup with a message. The older `--eawr-msaa 0|2|4|8` and `--eawr-smaa on|off` also work;
+the combined switch wins for fields it names. Overrides survive later Options and scene changes and never
+write themselves to the settings file. The launcher retains the player-start marker for `--eawr-aa` alone;
+captures and other evidence switches still select an evidence run.
+
+Supersampling scales each viewport's internal 3D resolution with bilinear filtering (the pinned engine's
+only supported filter above 1.0). Its memory guard uses the rendering device's actual local heaps and the
+smaller current Vulkan process budget, refreshed through the existing asynchronous render-thread probe
+before live level, registration or resolution changes. The main thread retains the current targets while
+polling the fresh sample without waiting. Root and registered 3D SubViewports share at most 35% of this
+memory: each target gets an equal share, so multiple full-screen layers cannot each spend 35%.
+
+The conservative planning estimate includes HDR colour (8 bytes/pixel), depth (4), two HDR resolve/post
+targets (16), scratch (4), multisample colour/depth (12 per sample), native output (8) and
+internal-resolution SMAA targets (16) when on. Live replacement counts the old target estimate plus the new estimate, since both may be
+alive during the switch. The steady goal is retained separately: when possible, a temporary bridge
+fits beside both the old and steady targets, then recovers the steady level on the following frame.
+It is an allocation estimate, not an exact engine-memory measurement. To fit its allowance,
+a target drops supersampling through 2.0, 1.5, 1.0, then MSAA through 8x, 4x, 2x, off; SMAA is disabled
+last if needed. An independent 8192-pixel dimension guard remains. If native targets alone cannot fit,
+the report says so rather than claiming safety. When VRAM cannot be read, supersampling is disabled
+above 1920x1080 output pixels. Resizes, registration changes and completion of the device probe recompute
+the decision. Without an old target, a 4 GiB device with one 1440p raw `msaa=8,ss=2,smaa=1` target selects SS1.5; an 8 GiB device
+permits SS2 there; a 24 GiB device permits 4K SS2. Old targets, multiple viewports or a smaller current
+process budget can lower these settings further.
+
+Mode reports (including the front-end startup report) include the selected profile and actual MSAA,
+supersampling, screen-space AA and anisotropy. Their `budget` object logs vendor/adapter, device-local
+bytes, current process budget and source, old/new/transient target estimates, allowance, viewport count, requested MSAA/SS, clamp
+reason and whether the result fits. Clamps also reach the console. `name` is `custom` when a run override
+differs from the selected profile after safety budgeting. AA never changes frame pacing, vsync or the
+AMD frame cap. The raw test switch can still request 8x MSAA with SS2 and SMAA; the guard applies to it
+as well. This guard is a precaution, not a guarantee that a scene's textures, meshes and other allocations will fit.
 
 - **Terrain sampler.** Only the terrain layer array requests anisotropic
   filtering. Retail TerrainRenderBump samples linear, so the retail profile
@@ -456,9 +549,19 @@ They identify inputs to the repeat tool, not qualification of a new build.
 ## Space sky
 
 The `E-space-environment-v1` tactical view keeps both sky layers and the
-sky-owned sun centred on the live camera. The sky radius is 48,000 units and
-the view's far plane is at least 60,000 units, including when Space_Mode
-supplies a shorter clip. Planet and nebula placements keep their map positions.
+sky-owned sun centred on the live camera. Each sky keeps its authored model
+size and object scale; the view's far plane is at least 100,000 units (retail's
+widened background range, BP-75), including when Space_Mode supplies a shorter clip.
+It was 60,000 before (legacy EAWR-6447), which cut off the far part of large backdrop planets
+(for example a scale-45 planet reaching about 72,600 units) when the camera pulled back,
+and, once skies kept their authored scale (legacy EAWR-6358), the whole sky of a mod whose sky shell lies
+beyond 60,000 units: the Remake Shola space map was reported to draw a flat background and no stars on that build (the reported symptom; not reproduced here).
+The sun billboard is still pulled to 0.9 x 48,000 = 43,200 units, so on stock maps
+(primary star mesh about 31,729 units out) it now sits outside the star shell, where it
+used to sit inside a 48,000-unit shell; sky surfaces write no depth, so the shell does
+not hide it. Planet and nebula placements keep their map positions, as retail's
+background objects do: they are world-space, not camera-relative, so their apparent
+size changes with camera distance.
 This is the viewer's environment presentation rule; sky object lookup and
 authored orientation still follow the TED environment fields below.
 
@@ -477,11 +580,23 @@ frames in a fixed capture, plus `--eawr-map-idle-offset`.
 The environment view sets `eawr_effect_time` on each Planet and Nebula surface
 whenever that tick changes.
 
-The bounded space slice selects environment 0's primary sky object (TED 0x19)
-from a semantically complete kind-2 map with no terrain. Secondary sky/cloud
-and unexamined Planet/Nebula fields retain explicit dispositions. Model lookup
+The space slice selects both sky objects from environment 0 (TED 0x19 and
+0x1a) from a semantically complete kind-2 map with no terrain. Unexamined
+Planet/Nebula fields retain explicit dispositions. Model lookup
 uses the viewer policy Space_Model_Name, Land_Model_Name, then Model_Name;
 this is not asserted to be the original lookup rule.
+
+| Rule | Evidence and outstanding question |
+|---|---|
+| SKY-6358-01 | The BFC Coruscant surface map's first environment names `STARS_HIGH` and `STAR_BACKDROP_RAW2_BLUE_ORANGE_HAZE_1`, with both TED scale fields 1 and all four orientation fields 0. Their XML models are `w_stars_high.alo` and `w_stars_nebula_blue_orange_haze01.alo`; their object scale factors are 1 and 20. Both set `Layer_Z_Adjust` 0, `In_Background` yes and `Exclude_From_Distance_Fade` true. Whether this particular map reproduces the reported difference needs a paired capture. |
+| SKY-6358-02 | The stock `benchmark_space` first environment names `STARS_MEDIUM` and `STAR_BACKDROP_GREEN`, both TED scales 1, primary angles (0, 0), secondary angles approximately (-1, 323) degrees. Their XML scale factors are 1 and 25, and the same three background tags match SKY-6358-01. |
+| SKY-6358-03 | Both example primary star meshes use MeshGloss with emissive RGB approximately 0.506, zero diffuse and specular; their sun billboards use MeshAdditive with white Color. Both example secondary meshes use MeshAdditiveVColor with zero UV scroll. The BFC secondary vertices are white; the stock secondary's vertex RGB ranges from 0 to 1. The preferred additive pass uses vertex RGB and light scale, not vertex or texture alpha, to attenuate RGB (AVC-01..04). |
+| SKY-6358-04 | The debug build creates primary then secondary as ordinary objects and does not consult the TED scales in that path (R-SKY-04). Transparent task ordering and blending follow AVC-04 and AVC-07 for the documented effect. Before submission the object light scale starts at white and can be modified by object effects; `Exclude_From_Distance_Fade` bypasses the distance-fade branch. The resulting scale reaches the effect via the render task. Its value for a particular sky and the final comparison need further verification; the equal-radius viewer policy is not evidence of retail geometry or opacity. |
+| SKY-6358-05 | The generic debug-build object transform passes the XML `Scale_Factor` to the attached model, unless a dynamic scale overrides it. The BFC example's primary star mesh has radius about 31,729 before its factor of 1, and its secondary has radius about 1,280 before its factor of 20. The resulting authored radii are therefore different. The model scales its renderable transform. The viewer applies each effective object scale (default 1) and retains its camera-centred sky policy. The visible consequence requires a paired capture. |
+| SKY-6358-06 | The BFC Coruscant skirmish map's sole environment selects `STARS_HIGH` and `STAR_BACKDROP_BLUE`, with both TED scales 1, primary angles (0, 0) and secondary angles approximately (21, 275) degrees. The latter uses `w_stars_nebula_blue.alo`, `Scale_Factor` 25 and the same three background tags in SKY-6358-01. Its additive vertex-colour mesh has RGB spanning 0 to 1 and radius about 1,248 before scaling, or about 31,198 after. Its base texture is BC1 without alpha. The primary radius is about 31,729. |
+| SKY-6358-07 | The BFC mod ships its sky textures as single-level images: the star texture `w_star_bkgnd_dense.dds` is 1024 px BC2 and the nebula `w_stars_nebula02.dds` 1024 px BC1, both with no mip chain, where the stock star texture is 512 px with a full chain. A paired capture of the same map on retail and on the viewer (GTX 970 rig, sky pixels only, same 1280x720) found retail with 30-80 star points per 100k sky pixels at luma 60 and above and the viewer with about 2900 (peak luma median 47 against 76, median sky luma 5-6 against 0). Forcing the sampled level (`textureLod` 0 to 3) and a level bias changed nothing in the viewer, i.e. the GPU texture had one level. Every environment texture now loads through one helper (`apps/viewer/src/environment_texture.hpp`: the default view, the evidence harness and the translated-shader texture loaders of the environment renderers) that completes a chain stopping above 1x1 with a plain box filter of the stored values (assets::extend_mip_chain, ChainKind::colour; the ship textures' loader requests a full chain the same way (legacy EAWR-5989) but gives additive ship materials the brightness-compensated chain: the sky's additive stars deliberately take the plain chain, which is what matches the retail statistics). The chain covers BC1 without 1-bit alpha, BC2, BC3 and the 24/32-bit formats (BFC's star, nebula, planet and city-light textures are BC2, BC1 and BC3, its atmosphere a TGA); other formats stay as decoded. Transparent and glow textures with an incomplete chain change too, which the ship policy leaves alone. A complete authored chain is never touched: all 184 stock `w_star*`, `w_nebula*`, `w_planet*` and `w_glow*` background textures have one, so stock skies are unchanged. The land map sky dome and its cloud layer (`apps/viewer/src/map_mode_ready.cpp`, a sky-only texture lookup passed to `compose_skydome`) load through the same helper (legacy EAWR-6722); the terrain and water lookup stays a plain load, and the one-time cost is the chain build on the decoded sky texture (a 8192x4096 DXT5 sky adds about a third of its base size in chain levels, built once at map load, before the battle starts). Unverified: that retail builds the chain for a sky texture rather than reaching the same look another way; the retail captures agree with a box chain by eye and by sky statistics. |
+| SKY-6358-08 | A sky object whose `Scale_Factor` is zero or negative is reported as an invalid sky (the sky is missing) instead of collapsing or mirroring it. Unverified: retail's handling of such a value has not been observed. The installed FoC sky-dome data and the installed workshop mods' sky-dome files (about 34 files) author no zero or negative factor, so there was nothing to capture; a mod that authored a negative factor used to see a mirrored sky and now sees none. |
+| SKY-6760-01 | An environment model names its textures as authored, and a mod may name a source-art suffix it does not ship: the Remake's ground-sunset sky dome names `W_Skydome_Sunset.jpg` and ships `W_Skydome_Sunset.dds` (4096 x 2846, BC3, one level). The environment loaders (the default view and the evidence harness) used to probe the authored name and the `.tga`/`.dds` suffixes only, so that sky resolved to no texture, drew no surface and left the flat clear colour with only the sun glow: a space battle at the Remake's Brentaal showed no sky (rig look-up captures before and after, ignored `out/eyecheck/`). They now use the asset layer's texture rule, `assets::resolve_texture_name`: the authored name first, then the name cut at its first dot plus `.dds` (RGC-122). The synthetic `test_primary_sky_texture_named_with_source_art_suffix_uses_the_shipped_dds` ships `.jpg`/`.png` names with `.dds` files. A dotted name that is not a `.tga`/`.dds` name follows the same cut: `tex.01` loads `tex.dds`, not `tex.01.dds`; no asset of stock FoC, Remake 4.0/5.0, Republic at War, BFC or Fall of the Republic relies on the old suffix probe resolving a dotted stem (scan of every texture-looking string in their models against their texture lists: no name resolved before and fails now; every difference is a name the retail rule resolves and the old probe did not), and the synthetic `test_primary_sky_texture_dotted_name_follows_the_first_dot_token_rule` pins the retail rule. Not changed here (fidelity list): the same suffix-only probe still serves the map terrain and particle loaders (`apps/viewer/src/map_mode.cpp`, `map_mode_particles.cpp`, `map_mode_ready_terrain.cpp`) and the space population loaders (`space_populate_arrivals.cpp`, `space_populate_materials.cpp`), where no known mod needs the retail retry. |
 
 The opt-in eawr-space-sky-meshgloss-v1 route preserves authored MeshGloss
 parameters and the [programmable semantics](behaviour/meshgloss-programmable.md).

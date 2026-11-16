@@ -1,5 +1,6 @@
 #include "ai_data.hpp"
 #include "ai_mode.hpp"
+#include "eawr/data/retail_values.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 
 #include <algorithm>
@@ -239,6 +240,7 @@ Difficulty resolve_difficulty(const AiData& data, const PlayerType* type, std::s
     // loader reads an absent sleep tag as 0 everywhere, so the dummy sleeps 0 too.)
     const Difficulty dummy;
     if (type == nullptr) return dummy;
+    // An empty level is the Normal entry (the engine's default level); a level the type does not author plays the dummy.
     const auto named = type->difficulty.find(level.empty() ? std::string("NORMAL") : upper_case(level));
     if (named == type->difficulty.end()) return dummy;
     const auto found = data.difficulties.find(named->second);
@@ -282,6 +284,9 @@ core::Result<AiData> load_ai_data_files(
         }
         if (path.ends_with("gameconstants.xml")) {
             Constants& constants = data.constants;
+            if (const auto value = constant_tag(*text, "AIUsesFogOfWarSpace")) {
+                if (const auto flag = data::retail::boolean(*value)) constants.uses_fog_space = *flag;
+            }
             const auto set = [&](std::string_view tag, Real& field) {
                 if (const auto value = constant_tag(*text, tag)) {
                     if (const auto parsed = number(*value)) field = *parsed;

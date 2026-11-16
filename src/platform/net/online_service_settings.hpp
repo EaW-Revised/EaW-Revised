@@ -1,6 +1,7 @@
 #pragma once
 
 #include "online_match.hpp"
+#include "eawr/net/gns_transport.hpp"
 #include "eawr/net/online_lobby_source.hpp"
 #include "eawr/presentation/ui/settings.hpp"
 #include <random>
@@ -14,6 +15,9 @@ inline core::Result<OnlineMatchOptions> online_match_options(const presentation:
     options.service.address = settings.online_host;
     options.service.port = static_cast<std::uint16_t>(settings.online_port);
     options.service.certificate_name = settings.online_host;
+    options.service.log = &net::GnsTransport::log_event;
+    options.service.turn_provider = settings.online_turn_provider == "own" ? net::GnsTurnProvider::own
+        : settings.online_turn_provider == "cloudflare" ? net::GnsTurnProvider::cloudflare : net::GnsTurnProvider::automatic;
     if (settings.online_trust == "pin") options.service.certificate_sha256 = settings.online_pin;
     else if (settings.online_trust == "ca-file") options.service.ca_file = settings.online_ca_file;
     // System trust leaves both overrides empty, even if the saved form has inactive values.

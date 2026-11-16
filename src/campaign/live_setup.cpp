@@ -15,6 +15,7 @@
 #include "eawr/sim/galactic/observer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <map>
 #include <optional>
@@ -518,7 +519,7 @@ core::Result<CampaignPlacementContext> prepare_context(const vfs::Vfs& filesyste
         auto reward = Fixed::from_integer(source->planet_capture_bonus_reward.value_or(0)); // WGS-90 constructor.
         if (!reward) return core::Result<CampaignPlacementContext>::failure(reward.error());
         control.capture_reward = reward.value();
-        control.production_owner = {location.initial_owner, location.initial_owner};
+        // WGM-66: no production controller at the start; the control service derives it from the queues every tick.
         context.control.planets.push_back(control); control_planets.push_back({control.planet, source->name});
         gc::PlanetProduction production; production.planet = control.planet;
         production.target_owner = location.initial_owner;
@@ -642,7 +643,9 @@ core::Result<void> prepare_live_relations(Prepared& p, const data::galactic::Gal
         faction.benefits_from_corruption = faction.benefits_from_corruption.value_or(false);
         faction.minimum_visible_base_level = faction.minimum_visible_base_level.value_or(0);
     }
-    if (!plan.fiscal() || plan.human_observers().empty()) return refuse<void>("live root requires fiscal policy and human observers");
+    if (!plan.fiscal()) return refuse<void>("live root requires fiscal policy");
+    if (plan.human_observers().empty())
+        return refuse<void>("live root requires a human observer: no active human seat and no single-player reference human");
     auto relations = prepare_initial_campaign_relations(data, plan.player_bindings());
     if (!relations) return core::Result<void>::failure(relations.error());
     p.relations = std::move(relations).value();
@@ -666,6 +669,26 @@ core::Result<void> prepare_live_starting_forces(Prepared& p, const data::Catalog
         const auto* type = types.find(binding.original_type);
         if (type && ((type->build_cost_credits && type->build_cost_credits->raw() > 0)
                 || type->build_requires_initial_placement.value_or(false))) wanted.insert(binding.id);
+    }
+    // RGC-177: a script's Spawn_Unit creates any type the galactic creation dispatch handles, by the type's dummy
+    // behaviour, whether or not the campaign names or sells it (a mod's orbital stand-ins cost nothing and are named
+    // only by the mod's own scripts). Every type that one call creates as a single object (a starship, an orbital or
+    // ground structure, a starbase) is therefore a creation input. A type with malformed authored inputs is left out;
+    // creating it asserts in the debug build as well, and it must not stop a campaign that never spawns it. Squadron and
+    // company composites need their members and carriers resolved and stay inputs only when the campaign names or sells
+    // them (a script-created composite that is neither is not yet covered; see the behaviour note GOL-16).
+    {
+        static constexpr std::array<std::string_view, 4> creatable{"DUMMY_STARSHIP", "DUMMY_GROUND_STRUCTURE",
+            "DUMMY_ORBITAL_STRUCTURE", "DUMMY_STAR_BASE"};
+        std::set<std::string> malformed;
+        for (const auto& issue : types.issues) if (issue.kind == data::galactic::IssueKind::bad_value) malformed.insert(key(issue.owner));
+        for (const auto& binding : plan.type_bindings()) {
+            const auto* type = types.find(binding.original_type);
+            if (!type || wanted.contains(binding.id) || malformed.contains(key(binding.original_type))) continue;
+            if (behaves(*type, "DUMMY_SPACE_FIGHTER_SQUADRON") || behaves(*type, "DUMMY_GROUND_COMPANY")) continue;
+            if (std::none_of(creatable.begin(), creatable.end(), [&](const auto token) { return behaves(*type, token); })) continue;
+            wanted.insert(binding.id);
+        }
     }
     // Corruption's authored prerequisite alternatives are canonical original
     // types even when their current owned count is zero. Keep the exact plan IDs.
@@ -989,7 +1012,9 @@ void install_live_ability_services(CampaignSetupServices& services,
             for (const auto* block : data::retail::list(original, "Abilities", data::retail::ListRule::replace_in_variant))
                 for (const auto& ability : block->children) {
                     if (key(ability.name) == "SLICER_ABILITY") slicer = &ability;
-                    if (key(ability.name) == "CORRUPT_PLANET_ABILITY") corruptors.push_back(&ability);
+                    // The stock corruption action is the Corruption_Ability block (the old Corrupt_Planet_Ability one is commented out
+                    // in the stock XML but still authored by mods); the activated-name list routes either by its Name (WGCH-01).
+                    if (key(ability.name) == "CORRUPT_PLANET_ABILITY" || key(ability.name) == "CORRUPTION_ABILITY") corruptors.push_back(&ability);
                     if (key(ability.name) == "REMOVE_CORRUPTION_ABILITY") removers.push_back(&ability);
                     if (key(ability.name) == "HACK_SUPER_WEAPON_ABILITY") hackers.push_back(&ability);
                     if (key(ability.name) == "PLANET_DESTRUCTION_ABILITY") destroyers.push_back(&ability);

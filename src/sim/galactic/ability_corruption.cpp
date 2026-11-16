@@ -4,6 +4,7 @@
 #include "eawr/sim/galactic/production.hpp"
 #include "eawr/sim/galactic/ability_host.hpp"
 #include "eawr/sim/galactic/corruption_actions.hpp"
+#include "eawr/sim/galactic/control.hpp"
 #include "observer_internal.hpp"
 
 #include <algorithm>
@@ -92,19 +93,30 @@ std::shared_ptr<const CorruptionMenu> GalacticSession::Impl::publish_corruption_
                 });
             row.units_satisfied = !choice.unit_count || choice.unit_types.empty()
                 || corruption_unit_count(choice.unit_types, result.player) >= choice.unit_count;
+            row.mission_available = corruption_mission_routable(choice, result.player, std::nullopt);
             result.choices.push_back(std::move(row));
         }
         return std::make_shared<const CorruptionMenu>(std::move(result));
     }
     return {};
 }
+bool GalacticSession::Impl::corruption_choice_tactical(const CorruptionChoice& choice, const PlayerId owner) const {
+    const auto* player = economy_corruption ? find(economy_corruption->players, owner, [](const auto& r) { return r.player; }) : nullptr;
+    // WGCH-198: a land mission choice takes the timed route (owner decision); only the space mode needs the mission service.
+    return !choice.map.empty() && choice.mode == 2 && player && player->human
+        && ability_host && setup.ability_host && !setup.ability_host->multiplayer && !setup.ability_host->fast_corruption;
+}
+bool GalacticSession::Impl::corruption_mission_routable(const CorruptionChoice& choice, const PlayerId owner,
+    const std::optional<std::uint64_t> request) const {
+    if (!corruption_choice_tactical(choice, owner)) return true;
+    return corruption_mission_handler && ability_host->missions.size() < galactic_max_objects
+        && (!corruption_mission_probe || corruption_mission_probe(choice, request));
+}
 core::Result<bool> GalacticSession::Impl::begin_corruption(PlanetId planet, CorruptionType type, Fixed seconds) {
     using R = core::Result<bool>;
     auto* row = ability_host ? find(ability_host->transitions, planet, [](const auto& r) { return r.planet; }) : nullptr;
     const auto* economic = economy_corruption ? find(economy_corruption->planets, planet, [](const auto& r) { return r.planet; }) : nullptr;
     if (!row || !economic || economic->destroyed) return R::success(false);
-    if (type == CorruptionType::none && economic->corruption == CorruptionType::militia)
-        return R::success(false); // named live revolt/retreat consumer seam; never clear a militia without its effects
     auto changed = row->transition;
     changed.current = economic->corruption;
     auto started = corruption_fixture::begin(changed, type, seconds, galactic_frames_per_second, clock.galactic_frame);
@@ -217,7 +229,8 @@ core::Result<void> GalacticSession::Impl::finish_corruption_mission(std::uint64_
     }
     touch_abilities(); return core::Result<void>::success();
 }
-core::Result<void> GalacticSession::Impl::service_corruption(const PartitionExecutor& executor, std::size_t preceding_events) {
+core::Result<void> GalacticSession::Impl::service_corruption(const PartitionExecutor& executor, std::vector<GalacticEvent>& events) {
+    const std::size_t preceding_events = events.size();
     if (!ability_host || corruption_due.empty() || corruption_due.begin()->first > clock.galactic_frame)
         return core::Result<void>::success();
     struct Completion { PlanetId planet{}; corruption_fixture::Transition before, after; bool destroyed{}; };
@@ -246,13 +259,13 @@ core::Result<void> GalacticSession::Impl::service_corruption(const PartitionExec
         auto* row = find(ability_host->transitions, item.planet, [](const auto& r) { return r.planet; });
         row->transition = item.after;
         if (item.destroyed) continue; // ruins abort; no reward or repeat callback
-        auto applied = apply_corruption_completion(item.planet, item.before.current, item.after.current, {}, preceding_events);
+        auto applied = apply_corruption_completion(item.planet, item.before.current, item.after.current, {}, preceding_events, &events);
         if (!applied) return applied;
     }
     touch_abilities(); return core::Result<void>::success();
 }
 core::Result<void> GalacticSession::Impl::apply_corruption_completion(PlanetId planet, CorruptionType old, CorruptionType next,
-    std::optional<PlayerId> recipient, std::optional<std::size_t> preceding_events) {
+    std::optional<PlayerId> recipient, std::optional<std::size_t> preceding_events, std::vector<GalacticEvent>* revolt_events) {
     auto* economic = find(economy_corruption->planets, planet, [](const auto& r) { return r.planet; });
     if (!economic || economic->destroyed) return invalid("corruption completion planet unavailable");
     economic->corruption = next;
@@ -352,7 +365,111 @@ core::Result<void> GalacticSession::Impl::apply_corruption_completion(PlanetId p
         auto notified = corruption_completion_handler(planet, old, next, CorruptionCompletionPhase::rewards, ability_host->planet_entitlements);
         if (!notified) return notified;
     }
+    // WGCH-13/17: the revolt is the last completion effect, and only the removal of a corrupt-militia type enters it.
+    if (revolt_events && old == CorruptionType::militia && next == CorruptionType::none) {
+        auto revolted = corruption_revolt(planet, *revolt_events);
+        if (!revolted) return revolted;
+    }
     touch_abilities(); return core::Result<void>::success();
+}
+void GalacticSession::Impl::clear_planet_site(std::size_t index) {
+    auto& presence = control->planets[index];
+    presence.starbase = {}; presence.special_control.clear(); presence.production_owner = {};
+    clear_control_structures(index);
+    refresh_ground_base_level(index);
+    dirty[static_cast<std::size_t>(StateSection::control)] = true;
+}
+core::Result<void> GalacticSession::Impl::retreat_planet_forces(PlanetId planet, std::size_t index,
+    std::optional<PlayerId> only_owner, std::vector<GalacticEvent>& events) {
+    const auto& presence = control->planets[index];
+    // Orbit-list order is the order the fleets entered orbit (WGM-61 traverses it in reverse for the departure).
+    struct Orbiting { std::uint64_t entry{}; FleetId id{}; PlayerId owner{}; };
+    std::vector<Orbiting> orbiting;
+    for (const auto& [id, handle] : fleets) {
+        const auto& fleet = registry.get<session_detail::FleetData>(handle);
+        if (fleet.orbit == planet && !fleet.motion.transit) orbiting.push_back({fleet.motion.orbit_entry, id, fleet.owner});
+    }
+    std::sort(orbiting.begin(), orbiting.end(), [](const auto& a, const auto& b) { return std::pair{a.entry, a.id} < std::pair{b.entry, b.id}; });
+    std::vector<PlayerId> owners;
+    const auto note = [&](PlayerId owner) { if (owner && std::find(owners.begin(), owners.end(), owner) == owners.end()) owners.push_back(owner); };
+    for (const auto& fleet : orbiting) note(fleet.owner);
+    for (const auto& force : presence.landed) note(force.owner);
+    if (only_owner) std::erase_if(owners, [&](PlayerId owner) { return owner != *only_owner; });
+    const auto landed_by = [&](PlayerId owner) {
+        return std::any_of(presence.landed.begin(), presence.landed.end(), [&](const auto& force) { return force.owner == owner; });
+    };
+    // A galaxy without live movement inputs has no movement system to retreat through (the departure needs them).
+    const bool can_retreat = setup.movement && setup.fleet_control && graph;
+    for (const auto owner : owners) {
+        if (!can_retreat) break;
+        const auto planets_now = sorted_planets(); const auto fleets_now = sorted_fleets();
+        if (landed_by(owner)) {
+            auto destination = select_retreat_destination(planets_now, &*control, fleets_now, movement_inputs.get(), actor_inputs(), planet, owner, true);
+            if (!destination) return core::Result<void>::failure(destination.error());
+            // WGM-U10: a surface retreat with no other planet to go to has not been qualified; the force stays.
+            if (destination.value() != planet) {
+                auto departed = retreat_departure(owner, planet, destination.value(), true, {}, {}, events);
+                if (!departed) return departed;
+            }
+        }
+        std::vector<FleetId> leaving;
+        for (auto at = orbiting.rbegin(); at != orbiting.rend(); ++at) {
+            const auto found = fleets.find(at->id);
+            if (found == fleets.end()) continue;
+            const auto& fleet = registry.get<session_detail::FleetData>(found->second);
+            if (fleet.owner == owner && fleet.orbit == planet && !fleet.motion.transit) leaving.push_back(at->id);
+        }
+        if (leaving.empty()) continue;
+        auto destination = select_retreat_destination(sorted_planets(), &*control, sorted_fleets(), movement_inputs.get(), actor_inputs(), planet, owner, false);
+        if (!destination) return core::Result<void>::failure(destination.error());
+        if (destination.value() == planet) continue; // WGM-99 cancels the equal-endpoint orbital fallback
+        auto departed = retreat_departure(owner, planet, destination.value(), false, leaving, {}, events);
+        if (!departed) return departed;
+    }
+    return core::Result<void>::success();
+}
+core::Result<void> GalacticSession::Impl::corruption_revolt(PlanetId planet, std::vector<GalacticEvent>& events) {
+    // WGCH-17 (debug build GCH-E08): clear the special structures and the starbase, then request each distinct owner's
+    // surface and orbital retreat (owners from the orbital fleets first, then the landed forces), then clear the
+    // political modifiers and process neutral allegiance at 1. The destinations are WGM-61..63; a departure is
+    // ordinary movement, so the forces leave over time and the next control service sees them until they do.
+    if (!control) return core::Result<void>::success();
+    const auto row = find(control->planets, planet, [](const auto& r) { return r.planet; });
+    if (!row) return core::Result<void>::success();
+    const auto index = static_cast<std::size_t>(row - control->planets.data());
+    auto& presence = control->planets[index];
+    clear_planet_site(index);
+    if (auto retreated = retreat_planet_forces(planet, index, std::nullopt, events); !retreated) return retreated;
+    presence.transition_modifiers.clear();
+    const auto neutral = std::find_if(control->players.begin(), control->players.end(), [](const auto& player) { return player.neutral; });
+    if (neutral != control->players.end() && index < control->state.size()) {
+        auto& state = control->state[index];
+        const auto one = Fixed::from_integer(1).value();
+        state.target_player = state.current_player = neutral->player;
+        state.target = state.current = one;
+    }
+    dirty[static_cast<std::size_t>(StateSection::control)] = true;
+    invalidate_observer_projection();
+    return core::Result<void>::success();
+}
+core::Result<void> GalacticSession::Impl::story_planet_faction(PlanetId planet, PlayerId new_owner, std::uint64_t tick,
+    std::vector<GalacticEvent>& events) {
+    // WST-42: clear the special structures and the starbase, send the previous owner's forces away, remove the
+    // political-control modifiers, then give the planet to the named faction's player at full control. Whether the
+    // previous owner's forces are destroyed instead of sent away when that owner is not the local player is a
+    // documented gap (WST-U19): the sent-away path is the least visible one and is the same for every owner.
+    const auto row = find(control->planets, planet, [](const auto& r) { return r.planet; });
+    if (!row || !planets.contains(planet)) return core::Result<void>::success();
+    const auto index = static_cast<std::size_t>(row - control->planets.data());
+    const auto previous = registry.get<session_detail::PlanetData>(planets.at(planet)).owner;
+    clear_planet_site(index);
+    if (previous != new_owner)
+        if (auto retreated = retreat_planet_forces(planet, index, previous, events); !retreated) return retreated;
+    control->planets[index].transition_modifiers.clear();
+    dirty[static_cast<std::size_t>(StateSection::control)] = true;
+    const auto one = Fixed::from_integer(1);
+    if (!one) return core::Result<void>::failure(one.error());
+    return force_planet_owner(planet, new_owner, tick, events, one.value());
 }
 core::Result<void> GalacticSession::Impl::initialize_corruption() {
     if (!ability_host) return core::Result<void>::success();
@@ -498,6 +615,10 @@ void GalacticSession::Impl::execute_corruption(const GameCommand& command, const
     if (!defeat) return reject();
     const auto& choice = target->slots[prepared.corruption.slot];
     if (choice.type != prepared.corruption.type) return reject();
+    // Remake-only refusal (no retail counterpart): a mission this host cannot start is refused before the debit,
+    // the prerequisite consumption and the RNG draws, which a later refund could not undo.
+    const bool tactical = corruption_choice_tactical(choice, actor.owner);
+    if (tactical && !corruption_mission_routable(choice, actor.owner, ability_host->next_request)) return reject();
     // WGCH-05/72: charge before the stale unit recheck, with no refund on later refusal.
     if (prepared.price > Fixed{}) {
         auto balance = math::subtract(account->credits, prepared.price), delta = math::negate(prepared.price);
@@ -572,9 +693,6 @@ void GalacticSession::Impl::execute_corruption(const GameCommand& command, const
             if (!lost) { failed = true; return; }
         }
     }
-    const auto* player = find(economy_corruption->players, actor.owner, [](const auto& r) { return r.player; });
-    const bool tactical = !choice.map.empty() && (choice.mode == 1 || choice.mode == 2) && player && player->human
-        && !setup.ability_host->multiplayer && !setup.ability_host->fast_corruption;
     const auto request = ability_host->next_request++;
     if (tactical) {
         // WGCH-72: a failed mission queue can follow the debit and prerequisite consumption; the refusal is retail order.
@@ -596,9 +714,19 @@ void GalacticSession::Impl::execute_corruption(const GameCommand& command, const
     AbilityResult receipt{request, prepared.preparation, actor.id, prepared.planet, actor.owner, 0, AbilityOutcome::purchased};
     receipt.kind = AbilityKind::corruption;
     put(ability_host->results, std::move(receipt), [](const auto& r) { return r.actor; }); touch_abilities();
+    // WGCH-09/128: a direct (non-mission) corruption that began voices the chosen slot's authored success
+    // speech/hologram to the local acting owner. Mission successes are voiced from their result, not here.
+    // "When permitted" is unverified beyond the local-owner filter; the least visible reading is kept.
+    if (!tactical && feedback_notice_handler && observer && std::find(observer->human_observers.begin(),
+            observer->human_observers.end(), actor.owner) != observer->human_observers.end()) {
+        GalacticFeedbackNotice notice{GalacticFeedbackNotice::Kind::corruption_success_voiced, actor.owner, prepared.planet, events.size()};
+        notice.slot = static_cast<std::uint8_t>(prepared.corruption.slot);
+        feedback_notice_handler(notice);
+    }
     event.kind = GalacticEventKind::ability_settled; event.value = prepared.preparation; events.push_back(event);
 }
 void GalacticSession::set_corruption_mission_handler(CorruptionMissionHandler handler) { impl_->corruption_mission_handler = std::move(handler); }
+void GalacticSession::set_corruption_mission_probe(CorruptionMissionProbe probe) { impl_->corruption_mission_probe = std::move(probe); }
 void GalacticSession::set_corruption_completion_handler(CorruptionCompletionHandler handler) { impl_->corruption_completion_handler = std::move(handler); }
 void GalacticSession::set_corruption_result_handler(CorruptionResultHandler handler) { impl_->corruption_result_handler = std::move(handler); }
 core::Result<bool> GalacticSession::begin_corruption(PlanetId planet, CorruptionType type, Fixed seconds) {

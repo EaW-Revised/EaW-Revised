@@ -42,6 +42,12 @@ using GalacticLobbyLoader = std::function<core::Result<GalacticLobbyContent>()>;
     const eawr::data::Catalog& catalog, std::shared_ptr<const void> keepalive,
     std::array<std::uint8_t, 32> checkpoint_mod_list = {});
 
+// The difficulty adjustment a fresh solo campaign start runs at for the staging dialog's level ("easy", "normal" or
+// "hard"; empty reads normal): the entry the campaign's own AI player types author for it, the pick the lobby offers
+// (CGS-26). The AI player types come from the mounted files; none loadable leaves the level's stock name.
+[[nodiscard]] std::string solo_campaign_difficulty(const vfs::Vfs& filesystem, const eawr::data::galactic::GalacticData& data,
+    std::string_view campaign, std::string_view level);
+
 // What a Galactic Conquest room needs from this machine's installed content, as one object the lobby hooks call. It
 // turns the agreed room choices into the #3768 setup offer (seal the roster with the local AI configurations and the
 // tick-zero claim, derive the content identities) and, on every peer, reuses that local preparation for the matching
@@ -92,8 +98,8 @@ public:
     [[nodiscard]] core::Result<std::vector<sim::IdentityDomain>> preparation_domains(const net::SetupOffer&) const;
     [[nodiscard]] core::Result<std::vector<core::ContentLayerIdentity>> preparation_mounts(
         const net::LobbySnapshot&, const net::SetupOffer*) const;
-    // #6045: the same offer, derived on a worker thread so the window and the lobby keep running for the 10-20 minutes a
-    // large mod chain needs. Answers net::start_pending_diagnostic until the derivation has finished, then the offer (or its
+    // #6045: the same offer, derived on a worker thread so the window and the lobby keep running for the minutes a
+    // large mod chain needs (bounded by net::preparation_timeout_minutes, the lobby's deadline and wait text alike). Answers net::start_pending_diagnostic until the derivation has finished, then the offer (or its
     // failure) exactly once. Call it again with the same arguments every pump. A call whose inputs differ from the running
     // derivation's waits for that derivation to end (one derivation runs per process at a time); `prepare_progress()` says so.
     // Nonce-bound Start requires the exact frozen snapshot; serial Start retains its readiness/revision memo rules. The worker reads the loaded

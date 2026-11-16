@@ -96,6 +96,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
     }
     Bytes campaign;
     Bytes market_purchases;
+    Bytes tsw_bytes; // TSW-03/04
     Bytes carriers;
     const auto carrier_count = std::count_if(replay.setup.units.begin(), replay.setup.units.end(),
         [](const auto& unit) { return unit.purchase_type != 0 || !unit.contained.empty(); });
@@ -117,6 +118,24 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
             sim::detail::append_u32(carriers, static_cast<std::uint32_t>(unit.contained.size()));
             for (const auto& object : unit.contained) node(node, carriers, object);
         }
+    }
+    if (replay.setup.tsw) {
+        const auto& tsw = *replay.setup.tsw;
+        sim::detail::append_u32(tsw_bytes, 1);
+        sim::detail::append_u32(tsw_bytes, static_cast<std::uint32_t>(tsw.targets.size()));
+        for (const auto& target : tsw.targets) {
+            sim::detail::append_u32(tsw_bytes, target.record);
+            sim::detail::append_u32(tsw_bytes, 0);
+            sim::detail::append_u64(tsw_bytes, target.faction);
+            sim::detail::append_u64(tsw_bytes, target.type);
+            sim::detail::append_i64(tsw_bytes, target.position.x.raw());
+            sim::detail::append_i64(tsw_bytes, target.position.y.raw());
+            sim::detail::append_i64(tsw_bytes, target.position.z.raw());
+            sim::detail::append_i64(tsw_bytes, target.yaw_degrees.raw());
+        }
+        sim::detail::append_u32(tsw_bytes, tsw.conflict
+            ? 1U | (tsw.conflict->planet_destroyable ? 2U : 0U) | (tsw.conflict->planet_destroyed ? 4U : 0U) : 0U);
+        sim::detail::append_u32(tsw_bytes, tsw.conflict ? tsw.conflict->defender : 0U);
     }
     if (replay.setup.campaign) {
         const auto& binding = *replay.setup.campaign;
@@ -202,6 +221,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         std::pair{replay_extension_beacon_rules, 8U + 16U * replay.setup.beacon_rules.size()},
         std::pair{replay_extension_campaign, campaign.size()},
         std::pair{replay_extension_market_purchases, market_purchases.size()},
+        std::pair{replay_extension_tactical_superweapon, tsw_bytes.size()},
         std::pair{replay_extension_carriers, carriers.size()},
         std::pair{replay_extension_cinematic_seats, 8U + 8U * replay.setup.cinematic_seats.size()},
         std::pair{replay_extension_attract_pool,
@@ -217,7 +237,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         || !replay.setup.cinematic_seats.empty() || !identity.empty()
         || replay.setup.departure_policy.has_value() || !replay.setup.beacon_rules.empty()
         || replay.setup.attract_pool.has_value() || replay.setup.native_scene.has_value()
-        || !replay.object_turns.empty() || replay.setup.domain != BattleDomain::space || !controllers.empty();
+        || !replay.object_turns.empty() || replay.setup.domain != BattleDomain::space || !controllers.empty() || !tsw_bytes.empty();
     const bool wide_header = replay.setup.native_scene.has_value();
     const auto header_size = replay_header_size + (wide_header ? 2U : 0U) + (extensions ? 4U : 0U)
         + (replay.setup.match_policy ? 8U : 0U) + (replay.setup.skirmish ? 4U + metadata.size() : 0U)
@@ -234,7 +254,8 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         + (replay.object_turns.empty() ? 0U : 12U)
         + (replay.setup.domain == BattleDomain::space ? 0U : 12U)
         + (controllers.empty() ? 0U : 4U + controllers.size())
-        + (market_purchases.empty() ? 0U : 4U + market_purchases.size());
+        + (market_purchases.empty() ? 0U : 4U + market_purchases.size())
+        + (tsw_bytes.empty() ? 0U : 4U + tsw_bytes.size());
     if (header_size > (wide_header ? replay_max_bytes : std::numeric_limits<std::uint16_t>::max())) {
         return fail<Bytes>(diagnostic_codes::resource_limit, "encoded replay header size " + std::to_string(header_size) + " exceeds the "
             + std::to_string(wide_header ? replay_max_bytes : std::numeric_limits<std::uint16_t>::max()) + "-byte limit", {});
@@ -294,7 +315,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
             + (replay.setup.beacon_rules.empty() ? 0U : 1U) + (replay.setup.attract_pool ? 1U : 0U) + (replay.setup.native_scene ? 1U : 0U)
             + (replay.object_turns.empty() ? 0U : 1U)
             + (replay.setup.domain == BattleDomain::space ? 0U : 1U) + (controllers.empty() ? 0U : 1U)
-            + (market_purchases.empty() ? 0U : 1U));
+            + (market_purchases.empty() ? 0U : 1U) + (tsw_bytes.empty() ? 0U : 1U));
     }
     if (replay.setup.match_policy) {
         sim::detail::append_u16(bytes, replay_extension_match_policy);
@@ -411,6 +432,11 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         sim::detail::append_u16(bytes, replay_extension_market_purchases);
         sim::detail::append_u16(bytes, static_cast<std::uint16_t>(market_purchases.size()));
         bytes.insert(bytes.end(), market_purchases.begin(), market_purchases.end());
+    }
+    if (!tsw_bytes.empty()) {
+        sim::detail::append_u16(bytes, replay_extension_tactical_superweapon);
+        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(tsw_bytes.size()));
+        bytes.insert(bytes.end(), tsw_bytes.begin(), tsw_bytes.end());
     }
     for (const auto& player : replay.setup.players) {
         detail::append_player(bytes, player);

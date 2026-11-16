@@ -107,7 +107,7 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_area_abi
     static_cast<void>(activate_ability(ability, active, phase.impl_->ability_gate(live, command_tick), command_tick));
     active.target = proxy_id;
     const CommandPayload attack = AttackPayload{proxy_id};
-    live.state.order = order_for(attack, command_tick);
+    replace_order(live, attack, command_tick);
     live.combat->attack_target = proxy_id;
     live.combat->attack_hardpoint = no_hardpoint;
     live.combat->direct = true;

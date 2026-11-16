@@ -158,6 +158,8 @@ void normalize_damage(DurabilityTable& table, core::LoadNoteBuffer& notes) {
     };
     clamp_value(rules.ion_storm_disable_seconds, 0, curve_x_limit_raw, "Ion_Storm_Shield_Disable_Time",
                 "damage rules: ion-storm window must be between zero and one hour");
+    clamp_value(rules.under_construction_multiplier, 0, multiplier_limit_raw, "Under_Construction_Damage_Multiplier",
+                "damage rules: construction damage multiplier exceeds the arithmetic domain");
     if (rules.shield_recharge_frames == 0) {
         record("EAWR-LOAD-0111", "ShieldRechargeIntervalInSecs", "0", "1",
                "damage rules: the shield recharge interval must be at least one frame");
@@ -274,6 +276,12 @@ core::Result<void> validate_damage(const DurabilityTable& table) {
         return core::Result<void>::success();
     }
     const auto& rules = *table.damage;
+    if (rules.under_construction_multiplier.raw() < 0 || rules.under_construction_multiplier.raw() > multiplier_limit_raw
+        || !std::is_sorted(rules.under_construction_types.begin(), rules.under_construction_types.end())
+        || std::adjacent_find(rules.under_construction_types.begin(), rules.under_construction_types.end())
+            != rules.under_construction_types.end()) {
+        return invalid("damage rules: invalid construction damage multiplier or type membership");
+    }
     if (rules.ion_storm_disable_seconds.raw() < 0 || rules.ion_storm_disable_seconds.raw() > 3600 * Fixed::scale) {
         return invalid("damage rules: ion-storm window must be between zero and one hour");
     }
@@ -459,6 +467,11 @@ core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const Damag
             amount = q.mul(amount, factor.value());
         }
     }
+    // WCC-41: applies to the recipient's behavior, including scripted and environmental hits.
+    // The immutable table avoids new mutable state and applies equally to redirected recipients.
+    if (rules.under_construction_multiplier.raw() != one_raw
+        && std::binary_search(rules.under_construction_types.begin(), rules.under_construction_types.end(), profile.type_id))
+        amount = q.mul(amount, rules.under_construction_multiplier);
     if (combat_damage) {
         // DG-26/WHZ-14: the target's combat defense modifier (a craft out of combat: -1, twice the
         // damage; #530 PU-38, an arriving unit -3 more). Independent of DG-05's two gates above:

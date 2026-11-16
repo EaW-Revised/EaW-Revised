@@ -236,4 +236,11 @@ ScrollPanelLayout scroll_panel_layout(const Viewport viewport, const ScrollPanel
     return result;
 }
 
+ButtonArtBand button_art_band(const double resting_height, const double state_height) noexcept {
+    // No resting art: the state's art is the whole button, so art and caption share one centre line.
+    if (resting_height <= 0.0) return ButtonArtBand{state_height > 0.0 ? state_height : 0.0, 0.0, state_height > 0.0 ? state_height : 0.0};
+    const double height = state_height > 0.0 ? state_height : resting_height;
+    return ButtonArtBand{height, (resting_height - height) / 2.0, resting_height};
+}
+
 } // namespace eawr::presentation::ui

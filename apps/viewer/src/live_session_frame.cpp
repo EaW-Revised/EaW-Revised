@@ -1,6 +1,7 @@
 #include "eawr/battle/start.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
+#include "laser_clip.hpp"
 #include "eawr/presentation/particles/lane_guard.hpp"
 #include "eawr/presentation/ui/pads.hpp"
 
@@ -99,6 +100,116 @@ void LiveSessionView::press_pause() {
         return;
     }
     if (session_ && time_.press_pause(session_->completed_tick())) apply_time();
+}
+
+void LiveSessionView::set_retreat_flight(std::optional<RetreatFlightSetup> setup) {
+    if (!setup) {
+        retreat_flight_ = {};
+        return;
+    }
+    retreat_flight_.setup = std::move(setup);
+}
+
+// #4444 (FS-R07, FC-R04, FC-R05, RC-07): while a retreat cinematic plays, the retreating ships are drawn staged around
+// the entry marker and flown along the departure direction by the simulation's cinematic frame k. The simulation holds
+// them where they stood; only the drawn pose, the object fade and the engine brightness change here, so every consumer
+// of the frame's poses (hull, emitters, effects) agrees on where the ship is.
+void LiveSessionView::apply_retreat_flight(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        BattleScene& population, std::vector<live::LiveUnitPose>& poses) {
+    namespace camera = presentation::camera;
+    auto& flight = retreat_flight_;
+    flight.opacity.clear();
+    flight.brightness.clear();
+    const auto views = latest->retreat_views();
+    if (!flight.setup || views.empty() || views.front().state.phase != sim::tactical::RetreatPhase::escaping) {
+        flight.planned = false;
+        flight.plan.clear();
+        flight.order.clear();
+        flight.jumped.clear();
+        return;
+    }
+    const auto& state = views.front().state;
+    const auto& setup = *flight.setup;
+    if (!flight.planned) {
+        // The roster that has a model and is drawn (FS-R07: only members with a model enter the cinematic roster).
+        // WR-85: the craft of an escaping squadron depart with it, so they fly with the roster (whether the debug
+        // build's cinematic roster counts them is unverified, RC-07).
+        std::set<sim::EntityId> roster(state.actors.begin(), state.actors.end());
+        for (const auto& squadron : latest->squadrons())
+            if (roster.contains(squadron.container)) roster.insert(squadron.members.begin(), squadron.members.end());
+        std::vector<camera::RetreatFlightMember> members;
+        for (const live::LiveUnitPose& pose : poses) {
+            if (!roster.contains(pose.entity)) continue;
+            const auto ship = ship_of(pose.entity, pose.type, pose.owner);
+            if (!ship) continue;
+            if (const auto present = population.live_ship_model_present(*ship); present && !*present) continue;
+            camera::RetreatFlightMember member;
+            member.id = pose.entity;
+            if (const auto box = population.live_ship_box(*ship)) {
+                const auto& rows = box->model_to_world.rows;
+                double scale = 1.0;
+                const double column_x = static_cast<double>(rows[0][0].raw()) / sim::math::Fixed::scale;
+                const double column_y = static_cast<double>(rows[1][0].raw()) / sim::math::Fixed::scale;
+                const double column_z = static_cast<double>(rows[2][0].raw()) / sim::math::Fixed::scale;
+                const double length = std::sqrt(column_x * column_x + column_y * column_y + column_z * column_z);
+                if (length > 0.0) scale = length;
+                const float width = std::max(box->high[0] - box->low[0], box->high[1] - box->low[1]);
+                member.radius = static_cast<float>(0.5 * static_cast<double>(width) * scale);
+            }
+            if (pose.instance != nullptr && pose.instance->durability)
+                member.max_health = static_cast<float>(static_cast<double>(pose.instance->durability->max_hull.raw())
+                    / sim::math::Fixed::scale);
+            members.push_back(member);
+        }
+        flight.plan = camera::plan_retreat_flight(members, setup.geometry);
+        flight.order.clear();
+        for (std::size_t index = 0; index < flight.plan.size(); ++index) flight.order.emplace(flight.plan[index].id, index);
+        flight.planned = true;
+    }
+    if (flight.plan.empty()) return;
+    // The battle presents between its last two ticks; the flight moves with the presented fraction of a frame.
+    const double lag = std::clamp(presented_tick_ - static_cast<double>(latest->completed_tick()), -1.0, 0.0);
+    const double position = std::max(0.0, static_cast<double>(state.cinematic_frame) + lag);
+    const auto whole = static_cast<std::uint32_t>(std::floor(position));
+    const float fraction = static_cast<float>(position - std::floor(position));
+    const std::size_t count = flight.plan.size();
+    const float yaw = camera::retreat_flight_yaw_degrees(setup.geometry.departure_direction);
+    auto& report = retreat_flight_report_;
+    report.ships_max = std::max(report.ships_max, count);
+    report.frame_max = std::max(report.frame_max, whole);
+    for (live::LiveUnitPose& pose : poses) {
+        const auto found = flight.order.find(pose.entity);
+        if (found == flight.order.end()) continue;
+        const std::size_t n = found->second;
+        const float distance = camera::retreat_flight_distance(n, count, whole, setup.rates, fraction);
+        const auto& staged = flight.plan[n].staged;
+        const std::array<float, 3> at{staged[0] + setup.geometry.departure_direction[0] * distance,
+            staged[1] + setup.geometry.departure_direction[1] * distance,
+            staged[2] + setup.geometry.departure_direction[2] * distance};
+        pose.position = {static_cast<double>(at[0]), static_cast<double>(at[1]), static_cast<double>(at[2])};
+        pose.yaw_degrees = static_cast<double>(yaw);
+        pose.roll_degrees = 0.0;
+        pose.pitch_degrees = 0.0;
+        const float dx = at[0] - setup.eye[0];
+        const float dy = at[1] - setup.eye[1];
+        const float dz = at[2] - setup.eye[2];
+        const float fade = camera::retreat_object_fade(std::sqrt(dx * dx + dy * dy + dz * dz), setup.fade_begin, setup.fade_end);
+        if (fade < 1.0F) flight.opacity[pose.entity] = fade;
+        report.distance_max = std::max(report.distance_max, distance);
+        report.opacity_min = std::min(report.opacity_min, fade);
+        if (const auto brightness = camera::retreat_engine_brightness(n, whole, fraction)) flight.brightness[pose.entity] = *brightness;
+        if (const auto accelerates = camera::retreat_flight_accelerates_at(n, count, setup.rates);
+            accelerates && whole >= *accelerates && flight.jumped.insert(pose.entity).second) {
+            flight.jumps.push_back({pose.entity, pose.type, pose.owner, pose.position});
+            ++report.jumps;
+        }
+    }
+    report.brightened_max = std::max(report.brightened_max, flight.brightness.size());
+}
+
+void LiveSessionView::set_cinematic_pacing(const bool on) {
+    if (!session_ || options_.lan || session_->agreed_pacing()) return;
+    if (time_.set_cinematic_pacing(on, session_->completed_tick())) apply_time();
 }
 
 bool LiveSessionView::request_speed(const std::uint32_t step) {
@@ -230,6 +341,7 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
         ~GrowthScope() { population = nullptr; renderer = nullptr; }
     } growth_scope{arrival_slots_.population, arrival_slots_.renderer};
     tick_wait_ms_ = session_tail_ms_ = clip_pose_ms_ = 0.0;
+    projectile_observe_ticks_ms_ = projectile_observe_final_ms_ = projectile_opacity_ms_ = 0.0;
     using UpdateResult = core::Result<BattleScene::Update>;
     const auto fail = [this](std::string message) {
         return UpdateResult::failure(frame_failure(std::move(message)));
@@ -323,6 +435,7 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
     FrameTimer bookkeeping_timer(trace_frames_ ? &bookkeeping_ms_ : nullptr);
     register_frame_squadrons(previous, latest);
     if (catch_up) warm_live_rosters(population, renderer, *latest);
+    pump_hangar_warm(population, renderer, *latest); // #5097 PR 2: hangars of queued, pooled and called-in ships
     // The events of the ticks this frame reached, from the session's event log rather than the
     // snapshot history, so a stall longer than the history loses none (#370 review 3). Should
     // the log's own bound have dropped some, the gap is reported, never silently skipped.
@@ -358,6 +471,7 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
                                          fading_entities, poses_, pose_workers_)) {
         return fail("live unit interpolation failed");
     }
+    apply_retreat_flight(latest, population, poses_);
     const auto& poses = poses_;
     // #447: the killed craft spinning away that the local player sees.
     const auto spinning = live::interpolate_spinning(*previous, *latest, alpha, player_, options_.reveal);
@@ -401,6 +515,8 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
     apply_frame_shield_flashes(population, renderer, visual_scales);
     BattleScene::Update update;
     publish_frame_instances(latest, population, renderer, observations, update);
+    // TSW-15: the target props the super weapon has destroyed leave the environment view's drawing.
+    if (debris_) update.hidden_environment_records = std::span<const std::uint32_t>(debris_->hidden_environment_records());
     if (auto failure = schedule_frame_capture(update)) return UpdateResult::failure(std::move(*failure));
     if (options_.lan && options_.lan_quit_tick) {
         if (*options_.lan_quit_tick && session_->completed_tick() >= *options_.lan_quit_tick && phase_ == Phase::running) quit();
@@ -506,6 +622,13 @@ void LiveSessionView::collect_frame_events(const std::shared_ptr<const sim::tact
     // over when the spin ends, at its last spin pose.
     for (const platform::LiveTickEvents& record : battle_frame_.reached) {
         for (const tactical::Event& event : record.events) {
+            // #7190: the reason the simulation gave for a refused call-down of the local player's company.
+            // Land only: the space pane showed no refusal before and keeps showing none.
+            if (event.kind == tactical::EventKind::order_rejected && event.order == tactical::OrderKind::reinforce
+                && event.player == player_ && land_terrain() != nullptr) {
+                reinforcement_refusal_ = ReinforcementRefusal{event.reason, record.tick};
+                continue;
+            }
             if (event.kind == tactical::EventKind::pad_structure_sold && event.sequence != sim::invalid_entity_id) {
                 pad_empty_since_[event.sequence] = event.tick;
             }
@@ -998,6 +1121,7 @@ std::optional<core::Diagnostic> LiveSessionView::compose_frame_units(BattleScene
         const auto count = session_->land_motion_through(land_playback_tick_, presented, land_motion_buffer_);
         for (std::size_t index = 0; index < count; ++index) {
             const auto& frame = land_motion_buffer_[index];
+            note_land_shots(frame.tick);
             advance_land_playback(population, frame);
             land_playback_tick_ = frame.tick;
         }
@@ -1142,6 +1266,36 @@ std::optional<core::Diagnostic> LiveSessionView::compose_frame_units(BattleScene
                                           foil.alternate});
                 }
             }
+            // #6554 (WSPL-08/09): a SUPER_LASER unit plays its attack clip from the clip start the snapshot publishes,
+            // at the clip's rate and held at its last playable frame (as the sim's fire gate counts it), until the use ends.
+            if (pose.instance != nullptr) {
+                for (const tactical::AbilityStatus& ability : pose.instance->abilities) {
+                    if (!laser_clip::clip_shown(ability)) continue;
+                    if (const animation::Player* attack = population.live_clip(*ship); attack != nullptr && attack->playable_frames() > 0) {
+                        constexpr std::uint32_t subdivisions = 64;
+                        const double frame = laser_clip::clip_frame(presented_tick_ - static_cast<double>(ability.laser_clip_tick),
+                            attack->frames_per_second(), attack->playable_frames(), tactical::logical_frames_per_second);
+                        clip_poses.push_back({*ship, {static_cast<std::uint64_t>(frame * subdivisions), subdivisions}, 0.0F});
+                        ++laser_clip_poses_;
+                        if (ability.laser_phase == tactical::LaserPhase::clip) ++laser_clip_poses_before_fire_;
+                    }
+                    break;
+                }
+            }
+            // TSW-15: a tactical super weapon plays its attack clip from the sim's attack start to the target's
+            // destruction, at the clip's rate and held at its last playable frame.
+            if (debris_ != nullptr && pose.instance != nullptr) {
+                if (const auto window = debris_->tsw_clip(pose.entity)) {
+                    if (const auto elapsed = space::tsw_clip_elapsed(*window, presented_tick_)) {
+                        if (const animation::Player* attack = population.live_clip(*ship); attack != nullptr && attack->playable_frames() > 0) {
+                            constexpr std::uint32_t subdivisions = 64;
+                            const double frame = laser_clip::clip_frame(*elapsed, attack->frames_per_second(),
+                                attack->playable_frames(), tactical::logical_frames_per_second);
+                            clip_poses.push_back({*ship, {static_cast<std::uint64_t>(frame * subdivisions), subdivisions}, 0.0F});
+                        }
+                    }
+                }
+            }
             last_poses_[pose.entity] = placed;
             live.push_back(std::move(placed));
         }
@@ -1220,19 +1374,34 @@ void LiveSessionView::compose_frame_projectiles(const std::shared_ptr<const sim:
             };
         // Events can span several ticks in a fast frame. Observe those retained
         // snapshots before terminal admission, including shots already gone.
-        for (const auto& record : battle_frame_.reached) {
-            const auto before = record.tick > 0 ? session_->snapshot_at(record.tick - 1) : nullptr;
-            const auto after = session_->snapshot_at(record.tick);
-            if (before && after) projectile_models_->observe_projectiles(*before, *after,
-                std::min(static_cast<double>(record.tick), presented_tick_), observer);
+        // The last per-tick observation already is the frame's own observation when it saw the same two
+        // snapshots at the same presented tick: a second identical pass changes nothing (the same
+        // maps get the same values, and ProjectileHide::advance returns at an equal tick before it asks
+        // the observer anything). Only a frame whose newest tick carried no event, or whose
+        // snapshots are gone, still needs the final pass.
+        bool final_observed = false;
+        {
+            FrameTimer observe_timer(trace_frames_ ? &projectile_observe_ticks_ms_ : nullptr, true);
+            for (const auto& record : battle_frame_.reached) {
+                const auto before = record.tick > 0 ? session_->snapshot_at(record.tick - 1) : nullptr;
+                const auto after = session_->snapshot_at(record.tick);
+                if (!before || !after) continue;
+                const double observed_at = std::min(static_cast<double>(record.tick), presented_tick_);
+                projectile_models_->observe_projectiles(*before, *after, observed_at, observer);
+                final_observed = before.get() == previous.get() && after.get() == latest.get()
+                    && observed_at == presented_tick_;
+            }
         }
-        projectile_models_->observe_projectiles(*previous, *latest, presented_tick_, observer);
+        if (!final_observed) {
+            FrameTimer final_timer(trace_frames_ ? &projectile_observe_final_ms_ : nullptr, true);
+            projectile_models_->observe_projectiles(*previous, *latest, presented_tick_, observer);
+        }
         projectile_models_->pose_projectile_models(*previous, *latest, battle_frame_.alpha,
             [this](const sim::EntityId entity) { return unit_frame(entity); }, live, &population, &renderer);
-        for (const auto& pose : live) {
-            if (projectile_models_->is_projectile_model(pose.ship))
-                population.set_live_opacity(renderer, pose.ship, projectile_models_->projectile_model_opacity(pose.ship));
-        }
+        // Only the poses the pool just appended can be projectile models: no scan of every live pose.
+        FrameTimer opacity_timer(trace_frames_ ? &projectile_opacity_ms_ : nullptr, true);
+        for (const std::size_t ship : projectile_models_->posed_model_ships())
+            population.set_live_opacity(renderer, ship, projectile_models_->projectile_model_opacity(ship));
     }
 }
 
@@ -1322,7 +1491,7 @@ void LiveSessionView::apply_frame_opacity(const std::shared_ptr<const sim::tacti
                     cloak_tint[channel] += cloak_blend->second.value() * (handler->stealth_colour[channel] / 255.0F - 1.0F);
             }
         }
-        const float opacity = fade_.opacity(pose.entity).value_or(1.0F)
+        const float opacity = fade_.opacity(pose.entity).value_or(1.0F) * retreat_flight_opacity(pose.entity)
             * (1.0F + nebula * (nebula_colour_.a / 255.0F - 1.0F)) * cloak_tint[3];
         population.set_live_opacity(renderer, *ship, opacity);
         // WR-37: frame 35 starts a light fade lasting 115/(FPS*4) seconds.

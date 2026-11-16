@@ -35,7 +35,12 @@ records what the engine runs today and the decisions it makes while rules are op
     sees the new level, so tech events follow in the same step). `SET_MAX_TECH_LEVEL` sets the maximum alone and is refused
     below the current level (unverified). The faction names the first active player of that faction.
   - `CREDITS` (amount): a whole-number windfall with multiplier one.
-  Every applied reward is a journaled native effect (kind 12 for tech, 19 for locks, 20 for spawns and credits), so a recording
+  - `PLANET_FACTION` (planet, faction; both required, WST-42): the named planet's structures and starbase are cleared, its previous
+    owner's forces are sent away (the destroy-for-non-local-owner half is unverified, WST-U19), its political modifiers are
+    removed and it goes to the faction's active player at full control. Planet and faction are read from the plot, so any
+    planet the galaxy has takes part (the Remake corner "Dummy" planets are ordinary planets to this reward). An unknown
+    planet, a faction with no active player or an empty planet parameter is refused with its reason.
+  Every applied reward is a journaled native effect (kind 12 for tech, 19 for locks, 20 for spawns, credits and planet gifts), so a recording
   reconstructs it without the engine; a step that replays the journal applies nothing itself.
 - **Setup binds the plots' units.** A unit type a plot creates (`SPAWN_HERO`, `UNIQUE_UNIT`) joins the creation inputs of the live
   setup with what it needs (company members, transport, additional creation), so any plot can place it later
@@ -65,8 +70,50 @@ that fills the per-event dependant lists and the sub-plot order the loader appen
 - **Land and tactical events and rewards** (`STORY_LAND_TACTICAL`, `STORY_TACTICAL_DESTROY`, `STORY_LAND_ON`, `STORY_DEPLOY`,
   `LINK_TACTICAL`, `SET_TACTICAL_MAP` and the other tactical kinds) are parsed and refused with "not available until land
   battles": they are listed in `Engine::unavailable()`, never fire, and a triggered `LINK_TACTICAL` carries the refusal.
-- **Later evaluators.** The galactic event types of WST-31..39 other than the four above (arrival, conquest, construction,
-  destruction, battle results, corruption, notifications) are listed in `Engine::unavailable()` as "no evaluator yet".
+- **Counting evaluators (batch 1).** `STORY_WIN_BATTLES`, `STORY_LOSE_BATTLES`, `STORY_CONQUER`, `STORY_CONQUER_COUNT`,
+  `STORY_DESTROY` and `STORY_DESTROY_BASE` run from the typed notices (WST-32/34/35). Their running counts are sparse
+  `State::counters` rows, kept only until the event fires or resets; they ride the checkpoint as a tail after the AI flags and
+  join the digest only when a row exists, so a game that has counted nothing keeps its bytes. The owner filters are
+  relative to the sub-plot's owner through `Config::relations`. Open points are WST-U16. Two seams remain: the session
+  emits no galactic loss notice, so `STORY_DESTROY` and `STORY_DESTROY_BASE` are listed in `Engine::unavailable()` as "cannot
+  fire"; and the fleet-content filter of the battle events needs per-side ship classes the session does not supply, so an event that
+  lists classes is refused with one diagnostic and never matches.
+- **Arrival evaluators (batch 2, part A).** `STORY_ENTER` and `STORY_FLEET_BOUNCED` run from the jump arrival and bounce
+  notices that the galaxy's movement service collects during its serial commit and hands to the story once per tick, sorted by
+  (fleet, kind), so the order is the same on every worker count (`GalacticSession::set_fleet_story_handler`). A fleet's
+  contents are the member types plus everything inside the members. `STORY_INVASION_BOUNCED` shares the evaluator but no
+  refused-invasion notice exists yet, so it is listed as "cannot fire". A bounce is announced when the movement access table
+  (WGM-20/31) refuses the final destination; the story's own planet-entry restriction (WST-52) is not wired into that table yet,
+  so a story-restricted planet does not bounce a fleet. An event that lists an orbit-type list (parameter 4) or
+  the raid flag (parameter 7) needs data the session does not supply: it is refused with one diagnostic and never matches.
+  Orbit links outside a hyperspace jump (production, launching from the surface, orbit rechecks) are not announced: WST-U17.
+- **Hero defeats (batch 3, part 2).** `STORY_DEFEAT_HERO` rides the battle loss notice of batch 2 part B: when the lost object's
+  original type is a named hero (the same hero set as `STORY_MOVE`), the campaign layer sends a hero-defeat notice after the
+  `STORY_DESTROY` ones, so the same loss also counts as a destroy. The type list (parameter 1) counts down from its entry of
+  the count list (parameter 2, a short list leaves the rest at one); the owner filter (parameter 3) is relative to the plot's
+  owner and applied to the defeated hero's owner; there is no planet list. Only battle results announce; a hero removed by an
+  ability, a planet ruin or a script (the saved hero-return queue path) does not, and capture is not a defeat
+  (`STORY_CAPTURE_HERO` has no notice): WST-U18.
+- **Hero moves (batch 3, part 1).** `STORY_MOVE` rides the same arrival: after the arrival's `STORY_ENTER` notice the campaign
+  layer sends one move notice per hero in the fleet or its transports, in ascending type id, so the order stays worker-count
+  independent. A hero is a type with `Is_Named_Hero` (the set is built from the plan's type bindings and rebuilt on load, never saved);
+  a generic hero (`Is_Generic_Hero`) is not counted yet because the galactic type table does not carry that flag and adding
+  it would move the content identity (WST-U12). The hero list (parameter 1) and the planet list (parameter 2) must both match, an empty list
+  matching anything (an empty hero list is unverified, WST-U12); there is no owner filter, so an enemy hero's move fires the
+  event too. Two instances of one hero type in a fleet send one notice (the contents are a sorted unique set of original types: per type versus per unit is unverified, WST-U12); heroes are matched by authored type
+  name. `STORY_LAND_ON` and `STORY_DEPLOY` are still not evaluated.
+- **Construction and loss evaluators (batch 2, part B).** `STORY_CONSTRUCT` and `STORY_CONSTRUCT_LEVEL` run from the
+  production service: a completed build other than a technology is collected during the ordered commit and handed over after
+  it, sorted by (planet, build, kind) (`set_construct_story_handler`); a starbase also sends its base level. `STORY_DESTROY`
+  runs from the battle-loss commit (tactical return and auto-resolve): each lost object is announced after the commit in
+  ascending object id, once for its type and once more for the original type when they differ
+  (`set_loss_story_handler`). The world hooks are installed only when a loaded plot holds one of these events, so other games
+  pay nothing and publish no notice. Seams: `STORY_DESTROY_BASE` has no emitter (a starbase can be lost in several ways) and is
+  listed as "cannot fire"; a `STORY_CONSTRUCT_LEVEL` that names a ground base is listed the same way (only a starbase completion sends a level); tactical build-pad construction is not announced (M4); losses outside a battle result
+  (abilities, planet ruins, script despawns) are not announced; `STORY_ACCUMULATE` has no emitter, the credit hook is single
+  owner (the AI's) and a general credit-change notice does not exist: WST-U18.
+- **Later evaluators.** The galactic event types of WST-31..39 not named above (accumulate, retreat and victory,
+  corruption, speech, view) are listed in `Engine::unavailable()` as "no evaluator yet".
 - **Lua.** `Lua_Script` names are stored with their sub-plot; the `Story_Event_Trigger` callback of WST-20 step 3 and the
   story Lua service of WST-54 belong to the Lua story host.
 - **Unverified choices** (least visible behaviour, to confirm with a debug-build capture): an absent switch parameter of

@@ -138,8 +138,9 @@ bool CampaignSetupScreen::build(Control& root, const Resources& resources, const
         facts.name = faction.name;
         facts.playable = faction.is_playable.value_or(false);
         facts.displayed_tech_adjustment = faction.displayed_tech_level_adjustment.value_or(0);
+        // WGP-40a: a faction without display text is a row without a caption, as in retail.
         facts.title = resources_.text
-            ? model::faction_display_name(*resources_.catalog, resources_.text, faction.name) : faction.name;
+            ? model::faction_caption_or_blank(*resources_.catalog, resources_.text, faction.name) : faction.name;
         factions.push_back(std::move(facts));
     }
     model_ = std::make_unique<model::CampaignSetupModel>(std::move(campaigns), std::move(factions), support);
@@ -348,6 +349,7 @@ void CampaignSetupScreen::refresh() {
     }
     if (auto* options = Object::cast_to<BaseButton>(options_)) {
         options->set_disabled(!model_->options_available() || !advanced_);
+        options->set_visible(model_->options_visible());
         options->set_tooltip_text(text(model_->options_disabled_reason()));
     }
     refresh_preview();

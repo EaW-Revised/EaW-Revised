@@ -1,4 +1,5 @@
 """Genuine campaign admission, borrowed planet map and released child presentation."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -248,7 +249,7 @@ func _process(delta):
         self.assertTrue((directory / "space-cycle" / "tactical.png").is_file())
         print("commander GC lit capture:", directory / "space-cycle" / "tactical.png")
 
-    def cycle(self, mode, resize=None):
+    def cycle(self, mode, resize=None, arrival=None):
         directory = Path(tempfile.mkdtemp(prefix="eawr-gc-space-cycle-"))
         report, capture = directory / "report.json", directory / "returned.png"
         began = time.monotonic()
@@ -259,6 +260,7 @@ func _process(delta):
             "--eawr-game-root", support.GAME_ROOT,
             "--eawr-lighting", "sh", "--eawr-shadows", "on", "--eawr-environment", "map",
             *(["--eawr-resize-in-loading", resize] if resize else []),
+            *(["--eawr-galactic-arrival-proof", arrival] if arrival else []),
             "--eawr-report", str(report), "--eawr-capture", str(capture)],
             cwd=support.ROOT, capture_output=True, text=True, timeout=1200, check=False)
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
@@ -320,6 +322,16 @@ func _process(delta):
         self.assertTrue(cycle["galaxy_same_instance"])
         self.assertTrue(capture.is_file())
         tactical = json.loads((directory / "tactical.json").read_text(encoding="utf-8"))
+        if mode == "retreat":
+            # #4444 (RC-07/RC-08): the retreating ships are drawn staged and flown away, not left standing: they cover
+            # more than the object fade distance (Unlocked camera, 11000) and fade out, their engines brighten and each
+            # plays its jump sound moment once.
+            flight = tactical["live_session"]["retreat_flight"]
+            self.assertGreaterEqual(flight["ships"], 1, flight)
+            self.assertGreater(flight["max_distance"], 11000, flight)
+            self.assertLess(flight["min_opacity"], 0.01, flight)
+            self.assertGreaterEqual(flight["jumps"], 1, flight)
+            self.assertGreaterEqual(flight["brightened"], 1, flight)
         loading = tactical["loading_screen"]
         if resize:
             # #3270/#3272: the window resized while the loading screen was up; the loading screen's layout
@@ -364,6 +376,25 @@ func _process(delta):
             expected = factions[slots[player]]["No_Colorization_Color"]
             self.assertEqual(pad["capture_rgb"], expected, pad)
         print(f"campaign pads checked: {len(pads)} of {len(live['pads'])}")
+        if arrival:
+            # SK-ARR-01..14: the campaign battle opens with the 150-frame arrival cinematic; the proof captured a lit frame
+            # per presented frame. The camera moves (the frames differ) and starts at frame 0.
+            shots = sorted((directory / "space-cycle" / f"arrival-{arrival}").glob("k*.png"))
+            numbers = [int(path.stem[1:]) for path in shots]
+            self.assertGreaterEqual(len(numbers), 60, numbers)
+            self.assertLessEqual(min(numbers), 3, numbers)
+            self.assertGreaterEqual(max(numbers), 120, numbers)
+            digests = {hashlib.sha256(path.read_bytes()).hexdigest() for path in shots}
+            self.assertGreater(len(digests), 20, "the arrival camera must move")
+            self.assertGreaterEqual(data["arrival_cinematic"]["starts"], 1)
+            self.assertEqual(data["arrival_cinematic"]["gate"][0], {"ready_tick": 0, "admitted": True})
+            print(f"campaign arrival {arrival}: {len(numbers)} frames {min(numbers)}..{max(numbers)} in {directory}")
+
+    def test_viewer_gc_space_arrival_attacker(self):
+        self.cycle("loss", arrival="attacker")
+
+    def test_viewer_gc_space_arrival_defender(self):
+        self.cycle("loss", arrival="defender")
 
     @unittest.skip("Pending qualified stock winning-matchup GPU acceptance (legacy EAWR-2645)")
     def test_viewer_gc_space_win(self):

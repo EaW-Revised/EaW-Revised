@@ -17,6 +17,16 @@ namespace eawr::presentation::ui {
     return constructing != sim::invalid_entity_id ? constructing : constructed;
 }
 
+// #6992 (land): a pad that carries a structure stays drawn under it, so its flat pick volume would sit under the building's.
+// The pad yields the click to the structure (or to its construction) only when that entity has a pick volume of its own this
+// frame (`drawn`); a structure the viewer could not bind to a ship leaves the pad as the target.
+template <class Drawn>
+[[nodiscard]] inline bool pad_yields_to_structure(const sim::EntityId constructing, const sim::EntityId constructed,
+    Drawn&& drawn) noexcept(noexcept(drawn(constructing))) {
+    return (constructing != sim::invalid_entity_id && drawn(constructing))
+        || (constructed != sim::invalid_entity_id && drawn(constructed));
+}
+
 // WBP-37: neutralization shows remaining owner fill; the capture timer is never hull.
 [[nodiscard]] inline double capture_fill(const double progress, const bool neutralizing) noexcept {
     return neutralizing ? 1.0 - std::clamp(progress, 0.0, 1.0) : std::clamp(progress, 0.0, 1.0);

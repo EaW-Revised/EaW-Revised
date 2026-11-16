@@ -8,6 +8,7 @@ include("${PROJECT_SOURCE_DIR}/src/mods/sources.cmake")
 list(FILTER EAWR_MODS_SOURCES EXCLUDE REGEX "/file_index_build[.]cpp$")
 include("${PROJECT_SOURCE_DIR}/cmake/EawrBuildIdentity.cmake")
 set(EAWR_MODS_SERVICE_SOURCES
+    src/digest_pause.cpp
     src/line_framer.cpp
     src/file_methods.cpp
     src/loadcheck.cpp

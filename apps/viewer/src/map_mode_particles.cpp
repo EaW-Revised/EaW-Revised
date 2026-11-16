@@ -1,5 +1,6 @@
 #include "eawr/scene/scene.hpp"
 #include "map_mode_internal.hpp"
+#include "particle_texture_load.hpp"
 
 namespace eawr::presentation::godot_backend {
 namespace map_mode_detail {
@@ -19,7 +20,7 @@ const assets::Texture* MapParticleProvider::resolve_texture(const std::string_vi
     auto found = textures_.find(*path);
     if (found == textures_.end()) {
         std::optional<assets::Texture> decoded;
-        if (auto loaded = assets::load_texture(*filesystem_, *path)) decoded = std::move(loaded.value());
+        if (auto loaded = load_particle_texture(*filesystem_, *path)) decoded = std::move(loaded.value());
         found = textures_.emplace(*path, std::move(decoded)).first;
     }
     return found->second ? &*found->second : nullptr;
@@ -310,8 +311,18 @@ void MapParticleProvider::start_attached(const particles::MapEffectPlan& plan, c
     placements_.push_back(std::move(record));
     ParticlePlacement& current = placements_.back();
     const auto fail = [&](const std::string& cause) {
-        current.status = "failed";
         current.causes.push_back(cause);
+        if (drop_unpreparable_) {
+            // Project rule (retail behaviour unverified): an effect that cannot be prepared is left out
+            // and the rest of the map goes on. The record stays listed.
+            current.status = "dropped";
+            if (current.handle != 0) {
+                static_cast<void>(registry_->release(current.handle));
+                current.handle = 0;
+            }
+            return;
+        }
+        current.status = "failed";
         failed_ = true;
     };
     const auto bytes = filesystem_->open(effect.effect_logical_path);
@@ -450,9 +461,22 @@ void MapParticleProvider::start_attached(const particles::MapEffectPlan& plan, c
             fail(core::format_diagnostic(placed.error())); return;
         }
     }
+    bool resource_refused = false;
     for (const auto& emitter : *registry_->plans(current.handle)) {
         if (!emitter.drawable) {
-            fail("emitter " + std::to_string(emitter.emitter_index) + ": " + emitter.cause);
+            const std::string cause = "emitter " + std::to_string(emitter.emitter_index) + ": " + emitter.cause;
+            if (emitter.backend_resource_failure) {
+                // The engine would not give a resource: a failure of the run, never a dropped effect.
+                current.causes.push_back(cause);
+                current.status = "failed";
+                failed_ = true;
+                resource_refused = true;
+                continue;
+            }
+            // Dropping: the emitters that can be drawn keep running, the
+            // others are listed with their cause (the registry never draws
+            // an emitter its backend refused for its data).
+            if (drop_unpreparable_) current.causes.push_back(cause); else fail(cause);
             continue;
         }
         const auto resources = backend_->fog_emitter_evidence();
@@ -465,8 +489,15 @@ void MapParticleProvider::start_attached(const particles::MapEffectPlan& plan, c
             .resource = found == resources.end() ? 0 : found->resource,
             .fog_handle = found == resources.end() ? 0 : found->fog_handle, .fog_source_sha256 = {}});
     }
-    if (current.causes.empty()) current.status = "ready";
-
+    if (resource_refused) return;
+    if (drop_unpreparable_ && current.emitters.empty()) {
+        // Nothing of this effect can be drawn: free it now.
+        static_cast<void>(registry_->release(current.handle));
+        current.handle = 0;
+        current.status = "dropped";
+        return;
+    }
+    if (drop_unpreparable_ || current.causes.empty()) current.status = "ready";
 }
 
 bool MapParticleProvider::advance(const float delta, const particles::CameraFrame& camera) {
@@ -593,6 +624,8 @@ bool MapMode::State::sync_space_attached(Node3D& host, SpacePopulation& populati
     build_attached_plan(cache, &population);
     if (!particles && !attached_plan.records.empty()) {
         particles = std::make_unique<MapParticleProvider>(host, *filesystem);
+        particles->set_drop_unpreparable(true);
+        particles->set_reject_resource_for_test(particle_reject_resource_test);
     }
     const bool synced = !particles || particles->sync_attached(before, attached_plan, *scene);
     population.set_attached_effects(space_attached_effects());
@@ -615,6 +648,9 @@ SpacePopulation::AttachedEffects MapMode::State::space_attached_effects() const 
             attached.admitted += record.status == particles::MapEffectStatus::admitted ? 1U : 0U;
             attached.capacity_exhausted += record.cause == particles::MapEffectCause::capacity_exhausted ? 1U : 0U;
         }
+        attached.dropped = static_cast<std::size_t>(std::count_if(particles->placements().begin(),
+            particles->placements().end(),
+            [](const ParticlePlacement& placement) { return placement.attached && placement.status == "dropped"; }));
         attached.cause = "the land attachment plan over the space scene, advanced by the map particle "
                          "provider with the space camera; per-placement status in map_particles";
     }
@@ -653,7 +689,7 @@ bool MapMode::State::verify_particles(const std::vector<std::byte>& with_effects
     particle_placements_outside_view = 0;
     particle_placements_subpixel_heat = 0;
     for (ParticlePlacement& placement : particles->placements_mutable()) {
-        if (placement.status == "unsupported") continue;
+        if (placement.status == "unsupported" || placement.status == "dropped") continue;
         if (!placement.confirmed_particle_model && !placement.attached) continue;
         if (placement.status == "skipped") { ++skipped_mesh; continue; }
         if (placement.owned && !placement.has_bounds) {

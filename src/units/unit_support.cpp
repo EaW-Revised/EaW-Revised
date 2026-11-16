@@ -169,6 +169,7 @@ constexpr std::string_view combat_scalars[] = {
     "Asteroid_Field_Damage_Rate",
     "Nebula_Ability_Disable_Time",
     "Ion_Storm_Shield_Disable_Time",
+    "Under_Construction_Damage_Multiplier",
     "ShieldRechargeIntervalInSecs",
     "EnergyRechargeIntervalInSecs",
     "EnergyToShieldExchangeRate",
@@ -214,6 +215,7 @@ constexpr std::string_view combat_scalars[] = {
     "MP_Default_Start_Tech_Level",        // WPR-02
     "MP_Default_Max_Tech_Level",          // WPR-02
     "Tactical_Build_Time_Multiplier",     // #530 PU-13
+    "Max_Build_Queue",                   // PU-14: optional signed integer, default 5
     "Credit_Cap_Per_Planet",              // WGT-27
     "Space_Station_Destruction_Forces_Retreat", // WGM-51
     "Allow_Reinforcement_Percentage_Normalized", // #530 PU-21
@@ -231,6 +233,12 @@ constexpr std::string_view land_formation_scalars[] = {
 // LC-102: the factor an occupant's weapon ranges grow by while it is inside a garrison structure. Land tables only; an
 // unauthored constant leaves occupants at their ordinary range.
 constexpr std::string_view land_garrison_scalars[] = {"Garrisoned_Max_Attack_Distance_Multiplier"};
+
+// WLAB-08: how long a Force-disabled unit stays disabled after a carrier last reached it (seconds). Land tables only; any
+// decimal is kept (the rule clamps a value under 0.1 s to 0), and an unauthored constant leaves the stock window.
+// WLAB-13: the factor a formation row layout multiplies member spacing by while SPREAD_OUT is on; an unauthored constant
+// leaves the spacing as it is.
+constexpr std::string_view land_ability_scalars[] = {"Force_Ability_Disable_Time", "Spread_Out_Spacing_Coefficient"};
 
 // The scalar constants FoC's database map reads as integers (engine-tags game-constants rows typed signed or
 // unsigned integer): the C `atoi` of the text with no range or sign check (#4992).
@@ -712,9 +720,23 @@ void load_constants(const vfs::Vfs& filesystem, const std::set<std::string>& dam
     const auto& root = document.value().root;
     data::tag_trace::document(root);
     for (const auto space_tag : combat_scalars) {
+        if (space_tag == "Under_Construction_Damage_Multiplier"
+            && (tables.domain != sim::tactical::BattleDomain::space
+                || std::none_of(tables.units.begin(), tables.units.end(), [](const auto& unit) { return unit.under_construction; })))
+            continue; // WCC-41: no affected recipient in this content selection; preserve its identity.
         const auto tag = domain_variant(tables.domain, space_tag); // BF-2: land reads its own multipliers
         NamedConstant constant{std::string(tag), std::nullopt, {}};
         const auto* node = last_child(root, tag);
+        // WCC-41: the durability adapter reports an omitted construction scalar.
+        if (tag == "Under_Construction_Damage_Multiplier" && node == nullptr) continue;
+        if (tag == "Max_Build_Queue") {
+            // PU-14 / AU-82: keep an omitted or placeholder default out of stock content identity.
+            if (node == nullptr || data::retail::is_placeholder(node->raw_text)) continue;
+            constant.text = trim(node->raw_text);
+            constant.value = Fixed::from_raw(static_cast<std::int64_t>(data::retail::integer_constant(constant.text)) * Fixed::scale);
+            tables.constants.scalars.push_back(std::move(constant));
+            continue;
+        }
         if (tag == "Stealth_Detection_Time") {
             // Keep an absent optional constant out of content identity (stock data authors none).
             if (node == nullptr) continue;
@@ -789,6 +811,14 @@ void load_constants(const vfs::Vfs& filesystem, const std::set<std::string>& dam
                 report.missing("GameConstants", constant.tag, constant.text, "not a non-negative decimal");
                 continue;
             }
+            tables.constants.scalars.push_back(std::move(constant));
+        }
+        for (const auto tag : land_ability_scalars) {
+            const auto* node = last_child(root, tag);
+            if (node == nullptr) continue;
+            NamedConstant constant{std::string(tag), std::nullopt, trim(node->raw_text)};
+            constant.value = number(constant.text);
+            if (!constant.value) { report.missing("GameConstants", constant.tag, constant.text, "not a decimal"); continue; }
             tables.constants.scalars.push_back(std::move(constant));
         }
     }

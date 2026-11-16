@@ -233,8 +233,8 @@ quota exhaustion or script faults stop the step without publishing partial state
 or commands. Physical allocation failure aborts the local session and requests
 recovery; it must not let one peer continue with different behavior. GC may run
 at different physical times only if unreachable objects are unobservable: forbid
-weak tables, user finalizers, resurrection and `gcinfo`, including metatable and alias
-bypasses; `collectgarbage(limit)` is an accepted no-op (amendment 3). Host resources have explicit ordered teardown;
+weak tables, user finalizers, resurrection and the real `gcinfo` figures, including metatable and alias
+bypasses; `collectgarbage(limit)` is an accepted no-op and `gcinfo` a constant (amendment 3). Host resources have explicit ordered teardown;
 collector callbacks may reclaim memory but cannot issue commands or events.
 Canonical saved state excludes unreachable garbage and allocator statistics.
 
@@ -255,8 +255,14 @@ over the draft policy. The files are in FoC's `Data/Scripts/Library`.
    function) for every event it pumps. A fault would stop every script that receives an
    event, and a bare type name would make all functions print alike; the text is the type
    and the per-instance identity in FoC's `%p` shape.
-3. **`collectgarbage`.** `PGBaseDefinitions` calls `collectgarbage(256)` when it loads, so the
-   call is accepted and does nothing. No FoC script uses another form; `gcinfo` stays absent.
+3. **`collectgarbage` and `gcinfo`.** `PGBaseDefinitions` calls `collectgarbage(256)` when it loads, so the
+   call is accepted and does nothing. No FoC script uses another form. Retail's `gcinfo` returns the
+   real heap figures (two numbers), which differ per peer and per run. The sandbox first left it
+   absent, which stopped a shipped mod's skirmish at its first service tick, so since policy v4
+   (2026-11-12) it returns the constants `0, 0`: the same on every peer, and a script that waits
+   for the figure to drop ends. `print` is accepted into a non-faulting script log and `loadstring`
+   compiles text only (binary chunks refused), both under the same identity bump; the rules are
+   in [Lua sandbox](lua-sandbox.md), library surface.
 4. **Same-pump threads.** FoC's thread pump re-reads the slot count on every step, so a
    thread created during a pump is resumed in that pump (FoC debug build,
    L-20 to L-26 in docs/lua-sandbox.md). The scheduler keeps that order.
@@ -685,6 +691,18 @@ while receivers that retained the timing vote report the departure timeout
 (`EAWR-NET-0502`). This diagnostic-code difference is accepted: every surviving
 peer ends in a latched refusal, preserves the same simulation prefix, and neither
 continues nor hangs waiting for another vote.
+The product sets `AdaptiveTiming::hold_on_expiry` for online sessions: while every voter stream is open, a vote that
+outlives the completeness deadline keeps the current delay, keeps waiting and counts a deferral (logged as
+`timing-agreement-deferred`) instead of ending the match; dropping the agreement on one peer alone could split the delay
+while another peer applies it. A closed voter stream or a pending departure still fails closed as above. Online
+skirmish and online co-op campaign sessions run with the host proposing the delay from measured RTT (`timing-mode
+adaptive` at match start, then `input-delay-change` with a running count; a stable link changes the delay once, to leave the
+offered delay); TCP LAN keeps the fixed offered delay (`timing-mode fixed`). A recovery frontier carries the delay in force:
+it is refused (`frontier_agreement_in_progress`, retried by the caller) while a change is pending or its old-delay horizon
+is still immutable, and the rebuilt core is created at the frontier's delay. A co-op save that hits a pending proposal or
+roster change is refused with `EAWR-NET-0110` (nothing saved, nothing failed) and the live session issues the same save
+again, up to 16 times, so the player never sees an error; the host does not start a proposal while a save barrier runs.
+A loaded save starts a new session at the offered delay on every peer (a pending proposal is never part of a save).
 Departure acknowledgements settle during receive processing, so a following
 host timing proposal in the same drain sees the agreed roster. When another
 stream still holds a departure acknowledgement, a timing control that follows

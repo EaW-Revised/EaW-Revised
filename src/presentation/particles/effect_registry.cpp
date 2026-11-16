@@ -31,6 +31,7 @@ std::atomic<bool> default_stream_bucketing{true};
 std::atomic<bool> default_catchup_folding{true};
 std::atomic<bool> default_clean_present{true};
 std::atomic<std::size_t> default_slice_cap{StepExecutor::max_ordered};
+std::atomic<bool> diagnostic_inert{false};
 // Exact bit equality: a value that merely compares equal (-0 and +0) may still build another stream.
 template<class T> bool same_bits(const T& left, const T& right) noexcept {
     static_assert(std::is_trivially_copyable_v<T>);
@@ -222,6 +223,10 @@ bool StepExecutor::run_ordered(const std::size_t count, const std::function<void
     // An executor that gave the caller no job leaves the commits to it, every task being done.
     if (ran && !shared.failed.load(std::memory_order_relaxed) && shared.consumed < shared.count) shared.commit();
     return ran && !shared.failed.load(std::memory_order_relaxed) && shared.consumed == shared.count;
+}
+
+void EffectRegistry::set_diagnostic_inert(const bool on) noexcept {
+    diagnostic_inert.store(on, std::memory_order_relaxed);
 }
 
 void EffectRegistry::set_clean_present_default(const bool on) noexcept {
@@ -717,6 +722,7 @@ core::Result<EffectHandle> EffectRegistry::spawn_impl(
             // or a shader the compiler rejected): the emitter is reported as
             // not drawn with that cause instead of being drawn another way.
             plan.drawable = false;
+            plan.backend_resource_failure = backend_->failure_is_resource();
             const std::string detail = backend_->failure_cause();
             plan.cause = "backend could not create the emitter's resources"
                 + (detail.empty() ? std::string{} : ": " + detail);
@@ -823,6 +829,7 @@ core::Result<void> EffectRegistry::set_pinched_cylinder(const EffectHandle handl
 
 core::Result<EffectFrameStats> EffectRegistry::advance(
     const EffectHandle handle, const float delta_seconds, const CameraFrame& camera) {
+    if (diagnostic_inert.load(std::memory_order_relaxed)) return core::Result<EffectFrameStats>::success(EffectFrameStats{});
     Instance* const instance = find(handle);
     if (instance == nullptr) return core::Result<EffectFrameStats>::failure(unknown(handle));
     EffectFrameStats stats;
@@ -838,6 +845,7 @@ core::Result<EffectFrameStats> EffectRegistry::advance(
 }
 
 core::Result<void> EffectRegistry::present(const EffectHandle handle, const CameraFrame& camera) {
+    if (diagnostic_inert.load(std::memory_order_relaxed)) return core::Result<void>::success();
     Instance* const instance = find(handle);
     if (instance == nullptr) return core::Result<void>::failure(unknown(handle));
     observe_environment(camera);
@@ -882,6 +890,10 @@ core::Result<void> EffectRegistry::advance_all(const std::span<const EffectHandl
 core::Result<void> EffectRegistry::advance_batch(const std::span<const EffectHandle> handles,
     const float uniform_delta, const std::span<const float> deltas, const CameraFrame& camera,
     std::vector<EffectFrameStats>& stats) {
+    if (diagnostic_inert.load(std::memory_order_relaxed)) {
+        stats.assign(handles.size(), EffectFrameStats{});
+        return core::Result<void>::success();
+    }
     if (auto resolved = resolve(handles); !resolved) return resolved;
     observe_environment(camera);
     stats.resize(batch_.size());
@@ -932,6 +944,7 @@ core::Result<bool> EffectRegistry::begin_advance_all(const std::span<const Effec
         diagnostics_.push_back(diagnostic);
         return core::Result<bool>::failure(std::move(diagnostic));
     }
+    if (diagnostic_inert.load(std::memory_order_relaxed)) return core::Result<bool>::success(false);
     // Inside a deferred-upload scope the pack waits for the scope's exit; a backend that does not allow
     // its commit beside the pack may not pack while the caller does other work either.
     if (executor_ == nullptr || handles.size() < 2 || upload_scopes_ != 0 || executor_->participants() < 2
@@ -994,6 +1007,7 @@ core::Result<void> EffectRegistry::finish_advance_all() {
 }
 
 core::Result<void> EffectRegistry::present_all(const std::span<const EffectHandle> handles, const CameraFrame& camera) {
+    if (diagnostic_inert.load(std::memory_order_relaxed)) return core::Result<void>::success();
     if (auto resolved = resolve(handles); !resolved) return resolved;
     observe_environment(camera);
     if (clean_present_) {

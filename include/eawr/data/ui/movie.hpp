@@ -55,6 +55,19 @@ struct HudMovie {
     std::string cache_key;
 };
 
+// The declaration a full-screen request reads (WGP-107..110), without opening
+// the file: the authored Movie_File, whether a game-hiding playback may be
+// skipped (`Cannot_Skip`), and whether the credits roll over it (`Has_Credits`).
+// Same lookup and errors as resolve_hud_movie up to movie_file (an empty
+// Movie_File); the file itself is not checked here.
+struct MovieDefinition {
+    std::string name;
+    std::string file;
+    bool cannot_skip{};
+    bool has_credits{};
+};
+[[nodiscard]] core::Result<MovieDefinition> resolve_movie_definition(const vfs::Vfs& filesystem, std::string_view name);
+
 // Resolves `name` (ASCII case-insensitive; a later declaration of the same
 // name wins) and identifies its file. Errors: movie_catalog, movie_unknown,
 // movie_file, movie_format. Only Bink 1 resolves: it is all FoC and the

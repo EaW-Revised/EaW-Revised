@@ -20,6 +20,8 @@
 // list, combo and edit keep Godot's ItemList, OptionButton and LineEdit
 // behaviour and apply the skin as theme overrides plus a drawn frame.
 
+#include "eawr/presentation/ui/toggle_layout.hpp"
+
 #include <cstdint>
 
 #include <godot_cpp/classes/base_button.hpp>
@@ -179,8 +181,9 @@ public:
     EawrUiCheck();
     void set_text(const godot::String& text);
     void set_radio(bool radio);
-    // BS_PUSHLIKE: the on/off piece fills the whole rect and the caption is centred in it, as for a
-    // tab button (the keyboard pages' tabs), instead of a box with the caption beside it.
+    // Remember zero resource dimensions so a radio can receive clicks on its visible OFF-art glyph.
+    void set_authored_size(const godot::Vector2& size);
+    // BS_PUSHLIKE: a radio centres its caption on its native glyph; a check fills its rectangle.
     void set_pushlike(bool pushlike);
     void set_forced_state(KitState state);
     [[nodiscard]] KitState state() const;
@@ -191,8 +194,11 @@ protected:
     static void _bind_methods() {}
 
 private:
+    // #5345: the glyph box (the OFF art's size, top-left), the one box every state draws in.
+    [[nodiscard]] presentation::ui::ToggleBox glyph_box() const;
     godot::String text_;
     bool radio_{};
+    presentation::ui::ToggleSize authored_size_{1.0F, 1.0F};
     bool pushlike_{};
     KitState forced_{KitState::automatic};
     KitText caption_;
@@ -292,7 +298,9 @@ private:
     void apply_skin();
     void apply_retail_list(godot::PopupMenu& popup);
     void scale_retail_list();
+    void keep_authored_box();
     float list_height_{};
+    int box_height_{};
     KitState forced_{KitState::automatic};
     bool applying_{};
     bool retail_list_{};

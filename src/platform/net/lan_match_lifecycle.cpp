@@ -117,6 +117,7 @@ void TcpLanMatch::host(std::uint16_t port)  {
         io_->transport.tcp = std::make_unique<MatchTransport>(std::move(opened).value());
         if (map_port_) mapping_ = std::make_unique<net::PortMapping>(io_->transport.tcp->port());
         const std::lock_guard lock(mutex_);
+        host_mod_refresh_owed_ = false;
         view_ = {}; view_.host = true; view_.port = io_->transport.tcp->port(); view_.phase = LanPhase::connecting;
         view_.human_owners = owners_; view_.player = owners_.front();
         view_.reconnect_enabled = recovery_policy_.reconnect && static_cast<bool>(credentials_);

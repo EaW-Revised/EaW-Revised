@@ -384,6 +384,8 @@ void content_refusals() {
             {"gc-content", "gc-story"}, {}},
         {"ai data", [](Local& l) { l.content.xml_digest = std::string(64, 'd'); }, {}, {"gc-ai-data"}},
         {"resolver", [](Local& l) { l.data.constants.push_back({"AutoResolve_Test", "2", whole(2)}); }, {"gc-resolver"}, {}},
+        // Sandbox policy v4: a peer still on the previous Lua sandbox policy disagrees on the rules domain alone.
+        {"sandbox policy v3", [](Local& l) { l.content.sandbox_policy = "eawr-lua-sandbox-v3"; }, {}, {"gc-rules"}},
         {"ai controllers", [](Local& l) {
              l.content.ai_configuration = [](std::string_view, gc::PlayerId, std::string_view) {
                  return eawr::core::Result<Bytes>::success(Bytes{9, 9, 9});

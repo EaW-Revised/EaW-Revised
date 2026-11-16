@@ -1,5 +1,8 @@
 #include "ability_ruins_support.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/campaign/tactical_return.hpp"
+#include "eawr/sim/galactic/victory.hpp"
+#include <optional>
 #include <stdexcept>
 
 // WGCH-67/140..143/176..179: the shared live ruins adapter (native effect 17).
@@ -130,10 +133,133 @@ void aborts_transition(const eawr::sim::PartitionExecutor& pool, std::vector<std
     expect(world.economy_corruption()->planets[0].corruption == gc::corruption_fixture::Type::none
         && world.snapshot()->player_economy()->players[0].credits >= cash, "an aborted transition never completes later or rewards");
 }
+// #7187 / TSW-10: a battle result that carries the planet fact commits the ruins once, through the shared request.
+void battle_planet_fact() {
+    const auto config = ruins_setup(false); const auto planet = config.planets[0].id;
+    auto world = take(gc::GalacticSession::create(config)); std::vector<gc::HeroReturnRecord> returns;
+    world.set_ability_consumption_handler([&](const gc::HeroDefeat& defeat) {
+        auto scheduled = gc::schedule_hero_return(returns, defeat, world.clock().galactic_frame, world.snapshot()->planets());
+        if (!scheduled) return eawr::core::Result<void>::failure(scheduled.error());
+        std::vector<eawr::sim::EntityId> removed = scheduled.value().destroyed_companions;
+        removed.insert(removed.end(), defeat.removed_objects.begin(), defeat.removed_objects.end());
+        removed.push_back(defeat.id); std::sort(removed.begin(), removed.end());
+        removed.erase(std::unique(removed.begin(), removed.end()), removed.end());
+        return world.apply_battle_losses(removed);
+    });
+    eawr::platform::ThreadWorkerAdapter executor(1);
+    eawr::campaign::ConflictRecord conflict; conflict.planet = planet; conflict.layer = eawr::campaign::BattleLayer::space;
+    eawr::campaign::TacticalReturnPlan plan; eawr::campaign::TacticalReturnState state;
+    eawr::testing::must(eawr::campaign::apply_tactical_return(world, conflict, plan, state, executor));
+    expect(!world.snapshot()->control()->planets[0].destroyed, "a battle result without the planet fact leaves the planet intact");
+    const auto before = world.native_effects().size();
+    plan.result.planet_destroyed = true;
+    eawr::testing::must(eawr::campaign::apply_tactical_return(world, conflict, plan, state, executor));
+    expect(world.snapshot()->control()->planets[0].destroyed && world.snapshot()->economy_corruption()->planets[0].destroyed,
+        "the battle's planet fact commits the planet's ruins");
+    const auto effects = world.native_effects().size();
+    eawr::testing::must(eawr::campaign::apply_tactical_return(world, conflict, plan, state, executor));
+    expect(world.native_effects().size() == effects, "a repeated return of a destroyed planet commits nothing more");
+    // The request journals the same native effect the ability route does, so save and load of a ruined planet is the
+    // reconstruction `ruins` above already checks through the game checkpoint.
+    expect(world.native_effects().size() == before + 1, "the battle's planet fact is one journaled ruins effect");
+}
+// WGSI-11 / WGEP-12: the income forecast publishes the credits the view player's own siphon takes from a planet (the
+// planet's pre-siphon income times the fraction, the value the payment uses); another player's siphon, an ended one
+// and an unsiphoned planet publish nothing.
+void siphon_forecast() {
+    const auto siphoned = [](const gc::GalacticSetup& config) {
+        auto world = take(gc::GalacticSession::create(config));
+        const auto* forecast = world.snapshot()->economy_forecast();
+        expect(forecast && forecast->player == 2, "the forecast is the view player's");
+        std::vector<std::optional<Fixed>> values;
+        if (forecast) for (const auto& row : config.planets) {
+            const auto found = std::find_if(forecast->planets.begin(), forecast->planets.end(),
+                [&](const auto& value) { return value.planet == row.id; });
+            values.push_back(found == forecast->planets.end() ? std::nullopt : found->siphoned);
+        }
+        return values;
+    };
+    auto config = ruins_setup(false);
+    const auto whole = siphoned(config);
+    expect(whole.size() == config.planets.size() && whole[0] && *whole[0] > Fixed{},
+        "a whole-fraction siphon of the view player publishes the planet's income");
+    for (std::size_t i = 1; i < whole.size(); ++i) expect(!whole[i], "an unsiphoned planet publishes no siphon");
+    config.economy_corruption->planets[0].siphon.fraction = Fixed::from_raw(Fixed::scale / 4);
+    const auto quarter = siphoned(config);
+    expect(whole[0] && !quarter.empty() && quarter[0] == take(eawr::sim::math::multiply(*whole[0], Fixed::from_raw(Fixed::scale / 4))),
+        "the published value is the pre-siphon income times the fraction");
+    auto foreign = config; foreign.economy_corruption->planets[0].siphon.recipient = 1;
+    const auto other = siphoned(foreign);
+    expect(!other.empty() && !other[0], "another player's siphon is not published to the view player");
+    auto inactive = config; inactive.economy_corruption->planets[0].siphon.active = false;
+    const auto ended = siphoned(inactive);
+    expect(!ended.empty() && !ended[0], "an ended siphon publishes nothing");
+}
+// WGT-102 / WGS-79: a tactical super weapon's obliteration tests the controller's leader among the landed transport
+// contents before the ruins, with the condition's authored leader names, and credits the weapon's owner.
+void tactical_obliteration_leader_kill() {
+    const auto with_victory = [](std::vector<std::string> leaders, gc::PlayerId actor) {
+        auto config = ruins_setup(false);
+        gc::VictoryContext context;
+        for (const auto& row : config.players) {
+            gc::VictoryPlayer player; player.player = row.player_id; player.faction = "F" + std::to_string(row.player_id);
+            player.neutral = row.player_id == neutral_player; player.playable = !player.neutral;
+            player.human = row.player_id == actor; player.ai = !player.neutral && !player.human;
+            player.planet_leader_unit = "Hero_Leader"; player.planet_leader_type = 1000; // the landed hero's type
+            context.players.push_back(player);
+        }
+        for (const auto& a : context.players) for (const auto& b : context.players)
+            context.relations.push_back({a.player, b.player, a.player == b.player});
+        // Setup validation: one victory row per listed planet, in listing order, with its planet type.
+        for (const auto& row : config.planets) context.planets.push_back({row.id, 3000, row.owner, row.owner, row.owner, false});
+        gc::VictoryAuthoring authoring; authoring.human = {gc::VictoryKind::superweapon_kill_leader};
+        authoring.human_parameters.leaders = std::move(leaders);
+        config.victory = gc::install_victory(authoring, context, actor);
+        return config;
+    };
+    const gc::PlayerId actor = 1;
+    const auto planet = ruins_setup(false).planets[0].id;
+    {
+        auto world = take(gc::GalacticSession::create(with_victory({"Other_Leader"}, actor)));
+        const auto before = world.state_sha256();
+        expect(!take(world.apply_tactical_obliteration_victory(actor, planet)) && !world.victory()->pending
+            && world.state_sha256() == before, "WGT-102: a leader-name list that does not name the controller's leader refuses");
+    }
+    for (const auto& names : {std::vector<std::string>{}, std::vector<std::string>{"hero_LEADER"}}) {
+        auto world = take(gc::GalacticSession::create(with_victory(names, actor)));
+        expect(!take(world.apply_tactical_obliteration_victory(actor, 999999)) && !world.victory()->pending,
+            "an unknown planet tests nothing");
+        expect(take(world.apply_tactical_obliteration_victory(actor, planet)) && world.victory()->pending
+            && world.victory()->pending->player == actor && world.victory()->remaining == 30,
+            "WGT-102: the landed leader credits the weapon owner with 30 frames (an empty list, or a case-insensitive match)");
+    }
+    {
+        // The return path: the conflict's superweapon force names the weapon owner, and the test runs before the ruins
+        // remove the landed transport that carries the leader.
+        auto world = take(gc::GalacticSession::create(with_victory({}, actor)));
+        world.set_ability_consumption_handler([&](const gc::HeroDefeat& defeat) {
+            std::vector<eawr::sim::EntityId> removed = defeat.removed_objects; removed.push_back(defeat.id);
+            std::sort(removed.begin(), removed.end()); removed.erase(std::unique(removed.begin(), removed.end()), removed.end());
+            return world.apply_battle_losses(removed);
+        });
+        eawr::platform::ThreadWorkerAdapter executor(1);
+        eawr::campaign::ConflictRecord conflict; conflict.planet = planet; conflict.layer = eawr::campaign::BattleLayer::space;
+        conflict.superweapon = 70000;
+        eawr::campaign::ConflictForce weapon; weapon.id = 70000; weapon.owner = actor; conflict.forces.push_back(weapon);
+        eawr::campaign::TacticalReturnPlan plan; eawr::campaign::TacticalReturnState state;
+        plan.result.planet_destroyed = true;
+        eawr::testing::must(eawr::campaign::apply_tactical_return(world, conflict, plan, state, executor));
+        expect(world.victory()->pending && world.victory()->pending->player == actor
+            && world.snapshot()->control()->planets[0].destroyed, "the return credits the leader kill, then commits the ruins");
+    }
+}
 } // namespace
 int case_galactic_ability_ruins_tests() {
     try {
         notice_entry_latch();
+        battle_planet_fact();
+        siphon_forecast();
+        tactical_obliteration_leader_kill();
         std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1);
         ruins(one, baseline, false); ruins(one, baseline, true); without_flag(one, baseline); aborts_transition(one, baseline);
         for (std::size_t count : {2U, 4U, 8U}) {

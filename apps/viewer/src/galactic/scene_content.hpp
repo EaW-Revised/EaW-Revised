@@ -9,6 +9,7 @@
 #include "eawr/presentation/particles/particles.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
 
+#include <array>
 #include <map>
 #include <optional>
 
@@ -36,7 +37,13 @@ struct PlanetArt final {
     float pick_radius{};
     // Zoomed_Terrain_Index: the focused organize shell's alternate (GHUD-S rows); absent when not authored.
     std::optional<std::uint32_t> terrain_index;
+    // Corruption_N_Success_Speech_Event / _Bink_Hologram_Name for choice slots 1..3 (WGCH-09/128).
+    std::array<std::string, 3> corruption_success_speech{}, corruption_success_hologram{};
 };
+// The authored success speech event for a 0-based corruption slot; empty when the slot authors none or is out of range.
+[[nodiscard]] inline std::string_view corruption_success_speech_event(const PlanetArt& art, const std::size_t slot) noexcept {
+    return slot < art.corruption_success_speech.size() ? std::string_view(art.corruption_success_speech[slot]) : std::string_view{};
+}
 struct ProductionArt final {
     std::string name, icon, text;
     std::string base_position, every_marker_type, additional_structure;
@@ -44,6 +51,9 @@ struct ProductionArt final {
     std::string sold_sound{}; // GHUD-S93: authored SFXEvent_Sold_Tactical on the current type.
     // GHUD-S78: focused orbit uses the current station type's galactic art.
     std::string galactic_model;
+    // WGP-16: a fleet that holds this type draws this model on the galaxy map instead of the stock fleet marker
+    // (Galactic_Fleet_Override_Model_Name). Empty when the type authors none.
+    std::string fleet_override_model;
     bool station{};
     std::string encyclopedia;
     presentation::ui::UnitCardLooks encyclopedia_looks;
@@ -63,6 +73,15 @@ struct ProductionArt final {
     // WGUI-89: authored rank, with the shared type default established by BA-20.
     std::int64_t hero_rank{25};
 };
+// WGP-16: the model a galaxy-map fleet marker uses: the override model of the first member, in fleet order, whose type
+// authors one (`override_of(type)` returns it, empty for none), else the stock marker. Which member decides in a fleet
+// that mixes types is unread in the debug build (U-05); the first one is the least surprising choice.
+template <typename Members, typename Lookup>
+[[nodiscard]] std::string fleet_marker_model(const Members& members, const std::string& stock, Lookup&& override_of) {
+    for (const auto& member : members)
+        if (auto model = override_of(member.type); !model.empty()) return model;
+    return stock;
+}
 // Cache shared object content once, selecting non-multiplayer encyclopedia
 // text. GC ordering and authoritative prices remain caller-owned.
 [[nodiscard]] std::map<std::string, ProductionArt> load_production_art(
@@ -79,6 +98,7 @@ struct Affiliation final {
     std::string faction;
     std::string icon;
     bool present{};
+    std::string tech_tree_dialog{}; // authored Tech_Tree_Dialog_Name, WGP-147
 };
 void update_affiliation(Affiliation& current, const Affiliation* apparent, bool plain = false);
 

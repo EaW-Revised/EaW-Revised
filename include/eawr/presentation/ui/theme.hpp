@@ -159,10 +159,14 @@ struct ThemeModel final {
 // The logical path of a standalone texture, or nothing.
 using StandaloneTextures = std::function<std::optional<std::string>(std::string_view texture)>;
 
-// Data/Art/Textures/<stem>.tga, then .dds, as data::ui::vfs_texture_probe
-// probes (the name may carry either extension), then the name as written, for
-// the other image files mods name. `filesystem` must outlive it.
-[[nodiscard]] StandaloneTextures vfs_standalone_textures(const vfs::Vfs& filesystem);
+// Data/Art/Textures/<name> through the shared asset-name resolver
+// (assets::resolve_texture, docs/behaviour/asset-name-resolution.md): the name as
+// authored, then its stem with the sibling extensions, so a `.jpg`-named texture
+// that ships as `.dds` still loads. A miss is reported once per name as
+// EAWR-ASSET-NAME-0001. The logical path comes back lower-cased. `filesystem`
+// must outlive it. `report_misses` false is for an optional probe (a variant the caller falls back from silently):
+// the same lookup, no EAWR-ASSET-NAME-0001 line and no degradation-ledger entry.
+[[nodiscard]] StandaloneTextures vfs_standalone_textures(const vfs::Vfs& filesystem, bool report_misses = true);
 
 // A UI texture name resolved as a kit slot's is: the mega-texture entry, then a
 // standalone file; `missing` when neither has it (no diagnostic is recorded).

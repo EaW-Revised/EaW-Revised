@@ -194,6 +194,9 @@ void EawrUiBar::_draw() {
 
 EawrUiList::EawrUiList() {
     set_theme_type_variation("EawrUi");
+    // Godot passes the wheel on through a STOP control by default, so a list scrolled to either end would hand the
+    // wheel to whatever lies beneath it. A list under the pointer consumes the wheel whether or not it can scroll (#6758).
+    set_force_pass_scroll_events(false);
     set_texture_repeat(CanvasItem::TEXTURE_REPEAT_DISABLED);
     if (VScrollBar* bar = get_v_scroll_bar()) bar->connect("draw", callable_mp(this, &EawrUiList::draw_scroll_tab));
     track_oversampling(*this);
@@ -320,6 +323,26 @@ void EawrUiCombo::scale_retail_list() {
     // PopupMenu owns the clipped ScrollContainer and moves its Window into the
     // usable parent rectangle. The maximum applies before its shrink-wrap pass.
     popup->set_max_size(Vector2i(std::max(1, static_cast<int>(std::floor(viewport.x))), height));
+    // The authored box keeps its height around a short list (blank below the entries, as in the
+    // original); a combo with no list budget still shrinks to its entries.
+    const bool budgeted = presentation::ui::combo_popup_has_budget(list_height_, scale, frame, row);
+    box_height_ = budgeted ? height : 0;
+    // The window's own minimum size is not honoured by the menu's shrink-wrap, so the box is grown once
+    // it is up (one deferred call, after the menu's own layout pass) and kept inside the viewport.
+    if (box_height_ > 0) callable_mp(this, &EawrUiCombo::keep_authored_box).call_deferred();
+}
+
+void EawrUiCombo::keep_authored_box() {
+    PopupMenu* popup = get_popup();
+    if (box_height_ <= 0 || !popup->is_visible()) return;
+    Vector2i size = popup->get_size();
+    if (size.y >= box_height_) return;
+    size.y = box_height_;
+    popup->set_size(size);
+    Vector2i position = popup->get_position();
+    const int viewport_height = static_cast<int>(std::floor(get_viewport_rect().size.y));
+    if (position.y + size.y > viewport_height) position.y = std::max(0, viewport_height - size.y);
+    popup->set_position(position);
 }
 
 void EawrUiCombo::set_list_height(const float height) {

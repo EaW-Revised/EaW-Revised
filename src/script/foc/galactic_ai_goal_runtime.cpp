@@ -1,3 +1,4 @@
+#include "eawr/core/gc_profile.hpp"
 #include "ai_engine_internal.hpp"
 #include "galactic_ai_goals.hpp"
 #include "galactic_ai_actions.hpp"
@@ -43,6 +44,7 @@ GalacticGoalIdentity identity(const PlayerAi& player, const Goal& goal, const En
 
 core::Result<std::optional<GalacticGoalIdentity>> Engine::allocate_galactic_goal(
     tactical::PlayerId id, std::size_t function_index, std::uint64_t target_id) {
+    gc_profile::Scope profile_scope(gc_profile::Phase::goal_allocate);
     const auto native_record_write = native_record_scope();
     native_records_changed(id, {1});
     mark_native_state_changed();

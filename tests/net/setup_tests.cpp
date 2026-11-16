@@ -1,5 +1,7 @@
 #include "setup_test_support.hpp"
 #include "fake_transport.hpp"
+#include "eawr/skirmish/start.hpp"
+#include "eawr/units/unit_tables.hpp"
 
 #include <filesystem>
 #include <array>
@@ -17,15 +19,25 @@ struct Pair {
     unsigned barrier_checks{};
     net::SetupSession host, client;
     Pair(const std::filesystem::path& directory, sim::MatchAgreement local = identity(), bool perturb = false,
-        net::SetupOptions options = {}, std::optional<net::SetupOptions> client_options = {}, bool departures = false)
+        net::SetupOptions options = {}, std::optional<net::SetupOptions> client_options = {}, bool departures = false,
+        std::optional<sim::MatchAgreement> host_identity = {})
         : host_monitor(host_transport, monitor_options(directory / "host", options.session.input_delay)),
           client_monitor(client_transport, monitor_options(directory / "client", options.session.input_delay)),
-          host(require(net::SetupSession::host(host_transport, configured_offer(options, departures), providers(host_monitor, executor), options))),
+          host(require(net::SetupSession::host(host_transport, configured_offer(options, departures, host_identity), providers(host_monitor, executor, host_identity.value_or(identity())), options))),
           client(require(net::SetupSession::join(client_transport,
               providers(client_monitor, executor, std::move(local), perturb, &builds, &client_adapter),
               client_options.value_or(options)))) {}
-    static net::SetupOffer configured_offer(const net::SetupOptions& options, bool departures) {
-        auto selected = offer(); selected.final_tick_count = options.session.final_tick_count;
+    static net::SetupOffer configured_offer(const net::SetupOptions& options, bool departures, std::optional<sim::MatchAgreement> host_identity) {
+        auto selected = offer();
+        if (host_identity) {
+            // The encoded setup carries the identity the offer claims (the offer is refused when they disagree).
+            auto initial = setup();
+            initial.match_identity = host_identity->content;
+            for (const auto& domain : initial.match_identity->domains) if (domain.name == "units") initial.content_identity = domain.digest;
+            selected.identity = std::move(*host_identity);
+            selected.setup = require(net::encode_skirmish_setup(initial));
+        }
+        selected.final_tick_count = options.session.final_tick_count;
         selected.input_delay = options.session.input_delay;
         if (departures) {
             auto initial = setup();
@@ -507,6 +519,30 @@ void identity_refusals(const std::filesystem::path& directory) {
     Pair missing(directory / "missing", local); missing.refused();
     expect(missing.client.refusal()->domain == "ai-data", "missing local domain names the absent domain");
 }
+// Sandbox policy v4: both peers derive their match identity with the skirmish's own function, one of them as a build
+// still on the previous Lua sandbox policy; the setup refuses it naming the sandbox domain, before any simulation.
+void sandbox_policy_refusal(const std::filesystem::path& directory) {
+    eawr::units::UnitTables tables;
+    const auto derive = [&](std::string policy) {
+        eawr::skirmish::StartInputs inputs;
+        inputs.map = "data/art/maps/test.ted"; inputs.map_sha256 = std::string(64, 'a'); inputs.tables = &tables;
+        inputs.sandbox_policy = std::move(policy);
+        return sim::MatchAgreement{std::string(eawr::core::build_identity()), eawr::skirmish::match_identity(inputs)};
+    };
+    for (const bool host_is_old : {false, true}) {
+        const auto current = derive(""), old = derive("eawr-lua-sandbox-v3");
+        expect(current.content != old.content, "the seam changes the identity");
+        Pair pair(directory / (host_is_old ? "old-host" : "old-client"), host_is_old ? current : old, false, {}, {}, false,
+                  host_is_old ? old : current);
+        pair.refused();
+        expect(pair.client.refusal()->reason == net::SetupReason::identity && pair.client.refusal()->domain == "sandbox",
+            "a peer on another sandbox policy is refused naming the sandbox domain");
+        expect(*pair.host.refusal() == *pair.client.refusal(), "the host retains the same sandbox refusal");
+        expect(pair.builds == 0, "a peer on another sandbox policy never builds a simulation");
+    }
+    // Control: two peers on one policy derive one identity (their simulation content is not the subject here).
+    expect(!sim::describe_mismatch(derive(""), derive("")), "two peers on one sandbox policy agree");
+}
 void divergence(const std::filesystem::path& directory) {
     Pair pair(directory, identity(), true); pair.refused();
     expect(pair.client.refusal()->reason == net::SetupReason::tick_zero
@@ -646,7 +682,7 @@ int main(int argc, char** argv) {
         expect(argc == 2, "diagnostic output directory required");
         const std::filesystem::path directory(argv[1]);
         encoding(); battle_domains(); recovery_policy_encoding(); disabled_recovery_presets(directory / "disabled-recovery"); text_contracts(); runtime_maximum_lead(); runtime_departure(directory / "departure"); agreement(directory / "agreement"); identity_refusals(directory / "identity");
-        divergence(directory / "divergence"); preview_start(directory / "preview"); credential_start_gate(directory / "credential-gate");
+        sandbox_policy_refusal(directory / "sandbox-policy"); divergence(directory / "divergence"); preview_start(directory / "preview"); credential_start_gate(directory / "credential-gate");
         session_policy(directory / "policy"); provider_failure(directory / "provider");
         buffered_offer(directory / "buffer"); bad_frames(directory / "bad");
         std::cout << "setup contracts passed: canonical SKSU, eight domains/build, refusal, preview/start, tick zero and battle\n";

@@ -2,6 +2,7 @@
 
 #include "eawr/core/result.hpp"
 #include "eawr/sim/tactical/damage.hpp"
+#include "eawr/sim/tactical/tsw.hpp"
 #include "eawr/sim/tactical/types.hpp"
 
 #include <array>
@@ -325,6 +326,7 @@ struct CombatProfile {
     bool valid_target{true}; // WCC-25: Is_Valid_Target defaults true
     bool special_weapon{}; // WCC-25: SPECIAL_WEAPON targets require the star-base exception
     std::optional<PlanetaryWeaponProfile> planetary_weapon{};
+    std::optional<TswProfile> tactical_super_weapon{}; // TSW-01..05: the TACTICAL_SUPER_WEAPON behaviour's numbers
     bool star_base{}; // DUMMY_STAR_BASE behavior, independent of XML class
     std::vector<ShotProfile> death_projectiles{}; // WNO-29: one choice per ordinary death
     // #5696: a lenient load drops an authored entry that names no projectile, but WAR-108 draws over the authored

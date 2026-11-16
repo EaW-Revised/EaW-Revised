@@ -14,6 +14,7 @@
 // WGA-284..299: economy readers consume immutable completed inputs.
 #include "galactic_support.hpp"
 #include "galactic_ai_world.hpp"
+#include "ai_script_evaluators.hpp"
 #include "galactic_ai_funding.hpp"
 #include "galactic_ai_state.hpp"
 #include "tactical_ai_internal.hpp"
@@ -33,6 +34,7 @@
 #include <stdexcept>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 #include <utility>
 using eawr::testing::must;
@@ -44,6 +46,7 @@ namespace gc = eawr::sim::galactic;
 using galactic_test::expect;
 using ai::real;
 using eawr::sim::math::Fixed;
+thread_local std::size_t evaluator_chain{};
 Fixed whole(std::int64_t value) { return Fixed::from_integer(value).value(); }
 
 ai::GalacticPerceptionSetup setup() {
@@ -131,6 +134,11 @@ struct Host {
         const std::vector<std::pair<std::string, std::string>> expressions{
             {"CONTROL", "Variable_Self.PlanetsControlled"}, {"CONTROLRAW", "Variable_Self.PlanetsControlledUnnormalized"},
             {"ENEMYCONTROL", "Variable_Enemy.PlanetsControlled"}, {"HUMANCONTROL", "Variable_Human.PlanetsControlledUnnormalized"},
+            {"DEFENDEDSPACE", "Variable_Self.SpaceDefendedPlanets"}, {"DEFENDEDGROUND", "Variable_Self.GroundDefendedPlanets"},
+            {"HUMANSPACE", "Variable_Human.SpaceDefendedPlanets"}, {"HUMANGROUND", "Variable_Human.GroundDefendedPlanets"},
+            {"DEFENDEDPARAMS", "Variable_Self.SpaceDefendedPlanets {Parameter_Faction=\"Unknown\",Parameter_Category=0}"},
+            {"Num_Enemy_Space_Territories", "Variable_Human.SpaceDefendedPlanets * Variable_Human.PlanetsControlledUnnormalized"},
+            {"Num_Enemy_Land_Territories", "Variable_Human.GroundDefendedPlanets * Variable_Human.PlanetsControlledUnnormalized"},
             {"MAXG", "Variable_Self.MaxedGroundbases"}, {"MAXS", "Variable_Self.MaxedStarbases"},
             {"NUMG", "Variable_Self.NumGroundbaseOfLevel {Parameter_Level=4.5,Parameter_Count=2}"},
             {"NUMS", "Variable_Self.NumStarbaseOfLevel {Parameter_Level=3}"},
@@ -171,6 +179,15 @@ struct Host {
             {"FOREIGNCATEGORY", "Variable_Enemy.BudgetFractionToBuild {Parameter_Type=\"TYPE500\",Parameter_Category=7}"},
             {"FOREIGNACTIVE", "Variable_Enemy.BudgetFractionToBuild {Parameter_Type=\"TYPE300\"}"},
             {"TIMELINE", "Game.Timeline"}, {"NESTEDTIMELINE", "Function_TIMELINE.Evaluate"}, {"TIMELINEBASES", "Function_TIMELINE.Evaluate + Function_MAXG.Evaluate"}, {"FOREIGN", "Variable_Enemy.StructureCount {Parameter_Type=\"TYPE100\"}"},
+            {"OPENSLOTS", "Variable_Target.OpenGroundCompanySlots"},
+            {"CONFLICTAGE", "Variable_Target.TimeSinceSpaceConflict"},
+            {"LUASUM", "Script_CustomSum.Evaluate {Parameter_Script_String=\"ok\",Parameter_Script_Number=2,Parameter_Script_Number=3}"},
+            {"LUABOUND", "Script_CustomBound.Evaluate"}, {"LUANIL", "Script_CustomNil.Evaluate"},
+            {"LUABOOM", "Script_CustomBoom.Evaluate"}, {"LUAMISSING", "Script_Unmounted.Evaluate"},
+            {"LUACLOCK", "Script_CustomClock.Evaluate"},
+            {"LUACOUNTA", "Script_CustomCounter.Evaluate {Parameter_Script_Number=1}"},
+            {"LUACOUNTB", "Script_CustomCounter.Evaluate {Parameter_Script_Number=2}"},
+            {"LUACOUNTC", "Script_CustomCounter.Evaluate {Parameter_Script_Number=3}"},
             {"UNKNOWN", "Variable_Target.StructureCount"}};
         std::string xml = "<Equations>";
         for (const auto& [name, value] : expressions) xml += "<" + name + ">" + value + "</" + name + ">";
@@ -186,6 +203,201 @@ struct Host {
     }
     std::optional<ai::Real> query(std::string_view name) { return world->evaluate(engine, name, 1, engine.target_of_object(10)); }
 };
+
+// GGL-01..03: signed occupancy, synchronization stamps and generic mounted Lua dispatch.
+std::string ground_leaves(unsigned workers) {
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    const auto generation = std::make_shared<gc::EconomyInputGeneration>();
+    gc::NativeSnapshotChanges changes;
+    gc::PoliticalControlSetup control; control.max_ground_forces = 2;
+    for (const auto id : {10U, 11U, 20U}) { gc::ControlPlanet row; row.planet = id; control.planets.push_back(row); }
+    changes.control = control;
+    auto observer = *snapshot(9, generation)->observer();
+    // List size counts null, pending-deletion and foreign entries, independently of queues/structures.
+    observer.planets.front().landed_transports = {{0, 1, false, false}, {51, 2, true, false}, {52, 1, false, true}};
+    changes.observer = observer;
+    const auto view = gc::GalacticSnapshot::native_view(snapshot(9, generation), changes);
+    Host host;
+    must(host.world->bind(view, {}, executor, 90, 200));
+    std::uint64_t sequence{}; must(host.engine.before_service(*host.world, host.scripts, sequence, &executor));
+    expect(host.query("OPENSLOTS") == real(-1), "GGL-01 overfull landed list gives signed negative capacity");
+    expect(host.world->evaluate(host.engine, "OPENSLOTS", 1, host.engine.target_of_object(11)) == real(2),
+        "GGL-01 empty landed list leaves authored capacity despite production objects");
+    expect(!host.world->evaluate(host.engine, "OPENSLOTS", 1, nullptr), "ground capacity requires a planet");
+    expect(host.query("CONFLICTAGE") == ai::to_single(real(1000000000000000000LL)), "GGL-02 never-fought binary32 sentinel");
+    host.world->space_conflict_ended(10, 60);
+    const auto age = real(30) * ai::to_single(real(1) / real(30));
+    expect(host.query("CONFLICTAGE") == age, "GGL-02 elapsed synchronization frames times binary32 inverse FPS");
+    expect(host.world->evaluate(host.engine, "CONFLICTAGE", 2, host.engine.target_of_object(10)) == age,
+        "conflict end reaches every configured player evaluator");
+    host.world->space_conflict_ended(10, 45);
+    expect(host.query("CONFLICTAGE") == age, "late older notice cannot move the last conflict backwards");
+    const auto saved = must(host.world->capture());
+    const auto digest = must(host.world->state_hash());
+    {
+        auto phase = must(host.world->begin_phase(executor));
+        host.world->space_conflict_ended(10, 75); host.world->space_conflict_ended(11, 80);
+        expect(host.query("CONFLICTAGE") == real(15) * ai::to_single(real(1) / real(30)), "new conflict updates age");
+        expect(phase->work().conflict_rows > 0, "conflict updates retain bounded undo rows");
+        must(phase->rollback());
+    }
+    expect(must(host.world->capture()).components == saved.components && must(host.world->state_hash()) == digest,
+        "conflict insert/update rollback restores exact canonical state");
+    Host restored; must(restored.world->bind(view, {}, executor, 90, 200));
+    sequence = 0; must(restored.engine.before_service(*restored.world, restored.scripts, sequence, &executor));
+    expect(restored.engine.target_of_object(10) != nullptr, "restored engine initializes the conflict-age target");
+    must(restored.world->restore(must(foc::galactic_ai::decode_native_state(must(foc::galactic_ai::encode_native_state(saved))))));
+    expect(must(restored.world->capture()).components == saved.components,
+        "perception v4 round-trips conflict stamps through native save bytes");
+    expect(restored.query("CONFLICTAGE") == age, "restored conflict stamps reproduce the target-bound age");
+    // Mode time stays at 9 while synchronization advances, including time outside the galactic mode.
+    host.world->set_synchronized_frame(120); restored.world->set_synchronized_frame(120);
+    expect(host.query("CONFLICTAGE") == real(60) * ai::to_single(real(1) / real(30))
+        && restored.query("CONFLICTAGE") == host.query("CONFLICTAGE"), "conflict clock follows synchronization, including after load");
+    auto invalid = restored.world->state(); invalid.space_conflicts.push_back(invalid.space_conflicts.front());
+    expect(!restored.world->restore(invalid), "duplicate stamp is refused");
+    invalid = restored.world->state(); invalid.space_conflicts.front().frame = 121;
+    expect(!restored.world->restore(invalid), "future stamp is refused");
+    invalid = restored.world->state(); invalid.space_conflicts.front().planet = 999;
+    expect(!restored.world->restore(invalid), "unknown stamp planet is refused");
+
+    const std::map<std::string, std::string> modules{
+        {"Data/Scripts/Evaluators/CustomSum.lua", "function Evaluate(s,a,b) if s == 'OK' then return a+b end end"},
+        {"Data/Scripts/Evaluators/CustomBound.lua", "function Evaluate() if Target then return PlayerObject.Get_ID() end end"},
+        {"Data/Scripts/Evaluators/CustomNil.lua", "function Evaluate() return 'text' end"},
+        {"Data/Scripts/Evaluators/CustomBoom.lua", "function Evaluate() error('expected') end"},
+        {"Data/Scripts/Evaluators/CustomClock.lua", "function Evaluate() return GetCurrentTime() end"},
+        {"Data/Scripts/Evaluators/CustomCounter.lua", "calls=0 function Evaluate(x) calls=calls+1 return calls end"}};
+    auto evaluators = must(foc::tactical_ai_detail::ScriptEvaluators::create(host.host, modules));
+    host.engine.attach_script_evaluators(evaluators);
+    expect(host.query("LUASUM") == real(5), "generic Script_ dispatch preserves ordered string/number arguments");
+    expect(host.query("LUABOUND") == real(1), "evaluator receives the context player and target");
+    expect(!host.query("LUANIL") && !host.query("LUABOOM") && !host.query("LUAMISSING"),
+        "nonnumeric/error/unmounted evaluators remain unavailable");
+    expect(host.query("LUACLOCK") == ai::to_single(real(9) / real(gc::galactic_frames_per_second)),
+        "galactic evaluator uses completed galactic mode time, separately from conflict age");
+    std::vector<std::shared_ptr<foc::tactical_ai_detail::ScriptEvaluators>> chains;
+    for (unsigned i = 0; i < 8; ++i) chains.push_back(must(foc::tactical_ai_detail::ScriptEvaluators::create(host.host, modules)));
+    host.engine.set_script_evaluator_reader([&] { return chains.at(evaluator_chain).get(); });
+    const auto parallel = [&](std::string_view equation, ai::Real expected) {
+        std::array<std::optional<ai::Real>, 8> values;
+        {
+            const auto reads = host.world->partitioned_reads();
+            must(executor.execute_phase("independent-galactic-evaluators", values.size(), [&](std::size_t chain) {
+                evaluator_chain = chain;
+                values[chain] = host.world->evaluate(host.engine, equation, 1, host.engine.target_of_object(10));
+            }));
+        }
+        expect(std::all_of(values.begin(), values.end(), [&](const auto& value) { return value == expected; }),
+            "parallel decision chains keep independent Lua state and memo tables");
+    };
+    parallel("LUACOUNTA", real(1));
+    std::vector<std::unique_ptr<foc::tactical_ai_detail::ScriptEvaluators::PhaseSavepoint>> phases;
+    for (const auto& chain : chains) phases.push_back(must(chain->begin_phase(executor)));
+    parallel("LUACOUNTB", real(2));
+    for (auto& phase : phases) must(phase->rollback());
+    parallel("LUACOUNTC", real(2));
+    host.engine.set_script_evaluator_reader({});
+    return must(host.world->state_hash()) + must(restored.world->state_hash());
+}
+
+std::string defended_territories(unsigned workers) {
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    const auto generation = std::make_shared<gc::EconomyInputGeneration>();
+    gc::NativeSnapshotChanges changes;
+    gc::Fleet self; self.id = 90; self.owner = 1; self.orbit = 10; self.members = {{91, 100}};
+    gc::Fleet human; human.id = 92; human.owner = 2; human.orbit = 20; human.members = {{93, 100}};
+    changes.fleets = std::vector{self, human};
+    gc::PoliticalControlSetup control;
+    for (const auto id : {10U, 11U, 20U}) {
+        gc::ControlPlanet planet; planet.planet = id;
+        if (id != 11) planet.landed.push_back({id + 100, 700, id == 10 ? 1U : 3U});
+        control.planets.push_back(planet);
+    }
+    changes.control = control;
+    const auto view = gc::GalacticSnapshot::native_view(snapshot(0, generation), changes);
+    Host host;
+    must(host.world->bind(view, {}, executor, 0, 200));
+    std::uint64_t sequence{}; must(host.engine.before_service(*host.world, host.scripts, sequence, &executor));
+    const std::array names{"DEFENDEDSPACE", "DEFENDEDGROUND", "HUMANSPACE", "HUMANGROUND",
+        "Num_Enemy_Space_Territories", "Num_Enemy_Land_Territories", "DEFENDEDPARAMS"};
+    const std::array expected{real(1) / real(2), real(1) / real(2), real(1), real(1), real(1), real(1), real(1) / real(2)};
+    std::string trace;
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        const auto value = host.query(names[i]);
+        expect(value == expected[i], std::string("GDT-01..03 ") + names[i]);
+        trace += value ? std::to_string(value->repr) : "none"; trace += ';';
+    }
+    // Both fleet types have zero power; buildings alone at the other owned planet do not give presence.
+    const auto retained = host.world->state();
+    const auto frozen = must(host.world->state_hash());
+    expect(host.world->evaluate_read_only(host.engine, "HUMANGROUND", 1, nullptr) == real(1)
+        && must(host.world->state_hash()) == frozen, "defended aggregate read-only query preserves native state");
+    Host restored;
+    must(restored.world->bind(view, {}, executor, 0, 200));
+    sequence = 0; must(restored.engine.before_service(*restored.world, restored.scripts, sequence, &executor));
+    must(restored.world->restore(retained));
+    for (const auto name : names) expect(restored.query(name) == host.query(name), "defended aggregate restore agrees");
+
+    ai::PlayerAi selected; selected.player = 1;
+    auto context = host.world->goal_context(selected, nullptr);
+    context.human = 3; // A player with forces elsewhere, but no owned planets.
+    expect(host.world->evaluate(host.engine, "HUMANSPACE", context) == real(0)
+        && host.world->evaluate(host.engine, "Num_Enemy_Land_Territories", context) == real(0), "no owned targets gives zero");
+    context.human.reset();
+    expect(!host.world->evaluate(host.engine, "HUMANSPACE", context)
+        && !host.world->evaluate(host.engine, "Num_Enemy_Land_Territories", context), "absent human root remains unavailable");
+
+    auto allied_setup = setup(); allied_setup.players[1].team = allied_setup.players[0].team;
+    Host allied(allied_setup);
+    gc::NativeSnapshotChanges alliance; alliance.observer = *view->observer();
+    alliance.observer->players[0].allies = {2}; alliance.observer->players[1].allies = {1};
+    must(allied.world->bind(gc::GalacticSnapshot::native_view(view, alliance), {}, executor, 0, 200));
+    sequence = 0; must(allied.engine.before_service(*allied.world, allied.scripts, sequence, &executor));
+    expect(allied.query("HUMANSPACE") == real(0) && allied.query("HUMANGROUND") == real(1),
+        "foreign allied player uses enemy presence: its own fleet is excluded, a third player's landed force qualifies");
+
+    changes.fleets = std::vector<gc::Fleet>{}; changes.control->planets.back().landed.clear();
+    Host empty;
+    must(empty.world->bind(gc::GalacticSnapshot::native_view(snapshot(0, generation), changes), {}, executor, 0, 200));
+    sequence = 0; must(empty.engine.before_service(*empty.world, empty.scripts, sequence, &executor));
+    expect(empty.query("DEFENDEDSPACE") == real(0) && empty.query("HUMANSPACE") == real(0)
+        && empty.query("HUMANGROUND") == real(0), "owned planets without forces give zero, including planets with bases");
+
+    auto observed = *view->observer();
+    for (auto& planet : observed.planets) planet.target_owner = 2;
+    gc::NativeSnapshotChanges apparent; apparent.observer = observed;
+    Host observer;
+    must(observer.world->bind(gc::GalacticSnapshot::native_view(view, apparent), {}, executor, 0, 200));
+    sequence = 0; must(observer.engine.before_service(*observer.world, observer.scripts, sequence, &executor));
+    expect(observer.query("HUMANSPACE") == real(1) / real(3)
+        && observer.query("HUMANGROUND") == real(1) / real(3)
+        && observer.query("DEFENDEDSPACE") == real(0), "selected target-owner facts override physical ownership; thirds retain binary64 division");
+    expect(observer.query("Num_Enemy_Space_Territories") == real(1)
+        && observer.query("Num_Enemy_Land_Territories") == real(1), "XML-form equations multiply the fraction by observed controlled holdings");
+    apparent.observer->planets.erase(apparent.observer->planets.begin() + 1);
+    Host missing;
+    must(missing.world->bind(gc::GalacticSnapshot::native_view(view, apparent), {}, executor, 0, 200));
+    expect(!missing.query("DEFENDEDSPACE") && !missing.query("HUMANSPACE"),
+        "a failed ownership read anywhere leaves the aggregate unavailable, rather than a partial count");
+
+    auto cached_setup = setup();
+    cached_setup.cache_intervals = {{"TARGETPLAYERID", real(-1)}, {"ENEMYFORCE.HASSPACEFORCE", real(-1)}};
+    Host cached(cached_setup);
+    gc::NativeSnapshotChanges initial; initial.fleets = std::vector{self, human};
+    must(cached.world->bind(gc::GalacticSnapshot::native_view(snapshot(1, generation), initial), {}, executor, 1, 200));
+    expect(cached.query("HUMANSPACE") == real(1), "aggregate populates nested cached ownership and presence reads");
+    const auto saved = must(cached.world->capture());
+    gc::NativeSnapshotChanges removed; removed.fleets = std::vector<gc::Fleet>{};
+    const auto later = gc::GalacticSnapshot::native_view(snapshot(2, generation), removed);
+    must(cached.world->bind(later, {}, executor, 2, 200));
+    Host cold(cached_setup); must(cold.world->bind(later, {}, executor, 2, 200)); must(cold.world->restore(saved));
+    expect(cached.query("HUMANSPACE") == real(1) && cold.query("HUMANSPACE") == real(1),
+        "aggregate respects remembered presence instead of bypassing it with physical fleet counts");
+    expect(must(cached.world->capture()).components == must(cold.world->capture()).components,
+        "warm and restored aggregate continuation retain identical observation bytes");
+    return trace;
+}
 
 // Owner projection removes only rows the budget equations cannot consume. Check real active-head math,
 // foreign evaluators, all status branches and the exact full/filtered values before the engine uses that view.
@@ -677,6 +889,10 @@ void installed() {
     expect(perception_order == registered, "installed perception carries complete registration order");
     ga::LifecycleSetup lifecycle; for (const auto& path : ga::required_xml()) lifecycle.xml.emplace(path, read(filesystem, path));
     const auto ai_data = must(ga::load_data(lifecycle));
+    std::map<std::string, std::string> evaluator_modules;
+    for (const auto& asset : must(filesystem.enumerate("data/scripts", ".lua")))
+        if (asset.canonical_path.starts_with("data/scripts/library/") || asset.canonical_path.starts_with("data/scripts/evaluators/"))
+            evaluator_modules.emplace(asset.canonical_path, read(filesystem, asset.canonical_path));
     gc::PlayerId empire{}; for (const auto& player : prepared->players) if (ai::upper_case(player.faction) == "EMPIRE") empire = player.player;
     expect(empire != 0, "installed Empire player present"); std::string baseline;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
@@ -693,6 +909,8 @@ void installed() {
         must(world->bind_economy_runtime(ai::fresh_economy_runtime(prepared->players)));
         const std::array selected{ga::PlayerSelection{empire, "BASICEMPIRE", "NORMAL", {}, {}}};
         must(engine.begin_galactic_barrier(*world, {view->completed_tick(), view->clock().galactic_frame}, scripts, sequence, selected, &executor));
+        host->find_target_queries = std::make_shared<ai::GalacticFindTargetQueries>(engine, *world, nullptr, nullptr, ga::Mode::galactic);
+        engine.attach_script_evaluators(must(foc::tactical_ai_detail::ScriptEvaluators::create(host, evaluator_modules)));
         const auto& player_type = ai_data.players.at("BASICEMPIRE");
         const auto policy = ga::apply_template(ai_data, {}, {}, ai_data.templates.at(player_type.galactic_templates.front()));
         must(engine.apply_galactic_policy(empire, policy));
@@ -715,9 +933,14 @@ void installed() {
             if (!value) throw std::runtime_error("stock token unavailable: " + expression);
             trace += expression + ":" + std::to_string(value->repr) + ";"; return *value;
         };
-        for (const auto token : {"PlanetsControlled", "PlanetsControlledUnnormalized", "MaxedStarbases", "MaxedGroundbases", "NumStarbaseOfLevel", "NumGroundbaseOfLevel", "HasStarbaseOfLevel", "HasGroundbaseOfLevel",
+        for (const auto token : {"PlanetsControlled", "PlanetsControlledUnnormalized", "SpaceDefendedPlanets", "GroundDefendedPlanets", "MaxedStarbases", "MaxedGroundbases", "NumStarbaseOfLevel", "NumGroundbaseOfLevel", "HasStarbaseOfLevel", "HasGroundbaseOfLevel",
             "Maintenance", "MaintenanceUnnormalized", "GrossIncomeUnnormalized", "NetIncomeUnnormalized", "CanAdvanceTech", "SpaceTotalUnnormalized", "GroundTotalUnnormalized"})
             static_cast<void>(probe("Variable_Self." + std::string(token)));
+        for (const auto name : {"Num_Enemy_Space_Territories", "Num_Enemy_Land_Territories"}) {
+            const auto value = engine.evaluate(name, empire, nullptr);
+            expect(value.has_value(), "mounted stock defended-territory equation is available");
+            if (value) trace += std::string(name) + ":" + std::to_string(value->repr) + ";";
+        }
         const auto type = std::find_if(prepared->economy_types.begin(), prepared->economy_types.end(), [&](const auto& row) {
             return std::any_of(row.affiliations.begin(), row.affiliations.end(), [](const auto& faction) { return ai::upper_case(faction) == "EMPIRE"; }) && row.generic_price > real(0) && row.generic_seconds > real(0);
         });
@@ -728,6 +951,10 @@ void installed() {
         const auto parameter = " {Parameter_Type=\"" + named->name + "\"}";
         for (const auto token : {"HasUnit", "HasTechToProduce", "StructureCount", "HasStructure", "BudgetFractionToBuild"}) static_cast<void>(probe("Variable_Self." + std::string(token) + parameter));
         const auto* target = engine.target_of_object(view->planets().front().id);
+        for (const auto token : {"OpenGroundCompanySlots", "TimeSinceSpaceConflict"})
+            static_cast<void>(probe("Variable_Target." + std::string(token), target));
+        expect(engine.evaluate("Allow_Blind_Ground_Production", empire, nullptr).has_value(),
+            "mounted Script_ evaluator and reachable ground-slot equation are available");
         for (const auto token : {"StructureCount", "HasStructure"}) static_cast<void>(probe("Variable_Target." + std::string(token) + parameter, target));
         expect(probe("Game.Timeline") == real(0), "authentic fresh retained timeline zero");
         const auto bytes = must(ga::encode_funding_state(funding.state())); ai::GalacticFunding restored; must(restored.restore(must(ga::decode_funding_state(bytes))));
@@ -737,12 +964,87 @@ void installed() {
         std::cout << "stock Normal budget and economy tokens workers=" << workers << '\n';
     }
 }
+
+// #6806 / CGS-22: a company whose first member is out of the type table (its variant base is defined nowhere) is a null reference, not a
+// refusal of the campaign start. Synthetic mod-free overlay on the installed data: one dummy company of two members whose variant base does
+// not exist; the selection content must still build, name the member as unresolved and keep the company's own row.
+void orphan_company_member() {
+    namespace cp = eawr::campaign;
+    const auto root = std::filesystem::path(game_root()); std::vector<eawr::vfs::MountSpec> stock;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+        stock.push_back(must(eawr::vfs::resolve_manifest_mount(id, root / folder / "Data")).mount);
+    const auto stock_files = must(eawr::vfs::Vfs::mount(stock));
+    const auto overlay = std::filesystem::temp_directory_path() / "eawr_orphan_company_overlay";
+    std::filesystem::remove_all(overlay); std::filesystem::create_directories(overlay / "XML");
+    auto list = read(stock_files, "data/xml/gameobjectfiles.xml");
+    const auto close = list.rfind("</");
+    expect(close != std::string::npos, "the installed object file list parses as a closed element");
+    list.insert(close, "<File>Eawr_Orphan_Company.xml</File>\n");
+    const auto write_file = [&](const std::filesystem::path& path, const std::string& text) {
+        std::ofstream out(path, std::ios::binary); out << text;
+    };
+    write_file(overlay / "XML" / "GameObjectFiles.xml", list);
+    write_file(overlay / "XML" / "Eawr_Orphan_Company.xml", R"xml(<?xml version="1.0"?>
+<Props_Story>
+  <Props_Story Name="Eawr_Orphan_Member">
+    <Variant_Of_Existing_Type>Eawr_Base_Defined_Nowhere</Variant_Of_Existing_Type>
+    <Tactical_Health>100</Tactical_Health>
+  </Props_Story>
+  <Props_Story Name="Eawr_Orphan_Company">
+    <Is_Dummy>Yes</Is_Dummy>
+    <Behavior>DUMMY_GROUND_COMPANY</Behavior>
+    <Build_Cost_Credits>0</Build_Cost_Credits>
+    <Build_Time_Seconds>0</Build_Time_Seconds>
+    <Company_Units>Eawr_Orphan_Member, Eawr_Orphan_Member</Company_Units>
+    <Max_Squad_Size> 2 </Max_Squad_Size>
+  </Props_Story>
+</Props_Story>)xml");
+    std::vector<eawr::vfs::MountSpec> mounts;
+    mounts.push_back({"overlay", overlay, "data", {}});
+    for (auto& mount : stock) mounts.push_back(std::move(mount));
+    const auto filesystem = must(eawr::vfs::Vfs::mount(mounts));
+    const auto loaded = must(eawr::data::load_catalog(filesystem, eawr::data::Profile::foc));
+    const auto data = must(eawr::data::galactic::load_galactic_data(filesystem, loaded.catalog));
+    const auto types = eawr::units::galactic_type_table(loaded.catalog);
+    expect(types.find("Eawr_Orphan_Company") != nullptr && types.find("Eawr_Orphan_Member") == nullptr,
+        "the company is in the type table and its member, whose variant base is defined nowhere, is not");
+    cp::CampaignSetupOptions options; options.seed = 42;
+    for (const auto& faction : data.factions) {
+        const auto id = static_cast<gc::PlayerId>(options.players.size() + 1); options.players.push_back({{id, id, 0}, faction.name, true});
+        const bool human = faction.name == "Rebel"; if (human) options.solo_reference_human = id;
+        if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id, human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, human ? id : 0});
+    }
+    std::vector<std::string> names; for (const auto& type : types.types) names.push_back(type.name); std::sort(names.begin(), names.end());
+    for (const auto& name : names) options.types.push_back({options.types.size() + 1, name});
+    const auto planned = must(cp::plan_live_campaign_setup(filesystem, data, types, "Sandbox_Equal_Footing_Empire", options, "Normal_Default"));
+    const auto content = cp::prepare_ai_selection_content(filesystem, loaded.catalog, data, types, planned);
+    expect(static_cast<bool>(content), "a company with an unresolvable first member does not refuse the selection content: "
+        + (content ? std::string() : content.error().message));
+    if (content) {
+        const auto& unresolved = content.value()->unresolved_names;
+        expect(std::find(unresolved.begin(), unresolved.end(), "Eawr_Orphan_Company Company_Units: Eawr_Orphan_Member") != unresolved.end(),
+            "the orphan first member is reported as an unresolved name (CGS-07)");
+        expect(content.value()->null_references == std::vector<std::string>{"Eawr_Orphan_Member"},
+            "the orphan member is one null reference, named once however often the company lists it (CGS-22)");
+        const auto row = std::find_if(content.value()->types.begin(), content.value()->types.end(),
+            [](const auto& entry) { return entry.second.name == "EAWR_ORPHAN_COMPANY"; });
+        expect(row != content.value()->types.end() && row->second.company && row->second.survival_type == "EAWR_ORPHAN_COMPANY",
+            "the company keeps its own row and survival type");
+    }
+    std::filesystem::remove_all(overlay);
+}
 }
 int case_galactic_ai_economy_tokens_tests(int argc, char** argv) {
     try {
-        if (argc == 2 && std::string_view(argv[1]) == "--installed") { installed(); return galactic_test::failures ? 1 : 0; }
+        if (argc == 2 && std::string_view(argv[1]) == "--installed") { installed(); orphan_company_member(); return galactic_test::failures ? 1 : 0; }
         if (argc != 1) throw std::runtime_error("economy contracts accept only --installed");
         budget_query_reader();
+        const auto leaves = ground_leaves(1);
+        for (const auto workers : {2U, 4U, 8U}) expect(ground_leaves(workers) == leaves,
+            "ground leaves and restored stamps agree on 1/2/4/8 workers");
+        const auto territories = defended_territories(1);
+        for (const auto workers : {2U, 4U, 8U}) expect(defended_territories(workers) == territories,
+            "defended territory fractions and stock-form equation results agree on 1/2/4/8 workers");
         const auto projection = budget_owner_projection(1);
         for (const auto workers : {2U, 4U, 8U}) expect(budget_owner_projection(workers) == projection,
             "full/owner-filtered budget values are equal on 1/2/4/8 workers");

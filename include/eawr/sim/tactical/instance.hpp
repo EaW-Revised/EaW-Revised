@@ -48,6 +48,11 @@ struct InstanceDurability {
     friend bool operator==(const InstanceDurability&, const InstanceDurability&) = default;
 };
 
+// WSPL-08/09, presentation only: where a SUPER_LASER use stands. `aiming`: locked, the unit still turns toward
+// the target; `clip`: the attack clip plays and the fire stage waits; `fired`: the beam deals damage;
+// `continuing`: the target left the world and the beam stays on, without damage, for Fire_Continuation.
+enum class LaserPhase : std::uint8_t { none, aiming, clip, fired, continuing };
+
 // One ability of an instance (#76, docs/behaviour/space-abilities.md AB-50): whether it is on,
 // may be switched on (AB-13), is on autofire, and its timer. While a time-limited ability is on,
 // `remaining_frames` counts down its duration (`total_frames`, the Expiration_Seconds frames);
@@ -67,6 +72,12 @@ struct AbilityStatus {
     std::optional<math::Vec3> position{}; // WHE-33: flare at the consumed marker point
     std::uint32_t blast_charge_remaining{};
     bool blast_charged_presentation{}; // independent of the generic recharge dial
+    // WSPL-08/09: a SUPER_LASER's phase and the ticks of its attack clip and continuation. Presentation only: read
+    // from the use state the sim already keeps, never a hash input. The viewer finds its clip by the type's
+    // Attack_Anim_Sub_Index (units::attack_clip_path).
+    LaserPhase laser_phase{LaserPhase::none};
+    std::uint64_t laser_clip_tick{}; // the tick the attack clip started (frame 0); differs for every use; meaningful from `clip` on
+    std::uint64_t laser_end_tick{}; // `continuing`: the tick the beam goes off (tools and tests; the viewer follows the phase)
     friend constexpr bool operator==(const AbilityStatus&, const AbilityStatus&) noexcept = default;
 };
 

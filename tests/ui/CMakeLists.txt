@@ -39,6 +39,19 @@ target_compile_features(ui_input_command_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(ui_input_command_tests)
 add_test(NAME ui_input_command_contracts COMMAND ui_input_command_tests)
 
+# HCB-47: the Death Star switch presenter, its click, and the click's round trip through the sink and the simulation.
+add_executable(ui_superweapon_switch_tests superweapon_switch_tests.cpp)
+target_link_libraries(ui_superweapon_switch_tests PRIVATE eawr::ui_model eawr::sim eawr::platform Threads::Threads)
+target_compile_features(ui_superweapon_switch_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_superweapon_switch_tests)
+add_test(NAME ui_superweapon_switch_contracts COMMAND ui_superweapon_switch_tests)
+
+add_executable(ui_superlaser_switch_tests superlaser_switch_tests.cpp)
+target_link_libraries(ui_superlaser_switch_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_superlaser_switch_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_superlaser_switch_tests)
+add_test(NAME ui_superlaser_switch_contracts COMMAND ui_superlaser_switch_tests)
+
 # UI-05 (#191): the font extraction tool on synthetic fonts; the real-executable
 # checks run when EAWR_EAW_GAME_ROOT is set.
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
@@ -248,6 +261,13 @@ target_link_libraries(ui_net_perf_tests PRIVATE eawr::ui_model)
 target_compile_features(ui_net_perf_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(ui_net_perf_tests)
 add_test(NAME ui_net_perf_contracts COMMAND ui_net_perf_tests)
+
+# #5345: the radio and check glyph slot (every state draws on one line).
+add_executable(ui_toggle_layout_tests toggle_layout_tests.cpp)
+target_link_libraries(ui_toggle_layout_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_toggle_layout_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_toggle_layout_tests)
+add_test(NAME ui_toggle_layout_contracts COMMAND ui_toggle_layout_tests)
 
 eawr_label_tests()
 

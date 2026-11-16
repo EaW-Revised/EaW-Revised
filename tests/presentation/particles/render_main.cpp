@@ -67,6 +67,8 @@ int main() {
     test_clean_present_matches_rebuild_for_every_input();
     test_clean_present_resubmits_deferred_moved_instance();
     test_ordered_run_commits_in_order();
+    test_ordered_spread();
+    test_diagnostic_switches();
     test_pipelined_commit_matches_serial_batches();
     test_pipelined_commit_off_when_backend_forbids_overlap();
     test_async_advance_matches_advance_all();

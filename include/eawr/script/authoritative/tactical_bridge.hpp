@@ -72,6 +72,10 @@ struct ScriptedTick {
     std::vector<RoutedCommand> script_input;
     // This tick's service; its commands are the next tick's script input.
     ServiceReport scripts;
+    // This tick's commands of the verbs registered with register_presentation_verb, in commit order. They never become
+    // world input, are not recorded and are not saved: a headless replay makes none and a restored session starts without
+    // them. The viewer turns them into local presentation (legacy #6634: Letter_Box_In / Letter_Box_Out).
+    std::vector<ScriptCommand> presentation;
     // authoritative_state_sha256 of the completed tick: world and script state. Empty with a
     // state hasher (set_state_hasher); then `state_hash` has it. Both stay empty when the
     // session does not compute it (set_authoritative_hash); `world` has the world's hash always.
@@ -158,6 +162,9 @@ public:
     // Before the first step. A verb without a translator is dropped with
     // EAWR-SCRIPT-0214 when a script issues it.
     [[nodiscard]] core::Result<void> register_verb(std::string_view verb, CommandTranslator translator);
+    // Before the first step. Commands of this verb leave the script report for ScriptedTick::presentation instead of
+    // becoming the next tick's world input; the simulation never sees them.
+    [[nodiscard]] core::Result<void> register_presentation_verb(std::string_view verb);
     // Before the first step; without one every instance is pumped every tick.
     [[nodiscard]] core::Result<void> set_engine(std::shared_ptr<ScriptEngine> engine);
     // #637: hashes the world (TacticalSession::set_state_hasher) and derives the tick's combined

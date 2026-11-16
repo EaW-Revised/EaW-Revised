@@ -17,6 +17,7 @@
 #include "eawr/sim/tactical/object_turn.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
+#include "eawr/sim/tactical/tsw.hpp"
 #include "eawr/sim/tactical/types.hpp"
 #include "eawr/sim/tactical/victory.hpp"
 #include "eawr/sim/tactical/visibility.hpp"
@@ -224,6 +225,16 @@ public:
     };
     [[nodiscard]] TickWork tick_work() const noexcept;
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
+    // TSW-02: the super weapon record of `id`; none for an object without one. A read seam for tests and the later
+    // switch presenter (whose snapshot view is its own ticket); the record is simulation state, never a published copy.
+    [[nodiscard]] std::optional<TswState> tsw_state(EntityId id) const;
+    // TSW-09/10: the victory hold, the destroyed targets and the planet fact. `tsw_planet_destroyed` is what the
+    // galactic side reads into BattleResult::planet_destroyed.
+    [[nodiscard]] TswWorld tsw_world() const;
+    [[nodiscard]] bool tsw_planet_destroyed() const noexcept;
+    // TSW-04: the gate of both requests as it stands now (the conflict exists, its planet stands and may be destroyed, and
+    // this battle has not destroyed it). False without a TSW setup. The script readiness call reads it with the phase.
+    [[nodiscard]] bool tsw_gate_open() const noexcept;
     [[nodiscard]] BattleDomain domain() const noexcept;
     [[nodiscard]] EntityId next_entity_id() const noexcept;
     [[nodiscard]] std::uint64_t rng_state() const noexcept;
@@ -300,6 +311,38 @@ public:
     [[nodiscard]] std::optional<DurabilityState> durability_state(EntityId unit) const;
     // The unit's abilities (#76), or nothing when it is not live or its type has none.
     [[nodiscard]] std::optional<AbilityState> ability_state(EntityId unit) const;
+    // WLAB-08 (land): the tick a Force-disabling carrier's scan last reached the unit, while the stamp is kept (a stamp older
+    // than the window is dropped by the next scan). Nothing for a space session, a unit never reached, or a stamp already dropped.
+    [[nodiscard]] std::optional<std::uint64_t> land_force_disable_stamp(EntityId unit) const;
+    // WLAB-12..15, 37 (land): what the active abilities of a unit supply to the land speed, formation and combat contexts
+    // (#1451 and land combat read it; nothing in the land session applies it yet). The multipliers are the product over the
+    // unit's active abilities (1 with none). `spacing` is Spread_Out_Spacing_Coefficient while the unit's company container
+    // is spread out, else 1. Nothing when the unit is not live or the session is not a land battle.
+    struct LandAbilityInputs {
+        math::Fixed speed{math::Fixed::from_raw(math::Fixed::scale)};
+        math::Fixed cause_damage{math::Fixed::from_raw(math::Fixed::scale)};
+        math::Fixed take_damage{math::Fixed::from_raw(math::Fixed::scale)};
+        math::Fixed weapon_delay{math::Fixed::from_raw(math::Fixed::scale)};
+        math::Fixed spacing{math::Fixed::from_raw(math::Fixed::scale)};
+        std::optional<bool> allow_target_diminishing_firepower{}; // the last active ability that authors the flag
+    };
+    [[nodiscard]] std::optional<LandAbilityInputs> land_ability_inputs(EntityId unit) const;
+    // WLAB-16/17 (land): what JET_PACK and DEPLOY left on a unit: the locomotor in use (0 the primary, 1 the secondary), whether it
+    // is deployed, and a jump that was ordered and not yet taken by the land movement (#7084) with its point. A live unit without
+    // a record reads as the default; nothing for a unit that is not live or a session that is not a land battle.
+    struct LandAbilityMotionView {
+        std::uint8_t locomotor{};
+        bool deployed{}, jump_pending{};
+        math::Vec3 jump_point{};
+        // WLAB-16 (#7084): the jump's phase (0 none, 1 waiting for the lift-off, 2 flying, 3 coming down) and, while flying, the
+        // body's position (the movement body already stands at the landing point).
+        std::uint8_t jump_phase{};
+        math::Vec3 jump_position{};
+        // WLAB-19, WLAB-71: the unit's current projectile index (0 the first projectile type, 1 the second). The land weapon fire
+        // does not read it yet (#1451): that consumer takes it as its input.
+        std::uint8_t projectile{};
+    };
+    [[nodiscard]] std::optional<LandAbilityMotionView> land_ability_motion(EntityId unit) const;
     // The unit's movement, or nothing when it is not live or its type has no motion profile.
     [[nodiscard]] std::optional<MotionState> motion_state(EntityId unit) const;
     // Diagnostic const query at a completed tick; caller excludes concurrent stepping.

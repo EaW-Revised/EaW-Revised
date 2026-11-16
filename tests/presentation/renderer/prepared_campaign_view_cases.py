@@ -134,7 +134,9 @@ int main() {
   || view.placed_ships_[1].object_id!="MapObject" || view.owner_of_entity_[101]!=9 || view.team_of_player_[4]!=7
   || !view.start_ || view.setup_->content_identity!="prepared") return 1;
  LiveSessionView standalone;
- if (standalone.prepare_replay(failure) || failure.find("at least two players")==std::string::npos) return 2;
+ if (standalone.prepare_replay(failure)
+  || failure.find("authored player capacity is 1")==std::string::npos
+  || failure.find("at least 2 players")==std::string::npos) return 2;
  auto invalid=std::make_shared<LiveSessionView::PreparedBattle>(*battle); invalid->tables.identity="different";
  LiveSessionView bad; bad.options_={invalid,4}; if (bad.prepare_replay(failure)) return 3;
  LiveSessionView observer; observer.options_={battle,5}; if (observer.prepare_replay(failure)) return 4;

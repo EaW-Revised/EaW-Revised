@@ -127,7 +127,9 @@ GalacticAudio::GalacticAudio(godot::Node3D& host, const vfs::Vfs& filesystem,
                 }
             }
             std::vector<std::string> keys{"Strategic_Map_Music_Event", "Music_Event_Strategic_Win", "Music_Event_Strategic_Lose",
-                "Music_Event_Tactical_Space_Battle_Pending", "Music_Event_Tactical_Land_Battle_Pending"};
+                "Music_Event_Tactical_Space_Battle_Pending", "Music_Event_Tactical_Land_Battle_Pending",
+                // WGUI-66/WGP-127: the faction's default advisor cues (stock: droid hint and R2 urgent sounds).
+                "SFXEvent_HUD_Advisor_Message", "SFXEvent_HUD_Advisor_Urgent"};
             for (int index = 0; index <= static_cast<int>(audio::GalacticSound::land_battle_pending); ++index) {
                 const auto cue = static_cast<audio::GalacticSound>(index);
                 if (!audio::galactic_sound_uses_audio_table(cue)) keys.emplace_back(audio::galactic_sound_tag(cue));
@@ -217,6 +219,10 @@ void GalacticAudio::advisor_urgent() {
     // WGUI-66/114: queue feedback is separate from the approach faction cue.
     play_event(value(faction_fields_, "SFXEvent_HUD_Advisor_Urgent"));
 }
+void GalacticAudio::advisor_message() {
+    // WGUI-66: an ordinary advisor line uses the faction's message cue.
+    play_event(value(faction_fields_, "SFXEvent_HUD_Advisor_Message"));
+}
 void GalacticAudio::battle_load() {
     strategic_ = false;
     const auto loading = director_.battle_load(music(value(audio_fields_, "Music_Event_Battle_Load_Screen")));
@@ -224,6 +230,12 @@ void GalacticAudio::battle_load() {
         for (auto& track : tracks_) { track.player->stop(); track.active = false; }
     }
     play(loading.cue);
+}
+void GalacticAudio::campaign_end_stop() {
+    strategic_ = false;
+    director_.external_mode(audio::GalacticMusicDirector::Mode::none);
+    for (auto& track : tracks_) { track.player->stop(); track.active = false; }
+    speech_player_->stop();
 }
 void GalacticAudio::tactical() {
     strategic_ = false;
@@ -296,7 +308,8 @@ const std::vector<audio::Field>& GalacticAudio::type_fields(const std::string_vi
     auto& result = type_fields_[key];
     const auto object = catalog_.resolve(type, data::Category::game_object);
     if (!object) { if (problems_.size() < 256) problems_.push_back("type did not resolve: " + std::string(type)); return result; }
-    std::vector<std::string_view> tags{"CategoryMask", "Ranking_In_Category", "SFXEvent_Fleet_Move", "SFXEvent_Move"};
+    std::vector<std::string_view> tags{"CategoryMask", "Ranking_In_Category", "SFXEvent_Fleet_Move", "SFXEvent_Move",
+        "Build_Countdown_Timer", "Build_Speech_Countdowns", "Build_Music_Completed"};
     for (const auto cue : {audio::GalacticBuildCue::underway, audio::GalacticBuildCue::completed, audio::GalacticBuildCue::stopped}) {
         tags.push_back(audio::galactic_build_speech_tag(cue)); tags.push_back(audio::galactic_build_sfx_tag(cue));
     }
@@ -344,6 +357,41 @@ void GalacticAudio::build(const audio::GalacticBuildCue cue, const std::string_v
     }
     if (!speech_queue_.push(&found->second, audio::galactic_build_speech_tag(cue)) && problems_.size() < 256)
         problems_.push_back("speech queue full: " + feedback.speech);
+}
+
+void GalacticAudio::build_countdown(const std::string_view type, const float previous, const float remaining) {
+    if (type.empty()) return;
+    const auto& fields = type_fields(type);
+    const auto timer = audio::upper(value(fields, "Build_Countdown_Timer"));
+    if (timer != "YES" && timer != "TRUE" && timer != "1") return;
+    const auto request = audio::galactic_build_countdown_request(value(fields, "Build_Speech_Countdowns"), previous, remaining);
+    if (request.empty()) return;
+    // WGEP-98: the request is made from the type's prefix; an event nothing defines (the stock minute/second lines are inside an
+    // XML comment) simply matches nothing and is not a problem.
+    const auto found = speech_events_.find(audio::upper(request));
+    if (found == speech_events_.end()) return;
+    const bool queued = speech_queue_.push(&found->second, "Build_Speech_Countdowns");
+    if (!queued && problems_.size() < 256) problems_.push_back("speech queue full: " + request);
+}
+
+void GalacticAudio::corruption_success_speech(const std::string_view event) {
+    if (event.empty()) return;
+    const auto found = speech_events_.find(audio::upper(std::string(event)));
+    if (found == speech_events_.end()) {
+        if (problems_.size() < 256) problems_.push_back("missing speech event: " + std::string(event));
+        return;
+    }
+    if (!speech_queue_.push(&found->second, "Corruption_Success_Speech_Event") && problems_.size() < 256)
+        problems_.push_back("speech queue full: " + std::string(event));
+}
+
+void GalacticAudio::build_completed_music(const std::string_view type) {
+    if (type.empty()) return;
+    const auto name = value(type_fields(type), "Build_Music_Completed");
+    if (name.empty()) return;
+    const auto* event = music(name);
+    if (!event) { if (problems_.size() < 256) problems_.push_back("missing music event: " + std::string(name)); return; }
+    play(director_.start(audio::GalacticMusicDirector::Mode::constructed_super_unit, event));
 }
 
 namespace {
@@ -598,7 +646,7 @@ void GalacticAudio::write_report(std::ostream& output) const {
         : mode == Mode::battle_summary ? "battle_summary" : mode == Mode::tactical ? "tactical"
         : mode == Mode::strategic_win ? "strategic_win" : mode == Mode::strategic_lose ? "strategic_lose"
         : mode == Mode::superweapon_attack ? "superweapon_attack" : mode == Mode::demo_finale ? "demo_finale"
-        : mode == Mode::scripted ? "scripted" : "none";
+        : mode == Mode::scripted ? "scripted" : mode == Mode::constructed_super_unit ? "constructed_super_unit" : "none";
     output << "{\"mode\":" << galactic_detail::json(mode_name)
         << ",\"muted\":" << (muted_ ? "true" : "false") << ",\"music\":[";
     for (std::size_t index = 0; index < music_log_.size(); ++index)

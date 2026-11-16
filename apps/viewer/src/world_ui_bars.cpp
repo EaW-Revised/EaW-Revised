@@ -84,6 +84,7 @@ void WorldUiView::draw_bars(const Frame& frame, const RID canvas_item, const flo
     health_bars_ = 0;
     shield_bars_ = 0;
     bar_rows_.clear();
+    bracket_flag_rows_.clear();
     if (!frame.camera) return;
     const auto snapshot = frame.live->battle_frame().latest;
     const auto& squadron_of = frame.live->squadron_of();
@@ -197,8 +198,23 @@ void WorldUiView::draw_bars(const Frame& frame, const RID canvas_item, const flo
         }
         const std::array<float, 2> bracket{std::trunc((*screen)[0]), std::trunc((*screen)[1])};
         const auto parent = squadron_of.find(candidate.entity);
-        draw_abilities(frame, canvas_item, candidate.entity, type->second, frame.live->is_ally_of_local(instance->owner),
-                       bracket, false, height, ui_scale);
+        const bool ally = frame.live->is_ally_of_local(instance->owner);
+        draw_abilities(frame, canvas_item, candidate.entity, type->second, ally, bracket, false, height, ui_scale);
+        // WU-39a (#6931): a marked ally's bracket carries the garrison flag, single ships included.
+        if (atlas_.is_valid() && ui::bracket_garrison_flag_shown(instance->garrison_unit, ally)) {
+            if (const auto region = atlas_region("i_garrison_flag.tga")) {
+                const auto flag = ui::bracket_garrison_flag_rect(bracket[0], bracket[1], width,
+                                                                 type->second.bounds_scale, ui_scale);
+                const float flag_x = flag.centre_x - flag.width * 0.5F;
+                const float flag_y = flag.centre_y - flag.height * 0.5F;
+                RenderingServer::get_singleton()->canvas_item_add_texture_rect_region(
+                    canvas_item, Rect2(flag_x, flag_y, flag.width, flag.height), atlas_->get_rid(), *region);
+                const std::string flagged = std::to_string(candidate.entity);
+                bracket_flag_rows_.push_back(flagged + ":x=" + std::to_string(std::lround(flag_x))
+                                             + ",y=" + std::to_string(std::lround(flag_y)));
+                bracket_flags_seen_.insert(flagged);
+            }
+        }
         // WU-45: tactical text occupies the foreground layer despite earlier submission.
         draw_group(frame, canvas_item, parent != squadron_of.end() ? parent->second : candidate.entity,
                    bracket, false, ui_scale);

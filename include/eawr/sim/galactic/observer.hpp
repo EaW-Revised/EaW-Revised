@@ -78,11 +78,17 @@ struct ObservedPlanet {
     PlanetId planet{};
     bool discovered{};
     PlanetKnowledge knowledge;
-    // A value is supplied only when the corresponding current query succeeds.
+    // A value is supplied only when the corresponding current query succeeds. A query that succeeds and finds no owner or
+    // controller (a planet nothing controls) leaves the optional empty; `knowledge` says whether the query succeeded, and
+    // `apparent_allegiance_none` does so for the apparent allegiance, whose empty value also means "not visible".
     std::optional<PlayerId> known_owner, known_allegiance;
     std::optional<math::Fixed> known_political_control;
     std::optional<PlayerId> apparent_owner;
     std::optional<PlayerId> apparent_allegiance_owner;
+    // True only when the apparent allegiance was read live (political control visible, or an own non-Empire orbit fleet) and
+    // the planet has no controller: the retail Neutral. False with an empty apparent_allegiance_owner means unknown (#6985):
+    // not visible, or the canonical Empire's own-orbit read at integer control >= 1, which returns no controller too.
+    bool apparent_allegiance_none{};
     math::Fixed apparent_political_control{};
     std::vector<GroundLayoutEntry> ground_layout; // present only with ground-content intelligence
     friend bool operator==(const ObservedPlanet&, const ObservedPlanet&) = default;

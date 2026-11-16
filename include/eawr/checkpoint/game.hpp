@@ -23,12 +23,14 @@ namespace eawr::checkpoint {
 // (boundary tick, chained frontier digest, last sealed key, dropped counts); the frontier input digest is
 // sha256(previous digest || replay window bytes), never a digest of the window alone.
 // v48 (#2044): the owner tail ends with the holocron story goals and objectives per plot owner, after the plot state.
+// Campaign owner format 7 (legacy #236): objectives store a Boolean suggestion and the goals state ends with the objective numbering counter.
 // v49: agreed resume metadata, producer continuation and complete policy site archives.
 // v53: authored corruption-removal profiles, planet costs and live enabled/cancelled service state.
 // v54: ordered market-item ability identities.
 // v56: the production offer tables are stored once, in the required offer-pool section; the session recording, the
 // production state and the owner barrier carry one table index per planet (docs/checkpoint-format.md, Offer pool).
-inline constexpr std::uint16_t galaxy_section_version = 56;
+// v57: optional galactic object-script scheduler.
+inline constexpr std::uint16_t galaxy_section_version = 58;
 inline constexpr std::uint16_t mod_list_section_version = 1;
 
 // Transport starts a fresh epoch at completed_tick. Both cursors denote the first
@@ -83,6 +85,9 @@ struct GameLoadOptions {
         campaign::GameSession::ScriptFactory child_scripts;
         campaign::GameSession::ChildConfigurator configure_child;
         campaign::GalacticParentQueryFactory child_parent_queries{};
+        std::optional<script::authoritative::ScriptScheduler> object_scheduler{};
+        // Installs the world-owned script adapter independently of native AI.
+        std::function<core::Result<void>(campaign::GameSession&)> configure_world_scripts{};
     };
     std::function<core::Result<PreparedGalacticScripts>()> prepare_galactic;
     std::function<core::Result<void>(script::authoritative::ScriptedGalacticSession&)> configure_galactic;

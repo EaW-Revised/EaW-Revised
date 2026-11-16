@@ -2,6 +2,7 @@
 #include "eawr/vfs/vfs.hpp"
 #include "space_environment.hpp"
 #include "space_environment_internal.hpp"
+#include "environment_texture.hpp"
 #include "shader_activation_owner.hpp"
 #include "startup_trace.hpp"
 
@@ -130,17 +131,6 @@ namespace space_environment_detail {
     bindings.push_back({"eawr_sky_light_specular", policy.light_specular});
     bindings.push_back({"eawr_sky_light_scale", policy.light_scale});
     return bindings;
-}
-
-[[nodiscard]] std::vector<MaterialBinding> meshadditive_bindings(
-    const space::MeshAdditiveMaterial& material, const space::MeshAdditiveInputs& inputs) {
-    return {
-        {"BaseTexture", std::string{"space-sky-base-texture"}},
-        {"Color", material.color},
-        {"UVScrollRate", material.uv_scroll_rate},
-        {"eawr_sky_time", inputs.time},
-        {"eawr_sky_light_scale", inputs.light_scale},
-    };
 }
 
 // sky-shadow: the shipped sky, flag off (the policy under test).
@@ -589,7 +579,7 @@ bool SpaceEnvironment::ready(Node3D& host, const assets::Map& map, const vfs::Vf
         const auto cached = textures.find(std::string(declared));
         if (cached != textures.end()) return cached->second;
         space::TextureLookup lookup;
-        const auto path = probe_reference(filesystem, "data/art/textures/", declared, texture_suffixes);
+        const auto path = probe_texture(filesystem, "data/art/textures/", declared);
         if (!path) {
             lookup.status = space::TextureLookup::Status::not_in_vfs;
             lookup.logical_path = std::string(declared);
@@ -597,7 +587,7 @@ bool SpaceEnvironment::ready(Node3D& host, const assets::Map& map, const vfs::Vf
         } else {
             lookup.logical_path = *path;
             auto bytes = filesystem.open(*path);
-            auto texture = assets::load_texture(filesystem, *path);
+            auto texture = load_environment_texture(filesystem, *path);
             if (!bytes || !texture) {
                 lookup.status = space::TextureLookup::Status::failed_to_decode;
                 lookup.failure = !bytes ? core::format_diagnostic(bytes.error())
@@ -626,9 +616,9 @@ bool SpaceEnvironment::ready(Node3D& host, const assets::Map& map, const vfs::Vf
     // One renderer on the host's own scenario; no second device and no
     // per-object scene nodes. The camera is live before any upload or frame.
     state.renderer = std::make_unique<GodotRenderer>(host, state.options.shaders);
-    install_mod_shaders(*state.renderer, state.options.shader_generation, state.options.shader_filesystem);
+    install_mod_shaders(*state.renderer, state.options.shader_generation, state.options.shader_filesystem, true);
     state.renderer->set_texture_loader([&filesystem](const assets::Source& source) -> std::optional<assets::Texture> {
-        auto loaded = assets::load_texture(filesystem, source.logical_path);
+        auto loaded = load_environment_texture(filesystem, source.logical_path);
         if (!loaded) return std::nullopt;
         return std::move(loaded.value());
     });

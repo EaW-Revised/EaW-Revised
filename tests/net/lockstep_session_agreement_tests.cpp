@@ -10,6 +10,7 @@
 #include "eawr/net/session_monitor.hpp"
 #include "eawr/net/tactical_input.hpp"
 #include "eawr/net/transport.hpp"
+#include <limits>
 
 #include <algorithm>
 #include <array>
@@ -462,6 +463,19 @@ void strict_codec_and_admission() {
     expect(!net::encode_tactical_input(stamped.key, binding,
         {{1}, tactical::SpecialFirePayload{2, tactical::SpecialFireAdmission::ai_object}}),
         "AI special-fire engine route refused");
+    expect(!net::encode_tactical_input(stamped.key, binding,
+        {{1}, tactical::TacticalSuperweaponPayload{tactical::TswStage::start_approach, tactical::TswAdmission::ai_object}}),
+        "AI super weapon switch route refused (TSW-07, every battle kind: the LAN ingress is this adapter)");
+    expect(static_cast<bool>(net::encode_tactical_input(stamped.key, binding,
+        {{1}, tactical::TacticalSuperweaponPayload{tactical::TswStage::start_approach, tactical::TswAdmission::player}})),
+        "player super weapon switch click accepted");
+    auto forged_switch = require(tactical::parse_replay(stamped.bytes));
+    forged_switch.commands.front().payload =
+        tactical::TacticalSuperweaponPayload{tactical::TswStage::start_approach, tactical::TswAdmission::ai_object};
+    net::SeatInput forged_input{stamped.key, require(tactical::write_replay(forged_switch))};
+    const auto forged_decoded = net::decode_tactical_input(forged_input, binding);
+    expect(!forged_decoded && forged_decoded.error().code == net::session_errors::admission,
+        "a hostile packet with the AI super weapon admission is refused at decode");
     Match match(2);
     const auto before = require(match.sessions[0].submit({{1}, tactical::StopPayload{}}));
     expect(before.tick == 3 && before.sequence == 0, "stamp at entry before seal");
@@ -807,5 +821,144 @@ void monitor_quit_and_options() {
     require(zero.sessions[0].pump(0));
     require(zero.sessions[0].pump(1));
     expect(zero_monitor.ticks == std::vector<std::uint64_t>{0}, "zero-length session records one final tick-zero observation");
+}
+
+namespace {
+struct AdaptiveWanRun {
+    std::string hash;
+    std::vector<std::string> peer0_hashes; // every completed tick's state hash on peer 0
+    std::uint64_t rounds{};
+    std::uint64_t deferrals{};
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> changes; // (tick the change was seen, new delay), peer 0
+};
+
+// Two peers: a lockstep match from `initial_tick` (a stand-in for a loaded save; no network input runs before it) over an
+// emulated link. With `inputs`, both seats send a move command at every tick, stamped by the delay in force, so a
+// peer that applies an agreed delay at the wrong tick diverges (every completed tick's hash is compared across
+// peers). Without it the state hash is independent of the delay. With `adaptive`, the host measures
+// `rtt_ms(completed tick)`; otherwise the delay stays fixed like TCP LAN.
+AdaptiveWanRun adaptive_wan_run(std::size_t workers, std::optional<eawr::testing::WanProfile> wan, bool adaptive,
+    std::uint64_t initial_tick, std::uint64_t initial_delay, std::uint64_t final_tick,
+    std::function<std::uint64_t(std::uint64_t)> rtt_ms, bool inputs) {
+    constexpr std::uint32_t peers = 2;
+    FakeNetwork network(peers);
+    if (wan) network.emulate(*wan);
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    const auto roster = bindings(peers);
+    std::vector<std::unique_ptr<FakeTransport>> transports;
+    std::vector<std::unique_ptr<net::DesyncMonitor>> monitors;
+    std::vector<std::unique_ptr<net::TacticalSessionAdapter>> adapters;
+    std::vector<net::LockstepSession> sessions;
+    for (net::PeerIndex peer = 0; peer < peers; ++peer) {
+        transports.push_back(std::make_unique<FakeTransport>(network, peer));
+        adapters.push_back(std::make_unique<net::TacticalSessionAdapter>(
+            require(tactical::TacticalSession::create(setup(), content())), executor, roster));
+        while (adapters.back()->completed_tick() < initial_tick) require(adapters.back()->step());
+        net::DesyncOptions monitor_options;
+        monitor_options.input_delay = initial_delay; monitor_options.initial_tick = initial_tick;
+        monitors.push_back(std::make_unique<net::DesyncMonitor>(*transports.back(), monitor_options));
+        net::SessionOptions options;
+        options.initial_tick = initial_tick; options.input_delay = initial_delay; options.final_tick_count = final_tick;
+        if (adaptive) {
+            options.non_lan = true;
+            options.adaptive_timing = net::AdaptiveTiming{0, true,
+                [&adapters, rtt_ms](net::PeerIndex) { return std::optional<std::uint64_t>{rtt_ms(adapters[0]->completed_tick())}; }, true};
+        }
+        std::vector<net::PeerSeat> seats;
+        for (const auto& bound : roster) seats.push_back({bound.seat, true});
+        sessions.push_back(require(net::LockstepSession::create(*adapters.back(), *transports.back(), seats, options,
+            monitors.back().get())));
+    }
+    AdaptiveWanRun run;
+    std::vector<std::vector<std::string>> hashes(peers);
+    std::vector<std::uint64_t> submitted(peers, std::numeric_limits<std::uint64_t>::max());
+    std::uint64_t round{};
+    for (; round < 400000; ++round) {
+        network.round = round;
+        for (net::PeerIndex peer = 0; peer < peers; ++peer) {
+            const auto old_delay = sessions[peer].input_delay();
+            const auto tick = adapters[peer]->completed_tick();
+            if (inputs && tick + 40 < final_tick && submitted[peer] != tick) {
+                require(sessions[peer].submit([&](auto key) {
+                    return net::encode_tactical_input(key, roster[peer], {{roster[peer].player},
+                        tactical::MovePayload{{units(static_cast<std::int64_t>((tick + 7 * peer) % 20)), {}, {}}}});
+                }));
+                submitted[peer] = tick;
+            }
+            const auto result = require(sessions[peer].pump(round));
+            if (result.completed) hashes[peer].push_back(result.completed->state_sha256);
+            if (peer == 0 && sessions[peer].input_delay() != old_delay) run.changes.push_back({tick, sessions[peer].input_delay()});
+        }
+        if (std::all_of(monitors.begin(), monitors.end(), [](const auto& monitor) { return monitor->agreed_end(); })) break;
+    }
+    run.rounds = round;
+    for (net::PeerIndex peer = 0; peer < peers; ++peer) {
+        expect(adapters[peer]->completed_tick() == final_tick && monitors[peer]->agreed_end(), "adaptive WAN run completes on every peer");
+        expect(adapters[peer]->state_hash() == adapters[0]->state_hash(), "adaptive WAN run ends in one state on every peer");
+        run.deferrals += sessions[peer].timing_deferrals();
+    }
+    expect(hashes[1] == hashes[0], "adaptive WAN run: every completed tick hash agrees across peers (a delay applied at the wrong tick diverges)");
+    run.hash = adapters[0]->state_hash();
+    run.peer0_hashes = std::move(hashes[0]);
+    return run;
+}
+} // namespace
+
+// A high-RTT link cannot sustain the fixed LAN delay: each tick then waits for the remote batch. Once the host
+// proposes the measured delay the match keeps a tick rate instead of stalling every tick, on every worker count.
+void adaptive_high_rtt_recovers() {
+    using eawr::testing::WanDirection;
+    using eawr::testing::WanProfile;
+    const WanProfile clean{"high-rtt-330", WanDirection{165, 20, 0, 0, 0, 0}, WanDirection{165, 20, 0, 0, 0, 0}};
+    const WanProfile lossy{"lossy-high-rtt-330", WanDirection{165, 20, 11, 330, 7, 60}, WanDirection{165, 20, 13, 330, 5, 60}};
+    const auto constant_rtt = [](std::uint64_t) { return std::uint64_t{330}; };
+    for (const auto& profile : {clean, lossy}) {
+        const std::string label = std::string(profile.name) + ": ";
+        const auto fixed = adaptive_wan_run(1, profile, false, 0, 3, 600, constant_rtt, true);
+        std::uint64_t slowest{};
+        AdaptiveWanRun reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            const auto run = adaptive_wan_run(workers, profile, true, 0, 3, 600, constant_rtt, true);
+            // Real inputs are stamped by the delay in force, so the adaptive state is not the fixed one; what must hold is
+            // that every worker count reproduces the same state at every tick and the same agreed change ticks.
+            if (workers == 1) reference = run;
+            expect(run.peer0_hashes == reference.peer0_hashes && run.changes == reference.changes,
+                label + "adaptive delay with player input is identical on " + std::to_string(workers) + " workers (hashes and change ticks)");
+            expect(!run.changes.empty() && run.changes.back().second == 8, label + "the host proposes the measured delay");
+            slowest = std::max(slowest, run.rounds);
+            if (workers == 1) std::cout << "adaptive " << profile.name << " rounds fixed=" << fixed.rounds << " adaptive=" << run.rounds << '\n';
+        }
+        // One round is one fake millisecond: the adaptive match needs clearly fewer rounds for the same ticks.
+        expect(slowest * 3 < fixed.rounds * 2, label + "adaptive delay recovers the tick rate instead of stalling every tick");
+    }
+}
+
+// Online skirmish cannot save today (LiveSessionView::can_save refuses any LAN/online session), so a timing proposal
+// is never pending at a save point in this change; a co-op campaign save is PR 2's case. This sweep covers the session
+// layer: a session started from a loaded state at every phase of a delay change (the state hash is delay-independent
+// without player input, so it compares with the uninterrupted run).
+// Saving and loading at every phase of a delay change (before the proposal, between proposal and event, on the event
+// tick, after it, around the later decrease) resumes into the same end state; the loaded session may start from the
+// delay in force or from the offer's default.
+void adaptive_save_load_sweep() {
+    const auto rtt = [](std::uint64_t tick) { return tick < 200 ? std::uint64_t{330} : std::uint64_t{0}; };
+    const auto whole = adaptive_wan_run(1, std::nullopt, true, 0, 3, 600, rtt, false);
+    expect(whole.changes.size() >= 2 && whole.changes.front().second == 8 && whole.changes.back().second == 4,
+        "uninterrupted adaptive match raises and lowers the delay");
+    const auto delay_at = [&](std::uint64_t tick) {
+        std::uint64_t delay = 3;
+        for (const auto& change : whole.changes) if (change.first < tick) delay = change.second;
+        return delay;
+    };
+    std::vector<std::uint64_t> saves{1, 30, 36};
+    for (const auto& change : whole.changes) for (const auto offset : {-2, -1, 0, 1, 2}) {
+        const auto at = static_cast<std::int64_t>(change.first) + offset;
+        if (at > 0 && at < 590) saves.push_back(static_cast<std::uint64_t>(at));
+    }
+    for (const auto save : saves) for (const bool in_force : {true, false}) for (const auto workers : {1U, 4U}) {
+        const auto resumed = adaptive_wan_run(workers, std::nullopt, true, save, in_force ? delay_at(save) : 3, 600, rtt, false);
+        expect(resumed.hash == whole.hash, "save at tick " + std::to_string(save) + (in_force ? " with the delay in force" : " with the offer delay")
+            + " on " + std::to_string(workers) + " workers loads into the uninterrupted end state");
+    }
 }
 }

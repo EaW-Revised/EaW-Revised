@@ -319,6 +319,11 @@ func _process(delta):
             self.assertEqual(data["handoff"]["conflict"], data["save_controls"]["restored_conflict"])
             self.assertEqual(data["handoff"]["child_ready_tick"], data["save_controls"]["restored_child_tick"],
                              "loaded success preceded the retained MapMode readiness barrier")
+            # SK-ARR-01: the fresh battle opened with the arrival cinematic; the battle restored past its start plays none.
+            gate = data["arrival_cinematic"]["gate"]
+            self.assertTrue(gate and gate[0] == {"ready_tick": 0, "admitted": True}, gate)
+            restored = [row for row in gate if row["ready_tick"] > 0]
+            self.assertTrue(restored and not any(row["admitted"] for row in restored), gate)
         for name in ("escape.png", "save.png", "load.png", "saved.png", "restored.png", "refused.png"):
             self.assertTrue((directory / name).is_file())
 
@@ -636,6 +641,7 @@ var elapsed = 0.0
 var beat = 0.0
 var phase = 0
 var rows = []
+var last_escape = 0.0
 var begun_at = 0.0
 func _initialize():
     instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
@@ -686,10 +692,15 @@ func _process(delta):
         1:
             # Escape is refused while the battle's loading state is still shown: wait for the ready child.
             if FileAccess.file_exists(SAVES + "/Auto Save.eawrsave") and instance.find_child("CampaignSpaceBattleReady", true, false) != null:
-                key(KEY_ESCAPE); phase = 2
+                key(KEY_ESCAPE); phase = 2; last_escape = elapsed
             elif elapsed - begun_at > 60: finish("Begin never wrote the autosave")
         2:
-            if click(esc, "IDC_LOAD_GAME"): phase = 3
+            # SK-ARR-06: the arrival cinematic that opens the battle ignores Escape; press it again until the menu is up.
+            if esc != null and esc.is_visible_in_tree():
+                if click(esc, "IDC_LOAD_GAME"): phase = 3
+            elif elapsed - begun_at > 120: finish("the Escape menu never opened after the arrival")
+            elif elapsed - last_escape > 1.0:
+                key(KEY_ESCAPE); last_escape = elapsed
         3:
             var list = control(load_panel, "IDC_SAVE_GAME_LIST")
             if list != null and list.is_visible_in_tree() and list.item_count > 0:
@@ -708,6 +719,12 @@ func _process(delta):
         self.assertTrue((saves / "Auto Save.eawrsave").is_file())
         self.assertTrue(any("auto" in row.lower() for row in trace["rows"]), trace["rows"])
         self.assertEqual(data["failure"], "")
+        # SK-ARR-06 / F3: the arrival dropped the Escape pressed during it, and dropping did not unfocus the battle camera
+        # (nothing refocuses it afterwards, so camera input would stay dead once the arrival ended).
+        arrival = data["arrival_cinematic"]
+        self.assertGreaterEqual(arrival["starts"], 1, arrival)
+        self.assertGreater(arrival["dropped_events"], 0, arrival)
+        self.assertEqual(arrival["focus_losses"], 0, arrival)
         print("prebattle autosave rows:", trace["rows"], directory)
 
 

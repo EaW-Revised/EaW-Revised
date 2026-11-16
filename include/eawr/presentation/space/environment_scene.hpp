@@ -53,6 +53,10 @@ struct EnvironmentLight final {
 // malformed mini reads 0, the record default.
 [[nodiscard]] assets::Vec3f sky_orientation_degrees(const assets::EnvironmentDescriptor& environment, bool secondary);
 
+// R-SKY-05: effective XML scale, defaulting to one; malformed and non-positive
+// values fail (legacy #6658).
+[[nodiscard]] std::optional<float> sky_object_scale(const data::EffectiveObject& object);
+
 // -- transforms -------------------------------------------------------------------
 
 // Row-major 3x4 affine transform: rows [r0 r1 r2 t].
@@ -177,10 +181,12 @@ struct Billboard final {
 
 // -- default camera ------------------------------------------------------------------
 
-// The render far plane of the environment view and the radius every sky is
-// scaled to around the eye. Backdrop objects (the planet, the sun, nebulae)
-// lie far beyond Space_Mode's Far_Clip, so the view uses its own far plane.
-inline constexpr float environment_far_plane = 60000.0F;
+// The render far plane of the environment view. Skies keep their authored
+// scale; environment_sky_radius below only places the sun billboard (0.9 times
+// it). Backdrop objects (the planet, the sun, nebulae)
+// lie far beyond Space_Mode's Far_Clip, so the view uses its own far plane:
+// retail's widened background range (BP-75), 100000 (#6447).
+inline constexpr float environment_far_plane = 100000.0F;
 inline constexpr float environment_sky_radius = 48000.0F;
 
 // Space_Mode supplies the pose and near plane; the environment needs its own

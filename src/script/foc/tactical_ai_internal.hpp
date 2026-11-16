@@ -5,6 +5,8 @@
 #include "ai_engine.hpp"
 #include "host.hpp"
 
+#include "eawr/vfs/vfs_fwd.hpp"
+
 namespace eawr::script::foc::tactical_ai_detail {
 
 using HostPtr = std::shared_ptr<detail::Host>;
@@ -29,12 +31,20 @@ core::Result<void> service_objects(const sim::PartitionExecutor& executor, const
     std::vector<authoritative::ScriptDiagnostic>& diagnostics, std::uint32_t& active, std::uint32_t& pumps, bool schedule = true);
 
 authoritative::Binding noop();
+// tactical_world_queries=false leaves out the globals that read the tactical battle view (Find_First_Object); a galactic
+// scheduler passes false because the galactic freestore registers its own Find_First_Object there.
 void register_globals(authoritative::ScriptScheduler& scripts, const HostPtr& host,
-    std::vector<core::Diagnostic>& errors, bool install_type_lists = true);
+    std::vector<core::Diagnostic>& errors, bool install_type_lists = true, bool tactical_world_queries = true);
 void register_methods(authoritative::ScriptScheduler& scripts, const HostPtr& host,
     std::vector<core::Diagnostic>& errors, bool install_type_lists = true);
 core::Result<authoritative::TacticalOrder> translate_order(const authoritative::ScriptCommand& command);
 core::Result<void> load_contrast(detail::Host& host, const std::map<std::string, std::string>& modules);
+// The directories load_contrast's scheduler searches.
+std::vector<std::string> contrast_script_directories();
+// Every module of those directories read from the mounted view. A host that has no module map of its own passes this
+// one, so `require` inside PGAICommands resolves whatever the mounted library holds (ML-31, ML-38, L-03a) and no
+// fixed module list stands between the scripts and their data.
+core::Result<std::map<std::string, std::string>> read_contrast_modules(const vfs::Vfs& files);
 core::Result<std::vector<ai::PlanDef>> load_plans(const HostPtr& host,
     const std::map<std::string, std::string>& modules, std::vector<std::string>& notes,
     const std::set<std::string>* selected_goals = nullptr);

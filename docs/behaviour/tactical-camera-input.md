@@ -7,7 +7,7 @@
 | Permitted XML facts | Distance/pitch/yaw/FOV ranges, splines, `Distance_Per_Mouse_Unit`, `Yaw_Per_Mouse_Unit`, tactical scroll speeds and edge regions | `data/xml/tacticalcameras.xml` and `gameconstants.xml` through `eawr::presentation::camera`, see the tactical camera contract |
 | FoC code and runtime facts | The middle-button law: mouse units as screen fractions times 100, the x4/x1 Ctrl factor, translate by the camera distance, the click reset | The FoC debug build and RO-7 (rotate-drag camera law); see [original camera facts](#original-camera-facts-foc-debug-build) |
 | Local project policy | Every other binding, chord, trigger kind, the free-camera toggle, free-flight speeds, look sensitivity, pitch limits, the transition and cancellation rules below | `apps/viewer/project/config/camera-bindings.json` (schema v2, `provenance: project-authored`) and this note |
-| Unresolved observations | Retail default bindings, input cadence, pan acceleration, spline and pan-speed fidelity, what the camera-lock flag blocks, whether the original has a comparable free camera | Open. Not implemented as fact anywhere. [Original camera facts](#original-camera-facts-foc-debug-build) lists what the debug build answers. |
+| Unresolved observations | Retail default bindings, input cadence, the original's display rate for the scroll law, spline and pan-speed fidelity, what the camera-lock flag blocks, whether the original has a comparable free camera | Open. Not implemented as fact anywhere. [Original camera facts](#original-camera-facts-foc-debug-build) lists what the debug build answers. |
 
 The `Unlocked` XML definition does not supply free-flight bindings, speed, look sensitivity or
 collision policy. The free camera does not read it.
@@ -43,6 +43,16 @@ unimplemented.
   alone. Only the per-frame eye lift over `Min_Height_Above_Terrain`, which FoC applies to
   every land frame, can still raise the view. The home command restores the saved position
   and height as well. The wheel zooms and is ignored while the middle button is held.
+- **Scroll ramp and release (CAMIN-REL-1).** Keyboard pan and edge scroll are stepped once
+  per rendered frame by the UI update. The wanted scroll speed for the frame already carries
+  the frame's elapsed seconds (capped at one second), so holding a key or the edge pans at a
+  frame-rate independent speed. While held, the scroll speed grows by the wanted speed times
+  `Scroll_Acceleration_Factor` each frame and never passes the wanted speed. With nothing
+  held it is divided by `Scroll_Deceleration_Factor` each frame and set to zero once both
+  axes are under 0.1. The camera then moves by the scroll speed times 0.03 times 1/100 of the
+  smoothed camera distance. Both factors are therefore per-frame gains, not seconds, and the
+  original's ramp and coast get shorter in seconds as the frame rate rises. Source:
+  debug build; the galactic scroll service uses the same per-invocation law (WGUI-141).
 - **Free camera.** No free-flight mode was found in the tactical camera controller. That is not
   a claim that the original has none.
 - **Field of view (hardpoint reticle scaling).** FoC's camera angle (`Fov_Default`, `Tactical_Overview_FOV`,
@@ -368,6 +378,39 @@ The synthetic fixtures (`map-camera.xml`, `space-map-camera.xml`) use the same t
 they move at these rates too. The free-flight fixture table and the host camera table
 (`camera-bindings.json`) are unchanged.
 
+## CAMIN-REL-1: pan ramp and release
+
+Project policy over the [debug-build scroll law](#original-camera-facts-foc-debug-build).
+The original steps ramp and release once per rendered frame, so it has no frame-rate
+independent coast. The remake stays frame-rate independent on purpose and converts the two
+per-frame factors to time constants of the eased pan velocity at a reference frame time of
+1/60 second. The original has no fixed display rate, so 60 Hz is a project choice
+(unverified against retail captures; on the fidelity list).
+
+- **Release.** The original's coast is the geometric sum of the speed divided by the factor
+  each frame, which is 1 / (factor - 1) frames of the speed at release. The release time
+  constant is `(1/60) / (Scroll_Deceleration_Factor - 1)` seconds, so the total coast
+  travel equals the original's at 60 Hz. A factor of 1 or less has no braking, so there is no
+  coast (the original would divide by one and never stop; unverified).
+- **Ramp.** After `k` frames the original reaches `min(k * factor, 1)` of the wanted speed,
+  so its lag behind the wanted speed is the sum of `1 - k * factor` over the frames with
+  `k * factor < 1`. The ramp time constant is that many reference frames. A factor of 1 or
+  more reaches full speed in one frame; 0 or less is instant (the original would never start).
+- **Both at any frame rate.** The pan velocity follows the closed form per step, so the same
+  held-then-released pan travels the same at 30, 60 and 144 fps. The camera tests check
+  ramp lag and coast against the per-frame law at those rates.
+- **Data, before and after.** The factors come from `gameconstants.xml` through the loader;
+  only the 1/60 reference is a project constant.
+
+| Data | Factors (accel / decel) | Ramp lag before | Ramp lag now | Coast before | Coast now |
+|---|---|---|---|---|---|
+| Stock FoC | 0.08 / 1.5 | 0.080 s | 0.096 s | 0.053 s | 0.033 s |
+| Remake 5.0 | 0.65 / 1.15 | 0.650 s | 0.006 s | 0.565 s | 0.111 s |
+
+"Before" took the acceleration factor as seconds and the release as acceleration divided by
+deceleration, which was right only by accident for stock data. At 60 Hz the original's coast
+is 0.033 s for stock and 0.111 s for Remake 5.0; at 144 fps it would be 2.4 times shorter.
+
 ## Middle-button law (FoC, PI-9)
 
 The land and space map cameras follow the [original camera facts](#original-camera-facts-foc-debug-build)
@@ -404,7 +447,9 @@ and set `click_reset: true` and `screen_mouse_units: true`.
   (smoothed) camera distance along the yaw-turned screen axes, once per event like the Alt
   drag, without feeding the eased pan velocity. A drag right moves the camera right and a
   drag down moves it back, as in FoC. The target bounds still clamp it. The Alt drag keeps
-  its own screen-matched law.
+  its own screen-matched law. Translate events are taken at the yaw they were made at, so
+  the result does not depend on frame rate (PI-9): a move and a Ctrl turn in one long frame
+  give the same camera as the same two events in separate frames.
 - **Wheel while grabbed (PI-9).** A held middle grab suppresses wheel events during
   either translation or rotation. Release does not replay them; fresh wheel events zoom.
 - **Chords.** Both motions are routed only while a middle grab is held, and by the
@@ -439,8 +484,9 @@ and set `click_reset: true` and `screen_mouse_units: true`.
   needs a fresh press.
 - **Report.** `final` records `pitch_degrees`, `orbit_pitch_offset_degrees` and
   `orbit_pitch_range_degrees`; the sections count `resets` and `view_resets`. Each space trace
-  entry records `consumed.rotate_units`, `orbit_pitch_units`, `translate_units` and
-  `view_resets`. The land and space graphical self-tests drive a plain drag, a Ctrl drag, a
+  entry records `consumed.rotate_units`, `orbit_pitch_units`, `translate_units` (the raw
+  per-step sums as the adapter consumed them, not the start-yaw pair the controller applies)
+  and `view_resets`. The land and space graphical self-tests drive a plain drag, a Ctrl drag, a
   Ctrl click and a middle click through real Godot events.
 - **Scope.** The law belongs to the land and space map tables only. The host table
   (`camera-bindings.json`) and the free-camera fixture table (`map-camera-free-bindings.json`)

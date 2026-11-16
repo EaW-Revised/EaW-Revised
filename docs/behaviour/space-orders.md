@@ -15,8 +15,8 @@
   `commandbarcomponents.xml` and the unit XML of the M2 lock), **project** (a remake decision).
   No original-game recording of these orders exists yet (OR-U4).
 - Out of scope: squadron craft, which have no space layer and divert on their own (OR-13; a
-  squadron's attack-move and guard are [space fighters](space-fighters.md) FO-05 and FO-06); waypoint queues (Alt), the compass facing
-  of a right drag and abilities. Attacks on one hardpoint are OR-20 to OR-27 (specific-hardpoint attack orders).
+  squadron's attack-move and guard are [space fighters](space-fighters.md) FO-05 and FO-06); waypoint queues (Alt), the final facing a right drag carries
+  ([battle selection](foc-battle-selection.md) O-2, O-6) and abilities. Attacks on one hardpoint are OR-20 to OR-27 (specific-hardpoint attack orders).
 
 ## How FoC does it
 

@@ -61,6 +61,10 @@ public:
         double idle_upload_ms{};
         SkinPoseWork idle_skin_work{};
         std::size_t idle_placements{}, idle_surfaces{};
+        // PF idle skin: placements whose palette upload ran / was skipped as unchanged this frame, the instances the
+        // upload loops visited, and the placements the renderer reported disturbed (drained) before the upload.
+        std::size_t idle_uploaded{}, idle_skipped{}, idle_visited{}, idle_disturbed{};
+        std::array<std::uint64_t, 9> idle_causes{};
         GodotParticleBackend::FrameWork particle_work{};
         particles::RegistryTimings emitter_timing{}, effects_timing{}, debris_timing{};
         double bookkeeping_ms{};
@@ -76,11 +80,14 @@ public:
         double slot_growth_ms{};
         std::size_t launch_preload_fallbacks{}; // Cumulative distinct fallback rosters.
         std::uint64_t launch_read_bytes{};
+        double hangar_warm_ms{};            // #5097 PR 2: main-thread time of the hangar warm pass this frame
+        std::size_t hangar_warm_slots{};    // slots (recipes and copies) that pass made this frame
         double hud_ms{};
         double audio_ms{};
         std::array<double, audio_trace::lap_count> audio_laps{};
         std::array<std::uint64_t, audio_trace::count_count> audio_counts{};
         double audio_play_ms{};
+        double projectile_observe_ticks_ms{}, projectile_observe_final_ms{}, projectile_opacity_ms{};
         std::array<std::uint64_t, audio_trace::digest_count> audio_digests{};
         double fog_ms{};
         double pose_ms{};

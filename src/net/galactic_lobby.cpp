@@ -339,4 +339,12 @@ core::Result<SetupOffer> make_galactic_lobby_offer(const GalacticLobbyOptions& o
     return core::Result<SetupOffer>::success(std::move(offer));
 }
 
+std::string galactic_prepare_wait_text(const bool host_waits, const std::string& so_far) {
+    const std::string bound = std::to_string(preparation_timeout_minutes) + " minutes";
+    if (host_waits)
+        return "Preparing the campaign for all players (" + so_far + "). A large mod chain can take up to " + bound + ". "
+            "The room is locked; Cancel stops waiting.";
+    return "Preparing your copy of the campaign (" + so_far + "). A large mod chain can take up to " + bound + ".";
+}
+
 } // namespace eawr::net

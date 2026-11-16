@@ -6,14 +6,12 @@
 
 namespace eawr::sim::galactic::story {
 Goals::Goals(Player owner, GoalsState state) : owner_(owner), state_(std::move(state)) {
-    // WST-60 fixture restore; reject ambiguous keys rather than silently choosing a row.
-    for (std::size_t i = 0; i < state_.objectives.size(); ++i) {
-        const auto& row = state_.objectives[i];
+    // WST-67: a restore appends the stored entries in order, duplicates included (WST-65 admits duplicate identities).
+    for (const auto& row : state_.objectives) {
         if (row.text_id.empty() || (row.status != ObjectiveStatus::incomplete
             && row.status != ObjectiveStatus::complete && row.status != ObjectiveStatus::failed))
             throw std::invalid_argument("invalid objective snapshot");
-        for (std::size_t j = 0; j < i; ++j)
-            if (state_.objectives[j].text_id == row.text_id) throw std::invalid_argument("duplicate objective key");
+        if (row.number >= state_.next_number) throw std::invalid_argument("objective number beyond the numbering counter");
     }
     for (std::size_t i = 0; i < state_.goals.size(); ++i) {
         if (state_.goals[i].tag.empty() || state_.goals[i].dialog.empty()) throw std::invalid_argument("invalid goal snapshot");
@@ -38,35 +36,41 @@ bool Goals::apply(const GoalCommand& command, PresentationSink& sink) {
             }
             sink.receive({owner_, GoalChanged{r.tag, value}});
         } else {
+            // WST-65/66: first exact text-identity match; a missing match changes nothing.
             auto row = std::find_if(state_.objectives.begin(), state_.objectives.end(), [&](const auto& o) { return o.text_id == r.identity; });
             std::optional<Objective> value;
-            switch (r.action) { // WST-47; detailed mutations follow goals_policy_seam.
-            case ObjectiveAction::add:
-            case ObjectiveAction::replace: {
-                if (r.objective.text_id.empty() || r.objective.status != ObjectiveStatus::incomplete) return false;
-                if (r.action == ObjectiveAction::replace && row == state_.objectives.end()) return false;
-                auto target = std::find_if(state_.objectives.begin(), state_.objectives.end(), [&](const auto& o) { return o.text_id == r.objective.text_id; });
-                if (r.action == ObjectiveAction::add) row = target;
-                else if (target != state_.objectives.end() && target != row) return false;
-                if (row == state_.objectives.end()) state_.objectives.push_back(r.objective);
-                else *row = r.objective;
-                value = r.objective;
+            std::int64_t inserted_at = -1;
+            switch (r.action) {
+            case ObjectiveAction::add: {
+                if (r.objective.text_id.empty()) return false; // WST-65: an empty identity does nothing
+                Objective added{r.objective.text_id, r.objective.suggestion, state_.next_number++, ObjectiveStatus::incomplete};
+                const auto size = static_cast<std::int64_t>(state_.objectives.size());
+                const auto at = r.index >= 0 && r.index <= size ? r.index : size; // out of range appends
+                state_.objectives.insert(state_.objectives.begin() + at, added);
+                inserted_at = at;
+                value = added;
                 break;
             }
+            case ObjectiveAction::replace: // UPDATE_OBJECTIVE: both identities nonempty; a duplicate identity is admitted
+                if (r.identity.empty() || r.objective.text_id.empty() || row == state_.objectives.end()) return false;
+                row->text_id = r.objective.text_id;
+                row->status = ObjectiveStatus::incomplete; // number, suggestion and position stay
+                value = *row;
+                break;
             case ObjectiveAction::complete:
             case ObjectiveAction::fail:
                 if (row == state_.objectives.end()) return false;
-                row->status = r.action == ObjectiveAction::complete ? ObjectiveStatus::complete : ObjectiveStatus::failed;
+                row->status = r.action == ObjectiveAction::complete ? ObjectiveStatus::complete : ObjectiveStatus::failed; // even if already in it
                 value = *row;
                 break;
             case ObjectiveAction::remove:
                 if (row == state_.objectives.end()) return false;
-                state_.objectives.erase(row); break;
+                state_.objectives.erase(row); break; // the counter does not rewind
             case ObjectiveAction::remove_all: state_.objectives.clear(); break;
             case ObjectiveAction::display: state_.objectives_visible = r.visible; break;
             default: return false;
             }
-            sink.receive({owner_, ObjectiveChanged{r.action, r.action == ObjectiveAction::add ? r.objective.text_id : r.identity, value, state_.objectives_visible}});
+            sink.receive({owner_, ObjectiveChanged{r.action, r.action == ObjectiveAction::add ? r.objective.text_id : r.identity, value, state_.objectives_visible, inserted_at}});
         }
         return true;
     }, command);

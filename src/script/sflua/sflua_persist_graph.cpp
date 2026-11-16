@@ -165,7 +165,7 @@ void GraphSaver::expand(::std::uint32_t index) {
         case kind_prototype:
             if (entry.kind == kind_prototype &&
                 !sandbox_.prototype_paths.contains(static_cast<const Proto*>(entry.object))) {
-                fail("a function prototype was not compiled by the sandbox");
+                fail("a function prototype was not compiled from a session module (a loadstring chunk cannot be saved)");
             }
             return;
         case kind_table: {

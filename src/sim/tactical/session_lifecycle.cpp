@@ -180,8 +180,8 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
         for (const auto& unit : source.units) {
             add_starbase(unit);
             if (economy.pads.point(unit.type_id) != nullptr) pads.emplace(unit.entity_id, PadState{unit.owner});
-            // #530 PU-02: the stations whose stream pays, ascending ID.
-            if (!economy.empty() && economy.stream(unit.type_id) != nullptr) earners.emplace_back(unit.entity_id, unit.owner);
+            // #530 PU-02: the stations whose stream pays from creation, in unit order.
+            if (!economy.empty() && economy.earner_stream(unit.type_id) != nullptr) earners.emplace_back(unit.entity_id, unit.owner);
         }
         if (source.units.empty()) {
             next_id = 1;
@@ -213,6 +213,10 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
         for (const auto& unit : source.units) {
             if (const auto* profile = combat.find(unit.type_id); profile && profile->planetary_weapon)
                 special_weapons.emplace(unit.entity_id, SpecialWeaponState{});
+            // TSW-02: a super weapon object needs the battle's TSW setup (targets, conflict gate); without it the
+            // behaviour stays inert, as in any battle that never carried the data.
+            if (const auto* profile = combat.find(unit.type_id); profile && profile->tactical_super_weapon && source.tsw)
+                tsw_states.emplace(unit.entity_id, TswState{});
             live.push_back(new_unit(unit, 0));
             auto slots = radar_slots(unit.type_id);
             if (!slots.empty()) radar_roster.emplace(unit.entity_id, std::move(slots));
@@ -528,15 +532,18 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
     if (setup.domain == BattleDomain::land) {
         if (!content.land_terrain) return core::Result<TacticalSession>::failure(detail::diagnostic(
             diagnostic_codes::land_provider_unavailable, "land tactical provider unavailable: terrain field required (L1)"));
-        if (setup.campaign || !setup.squadrons.empty() || !setup.free_garrisons.empty())
+        if (setup.campaign || !setup.squadrons.empty())
             return core::Result<TacticalSession>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
-                "land movement host does not support campaign, space squadrons or free garrisons"));
+                "land movement host does not support campaign or space squadrons"));
         core::LoadNoteBuffer local_notes;
         auto owned_durability = prepare_durability(content.durability, load_notes ? *load_notes : local_notes);
         if (!owned_durability) return core::Result<TacticalSession>::failure(owned_durability.error());
         if (auto valid = validate_combat(content.combat); !valid)
             return core::Result<TacticalSession>::failure(valid.error());
         if (auto valid = validate_victory(content.victory, resolved.players); !valid)
+            return core::Result<TacticalSession>::failure(valid.error());
+        // WLAB-01 (#3238): the land ability rows reach the session; an empty table keeps every land unit ability-free.
+        if (auto valid = validate_abilities(content.abilities); !valid)
             return core::Result<TacticalSession>::failure(valid.error());
         // LC-54..57: the land session runs the shared economy and pad services on the authored land profiles. A content
         // without rows (no players) keeps the previous inert economy.
@@ -548,7 +555,7 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
             return core::Result<TacticalSession>::failure(valid.error());
         // Land owns locomotion; the same authored combat and durability rows bind its members.
         auto impl = std::make_unique<Impl>(resolved, content.sensors, owned_durability.value(), MotionTable{},
-            content.fog, content.combat, content.victory, AbilityTable{}, owned_economy.value(), content.map_box);
+            content.fog, content.combat, content.victory, content.abilities, owned_economy.value(), content.map_box);
         if (impl->initialization_error) return core::Result<TacticalSession>::failure(*impl->initialization_error);
         if (auto initialized = impl->initialize_land(content); !initialized)
             return core::Result<TacticalSession>::failure(initialized.error());
@@ -693,7 +700,7 @@ core::Result<EntityId> TacticalSession::stage_spawn(const UnitState& unit) {
             initial_spawner(impl_->setup.seed, impl_->completed_tick + 1, state.entity_id));
     }
     impl_->add_starbase(state);
-    if (impl_->economy.stream(state.type_id) != nullptr) impl_->earners.emplace_back(state.entity_id, state.owner);
+    if (impl_->economy.earner_stream(state.type_id) != nullptr) impl_->earners.emplace_back(state.entity_id, state.owner);
     if (impl_->economy.pads.point(state.type_id) != nullptr) {
         impl_->pads.emplace(state.entity_id, PadState{state.owner});
         impl_->pad_stage.initialized = false;

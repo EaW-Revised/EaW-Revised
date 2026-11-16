@@ -71,9 +71,8 @@ void GalacticSession::Impl::dispatch_ground_ability(EntityId supplied, PlanetId 
         if (ai_slicer) kinds.push_back(AbilityKind::technology_theft);
         for (const auto kind : kinds) {
             if (!ground_ability_enabled(*profile, *service, kind, ai_slicer && kind == AbilityKind::technology_theft)) continue;
-            // #6120: neutralization is ground-activated for every seat (WGCH-187), but the AI has no chooser for its menu yet,
-            // so an AI landing never prepares it; a human's drop or landing does.
-            if (kind == AbilityKind::hero_neutralization && ai_purchaser && !ai_purchaser->human) continue;
+            // WGCH-187: neutralization is ground-activated for every seat. A human's drop or landing opens its menu, an AI's
+            // chooses and executes in the same step (WGCH-24/93, ability_neutralize.cpp).
             if (kind == AbilityKind::technology_theft || kind == AbilityKind::system_spy) {
                 const auto* planet = control ? find(control->planets, target, [](const auto& row) { return row.planet; }) : nullptr;
                 if (!planet) continue;

@@ -57,6 +57,10 @@ struct PlanetWeatherMetadata final {
 // GHUD-R45: the Planet Info dialog sections, localized (empty when the planet authors no key or it is unresolved).
 struct PlanetInfoMetadata final {
     std::string tactical{}, advantage{}, history{}, weather{}, terrain{}, population{};
+    // The focused planet card (GPI-07/08): every localized Encyclopedia_Text entry in authored order, and the
+    // planet type's Additional_Population_Capacity (its header contribution badge; zero draws no badge).
+    std::vector<std::string> encyclopedia{};
+    std::int64_t population_capacity{};
 };
 
 struct StubPlanet final {
@@ -64,6 +68,10 @@ struct StubPlanet final {
     std::string name;
     // Logical model path (the planet type's `Galactic_Model_Name`).
     std::string model;
+    // The planet type's `Destroyed_Galactic_Model_Name` (empty: a destroyed planet keeps its model), and whether the live
+    // snapshot says the planet is destroyed. The view draws the destroyed model while the planet is destroyed.
+    std::string destroyed_model;
+    bool destroyed{};
     std::array<sim::math::Fixed, 3> position{};
     sim::math::Fixed scale = sim::math::Fixed::from_raw(sim::math::Fixed::scale);
     std::optional<PlayerId> owner;

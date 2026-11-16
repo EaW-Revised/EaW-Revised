@@ -60,7 +60,7 @@ project version, the mods service version and the default build identity follow 
 suffix (`python tools/release/release_version.py label <suffix>`), and a release tag must equal `v` plus that version
 (`python tools/release/release_version.py check-tag <tag>`; `cut_kit.py --release-tag` runs the same check). The launcher executables' file and product versions are generated from the same
 version. The launcher pin (`config/launcher-pin.json`) is a separate
-product and keeps its own version. The last published release is v0.3.2.
+product and keeps its own version. The last published release is v0.3.3.
 The published release includes the portable player download with its double-click launcher,
 a debug download, playable space skirmish, LAN and online multiplayer and a partially working Galactic Conquest. The galactic AI is on by default
 in live campaigns; `--eawr-galactic-ai off` switches it off. Keep a candidate local until the
@@ -78,7 +78,7 @@ while the owner has paused release work.
 | Time from T0 | Work (parallel unless a dependency is named) | Aim / deadline |
 | --- | --- | --- |
 | 0–10 min | Delta re-export, all publish scans, review/update/merge the sync PR. Record private/public commit mapping; review the delta against pre-T0 qualification. | 10 / 30 min |
-| 10–15 min | Maintainer explicitly pushes the signed tag on reviewed public main. Pool checks out this exact public tag; tagging does not dispatch hosted work. | 15 / 35 min |
+| 10–15 min | Maintainer explicitly pushes the annotated tag (signing optional) on reviewed public main. Pool checks out this exact public tag; tagging does not dispatch hosted work. | 15 / 35 min |
 | 15–40 min | Incremental pool Release/Debug tools and online-enabled viewers, package and hash. ARM/Apple hosted verification starts only after publication, outside this critical path. | 40 / 120 min |
 | As pool archives finish | Fresh-user harness on exact player and Debug bytes; prepare draft, upload tested archives, sums, notes and pool provenance. | 55 / 150 min |
 | After all gates below | Owner approves; maintainer publishes manually. | T0+60 / T0+180 min |
@@ -132,8 +132,8 @@ publication gate. The pool route requires all of these conditions:
 
 Cut the pool package from the tagged public checkout with `python tools/release/cut_kit.py --release-tag v<version> --layer
 <reviewed Revised layer> --engine-dir ... --launcher-artifact ... --changes ... --work <new dir> --host any` (or `--cross-host`), finish it with
-`finish_kit.py` and add the replay76 and fresh-user receipts with `release_evidence.py`. The manifest then records the signed tag
-object, the exact commit and tree, the pinned inputs, the host receipt (tree check, input hashes, toolchain), the delivered archive
+`finish_kit.py` and add the replay76 and fresh-user receipts with `release_evidence.py`. The manifest then records the annotated tag
+object (signed or unsigned), the exact commit and tree, the pinned inputs, the host receipt (tree check, input hashes, toolchain), the delivered archive
 hashes and the evidence, and `kit_manifest.py verify --release` checks all of it; `tools/release/KIT-RUNBOOK.md` ("The release
 package") has the rules and what each step refuses.
 
@@ -156,7 +156,7 @@ The maintainer tags and pushes the reviewed public commit explicitly (never thro
 NO-PUSH remote):
 
 ```text
-git -C <public-clone> tag -s v<version> <reviewed-public-commit> -m "EaW Revised v<version>"
+git -C <public-clone> tag -a v<version> <reviewed-public-commit> -m "EaW Revised v<version>"   # annotated; add -s only if a signing key exists
 git -C <public-clone> push https://github.com/EaW-Revised/EaW-Revised.git refs/tags/v<version>
 ```
 
@@ -215,7 +215,6 @@ macOS support remains experimental; these release archives do not provide a macO
 ### The player folder
 
 Set `EAWR_REVISED_LAYER_DIR` or pass `--revised-layer <dir>` to provide the Revised layer source containing `Data/Audio` and `Data/XML`. It is copied to `Revised/Data` beside `EAWR.exe`; player and Debug packages require it; `--allow-missing-revised-layer` permits a preview without it and warns. `--public` requires the exact reviewed layer recorded in `tools/release/revised-layer-manifest.json`; missing, extra or changed files fail packaging. The advisor selection voices are included. The pool wrapper accepts `-RevisedLayer`, `-AllowMissingRevisedLayer`, and `-Public`. For a pool package produced with `-AllowMissingRevisedLayer`, run `python tools/release/add_revised_layer.py <extracted-player-folder> --revised-layer <dir> --zip <player.zip>` locally to add it and refresh the folder checksums and zip. Never commit layer content.
-
 
 `package_release.py --godot <Godot_v4.7.2-stable_win64.exe> --launcher <EAWR.exe>` also writes the player zip
 (Windows x64). These existing commands keep the normal layout and never fetch a manager pin.
@@ -351,18 +350,21 @@ For a Linux cross-build, `linux_cross_build.py --ref <sha> --host <cross-host> -
 relay viewer and private symbols under the normal VM admission and slot queue. On the source checkout that owns those
 outputs, `tools/release/package_cross.py --sha <sha> --version <version> --build-dir <root-build> --engine-dir <engine-dir>
 --launcher-artifact <zip> --symbol-store <private-dir> --out <output-dir> --allow-missing-revised-layer` runs the same
-player packager and symbol checks. On Linux, set `EAWR_GODOT_RUNNER` to the executable
-`tools/release/godot_wine.py`, and set `EAWR_WINE` to a working Wine executable if it is not on PATH. Wine runs the
-pinned Windows engine for both the identity probe and the headless project import; these checks remain required.
+player packager and symbol checks, plus `--linux-import-godot <exe>`: the pinned official Linux Godot 4.7.2 editor
+(`python tools/release/godot_linux_import.py fetch <dir>` downloads it and checks the release's SHA-512 and the exe's SHA-256).
+The editor writes the project's `.godot` metadata (`godot --headless --path <project> --import`; the viewer project has no
+imported resources, so that is three small files, byte-identical to what the patched Windows exe writes). The shipped Windows
+exe is copied as a file and identified by its pinned SHA-256 and the fork commit embedded in it; it is never run on Linux and
+no Wine is involved. The resulting host receipt records the Linux editor's version and SHA-256 under `toolchain.linux_godot`.
 The resulting archive still needs the normal Windows fresh-user and GPU verification before delivery.
 
 For a queued build and package on the cross host, pass `--kit --no-test --package-on-host <config.json>` to
-`linux_cross_build.py`. Use the same `local_inputs` object as the Windows pool configuration and add `wine`, the
-Wine executable's path relative to the host base, and `plan`, the `plan.json` of a kit cut (`cut_kit.py` writes it). Optional
-`wine_lib_dir` names a private Wine library directory, also relative to the base. The slot holder runs
+`linux_cross_build.py`. Use the same `local_inputs` object as the Windows pool configuration and add `linux_godot`, the
+Linux Godot editor's path relative to the host base (for example `tools/godot-4.7.2/Godot_v4.7.2-stable_linux.x86_64`), and
+`plan`, the `plan.json` of a kit cut (`cut_kit.py` writes it). The slot holder runs
 `tools/release/host_package.py verify` from its own tree after comparing that file's blob id with the plan's, which checks the
 tree, the plan and the staged input hashes (see `tools/release/KIT-RUNBOOK.md`), and produces a hash-verified
-`package.tar.gz` containing the release artifacts and private symbol store. `cut_kit.py --cross-host <host> --wine
+`package.tar.gz` containing the release artifacts and private symbol store. `cut_kit.py --cross-host <host> --linux-godot
 <base-relative-path>` automates this route and prepares the work directory for `finish_kit.py`.
 
 The fresh-user gate exercises Windows process launch, user profiles and the installed graphics driver, so it runs on a

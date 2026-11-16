@@ -61,6 +61,13 @@ bool unique_instances(const ScriptScheduler& ai, const ScriptScheduler& story) {
     return true;
 }
 
+// The per-tick form: the AI side comes from the sim-side copy of its ids (see Impl::ai_ids), not from the AI scheduler.
+bool unique_instances(const std::vector<std::uint64_t>& ai_ids, const ScriptScheduler& other) {
+    const auto s = other.instances();
+    for (const auto id : s) if (std::binary_search(ai_ids.begin(), ai_ids.end(), id)) return false;
+    return true;
+}
+
 Binding missing(std::string name) {
     return [name = std::move(name)](BindingContext&, const ValueList&) {
         return core::Result<ValueList>::failure(error(codes::missing_api, "galactic Lua API " + name + " is unbound"));
@@ -113,8 +120,10 @@ struct ScriptedGalacticSession::Impl {
     gc::GalacticSession world;
     ScriptScheduler ai;
     ScriptScheduler story;
+    std::optional<ScriptScheduler> objects;
     std::shared_ptr<GalacticScriptEngine> ai_engine;
     std::shared_ptr<GalacticScriptEngine> story_engine;
+    std::shared_ptr<GalacticObjectScriptEngine> object_engine;
     std::shared_ptr<sim::StateHasher> hasher;
     std::map<std::string, GalacticCommandTranslator, std::less<>> translators;
     std::map<gc::SeatId, std::uint64_t> next_sequence;
@@ -124,9 +133,23 @@ struct ScriptedGalacticSession::Impl {
     std::function<void(ServiceReport&)> global_value_committer;
     std::function<core::Result<void>(ServiceReport&)> story_command_committer;
     bool stepped{};
+    // Async AI step 2c-3 (R3): the sim-side copy of the AI scheduler's instance ids for the per-tick disjointness checks. The AI scheduler
+    // owns its instance set; it changes only inside the AI service (window body), at load and when a host creates or removes an instance,
+    // all of which move `instance_revision`. The copy is read again from the scheduler only when the revision moved; every other tick
+    // reads one scalar and no id list. `ai_instance_list_reads` counts those re-reads.
+    std::vector<std::uint64_t> ai_ids_copy;
+    std::uint64_t ai_ids_revision{std::numeric_limits<std::uint64_t>::max()};
+    std::uint64_t ai_instance_list_reads{};
+    const std::vector<std::uint64_t>& ai_ids() {
+        if (const auto revision = ai.instance_revision(); revision != ai_ids_revision) {
+            ai_ids_copy = ai.instances(); ai_ids_revision = revision; ++ai_instance_list_reads;
+        }
+        return ai_ids_copy;
+    }
 
-    Impl(gc::GalacticSession world_in, ScriptScheduler ai_in, ScriptScheduler story_in)
-        : world(std::move(world_in)), ai(std::move(ai_in)), story(std::move(story_in)) {
+    Impl(gc::GalacticSession world_in, ScriptScheduler ai_in, ScriptScheduler story_in,
+        std::optional<ScriptScheduler> objects_in)
+        : world(std::move(world_in)), ai(std::move(ai_in)), story(std::move(story_in)), objects(std::move(objects_in)) {
         world.defer_history_service(true);
         ai.set_managed_handle_roots([this] {
             ValueList roots;
@@ -279,6 +302,11 @@ struct ScriptedGalacticSession::Impl {
         field(bytes, sync_ai ? "eawr-script-galactic-sync-state-v2" : "eawr-script-galactic-state-v1");
         field(bytes, "ai"); field(bytes, a.value());
         field(bytes, "story"); field(bytes, s.value());
+        if (objects) {
+            auto object_hash = objects->state_hash();
+            if (!object_hash) return core::Result<std::string>::failure(object_hash.error());
+            field(bytes, "objects"); field(bytes, object_hash.value());
+        }
         field(bytes, std::to_string(next_sequence.size()));
         for (const auto& [seat, sequence] : next_sequence) {
             field(bytes, std::to_string(seat.value)); field(bytes, std::to_string(sequence));
@@ -296,14 +324,16 @@ struct ScriptedGalacticSession::Impl {
 };
 
 core::Result<ScriptedGalacticSession> ScriptedGalacticSession::create(
-    gc::GalacticSession world, ScriptScheduler ai, ScriptScheduler story) {
+    gc::GalacticSession world, ScriptScheduler ai, ScriptScheduler story, std::optional<ScriptScheduler> objects) {
     if (world.completed_tick() != 0 || world.pending_command_count() != 0 || ai.completed_tick() != 0 || story.completed_tick() != 0 ||
-        !ai.uses_galactic_clock() || !story.uses_galactic_clock() || !unique_instances(ai, story)) {
+        !ai.uses_galactic_clock() || !story.uses_galactic_clock() || !unique_instances(ai, story) ||
+        (objects && (objects->completed_tick() != 0 || !objects->uses_galactic_clock()
+            || !unique_instances(ai, *objects) || !unique_instances(story, *objects)))) {
         return core::Result<ScriptedGalacticSession>::failure(error(codes::invalid_request,
             "fresh GC-profile schedulers with disjoint AI/story instance IDs and a fresh galaxy are required"));
     }
     return core::Result<ScriptedGalacticSession>::success(
-        ScriptedGalacticSession(std::make_unique<Impl>(std::move(world), std::move(ai), std::move(story))));
+        ScriptedGalacticSession(std::make_unique<Impl>(std::move(world), std::move(ai), std::move(story), std::move(objects))));
 }
 
 ScriptedGalacticSession::ScriptedGalacticSession(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -312,12 +342,13 @@ ScriptedGalacticSession& ScriptedGalacticSession::operator=(ScriptedGalacticSess
 ScriptedGalacticSession::~ScriptedGalacticSession() = default;
 
 core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore(
-    gc::GalacticSession world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved) {
-    return restore_preserving(world, std::move(ai), std::move(story), saved);
+    gc::GalacticSession world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved,
+    std::optional<ScriptScheduler> objects) {
+    return restore_preserving(world, std::move(ai), std::move(story), saved, false, std::move(objects));
 }
 core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore_preserving(
     gc::GalacticSession& world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved,
-    const bool timer_held) {
+    const bool timer_held, std::optional<ScriptScheduler> objects) {
     auto refuse = [](std::string message) {
         return core::Result<ScriptedGalacticSession>::failure(error(codes::load_rejected, std::move(message)));
     };
@@ -326,6 +357,14 @@ core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore_preservin
         return refuse("the galaxy and script save must belong to the same GC clock barrier");
     if (auto loaded = ai.load(saved.ai); !loaded) return refuse(loaded.error().message);
     if (auto loaded = story.load(saved.story); !loaded) return refuse(loaded.error().message);
+    if (objects.has_value() != saved.objects.has_value()) return refuse("object script host presence differs");
+    if (objects) {
+        if (!objects->uses_galactic_clock()) return refuse("object scripts require the galactic clock");
+        if (auto loaded = objects->load(*saved.objects); !loaded) return refuse(loaded.error().message);
+        if (objects->completed_tick() > saved.completed_tick || objects->galactic_frame() > saved.galactic_frame ||
+            !unique_instances(ai, *objects) || !unique_instances(story, *objects))
+            return refuse("object script clocks or identities differ from the barrier");
+    }
     // Tactical child return reconciles the galaxy to the shared session frontier
     // without servicing these frozen schedulers (GameSession::step / reconcile_battle).
     // Story service ticks may therefore lag that frontier, but never lead it.
@@ -389,7 +428,7 @@ core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore_preservin
     }
     auto shell = gc::GalacticSession::create(world.setup());
     if (!shell) return refuse(shell.error().message);
-    auto impl = std::make_unique<Impl>(std::move(shell).value(), std::move(ai), std::move(story));
+    auto impl = std::make_unique<Impl>(std::move(shell).value(), std::move(ai), std::move(story), std::move(objects));
     impl->pending = saved.pending;
     impl->next_sequence = saved.next_sequence;
     impl->exhausted_seats = saved.exhausted_seats;
@@ -413,6 +452,19 @@ core::Result<void> ScriptedGalacticSession::set_ai_engine(std::shared_ptr<Galact
 core::Result<void> ScriptedGalacticSession::set_story_engine(std::shared_ptr<GalacticScriptEngine> engine) {
     if (impl_->stepped) return core::Result<void>::failure(error(codes::invalid_request, "set the engine before stepping"));
     impl_->story_engine = std::move(engine);
+    return core::Result<void>::success();
+}
+core::Result<void> ScriptedGalacticSession::set_object_scheduler(ScriptScheduler objects) {
+    if (impl_->stepped || impl_->objects || impl_->world.completed_tick() != 0 || objects.completed_tick() != 0
+        || !objects.uses_galactic_clock() || !unique_instances(impl_->ai, objects) || !unique_instances(impl_->story, objects))
+        return core::Result<void>::failure(error(codes::invalid_request, "object scheduler requires a fresh disjoint world host"));
+    impl_->objects.emplace(std::move(objects));
+    return core::Result<void>::success();
+}
+core::Result<void> ScriptedGalacticSession::set_object_engine(std::shared_ptr<GalacticObjectScriptEngine> engine) {
+    if (impl_->stepped || !impl_->objects || !engine)
+        return core::Result<void>::failure(error(codes::invalid_request, "object engine requires an installed object scheduler before stepping"));
+    impl_->object_engine = std::move(engine);
     return core::Result<void>::success();
 }
 
@@ -439,7 +491,19 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
         if (!stepped) return abort(stepped.error());
         out.world = std::move(stepped).value();
         if (impl.ai_engine ? impl.ai_engine->admits_service(out.world) : out.world.work.serviced) {
-            auto serviced = gc_profile::timed_ai([&] { return impl.service(executor, out.world, impl.ai, impl.ai_engine, false); });
+            // #6933: the AI barrier's state writes republish the snapshot once, on the next read or at the barrier's end.
+            struct SnapshotBatch {
+                sim::galactic::GalacticSession& session; bool open{true};
+                explicit SnapshotBatch(sim::galactic::GalacticSession& value) noexcept : session(value) { session.begin_snapshot_batch(); }
+                void finish() { if (open) { open = false; session.end_snapshot_batch(); } }
+                ~SnapshotBatch() { if (open) { try { session.end_snapshot_batch(); } catch (...) {} } }
+            };
+            auto serviced = [&] {
+                SnapshotBatch batch(impl.world);
+                auto result = gc_profile::timed_ai([&] { return impl.service(executor, out.world, impl.ai, impl.ai_engine, false); });
+                batch.finish();
+                return result;
+            }();
             if (!serviced) return abort(serviced.error());
             out.ai = std::move(serviced).value();
             impl.pending = out.ai->commands;
@@ -451,7 +515,23 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
         auto serviced = gc_profile::timed(gc_profile::Phase::tick_story_service, [&] { return impl.service(executor, out.world, impl.story, impl.story_engine, true); });
         if (!serviced) return abort(serviced.error());
         out.story = std::move(serviced).value();
-        if (!unique_instances(impl.ai, impl.story))
+        // The one provisional service-order assumption is recorded in the
+        // galactic object-script host design; no binding chooses its own phase.
+        if (impl.objects && out.world.work.serviced) {
+            if (!impl.object_engine) return abort(error(codes::invalid_request, "object scheduler has no engine"));
+            auto object_result = impl.object_engine->service(executor, impl.world, *impl.objects);
+            if (!object_result) return abort(object_result.error());
+            out.objects = std::move(object_result).value();
+            if (impl.story_command_committer) {
+                if (auto committed = impl.story_command_committer(*out.objects); !committed) return abort(committed.error());
+            }
+            impl.world.add_runtime_load_notes(out.objects->load_notes);
+            impl.pending.insert(impl.pending.end(), out.objects->commands.begin(), out.objects->commands.end());
+            out.world.snapshot = impl.world.snapshot();
+            if (!unique_instances(impl.ai_ids(), *impl.objects) || !unique_instances(impl.story, *impl.objects))
+                return abort(error(codes::invalid_request, "object instance IDs overlap another galactic host"));
+        }
+        if (!unique_instances(impl.ai_ids(), impl.story))
             return abort(error(codes::invalid_request, "AI and story instance IDs must be disjoint"));
         impl.pending.insert(impl.pending.end(), out.story.commands.begin(), out.story.commands.end());
         std::sort(impl.pending.begin(), impl.pending.end(), [](const ScriptCommand& a, const ScriptCommand& b) {
@@ -489,7 +569,13 @@ void ScriptedGalacticSession::set_state_hasher(std::shared_ptr<sim::StateHasher>
 gc::GalacticSession& ScriptedGalacticSession::parent_world() noexcept { return impl_->world; }
 const gc::GalacticSession& ScriptedGalacticSession::world() const noexcept { return impl_->world; }
 ScriptScheduler& ScriptedGalacticSession::ai_scheduler() noexcept { return impl_->ai; }
+std::uint64_t ScriptedGalacticSession::ai_instance_list_reads() const noexcept { return impl_->ai_instance_list_reads; }
+bool ScriptedGalacticSession::ai_instance_copy_matches() const {
+    const auto& impl = *impl_;
+    return impl.ai_ids_revision != impl.ai.instance_revision() || impl.ai_ids_copy == impl.ai.instances();
+}
 ScriptScheduler& ScriptedGalacticSession::story_scheduler() noexcept { return impl_->story; }
+ScriptScheduler* ScriptedGalacticSession::object_scheduler() noexcept { return impl_->objects ? &*impl_->objects : nullptr; }
 std::uint64_t ScriptedGalacticSession::completed_tick() const noexcept { return impl_->world.completed_tick(); }
 std::size_t ScriptedGalacticSession::pending_script_commands() const noexcept { return impl_->pending.size(); }
 gc::GalacticReplay ScriptedGalacticSession::record() const { return impl_->world.record(); }
@@ -505,9 +591,15 @@ core::Result<GalacticScriptSave> ScriptedGalacticSession::save_scripts() {
     if (!s) return core::Result<GalacticScriptSave>::failure(s.error());
     auto digest = impl_->script_hash();
     if (!digest) return core::Result<GalacticScriptSave>::failure(digest.error());
+    std::optional<std::string> objects;
+    if (impl_->objects) {
+        auto saved = impl_->objects->save();
+        if (!saved) return core::Result<GalacticScriptSave>::failure(saved.error());
+        objects = std::move(saved).value();
+    }
     return core::Result<GalacticScriptSave>::success({completed_tick(), impl_->world.clock().galactic_frame,
         std::move(a).value(), std::move(s).value(), impl_->pending, impl_->next_sequence, impl_->exhausted_seats,
-        impl_->world.state_sha256(), std::move(digest).value()});
+        impl_->world.state_sha256(), std::move(digest).value(), std::move(objects)});
 }
 
 core::Result<void> register_galactic_orbit_recheck_method(ScriptScheduler& scripts, std::uint32_t kind) {

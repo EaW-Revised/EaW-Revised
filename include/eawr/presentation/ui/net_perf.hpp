@@ -27,12 +27,28 @@ inline constexpr double net_perf_game_ms = 1000.0 / 30.0 + 0.5;
 // The godot.log summary line repeats this often while a match runs.
 inline constexpr double net_perf_log_seconds = 5.0;
 
+// How a peer's link is carried, read from the transport. relay is a relayed link whose provider is not known (yet);
+// relay_own and relay_cloudflare name the TURN provider. unknown until the link is open or when the transport cannot
+// tell (a plain LAN stream).
+enum class NetRoute { unknown, direct, relay, relay_own, relay_cloudflare };
+// The stable token for logs and reports ("direct", "relay-own", ...) and the words for the overlay ("relay (own)").
+[[nodiscard]] const char* net_route_name(NetRoute route);
+[[nodiscard]] const char* net_route_text(NetRoute route);
+
 struct NetPeerLink final {
     std::uint32_t peer{};
     bool measured{};        // false until the transport has a round-trip sample
     double rtt_ms{};
     double jitter_ms{};
     double loss_pct{};      // packets lost in the recent window, 0 when the transport cannot tell
+    NetRoute route{NetRoute::unknown};
+    bool route_lossy{};     // a relayed link whose receive loss stayed high for a while (transport observation only)
+};
+
+// What the transport says about one peer's route: how it is carried and whether it has been lossy for a while.
+struct NetRouteInfo final {
+    NetRoute route{NetRoute::unknown};
+    bool lossy{};
 };
 
 // What the ledger knows at one instant.
@@ -86,6 +102,9 @@ struct NetVerdict final {
 };
 
 [[nodiscard]] NetVerdict net_verdict(const NetPerfReport& report);
+// The player hint for a degraded route, "Network route degraded (relay own, 22% loss)" for the lossiest flagged peer; empty
+// when no link is flagged. Observation only: nothing switches the route.
+[[nodiscard]] std::string net_route_hint(const NetPerfReport& report);
 // One stable line for godot.log: "EAWR net summary seat=0 verdict=ok wait_peer=- ...".
 [[nodiscard]] std::string net_summary_line(const NetPerfReport& report);
 // The `net_perf` object of the end-of-match report.

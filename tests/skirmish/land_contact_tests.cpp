@@ -10,6 +10,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <optional>
 
 namespace {
 using namespace eawr;
@@ -21,6 +22,7 @@ const auto dt = Fixed::from_ratio(1, 30).value();
 // A member box of half extent 4.243 has a diagonal of 6.0: the squad body of one such soldier is the 6-unit disc the
 // member-level fixtures used before the squad became the collision body (WLPA-95).
 const auto box_half = Fixed::from_ratio(4243, 1000).value();
+const auto no_gap = land_contact_no_gap;
 
 LandMovement::Checkpoint seed(const Field& field, bool stopped = false, std::size_t count = 2) {
     LandMovement::Checkpoint saved;
@@ -129,11 +131,16 @@ void quota_and_states() {
 
     saved = seed(field, true); saved.contacts.push_back(retained(LandContactKind::moving_stopped));
     saved.members[0].collision_lock = 99;
+    // The idle blocker cannot be pushed (WLPA-57): a lock refusal now lets the push run (review #4840 F1), and this case is
+    // about the refusal itself and the WLPA-92 retry that follows it.
+    saved.squads[1].maximum_speed = Fixed{};
     movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
     expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, 1)), "lock-rejected result service");
-    expect(movement.contacts()[0].search_succeeded && !movement.contacts()[0].installed
-        && movement.contacts()[0].search == LandContactSearch::install_rejected,
-        "LR3-13 successful search and refused lock installation are separate outcomes");
+    // The push that runs after the refusal (it refuses the immovable blocker before any search) leaves its own no_route.
+    expect(!movement.contacts()[0].search_succeeded && !movement.contacts()[0].installed
+        && movement.contacts()[0].state == LandContactState::unresolvable
+        && movement.contacts()[0].charged_nodes == 0 && movement.checkpoint().contact_complexity == 0,
+        "a lock that refuses the install is known before the search: no search, no quota charge (#4840 B2)");
     expect(movement.squads()[0].path == saved.squads[0].path, "lock rejection preserves the ordinary path");
     saved = movement.checkpoint();
     saved.members[0].collision_lock = 0;
@@ -414,9 +421,26 @@ void live_subtype_and_bounded_escape_retries() {
     expect(movement.checkpoint() == checkpoint, "failed-escape admission state and progress baselines survive restore");
     auto settings = checkpoint.contact_settings; settings.complexity_quota = field.occupancy.cells().size();
     expect(movement.configure_contacts(settings), "enable one graph's authored retry quota");
-    expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, 10)), "quota-admitted failed escape retry");
+    // #4840 B3: a failed escape waits the WLPA-92 retry count of visits without pair progress before it searches again, also
+    // while the quota would admit it (it used to search on every admitted tick). It failed at frame 1; frames 2-31 are the
+    // 30 counted visits (ordinary service, not queued); frame 32 queues the retry.
+    for (std::uint64_t frame = 10; frame < 32; ++frame) {
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, frame)), "failed escape backoff visit");
+        expect(total_charges(movement) == initial_charge, "a failed escape does not search again before the retry count");
+    }
+    expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, 32)), "quota-admitted failed escape retry");
     expect(total_charges(movement) == initial_charge + 2 * field.occupancy.cells().size(),
-        "one admitted two-pass retry may overshoot quota and denies the remaining stuck pairs");
+        "after the retry count one admitted two-pass retry may overshoot quota and denies the remaining stuck pairs");
+    std::size_t terminal = 0, ready = 0;
+    for (const auto& c : movement.contacts()) {
+        terminal += c.state == LandContactState::no_action && !c.first_stopped && !c.second_stopped;
+        ready += c.retry_failed && c.retry_remaining == 0 && c.search == LandContactSearch::quota_denied;
+    }
+    expect(terminal == 1 && ready == 7,
+        "WLPA-97: the second failed escape takes the terminal no_action rung; the denied ones stay ready at zero");
+    expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, 33))
+        && total_charges(movement) == initial_charge + 2 * field.occupancy.cells().size(),
+        "no stuck pair searches again before the quota resets");
 }
 
 void deadlock() {
@@ -1910,11 +1934,819 @@ void squad_body_contracts() {
     }
 }
 
+// #4840 liveness C4: a leg that runs diagonally through the corner of a blocked cell. The movement refuses the corner step
+// (the cell rectangle of its two samples holds the blocked cell); the terrain contact must see the same refusal and route
+// round. With a weaker point test the row was cleared without a search, found again from the refused step, cleared again,
+// and the squad stood at the corner for ever.
+LandMovement::Checkpoint corner_leg(const sim::PartitionExecutor& executor, bool restore, bool& arrived, bool& routed) {
+    auto field = make_field({"...............", "...............", "...#...........", "...............",
+        "...............", "...............", "..............."});
+    auto saved = seed(field, false, 1);
+    auto& squad = saved.squads[0];
+    squad.position = centre(2, 2); squad.facing = Fixed::from_ratio(1, 8).value();
+    squad.path = {LandPathStatus::found, {centre(2, 2), centre(4, 4)}, distance(centre(2, 2), centre(4, 4))};
+    squad.next_node = 1;
+    saved.members[0].position = squad.position; saved.members[0].facing = squad.facing;
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    routed = false;
+    for (std::uint64_t tick = 0; tick < 300; ++tick) {
+        expect(static_cast<bool>(movement.step(field.occupancy, executor, dt)), "corner leg ordinary motion");
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, executor, tick)), "corner leg late contacts");
+        for (const auto& c : movement.contacts()) routed |= c.kind == LandContactKind::terrain && c.installed;
+        if (restore && tick == 60) {
+            const auto checkpoint = movement.checkpoint();
+            auto resumed = LandMovement::from_checkpoint(checkpoint);
+            expect(resumed && resumed->checkpoint() == checkpoint, "corner leg restore round trip");
+            if (resumed) movement = std::move(*resumed);
+        }
+    }
+    arrived = movement.squads()[0].order == LandMoveOrder::reached
+        && distance(movement.squads()[0].position, centre(4, 4)) < whole(1);
+    return movement.checkpoint();
+}
+
+void corner_leg_contracts() {
+    sim::InlineExecutor serial;
+    bool arrived = false, routed = false;
+    const auto reference = corner_leg(serial, false, arrived, routed);
+    expect(routed, "C4: the terrain contact sees the step's own refusal at the corner and installs a route round it");
+    expect(arrived, "C4: the squad reaches the end of its move instead of standing at the corner for ever");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        expect(corner_leg(executor, true, arrived, routed) == reference, "C4 corner leg equals at 1/2/4/8 workers with restore");
+        test_support::ReverseOrderExecutor reverse(workers);
+        expect(corner_leg(reverse, true, arrived, routed) == reference, "C4 corner leg equals with reverse partitions");
+    }
+}
+
+// #4840 liveness B2 / C2: an escape that the actor's lock refuses is refused before any search, charges nothing, and then
+// waits the retry count like any failed escape.
+LandMovement::Checkpoint refused_escape(const sim::PartitionExecutor& executor) {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(field); saved.contacts.push_back(retained());
+    saved.contact_settings.minimum_prediction_distance = whole(200);
+    saved.contact_settings.complexity_quota = 0;
+    saved.contacts[0].deadlock_remaining = 1;
+    for (auto& m : saved.members) m.collision_lock = 99;
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    expect(static_cast<bool>(movement.service_contacts(field.occupancy, executor, 1)), "lock-refused escape service");
+    const auto& c = movement.contacts()[0];
+    expect(c.state == LandContactState::deadlocked && !c.installed && c.search == LandContactSearch::install_rejected
+        && c.charged_nodes == 0 && movement.checkpoint().contact_complexity == 0,
+        "B2: a lock-refused escape is refused before the search and charges no quota");
+    expect(c.retry_failed && c.retry_remaining == land_contact_retry_visits,
+        "B3: the refused escape waits the full retry count before it tries again");
+    for (std::uint64_t frame = 2; frame <= 40; ++frame)
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, executor, frame)), "lock-refused escape retries");
+    expect(movement.contacts()[0].charged_nodes == 0 && movement.checkpoint().contact_complexity == 0,
+        "B2: the refused escape retries after the count and is refused again, still without a search");
+    return movement.checkpoint();
+}
+
+void refused_escape_charges_nothing() {
+    sim::InlineExecutor serial;
+    const auto reference = refused_escape(serial);
+    for (const std::size_t workers : {1U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        expect(refused_escape(executor) == reference, "B2/B3 refused escape equals at 1 and 8 workers");
+        test_support::ReverseOrderExecutor reverse(workers);
+        expect(refused_escape(reverse) == reference, "B2/B3 refused escape equals with reverse partitions");
+    }
+}
+
+// Review #4840 F1: a lock refusal known before the search says nothing about a route, so the push still runs, as on main when
+// the search found no route. A hard mover whose squad is locked meets an idle squad in a one-wide corridor: no path round,
+// but the idle squad can be pushed to an open spot.
+void lock_refused_mover_still_pushes() {
+    sim::InlineExecutor serial;
+    auto corridor = make_field({"###############", "###############", "###############", "...............",
+        "###############", "###############", "###############", "###############", "###############"});
+    auto saved = seed(corridor, true);
+    saved.squads[1].position = at(148, 60); saved.members[1].position = at(148, 60);
+    saved.squads[1].path = {}; saved.squads[1].next_node = 0;
+    saved.members[0].collision_lock = 99;
+    saved.contacts.push_back(retained(LandContactKind::moving_stopped));
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(corridor, movement);
+    expect(static_cast<bool>(movement.service_contacts(corridor.occupancy, serial, 1)), "locked mover corridor service");
+    expect(movement.contacts()[0].state == LandContactState::infantry_push && movement.contacts()[0].installed
+        && movement.squads()[1].temporary_first == 1000,
+        "F1: a mover refused by its lock before the search still pushes the idle squad aside, as on main");
+}
+
+// Review #4840 R2-2: with a route around the blocker, a lock refusal (known before the search) still lets the push run. Main
+// found the route, was refused by the lock and skipped the push; now every failed path-around tries the alternatives.
+LandMovement::Checkpoint lock_refused_route_exists(const sim::PartitionExecutor& executor) {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(field, true);
+    saved.squads[1].position = at(148, 60); saved.members[1].position = at(148, 60);
+    saved.squads[1].path = {}; saved.squads[1].next_node = 0;
+    saved.members[0].collision_lock = 99;
+    saved.contacts.push_back(retained(LandContactKind::moving_stopped));
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    expect(static_cast<bool>(movement.service_contacts(field.occupancy, executor, 1)), "locked mover open-field service");
+    expect(movement.contacts()[0].state == LandContactState::infantry_push && movement.contacts()[0].installed
+        && movement.squads()[1].temporary_first == 1000 && movement.squads()[0].temporary_first == 0,
+        "R2-2: a mover refused by its lock tries the push even where a route round exists");
+    return movement.checkpoint();
+}
+
+void lock_refused_route_exists_contracts() {
+    sim::InlineExecutor serial;
+    const auto reference = lock_refused_route_exists(serial);
+    for (const std::size_t workers : {1U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        expect(lock_refused_route_exists(executor) == reference, "R2-2 equals at 1 and 8 workers");
+        test_support::ReverseOrderExecutor reverse(workers);
+        expect(lock_refused_route_exists(reverse) == reference, "R2-2 equals with reverse partitions");
+    }
+}
+
+// Review #4840 R2-1: a generic team's route legs are tested with the leader's own profile, which walks them from the request
+// start. The narrow leader stands beside a wall cell that only its wide team mate's footprint would touch: the route round the
+// idle blocker is installed (as on main), not refused for a radius that never walks that leg.
+void generic_leader_profile_walks_the_legs() {
+    sim::InlineExecutor serial;
+    auto field = make_field({"...............", "...............", "..#............", "...............",
+        "...............", "...............", "...............", "...............", "..............."});
+    auto saved = seed(field, true);
+    saved.squads[0].generic_team = true; saved.squads[0].collision_class = units::LandCollisionGroup::none;
+    saved.members[0].next_node = 1;
+    auto tail = saved.members[0];
+    tail.object = 3; tail.position = centre(2, 6); tail.profile.radius = whole(12);
+    saved.members[0].profile.collision_class = tail.profile.collision_class = units::LandCollisionGroup::vehicle;
+    saved.members[0].slot = at(0, -10); tail.slot = at(0, 10);
+    saved.members.push_back(tail);
+    auto row = retained(LandContactKind::moving_stopped); row.first = 1; row.second = 1001;
+    saved.contacts.push_back(row);
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, 1)), "mixed-radius generic route service");
+    bool installed = false;
+    for (const auto& c : movement.contacts()) installed |= c.first == 1 && c.second == 1001 && c.installed;
+    expect(installed && movement.squads()[0].temporary_first == 1,
+        "R2-1: a narrow generic leader beside a wall gets the route round the blocker; the wide member's radius does not refuse it");
+}
+
+// #4840 liveness C3 (#5996): a generic team's contact route is released when no member of the team makes progress for the
+// retry count (WLPA-96). It used to be kept for ever, because the route ends only when its last member ends it.
+LandMovement::Checkpoint generic_route(const sim::PartitionExecutor& serial) {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(field, true);
+    saved.squads[0].generic_team = true; saved.squads[0].collision_class = units::LandCollisionGroup::none;
+    saved.members[0].next_node = 1; // a generic member walks the team route itself: its tracker is on the first leg
+    auto tail = saved.members[0];
+    tail.object = 3; tail.position = centre(2, 5);
+    saved.members[0].profile.collision_class = tail.profile.collision_class = units::LandCollisionGroup::vehicle;
+    saved.members[0].slot = at(0, -10); tail.slot = at(0, 10);
+    saved.members.push_back(tail);
+    auto row = retained(LandContactKind::moving_stopped); row.first = 1; row.second = 1001;
+    saved.contacts.push_back(row);
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, 1)), "generic route installation");
+    const auto installed_row = [](const LandMovement& moving) {
+        for (const auto& c : moving.contacts()) if (c.first == 1 && c.second == 1001) return std::optional<LandContact>{c};
+        return std::optional<LandContact>{};
+    };
+    const auto first = installed_row(movement);
+    expect(first && first->installed && movement.squads()[0].generic_team && movement.squads()[0].temporary_first == 1,
+        "the generic mover's contact installs a route for its whole team");
+    // A member that still walks is progress: the count restarts.
+    auto walking_state = movement.checkpoint();
+    walking_state.members[2].collision_speed = whole(1);
+    for (auto& contact : walking_state.contacts) if (contact.first == 1 && contact.second == 1001) contact.retry_remaining = 1;
+    auto walking = LandMovement::from_checkpoint(walking_state).value();
+    expect(static_cast<bool>(walking.service_contacts(field.occupancy, serial, 2)), "generic route visit with a walking tail");
+    const auto kept = installed_row(walking);
+    expect(kept && kept->installed && kept->retry_remaining == land_contact_retry_visits,
+        "B4: any member of the routed generic team that still walks restarts the WLPA-96 count");
+    // No member moves: the route is released after the retry count.
+    for (std::uint64_t frame = 2; frame <= 30; ++frame)
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, frame)), "generic route no-progress visit");
+    const auto last = installed_row(movement);
+    expect(last && last->installed && last->retry_remaining == 1, "29 visits without progress leave the route installed");
+    expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, 31)), "generic route release visit");
+    expect(movement.squads()[0].temporary_first == 0 && movement.squads()[0].temporary_path.nodes.empty()
+        && movement.members()[0].collision_lock == 0 && movement.members()[2].collision_lock == 0,
+        "C3: a generic team's route that no member advances is released after the retry count (WLPA-96, #5996)");
+    return movement.checkpoint();
+}
+
+void generic_route_released() {
+    sim::InlineExecutor serial;
+    const auto reference = generic_route(serial);
+    for (const std::size_t workers : {1U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        expect(generic_route(executor) == reference, "B4 generic route release equals at 1 and 8 workers");
+        test_support::ReverseOrderExecutor reverse(workers);
+        expect(generic_route(reverse) == reference, "B4 generic route release equals with reverse partitions");
+    }
+}
+
+// #4840 liveness C1 (#5995): a primary deadlocked against two counterparts has no escape (LR3-12/13). WLPA-97 counts each
+// retry count without progress as a failed attempt; the second one takes no_action, so the stopped counterparts are released
+// and the primary is no longer held against them.
+void multi_source_deadlock_ends() {
+    sim::InlineExecutor serial;
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(field, false, 3); saved.contact_settings.minimum_prediction_distance = whole(250);
+    saved.members[2].position = at(240, 65); saved.squads[2].position = at(240, 65);
+    saved.squads[2].facing = Fixed::from_ratio(1, 2).value();
+    saved.squads[2].path = {LandPathStatus::found, {at(240, 65), at(40, 65)}, whole(200)};
+    saved.members[2].facing = saved.squads[2].facing;
+    saved.squads[0].collision_class = units::LandCollisionGroup::giant_vehicle;
+    saved.contacts = {retained(), retained()}; saved.contacts[1].second = 1002;
+    for (auto& entry : saved.contacts) { entry.state = LandContactState::deadlocked; entry.deadlock_remaining = 0; }
+    std::vector<sim::math::Vec2> start;
+    for (const auto& squad : saved.squads) start.push_back(squad.position);
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    bool ended = false;
+    for (std::uint64_t tick = 1; tick <= 900; ++tick) {
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, tick)), "multi-source deadlock service");
+        for (const auto& c : movement.contacts())
+            ended |= c.first == 1000 && (c.second == 1001 || c.second == 1002) && c.state == LandContactState::no_action;
+        expect(static_cast<bool>(movement.step(field.occupancy, serial, dt)), "multi-source deadlock motion");
+    }
+    expect(ended, "C1: a deadlocked row with several sources takes the terminal no_action rung");
+    for (std::size_t i = 0; i < 3; ++i)
+        expect(distance(start[i], movement.squads()[i].position) > whole(10),
+            "C1: the primary and both stopped counterparts move again (#5995)");
+}
+
+// #4840 liveness C5: a route released by WLPA-96 keeps its row as a failed attempt, so the same route chosen again and
+// failing again takes the terminal rung instead of starting over with no history. Against an idle body the terminal rung
+// ends the mover's move where it stands.
+void released_route_keeps_history() {
+    sim::InlineExecutor serial;
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(field, true);
+    saved.contacts.push_back(retained(LandContactKind::moving_stopped));
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    bool released_kept = false, ended = false, terminal = false;
+    std::uint64_t spent = 0;
+    for (std::uint64_t frame = 1; frame <= 120; ++frame) {
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, frame)), "released route service");
+        for (const auto& c : movement.contacts()) {
+            if (c.first != 1000 || c.second != 1001) continue;
+            released_kept |= !c.installed && c.retry_failed && c.state == LandContactState::unresolvable
+                && movement.squads()[0].temporary_first == 0;
+            terminal |= c.state == LandContactState::no_action;
+            spent = std::max(spent, c.charged_nodes);
+        }
+        ended |= movement.squads()[0].order == LandMoveOrder::reached;
+    }
+    expect(released_kept, "C5: the WLPA-96 release keeps the row as a failed attempt instead of erasing it");
+    expect(ended && !terminal && movement.squads()[0].temporary_first == 0,
+        "C5: the second route that cannot advance ends the mover's move in front of the idle body (never no_action)");
+    expect(spent == 2 * field.occupancy.cells().size(), "C5: the stuck pair searched exactly twice");
+    const auto checkpoint = movement.checkpoint();
+    expect(LandMovement::from_checkpoint(checkpoint)->checkpoint() == checkpoint, "a terminal row survives restore");
+}
+
+// #4840 liveness C6: a generic mover ordered onto an idle generic vehicle cannot truncate, path round or push it. Its move
+// ends in front of the idle body instead of standing at zero speed for ever.
+LandMovement::Checkpoint immovable_on_goal(const sim::PartitionExecutor& executor, bool& ended, bool& untouched) {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(field, true);
+    for (auto& squad : saved.squads) { squad.generic_team = true; squad.collision_class = units::LandCollisionGroup::none; }
+    for (auto& member : saved.members) member.profile.collision_class = units::LandCollisionGroup::vehicle;
+    saved.squads[0].path = {LandPathStatus::found, {centre(2, 3), centre(7, 3)}, whole(100)};
+    saved.members[0].next_node = 1;
+    saved.squads[1].path = {}; saved.squads[1].next_node = 0;
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    for (std::uint64_t tick = 0; tick < 300; ++tick) {
+        expect(static_cast<bool>(movement.step(field.occupancy, executor, dt)), "immovable goal motion");
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, executor, tick)), "immovable goal contacts");
+    }
+    ended = movement.squads()[0].order == LandMoveOrder::reached
+        && distance(movement.members()[0].position, movement.members()[1].position) >= whole(11);
+    untouched = movement.members()[1].position == centre(7, 3);
+    return movement.checkpoint();
+}
+
+void immovable_on_goal_contracts() {
+    sim::InlineExecutor serial;
+    bool ended = false, untouched = false;
+    const auto reference = immovable_on_goal(serial, ended, untouched);
+    expect(ended, "C6: a move onto an idle body it cannot pass ends in front of it (WLPA-97)");
+    expect(untouched, "C6: the idle body is not moved");
+    for (const std::size_t workers : {1U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        expect(immovable_on_goal(executor, ended, untouched) == reference, "C6 equals at 1/4/8 workers");
+        test_support::ReverseOrderExecutor reverse(workers);
+        expect(immovable_on_goal(reverse, ended, untouched) == reference, "C6 equals with reverse partitions");
+    }
+}
+
+// #4840 liveness C2 scene: two hard bodies head-on in a one-body-wide corridor. No route exists either way; the escape
+// fails. They used to stand nose to nose for ever (and search on every admitted tick); now the pair takes no_action after
+// two failed escapes and they pass, with a bounded number of searches.
+LandMovement::Checkpoint corridor_head_on(const sim::PartitionExecutor& executor, bool restore, bool& passed, std::uint64_t& charged) {
+    auto corridor = make_field({"###############", "###############", "###############", "...............",
+        "###############", "###############", "###############", "###############", "###############"});
+    auto saved = seed(corridor);
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(corridor, movement);
+    for (std::uint64_t tick = 0; tick < 900; ++tick) {
+        expect(static_cast<bool>(movement.step(corridor.occupancy, executor, dt)), "corridor motion");
+        expect(static_cast<bool>(movement.service_contacts(corridor.occupancy, executor, tick)), "corridor contacts");
+        if (restore && tick == 150) {
+            const auto checkpoint = movement.checkpoint();
+            auto resumed = LandMovement::from_checkpoint(checkpoint);
+            expect(resumed && resumed->checkpoint() == checkpoint, "corridor restore round trip");
+            if (resumed) movement = std::move(*resumed);
+        }
+    }
+    passed = movement.squads()[0].order == LandMoveOrder::reached && movement.squads()[1].order == LandMoveOrder::reached;
+    charged = movement.checkpoint().contact_complexity;
+    std::uint64_t rows = 0;
+    for (const auto& c : movement.contacts()) rows += c.charged_nodes;
+    charged = std::max(charged, rows);
+    return movement.checkpoint();
+}
+
+void corridor_head_on_contracts() {
+    sim::InlineExecutor serial;
+    bool passed = false;
+    std::uint64_t charged = 0;
+    const auto reference = corridor_head_on(serial, false, passed, charged);
+    expect(passed, "C2: two hard bodies head-on in a one-wide corridor both reach their goals (WLPA-97 no_action)");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        expect(corridor_head_on(executor, true, passed, charged) == reference, "C2 corridor equals at 1/2/4/8 workers with restore");
+        test_support::ReverseOrderExecutor reverse(workers);
+        expect(corridor_head_on(reverse, true, passed, charged) == reference, "C2 corridor equals with reverse partitions");
+    }
+}
+
+// Review #6855 F3: only real progress clears a failed attempt. A mover in a one-wide corridor meets an immobile idle body it
+// cannot path round or push, with one failed attempt already on the row. If the mover has since come at least one cell
+// pitch closer to its goal than at that failure, the attempt is cleared and this failure is the first again (the order goes
+// on); a nudge (less than a pitch) or no progress leaves it, and this failure ends the order (WLPA-97). A row saved before
+// the baseline existed holds zero there, so it never clears (as before).
+LandMovement::Checkpoint corridor_blocked(const Field& corridor) {
+    auto saved = seed(corridor, true);
+    saved.squads[1].position = at(148, 60); saved.members[1].position = at(148, 60);
+    saved.squads[1].path = {}; saved.squads[1].next_node = 0;
+    saved.squads[1].maximum_speed = Fixed{}; // an immobile blocker cannot be pushed aside (WLPA-57)
+    return saved;
+}
+Field corridor_field() {
+    return make_field({"###############", "###############", "###############", "...............",
+        "###############", "###############", "###############", "###############", "###############"});
+}
+struct ProgressCase { bool ended{}, failed{}; Fixed gap, baseline_after; LandMovement::Checkpoint checkpoint; };
+ProgressCase progress_case(const sim::PartitionExecutor& executor, Fixed extra, bool zero_baseline) {
+    auto corridor = corridor_field();
+    auto saved = corridor_blocked(corridor);
+    const auto gap = distance(saved.squads[0].path.nodes.back(), saved.squads[0].position);
+    auto row = retained(LandContactKind::moving_stopped);
+    row.retry_failed = true;
+    row.terrain_target = {zero_baseline ? Fixed{} : Fixed::from_raw(gap.raw() + extra.raw()), no_gap};
+    saved.contacts.push_back(row);
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(corridor, movement);
+    expect(static_cast<bool>(movement.service_contacts(corridor.occupancy, executor, 1)), "progress case service");
+    ProgressCase out;
+    out.gap = gap;
+    out.ended = movement.squads()[0].order == LandMoveOrder::reached;
+    for (const auto& c : movement.contacts()) if (c.first == 1000 && c.second == 1001) {
+        out.failed = c.retry_failed && c.state == LandContactState::unresolvable;
+        out.baseline_after = c.terrain_target.x;
+    }
+    out.checkpoint = movement.checkpoint();
+    return out;
+}
+
+// Review #6855 R1: a body that was idle when the row failed has no baseline yet (not a zero distance). The first visit it
+// moves sets its baseline without clearing; once it is a pitch closer to its goal, the failure clears and its next failure
+// is the first again. Without that progress the next failure ends its order.
+LandMovement::Checkpoint idle_failure_then_move(const sim::PartitionExecutor& executor, bool advance, bool& ended) {
+    auto corridor = corridor_field();
+    auto saved = corridor_blocked(corridor);
+    auto row = retained(LandContactKind::moving_stopped);
+    // The row failed while both bodies stood (a stopped/stopped failure); it waits the retry count as unresolvable.
+    row.retry_failed = true; row.state = LandContactState::unresolvable; row.terrain_target = {no_gap, no_gap};
+    saved.contacts.push_back(row);
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(corridor, movement);
+    expect(static_cast<bool>(movement.service_contacts(corridor.occupancy, executor, 1)), "idle failure baseline visit");
+    auto moved = movement.checkpoint();
+    expect(moved.contacts.size() == 1 && moved.contacts[0].retry_failed && moved.contacts[0].terrain_target.x
+        == distance(moved.squads[0].path.nodes.back(), moved.squads[0].position) && moved.contacts[0].terrain_target.y == no_gap,
+        "R1: the first visit a body moves sets its baseline and clears nothing; the idle body keeps none");
+    if (advance) {
+        moved.squads[0].position = centre(4, 3); moved.members[0].position = centre(4, 3);
+    }
+    moved.contacts[0].retry_remaining = 0;
+    movement = LandMovement::from_checkpoint(moved).value(); publish(corridor, movement);
+    expect(static_cast<bool>(movement.service_contacts(corridor.occupancy, executor, 2)), "idle failure retry visit");
+    ended = movement.squads()[0].order == LandMoveOrder::reached;
+    return movement.checkpoint();
+}
+
+void real_progress_clears_failure() {
+    const auto pitch = whole(20);
+    sim::InlineExecutor serial;
+    const auto progressed = progress_case(serial, Fixed::from_raw(2 * pitch.raw()), false);
+    expect(!progressed.ended && progressed.failed,
+        "F3: a mover a pitch or more closer to its goal than at the last failure starts its attempts again; the order goes on");
+    const auto restored = LandMovement::from_checkpoint(progressed.checkpoint);
+    expect(restored && restored->checkpoint() == progressed.checkpoint, "F3: the failed attempt and its baseline survive restore");
+    expect(progressed.baseline_after == progressed.gap,
+        "F3: the cleared and failed attempt keeps the mover's new lowest distance to its goal as the baseline");
+    expect(progress_case(serial, Fixed::from_raw(pitch.raw() / 2), false).ended,
+        "F3: a nudge of less than a pitch is no real progress: the second failure ends the order");
+    expect(progress_case(serial, Fixed{}, false).ended, "F3: without progress the second failure ends the order");
+    expect(progress_case(serial, Fixed{}, true).ended, "F3: a row saved without a baseline (zero) never clears");
+    bool ended = true;
+    const auto advanced = idle_failure_then_move(serial, true, ended);
+    expect(!ended, "R1: a body idle at the failure that then moves a pitch closer to its goal clears it; the order goes on");
+    bool stood_ended = false;
+    const auto stood = idle_failure_then_move(serial, false, stood_ended);
+    expect(stood_ended, "R1: without that progress the next failure ends the order");
+    for (const std::size_t workers : {1U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        test_support::ReverseOrderExecutor reverse(workers);
+        expect(progress_case(executor, Fixed::from_raw(2 * pitch.raw()), false).checkpoint == progressed.checkpoint
+            && progress_case(reverse, Fixed::from_raw(2 * pitch.raw()), false).checkpoint == progressed.checkpoint,
+            "F3 equals at 1 and 8 workers and with reverse partitions");
+        bool other = false;
+        expect(idle_failure_then_move(executor, true, other) == advanced && idle_failure_then_move(reverse, true, other) == advanced
+            && idle_failure_then_move(executor, false, other) == stood && idle_failure_then_move(reverse, false, other) == stood,
+            "R1 equals at 1 and 8 workers and with reverse partitions");
+    }
+}
+
+// Review #6855 F1: no_action is only for two moving bodies. A moving pair on the terminal no_action rung whose partner
+// stops becomes a moving/stopped pair: the row starts again with its failed attempt, so its next failure ends the mover's
+// move in front of the idle body instead of walking through it.
+LandMovement::Checkpoint no_action_partner_stops(const sim::PartitionExecutor& executor, bool& ended, bool& walked_through) {
+    auto corridor = corridor_field();
+    auto saved = corridor_blocked(corridor);
+    auto row = retained(LandContactKind::moving_moving);
+    row.state = LandContactState::no_action; row.retry_failed = true;
+    saved.contacts.push_back(row);
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(corridor, movement);
+    expect(static_cast<bool>(movement.service_contacts(corridor.occupancy, executor, 1)), "no_action kind change service");
+    walked_through = false;
+    for (const auto& c : movement.contacts()) walked_through |= c.state == LandContactState::no_action;
+    ended = movement.squads()[0].order == LandMoveOrder::reached && movement.squads()[1].position == at(148, 60);
+    return movement.checkpoint();
+}
+
+// Review #6855 F1 (sweep half): the movement step releases a no_action pair only while both bodies move. Two hard bodies on
+// one lane with a no_action row: head-on they pass through each other; against the same body standing idle the mover is
+// held apart, whatever the row says.
+LandMovement::Checkpoint no_action_sweep(const sim::PartitionExecutor& executor, bool partner_moves, Fixed& closest) {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(field, !partner_moves);
+    saved.squads[0].position = centre(5, 3); saved.members[0].position = centre(5, 3);
+    if (partner_moves) { saved.squads[1].position = centre(8, 3); saved.members[1].position = centre(8, 3); }
+    auto row = retained(LandContactKind::moving_moving);
+    row.state = LandContactState::no_action; row.retry_failed = true;
+    saved.contacts.push_back(row);
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    closest = whole(1000);
+    for (int tick = 0; tick < 90; ++tick) {
+        expect(static_cast<bool>(movement.step(field.occupancy, executor, dt)), "no_action sweep motion");
+        closest = std::min(closest, distance(movement.squads()[0].position, movement.squads()[1].position));
+    }
+    return movement.checkpoint();
+}
+
+void no_action_ends_when_partner_stops() {
+    sim::InlineExecutor serial;
+    bool ended = false, walked = true;
+    const auto reference = no_action_partner_stops(serial, ended, walked);
+    expect(!walked && ended,
+        "F1: a no_action pair whose partner stopped does not keep no_action; the mover's move ends in front of the idle body");
+    Fixed passing, held;
+    const auto pass_reference = no_action_sweep(serial, true, passing);
+    const auto hold_reference = no_action_sweep(serial, false, held);
+    expect(passing < whole(6), "F1: the sweep releases a no_action pair while both bodies move (they pass through)");
+    expect(held >= whole(11), "F1: the sweep holds the mover against an idle body even on a no_action row");
+    for (const std::size_t workers : {1U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        test_support::ReverseOrderExecutor reverse(workers);
+        bool e = false, w = false;
+        Fixed ignored;
+        expect(no_action_partner_stops(executor, e, w) == reference && no_action_partner_stops(reverse, e, w) == reference,
+            "F1 equals at 1 and 8 workers and with reverse partitions");
+        expect(no_action_sweep(executor, true, ignored) == pass_reference && no_action_sweep(reverse, true, ignored) == pass_reference
+            && no_action_sweep(executor, false, ignored) == hold_reference && no_action_sweep(reverse, false, ignored) == hold_reference,
+            "F1 sweep equals at 1 and 8 workers and with reverse partitions");
+    }
+}
+
+// #4840 liveness property: small seeded scenes of two to four hard and soft single bodies with wall stubs and crossing
+// goals. No body may keep an active order without moving for 600 ticks (20 s), and no row may run more than 16 search passes.
+// The bound is the longest ladder of a moving pair, each step a 30-visit stall or wait plus its walk: a path-around, the
+// retry wait, the deadlock entry, an escape, the retry wait and a second escape (the waiting body stands through them all).
+void contact_liveness_sweep() {
+    std::uint64_t state = 0x4840;
+    const auto next = [&](std::uint64_t bound) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        return (state >> 33) % bound;
+    };
+    std::size_t scenes = 0, frozen = 0, overspent = 0;
+    std::uint64_t longest_stand = 0;
+    int longest_scene = -1;
+    for (int scene = 0; scene < 48; ++scene) {
+        std::vector<std::string> picture(11, std::string(17, '.'));
+        for (int stub = 0; stub < 6; ++stub) picture[1 + next(9)][1 + next(15)] = '#';
+        auto field = make_field(picture);
+        const auto count = static_cast<std::size_t>(2 + next(3));
+        auto saved = seed(field, false, count);
+        bool usable = true;
+        for (std::size_t i = 0; i < count && usable; ++i) {
+            std::int64_t sx = 0, sy = 0, gx = 0, gy = 0;
+            for (int attempt = 0; attempt < 20; ++attempt) {
+                sx = static_cast<std::int64_t>(1 + next(15)); sy = static_cast<std::int64_t>(1 + next(9));
+                gx = static_cast<std::int64_t>(1 + next(15)); gy = static_cast<std::int64_t>(1 + next(9));
+                if (picture[sy][sx] == '.' && picture[gy][gx] == '.' && (sx != gx || sy != gy)) break;
+            }
+            auto& squad = saved.squads[i];
+            squad.position = centre(sx, sy);
+            squad.path = plan(field, request(*field.terrain, sx, sy, gx, gy));
+            usable = squad.path.status == LandPathStatus::found && squad.path.nodes.size() > 1;
+            if (!usable) break;
+            const auto delta = sim::math::Vec2{Fixed::from_raw(squad.path.nodes[1].x.raw() - squad.position.x.raw()),
+                Fixed::from_raw(squad.path.nodes[1].y.raw() - squad.position.y.raw())};
+            const auto heading = sim::math::atan2_turn(delta.y, delta.x);
+            squad.facing = heading ? heading.value() : Fixed{};
+            squad.next_node = 1;
+            squad.collision_class = next(3) == 0 ? units::LandCollisionGroup::infantry : units::LandCollisionGroup::vehicle;
+            saved.members[i].position = squad.position; saved.members[i].facing = squad.facing;
+        }
+        for (std::size_t i = 0; usable && i < count; ++i)
+            for (std::size_t j = i + 1; j < count; ++j) usable &= saved.squads[i].position != saved.squads[j].position;
+        if (!usable) continue;
+        ++scenes;
+        sim::InlineExecutor serial;
+        auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+        std::vector<std::uint64_t> still(count, 0);
+        std::vector<sim::math::Vec2> last(count);
+        std::vector<Fixed> last_facing(count);
+        for (std::size_t i = 0; i < count; ++i) { last[i] = movement.squads()[i].position; last_facing[i] = movement.squads()[i].facing; }
+        bool scene_frozen = false;
+        // Freeze history: one line whenever a contact row changes, and the positions every 30 ticks (last 60 lines).
+        std::vector<std::string> history;
+        std::string last_signature;
+        for (std::uint64_t tick = 0; tick < 1800 && !scene_frozen; ++tick) {
+            expect(static_cast<bool>(movement.step(field.occupancy, serial, dt)), "liveness sweep motion");
+            expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, tick)), "liveness sweep contacts");
+            {
+                std::string signature;
+                for (const auto& c : movement.contacts())
+                    signature += std::to_string(c.first) + ',' + std::to_string(c.second) + " k" + std::to_string(static_cast<int>(c.kind))
+                        + " s" + std::to_string(static_cast<int>(c.state)) + " q" + std::to_string(static_cast<int>(c.search))
+                        + " f" + std::to_string(c.retry_failed) + " i" + std::to_string(c.installed) + " p" + std::to_string(c.primary)
+                        + " st" + std::to_string(c.first_stopped) + std::to_string(c.second_stopped) + "; ";
+                if (signature != last_signature || tick % 30 == 0) {
+                    std::string line = "    t" + std::to_string(tick) + ' ' + signature + '|';
+                    for (std::size_t k = 0; k < count; ++k) {
+                        const auto& row = movement.squads()[k];
+                        line += ' ' + std::to_string(row.object) + '@' + std::to_string(row.position.x.raw() / Fixed::scale) + ','
+                            + std::to_string(row.position.y.raw() / Fixed::scale) + " o" + std::to_string(static_cast<int>(row.order))
+                            + " v" + std::to_string(row.collision_speed.raw() / Fixed::scale) + " tmp" + std::to_string(row.temporary_first)
+                            + '/' + std::to_string(row.temporary_next) + '/' + std::to_string(row.temporary_path.nodes.size());
+                    }
+                    history.push_back(std::move(line));
+                    if (history.size() > 60) history.erase(history.begin());
+                    last_signature = std::move(signature);
+                }
+            }
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto& squad = movement.squads()[i];
+                const bool active = squad.order == LandMoveOrder::following || squad.order == LandMoveOrder::recovering;
+                if (!active || squad.position != last[i] || squad.facing != last_facing[i]) still[i] = 0;
+                else if (++still[i] > 600) {
+                    scene_frozen = true;
+                    const auto real = [](Fixed value) { return static_cast<double>(value.raw()) / Fixed::scale; };
+                    std::cout << "liveness sweep scene " << scene << " squad " << squad.object << " frozen at tick " << tick
+                        << " order=" << static_cast<int>(squad.order) << '\n';
+                    for (std::size_t k = 0; k < count; ++k) {
+                        const auto& row = movement.squads()[k];
+                        std::cout << "  squad " << row.object << " class=" << static_cast<int>(row.collision_class)
+                            << " pos=" << real(row.position.x) << ',' << real(row.position.y) << " facing=" << real(row.facing)
+                            << " order=" << static_cast<int>(row.order) << " speed=" << real(row.speed)
+                            << " assigned=" << real(row.assigned_speed) << " collision=" << real(row.collision_speed)
+                            << " next=" << row.next_node << '/' << row.path.nodes.size() << " temporary=" << row.temporary_first
+                            << ',' << row.temporary_second << " tnext=" << row.temporary_next << '/' << row.temporary_path.nodes.size()
+                            << " terrain=" << row.terrain_blocked << " straggler=" << static_cast<int>(row.straggler_wait_remaining)
+                            << " turning=" << row.turning << '\n';
+                        for (const auto& node : row.path.nodes) std::cout << "    node=" << real(node.x) << ',' << real(node.y) << '\n';
+                    }
+                    for (const auto& c : movement.contacts())
+                        std::cout << "  contact " << c.first << ',' << c.second << " kind=" << static_cast<int>(c.kind)
+                            << " state=" << static_cast<int>(c.state) << " search=" << static_cast<int>(c.search)
+                            << " stopped=" << c.first_stopped << ',' << c.second_stopped << " retry=" << static_cast<int>(c.retry_remaining)
+                            << " failed=" << c.retry_failed << " deadlock=" << static_cast<int>(c.deadlock_remaining)
+                            << " installed=" << c.installed << " primary=" << c.primary << '\n';
+                    for (std::size_t r = 0; r < picture.size(); ++r) std::cout << "    map " << picture[r] << '\n';
+                    std::cout << "  history (row changes, positions every 30 ticks):\n";
+                    for (const auto& line : history) std::cout << line << '\n';
+                }
+                if (still[i] > longest_stand) { longest_stand = still[i]; longest_scene = scene; }
+                last[i] = squad.position; last_facing[i] = squad.facing;
+            }
+        }
+        frozen += scene_frozen;
+        for (const auto& c : movement.contacts())
+            if (c.charged_nodes > 16 * field.occupancy.cells().size()) {
+                ++overspent;
+                std::cout << "liveness sweep scene " << scene << " row " << c.first << ',' << c.second << " charged "
+                    << c.charged_nodes / field.occupancy.cells().size() << " passes\n";
+            }
+    }
+    std::cout << "contact liveness sweep: " << scenes << " scenes, frozen " << frozen << ", over budget " << overspent << '\n';
+    std::cout << "contact liveness sweep: longest stand " << longest_stand << " ticks (scene " << longest_scene << ")\n";
+    expect(scenes >= 24, "the liveness sweep builds enough usable scenes");
+    expect(frozen == 0, "WLPA-97: no body keeps an active order without moving for 600 ticks");
+    expect(overspent == 0, "WLPA-97: no contact row runs more than 16 search passes");
+}
+
+// #6062 (WLPA-57): a moving body never pushes a hostile idle body aside. A hard mover in a one-wide corridor meets an idle
+// squad it cannot path round: a friendly or neutral one is pushed to an open spot, a hostile one is not, and after the
+// second failed attempt (WLPA-97) the mover's move ends in front of it instead of passing through.
+void hostile_idle_is_not_pushed() {
+    sim::InlineExecutor serial;
+    auto corridor = make_field({"###############", "###############", "###############", "...............",
+        "###############", "###############", "###############", "###############", "###############"});
+    auto saved = seed(corridor, true);
+    saved.squads[1].position = at(148, 60); saved.members[1].position = at(148, 60);
+    saved.squads[1].path = {}; saved.squads[1].next_node = 0;
+    saved.contacts.push_back(retained(LandContactKind::moving_stopped));
+    const auto first_service = [&](const std::vector<std::int64_t>& sides) {
+        auto movement = LandMovement::from_checkpoint(saved).value(); publish(corridor, movement);
+        expect(static_cast<bool>(movement.service_contacts(corridor.occupancy, serial, 1, sides)), "corridor push service");
+        return movement;
+    };
+    const auto friendly = first_service({1, 1});
+    expect(friendly.contacts()[0].state == LandContactState::infantry_push && friendly.contacts()[0].installed,
+        "a friendly idle squad that blocks the corridor is pushed to an open spot");
+    const auto neutral = first_service({-1, 1});
+    expect(neutral.contacts()[0].state == LandContactState::infantry_push, "a neutral idle squad is pushed too (WHZ-51)");
+    const auto unsided = first_service({});
+    expect(unsided.contacts()[0].state == LandContactState::infantry_push, "no sides given: no pair is hostile");
+    auto hostile = first_service({0, 1});
+    expect(hostile.contacts()[0].state == LandContactState::unresolvable && !hostile.contacts()[0].installed
+        && hostile.squads()[1].temporary_first == 0, "#6062: a hostile idle squad is never pushed");
+    for (std::uint64_t frame = 2; frame <= 40; ++frame)
+        expect(static_cast<bool>(hostile.service_contacts(corridor.occupancy, serial, frame, std::vector<std::int64_t>{0, 1})),
+            "hostile corridor retry service");
+    expect(hostile.squads()[0].order == LandMoveOrder::reached && hostile.squads()[1].position == at(148, 60)
+        && hostile.squads()[1].order == LandMoveOrder::idle,
+        "#6062 / WLPA-97: after the second failed attempt the mover's move ends in front of the hostile body");
+    auto mismatch = LandMovement::from_checkpoint(saved).value();
+    expect(!mismatch.service_contacts(corridor.occupancy, serial, 1, std::vector<std::int64_t>{0}),
+        "contact sides that do not match the squads are refused");
+}
+
+// Review #6856: a hostile soft pair (two infantry bodies) whose move ends on the idle enemy, with no truncate (a generic
+// mover), no route round and no push, does not fall through to repulsion and walk on through it: the move ends in front of
+// it (WLPA-57/97, #6062). The early soft repulsion for a move that does not end on the idle body is retail's and is kept.
+LandMovement::Checkpoint hostile_soft(const sim::PartitionExecutor& executor, bool& ended, bool& untouched, bool& repulsed) {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(field, true);
+    for (auto& squad : saved.squads) { squad.generic_team = true; squad.collision_class = units::LandCollisionGroup::none; }
+    for (auto& member : saved.members) member.profile.collision_class = units::LandCollisionGroup::infantry;
+    saved.squads[0].path = {LandPathStatus::found, {centre(2, 3), centre(7, 3)}, whole(100)};
+    saved.members[0].next_node = 1;
+    saved.squads[1].path = {}; saved.squads[1].next_node = 0;
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    const std::vector<std::int64_t> sides{0, 1};
+    repulsed = false;
+    for (std::uint64_t tick = 0; tick < 300; ++tick) {
+        expect(static_cast<bool>(movement.step(field.occupancy, executor, dt)), "hostile soft motion");
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, executor, tick, sides)), "hostile soft contacts");
+        for (const auto& c : movement.contacts()) repulsed |= c.second && c.state == LandContactState::repulsion;
+    }
+    ended = movement.squads()[0].order == LandMoveOrder::reached;
+    untouched = movement.members()[1].position == centre(7, 3);
+    return movement.checkpoint();
+}
+
+void hostile_soft_pair_ends_in_front() {
+    sim::InlineExecutor serial;
+    bool ended = false, untouched = false, repulsed = false;
+    const auto reference = hostile_soft(serial, ended, untouched, repulsed);
+    expect(!repulsed, "#6062: a hostile soft pair whose move ends on the idle enemy never takes repulsion");
+    expect(ended && untouched, "#6062 / WLPA-97: the soft mover's move ends in front of the hostile idle body, which is not moved");
+    for (const std::size_t workers : {1U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        expect(hostile_soft(executor, ended, untouched, repulsed) == reference, "hostile soft pair equals at 1 and 8 workers");
+        test_support::ReverseOrderExecutor reverse(workers);
+        expect(hostile_soft(reverse, ended, untouched, repulsed) == reference, "hostile soft pair equals with reverse partitions");
+    }
+}
+
+// #6845 ladder length: how long a body with an active order stands still (position and facing unchanged) in the scenes
+// whose resolution ladders are the longest. The counts are exact and deterministic; they are pinned below (a change that
+// lengthens a ladder must say so here). Restoring from a checkpoint inside the ladder must continue byte-equal.
+struct Stands {
+    std::vector<std::uint64_t> longest;
+    LandMovement::Checkpoint end;
+    bool operator==(const Stands&) const = default;
+};
+Stands measure_stands(Field& field, const LandMovement::Checkpoint& saved, std::uint64_t ticks,
+    const sim::PartitionExecutor& executor, std::uint64_t restore_at = 0) {
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    const auto count = movement.squads().size();
+    Stands out; out.longest.assign(count, 0);
+    std::vector<std::uint64_t> still(count, 0);
+    std::vector<sim::math::Vec2> last(count);
+    std::vector<Fixed> last_facing(count);
+    for (std::size_t i = 0; i < count; ++i) { last[i] = movement.squads()[i].position; last_facing[i] = movement.squads()[i].facing; }
+    for (std::uint64_t tick = 0; tick < ticks; ++tick) {
+        expect(static_cast<bool>(movement.step(field.occupancy, executor, dt)), "stand measurement motion");
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, executor, tick)), "stand measurement contacts");
+        if (restore_at != 0 && tick == restore_at) {
+            const auto checkpoint = movement.checkpoint();
+            auto resumed = LandMovement::from_checkpoint(checkpoint);
+            expect(resumed && resumed->checkpoint() == checkpoint, "stand measurement restore round trip");
+            if (resumed) movement = std::move(*resumed);
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& squad = movement.squads()[i];
+            const bool active = squad.order == LandMoveOrder::following || squad.order == LandMoveOrder::recovering;
+            if (!active || squad.position != last[i] || squad.facing != last_facing[i]) still[i] = 0;
+            else out.longest[i] = std::max(out.longest[i], ++still[i]);
+            last[i] = squad.position; last_facing[i] = squad.facing;
+        }
+    }
+    out.end = movement.checkpoint();
+    return out;
+}
+
+void expect_stands(const char* name, Field& field, const LandMovement::Checkpoint& saved, std::uint64_t ticks,
+    const std::vector<std::uint64_t>& pinned, std::uint64_t restore_at) {
+    sim::InlineExecutor serial;
+    const auto reference = measure_stands(field, saved, ticks, serial);
+    if (reference.longest != pinned) {
+        std::cerr << "stand " << name << ": measured";
+        for (const auto n : reference.longest) std::cerr << ' ' << n;
+        std::cerr << "\n";
+    }
+    expect(reference.longest == pinned, name);
+    expect(measure_stands(field, saved, ticks, serial, restore_at) == reference, "ladder restored inside the ladder equals the uninterrupted run");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter threads(workers);
+        expect(measure_stands(field, saved, ticks, threads) == reference, "ladder stand equals at 1/2/4/8 workers");
+        test_support::ReverseOrderExecutor reverse(workers);
+        expect(measure_stands(field, saved, ticks, reverse) == reference, "ladder stand equals with reverse partitions");
+    }
+}
+
+// Two hard bodies head-on in a one-wide corridor (the search fails first): one retry count, then the escape fails at the
+// deadlock entry and the pair takes the terminal rung. The deadlock entry keeps the earlier failure (#6845), so there is no
+// second wait and no second escape: 30 ticks standing (was about 120).
+// A primary against two counterparts (C1): the fixture starts the pair already deadlocked, so the primary walks on for its own
+// approach before the counts run; the stands are the counts plus that approach and the walk of the escape.
+// C7: a hard follower behind a leader whose path turns back through it. The same-direction row does not hold for ever: the
+// leader turns, the pair is no longer the same direction and joins the ladder (path-around stall, retry wait, deadlock entry,
+// escape stall, terminal rung): about 60 ticks standing for containers and for generic members alike.
+void ladder_stands_pinned() {
+    auto corridor = make_field({"###############", "###############", "###############", "...............",
+        "###############", "###############", "###############", "###############", "###############"});
+    expect_stands("corridor head-on stands 30 ticks (was about 120)", corridor, seed(corridor), 400, {30, 30}, 20);
+    auto open = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(open, false, 3); saved.contact_settings.minimum_prediction_distance = whole(250);
+    saved.members[2].position = at(240, 65); saved.squads[2].position = at(240, 65);
+    saved.squads[2].facing = Fixed::from_ratio(1, 2).value();
+    saved.squads[2].path = {LandPathStatus::found, {at(240, 65), at(40, 65)}, whole(200)};
+    saved.members[2].facing = saved.squads[2].facing;
+    saved.squads[0].collision_class = units::LandCollisionGroup::giant_vehicle;
+    saved.contacts = {retained(), retained()}; saved.contacts[1].second = 1002;
+    for (auto& entry : saved.contacts) { entry.state = LandContactState::deadlocked; entry.deadlock_remaining = 0; }
+    expect_stands("C1 crossroads stands are pinned", open, saved, 900, {60, 347, 410}, 330);
+    for (const bool generic : {false, true}) {
+        auto nose = seed(open, false, 2);
+        nose.contact_settings.minimum_prediction_distance = whole(40);
+        const auto put = [&](std::size_t i, std::int64_t column, std::vector<sim::math::Vec2> nodes) {
+            auto& squad = nose.squads[i];
+            squad.position = centre(column, 3); squad.facing = Fixed{};
+            squad.path = {LandPathStatus::found, std::move(nodes), whole(400)}; squad.next_node = 1;
+            squad.generic_team = generic;
+            if (generic) squad.collision_class = units::LandCollisionGroup::none;
+            nose.members[i].position = squad.position; nose.members[i].facing = Fixed{}; nose.members[i].next_node = 1;
+            if (generic) nose.members[i].profile.collision_class = units::LandCollisionGroup::vehicle;
+        };
+        put(0, 2, {centre(2, 3), centre(13, 3)});
+        put(1, 4, {centre(4, 3), centre(6, 3), centre(1, 3)});
+        expect_stands(generic ? "C7 nose to tail (generic members) ends within about 60 ticks"
+                              : "C7 nose to tail (containers) ends within about 60 ticks",
+            open, nose, 600, generic ? std::vector<std::uint64_t>{62, 60} : std::vector<std::uint64_t>{61, 63}, 150);
+    }
+}
+
 int main() {
+    ladder_stands_pinned();
     quota_and_states(); roles_and_prediction(); terrain_and_dynamic_inputs(); live_subtype_and_bounded_escape_retries();
     deadlock(); head_on(); pushed_squad_pusher_dies(); stopped_path_around(); squad_turning_state(); rotating_pair_is_not_deadlocked(); member_terrain_detours();
     authored_class_eligibility(); peer_guard_reads_both_classes(); idle_peer_passes_without_a_row(); moving_pair_peer_classes(); same_direction_threshold_and_stalled(); soft_crossing_contracts(); soft_crowd_contracts();
     rows_layout_contract(); rows_remap_contracts(); reached_on_parent_arrival(); squad_body_contracts(); stock_stormtrooper_push_contracts();
+    corner_leg_contracts(); refused_escape_charges_nothing(); lock_refused_mover_still_pushes(); generic_route_released();
+    lock_refused_route_exists_contracts(); generic_leader_profile_walks_the_legs();
+    multi_source_deadlock_ends(); released_route_keeps_history(); immovable_on_goal_contracts(); corridor_head_on_contracts();
+    contact_liveness_sweep(); real_progress_clears_failure(); no_action_ends_when_partner_stops();
+    hostile_idle_is_not_pushed(); hostile_soft_pair_ends_in_front();
     sim::InlineExecutor serial;
     const auto stragglers = straggler_contact(serial, false, true);
     const auto wedge = straggler_contact(serial, false, true, true);

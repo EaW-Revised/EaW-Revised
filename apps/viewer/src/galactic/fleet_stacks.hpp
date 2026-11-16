@@ -91,13 +91,30 @@ using StackHealth = std::function<std::optional<float>(sim::galactic::TypeId)>;
 // The "bring heroes to front" bit (the debug build's best-ship helper, GHUDL-16): with it set, the lowest
 // Ranking_In_Category among hero types wins the image, the first group on a tie (strict less-than), and the health
 // winner is only the fallback when the fleet holds no hero. `rank` returns the ranking of a type that is a named hero,
-// or a generic hero with an icon, and nothing for any other type (#6122). Gap: a hero carried inside another ship is
-// not a group of its own here, so it does not count.
+// or a generic hero with an icon, and nothing for any other type (#6122). A named hero carried inside another ship
+// is not a group of its own: the observer card publishes it as `overview_hero_type` (#6745, the original's helper
+// asks every ship whether it holds a named hero), and a foreign fleet's card is ranked the same way (the original
+// has no owner branch in the helper).
 using StackHeroRank = std::function<std::optional<std::int64_t>(sim::galactic::TypeId)>;
 struct StackHeroPreference final {
     bool prefer{};
     StackHeroRank rank;
 };
+
+// The lowest-ranked hero type among the visible groups, the first group on a tie; nothing when the hero preference
+// is off or no group is a hero.
+[[nodiscard]] inline std::optional<sim::galactic::TypeId> ranked_group_hero(
+    std::span<const sim::galactic::ObservedFleetGroup* const> groups, const StackHeroPreference& hero) {
+    std::optional<sim::galactic::TypeId> hero_type;
+    if (!hero.prefer || !hero.rank) return hero_type;
+    std::int64_t lowest{};
+    for (const auto* group : groups) {
+        if (!group || !group->type) continue;
+        const auto rank = hero.rank(*group->type);
+        if (rank && (!hero_type || *rank < lowest)) { hero_type = group->type; lowest = *rank; }
+    }
+    return hero_type;
+}
 
 // GHUDL-16 best ship: the greatest max tactical health among the visible groups
 // (debug build best-ship helper with the hero-category filter clear). Unknown
@@ -107,16 +124,7 @@ struct StackHeroPreference final {
 [[nodiscard]] inline std::optional<sim::galactic::TypeId> best_stack_ship(
     std::span<const sim::galactic::ObservedFleetGroup* const> groups, const StackHealth& health,
     const StackHeroPreference& hero = {}) {
-    if (hero.prefer && hero.rank) {
-        std::optional<sim::galactic::TypeId> hero_type;
-        std::int64_t lowest{};
-        for (const auto* group : groups) {
-            if (!group || !group->type) continue;
-            const auto rank = hero.rank(*group->type);
-            if (rank && (!hero_type || *rank < lowest)) { hero_type = group->type; lowest = *rank; }
-        }
-        if (hero_type) return hero_type;
-    }
+    if (const auto hero_type = ranked_group_hero(groups, hero)) return hero_type;
     std::optional<sim::galactic::TypeId> best, first;
     float greatest = 0.0F;
     bool measured = false;
@@ -141,6 +149,7 @@ struct StackAccumulator final {
     std::vector<const sim::galactic::ObservedFleetGroup*> groups;
     std::vector<FleetStackEntry> contents;
     std::optional<sim::galactic::TypeId> overview_type;
+    std::optional<sim::galactic::TypeId> overview_hero; // lowest-ranked hero among the merged cards (#6745)
 };
 } // namespace detail
 
@@ -164,11 +173,16 @@ struct StackAccumulator final {
     std::array<detail::StackAccumulator, 3> slots;
     const bool foreign = aware_other || std::any_of(cards.begin(), cards.end(),
         [](const auto* card) { return card && !card->local; });
-    const auto add = [&health](detail::StackAccumulator& slot, const sim::galactic::ObservedFleet& card,
+    const auto add = [&health, &hero](detail::StackAccumulator& slot, const sim::galactic::ObservedFleet& card,
                         const bool whole) {
         if (!slot.used) { slot.owner = card.owner; slot.local = card.local; slot.fleet = card.fleet; }
         slot.used = true;
         slot.stealth = slot.stealth && card.all_stealth;
+        if (hero.prefer && hero.rank && card.overview_hero_type) {
+            const auto rank = hero.rank(*card.overview_hero_type);
+            const auto held = slot.overview_hero ? hero.rank(*slot.overview_hero) : std::nullopt;
+            if (rank && (!held || *rank < *held)) slot.overview_hero = card.overview_hero_type;
+        }
         if (!card.local && card.overview_type) {
             const auto candidate = health ? health(*card.overview_type) : std::nullopt;
             const auto current = health && slot.overview_type ? health(*slot.overview_type) : std::nullopt;
@@ -211,6 +225,14 @@ struct StackAccumulator final {
         icon.stealth = slot.stealth;
         icon.texture = stack_texture_index(slot.count, textures);
         icon.best = slot.overview_type ? slot.overview_type : best_stack_ship(slot.groups, health, hero);
+        if (hero.prefer && hero.rank && slot.overview_hero) {
+            // #6745: a carried or foreign hero joins the visible groups' heroes; the lowest rank wins, the groups first on a tie.
+            const auto group_hero = ranked_group_hero(slot.groups, hero);
+            const auto group_rank = group_hero ? hero.rank(*group_hero) : std::nullopt;
+            const auto overview_rank = hero.rank(*slot.overview_hero);
+            if (overview_rank && (!group_rank || *overview_rank < *group_rank)) icon.best = slot.overview_hero;
+            else if (group_hero) icon.best = group_hero;
+        }
         icon.contents = slot.contents;
         icons.push_back(std::move(icon));
     }

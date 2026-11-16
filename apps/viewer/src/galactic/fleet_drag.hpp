@@ -31,6 +31,7 @@ public:
         std::optional<std::size_t> count = {}, bool base_only = false, bool draw_base = true);
     void lift_source(godot::Control& source, std::optional<std::size_t> remainder = {}, bool base_only = false);
     void cancel();
+    [[nodiscard]] godot::Control* ghost() const { return ghost_; }
     bool _has_point(const godot::Vector2& point) const override;
     godot::Variant _get_drag_data(const godot::Vector2& point) override;
     bool _can_drop_data(const godot::Vector2& point, const godot::Variant& data) const override;

@@ -117,6 +117,10 @@ public:
     // WGP-67: the options button needs a selected entry that supports custom settings, and a host
     // that applies them.
     [[nodiscard]] bool options_available() const noexcept;
+    // WGP-40b: whether the options button is shown. Hidden with no campaign selected; for a selected campaign
+    // played as the selected side it follows that entry's custom-settings flag; a side with no entry in the
+    // campaign leaves it as it was (only disabled).
+    [[nodiscard]] bool options_visible() const noexcept { return options_visible_; }
     [[nodiscard]] std::string options_disabled_reason() const;
     struct TechOptions final {
         std::int64_t starting{}; // displayed coordinates (WGP-190)
@@ -140,6 +144,8 @@ private:
     CampaignHostSupport support_;
     std::optional<std::size_t> row_;
     std::optional<std::size_t> faction_;
+    bool options_visible_{false};
+    void refresh_options_visible() noexcept;
     CampaignDifficulty difficulty_{CampaignDifficulty::normal};
     std::optional<TechOptions> accepted_{};
     std::optional<TechOptions> editing_{};

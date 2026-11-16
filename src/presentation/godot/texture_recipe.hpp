@@ -27,6 +27,14 @@ public:
     [[nodiscard]] const GpuItem& item() const { return item_; }
 
     [[nodiscard]] const assets::Texture* retained() const { return retained_.get(); }
+    // The retained snapshot, shared (null once released after a verified upload).
+    [[nodiscard]] const std::shared_ptr<const assets::Texture>& snapshot() const { return retained_; }
+
+    // The stored item, but only for the retained snapshot it was made from. A re-read after upload gives the authored
+    // levels alone (see above), whose pixels hash differently from a generated chain: it must be keyed by its own item.
+    [[nodiscard]] const GpuItem* item_for(const assets::Texture* read) const {
+        return read != nullptr && read == retained_.get() ? &item_ : nullptr;
+    }
 
     // Where the pixels came from, also after the CPU snapshot was released (texture census).
     [[nodiscard]] const assets::Source& source() const { return retained_ ? retained_->source : source_; }

@@ -28,6 +28,7 @@ struct Options {
     std::filesystem::path config_path;
     std::filesystem::path log_path;
     bool turn_only{};
+    std::string turn_provider{"auto"}; // auto, own or cloudflare: which relay provider's TURN servers to use
     std::chrono::seconds timeout{90};
 };
 

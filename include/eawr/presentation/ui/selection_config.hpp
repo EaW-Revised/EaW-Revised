@@ -39,12 +39,13 @@ namespace eawr::presentation::ui {
             std::string name;
             for (const auto& attribute : node.attributes) if (attribute.name == "Name") name = trim(attribute.value);
             const auto found = std::find(selection_commands.begin(), selection_commands.end(), name);
-            if (found == selection_commands.end()) continue;
-            auto& action = result.actions[static_cast<std::size_t>(found - selection_commands.begin())];
+            if (found == selection_commands.end() && name != "GIFT_UNITS") continue;
+            auto& action = name == "GIFT_UNITS" ? result.gift
+                : result.actions[static_cast<std::size_t>(found - selection_commands.begin())];
             for (const auto& field : node.children) {
                 const auto value = trim(field.raw_text);
                 if (field.name == "Default_Key"
-                    && std::find(selection_key_choices.begin(), selection_key_choices.end(), value) != selection_key_choices.end())
+                    && selection_chord_usable(value))
                     action.default_key = value;
                 if (field.name == "Include_Heroes") {
                     const auto flag = lower(value);

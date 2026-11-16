@@ -37,7 +37,7 @@ void order(eawr::campaign::GameSession& game, std::uint64_t sequence, gc::Comman
     take(game.submit({{game.completed_tick(), {2}, sequence}, std::move(payload)}));
 }
 constexpr gc::TypeId unlock = (std::uint64_t{1} << 40) + 17;
-gc::GalacticSetup setup(bool mission = false) {
+gc::GalacticSetup setup(bool mission = false, std::uint32_t mission_mode = 2) {
     auto s = base_setup(); auto& host = *s.ability_host;
     host.profiles[0].has_market = false; host.profiles[0].corruption = gc::CorruptionAbilityProfile{"ACT", true};
     host.activated_corruption_abilities = {"ACT"};
@@ -51,7 +51,7 @@ gc::GalacticSetup setup(bool mission = false) {
         gc::CorruptionPlanet p; p.planet = planet.id; p.type = 3000; p.retains_influence = true;
         p.slots[0].type = gc::corruption_fixture::Type::piracy; p.slots[0].price = f(100); p.slots[0].credit_reward = f(25);
         p.slots[0].build_unlock = unlock; p.slots[0].unlock_build_cost = f(50); p.slots[0].tactical_upgrade = unlock + 1;
-        if (mission) { p.slots[0].mode = 2; p.slots[0].map = "AUTHORED"; p.slots[0].script = "PLOT"; }
+        if (mission) { p.slots[0].mode = mission_mode; p.slots[0].map = "AUTHORED"; p.slots[0].script = "PLOT"; }
         p.slots[2].type = gc::corruption_fixture::Type::racketeering; p.slots[2].price = f(2000);
         host.corruption_planets.push_back(p);
     }
@@ -100,6 +100,26 @@ void direct(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& 
     const auto cash = game.galaxy().snapshot()->player_economy()->players[0].credits;
     for (int i = 0; i < 5; ++i) (void)take(game.step(pool));
     expect(game.galaxy().snapshot()->player_economy()->players[0].credits == cash, "settled completion never rewards again");
+}
+// WGCH-09/128: a direct corruption that began notifies the local acting owner with the chosen slot, once, and nobody else.
+void direct_voice(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    for (const std::uint32_t local : {2u, 1u}) {
+        auto config = setup(); ability_fixture::add_observer(config, local, {1000, 3000});
+        auto game = take(eawr::campaign::GameSession::create(config));
+        std::vector<gc::GalacticFeedbackNotice> notices;
+        game.set_feedback_notice_handler([&](const auto& notice) { notices.push_back(notice); });
+        const auto prepared = prepare(game, config, pool, hashes);
+        order(game, 2, gc::ExecutePreparedAbility{prepared}); hashes.push_back(take(game.step(pool)).state_hash.get());
+        const auto voiced = std::count_if(notices.begin(), notices.end(), [](const auto& n) {
+            return n.kind == gc::GalacticFeedbackNotice::Kind::corruption_success_voiced; });
+        if (local == 2) {
+            expect(voiced == 1, "a local acting owner hears the authored success speech once");
+            const auto at = std::find_if(notices.begin(), notices.end(), [](const auto& n) {
+                return n.kind == gc::GalacticFeedbackNotice::Kind::corruption_success_voiced; });
+            expect(at != notices.end() && at->player == 2 && at->planet == config.planets[0].id && at->slot == prepared.corruption.slot,
+                "the notice names the acting owner, the planet and the chosen slot");
+        } else expect(voiced == 0, "a non-local acting owner voices nothing");
+    }
 }
 void ai_invocation(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
     // Each individual prerequisite can exclude the otherwise affordable piracy slot.
@@ -184,12 +204,21 @@ void human_refusal(const eawr::sim::PartitionExecutor& pool, std::vector<std::st
     }
 }
 void missions(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
-    const auto config = setup(true);
+    const auto base = setup(true); auto config = base; ability_fixture::add_observer(config, 2, {1000, 3000});
     auto refused = take(eawr::campaign::GameSession::create(config)); const auto prepared = prepare(refused, config, pool, hashes);
+    // The missing mission service is a remake gap with no retail counterpart: the menu offers the choice as
+    // unavailable and an execution refuses before any debit, consumption or RNG draw.
+    const auto* menu = refused.galaxy().snapshot()->corruption_menu();
+    expect(menu && !menu->choices[0].mission_available && menu->choices[1].mission_available,
+        "a mission choice with no live mission service is offered unavailable; a plain choice stays available");
+    const auto before_draw = refused.galaxy().economy_corruption()->random_draws;
+    const auto before_objects = refused.galaxy().snapshot()->fleets().size();
     order(refused, 2, gc::ExecutePreparedAbility{prepared}); hashes.push_back(take(refused.step(pool)).state_hash.get());
-    expect(refused.galaxy().snapshot()->player_economy()->players[1].credits == f(900) && refused.return_state().heroes.empty(),
-        "GameSession's missing authored map builder refuses after debit and before actor consumption");
-    auto world = take(gc::GalacticSession::create(config)); std::vector<gc::HeroReturnRecord> returns;
+    expect(refused.galaxy().snapshot()->player_economy()->players[1].credits == f(1000) && refused.return_state().heroes.empty()
+        && refused.galaxy().snapshot()->fleets().size() == before_objects && refused.galaxy().economy_corruption()->random_draws == before_draw
+        && refused.galaxy().ability_state()->missions.empty() && !refused.galaxy().ability_state()->transitions[0].transition.active(),
+        "GameSession's missing mission service refuses before the debit, the actor consumption and any RNG draw");
+    auto world = take(gc::GalacticSession::create(base)); std::vector<gc::HeroReturnRecord> returns;
     world.set_ability_consumption_handler([&](const gc::HeroDefeat& defeat) {
         auto scheduled = gc::schedule_hero_return(returns, defeat, world.clock().galactic_frame, world.snapshot()->planets());
         if (!scheduled) return eawr::core::Result<void>::failure(scheduled.error());
@@ -207,6 +236,31 @@ void missions(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>
     expect(world.ability_state()->transitions[0].transition.active() && world.ability_state()->corruption_usage[1].uses[2] == 1,
         "saved successful mission result begins transition and increments retained recipient usage");
     expect(!world.finish_corruption_mission(request, gc::CorruptionMissionState::succeeded), "duplicate live mission result refuses without journaling a second mutation");
+}
+// WGCH-198: a solo human land mission choice runs on the timed route (no mission service involved, unlike the space mode).
+void land_timed(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    auto config = setup(true, 1); ability_fixture::add_observer(config, 2, {1000, 3000});
+    auto game = take(eawr::campaign::GameSession::create(config));
+    std::size_t voiced = 0;
+    game.set_feedback_notice_handler([&](const auto& notice) {
+        if (notice.kind == gc::GalacticFeedbackNotice::Kind::corruption_success_voiced) ++voiced; });
+    const auto prepared = prepare(game, config, pool, hashes);
+    const auto* menu = game.galaxy().snapshot()->corruption_menu();
+    expect(menu && menu->choices[0].mission_available, "a land mission choice is offered available without a mission service");
+    order(game, 2, gc::ExecutePreparedAbility{prepared}); hashes.push_back(take(game.step(pool)).state_hash.get());
+    const auto state = game.galaxy().ability_state()->transitions[0].transition;
+    expect(game.galaxy().snapshot()->player_economy()->players[1].credits == f(900) && game.return_state().heroes.size() == 1
+        && game.galaxy().ability_state()->missions.empty() && state.increasing && state.end - state.start == 150
+        && game.galaxy().ability_state()->corruption_usage[1].uses[2] == 1,
+        "land corruption choice debits, queues no mission, counts one use and starts the five second transition");
+    expect(voiced == 1, "a timed land choice takes the direct path and voices its success exactly once");
+    for (unsigned guard = 0; game.galaxy().clock().galactic_frame <= state.end; ++guard) {
+        expect(guard < 600, "land corruption transition completes within a bounded number of ticks");
+        if (guard >= 600) break;
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+    }
+    expect(game.galaxy().ability_state()->transitions[0].transition.current == gc::corruption_fixture::Type::piracy
+        && game.galaxy().snapshot()->player_economy()->players[0].credits == f(1025), "land corruption choice reaches its timed outcome");
 }
 void stale_units(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
     auto config = setup(); auto& choice = config.ability_host->corruption_planets[0].slots[0];
@@ -421,7 +475,7 @@ void accepted_space_mission(const eawr::sim::PartitionExecutor& pool, std::vecto
     }
 }
 void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
-    for (unsigned variant = 0; variant < 14; ++variant) {
+    for (unsigned variant = 0; variant < 15; ++variant) {
         auto config = setup(); const auto target = config.planets[0].id, actor = buyer(config);
         config.planets[0].owner = 2;
         config.control->planets[0].ground_base.owner = config.control->planets[0].starbase.owner = 2;
@@ -451,6 +505,17 @@ void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>&
             config.economy_corruption->planets[0].corruption = gc::corruption_fixture::Type::militia;
             profile.removal->causes_despawn = true;
         }
+        if (variant == 14) {
+            // WGCH-17: a militia planet with a starbase, a special political source, a political modifier, an enemy
+            // fleet in orbit and an enemy force landed; the removal's completion runs the revolt.
+            config.economy_corruption->planets[0].corruption = gc::corruption_fixture::Type::militia;
+            ability_fixture::add_movement(config);
+            config.fleets[0].orbit = target;
+            for (auto& object : config.census->objects) if (object.container == config.fleets[0].id) object.planet = target;
+            auto& presence = config.control->planets[0];
+            presence.starbase = {2, 3}; presence.special_control = {f(1)};
+            presence.transition_modifiers.push_back({7, 99, Fixed::from_ratio(1, 2).value(), 0});
+        }
         // The viewer reads observer-local service rows, not the raw host state.
         ability_fixture::add_observer(config, 2, {1000, 3000});
         auto game = take(eawr::campaign::GameSession::create(config));
@@ -473,16 +538,16 @@ void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>&
         }
         const auto preview = eawr::viewer::galactic::ability_drop_candidate(*game.galaxy().snapshot(), 2,
             config.fleets[1].id, *config.ability_host);
-        expect(bool(preview) == (variant < 4 || variant == 6 || variant == 8 || variant == 11 || variant == 13),
+        expect(bool(preview) == (variant < 4 || variant == 6 || variant == 8 || variant == 11 || variant >= 13),
             "shared viewer slot admits authored enabled removal on a corrupted owned target independently of price");
         order(game, 1, gc::DeployGroundAbility{actor, target});
         hashes.push_back(take(game.step(pool)).state_hash.get());
-        const bool success = variant < 4 || variant == 8 || variant == 11 || variant == 12;
+        const bool success = variant < 4 || variant == 8 || variant == 11 || variant == 12 || variant >= 13;
         const auto price = variant == 1 ? f(200) : variant == 8 || variant == 11 ? Fixed{} : f(50);
         expect(game.galaxy().snapshot()->player_economy()->players[1].credits == take(eawr::sim::math::subtract(f(1000), success ? price : Fixed{})),
             "removal uses authored base times multiplier, clamps negative cost and never charges a refusal");
         expect(land_notices == (success ? 1U : 0U) && deploy_notices == (success ? 1U : 0U)
-            && game.return_state().heroes.size() == (variant == 3 ? 1U : 0U),
+            && game.return_state().heroes.size() == (variant == 3 || variant == 13 ? 1U : 0U),
             "removal notifies and consumes only on successful activation with the authored flag");
         const auto state = game.galaxy().ability_state()->transitions[0].transition;
         expect(state.active() == success && (!success || (!state.increasing && state.decreasing
@@ -491,11 +556,12 @@ void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>&
             [&](const auto& event) { return event.kind == gc::GalacticEventKind::corruption_removal_started
                 && event.subject == target && event.value == profile.type; }) == (success ? 1 : 0),
             "successful removal publishes one typed source/target event even when the actor is consumed");
-        if (variant == 13) {
+        if (variant >= 13) {
+            // #6257: the corrupt-militia removal is no longer refused; it starts like any other removal.
             expect(game.galaxy().snapshot()->economy_corruption()->planets[0].corruption == gc::corruption_fixture::Type::militia
-                && game.galaxy().snapshot()->player_economy()->players[1].credits == f(1000)
-                && land_notices == 0U && deploy_notices == 0U && game.return_state().heroes.empty(),
-                "militia removal refuses before payment, story notifications or authored hero consumption");
+                && game.galaxy().ability_state()->transitions[0].transition.decreasing
+                && game.galaxy().snapshot()->player_economy()->players[1].credits == take(eawr::sim::math::subtract(f(1000), f(50))),
+                "militia removal starts its transition and charges the authored price");
         }
         const auto ids = cp::game_identities(config);
         const auto saved = take(cp::save_game_checkpoint(game, ids));
@@ -507,6 +573,23 @@ void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>&
         }
         expect(!success || game.galaxy().snapshot()->economy_corruption()->planets[0].corruption == gc::corruption_fixture::Type::none,
             "successful removal finishes through the existing corruption completion owner");
+        if (variant >= 13) {
+            // WGCH-17: the completed militia removal cleared the starbase, special and political sources, the enemy
+            // fleet left orbit, and allegiance went neutral at 1.
+            const auto* control = game.galaxy().snapshot()->control();
+            const auto& presence = control->planets[0];
+            expect(presence.starbase.level == 0 && presence.special_control.empty() && presence.transition_modifiers.empty(),
+                "militia revolt clears the starbase, special structures and political modifiers");
+            const auto& allegiance = control->state[0];
+            expect(allegiance.target_player == ability_fixture::neutral_player && allegiance.current_player == ability_fixture::neutral_player
+                && allegiance.current > Fixed::from_ratio(9, 10).value(), "militia revolt processes neutral allegiance at 1");
+            if (variant == 14) {
+                const auto fleet = std::find_if(game.galaxy().snapshot()->fleets().begin(), game.galaxy().snapshot()->fleets().end(),
+                    [&](const auto& row) { return row.id == config.fleets[0].id; });
+                expect(fleet != game.galaxy().snapshot()->fleets().end() && fleet->orbit != target,
+                    "militia revolt sends each orbiting owner's fleet away from the planet");
+            }
+        }
     }
 }
 } // namespace
@@ -514,7 +597,7 @@ int case_galactic_ability_corruption_tests() {
     ability_fixture::arm_watchdog();
     try {
         using Phase = void (*)(const eawr::sim::PartitionExecutor&, std::vector<std::string>&);
-        const Phase phases[] = {direct, ai_invocation, human_refusal, missions, stale_units, representative, unsuccessful_missions, accepted_space_mission, startup, removal};
+        const Phase phases[] = {direct, direct_voice, ai_invocation, human_refusal, missions, land_timed, stale_units, representative, unsuccessful_missions, accepted_space_mission, startup, removal};
         std::vector<std::string> baseline;
         for (std::size_t count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter workers(count); std::vector<std::string> hashes;

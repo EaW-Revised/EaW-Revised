@@ -206,6 +206,10 @@ void write_catalog(const std::filesystem::path& root) {
 <SpaceProp Name="EAWR_SCENE_PARTICLE_PROP">
   <Space_Model_Name>eawr_scene_particle.alo</Space_Model_Name>
 </SpaceProp>
+<SpaceUnit Name="EAWR_SCENE_PARTICLE_UNIT">
+  <Space_Model_Name>eawr_scene_particle.alo</Space_Model_Name>
+  <Scale_Factor>2</Scale_Factor>
+</SpaceUnit>
 </Objects>)xml");
 }
 

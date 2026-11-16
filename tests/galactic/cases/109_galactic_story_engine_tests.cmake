@@ -17,5 +17,8 @@ eawr_add_galactic_area_case(
     LIBS eawr::campaign eawr::platform eawr::checkpoint
 )
 
+eawr_add_game_data_test(NAME galactic_story_installed_type_names COMMAND galactic_area_campaign_transitions galactic_story_engine_tests --installed-type-names)
+set_tests_properties(galactic_story_installed_type_names PROPERTIES LABELS game-data SKIP_RETURN_CODE 77 TIMEOUT 1800)
+
 eawr_add_game_data_test(NAME galactic_story_engine_stock COMMAND galactic_area_campaign_transitions galactic_story_engine_stock_tests)
 set_tests_properties(galactic_story_engine_stock PROPERTIES LABELS game-data TIMEOUT 1800)

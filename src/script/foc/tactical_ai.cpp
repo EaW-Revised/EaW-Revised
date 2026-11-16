@@ -815,9 +815,10 @@ core::Result<PreparedAiSession> prepare_session(
             std::sort(omitted_types.begin(), omitted_types.end());
             if (auto admitted = session.omit_object_script_decisions(omitted_types); !admitted) return admitted;
         }
-        for (const std::string_view verb : {verb_move, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all, verb_make_invulnerable}) {
+        for (const std::string_view verb : {verb_move, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_tactical_superweapon, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all, verb_make_invulnerable}) {
             if (auto added = session.register_verb(verb, translate_order); !added) return added;
         }
+        if (auto added = session.register_presentation_verb(verb_letter_box); !added) return added;
         if (host->setup.perception.campaign_game && host->setup.campaign_can_retreat && host->setup.campaign_retreat_order) {
             auto translate = [host](const authoritative::ScriptCommand& command) -> core::Result<authoritative::TacticalOrder> {
                 using OrderResult = core::Result<authoritative::TacticalOrder>;

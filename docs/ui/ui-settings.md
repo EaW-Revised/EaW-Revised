@@ -66,7 +66,7 @@ table of controls and reasons lives next to the record (`find_option_status`) an
 | ST-A3 | Volume sliders | Heard at once on the run's shared audio buses (BA-45, section 5), with or without a battle; Cancel and Esc put the saved levels back; Accept saves; Defaults restores ST-A1 and previews. The front end, a battle and the demo battle start at the saved levels. |
 | ST-V2 | Resolution list | Windowed: applied to the window. Full screen: stored, and the window system keeps the display's own resolution. The list is the project's common sizes that fit the screen, the screen's own size, the window's current size and the saved sizes. |
 | ST-V5 | Windowed check, vsync check | Apply applies changed values and stays; Accept applies changed values and leaves; Cancel leaves without applying. An unchanged Accept makes no video calls, including when accepting another page. Vsync, window mode/size, texture detail and render profile are compared independently against the last committed values. Apply is disabled until something changes. The shared engine apply also checks current mode, size, vsync and texture detail, including at startup. Vsync on requests FIFO directly. Render-profile setters compare current viewport values. Retail release capture confirms no visible display reset on unchanged Accept. |
-| ST-P1 | Anti-aliasing slider | Off is the retail look, Max the enhanced one (section 4). |
+| ST-P1 | Anti-aliasing slider | Four AA levels: Off, Low, Medium and High; independent supersampling Off / 1.5x / 2x (section 4). |
 | ST-G3 | Tactical game speed | The battle's speed step (TM-01) unless `--eawr-live-speed` chose one. |
 | PD-01 | Reinforcement areas only while placing | Enabled Tweaks checkbox. On: red no-drop areas appear only during placement; off: follows the retail/mod panel-or-drag rule. Accept saves immediately, Cancel discards edits, Defaults enables it. Presentation only. |
 | ST-O1 | Gamma, detail sliders, advanced page, widescreen, hardware cursor, subtitles, audio provider | Disabled: the detail levels and cursor kind are not built, the layout follows the window already. |
@@ -86,11 +86,19 @@ This changes presentation only and takes effect without restarting.
 
 ## 4. The render profile
 
-`--eawr-render-profile retail|enhanced` is an internal switch for evidence runs and the render
-profile has had no player setting (docs/rendering.md). The anti-aliasing slider of the video page
-is that setting: Off applies the retail look (no MSAA, no screen-space AA, no anisotropic
-filtering), Max the enhanced look. Until the player moves the slider the setting is `automatic`
-and the run keeps its own choice (enhanced for a player's view, retail for captures and tests).
+The video page's anti-aliasing slider offers Off, Low (2x MSAA), Medium (4x MSAA plus SMAA, default)
+and High (8x MSAA plus SMAA).
+Supersampling is a separate option: Off (default), 1.5x or 2x, saved as `video.supersampling` step
+0, 1 or 2. It works with every AA level. It is a slider (Off .. 2x) in **Video > Advanced**, one row
+below the detail sliders; Apply and Accept there save it and apply it at once. The Video dialog keeps the
+AA slider and the frame-rate limit only. No options screen shows a cost, GPU time or performance number
+(owner rule); the measured figures live in [rendering.md](../rendering.md#render-profiles) only.
+The full settings table and VRAM guard are in [rendering.md](../rendering.md#render-profiles).
+Until the player moves the AA slider the setting is `automatic`, using Medium for a player's view
+and retail for captures and tests. Old saved `retail` migrates to Medium with supersampling Off;
+old `high` and legacy `enhanced` migrate to Medium with 2x supersampling, and old `max` to High with 2x.
+The presence of the supersampling field distinguishes new High from old High. An explicitly saved
+supersampling step takes priority over migration. The guard reduces supersampling before MSAA.
 An explicit `--eawr-render-profile` still wins at start-up.
 
 ## 5. Where the settings apply
@@ -100,6 +108,13 @@ An explicit `--eawr-render-profile` still wins at start-up.
   and an explicit render profile apply before the first mode starts, and the file's volumes and
   tactical speed are kept for the battle. A capture, report or test run never reads the file, so
   evidence runs do not depend on the machine.
+- **Where the window opens.** A windowed player's view (also without a settings file) is centred on the
+  launcher's current screen, passed as the transient `--eawr-launcher-screen <index>` hint. An absent,
+  malformed or disconnected index falls back to the game's current screen. Its whole frame stays inside
+  that screen's usable area (`ui::place_window`); a size
+  larger than the usable area shrinks to it. The window is never pinned to the corner it was created in
+  or to the launcher's corner. A size change from the options page keeps the position and only pulls the
+  window back onto the screen when it would hang off it. Capture and test runs keep their pinned geometry.
 - **Audio buses.** One layout per run, made at the viewer's start and shared by the front
   end and BattleAudio (`apps/viewer/src/audio_buses.hpp`): `EAWR_SFX`, `EAWR_Voice`, `EAWR_Music`
   and `EAWR_Mix`, which feeds Master. A player sees: the master slider is the Mix bus, so it
@@ -168,7 +183,8 @@ steps also exercise the shared current-state guards directly, independently of d
 ### Owner-requested frame pacing (ST-P2)
 
 The Graphics page adds a frame-rate limit to the loaded dialog: Off, Display refresh rate,
-30, 60, 90, 120, 144, 165 or 240 FPS. This is a project addition requested by the owner;
+30, 60, 90, 120, 144, 165 or 240 FPS. The row sits in the free band between the check boxes and the
+Cancel / Apply / Accept buttons, so the dialog keeps the retail size. This is a project addition requested by the owner;
 retail has no corresponding row. A fresh profile defaults to 120 FPS, a predictable ceiling
 that also works when the window system cannot report a refresh rate. Existing saved values
 are retained, including Off. Files without the field acquire 120 without replacing other settings.
@@ -190,7 +206,8 @@ Driven audio recordings keep their explicit audio-pace render clock, including r
 ### Performance options (ST-P3)
 
 Both Options hubs add **Performance**. This project-owned page uses the loaded dialog skin and
-button styles. The render-thread selector moves here from Video; frame-rate limit and vsync
+button styles. The panel is tall enough to show every row without a scroll bar; the scroll area is only
+a fallback for a screen too short to hold the panel. The render-thread selector moves here from Video; frame-rate limit and vsync
 remain under Video. **Separate (default)** takes effect after restart. A previously saved Safe choice remains visible; Safe is otherwise available through the launcher. Apply and Accept
 save only this preference; Cancel discards it; Defaults selects Separate and saves only after
 Apply or Accept. Other Video settings are preserved.
@@ -221,7 +238,9 @@ setter calls. Camera/input presentation changes do not enter simulation hashes.
 
 Options > Tweaks has a default-off **Selection hotkeys** toggle. In Options > Controls,
 **Select own units** defaults to Ctrl+Q and **Select own units on screen** defaults to Q.
-Each dropdown offers the verified free tactical Q, Ctrl+Q, Ctrl+U and Ctrl+Y chords and rejects a duplicate.
+Each row is a press-to-bind button (legacy EAWR-5131): click it, then press a letter key, alone or with Ctrl; Esc cancels.
+A chord the other action holds, or that the command, camera-preset or ability maps already use (for example
+Ctrl+A, G, Ctrl+D), is refused with a message under the rows and the binding stays.
 Selection hotkeys are suspended while the development free camera is active.
 Labels follow the active keyboard layout; stored chords refer to physical keys.
 These feature rows persist through Apply/Accept; Cancel discards changes and Reset selection keys restores
@@ -252,9 +271,25 @@ out. Structures and decorations stay excluded. Audio uses normal SFX Play_Sequen
 
 The built-in Revised data layer uses `revised_layer_enabled` (0 or 1, default 1 when absent) and an optional `revised_layer_path` development override in the same settings file (for example `revised_layer_path=<workspace>/eawr-layers/Revised`); it names the folder containing `Data`. Service changes apply on the next start, and the launcher disables the switch while a game runs.
 
-**Fit radar to galaxy** (WGUI-177, owner decision) (legacy EAWR-5967) is a default-off checkbox
-in Options > Tweaks, stored as `gameplay.fit_radar_to_galaxy`. Apply/Accept saves
-it, Cancel discards edits and Defaults switches it off. It expands the galactic
-radar from the loaded planet positions; retail's fixed frame remains the default.
-This is an optional presentation deviation for large mod galaxies, shared by the
-normal and advanced radar and their click transforms.
+**Fit radar to galaxy** (WGUI-177, owner decision) (legacy EAWR-5967) is a checkbox
+in Options > Tweaks, **on by default** (owner decision 2026-11-13; DEV-9), stored as
+`gameplay.fit_radar_to_galaxy`. Apply/Accept saves it, Cancel discards edits and
+Defaults switches it on. It expands the galactic radar from the loaded planet
+positions; turning it off gives the original's fixed frame. A galaxy inside the
+fixed frame looks the same either way. This is a presentation deviation for large
+mod galaxies, shared by the normal and advanced radar and their click transforms.
+Every settings file the game writes carries the line `migrate.fit_radar_default_on=1`.
+Before the default turned on, every save stored the old default (off), so a stored
+off could not be told from a choice: a file without that line has its radar value
+reset once to on when it is read (a note says so), and the next save writes the
+line. After that a stored off is the player's own choice and wins. A fresh profile,
+and a file from before the option existed, start with it on.
+
+**Space pauses the galactic game** (DEV-13, owner decision) (legacy EAWR-6291) is a default-off checkbox
+in Options > Tweaks, stored as `gameplay.space_pauses_galactic`. Apply/Accept saves
+it, Cancel discards edits and Defaults switches it off. Off is the original's Space on the
+galaxy map: it starts the cinematic tour (on its release) and never pauses. On, Space only
+pauses and resumes (on its press, like the clock panel's pause button) and never starts the
+tour, which stays on the camera button. The pause button, the paused banner and its Resume
+Game button work in both settings. The key reads the setting each time it is used, so a
+change applies without a restart.

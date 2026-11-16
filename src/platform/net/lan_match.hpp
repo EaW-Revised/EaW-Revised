@@ -44,6 +44,10 @@ struct LanView {
     std::string peer_name{"Opponent"}, message, bundle_path, setup_summary;
     bool mod_review_pending{};
     std::vector<std::uint8_t> host_mod_description;
+    // Guest: the host's newest mod description (a refresh after the room opened, e.g. its content digests finished) and how many
+    // refreshes arrived. Display only; never part of the match.
+    std::vector<std::uint8_t> host_mod_refresh;
+    std::uint64_t host_mod_refreshes{};
     std::optional<std::uint64_t> desync_tick;
     std::optional<std::uint64_t> peer_confirmed_tick;
     std::optional<bool> victory;
@@ -321,6 +325,13 @@ public:
     virtual void lobby_leave() {}
     virtual std::optional<LanLobbyState> lobby_state() const { return {}; }
     virtual void accept_mod_review() {}
+    // Host, nonblocking: the mod description changed after the room was opened (its content digests finished). Guests compare it
+    // when they can. Returns false when this match cannot send it. Never delays Start or any join.
+    virtual bool refresh_host_mod_description(std::vector<std::uint8_t>) { return false; }
+    // Host: the room opened before its mod digests were ready, so a refresh is still owed to the guests. While it is owed,
+    // Start stays off with a reason, so a match never starts with a mod list the guests have not been given to check. A
+    // successful refresh (or an explicit false here) clears it.
+    virtual void expect_host_mod_refresh(bool) {}
     // GCMP-07 (#4363): Galactic Conquest mode. The host owns the mode, and it holds for the room's lifetime: set_galactic_game
     // right after host() (which discards any earlier room) and before the first pump opens the room in GC mode. The options
     // travel in LobbyGame::options, so every peer reads the same mode from the same revision; a room that never gets it is a

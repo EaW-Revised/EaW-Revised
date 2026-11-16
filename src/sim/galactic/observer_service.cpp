@@ -81,8 +81,9 @@ void GalacticSession::Impl::sync_observer_control(const std::size_t control_inde
     const auto at = std::lower_bound(observer->planets.begin(), observer->planets.end(), presence.planet,
         [](const auto& row, auto id) { return row.planet < id; });
     if (at == observer->planets.end() || at->planet != presence.planet) return;
-    // WGUI-100 supports live facts; its zero-controller fallback is an unverified adapter.
-    // Observer setup accepts only listed controllers, while later control commits may have no cap controller.
+    // WGUI-100 supports live facts; its zero-controller fallback is an unverified adapter. Observer setup admits the none
+    // (#6960) as well as listed controllers, and later control commits may have no cap controller: the stored controller then
+    // falls back to the current player here, and the observed projection publishes a zero as an empty optional (#6985).
     const PlayerId controller = state.controller ? state.controller : state.current_player;
     const bool target_changed = at->target_owner != state.target_player;
     const auto political = math::Fixed::from_raw(state.current.raw() / math::Fixed::scale * math::Fixed::scale); // integer getter

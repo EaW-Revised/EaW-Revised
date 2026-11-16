@@ -1,4 +1,5 @@
 #include "galactic/scene_content.hpp"
+#include "galactic/scene_refresh.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/core/diagnostic.hpp"
@@ -68,6 +69,8 @@ void planet_bonus_metadata(const data::galactic::GalacticData& tables) {
     const auto* planet = tables.planet("Beta");
     assert(planet && planet->planet_ability_icon == "mod_bonus.tga");
     assert(planet->planet_weather_icon == "mod_weather.tga" && planet->planet_weather_name == "MOD_WEATHER");
+    assert(planet->corruption_success_speech_event[0] == "MOD_SPEECH_ONE" && planet->corruption_success_speech_event[1].empty()
+        && planet->corruption_success_hologram_name[1] == "Mod_Loop" && planet->corruption_success_hologram_name[0].empty());
     // Hover text: name, then info on its own line; either alone stands without a separator.
     assert(weather_tooltip({"i.tga", "Storm", "Wind"}) == std::string("Storm") + '\n' + "Wind");
     assert(weather_tooltip({"i.tga", "Storm", ""}) == "Storm" && weather_tooltip({"i.tga", "", "Wind"}) == "Wind");
@@ -128,6 +131,23 @@ void production_names_localize_once(const data::Catalog& catalog) {
         && inherited.encyclopedia_looks.icon == "i_variant.tga"
         && inherited.encyclopedia_looks.description == "Line one\n\nLine two");
     assert(inherited.type_order > art.at("Crusader_Gunship").type_order);
+    // #7373: fleet/production art and its encyclopedia use the same ML-24 scalar icon reader.
+    assert(art.at("Mod_Repeated_Icon").icon == "i_repeat.tga");
+    assert(art.at("Mod_Repeated_Icon").encyclopedia_looks.icon == "i_repeat.tga");
+    assert(art.at("Mod_Inherited_Icon").icon == "i_repeat.tga");
+    assert(art.at("Mod_Inherited_Icon").encyclopedia_looks.icon == "i_repeat.tga");
+    // WGP-16: the fleet override model is read from the object (and its variant parent); a type without one has none.
+    assert(art.at("Crusader_Gunship").fleet_override_model.find("custom_fleet.alo") != std::string::npos);
+    assert(inherited.fleet_override_model == art.at("Crusader_Gunship").fleet_override_model);
+    assert(art.at("Modded_Ship").fleet_override_model.empty());
+    {
+        struct Member { std::uint64_t type; };
+        const std::vector<Member> plain{{1}, {2}}, mixed{{1}, {7}, {8}}, none;
+        const auto lookup = [](const std::uint64_t type) -> std::string { return type == 7 ? "first.alo" : type == 8 ? "second.alo" : ""; };
+        assert(fleet_marker_model(plain, "stock.alo", lookup) == "stock.alo");
+        assert(fleet_marker_model(mixed, "stock.alo", lookup) == "first.alo"); // U-05: the first overriding member
+        assert(fleet_marker_model(none, "stock.alo", lookup) == "stock.alo");
+    }
     const auto unlocalized = load_production_art(catalog);
     assert(unlocalized.at("Crusader_Gunship").text == "Crusader_Gunship");
     assert(unlocalized.at("Crusader_Gunship").text_id == "TEXT_UNIT_GUNSHIP");
@@ -152,13 +172,19 @@ void campaign_art_is_data_driven() {
       <Planet_Ability_Icon>mod_bonus.tga</Planet_Ability_Icon>
       <Encyclopedia_Weather_Icon>mod_weather.tga</Encyclopedia_Weather_Icon>
       <Encyclopedia_Weather_Name>MOD_WEATHER</Encyclopedia_Weather_Name>
+      <Corruption_1_Success_Speech_Event>MOD_SPEECH_ONE</Corruption_1_Success_Speech_Event>
+      <Corruption_2_Success_Bink_Hologram_Name>Mod_Loop</Corruption_2_Success_Bink_Hologram_Name>
       <Describe_History>MOD_HISTORY</Describe_History></Planet>
       <SpaceUnit Name="Crusader_Gunship"><Icon_Name>i_gunship.tga</Icon_Name><Text_ID>TEXT_UNIT_GUNSHIP</Text_ID>
       <Encyclopedia_Text>TEXT_ENC_GUNSHIP_1, TEXT_ENC_MISSING TEXT_ENC_GUNSHIP_2</Encyclopedia_Text>
-      <MP_Encyclopedia_Text>TEXT_ENC_MULTIPLAYER</MP_Encyclopedia_Text><Ranking_In_Category>90</Ranking_In_Category></SpaceUnit>
+      <MP_Encyclopedia_Text>TEXT_ENC_MULTIPLAYER</MP_Encyclopedia_Text><Ranking_In_Category>90</Ranking_In_Category>
+      <Galactic_Fleet_Override_Model_Name> Custom_Fleet.alo </Galactic_Fleet_Override_Model_Name></SpaceUnit>
       <SpaceUnit Name="Modded_Ship"><Text_ID>TEXT_MISSING</Text_ID></SpaceUnit>
       <SpaceUnit Name="Modded_Variant"><Variant_Of_Existing_Type>Crusader_Gunship</Variant_Of_Existing_Type>
       <Icon_Name>i_variant.tga</Icon_Name><GUI_Row>7</GUI_Row></SpaceUnit>
+      <HeroCompany Name="Mod_Repeated_Icon"><Icon_Name>i_repeat.tga</Icon_Name><Icon_Name></Icon_Name></HeroCompany>
+      <HeroCompany Name="Mod_Inherited_Icon"><Variant_Of_Existing_Type>Mod_Repeated_Icon</Variant_Of_Existing_Type>
+      <Icon_Name> </Icon_Name><Icon_Name>TBD</Icon_Name></HeroCompany>
       <SpaceUnit Name="Mod_Weapon"><Abilities><Planet_Destruction_Ability Name="Mod_Destroy">
       <SFXEvent_Target_Affected>Mod_Target_A</SFXEvent_Target_Affected><Target_Particle_Effect>Mod_Base</Target_Particle_Effect>
       </Planet_Destruction_Ability></Abilities></SpaceUnit>
@@ -170,7 +196,7 @@ void campaign_art_is_data_driven() {
     </Planets>)XML");
     write(root, "Data/XML/FactionFiles.xml", "<Faction_Files><File>Factions.xml</File></Faction_Files>");
     write(root, "Data/XML/Factions.xml", R"XML(<Factions><Faction Name="Test">
-      <Faction_Leader>Modded_Ship</Faction_Leader>
+      <Faction_Leader>Modded_Ship</Faction_Leader><Tech_Tree_Dialog_Name>IDD_TECH_TREE_FOURTH</Tech_Tree_Dialog_Name>
       <Color>64,128,192,255</Color><Display_Font_Color>32,96,160,255</Display_Font_Color><Icon_Name>icon.tga</Icon_Name>
     </Faction><Faction Name="Neutral"><Color>100,100,100,255</Color></Faction>
       <Faction Name="Other"><Color>192,64,128,255</Color></Faction></Factions>)XML");
@@ -260,6 +286,7 @@ void campaign_art_is_data_driven() {
     assert(initial_home(scene, PlayerId{1}) && initial_home(scene, PlayerId{1})->name == "Alpha");
     assert(!initial_home(scene, PlayerId{999}));
     assert(scene.leader_types.at(1) == "Modded_Ship");
+    assert(scene.factions.at(1).tech_tree_dialog == "IDD_TECH_TREE_FOURTH" && scene.factions.at(2).tech_tree_dialog.empty());
     const std::map<sim::galactic::TypeId, std::string> type_names{{7, "mOdDeD_sHiP"}, {9, "Other"}};
     assert(home_leader_type(scene, 1, type_names) == 7);
     assert(home_leader_type(scene, 999, type_names) == 0);
@@ -278,6 +305,10 @@ void campaign_art_is_data_driven() {
     assert(scene.art.at(1).loop_idle);
     assert(scene.art.at(2).show_name && scene.art.at(2).label == "ALPHA");
     assert(scene.art.at(2).pick_radius == 17.0F);
+    // WGCH-09/128: the planet's authored success speech/hologram reach the scene art per slot (0-based).
+    assert(corruption_success_speech_event(scene.art.at(3), 0) == "MOD_SPEECH_ONE" && corruption_success_speech_event(scene.art.at(3), 1).empty()
+        && corruption_success_speech_event(scene.art.at(3), 3).empty() && corruption_success_speech_event(scene.art.at(2), 0).empty());
+    assert(scene.art.at(3).corruption_success_hologram[1] == "Mod_Loop" && scene.art.at(3).corruption_success_hologram[0].empty());
     assert((scene.art.at(2).name_adjust == Vec3{1,2,3}));
     assert(scene.snapshot.planets[1].position[0] == sim::math::Fixed::from_decimal("12").value());
     assert(scene.snapshot.planets[1].scale == sim::math::Fixed::from_decimal("2.5").value());
@@ -290,6 +321,10 @@ void campaign_art_is_data_driven() {
     const auto* neutral = affiliation_for_owner(scene, scene.snapshot.planets[2].owner);
     assert(neutral && neutral->faction == "Neutral");
     assert(neutral->primary.r == 100.0F / 255.0F);
+    // #6985: a planet known to have no owner takes exactly this presentation (an empty optional), and its colour is the
+    // grey the HUD already uses for an unknown owner, so no name colour moves.
+    assert(neutral->primary.g == 100.0F / 255.0F && neutral->primary.b == 100.0F / 255.0F);
+    assert(affiliation_for_owner(scene, std::nullopt) == neutral);
     assert(affiliation_for_owner(scene, scene.snapshot.planets[1].owner)->faction == "Test");
     assert(!affiliation_for_owner(scene, PlayerId{999}));
     const std::vector<data::ValueOverride> overrides{{"Alpha", "Scale_Factor", {"4"}}, {"Alpha", "Galactic_Model_Name", {"other.alo"}}};
@@ -426,7 +461,66 @@ int stock_faction_colours() {
     return 0;
 }
 
+void retained_layer_refresh_work() {
+    SceneRefresh refresh;
+    const std::array<bool, 4> all{true, true, true, true};
+    const std::array<bool, 4> world{true, false, false, false};
+    const std::array<bool, 4> none{};
+    assert(refresh.begin_frame(false) == none);
+    assert(refresh.requests(1) == 0 && !refresh.valid(1));
+    assert(refresh.begin_frame(true) == all);
+    for (int frame = 0; frame < 120; ++frame) {
+        refresh.invalidate(0); // Live units, routes and rotating stations stay downstream.
+        assert(refresh.begin_frame(true) == world);
+    }
+    for (std::size_t layer = 1; layer < 4; ++layer) {
+        assert(refresh.requests(layer) == 1 && refresh.valid(layer));
+    }
+    refresh.invalidate(2);
+    assert((refresh.begin_frame(true) == std::array<bool, 4>{true, false, true, true}));
+    refresh.invalidate(3);
+    assert((refresh.begin_frame(true) == std::array<bool, 4>{true, false, false, true}));
+    refresh.invalidate(1);
+    assert(refresh.begin_frame(false) == none);
+    assert(refresh.begin_frame(false) == none);
+    assert(refresh.begin_frame(true) == all); // Hidden dirty work survives; resume refreshes the whole chain.
+    const auto before = refresh.requests(1);
+    for (int frame = 0; frame < 120; ++frame) {
+        refresh.invalidate(1); // A live background idle also changes both empty filtered middle passes.
+        assert(refresh.begin_frame(true) == all);
+    }
+    for (std::size_t layer = 1; layer < 4; ++layer)
+        assert(refresh.requests(layer) >= before + 120);
+    assert(refresh.begin_frame(true) == world);
+    refresh.invalidate_all(); // Camera, size, lighting and filter/detail changes.
+    assert(refresh.begin_frame(true) == all);
+
+    // Loading a clean save removes both cloud and line owners. The first
+    // owner-free frame must erase their cached pixels, then become static.
+    const std::array<bool, 4> corruption{false, false, true, true};
+    const std::array<bool, 4> middle{true, false, true, true};
+    const auto background_requests = refresh.requests(1);
+    refresh.observe_dynamic_owners(corruption);
+    assert(refresh.begin_frame(true) == middle);
+    refresh.observe_dynamic_owners(corruption);
+    assert(refresh.begin_frame(true) == middle);
+    refresh.observe_dynamic_owners(none);
+    assert(refresh.begin_frame(true) == middle);
+    refresh.observe_dynamic_owners(none);
+    assert(refresh.begin_frame(true) == world);
+    assert(refresh.requests(1) == background_requests);
+    // A downstream-only line owner never refreshes the background/cloud pass.
+    refresh.observe_dynamic_owners({false, false, false, true});
+    assert((refresh.begin_frame(true) == std::array<bool, 4>{true, false, false, true}));
+    refresh.observe_dynamic_owners(none);
+    assert(refresh.begin_frame(false) == none);
+    refresh.observe_dynamic_owners(none);
+    assert(refresh.begin_frame(true) == all);
+    assert(refresh.begin_frame(true) == world);
+}
+
 int main(int argc, char** argv) {
+    retained_layer_refresh_work();
     if (argc > 1 && std::string_view(argv[1]) == "--stock-colours") {
         try { return stock_faction_colours(); }
         catch (const std::exception& error) { std::cerr << "stock colours: " << error.what() << std::endl; return 1; }
@@ -443,7 +537,7 @@ int main(int argc, char** argv) {
     assert(animation_elapsed(0.5, true, true) == 0.5);
     assert(animation_elapsed(0.5, false, false) == 0.5);
     Affiliation current;
-    Affiliation apparent{{0.1F,0.2F,0.3F}, {0.4F,0.5F,0.6F}, "Faction", "icon", true};
+    Affiliation apparent{{0.1F,0.2F,0.3F}, {0.4F,0.5F,0.6F}, "Faction", "icon", true, {}};
     update_affiliation(current, &apparent);
     update_affiliation(current, nullptr);
     assert(current.primary == apparent.primary && current.icon == "icon" && current.present);

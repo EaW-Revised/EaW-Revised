@@ -39,6 +39,13 @@ struct ArrivalSlotState final {
     std::uint64_t warm_resident_bytes{};
     std::uint64_t launch_read_bytes{}, frame_launch_read_bytes{};
     bool warm_out_of_memory{};
+    // #5097 PR 2 (hangars of queued, pooled and called-in ships): totals for the report, and this frame's main-thread
+    // time and slots for the frame trace.
+    std::size_t hangar_planned{}, hangar_recipes{}, hangar_copies{}, hangar_skipped{}, hangar_late{};
+    std::uint64_t hangar_proxy_bytes{}, hangar_recipe_bytes{};
+    double hangar_total_ms{}, hangar_worst_ms{}, hangar_frame_ms{};
+    std::size_t hangar_frame_slots{};
+    BattleScene::AheadStats hangar_ahead; // the scene's read-ahead totals after the last recipe commit
     std::map<std::pair<sim::tactical::PlayerId, std::string>, std::string> warm_fallbacks;
     std::vector<sim::EntityId> undrawn;
     std::set<std::pair<sim::tactical::PlayerId, sim::tactical::TypeId>> purchases;

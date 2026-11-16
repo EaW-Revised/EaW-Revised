@@ -754,6 +754,32 @@ int main(int argc, char** argv) {
             }
         }
     }
+    // WCC-41: the recipient behavior scales all ordinary damage before shields/armor.
+    for (const bool projectile : {false, true}) {
+        for (const auto kind : {tactical::HitKind::ordinary, tactical::HitKind::asteroid, tactical::HitKind::delayed}) {
+            auto damage = rules();
+            damage.diminishing = {{units(0), decimal("0.5")}, {units(1), decimal("0.5")}};
+            damage.under_construction_multiplier = units(3);
+            auto profile = frigate();
+            profile.max_shields = units(100);
+            profile.armor_type = tactical::no_type_index;
+            profile.shield_armor_type = tactical::no_type_index;
+            damage.under_construction_types = {profile.type_id};
+            auto state = tactical::full_durability(profile);
+            tactical::Hit hit;
+            hit.amount = units(20);
+            hit.projectile = projectile;
+            hit.kind = kind;
+            const auto applied = tactical::apply_hit(profile, damage, state, hit, 10);
+            expect(applied && state.shields == units(projectile ? 70 : 40) && state.hull == profile.max_hull,
+                "WCC-41: construction scaling follows diminishing and precedes shield absorption for every delivery");
+            damage.under_construction_types.clear();
+            state = tactical::full_durability(profile);
+            const auto completed = tactical::apply_hit(profile, damage, state, hit, 10);
+            expect(completed && state.shields == units(projectile ? 90 : 80),
+                "WCC-41: an ordinary or completed type keeps its previous damage");
+        }
+    }
     test_diminishing_gates();
     test_out_of_combat();
     test_arrival_vulnerability();

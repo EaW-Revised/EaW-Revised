@@ -50,6 +50,8 @@ set(EAWR_SFLUA_SOURCES
 set(EAWR_SCRIPT_AUTHORITATIVE_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/authoritative/bindings.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/authoritative/clock_rng.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/authoritative/letter_box.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/authoritative/manifest_pins.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/authoritative/persistence.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/authoritative/scheduler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/authoritative/tactical_bridge.cpp"

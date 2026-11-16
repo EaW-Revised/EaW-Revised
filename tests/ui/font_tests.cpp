@@ -314,6 +314,13 @@ void system_face_contracts() {
     expect(fonts::match_system_face("Arial Unicode MS", families) == std::nullopt, "an absent family has no match");
     expect(fonts::match_system_face("Arial Medium", families) == std::nullopt, "other styles are not families");
     expect(fonts::match_system_face(" Bold", families) == std::nullopt, "a bare style is no face");
+    const std::vector<std::string> base_only{"Arial", "DejaVu Sans"};
+    expect(fonts::match_system_face("Arial Black", base_only) == SystemFace{"Arial", true},
+           "a host listing only the base family has Arial Black as its heaviest weight (legacy #6681)");
+    expect(fonts::match_system_face("Arial Black", families) == SystemFace{"Arial Black", false},
+           "a host that lists Arial Black whole is taken whole");
+    expect(fonts::match_system_face("Comic Black", base_only) == std::nullopt && fonts::match_system_face(" Black", base_only) == std::nullopt,
+           "an absent stem or a bare Black has no match");
 }
 
 fonts::FontCache cache_with(const std::vector<std::string>& faces) {
@@ -373,6 +380,18 @@ void fallback_contracts() {
          "EmpireAtWar-Medium", FaceSource::cache, 7, true, {"Arial Unicode MS"}},
         {"Japanese always uses the Unicode face at its size", "EmpireAtWar-Medium", 5, "JAPANESE", all, windows,
          "Arial Unicode MS", FaceSource::system, 5, true, {}},
+        {"UI-F5: an absent system face is Arial where the host has no Unicode face", "Courier Fancy", 8, "ENGLISH", all, {"Arial"},
+         "Arial", FaceSource::system, 8, true, {"Courier Fancy", "Arial Unicode MS"}},
+        {"UI-F5: a bold request gets Arial Bold", "Courier Fancy Bold", 8, "ENGLISH", all, {"Arial"},
+         "Arial Bold", FaceSource::system, 8, true, {"Courier Fancy Bold", "Arial Unicode MS"}},
+        {"UI-F5: a black request gets Arial Bold", "Wide Black", 10, "ENGLISH", all, {"Arial"},
+         "Arial Bold", FaceSource::system, 10, true, {"Wide Black", "Arial Unicode MS"}},
+        {"UI-F5: the Unicode face still wins when the host has it", "Courier Fancy", 8, "ENGLISH", all, {"Arial", "Arial Unicode MS"},
+         "Arial Unicode MS", FaceSource::system, 8, true, {"Courier Fancy"}},
+        {"UI-F5: a host without Arial falls to EaW-Medium", "Courier Fancy", 8, "ENGLISH", all, {},
+         "EmpireAtWar-Medium", FaceSource::cache, 8, true, {"Courier Fancy", "Arial Unicode MS", "Arial"}},
+        {"UI-F5: Russian is not given Arial", "Courier Fancy", 8, "RUSSIAN", all, {"Arial"},
+         "EmpireAtWar-Medium", FaceSource::cache, 8, true, {"Arial Unicode MS"}},
         {"a request for the Unicode face is not substituted", "Arial Unicode MS", 5, "JAPANESE", all, windows,
          "Arial Unicode MS", FaceSource::system, 5, false, {}},
         {"other languages keep the requested face", "EmpireAtWar-Bold", 5, "GERMAN", all, windows,

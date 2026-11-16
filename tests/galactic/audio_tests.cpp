@@ -197,6 +197,19 @@ int main() {
         feedback = galactic_build_feedback(cue, spoken, false);
         assert(feedback.speech.empty() && feedback.sfx.empty());
     }
+    // WGEP-95: the build countdown's speech requests, by minute, ten-second and second bucket.
+    const auto request = [](const float previous, const float remaining) {
+        return galactic_build_countdown_request("Count_", previous, remaining);
+    };
+    assert(request(125.0F, 119.9F) == "Count_2_Minutes" && request(179.0F, 119.9F) == "Count_2_Minutes");
+    assert(request(130.0F, 125.0F).empty() && request(61.0F, 60.5F).empty()); // same minute bucket
+    assert(request(60.5F, 59.9F) == "Count_60_Seconds");                      // leaving the minutes: the tens bucket changed
+    assert(request(35.0F, 29.9F) == "Count_30_Seconds" && request(31.5F, 30.5F).empty());
+    assert(request(19.5F, 9.9F) == "Count_10_Seconds");
+    assert(request(9.9F, 8.9F) == "Count_9_Seconds" && request(5.9F, 4.9F) == "Count_5_Seconds");
+    assert(request(4.9F, 4.5F).empty() && request(4.0F, 4.0F).empty());       // same whole second, or no change
+    assert(request(130.0F, 31.0F) == "Count_32_Seconds");                     // a skipped interval makes only the current request
+    assert(galactic_build_countdown_request("", 10.0F, 5.0F).empty());       // no prefix, no request
     const std::vector<Field> plain{{"SFXEvent_Build_Complete", "rhd_complete"}};
     feedback = galactic_build_feedback(Build::completed, plain, true);
     assert(feedback.speech.empty() && feedback.sfx == "rhd_complete");

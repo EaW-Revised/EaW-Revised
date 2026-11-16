@@ -162,6 +162,9 @@ void MapMode::State::compose_skydome(const assets::Map& map, const assets::Objec
                     } else {
                         state.skydome_casts_shadows = false;
                         state.skydome_drawn = sky.value().dome_surfaces != 0;
+                        state.skydome_dome_surfaces = sky.value().dome_surfaces;
+                        state.skydome_sun_surfaces = sky.value().sun_surfaces;
+                        state.skydome_skipped = sky.value().skipped;
                         state.skydome_status = state.skydome_drawn ? "drawn" : "no_dome_surface";
                     }
                 }

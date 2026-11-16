@@ -192,7 +192,7 @@ CatalogResult load_plan_catalog(const AiSetup& setup, const std::map<std::string
     if (!created) return CatalogResult::failure(created.error());
     auto& scripts = created.value();
     std::vector<core::Diagnostic> errors;
-    tactical_ai_detail::register_globals(scripts, host, errors, false);
+    tactical_ai_detail::register_globals(scripts, host, errors, false, false);
     tactical_ai_detail::register_methods(scripts, host, errors, false);
     using WeightedList = std::vector<std::pair<std::string, Real>>;
     using ContrastLists = std::vector<std::pair<std::string, WeightedList>>;

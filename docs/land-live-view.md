@@ -98,3 +98,25 @@ EAWR land-move tick=101 squad=7 turn-exit reason=heading-reached heading 0.0100 
 ```
 
 Re-maps are limited to one line per squad per 5 ticks (the next line reports how many were suppressed).
+
+## Calling a bought company down (legacy EAWR-7190)
+
+A company bought at a land factory waits in the reinforcement list (the pane the reinforcements button opens), as the retail
+capture showed (legacy EAWR-7048). The player calls it down like in space: open the pane, press the entry and drag it onto the ground,
+release to drop.
+
+- While the entry is dragged, the cursor asks the simulation whether the company may land at the point under it
+  (`reinforcement_point`) and shows the landing-point pointer or the cannot-move pointer. On land the answer is the land rule:
+  the cap has room for the company and the whole company fits at the point with every member inside an allied reinforcement
+  point's enabling radius and outside every enemy prevention radius (LC-43..46). The query only reads the completed world: it
+  keeps nothing, draws no random number and changes no state, so it does not touch the save, the replay or the land state
+  version. The company always lands under the player's own reinforcement facing (LR-FACING), so the pane's rotate wheel does
+  not change a land drop.
+- The legal ground is drawn as one plain ring per allied reinforcement point at its enabling radius, only while a company is
+  being dragged. **Zone drawing not captured from retail:** the ring is a project presentation (a green line loop that reads
+  through models); how the retail game marks the legal ground, and how it draws the dragged company, were not captured.
+  A ghost company at the cursor is not drawn on land.
+- Releasing always sends the Reinforce command: the simulation alone admits or refuses a land drop. A refusal comes back as the
+  simulation's own reason (`invalid_position`, `no_population_room`, `not_in_pool`, `cannot_produce`, `battle_decided`) and the
+  open pane shows a plain label of that reason under the population for four seconds. An accepted drop takes the company out of
+  the list; it lands after the reinforcement delay and the landing clip (LC-51).

@@ -318,7 +318,9 @@ bool FontMode::State::write_report() const {
         }
         const std::vector<std::string>& families = provider->system_families();
         output << "]},\n  \"system\": {\"families\": " << families.size() << ", \"unicode_face\": "
-               << (model::match_system_face(model::unicode_face, families) ? "true" : "false") << "}";
+               << (model::match_system_face(model::unicode_face, families) ? "true" : "false")
+               << ", \"arial_face\": " << (model::match_system_face(model::mapper_pick_face, families) ? "true" : "false")
+               << "}";
     }
     output << ",\n  \"samples\": [";
     for (std::size_t index = 0; index < samples.size(); ++index) {

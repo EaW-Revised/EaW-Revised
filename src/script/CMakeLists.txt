@@ -94,7 +94,7 @@ target_include_directories(
 )
 target_link_libraries(
     eawr_script_authoritative
-    PUBLIC eawr::core eawr::sim eawr::script_numeric
+    PUBLIC eawr::core eawr::sim eawr::vfs eawr::script_numeric
     PRIVATE eawr::lua_502_sf
 )
 target_compile_features(eawr_script_authoritative PUBLIC cxx_std_20)

@@ -6,7 +6,9 @@
 #include "eawr/script/authoritative/galactic_bridge.hpp"
 #include "eawr/sim/galactic/story_engine.hpp"
 #include "eawr/vfs/vfs.hpp"
+#include "../../src/script/foc/mode_time.hpp"
 
+#include <bit>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -76,6 +78,231 @@ function main()
 end
 )LUA";
 
+void object_modules(const std::filesystem::path& root) {
+    std::filesystem::remove_all(root);
+    const auto data = root / "loose";
+    write(data / "scripts" / "library" / "helper.lua", "function helper() return 1 end\n");
+    write(data / "scripts" / "gameobject" / "beacon.lua", R"LUA(
+require('helper')
+Count = 0
+function Base_Definitions() ServiceRate = 1 end
+function main() while true do Count = Count + helper(); coroutine.yield(true) end end
+)LUA");
+    write(data / "scripts" / "gameobject" / "sleeping.lua", R"LUA(
+function Base_Definitions() ServiceRate = 0 end
+function Sleep(seconds)
+    local start = GetCurrentTime()
+    while GetCurrentTime() - start < seconds do coroutine.yield(true) end
+end
+function main() Count = 1; Sleep(0.1); Count = 2; while true do coroutine.yield(true) end end
+)LUA");
+    write(data / "scripts" / "gameobject" / "broken.lua", "error('injected object chunk failure')\n");
+    write(data / "scripts" / "gameobject" / "rate_later.lua",
+        "function Base_Definitions() end\nfunction main() Count = 1; coroutine.yield(true) end\n");
+    write(data / "scripts" / "story" / "unrelated.lua", "error('unrelated')\n");
+    eawr::vfs::MountSpec mount; mount.layer_id = "object-host"; mount.data_root = data;
+    const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+    const std::vector<std::pair<eawr::sim::galactic::TypeId, std::string>> types{{7, " Beacon "}, {8, "Missing"}};
+    const auto content = take(cpn::GalacticObjectScripts::load(files, types));
+    expect(content->types().size() == 1 && content->types().at(7) == "data/scripts/gameobject/beacon.lua",
+        "object modules resolve authored names without depending on a story plot");
+    expect(content->modules().size() == 5 && content->notes().size() == 1,
+        "the object host pins mounted GameObject and library modules and reports a missing script");
+    expect(content->fingerprint() == take(cpn::GalacticObjectScripts::load(files, types))->fingerprint(),
+        "object module identity is deterministic");
+    std::optional<std::uint64_t> first_stamp_bits;
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        auth::SessionConfig config; config.galactic_clock = true;
+        auto scheduler = take(content->create_scheduler(config));
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        eawr::sim::galactic::CensusObject actor{};
+        actor.id = 42; actor.original_type = actor.current_type = 7;
+        const std::vector actors{actor};
+        expect(take(content->reconcile(scheduler, actors, executor)).empty()
+            && scheduler.object_scripts().size() == 1, "a live scripted actor attaches once");
+        expect(take(content->reconcile(scheduler, actors, executor)).empty()
+            && scheduler.object_scripts().size() == 1, "reconciliation retains the existing attachment");
+        expect(take(content->service(scheduler, 1, executor)).diagnostics.empty(), "object definitions and thread start");
+        expect(take(content->service(scheduler, 2, executor)).diagnostics.empty(), "new object thread pumps");
+        const auto id = scheduler.object_scripts().front().instance;
+        const auto count = take(scheduler.read_global(id, "Count"));
+        expect(count && std::get<eawr::script::numeric::LuaNumber>(count->data) == eawr::script::numeric::LuaNumber(1),
+            "object thread sees its mounted library");
+        const auto first_stamp = take(scheduler.read_global(id, "LastService"));
+        const auto* stamp = first_stamp ? std::get_if<eawr::script::numeric::LuaNumber>(&first_stamp->data) : nullptr;
+        expect(stamp && *stamp <= eawr::script::numeric::LuaNumber(0) && *stamp >= eawr::script::numeric::LuaNumber(-1),
+            "the first continuing object pump stamps a synchronized negative offset within its service rate");
+        if (stamp) {
+            if (!first_stamp_bits) first_stamp_bits = stamp->repr;
+            expect(*first_stamp_bits == stamp->repr, "the first service offset agrees across worker counts");
+        }
+        const auto saved = take(scheduler.save());
+        auto restored = take(content->create_scheduler(config));
+        take(restored.load(saved));
+        expect(take(content->reconcile(restored, actors, executor)).empty()
+            && restored.object_scripts() == scheduler.object_scripts(), "restore keeps the object attachment");
+        expect(take(content->service(scheduler, 3, executor)).diagnostics.empty(), "throttled object service succeeds");
+        expect(take(content->service(restored, 3, executor)).diagnostics.empty()
+            && take(restored.state_hash()) == take(scheduler.state_hash()), "restored object service continues identically");
+        const auto throttled = take(scheduler.read_global(id, "Count"));
+        const bool due_again = stamp && eawr::script::foc::tactical_ai_detail::mode_seconds(3) - *stamp
+            > eawr::script::numeric::LuaNumber(1);
+        expect(throttled && std::get<eawr::script::numeric::LuaNumber>(throttled->data)
+                == eawr::script::numeric::LuaNumber(due_again ? 2 : 1),
+            "object service honors its authored rate and first random offset");
+        auto moved = actor; moved.owner = 2; moved.planet = 19; moved.container = 25;
+        expect(take(content->reconcile(scheduler, std::vector{moved}, executor)).empty()
+            && scheduler.object_scripts().front().instance == id, "a change of owner or parent retains the object script");
+        const auto retained = take(scheduler.read_global(id, "Count"));
+        expect(retained && std::get<eawr::script::numeric::LuaNumber>(retained->data)
+                == eawr::script::numeric::LuaNumber(due_again ? 2 : 1),
+            "a parent or owner change retains the script state");
+        actor.delete_pending = true;
+        expect(take(content->reconcile(scheduler, std::vector{actor}, executor)).empty()
+            && scheduler.object_scripts().empty(), "a deleting actor detaches");
+    }
+    const std::vector<std::pair<eawr::sim::galactic::TypeId, std::string>> sleeping_type{{9, "Sleeping"}};
+    const auto sleeping = take(cpn::GalacticObjectScripts::load(files, sleeping_type));
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auth::SessionConfig config; config.galactic_clock = true; config.tick_duration = {1, 30};
+        auto live = take(sleeping->create_scheduler(config));
+        eawr::sim::galactic::CensusObject actor{}; actor.id = 99; actor.original_type = actor.current_type = 9;
+        expect(take(sleeping->reconcile(live, std::vector{actor}, executor)).empty(), "sleeping object attaches");
+        expect(take(sleeping->service(live, 1, executor)).diagnostics.empty()
+            && take(sleeping->service(live, 2, executor)).diagnostics.empty(), "sleeping object starts");
+        const auto id = live.object_scripts().front().instance;
+        const auto sleeping_count = take(live.read_global(id, "Count"));
+        expect(sleeping_count && std::get<eawr::script::numeric::LuaNumber>(sleeping_count->data)
+            == eawr::script::numeric::LuaNumber(1), "sleeping object is suspended before its continuation");
+        const auto saved = take(live.save());
+        auto restored = take(sleeping->create_scheduler(config));
+        take(restored.load(saved));
+        for (std::uint64_t frame = 3; frame <= 8; ++frame) {
+            expect(take(sleeping->service(live, frame, executor)).diagnostics.empty()
+                && take(sleeping->service(restored, frame, executor)).diagnostics.empty(), "sleeping object resumes cleanly");
+            expect(take(live.state_hash()) == take(restored.state_hash()), "sleeping object restore follows the same state");
+        }
+        const auto resumed = take(restored.read_global(id, "Count"));
+        expect(resumed && std::get<eawr::script::numeric::LuaNumber>(resumed->data)
+            == eawr::script::numeric::LuaNumber(2), "sleeping object resumes after the saved wait");
+    }
+    const std::vector<std::pair<eawr::sim::galactic::TypeId, std::string>> late_rate_type{{11, "Rate_Later"}};
+    const auto late_rate = take(cpn::GalacticObjectScripts::load(files, late_rate_type));
+    auth::SessionConfig late_rate_config; late_rate_config.galactic_clock = true;
+    auto late = take(late_rate->create_scheduler(late_rate_config));
+    eawr::sim::galactic::CensusObject late_actor{}; late_actor.id = 102; late_actor.original_type = late_actor.current_type = 11;
+    const eawr::sim::InlineExecutor late_executor;
+    expect(take(late_rate->reconcile(late, std::vector{late_actor}, late_executor)).empty(), "late-rate object attaches");
+    expect(take(late_rate->service(late, 1, late_executor)).diagnostics.empty()
+        && take(late_rate->service(late, 2, late_executor)).diagnostics.empty(), "unrated object initializes");
+    const auto late_id = late.object_scripts().front().instance;
+    const auto before_rate = take(late.read_global(late_id, "Count"));
+    expect(before_rate && std::holds_alternative<std::monostate>(before_rate->data),
+        "an object with no numeric ServiceRate does not pump");
+    auth::ScriptEvent set_rate;
+    set_rate.key = {3, auth::first_simulation_producer, late_id, 10}; set_rate.target = late_id;
+    set_rate.kind = auth::ScriptEvent::Kind::assign; set_rate.name = "ServiceRate";
+    set_rate.parameter = auth::Value::text("not numeric");
+    take(late.submit_event(set_rate));
+    expect(take(late_rate->service(late, 3, late_executor)).diagnostics.empty(), "non-numeric rate assignment is delivered");
+    const auto during_rate = take(late.read_global(late_id, "Count"));
+    expect(during_rate && std::holds_alternative<std::monostate>(during_rate->data), "non-numeric rate does not start the thread");
+    set_rate.key.tick = 4; set_rate.parameter = auth::Value::number(eawr::script::numeric::LuaNumber(0));
+    take(late.submit_event(std::move(set_rate)));
+    expect(take(late_rate->service(late, 4, late_executor)).diagnostics.empty(), "numeric rate assignment is delivered");
+    const auto assigned = take(late.read_global(late_id, "Count"));
+    expect(assigned && std::holds_alternative<std::monostate>(assigned->data), "a new rate is read at the next visit");
+    expect(take(late_rate->service(late, 5, late_executor)).diagnostics.empty(), "new numeric rate admits a pump");
+    const auto late_count = take(late.read_global(late_id, "Count"));
+    expect(late_count && std::get<eawr::script::numeric::LuaNumber>(late_count->data)
+        == eawr::script::numeric::LuaNumber(1), "the newly admitted object thread runs once");
+    const std::vector<std::pair<eawr::sim::galactic::TypeId, std::string>> broken_type{{10, "Broken"}};
+    const auto broken = take(cpn::GalacticObjectScripts::load(files, broken_type));
+    auth::SessionConfig broken_config; broken_config.galactic_clock = true;
+    auto failed = take(broken->create_scheduler(broken_config));
+    eawr::sim::galactic::CensusObject failed_actor{}; failed_actor.id = 101; failed_actor.original_type = failed_actor.current_type = 10;
+    const eawr::sim::InlineExecutor broken_executor;
+    expect(take(broken->reconcile(failed, std::vector{failed_actor}, broken_executor)).size() == 1
+        && failed.instances().empty() && failed.object_scripts().size() == 1,
+        "a failed object chunk is diagnosed while its attachment remains known");
+    expect(take(broken->reconcile(failed, std::vector{failed_actor}, broken_executor)).empty(),
+        "an unchanged failed attachment is not retried each service");
+    const auto failed_save = take(failed.save());
+    auto failed_restored = take(broken->create_scheduler(broken_config));
+    take(failed_restored.load(failed_save));
+    expect(take(broken->reconcile(failed_restored, std::vector{failed_actor}, broken_executor)).empty()
+        && failed_restored.instances().empty(), "a failed attachment is not retried on restore");
+    auto duplicate = types; duplicate.push_back({8, "Beacon"});
+    expect(!cpn::GalacticObjectScripts::load(files, duplicate), "duplicate scripted type identities are rejected");
+    const std::vector<std::pair<eawr::sim::galactic::TypeId, std::string>> no_scripts{{7, ""}};
+    expect(take(cpn::GalacticObjectScripts::load(files, no_scripts))->modules().empty(), "empty object inventories pin no scripts");
+    cpn::GalacticObjectQueryCatalog query;
+    eawr::units::UnitTables vocabulary;
+    eawr::units::UnitType loaded;
+    loaded.id = "BEACON"; loaded.category_bits = 2; loaded.property_bits = 4;
+    vocabulary.units.push_back(loaded);
+    vocabulary.categories.push_back({"vehicle", 8});
+    vocabulary.properties.push_back({"rare", 16});
+    const std::vector<std::pair<std::string, eawr::sim::galactic::TypeId>> names{{"BEACON", 7}};
+    const auto built = take(cpn::make_galactic_object_query_catalog(vocabulary, names));
+    expect(built.types.at(7).categories == 2 && built.types.at(7).properties == 4
+        && built.categories.at("VEHICLE") == 8 && built.properties.at("RARE") == 16,
+        "object query vocabulary uses loaded type and enum masks");
+    const std::vector<std::pair<std::string, eawr::sim::galactic::TypeId>> missing{{"ABSENT", 8}};
+    const auto unqualified = take(cpn::make_galactic_object_query_catalog(vocabulary, missing));
+    expect(unqualified.names.at("ABSENT") == 8 && !unqualified.types.at(8).qualified,
+        "object query retains known identities without inventing missing type flags");
+    const std::vector<std::pair<std::string, eawr::sim::galactic::TypeId>> aliases{{"BEACON", 9}, {"beacon", 7}};
+    const auto duplicate_names = take(cpn::make_galactic_object_query_catalog(vocabulary, aliases));
+    expect(duplicate_names.names.at("BEACON") == 7 && duplicate_names.types.size() == 2,
+        "repeated authored names keep all type identities and resolve the first identity deterministically");
+    query.types.emplace(7, cpn::GalacticObjectQueryType{7, "BEACON", 2, 4});
+    query.types.emplace(8, cpn::GalacticObjectQueryType{8, "OTHER", 8, 16});
+    query.names = {{"BEACON", 7}, {"OTHER", 8}};
+    query.categories = {{"VEHICLE", 8}}; query.properties = {{"RARE", 16}};
+    const auth::ValueList filters{auth::Value{auth::Handle{2, 1}}, auth::Value{auth::Handle{3, 7}},
+        auth::Value::text("vehicle"), auth::Value::text("RARE")};
+    const auto filter = take(cpn::parse_galactic_object_filter(filters, query));
+    eawr::sim::galactic::CensusObject actor{}; actor.id = 42; actor.owner = 1;
+    actor.original_type = 7; actor.current_type = 8;
+    expect(take(cpn::matches_galactic_object_filter(filter, actor, &query.types.at(8))),
+        "object query intersects owner, original type and qualified flags");
+    actor.owner = 2;
+    expect(!take(cpn::matches_galactic_object_filter(filter, actor, &query.types.at(8))), "object query uses exact ownership");
+    expect(!cpn::parse_galactic_object_filter({}, query)
+        && !cpn::parse_galactic_object_filter({auth::Value::text("unknown")}, query),
+        "empty or unknown object filters are rejected");
+    query.properties.emplace("BEACON", 16);
+    const auto ambiguous = take(cpn::parse_galactic_object_filter({auth::Value::text("beacon")}, query));
+    expect(ambiguous.properties == 16 && !ambiguous.type, "property names take precedence over type names");
+    expect(!cpn::matches_galactic_object_filter(ambiguous, actor, nullptr),
+        "missing qualified flags cannot fabricate a category or property match");
+    actor.owner = 1; actor.planet = 12;
+    const std::vector view{actor};
+    const eawr::sim::InlineExecutor query_executor;
+    const auto handle = auth::Value{auth::Handle{1, 42}};
+    const auto found = take(cpn::query_galactic_object_view("galactic.object_find_all", filters, view, query, query_executor));
+    expect(std::get<auth::ValueList>(found.front().data).size() == 1, "object view enumerates matching live actors");
+    const auto original = take(cpn::query_galactic_object_view("galactic.object_type", {handle}, view, query, query_executor));
+    expect(std::get<auth::Handle>(original.front().data).id == 7, "Get_Type returns original type (WGA-312)");
+    const auto location = take(cpn::query_galactic_object_view("galactic.object_planet", {handle}, view, query, query_executor));
+    expect(std::get<auth::Handle>(location.front().data).id == 12, "object view resolves its containing planet");
+    const auto absent = take(cpn::query_galactic_object_view("galactic.object_valid", {auth::Value{auth::Handle{1, 99}}}, view, query, query_executor));
+    expect(!std::get<bool>(absent.front().data), "removed objects are invalid");
+    auto second = actor; second.id = 44;
+    auto deleting = actor; deleting.id = 45; deleting.delete_pending = true;
+    const std::vector ordered_view{actor, second, deleting};
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        const eawr::platform::ThreadWorkerAdapter threaded(workers);
+        const auto result = take(cpn::query_galactic_object_view("galactic.object_find_all", filters, ordered_view, query, threaded));
+        const auto& matches = std::get<auth::ValueList>(result.front().data);
+        expect(matches.size() == 2 && std::get<auth::Handle>(matches[0].data).id == 42
+            && std::get<auth::Handle>(matches[1].data).id == 44,
+            "object enumeration excludes pending deletion and keeps identity order across worker counts");
+    }
+}
+
 void host(const std::filesystem::path& root) {
     std::filesystem::remove_all(root);
     const auto data = root / "loose";
@@ -139,16 +366,20 @@ void host(const std::filesystem::path& root) {
     for (const auto& row : first.diagnostics)
         named_fault = named_fault || (row.message.find(std::string(auth::codes::missing_api)) != std::string::npos && row.message.find("Find_Hint") != std::string::npos);
     expect(named_fault, "an unbound engine function faults with its own name");
-    const auto retired = content->find("G.xml")->instance;
-    expect(scripts.retired_instances() == std::vector<std::uint64_t>{retired}
-        && first.load_notes.size() == 1 && first.load_notes[0].code == "EAWR-LOAD-1400"
-        && first.load_notes[0].object == std::to_string(retired), "the unbound story provider retires with one runtime LoadNote");
+    // An uncaught error ends the failing thread, not the story script: nothing is retired.
+    const auto failed_script = content->find("G.xml")->instance;
+    expect(content->subplots_of(std::vector<std::uint64_t>{failed_script, 987654}) == std::vector<std::string>{"G.xml"}
+        && content->subplots_of({}).empty(), "a failed script instance maps back to its sub-plot, unknown instances to nothing");
+    const auto running = scripts.instances();
+    expect(scripts.retired_instances().empty() && first.load_notes.empty()
+        && std::binary_search(running.begin(), running.end(), failed_script),
+        "the unbound story function ends its thread; the script is not retired and no runtime LoadNote is written");
 
     // The calls: the scripted sub-plot is called; the unscripted, the unbound and the unknown ones are dropped.
     std::uint64_t sequence = 0;
     const std::vector<st::ScriptCall> calls{{0, "Probe_Event"}, {1, "Ignored"}, {2, "Ignored"}, {6, "Ignored_Retired"}, {0, "Second_Event"}};
     take(cpn::forward_galactic_story_calls(scripts, *content, subs, calls, sequence));
-    expect(sequence == 2, "only calls for running scripts take an event sequence");
+    expect(sequence == 3, "only calls for running scripts take an event sequence (the script whose thread failed still runs)");
     options.time_tick = 2;
     const auto second = take(scripts.service(executor, options));
     expect(second.diagnostics.empty() || codes_of(second, auth::codes::script_error) == 0, "the calls raise no script error");
@@ -164,8 +395,8 @@ void host(const std::filesystem::path& root) {
     const auto saved = take(scripts.save());
     auto reloaded = take(cpn::create_galactic_story_scheduler(*content, config));
     take(reloaded.load(saved));
-    expect(reloaded.retired_instances() == std::vector<std::uint64_t>{retired}
-        && !reloaded.create_instance(retired, content->find("G.xml")->module), "story restore retains retirement and refuses restart");
+    expect(reloaded.retired_instances().empty() && reloaded.instances() == scripts.instances(),
+        "story restore keeps the scripts that had a failed thread running");
     expect(take(reloaded.state_hash()) == take(scripts.state_hash()), "a restored story scheduler has the saved state");
     options.time_tick = 3; take(scripts.service(executor, options));
     take(reloaded.service(executor, options));
@@ -195,13 +426,13 @@ void host(const std::filesystem::path& root) {
     options.time_tick = 2;
     const auto faulted = take(callback.service(executor, options));
     const auto survivors = callback.instances();
-    expect(faulted.load_notes.size() == 1 && faulted.load_notes[0].object == std::to_string(a->instance)
-        && !std::binary_search(survivors.begin(), survivors.end(), a->instance)
+    expect(faulted.load_notes.empty() && callback.retired_instances().empty()
+        && std::binary_search(survivors.begin(), survivors.end(), a->instance)
         && std::binary_search(survivors.begin(), survivors.end(), content->find("D.xml")->instance),
-        "uncaught story callback failure retires only its provider");
+        "uncaught story callback failure ends that call only; no script is retired");
     std::uint64_t after_fault = 0;
     take(cpn::forward_galactic_story_calls(callback, *content, subs, calls, after_fault));
-    expect(after_fault == 0, "later story requests for retired providers are dropped");
+    expect(after_fault == 3, "later story requests still reach the scripts that are running");
     options.time_tick = 3;
     expect(take(callback.service(executor, options)).load_notes.empty(), "story service continues without repeated retirement notes");
 }
@@ -260,6 +491,211 @@ std::size_t count_code(const auth::ServiceReport& report, std::string_view code)
     std::size_t n{};
     for (const auto& row : report.diagnostics) if (row.code == code) ++n;
     return n;
+}
+
+// #7073 (FS-44, WGS-140): the authored scoring module's Base_Definitions runs once, first, in an instance of its own; what it sets through
+// GlobalValue.Set is what a plot's script reads from its first line on (a chunk's load, its Base_Definitions, its main). Synthetic names only.
+struct ScoringFixture {
+    std::shared_ptr<const cpn::GalacticStoryScripts> content;
+    std::vector<st::SubPlotDef> subs;
+};
+ScoringFixture scoring_fixture(const std::filesystem::path& root, const std::string& name, const std::string& constants,
+    const std::string& scoring_body, bool sibling = true, const std::string& reader_body = {}) {
+    const auto data = root / name / "loose";
+    std::filesystem::remove_all(root / name);
+    write(data / "scripts" / "library" / "storyprobe.lua", std::string(library));
+    if (!reader_body.empty()) write(data / "scripts" / "story" / "Reader_Script.lua", reader_body);
+    else write(data / "scripts" / "story" / "Reader_Script.lua",
+        "require(\"StoryProbe\")\n"
+        "SeenAtLoad = GlobalValue.Get(\"SCORE_MARK\")\n"
+        "function Base_Definitions() SeenInBase = GlobalValue.Get(\"SCORE_MARK\"); SeenText = GlobalValue.Get(\"SCORE_TEXT\"); Leak = Score_Private; LeakSibling = Sibling_Loaded end\n"
+        "function main() SeenInMain = GlobalValue.Get(\"SCORE_MARK\") end\n");
+    if (!constants.empty()) write(data / "xml" / "gameconstants.xml", constants);
+    if (!scoring_body.empty()) write(data / "scripts" / "miscellaneous" / "MyScoring.lua", scoring_body);
+    if (sibling) write(data / "scripts" / "miscellaneous" / "ScoreSibling.lua", "Sibling_Loaded = 1\n");
+    eawr::vfs::MountSpec mount; mount.layer_id = "scoring-" + name; mount.data_root = data;
+    const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+    std::vector<st::SubPlotDef> subs{sub("Reader.xml", "Reader_Script", {})};
+    auto content = take(cpn::GalacticStoryScripts::load(files, subs));
+    return {std::move(content), std::move(subs)};
+}
+constexpr std::string_view scoring_constants = "<GameConstants><Game_Scoring_Script_Name>MyScoring</Game_Scoring_Script_Name></GameConstants>";
+constexpr std::string_view scoring_module =
+    "require(\"ScoreSibling\")\n"
+    "Score_Private = 5\n"
+    "function Base_Definitions() GlobalValue.Set(\"SCORE_MARK\", 7); GlobalValue.Set(\"SCORE_TEXT\", \"mod\"); Scoring_Only = 1 end\n"
+    "function main() GlobalValue.Set(\"SCORE_MAIN_RAN\", 1) end\n";
+
+std::optional<std::uint64_t> number_of(auth::ScriptScheduler& scripts, std::uint64_t instance, std::string_view name) {
+    const auto value = take(scripts.read_global(instance, name));
+    const auto* n = value ? std::get_if<eawr::script::numeric::LuaNumber>(&value->data) : nullptr;
+    return n ? std::optional(n->repr) : std::nullopt;
+}
+bool nil_global(auth::ScriptScheduler& scripts, std::uint64_t instance, std::string_view name) {
+    const auto value = take(scripts.read_global(instance, name));
+    return !value || std::holds_alternative<std::monostate>(value->data);
+}
+const auto n7 = eawr::script::numeric::LuaNumber(7).repr;
+const auto n11 = eawr::script::numeric::LuaNumber(11).repr;
+const auto n9 = eawr::script::numeric::LuaNumber(9).repr;
+
+void scoring_definitions(const std::filesystem::path& root) {
+    auth::SessionConfig config;
+    config.seed = 77; config.galactic_clock = true; config.tick_duration = {1, 30};
+    const auto fixture = scoring_fixture(root, "scored", std::string(scoring_constants), std::string(scoring_module));
+    const auto& content = fixture.content;
+    expect(content->notes().empty() && content->entries().size() == 1 && content->initial_globals().empty(),
+        "loading pins the scoring module and runs nothing: no value yet, no note, the plot's entry unchanged");
+    const auto run = [&](const eawr::sim::PartitionExecutor& executor, auth::GlobalValueReader globals = {}) {
+        auto scripts = take(cpn::create_galactic_story_scheduler(*content, config, false, {}, {}, std::move(globals)));
+        std::vector<std::string> notes;
+        take(cpn::start_galactic_story_scripts(scripts, *content, notes));
+        expect(notes.empty(), "the plot's script starts although it reads the scoring definitions' value while its chunk loads");
+        auth::ServiceOptions options; options.time_tick = 1;
+        take(scripts.service(executor, options));
+        return scripts;
+    };
+    const eawr::sim::InlineExecutor inline_executor;
+    auto scripts = run(inline_executor);
+    expect(content->notes().empty() && content->entries().size() == 1 && content->initial_globals().size() == 2,
+        "the named scoring module's definitions ran once when the scheduler was made: two values, no note");
+    const auto mark = content->initial_globals().find("SCORE_MARK");
+    expect(mark != content->initial_globals().end() && std::get_if<eawr::script::numeric::LuaNumber>(&mark->second.data)
+        && std::get_if<eawr::script::numeric::LuaNumber>(&mark->second.data)->repr == n7,
+        "a number the definitions set is kept as it was set");
+    expect(!content->initial_globals().contains("SCORE_MAIN_RAN"), "the scoring module's main is not started (#7075)");
+
+    const auto instance = content->find("Reader.xml")->instance;
+    const auto text = take(scripts.read_global(instance, "SeenText"));
+    expect(number_of(scripts, instance, "SeenAtLoad") == n7 && number_of(scripts, instance, "SeenInBase") == n7
+        && number_of(scripts, instance, "SeenInMain") == n7 && text && std::get_if<std::string>(&text->data)
+        && *std::get_if<std::string>(&text->data) == "mod",
+        "the scoring definitions' values are visible to a plot script in the same fresh-load pass: its chunk, its Base_Definitions and its main");
+    expect(nil_global(scripts, instance, "Leak") && nil_global(scripts, instance, "LeakSibling"),
+        "the scoring module's own globals and the modules it required stay out of the plot's environment");
+    const auto running = scripts.instances();
+    expect(running == std::vector<std::uint64_t>{instance}, "the scoring module has no instance in the story scheduler");
+
+    // A value the registry already holds replaces the definitions' starting value.
+    auto replaced = run(inline_executor, [](const std::string& key) -> std::optional<auth::Value> {
+        if (key == "SCORE_MARK") return auth::Value::number(eawr::script::numeric::LuaNumber(11));
+        return std::nullopt;
+    });
+    expect(number_of(replaced, instance, "SeenAtLoad") == n11 && number_of(replaced, instance, "SeenInMain") == n11
+        && !nil_global(replaced, instance, "SeenText"), "a registry value wins over the scoring definitions' starting value; a key it lacks keeps the starting one");
+
+    // 1/2/4/8 workers and a save/restore into a fresh scheduler of the same content.
+    std::string reference;
+    for (const std::size_t workers : std::vector<std::size_t>{1, 2, 4, 8}) {
+        const eawr::platform::ThreadWorkerAdapter threaded(workers);
+        auto one = run(threaded);
+        const auto hash = take(one.state_hash());
+        if (reference.empty()) reference = hash;
+        expect(hash == reference, "the scored story scheduler is equal on " + std::to_string(workers) + " workers");
+    }
+    const auto saved = take(scripts.save());
+    auto reloaded = take(cpn::create_galactic_story_scheduler(*content, config));
+    take(reloaded.load(saved));
+    expect(take(reloaded.state_hash()) == take(scripts.state_hash()), "a restored story scheduler has the saved state");
+    auth::ServiceOptions next; next.time_tick = 2;
+    take(scripts.service(inline_executor, next)); take(reloaded.service(inline_executor, next));
+    expect(take(reloaded.state_hash()) == take(scripts.state_hash()) && number_of(reloaded, instance, "SeenInMain") == n7,
+        "the restored scheduler services like the original and its plot keeps what it read");
+
+    // No constant, or a constant naming a module the data does not author: nothing runs, nothing changes (same identity as no scoring at all).
+    const auto plain = scoring_fixture(root, "plain", "", "");
+    const auto unauthored = scoring_fixture(root, "unauthored", std::string(scoring_constants), "");
+    const auto made = [&](const ScoringFixture& f) { take(cpn::create_galactic_story_scheduler(*f.content, config)); };
+    made(plain); made(unauthored);
+    expect(plain.content->initial_globals().empty() && plain.content->scoring_notes().empty() && unauthored.content->initial_globals().empty()
+        && unauthored.content->scoring_notes().empty() && plain.content->fingerprint() == unauthored.content->fingerprint(),
+        "no scoring module, or one the data does not author: no starting values, no note, the content identity is the same");
+    expect(plain.content->fingerprint() != content->fingerprint(), "a pinned scoring module is part of the content identity");
+
+    // A module that sets nothing starts nothing (its bytes are still part of the identity: it runs at every start).
+    const auto silent = scoring_fixture(root, "silent", std::string(scoring_constants), "function Base_Definitions() Quiet = 1 end\n");
+    made(silent);
+    expect(silent.content->initial_globals().empty() && silent.content->scoring_notes().empty(), "a scoring module that sets no global starts no value");
+
+    // The definitions look up the campaign's object types (a mod's MOD_ID comes from a dummy type), so the values depend on the players handed to the factory.
+    const auto typed = scoring_fixture(root, "typed", std::string(scoring_constants),
+        "function Base_Definitions() local d = Find_Object_Type(\"Mod_Dummy\"); if d then GlobalValue.Set(\"MOD_ID\", \"mymod\") else GlobalValue.Set(\"MOD_ID\", nil) end end\n");
+    made(typed);
+    expect(typed.content->initial_globals().empty() && typed.content->scoring_notes().empty(), "a type the campaign lacks leaves the value unset: a nil write starts nothing");
+    cpn::GalacticStoryPlayers with_types;
+    with_types.types = {{"MOD_DUMMY", 5}};
+    take(cpn::create_galactic_story_scheduler(*typed.content, config, false, with_types));
+    const auto owner = typed.content->initial_globals().find("MOD_ID");
+    expect(owner != typed.content->initial_globals().end() && std::get_if<std::string>(&owner->second.data)
+        && *std::get_if<std::string>(&owner->second.data) == "mymod", "the definitions find the campaign's dummy type and set the mod's identity");
+
+    // A fault in the definitions is a named note, never an abort; the plots start as before.
+    const auto broken = scoring_fixture(root, "broken", std::string(scoring_constants), "function Base_Definitions() Find_Hint(\"x\") end\n");
+    made(broken);
+    bool named = false;
+    for (const auto& note : broken.content->scoring_notes()) named = named || note.find("scoring definitions: data/scripts/miscellaneous/myscoring.lua") != std::string::npos;
+    expect(named && broken.content->initial_globals().empty() && broken.content->entries().size() == 1,
+        "a scoring module whose definitions fault is listed by name and sets nothing; the plot's entry is unchanged");
+    const auto bad_name = scoring_fixture(root, "badname", "<GameConstants><Game_Scoring_Script_Name>../x</Game_Scoring_Script_Name></GameConstants>", "");
+    expect(bad_name.content->initial_globals().empty() && !bad_name.content->notes().empty(),
+        "a constant that is not a module name is listed and runs nothing");
+}
+
+// GC review of #7100: a restore builds a new scheduler and so runs the scoring definitions again; what they set must never overwrite a
+// registry value a plot changed before the save. The registry here is the host's: a map the test fills from the plot's GlobalValue.Set commands.
+void scoring_restore(const std::filesystem::path& root) {
+    auth::SessionConfig config;
+    config.seed = 77; config.galactic_clock = true; config.tick_duration = {1, 30};
+    const auto fixture = scoring_fixture(root, "restore", std::string(scoring_constants), std::string(scoring_module),
+        true, "require(\"StoryProbe\")\nfunction main() GlobalValue.Set(\"SCORE_MARK\", 9) end\nfunction Probe_Read() Seen = GlobalValue.Get(\"SCORE_MARK\") end\n");
+    const auto& content = fixture.content;
+    std::map<std::string, auth::Value> registry;
+    const auto reader = [&registry](const std::string& key) -> std::optional<auth::Value> {
+        const auto found = registry.find(key);
+        return found == registry.end() ? std::nullopt : std::optional<auth::Value>(found->second);
+    };
+    const auto apply = [&registry](const auth::ServiceReport& report) {
+        for (const auto& command : report.commands) {
+            if (command.verb != auth::global_value_command || command.arguments.size() != 2) continue;
+            const auto* name = std::get_if<std::string>(&command.arguments[0].data);
+            if (name) registry.insert_or_assign(*name, command.arguments[1]);
+        }
+    };
+    const eawr::sim::InlineExecutor executor;
+    auto before = take(cpn::create_galactic_story_scheduler(*content, config, false, {}, {}, reader));
+    std::vector<std::string> notes;
+    take(cpn::start_galactic_story_scripts(before, *content, notes));
+    auth::ServiceOptions options; options.time_tick = 1;
+    apply(take(before.service(executor, options)));
+    const auto instance = content->find("Reader.xml")->instance;
+    const auto mark = registry.find("SCORE_MARK");
+    expect(notes.empty() && mark != registry.end() && std::get_if<eawr::script::numeric::LuaNumber>(&mark->second.data)
+        && std::get_if<eawr::script::numeric::LuaNumber>(&mark->second.data)->repr == n9,
+        "the plot changed SCORE_MARK from the definitions' 7 to 9 in the registry");
+    const auto read = [&](auth::ScriptScheduler& scripts, std::uint64_t tick, std::uint64_t sequence) {
+        auth::ScriptEvent event;
+        event.key = {tick, auth::first_simulation_producer, instance, sequence};
+        event.target = instance; event.kind = auth::ScriptEvent::Kind::call; event.name = "Probe_Read";
+        take(scripts.submit_event(std::move(event)));
+        auth::ServiceOptions step; step.time_tick = tick;
+        apply(take(scripts.service(executor, step)));
+        return number_of(scripts, instance, "Seen");
+    };
+    expect(read(before, 2, 100) == n9, "before the save the plot reads its own value");
+    const auto saved = take(before.save());
+
+    // The restore: a new scheduler (its definitions run again), the saved scripts, the host's saved registry.
+    auto after = take(cpn::create_galactic_story_scheduler(*content, config, false, {}, {}, reader));
+    take(after.load(saved));
+    const auto start = content->initial_globals().find("SCORE_MARK");
+    expect(start != content->initial_globals().end() && std::get_if<eawr::script::numeric::LuaNumber>(&start->second.data)
+        && std::get_if<eawr::script::numeric::LuaNumber>(&start->second.data)->repr == n7,
+        "the restore ran the definitions again and they still start SCORE_MARK at 7");
+    expect(read(after, 3, 101) == n9, "the restored registry's 9 wins over the re-run definitions' 7");
+
+    // A key the registry lacks answers the starting value, as at a fresh start.
+    registry.erase("SCORE_MARK");
+    expect(read(after, 4, 102) == n7, "a key the registry lacks answers the starting value");
 }
 
 void pending_call_checkpoint(const std::filesystem::path& root) {
@@ -530,6 +966,39 @@ end
 }
 
 // WST-90..94: full faction lookup, registered-player order, local alias and per-script wrapper identity.
+// #7101/#7102: Get_Game_Mode answers the galactic mode's name in the story host (L-51), and Player.Is_Human answers whether the registered
+// player's seat is human-controlled. The mods call both from their first story pass (StoryUtil.GetPlayerAgnosticPlot, FTGULibrary, GCUtility*).
+void game_mode_and_human(const std::filesystem::path& root) {
+    cpn::GalacticStoryPlayers roster;
+    roster.factions = {"Copper", "Indigo"};
+    roster.players = {{9, "Copper", "Normal", true}, {7, "Indigo", "Normal", false}};
+    const std::string body = R"LUA(
+function main()
+    Mode = Get_Game_Mode()
+    CopperHuman = Find_Player("Copper").Is_Human()
+    IndigoHuman = Find_Player("Indigo").Is_Human()
+    IndigoKind = type(Find_Player("Indigo").Is_Human())
+    Alike = Find_Player("copper").Is_Human() == CopperHuman
+end
+)LUA";
+    std::string reference;
+    for (const std::size_t workers : std::vector<std::size_t>{1, 2, 4, 8}) {
+        const eawr::platform::ThreadWorkerAdapter threaded(workers);
+        auto run = run_scripted(root, "human_mode", body, false, 4242, threaded, roster);
+        expect(run.first.diagnostics.empty(), "Get_Game_Mode and Is_Human raise no diagnostic");
+        const auto mode = take(run.scripts.read_global(run.instance, "Mode"));
+        const auto kind = take(run.scripts.read_global(run.instance, "IndigoKind"));
+        expect(mode && std::get_if<std::string>(&mode->data) && *std::get_if<std::string>(&mode->data) == "Galactic",
+            "Get_Game_Mode answers Galactic in the galactic story host");
+        expect(flag_global(run, "CopperHuman") && !flag_global(run, "IndigoHuman") && flag_global(run, "Alike")
+            && kind && std::get_if<std::string>(&kind->data) && *std::get_if<std::string>(&kind->data) == "boolean",
+            "Is_Human is true for the human seat's player and a boolean false for an AI seat's, whichever way the faction is spelled");
+        const auto hash = take(run.scripts.state_hash());
+        if (reference.empty()) reference = hash;
+        expect(hash == reference, "the mode and human answers are equal on " + std::to_string(workers) + " workers");
+    }
+}
+
 void player_lookup(const std::filesystem::path& root) {
     // Synthetic names, including a loaded faction with no player; deliberately unsorted player IDs.
     const cpn::GalacticStoryPlayers roster{{"Copper", "Indigo", "Unseated", "Minor"},
@@ -779,7 +1248,13 @@ struct SpawnState final : auth::ImmediateEffectState {
         }
         return eawr::core::Result<auth::ValueList>::success({});
     }
-    eawr::core::Result<auth::ValueList> query(std::string_view, const auth::ValueList&) const override {
+    eawr::core::Result<auth::ValueList> query(std::string_view name, const auth::ValueList&) const override {
+        if (name == "galactic.object_find_all")
+            return eawr::core::Result<auth::ValueList>::success({auth::Value{std::vector<auth::Value>{auth::Value{auth::Handle{1, 42}}}}});
+        if (name == "galactic.object_valid") return eawr::core::Result<auth::ValueList>::success({auth::Value{true}});
+        if (name == "galactic.object_planet") return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{1, 9}}});
+        if (name == "galactic.object_type") return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{3, 70}}});
+        if (name == "galactic.object_owner") return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{2, 1}}});
         return eawr::core::Result<auth::ValueList>::success({});
     }
 };
@@ -791,6 +1266,197 @@ struct SpawnHost final : auth::ImmediateEffectHost {
     }
     eawr::core::Result<void> publish(std::unique_ptr<auth::ImmediateEffectState>) override { return eawr::core::Result<void>::success(); }
 };
+
+void object_registration_order(const std::filesystem::path& root) {
+    const auto data = root / "registration" / "loose";
+    std::filesystem::remove_all(root / "registration");
+    write(data / "scripts" / "gameobject" / "order.lua", R"LUA(
+function Base_Definitions() ServiceRate = 0 end
+function main() Object.Despawn(); coroutine.yield(true) end
+)LUA");
+    eawr::vfs::MountSpec mount; mount.layer_id = "object-registration"; mount.data_root = data;
+    const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+    const std::vector<std::pair<eawr::sim::galactic::TypeId, std::string>> types{{7, "Order"}};
+    const auto content = take(cpn::GalacticObjectScripts::load(files, types));
+    auth::SessionConfig config; config.galactic_clock = true;
+    auto scripts = take(content->create_scheduler(config));
+    take(cpn::register_galactic_object_bindings(scripts, {}));
+    auto log = std::make_shared<SpawnLog>();
+    take(scripts.set_immediate_effect_host(std::make_shared<SpawnHost>(log), 4));
+    eawr::sim::galactic::CensusObject first{}; first.id = 40; first.original_type = first.current_type = 7;
+    auto second = first; second.id = 99;
+    const eawr::sim::InlineExecutor executor;
+    take(content->reconcile(scripts, std::vector{first}, executor));
+    take(content->reconcile(scripts, std::vector{first, second}, executor));
+    take(content->service(scripts, 1, executor));
+    const auto saved = take(scripts.save());
+    auto restored = take(content->create_scheduler(config));
+    take(cpn::register_galactic_object_bindings(restored, {}));
+    auto restored_log = std::make_shared<SpawnLog>();
+    take(restored.set_immediate_effect_host(std::make_shared<SpawnHost>(restored_log), 4));
+    take(restored.load(saved));
+    take(content->service(scripts, 2, executor));
+    take(content->service(restored, 2, executor));
+    expect(log->actions.size() == 2 && log->actions[0].ends_with("/99") && log->actions[1].ends_with("/40")
+        && restored_log->actions == log->actions && take(restored.state_hash()) == take(scripts.state_hash()),
+        "object scripts run in reverse registration order before and after restore");
+}
+
+void object_binding_primitives() {
+    auth::SessionConfig config; config.galactic_clock = true;
+    auth::ModuleManifest modules;
+    take(modules.add("Object.lua", R"LUA(
+-- The data's own base library defines TestValid in Lua; a native binding of that name would refuse this load.
+function TestValid(wrapper)
+    if wrapper == nil then return false end
+    if wrapper.Is_Valid == nil then return false end
+    return wrapper.Is_Valid()
+end
+function main()
+    local t = Find_Object_Type('hero_probe')
+    TypeValid = t.Is_Valid()
+    GlobalTypeValid = TestValid(t)
+    NilValid = TestValid(nil)
+    Name = t.Get_Name()
+    Mode = Get_Game_Mode()
+    Count = 0
+    for _, object in pairs(Find_All_Objects_Of_Type(t)) do
+        if TestValid(object) and object.Get_Planet_Location() == Planet()
+            and object.Get_Type() == t and object.Get_Owner() == Player() then Count = Count + 1 end
+    end
+    local result = Spawn_Unit(t, Planet(), Player())
+    result[1].Prevent_AI_Usage(true)
+    result[1].Despawn()
+    Story_Event('Probe', Planet())
+    Flag = Check_Story_Flag(Player(), 'missing')
+end
+Create_Thread('main')
+)LUA"));
+    auto scripts = take(auth::ScriptScheduler::create(config, std::move(modules)));
+    cpn::GalacticStoryPlayers players{}; players.types = {{"Hero_Probe", 70}};
+    take(cpn::register_galactic_object_bindings(scripts, players, std::make_shared<cpn::GalacticStoryLink>()));
+    take(scripts.register_binding("Planet", [](auth::BindingContext&, const auth::ValueList&) {
+        return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{1, 9}}});
+    }));
+    take(scripts.register_binding("Player", [](auth::BindingContext&, const auth::ValueList&) {
+        return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{2, 1}}});
+    }));
+    auto log = std::make_shared<SpawnLog>();
+    take(scripts.set_immediate_effect_host(std::make_shared<SpawnHost>(log), 1));
+    take(scripts.create_instance(41, "Object.lua"));
+    auth::ServiceOptions options; options.time_tick = 1;
+    const auto report = take(scripts.service(eawr::sim::InlineExecutor{}, options));
+    expect(report.diagnostics.empty() && log->actions.size() == 3
+        && log->actions[0].starts_with("galactic.spawn_unit")
+        && log->actions[1].starts_with("galactic.story_prevent_ai_usage")
+        && log->actions[2].starts_with("galactic.object_despawn"),
+        "object bindings route placement, AI usage and despawn to the native owner");
+    expect(report.commands.size() == 1 && report.commands.front().verb == "galactic.story_event",
+        "object story events enter the world story command stream");
+    const auto mode = take(scripts.read_global(41, "Mode"));
+    const auto name = take(scripts.read_global(41, "Name"));
+    const auto count = take(scripts.read_global(41, "Count"));
+    const auto flag = take(scripts.read_global(41, "Flag"));
+    const auto type_valid = take(scripts.read_global(41, "TypeValid"));
+    const auto global_type_valid = take(scripts.read_global(41, "GlobalTypeValid"));
+    const auto nil_valid = take(scripts.read_global(41, "NilValid"));
+    expect(mode && name && std::get<std::string>(mode->data) == "Galactic"
+        && std::get<std::string>(name->data) == "Hero_Probe", "object bindings preserve mode and authored type names");
+    expect(count && std::get<eawr::script::numeric::LuaNumber>(count->data) == eawr::script::numeric::LuaNumber(1),
+        "object enumeration and location reads reach the native owner");
+    expect(flag && !std::get<bool>(flag->data), "object scripts read story flags from the world story link");
+    expect(type_valid && std::get<bool>(type_valid->data), "loaded type wrappers satisfy TestValid");
+    expect(global_type_valid && std::get<bool>(global_type_valid->data) && nil_valid && !std::get<bool>(nil_valid->data),
+        "TestValid checks types and nil using the object host");
+}
+
+void object_perception_unavailable() {
+    auth::SessionConfig config; config.galactic_clock = true;
+    auth::ModuleManifest modules;
+    take(modules.add("Unavailable.lua", "function main() EvaluatePerception('x', nil) end\nCreate_Thread('main')\n"));
+    auto scripts = take(auth::ScriptScheduler::create(config, std::move(modules)));
+    take(cpn::register_galactic_object_bindings(scripts, {}));
+    take(scripts.create_instance(41, "Unavailable.lua"));
+    auth::ServiceOptions options; options.time_tick = 1;
+    const auto report = take(scripts.service(eawr::sim::InlineExecutor{}, options));
+    expect(!report.load_notes.empty() && report.load_notes.front().message.find("EvaluatePerception is not available") != std::string::npos
+        && !report.removed_instances.empty(), "unavailable world perception faults and retires the object script");
+}
+
+void object_sale_bindings() {
+    auth::SessionConfig config; config.galactic_clock = true;
+    auth::ModuleManifest modules;
+    take(modules.add("Sale.lua", R"LUA(
+function main()
+    local cost = Find_Object_Type('Hero_Probe').Get_Build_Cost()
+    Refund = cost / 3 + 1
+    Player().Give_Money(Refund)
+end
+Create_Thread('main')
+)LUA"));
+    auto scripts = take(auth::ScriptScheduler::create(config, std::move(modules)));
+    cpn::GalacticStoryPlayers players{}; players.types = {{"Hero_Probe", 70}};
+    players.type_build_costs.emplace(70, take(eawr::sim::math::Fixed::from_integer(900)));
+    take(cpn::register_galactic_object_bindings(scripts, players, std::make_shared<cpn::GalacticStoryLink>()));
+    take(scripts.register_binding("Player", [](auth::BindingContext&, const auth::ValueList&) {
+        return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{2, 1}}});
+    }));
+    auto log = std::make_shared<SpawnLog>();
+    take(scripts.set_immediate_effect_host(std::make_shared<SpawnHost>(log), 1));
+    take(scripts.create_instance(41, "Sale.lua"));
+    auth::ServiceOptions options; options.time_tick = 1;
+    const auto report = take(scripts.service(eawr::sim::InlineExecutor{}, options));
+    const auto refund = take(scripts.read_global(41, "Refund"));
+    expect(report.diagnostics.empty() && refund
+        && std::get<eawr::script::numeric::LuaNumber>(refund->data) == eawr::script::numeric::LuaNumber(301)
+        && log->actions.size() == 1 && log->actions.front().starts_with("galactic.give_money"),
+        "object scripts compute the authored sale refund and send it to the world credit owner");
+}
+
+void attached_object_calls_native(const std::filesystem::path& root) {
+    std::filesystem::remove_all(root);
+    const auto data = root / "loose";
+    write(data / "scripts" / "library" / "helper.lua", R"LUA(
+function CountAt(type_name, planet)
+    local count = 0
+    for _, object in pairs(Find_All_Objects_Of_Type(Find_Object_Type(type_name))) do
+        if object.Is_Valid() and object.Get_Planet_Location() == planet then count = count + 1 end
+    end
+    return count
+end
+)LUA");
+    write(data / "scripts" / "gameobject" / "beacon.lua", R"LUA(
+require('helper')
+function Base_Definitions() Object = nil; _ScriptMessage('start'); ServiceRate = 0 end
+function main()
+    local planet = Object.Get_Planet_Location()
+    if CountAt('Hero_Probe', planet) == 1 then
+        local created = Spawn_Unit(Find_Object_Type('Hero_Probe'), planet, Object.Get_Owner())
+        created[1].Prevent_AI_Usage(true)
+    end
+    Object.Service_Wrapper()
+    coroutine.yield(true)
+end
+)LUA");
+    eawr::vfs::MountSpec mount; mount.layer_id = "attached-object"; mount.data_root = data;
+    const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+    const std::vector<std::pair<eawr::sim::galactic::TypeId, std::string>> types{{7, "Beacon"}};
+    const auto content = take(cpn::GalacticObjectScripts::load(files, types));
+    auth::SessionConfig config; config.galactic_clock = true;
+    auto scripts = take(content->create_scheduler(config));
+    cpn::GalacticStoryPlayers players{}; players.types = {{"Hero_Probe", 70}}; players.planets = {{"ProbePlanet", 9}};
+    take(cpn::register_galactic_object_bindings(scripts, players, std::make_shared<cpn::GalacticStoryLink>()));
+    auto log = std::make_shared<SpawnLog>();
+    take(scripts.set_immediate_effect_host(std::make_shared<SpawnHost>(log), 8));
+    eawr::sim::galactic::CensusObject actor{}; actor.id = 42; actor.original_type = actor.current_type = 7;
+    const eawr::sim::InlineExecutor executor;
+    expect(take(content->reconcile(scripts, std::vector{actor}, executor)).empty(), "attach a scripted orbital fixture");
+    expect(take(content->service(scripts, 1, executor)).diagnostics.empty(), "prepare the attached object script");
+    expect(take(content->service(scripts, 2, executor)).diagnostics.empty(), "pump the attached object script");
+    expect(log->actions.size() == 2 && log->actions[0].starts_with("galactic.spawn_unit")
+        && log->actions[1].starts_with("galactic.story_prevent_ai_usage"),
+        "a data-authored object script reaches the placement and AI-usage callbacks");
+}
 
 cpn::GalacticStoryPlayers spawn_roster() {
     cpn::GalacticStoryPlayers players{};
@@ -965,13 +1631,20 @@ function main()
     Reached = true
 end
 )LUA", prevent_log);
-    expect(!prevent.first.diagnostics.empty() && prevent.scripts.instances().empty()
+    const auto thread_ended = [](const Scripted& run) {
+        const auto slots = run.scripts.thread_slots(run.instance);
+        return slots && std::none_of(slots.value().begin(), slots.value().end(), [](bool live) { return live; });
+    };
+    expect(!prevent.first.diagnostics.empty() && prevent.scripts.retired_instances().empty() && thread_ended(prevent)
+        && prevent.first.diagnostics.front().message.find("thread ") == 0
         && std::none_of(prevent_log->actions.begin(), prevent_log->actions.end(), [](const auto& row) { return row.rfind("galactic.story_prevent", 0) == 0; }),
         "Prevent_AI_Usage without a Boolean is a script error and changes nothing");
 
     // Without the ordered native shadow (no AI runtime) creation faults by name instead of pretending.
     auto bare = run_spawn(root, "spawn_no_host", good, nullptr);
-    expect(!bare.first.diagnostics.empty() && bare.scripts.instances().empty(), "Spawn_Unit without a native shadow host faults and creates nothing");
+    expect(!bare.first.diagnostics.empty() && bare.scripts.retired_instances().empty() && thread_ended(bare)
+        && bare.first.diagnostics.front().message.find("native shadow") != std::string::npos,
+        "Spawn_Unit without a native shadow host is a script error naming the missing host: its thread ends before anything is created");
 }
 } // namespace
 
@@ -979,18 +1652,27 @@ int case_galactic_story_script_host_tests(int argc, char** argv) {
     try {
         engine_requests_callbacks();
         const auto root = argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-script-host");
+        object_modules(root / "object-modules");
         host(root);
         pending_call_checkpoint(root);
+        scoring_definitions(root / "scoring");
+        scoring_restore(root / "scoring-restore");
         distribution_draw_bits(root / "random");
         distribution_contract(root / "random");
         debug_sinks(root / "random");
         random_streams(root / "random");
         distribution_state(root / "random");
         player_lookup(root / "players");
+        game_mode_and_human(root / "human-mode");
         planet_lookup(root / "planets");
         live_object_and_difficulty(root / "objects");
         advisor_hints_stub(root / "hints");
         spawn_bindings(root / "spawn");
+        object_binding_primitives();
+        object_perception_unavailable();
+        object_sale_bindings();
+        object_registration_order(root);
+        attached_object_calls_native(root / "attached-object");
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

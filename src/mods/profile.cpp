@@ -98,6 +98,7 @@ std::string profile_to_json(const Profile& p) {
     return out + "],\"launch\":{\"mode\":" + json_quote(p.launch.mode) + ",\"render_thread\":"
         + json_quote(p.launch.render_thread) + ",\"frame_rate_limit\":"
         + (p.launch.frame_rate_limit ? std::to_string(*p.launch.frame_rate_limit) : "null")
+        + (p.launch.no_fog ? ",\"no_fog\":true" : "") // written only when on: profiles of other players stay byte-identical
         + "},\"accepted\":{\"chain_fingerprint\":" + json_quote(p.accepted.chain_fingerprint)
         + ",\"load_check\":" + json_quote(p.accepted.load_check) + "}}";
 }
@@ -141,6 +142,10 @@ ProfileResult profile_from_json(std::string_view text) {
                 if (!integer(*cap, -1, std::numeric_limits<int>::max())) return failed(codes::profile_launch, "Invalid frame_rate_limit (-1..INT_MAX)");
                 p.launch.frame_rate_limit = static_cast<int>(cap->number);
             }
+        }
+        if (const auto* fog = launch->member("no_fog")) {
+            if (fog->kind != JsonValue::Kind::boolean) return failed(codes::profile_launch, "Invalid no_fog (true or false)");
+            p.launch.no_fog = fog->boolean;
         }
     }
     if (const auto* a = v.member("accepted")) {

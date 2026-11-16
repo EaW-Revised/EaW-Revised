@@ -53,6 +53,10 @@ namespace data = eawr::data::ui;
 
 namespace {
 
+[[nodiscard]] const char* supersampling_name(const int level) noexcept {
+    return level == 2 ? "2x" : level == 1 ? "1.5x" : "off";
+}
+
 // Above the loading screen (98) and under the performance overlay and capture pointer (100): the
 // screen is modal, so nothing under it takes input (UI-I1).
 constexpr int screen_layer = 99;
@@ -378,6 +382,7 @@ void EawrOptionsScreen::close_screen() {
 }
 
 void EawrOptionsScreen::rebuild_page() {
+    if (page_ != Page::keyboard) capturing_.reset(); // a waiting binding capture never outlives its page
     clear_page();
     Resources& resources = *resources_;
     state_ = std::make_unique<PageState>();
@@ -478,7 +483,7 @@ void EawrOptionsScreen::rebuild_page() {
     if (page_ == Page::keyboard) {
         // ST-K3: append the owner-requested preset to the loaded keyboard page.
         const int top = service.rect.height;
-        service.rect.height += 132;
+        service.rect.height += 170;
         data::DialogControl label;
         label.statement = "LTEXT"; label.id_name = "IDC_CAMERA_KEYS_LABEL";
         label.text = "Camera keys"; label.rect = {12, top + 8, service.rect.width / 3 - 18, 20};
@@ -487,44 +492,107 @@ void EawrOptionsScreen::rebuild_page() {
         combo.statement = "COMBOBOX"; combo.id_name = "IDC_CAMERA_KEYS";
         combo.rect = {service.rect.width / 3, top + 4, service.rect.width * 2 / 3 - 12, 26};
         combo.style = {"WS_VISIBLE", "WS_TABSTOP", "CBS_DROPDOWNLIST"}; service.controls.push_back(combo);
+        // #5131: a press-to-bind button per action; the next key press is the binding.
+        data::DialogControl bind;
+        bind.statement = "PUSHBUTTON"; bind.style = {"WS_VISIBLE", "WS_TABSTOP"};
         for (std::size_t action = 0; action < model::selection_commands.size(); ++action) {
             label.id_name = action == 0 ? "IDC_SELECTION_ALL_LABEL" : "IDC_SELECTION_SCREEN_LABEL";
             label.text = action == 0 ? "All own units" : "Own units on screen";
-            label.rect = {12, top + 40 + static_cast<int>(action) * 32, service.rect.width / 2 - 18, 20};
+            label.rect = {12, top + 40 + static_cast<int>(action) * 34, service.rect.width / 2 - 18, 20};
             service.controls.push_back(label);
-            combo.id_name = action == 0 ? "IDC_SELECTION_ALL_KEY" : "IDC_SELECTION_SCREEN_KEY";
-            combo.rect = {service.rect.width / 2, top + 36 + static_cast<int>(action) * 32, service.rect.width / 2 - 12, 26};
-            service.controls.push_back(combo);
+            bind.id_name = action == 0 ? "IDC_SELECTION_ALL_KEY" : "IDC_SELECTION_SCREEN_KEY";
+            bind.text = capturing_ == action ? "Press a key..." : keyboard_key_label(model::selection_key(draft_, action));
+            bind.rect = {service.rect.width / 2, top + 36 + static_cast<int>(action) * 34, service.rect.width / 2 - 12, 26};
+            service.controls.push_back(bind);
         }
         data::DialogControl defaults;
         defaults.statement = "PUSHBUTTON"; defaults.id_name = "IDC_SELECTION_KEYS_DEFAULTS";
         defaults.text = "Reset selection keys";
-        defaults.rect = {12, top + 102, service.rect.width / 2 - 18, 24};
+        defaults.rect = {12, top + 108, service.rect.width / 2 - 18, 24};
         defaults.style = {"WS_VISIBLE", "WS_TABSTOP"}; service.controls.push_back(defaults);
         defaults.id_name = "IDC_SELECTION_KEYS_CANCEL"; defaults.text = "Cancel";
         defaults.rect.x = service.rect.width / 2;
         service.controls.push_back(defaults);
+        data::DialogControl status;
+        status.statement = "LTEXT"; status.id_name = "IDC_SELECTION_KEYS_STATUS";
+        status.text = selection_message_.empty() ? "Click a binding, then press its key." : selection_message_;
+        status.rect = {12, top + 146, service.rect.width - 24, 20};
+        status.style = {"WS_VISIBLE"}; service.controls.push_back(status);
     }
     if (page_ == Page::video) {
-        // ST-P2 is an owner-requested addition to the loaded Graphics dialog.
-        const int top = service.rect.height;
-        service.rect.height += 32;
+        // The AA slider's top end is High (the removed Max level folded into High plus supersampling).
+        for (auto& control : service.controls) {
+            if (control.id_name == "IDC_ANTI_ALIAS_MAX_STATIC") control.text = "High";
+        }
+        // ST-P2 is an owner-requested addition to the loaded Graphics dialog. The row sits in the free band
+        // between the check boxes and the Cancel / Apply / Accept buttons, so the retail layout keeps its size.
+        int rows_bottom = 0;
+        int buttons_top = service.rect.height;
+        for (const auto& control : service.controls) {
+            if (control.id_name == "IDC_CANCEL" || control.id_name == "IDC_APPLY" || control.id_name == "IDC_OK") {
+                buttons_top = std::min(buttons_top, control.rect.y);
+            } else if (control.id_name != "IDC_STATIC_MEDIUM" && control.id_name != "IDC_DEVICE_DESC_STATIC") {
+                rows_bottom = std::max(rows_bottom, control.rect.y + control.rect.height);
+            }
+        }
+        const int row_height = 22;
+        int row_top = rows_bottom + (buttons_top - rows_bottom - row_height) / 2;
+        if (buttons_top - rows_bottom < row_height + 4) {
+            // No free band (a mod's dialog is tighter): grow the dialog and move the buttons down.
+            const int grow = row_height + 8 - (buttons_top - rows_bottom);
+            for (auto& control : service.controls) {
+                if (control.rect.y >= buttons_top) control.rect.y += grow;
+            }
+            service.rect.height += grow;
+            row_top = rows_bottom + 4;
+        }
         data::DialogControl label;
         label.statement = "LTEXT"; label.id_name = "IDC_FRAME_RATE_LIMIT_LABEL";
         label.text = "Frame-rate limit";
-        label.rect = {12, top + 6, service.rect.width / 2 - 18, 18};
+        label.rect = {22, row_top + 2, service.rect.width / 2 - 28, 18};
         label.style = {"WS_VISIBLE"};
         service.controls.push_back(label);
         data::DialogControl combo;
         combo.statement = "COMBOBOX"; combo.id_name = "IDC_FRAME_RATE_LIMIT";
-        combo.rect = {service.rect.width / 2, top + 4, service.rect.width / 2 - 12, 22};
+        combo.rect = {264, row_top, service.rect.width - 264 - 14, row_height};
         combo.style = {"WS_VISIBLE", "WS_TABSTOP", "CBS_DROPDOWNLIST"};
         service.controls.push_back(combo);
+    }
+    if (page_ == Page::advanced_video) {
+        // Supersampling is a slider here, one row below the authored detail sliders (the checkboxes and
+        // buttons below move down one row). End labels are the first and last step.
+        constexpr int row_step = 30;
+        int last_slider_top = 0;
+        for (const auto& control : service.controls) {
+            if (control.id_name == "IDC_ENVIRONMENT_DETAIL_SLIDER") last_slider_top = control.rect.y;
+        }
+        if (last_slider_top > 0) {
+            const int slider_top = last_slider_top + row_step;
+            for (auto& control : service.controls) {
+                if (control.rect.y >= slider_top - 5) control.rect.y += row_step;
+            }
+            service.rect.height += row_step;
+            data::DialogControl label;
+            label.statement = "LTEXT"; label.id_name = "IDC_SUPERSAMPLING_LABEL";
+            label.text = "Supersampling"; label.rect = {9, slider_top + 3, 173, 8};
+            label.style = {"WS_VISIBLE"}; service.controls.push_back(label);
+            label.id_name = "IDC_SUPERSAMPLING_OFF_STATIC"; label.text = "Off"; label.rect = {181, slider_top + 3, 48, 8};
+            service.controls.push_back(label);
+            label.id_name = "IDC_SUPERSAMPLING_MAX_STATIC"; label.text = "2x"; label.rect = {489, slider_top + 3, 75, 8};
+            service.controls.push_back(label);
+            data::DialogControl slider;
+            slider.statement = "CONTROL"; slider.class_name = "msctls_trackbar32";
+            slider.id_name = "IDC_SUPERSAMPLING_SLIDER";
+            slider.rect = {230, slider_top, 251, 14};
+            slider.style = {"TBS_BOTH", "TBS_NOTICKS", "WS_TABSTOP"};
+            service.controls.push_back(slider);
+        }
     }
     if (page_ == Page::performance || page_ == Page::tweaks) {
         // Project-owned page; reuse the loaded dialog's skin and button styles.
         data::Dialog performance = service;
-        performance.rect.height = page_ == Page::tweaks ? 282 : 202;
+        // Performance: four rows end at 178, the footer follows at 192 (Tweaks: rows end at 238).
+        performance.rect.height = page_ == Page::tweaks ? 314 : 262;
         performance.controls.clear();
         const int width = performance.rect.width;
         const auto label = [&](const char* id, const char* caption, const data::RcRect rect) {
@@ -574,6 +642,9 @@ void EawrOptionsScreen::rebuild_page() {
             check.id_name = "IDC_FIT_RADAR_TO_GALAXY";
             check.text = "TEXT_EAWR_FIT_RADAR_TO_GALAXY"; check.rect.y = 182;
             performance.controls.push_back(check);
+            check.id_name = "IDC_SPACE_PAUSES_GALACTIC";
+            check.text = "TEXT_EAWR_SPACE_PAUSES_GALACTIC"; check.rect.y = 214;
+            performance.controls.push_back(check);
         }
 
         const auto button = [&](const char* id, const char* caption, const int column, const int row) {
@@ -591,7 +662,7 @@ void EawrOptionsScreen::rebuild_page() {
             control.id_name = id; control.id.reset();
             if (caption != nullptr) control.text = caption;
             const int button_width = (width - 36) / 2;
-            control.rect = {12 + column * (button_width + 12), (page_ == Page::tweaks ? 212 : 132) + row * 30, button_width, 24};
+            control.rect = {12 + column * (button_width + 12), (page_ == Page::tweaks ? 244 : 192) + row * 30, button_width, 24};
             performance.controls.push_back(std::move(control));
         };
         button("IDC_RESTORE_DEFAULT", "TEXT_EAWR_DEFAULTS", 0, 0);
@@ -623,7 +694,7 @@ void EawrOptionsScreen::rebuild_page() {
             const std::string label = std::string(id) + "_LABEL";
             add("LTEXT", label.c_str(), caption, row, true); add("EDITTEXT", id, nullptr, row++, false);
         }
-        add("CONTROL", "IDC_ONLINE_RELAY_ONLY", "Require relay for online games", row++, true);
+        add("CONTROL", "IDC_ONLINE_RELAY_ONLY", "Hide my IP: always use a relay", row++, true);
         service.controls.back().class_name = "Button";
         service.controls.back().style.push_back("BS_AUTOCHECKBOX");
         add("LTEXT", "IDC_ONLINE_SERVICE_ERROR", "", row, true);
@@ -707,14 +778,19 @@ void EawrOptionsScreen::rebuild_page() {
         if (gadget.kind == "group") state.dialog->frame->move_child(gadget.control, 0);
     }
     if (page_ == Page::performance) {
-        // Keep the footer fixed while the row area can hold more than six settings.
+        // The panel is authored tall enough for every row, so the rows show without a scroll bar. The
+        // scroll container stays as the fallback: when the live controls are taller than the authored
+        // area (a thick skin) the panel grows first, and only a screen too short to hold it scrolls.
         Control* frame = state.dialog->frame;
         const float scale = frame->get_size().y / static_cast<float>(service.rect.height);
         auto* scroll = memnew(ScrollContainer);
         state.performance_scroll = scroll;
         scroll->set_name("PerformanceRows");
         scroll->set_position(Vector2(0.0F, 42.0F * scale));
-        scroll->set_size(Vector2(frame->get_size().x, 82.0F * scale));
+        const Control* footer = state.controls["IDC_RESTORE_DEFAULT"];
+        const float footer_top = footer != nullptr ? footer->get_position().y : 132.0F * scale;
+        const float rows_height = std::max(0.0F, footer_top - 8.0F * scale - scroll->get_position().y);
+        scroll->set_size(Vector2(frame->get_size().x, rows_height));
         scroll->set_horizontal_scroll_mode(ScrollContainer::SCROLL_MODE_DISABLED);
         frame->add_child(scroll);
         auto* rows = memnew(Control);
@@ -731,6 +807,19 @@ void EawrOptionsScreen::rebuild_page() {
             }
         }
         rows->set_custom_minimum_size(Vector2(frame->get_size().x - 20.0F * scale, content_bottom));
+        const float shortfall = content_bottom - rows_height;
+        if (shortfall > 0.0F) {
+            const float room = std::max(0.0F, size.y * 0.96F - frame->get_size().y);
+            const float grow = std::min(shortfall, room);
+            if (grow > 0.0F) {
+                for (const char* id : {"IDC_RESTORE_DEFAULT", "IDC_APPLY", "IDC_CANCEL", "IDC_OK"}) {
+                    if (Control* button = state.controls[id]) button->set_position(button->get_position() + Vector2(0.0F, grow));
+                }
+                frame->set_size(Vector2(frame->get_size().x, frame->get_size().y + grow));
+                frame->set_position(Vector2(frame->get_position().x, (size.y - frame->get_size().y) / 2.0F));
+                scroll->set_size(Vector2(frame->get_size().x, rows_height + grow));
+            }
+        }
         scroll->call_deferred("set_v_scroll", performance_scroll_);
     }
     wire_page();
@@ -970,12 +1059,13 @@ void EawrOptionsScreen::wire_page() {
         if (has("IDC_HARDWARE_MOUSE")) check("IDC_HARDWARE_MOUSE")->set_pressed_no_signal(video.hardware_cursor);
         if (has("IDC_WIDESCREEN")) check("IDC_WIDESCREEN")->set_pressed_no_signal(video.widescreen);
         if (auto* aa = has("IDC_ANTI_ALIAS_SLIDER") ? slider("IDC_ANTI_ALIAS_SLIDER") : nullptr) {
-            // ST-P1: the slider is the render profile, Off the retail look and Max the enhanced one.
+            // ST-P1: four AA levels, Off / Low / Medium / High.
             const RenderProfile shown = resolve_render_profile(video.render_profile, active_render_profile());
+            aa->set_tooltip_text("Off / Low / Medium / High");
             aa->set_min(0.0);
-            aa->set_max(1.0);
+            aa->set_max(static_cast<double>(aa_slider_profiles.size() - 1));
             aa->set_step(1.0);
-            aa->set_value_no_signal(shown == RenderProfile::enhanced ? 1.0 : 0.0);
+            aa->set_value_no_signal(aa_slider_index(shown));
         }
         if (auto* detail = has("IDC_DETAIL_LEVEL_SLIDER") ? slider("IDC_DETAIL_LEVEL_SLIDER") : nullptr) {
             detail->set_min(0.0);
@@ -1041,6 +1131,7 @@ void EawrOptionsScreen::wire_page() {
             combo->set_tooltip_text(text("Select own mobile units without heroes. Bind keys under Controls."));
         }
         if (has("IDC_FIT_RADAR_TO_GALAXY")) check("IDC_FIT_RADAR_TO_GALAXY")->set_pressed_no_signal(draft_.gameplay.fit_radar_to_galaxy);
+        if (has("IDC_SPACE_PAUSES_GALACTIC")) check("IDC_SPACE_PAUSES_GALACTIC")->set_pressed_no_signal(draft_.gameplay.space_pauses_galactic);
         if (has("IDC_ANIMATED_LOADING_BACKGROUND")) check("IDC_ANIMATED_LOADING_BACKGROUND")->set_pressed_no_signal(draft_.gameplay.animated_loading_background);
         if (has("IDC_HOVER_OWNER_NAMES")) check("IDC_HOVER_OWNER_NAMES")->set_pressed_no_signal(model::hover_owner_names_enabled(draft_.gameplay, options_.multiplayer));
         if (has("IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING")) check("IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING")->set_pressed_no_signal(draft_.gameplay.reinforcement_areas_only_while_placing);
@@ -1085,7 +1176,14 @@ void EawrOptionsScreen::wire_page() {
                 }
             }
         }
-        // Apply works for the particle slider and heat distortions only; the other controls stay inert.
+        if (auto* ss = has("IDC_SUPERSAMPLING_SLIDER") ? slider("IDC_SUPERSAMPLING_SLIDER") : nullptr) {
+            ss->set_min(0.0);
+            ss->set_max(static_cast<double>(model::supersampling_scales.size() - 1));
+            ss->set_step(1.0);
+            ss->set_value_no_signal(video.supersampling);
+            ss->set_tooltip_text(text("Off / 1.5x / 2x. Applies when you press Apply or Accept."));
+        }
+        // Apply works for the particle slider, heat distortions and supersampling; the other controls stay inert.
         if (has("IDC_APPLY")) {
             auto* apply = Object::cast_to<BaseButton>(state.controls["IDC_APPLY"]);
             apply->set_disabled(true);
@@ -1125,16 +1223,9 @@ void EawrOptionsScreen::wire_page() {
         break;
     }
     case Page::keyboard: {
-        for (std::size_t action = 0; action < model::selection_commands.size(); ++action) {
-            const char* id = action == 0 ? "IDC_SELECTION_ALL_KEY" : "IDC_SELECTION_SCREEN_KEY";
-            if (auto* combo = Object::cast_to<EawrUiCombo>(state.controls[id])) {
-                for (std::size_t index = 0; index < model::selection_key_choices.size(); ++index) {
-                    const auto chord = model::selection_key_choices[index];
-                    combo->add_item(text(keyboard_key_label(chord)));
-                    if (chord == model::selection_key(draft_, action)) combo->select(static_cast<int>(index));
-                }
-                combo->set_tooltip_text(text("Only free chords are listed; the two actions must use different keys."));
-            }
+        for (const char* id : {"IDC_SELECTION_ALL_KEY", "IDC_SELECTION_SCREEN_KEY"}) {
+            if (has(id)) state.controls[id]->set_tooltip_text(text(
+                "Click, then press a letter (with Ctrl if you like). Esc cancels. Keys other commands use are refused."));
         }
         if (auto* combo = Object::cast_to<EawrUiCombo>(state.controls["IDC_CAMERA_KEYS"])) {
             combo->clear();
@@ -1215,10 +1306,13 @@ void EawrOptionsScreen::wire_page() {
 void EawrOptionsScreen::update_advanced_dirty() {
     dirty_ = draft_.video.detail[model::detail_slot_particle] != committed_.video.detail[model::detail_slot_particle]
         || draft_.video.detail[model::detail_slot_heat] != committed_.video.detail[model::detail_slot_heat];
+    const bool battle_change = dirty_;
+    dirty_ = dirty_ || draft_.video.supersampling != committed_.video.supersampling;
     if (auto* apply = Object::cast_to<BaseButton>(state_->controls["IDC_APPLY"])) {
         apply->set_disabled(!dirty_);
-        apply->set_tooltip_text(text(dirty_ ? "Particle detail and heat distortions take effect when the next battle starts."
-                                            : "Nothing to apply yet."));
+        apply->set_tooltip_text(text(!dirty_ ? "Nothing to apply yet."
+            : battle_change ? "Particle detail and heat distortions take effect when the next battle starts."
+                            : ""));
     }
 }
 
@@ -1226,6 +1320,7 @@ void EawrOptionsScreen::update_tweaks_dirty() {
     dirty_ = draft_.selection_hotkeys != committed_.selection_hotkeys
         || draft_.selection_hotkeys_authored != committed_.selection_hotkeys_authored
         || draft_.gameplay.fit_radar_to_galaxy != committed_.gameplay.fit_radar_to_galaxy
+        || draft_.gameplay.space_pauses_galactic != committed_.gameplay.space_pauses_galactic
         || draft_.gameplay.animated_loading_background != committed_.gameplay.animated_loading_background
         || draft_.gameplay.hover_owner_names != committed_.gameplay.hover_owner_names
         || draft_.gameplay.reinforcement_areas_only_while_placing != committed_.gameplay.reinforcement_areas_only_while_placing;
@@ -1259,9 +1354,10 @@ void EawrOptionsScreen::on_toggled(const bool pressed, String id) {
         update_advanced_dirty();
         return;
     }
-    if (page_ == Page::tweaks && (name == "IDC_HOVER_OWNER_NAMES" || name == "IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING" || name == "IDC_ANIMATED_LOADING_BACKGROUND" || name == "IDC_FIT_RADAR_TO_GALAXY")) {
+    if (page_ == Page::tweaks && (name == "IDC_HOVER_OWNER_NAMES" || name == "IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING" || name == "IDC_ANIMATED_LOADING_BACKGROUND" || name == "IDC_FIT_RADAR_TO_GALAXY" || name == "IDC_SPACE_PAUSES_GALACTIC")) {
         if (name == "IDC_HOVER_OWNER_NAMES") draft_.gameplay.hover_owner_names = pressed ? 1 : 0;
         else if (name == "IDC_FIT_RADAR_TO_GALAXY") draft_.gameplay.fit_radar_to_galaxy = pressed;
+        else if (name == "IDC_SPACE_PAUSES_GALACTIC") draft_.gameplay.space_pauses_galactic = pressed;
         else if (name == "IDC_ANIMATED_LOADING_BACKGROUND") draft_.gameplay.animated_loading_background = pressed;
         else draft_.gameplay.reinforcement_areas_only_while_placing = pressed;
         update_tweaks_dirty();
@@ -1308,6 +1404,12 @@ void EawrOptionsScreen::on_value_changed(const double value, String id) {
         update_advanced_dirty();
         return;
     }
+    if (page_ == Page::advanced_video && name == "IDC_SUPERSAMPLING_SLIDER") {
+        draft_.video.supersampling = std::clamp(static_cast<int>(value + 0.5), 0,
+                                                static_cast<int>(model::supersampling_scales.size()) - 1);
+        update_advanced_dirty();
+        return;
+    }
     if (page_ == Page::video && is_video_edit(name)) {
         if (name == "IDC_ANTI_ALIAS_SLIDER") state_->profile_touched = true;
         dirty_ = true;
@@ -1326,16 +1428,6 @@ void EawrOptionsScreen::on_item_selected(const int64_t index, String id) {
         auto* edit = found != state_->controls.end() ? Object::cast_to<LineEdit>(found->second) : nullptr;
         if (edit != nullptr && index >= 0 && index < static_cast<int64_t>(state_->saves.size()))
             edit->set_text(text(state_->saves[static_cast<std::size_t>(index)]));
-        return;
-    }
-    if (page_ == Page::keyboard && (name == "IDC_SELECTION_ALL_KEY" || name == "IDC_SELECTION_SCREEN_KEY")) {
-        const std::size_t action = name == "IDC_SELECTION_ALL_KEY" ? 0 : 1;
-        if (index >= 0 && index < static_cast<int64_t>(model::selection_key_choices.size())) {
-            if (!model::set_selection_key(draft_, action, model::selection_key_choices[static_cast<std::size_t>(index)]))
-                notes_.push_back("Selection binding conflict: choose a different key for each action.");
-        }
-        dirty_ = draft_.keys != committed_.keys || draft_.camera_wasd != committed_.camera_wasd;
-        rebuild_page();
         return;
     }
     if (page_ == Page::tweaks && name == "IDC_SELECTION_HOTKEYS" && (index == 0 || index == 1)) {
@@ -1434,12 +1526,15 @@ void EawrOptionsScreen::apply_committed(const model::VideoSettings& previous_vid
     // last committed values, advancing the baseline after Apply as well as Accept.
     if (window_changed || targets.vsync || targets.texture_detail) apply_video(video, targets, report);
     // The render profile is the player's explicit choice only; "automatic" leaves the run's own.
-    if (video.render_profile != previous_video.render_profile
-        && video.render_profile != model::RenderProfileSetting::automatic) {
+    if ((video.render_profile != previous_video.render_profile
+         && video.render_profile != model::RenderProfileSetting::automatic)
+        || video.supersampling != previous_video.supersampling) {
         if (auto* tree = Object::cast_to<SceneTree>(Engine::get_singleton()->get_main_loop())) {
-            const RenderProfile profile = resolve_render_profile(committed_.video.render_profile, RenderProfile::retail);
-            apply_render_profile(*tree->get_root(), profile);
-            report.applied.emplace_back(std::string("render profile: ") + std::string(render_profile_name(profile)));
+            const RenderProfile profile = resolve_render_profile(video.render_profile, active_render_profile());
+            apply_render_profile(*tree->get_root(), profile,
+                model::supersampling_scales[static_cast<std::size_t>(video.supersampling)]);
+            report.applied.emplace_back(std::string("render profile: ") + std::string(render_profile_name(profile))
+                                        + ", supersampling " + supersampling_name(video.supersampling));
         }
     }
     last_apply_ = std::move(report);
@@ -1478,14 +1573,15 @@ void EawrOptionsScreen::sync_draft_from_controls() {
         }
         if (state.profile_touched) {
             if (const auto v = value("IDC_ANTI_ALIAS_SLIDER")) {
-                draft_.video.render_profile = *v > 0.5 ? model::RenderProfileSetting::enhanced
-                                                       : model::RenderProfileSetting::retail;
+                draft_.video.render_profile = setting_of(aa_slider_profiles[
+                    static_cast<std::size_t>(std::clamp(*v, 0.0, static_cast<double>(aa_slider_profiles.size() - 1)))]);
             }
         }
         break;
     }
     case Page::tweaks:
         if (const auto v = value("IDC_FIT_RADAR_TO_GALAXY")) draft_.gameplay.fit_radar_to_galaxy = *v > 0.5;
+        if (const auto v = value("IDC_SPACE_PAUSES_GALACTIC")) draft_.gameplay.space_pauses_galactic = *v > 0.5;
         if (const auto v = value("IDC_ANIMATED_LOADING_BACKGROUND")) draft_.gameplay.animated_loading_background = *v > 0.5;
         if (const auto v = value("IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING"))
             draft_.gameplay.reinforcement_areas_only_while_placing = *v > 0.5;
@@ -1501,6 +1597,10 @@ void EawrOptionsScreen::sync_draft_from_controls() {
         }
         if (state.heat_touched) {
             if (const auto v = value("IDC_HEAT_DISTORTIONS")) draft_.video.detail[model::detail_slot_heat] = *v > 0.5 ? 1 : 0;
+        }
+        if (const auto v = value("IDC_SUPERSAMPLING_SLIDER")) {
+            draft_.video.supersampling = std::clamp(static_cast<int>(*v + 0.5), 0,
+                                                    static_cast<int>(model::supersampling_scales.size()) - 1);
         }
         break;
     case Page::gameplay:
@@ -1541,6 +1641,7 @@ void EawrOptionsScreen::commit_page(const bool leave) {
         // The other detail controls are refused, so only these two slots are committed (#6560).
         committed_.video.detail[model::detail_slot_particle] = draft_.video.detail[model::detail_slot_particle];
         committed_.video.detail[model::detail_slot_heat] = draft_.video.detail[model::detail_slot_heat];
+        committed_.video.supersampling = draft_.video.supersampling;
         break;
     case Page::performance:
         committed_.video.render_thread = draft_.video.render_thread;
@@ -1551,6 +1652,7 @@ void EawrOptionsScreen::commit_page(const bool leave) {
     case Page::tweaks:
         committed_.selection_hotkeys = draft_.selection_hotkeys; committed_.selection_hotkeys_authored = draft_.selection_hotkeys_authored;
         committed_.gameplay.fit_radar_to_galaxy = draft_.gameplay.fit_radar_to_galaxy;
+        committed_.gameplay.space_pauses_galactic = draft_.gameplay.space_pauses_galactic;
         committed_.gameplay.animated_loading_background = draft_.gameplay.animated_loading_background;
         committed_.gameplay.hover_owner_names = draft_.gameplay.hover_owner_names;
         committed_.gameplay.reinforcement_areas_only_while_placing = draft_.gameplay.reinforcement_areas_only_while_placing; break;
@@ -1607,6 +1709,7 @@ void EawrOptionsScreen::defaults_page() {
         draft_.selection_hotkeys = draft_.selection_config.enabled;
         draft_.selection_hotkeys_authored = false;
         draft_.gameplay.fit_radar_to_galaxy = defaults.gameplay.fit_radar_to_galaxy;
+        draft_.gameplay.space_pauses_galactic = defaults.gameplay.space_pauses_galactic;
         draft_.gameplay.animated_loading_background = defaults.gameplay.animated_loading_background;
         draft_.gameplay.hover_owner_names = defaults.gameplay.hover_owner_names;
         draft_.gameplay.reinforcement_areas_only_while_placing = defaults.gameplay.reinforcement_areas_only_while_placing;
@@ -1857,10 +1960,16 @@ void EawrOptionsScreen::handle_button(const std::string& id) {
         else if (id == "IDC_DEFAULTS_BUTTON") defaults_page();
         break;
     case Page::keyboard:
+        if (id == "IDC_SELECTION_ALL_KEY" || id == "IDC_SELECTION_SCREEN_KEY") {
+            begin_capture(id == "IDC_SELECTION_ALL_KEY" ? 0 : 1);
+            break;
+        }
+        if (capturing_) end_capture(); // any other button ends a waiting capture
         if (id == "IDC_SELECTION_KEYS_CANCEL") cancel_page();
         else if (id == "IDC_SELECTION_KEYS_DEFAULTS") {
             for (const auto command : model::selection_commands) draft_.keys.erase(std::string(command));
             dirty_ = draft_.keys != committed_.keys || draft_.camera_wasd != committed_.camera_wasd;
+            selection_message_.clear();
             rebuild_page();
         }
         else if (id == "IDC_OK") commit_page(true);
@@ -1882,13 +1991,81 @@ void EawrOptionsScreen::open_page(const Page target) {
     // page is dropped as retail does.
     draft_ = committed_;
     page_ = target;
+    capturing_.reset();
+    selection_message_.clear();
     rebuild_page();
+}
+
+void EawrOptionsScreen::begin_capture(const std::size_t action) {
+    capturing_ = action;
+    selection_message_ = "Press the new key (Esc cancels).";
+    rebuild_page();
+}
+
+void EawrOptionsScreen::end_capture() { capturing_.reset(); }
+
+// The one place a pressed key becomes a binding: the real key path and the scripted `key:` step both land here.
+void EawrOptionsScreen::capture_key(const char letter, const bool ctrl) {
+    if (!capturing_) return;
+    const std::size_t action = *capturing_;
+    const std::string chord = model::selection_chord_for(letter, ctrl);
+    switch (model::selection_chord_status(draft_, action, chord)) {
+    case model::SelectionChordStatus::ok:
+        model::set_selection_key(draft_, action, chord);
+        selection_message_ = keyboard_key_label(chord) + " bound.";
+        end_capture();
+        break;
+    case model::SelectionChordStatus::duplicate:
+        selection_message_ = keyboard_key_label(chord) + " is already used by the other selection key.";
+        notes_.push_back("Selection binding conflict: choose a different key for each action.");
+        end_capture();
+        break;
+    default:
+        selection_message_ = keyboard_key_label(chord) + " is used by another command; press a different key.";
+        notes_.push_back("Selection binding refused: " + chord + " is reserved.");
+        end_capture();
+        break;
+    }
+    dirty_ = draft_.keys != committed_.keys || draft_.camera_wasd != committed_.camera_wasd;
+    rebuild_page();
+}
+
+bool EawrOptionsScreen::press_key(const std::string& chord) {
+    if (!shown_ || !capturing_) return false;
+    const bool ctrl = chord.starts_with("Ctrl+");
+    const std::string letter = ctrl ? chord.substr(5) : chord;
+    if (letter.size() != 1 || letter[0] < 'A' || letter[0] > 'Z') return false;
+    capture_key(letter[0], ctrl);
+    return true;
 }
 
 void EawrOptionsScreen::_input(const Ref<InputEvent>& event) {
     if (!shown_) return;
     const Ref<InputEventKey> key = event;
-    if (key.is_null() || !key->is_pressed() || key->is_echo() || key->get_keycode() != KEY_ESCAPE) return;
+    if (key.is_null() || !key->is_pressed() || key->is_echo()) return;
+    if (capturing_ && !confirm_open()) {
+        get_viewport()->set_input_as_handled();
+        const Key code = key->get_keycode();
+        if (code == KEY_SHIFT || code == KEY_CTRL || code == KEY_ALT || code == KEY_META) return; // a modifier waits for its key
+        if (code == KEY_ESCAPE) {
+            end_capture();
+            selection_message_.clear();
+            rebuild_page();
+            return;
+        }
+        const Key physical = key->get_physical_keycode() != KEY_NONE ? key->get_physical_keycode() : code;
+        const bool letter = physical >= KEY_A && physical <= KEY_Z;
+        if (!letter || key->is_shift_pressed() || key->is_alt_pressed() || key->is_meta_pressed()) {
+            // The dispatcher matches a physical letter, bare or with Ctrl; stay armed for another key.
+            selection_message_ = "Only a letter key, alone or with Ctrl, can be bound.";
+            notes_.push_back(selection_message_);
+            rebuild_page();
+            return;
+        }
+        capture_key(static_cast<char>('A' + (physical - KEY_A)), key->is_ctrl_pressed());
+        return;
+    }
+    if (key->get_keycode() != KEY_ESCAPE) return;
     if (confirm_open()) return; // the confirmation box answers Esc itself
     get_viewport()->set_input_as_handled();
     if (page_ == Page::game_menu) close_screen();
@@ -1953,7 +2130,17 @@ bool EawrOptionsScreen::press(const std::string& id) {
 }
 
 std::string EawrOptionsScreen::rectangles() const {
-    return state_ && state_->dialog ? dialog_rectangles(*state_->dialog) : "{}";
+    if (!state_ || !state_->dialog) return "{}";
+    std::string json = dialog_rectangles(*state_->dialog);
+    if (state_->performance_scroll != nullptr && state_->performance_scroll->get_child_count() > 0 && !json.empty()
+        && json.back() == '}') {
+        // The Performance rows scroll only when this content is taller than the viewport (the fallback).
+        const auto* rows = Object::cast_to<Control>(state_->performance_scroll->get_child(0));
+        json.pop_back();
+        json += ",\"performance_rows\":{\"viewport\":" + std::to_string(state_->performance_scroll->get_size().y)
+            + ",\"content\":" + std::to_string(rows != nullptr ? rows->get_combined_minimum_size().y : 0.0F) + "}}";
+    }
+    return json;
 }
 
 std::vector<EawrOptionsScreen::ControlState> EawrOptionsScreen::control_states() const {

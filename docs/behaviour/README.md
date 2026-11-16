@@ -5,6 +5,8 @@ These notes record format and runtime semantics used by the implementation. A ru
 ## Formats and runtime
 
 - [Deliberate deviations](deviations.md): where the remake intentionally differs from the original, with evidence level and owner decision
+- [Asset-name resolution](asset-name-resolution.md): how an authored texture, model, sound or movie name becomes a file (extension retry, model suffix, case), the one shared resolver rule and its named deviations
+- [A refused animation or model never aborts a start](asset-degrade.md): ASD-01, the start-path sites that keep the object, play no clip and publish one load note
 - [Galactic frame service schedule](galactic-frame-service-schedule.md): galactic order, cadence, same-frame dependencies and synthetic frame cases; qualified arrival/control and tactical-return probes
 - [Galactic AI frame service schedule](gc-ai-frame-schedule.md): six-system timing, retained-galaxy perception, budget producers and action-admission qualifications for S4
 - [XML registry](xml-registry-edge-cases.md), with [retail admission](xml-registry-retail-addendum.md) and [file-service limits](xml-registry-file-service-addendum.md)
@@ -15,6 +17,7 @@ These notes record format and runtime semantics used by the implementation. A ru
 - [Tactical time controls](tactical-time-controls.md): pause, fast forward and the game-speed steps (pause and speed controls); [battle end](battle-end.md): the win/lose message and the end 7 s after the outcome (victory display and battle-end delay)
 - [Space targeting](space-targeting.md), [space weapon fire, ship-level target choice and attack orders](space-weapon-fire.md), [space sensor visibility and query order](space-visibility.md), [hull and hardpoint damage, loss, death and repair](space-hardpoints.md), [projectiles, damage types, shields and regeneration](space-damage.md), [ship movement: move, turn in place and stop](space-movement.md), [orders: attacking out of range, attack-move and guard](space-orders.md), [unit abilities: power modes, timers and multipliers](space-abilities.md), [fixed-force victory and defeat](space-victory.md) and [fighter deaths: explode or spin away](space-fighter-deaths.md) (fighter death outcomes)
 - [FoC tactical space AI](foc-tactical-ai.md): architecture, the selected XML and Lua, and the tactical AI host function subset
+- [Space tactical super weapon: debug-build walk answers](space-tactical-superweapon-walks.md): the Death Star planet default, facing, target-prop destruction, battle-end cues and the switch button
 - [Debug-build audit](debug-build-audit.md): per-claim verdicts of the simulation, Lua, AI, registry, camera and river notes against the FoC debug build (debug-build behaviour audit)
 - [Loader numeric strictness, galactic tags](loader-strictness-galactic.md): retail parse rules per parser type and where our GC loaders reject values retail accepts (legacy EAWR-4994)
 - [Loader numeric strictness, land tags](loader-strictness-land.md): how the land loader and content adapter read and apply every value retail accepts (legacy EAWR-4994)

@@ -637,6 +637,7 @@ bool extend_mip_chain(Texture& texture, const ChainKind kind) {
         height = half_of(height);
     }
     texture.source.authored_levels = static_cast<std::uint8_t>(texture.mips.size());
+    texture.content_digest.reset();
     texture.mips.reserve(texture.mips.size() + added.size());
     for (MipLevel& level : added) texture.mips.push_back(std::move(level));
     return true;

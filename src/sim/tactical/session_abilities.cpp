@@ -475,9 +475,23 @@ AbilitySwitch TacticalSession::Impl::lock_beam(LiveUnit& source, const EntityId 
     special.targets = {target};
     special.next_service_frame = tick + nested->service_interval;
     if (kind == AbilityKind::super_laser) {
-        // WSPL-03/04: the beam fires, and its expiry timer starts, Fire_Delay after the lock.
-        special.next_service_frame = tick + nested->fire_delay_frames;
-        if (state.expires_tick != 0) state.expires_tick += nested->fire_delay_frames;
+        // WSPL-03: the lock arms the use. The beam fires, and its expiry timer starts, at the fire stage of the
+        // service (WSPL-08), not at the lock.
+        special.laser_fired = false;
+        special.laser_ending = false;
+        special.laser_end_tick = 0;
+        special.laser_fire_start = tick + nested->fire_delay_frames;
+        state.expires_tick = 0;
+        if (nested->laser_face_target && nested->laser_can_turn) {
+            // WSPL-03: the unit turns toward the target first and starts its attack clip once inside the cone.
+            special.laser_face = true;
+            special.laser_face_target = target;
+            special.laser_anim_started = false;
+            special.laser_anim_tick = 0;
+        } else {
+            special.laser_anim_started = true; // WSPL-03: the attack clip starts at the lock
+            special.laser_anim_tick = tick;
+        }
     }
     source.formation.reset();
     return switched;
@@ -515,14 +529,22 @@ void TacticalSession::Impl::release_beam(LiveUnit& unit, const AbilityKind kind,
     unit.abilities->replan_due = unit.abilities->replan_due || switched.speed;
     if (switched.changed && kind == AbilityKind::tractor_beam)
         state.ready_tick = tick + profile.abilities[slot].recharge_frames; // U-09 conservative full recharge
+    auto& special = unit.abilities->special.slots[static_cast<std::size_t>(nested - profile.special.data())];
     if (switched.changed && kind == AbilityKind::super_laser) {
         // WSPL-05: the recharge starts only when a beam existed, and then in full.
-        const bool fired = tick >= state.started_tick + nested->fire_delay_frames;
-        state.ready_tick = fired ? tick + profile.abilities[slot].recharge_frames : tick;
+        state.ready_tick = special.laser_fired ? tick + profile.abilities[slot].recharge_frames : tick;
+    }
+    if (kind == AbilityKind::super_laser) {
+        // WSPL-08: the use ends; the turn flag and its target stay until the firing cone is reached.
+        special.laser_fired = false;
+        special.laser_ending = false;
+        special.laser_anim_started = false;
+        special.laser_fire_start = 0;
+        special.laser_anim_tick = 0;
+        special.laser_end_tick = 0;
     }
     state.target = invalid_entity_id;
     state.target_hardpoint = no_hardpoint;
-    auto& special = unit.abilities->special.slots[static_cast<std::size_t>(nested - profile.special.data())];
     special.targets.clear();
     special.context.reset();
     // FM-08/FM-10: inactive beam housekeeping must preserve delayed move planning.
@@ -553,13 +575,113 @@ void TacticalSession::Impl::register_tractor(const LiveUnit& source, const LiveU
     sort_concentrate_effects(concentrate_effects);
 }
 
+void TacticalSession::Impl::turn_laser(LiveUnit& source, const SpecialAbilityProfile& nested, SpecialAbilitySlot& special,
+    const LiveUnit* const target) const {
+    // WSPL-08: the tactical-super-weapon behaviour turns the unit in yaw toward the locked target while its face flag is on.
+    if (!special.laser_face) return;
+    if (target == nullptr) { // the target left the world: nothing left to face
+        special.laser_face = false;
+        special.laser_face_target = invalid_entity_id;
+        return;
+    }
+    // A unit following a motion plan keeps the plan's heading (seam: the behaviour and the locomotor both write facing).
+    if (source.motion && source.motion->kind != MotionKind::none) return;
+    const auto yaw = yaw_degrees(source.state.rotation);
+    const auto head = planar_bearing(source.state.position, target->state.position);
+    if (!yaw || !head) return;
+    // Turn_To_Face: a non-positive rate means the unit's own maximum rate of turn.
+    const auto* profile = motion.find(source.state.type_id);
+    const auto rate = nested.laser_turn_rate.raw() > 0 ? nested.laser_turn_rate
+        : profile != nullptr ? profile->rate_of_turn : math::Fixed{};
+    const auto difference = wrap_degrees(math::Fixed::from_raw(head.value().raw() - yaw.value().raw()));
+    if (difference.raw() == 0 || rate.raw() <= 0) return;
+    const auto step = std::clamp<std::int64_t>(difference.raw(), -rate.raw(), rate.raw());
+    const auto turned = yaw_rotation(math::Fixed::from_raw(yaw.value().raw() + step));
+    if (turned) source.state.rotation = turned.value();
+}
+
+void TacticalSession::Impl::fire_laser(LiveUnit& source, const SpecialAbilityProfile& nested, const std::size_t ability_index,
+    SpecialAbilitySlot& special, const LiveUnit& target, const std::uint64_t tick) const {
+    auto& state = source.abilities->slots[ability_index];
+    // The lock happens inside the ability service of its tick; the first fire test is the next tick (legacy #6553, FS-54/FD-84).
+    if (!state.active || special.laser_fired || special.laser_ending || tick <= state.started_tick
+        || tick < special.laser_fire_start) return;
+    if (!special.laser_anim_started) {
+        // WSPL-04: wait until the facing is inside the firing cone (horizontal plane); a cone of 90 degrees or more
+        // is replaced by 0.01. The attack clip then starts and the turn stops; firing is judged from the next service.
+        const auto yaw = yaw_degrees(source.state.rotation);
+        const auto head = planar_bearing(source.state.position, target.state.position);
+        if (!yaw || !head) return;
+        const auto cone = nested.laser_firing_cone.raw() >= 90 * math::Fixed::scale
+            ? math::Fixed::from_raw(math::Fixed::scale / 100) : nested.laser_firing_cone;
+        const auto difference = wrap_degrees(math::Fixed::from_raw(head.value().raw() - yaw.value().raw()));
+        if (std::abs(difference.raw()) <= cone.raw()) {
+            special.laser_anim_started = true;
+            special.laser_anim_tick = tick;
+            special.laser_face = false;
+        }
+        return;
+    }
+    if (nested.attack_clip_frames > 0) {
+        // WSPL-08: the clip plays once from its first frame at its own rate and is held two frames short of its end;
+        // the beam fires when the shown frame reaches Fire_Frame (FS-54/FD-84: the clip advances before the ability service of each tick).
+        const auto elapsed = static_cast<std::int64_t>(std::min<std::uint64_t>(tick - special.laser_anim_tick, 1U << 30));
+        const auto last = static_cast<std::int64_t>(nested.attack_clip_frames > 2 ? nested.attack_clip_frames - 2 : 0);
+        const auto frame = std::min(elapsed * nested.attack_clip_fps.raw() / logical_frames_per_second,
+            last * math::Fixed::scale);
+        if (nested.laser_fire_frame.raw() > frame) return;
+    }
+    // The fire stage: the expiry timer starts now and the damage service follows from the next frame.
+    special.laser_fired = true;
+    const auto expiration = abilities.find(source.state.type_id)->abilities[ability_index].expiration_frames;
+    state.expires_tick = expiration != 0 ? tick + expiration : 0;
+    special.next_service_frame = tick + 1;
+}
+
+void TacticalSession::Impl::detach_laser(LiveUnit& source, const SpecialAbilityProfile& nested, SpecialAbilitySlot& special,
+    const std::uint64_t tick) const {
+    const auto& profile = *abilities.find(source.state.type_id);
+    auto& state = source.abilities->slots[*ability_slot(profile, AbilityKind::super_laser)];
+    special.laser_ending = true;
+    special.laser_end_tick = tick + nested.laser_continuation_frames;
+    // WSPL-09: the continuation runs its full length; the generic expiry timer no longer ends the use (the ending is the
+    // continuation's own end tick, after which the use releases and the recharge starts).
+    state.expires_tick = 0;
+    state.target = invalid_entity_id;
+    state.target_hardpoint = no_hardpoint;
+    special.targets.clear();
+}
+
 core::Result<void> TacticalSession::Impl::service_beams(std::vector<LiveUnit>& units,
-    const std::uint64_t tick, const PartitionExecutor& executor) {
+    const std::uint64_t tick, const PartitionExecutor& executor, const bool laser_pass) {
     const bool present = std::any_of(abilities.profiles.begin(), abilities.profiles.end(), [](const auto& profile) {
         return ability_slot(profile, AbilityKind::energy_weapon) || ability_slot(profile, AbilityKind::tractor_beam)
             || ability_slot(profile, AbilityKind::leech_shields) || ability_slot(profile, AbilityKind::super_laser);
     });
     if (!present) return core::Result<void>::success();
+    if (laser_pass) {
+        // WSPL-08: the behaviour's turn runs ahead of the ability's service, with or without a live use. It is its own
+        // phase: it writes only the turning unit's facing, which the range checks of the next phase read from every unit.
+        const auto turned = executor.execute_phase("laser-turn", tick_partition_count, [&](const std::size_t partition) {
+            const auto range = partition_range(partition, units.size());
+            for (auto i = range.begin; i < range.end; ++i) {
+                auto& source = units[i];
+                const auto* nested = source.abilities ? beam_profile(source, AbilityKind::super_laser) : nullptr;
+                if (nested == nullptr) continue;
+                auto& special = source.abilities->special.slots[static_cast<std::size_t>(
+                    nested - abilities.find(source.state.type_id)->special.data())];
+                if (!special.laser_face) continue;
+                const auto& locked = source.abilities->slots[*ability_slot(*abilities.find(source.state.type_id), AbilityKind::super_laser)];
+                if (locked.active && locked.started_tick == tick) continue; // the first turn is the tick after the lock
+                const auto facing = std::lower_bound(units.begin(), units.end(), special.laser_face_target,
+                    [](const auto& unit, const EntityId id) { return unit.state.entity_id < id; });
+                const bool facing_live = facing != units.end() && facing->state.entity_id == special.laser_face_target
+                    && facing->durability && facing->durability->hull.raw() > 0;
+                turn_laser(source, *nested, special, facing_live ? &*facing : nullptr);
+            }
+        });
+        if (!turned) return turned;
+    }
     std::array<std::vector<ConcentrateEffect>, tick_partition_count> effects;
     std::array<std::vector<EntityId>, tick_partition_count> replans;
     std::array<std::vector<EntityId>, tick_partition_count> leech_ended;
@@ -576,17 +698,33 @@ core::Result<void> TacticalSession::Impl::service_beams(std::vector<LiveUnit>& u
                 const auto slot = *ability_slot(profile, kind);
                 const auto& state = source.abilities->slots[slot];
                 const bool leech_locked = kind == AbilityKind::leech_shields && state.target != invalid_entity_id;
-                const auto& special = source.abilities->special.slots[static_cast<std::size_t>(nested - profile.special.data())];
+                auto& special = source.abilities->special.slots[static_cast<std::size_t>(nested - profile.special.data())];
                 const auto target = std::lower_bound(units.begin(), units.end(), state.target,
                     [](const auto& unit, const EntityId id) { return unit.state.entity_id < id; });
-                if (!state.active || source.abilities->special.service_cancelled || !special.enabled || special.cancelled
-                    || !ability_hardpoints_online(profile.abilities[slot], ability_gate(source, tick)) // WHD-02
+                const bool laser = kind == AbilityKind::super_laser;
+                const bool gates_ok = state.active && !source.abilities->special.service_cancelled && special.enabled && !special.cancelled
+                    && ability_hardpoints_online(profile.abilities[slot], ability_gate(source, tick)); // WHD-02
+                // WSPL-08: a fired use whose target left the world keeps its beam, without damage, for Fire_Continuation.
+                const bool continuing = laser && gates_ok && special.laser_ending && tick < special.laser_end_tick;
+                const bool target_found = target != units.end() && target->state.entity_id == state.target;
+                const bool target_lost = !target_found || !target->durability || target->durability->hull.raw() <= 0;
+                if (continuing) {
+                    // nothing to check: the target is gone
+                } else if (!gates_ok
                     || (kind == AbilityKind::leech_shields
                         && !ability_ready(profile.abilities[slot], state, ability_gate(source, tick), tick)) // WLS-03, WHZ-25
-                    || target == units.end() || target->state.entity_id != state.target
+                    || !target_found
                     || !beam_target_valid(source, *target, *nested, false) || !beam_in_range(source, *target, *nested)
-                    || (state.target_hardpoint != no_hardpoint && !target_hardpoint_standing(*target, state.target_hardpoint)))
-                    release_beam(source, kind, tick);
+                    || (state.target_hardpoint != no_hardpoint && !target_hardpoint_standing(*target, state.target_hardpoint))) {
+                    if (laser && gates_ok && target_lost && special.laser_fired && !special.laser_ending
+                        && nested->laser_continuation_frames > 0) {
+                        detach_laser(source, *nested, special, tick);
+                    } else {
+                        release_beam(source, kind, tick);
+                    }
+                } else if (laser && laser_pass) {
+                    fire_laser(source, *nested, slot, special, *target, tick);
+                }
                 // WLS-02: recompute the owner's category-zero bonus after expiry or release.
                 if (leech_locked && state.target == invalid_entity_id) leech_ended[partition].push_back(source.state.entity_id);
                 if (source.abilities->replan_due && source.motion) replans[partition].push_back(source.state.entity_id);
@@ -1523,6 +1661,20 @@ std::vector<AbilityStatus> TacticalSession::Impl::ability_statuses(const LiveUni
                 || ability.kind == AbilityKind::super_laser || ability.kind == AbilityKind::lucky_shot)) {
                 status.target = slot.target;
                 status.target_hardpoint = slot.target_hardpoint;
+            }
+            if (ability.kind == AbilityKind::super_laser && slot.active) {
+                // WSPL-08/09: the use state the fire stage already keeps, published for the viewer's clip and beam.
+                const auto nested = std::find_if(profile.special.begin(), profile.special.end(), [&](const auto& entry) {
+                    return entry.kind == SpecialAbilityKind::super_laser && entry.name == ability.gui_activated_ability_name;
+                });
+                if (nested != profile.special.end()) {
+                    const auto& handler = unit.abilities->special.slots[static_cast<std::size_t>(nested - profile.special.begin())];
+                    status.laser_phase = handler.laser_ending ? LaserPhase::continuing
+                        : handler.laser_fired ? LaserPhase::fired
+                        : handler.laser_anim_started ? LaserPhase::clip : LaserPhase::aiming;
+                    status.laser_clip_tick = handler.laser_anim_tick;
+                    status.laser_end_tick = handler.laser_end_tick;
+                }
             }
             // AB-05: publication is one tick ahead of timer servicing. The final active
             // snapshot still has a timed dial, even when its remaining duration is zero.

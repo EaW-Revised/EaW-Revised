@@ -342,7 +342,9 @@ void describe(const TacticalSession& session, const std::vector<sim::EntityId>& 
     for (const auto& contact : session.land_movement()->contacts())
         std::cerr << "  contact " << contact.first << ',' << contact.second << " kind=" << static_cast<int>(contact.kind)
                   << " state=" << static_cast<int>(contact.state) << " deadlock=" << static_cast<int>(contact.deadlock_remaining)
-                  << " stopped=" << contact.first_stopped << ',' << contact.second_stopped << '\n';
+                  << " stopped=" << contact.first_stopped << ',' << contact.second_stopped
+                  << " retry=" << static_cast<int>(contact.retry_remaining) << " failed=" << contact.retry_failed
+                  << " installed=" << contact.installed << '\n';
 }
 
 void formation_prepass_contracts() {
@@ -661,7 +663,9 @@ void session_contracts() {
     bool separated = true;
     for (int tick = 0; tick < 700; ++tick) {
         static_cast<void>(take(session.step(executor)));
-        separated = separated && pairwise_apart(session, vehicles, whole(8));
+        const bool apart = pairwise_apart(session, vehicles, whole(8));
+        if (separated && !apart) describe(session, vehicles, "vehicles first overlap");
+        separated = separated && apart;
     }
     run(restored.session, executor, 700);
     describe(session, vehicles, "vehicles +742 ticks");

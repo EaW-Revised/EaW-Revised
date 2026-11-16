@@ -7,6 +7,7 @@
 #include <numbers>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace eawr::viewer::galactic {
@@ -132,10 +133,15 @@ ViewResult build_live_view(const sim::galactic::GalacticSnapshot& snapshot,
     art_slots.reserve(metadata.planets.size());
     for (std::size_t slot = 0; slot < metadata.planets.size(); ++slot) art_slots.emplace(metadata.planets[slot].id, slot);
     display.planets.reserve(snapshot.planets().size() + scene_objects.size());
+    // WGCH-143: the destroyed state the simulation owns; the view only picks the model the planet type authors for it.
+    std::unordered_set<ObjectId> destroyed_planets;
+    if (const auto* control = snapshot.control())
+        for (const auto& row : control->planets) if (row.destroyed) destroyed_planets.insert(row.planet);
     for (const auto& planet : snapshot.planets()) {
         const auto art = art_slots.find(planet.id);
         if (art == art_slots.end()) return {{}, "live planet has no presentation metadata"};
         auto item = metadata.planets[art->second];
+        item.destroyed = destroyed_planets.contains(planet.id);
         item.position = {planet.position.x, planet.position.y, planet.position.z};
         item.owner = planet.owner == neutral_owner ? std::nullopt : std::optional(planet.owner);
         display.planets.push_back(std::move(item));
@@ -250,7 +256,8 @@ ViewResult build_view(const GalaxySnapshotStub& snapshot, const SeatId local_sea
         item.info = planet.info;
         item.id = planet.id;
         item.name = planet.name;
-        item.model = planet.model;
+        item.model = planet.destroyed && !planet.destroyed_model.empty() ? planet.destroyed_model : planet.model;
+        item.destroyed_model = planet.destroyed_model;
         item.position = to_vec(planet.position);
         item.scale = to_float(planet.scale);
         if (!(item.scale > 0.0F) || !std::isfinite(item.scale)) {
@@ -496,6 +503,7 @@ bool PlanetCamera::zoom_in(const PlanetView& planet, const bool renderable, cons
     radius_ = renderable ? focus_radius_factor * planet.scale : 0.0F; // WGUI-60: fixed radius factor times Scale_Factor.
     planet_ = planet.id;
     state_ = CameraState::inward;
+    ++zoom_flights_;
     alpha_ = 0.0F;
     start_.reset();
     radar_rate_ = 1.5F; // WGUI-65: explicit commands use the fixed radar animation rate.
@@ -515,6 +523,7 @@ bool PlanetCamera::zoom_out(const ZoomGates gates) {
         return false;
     }
     state_ = CameraState::outward;
+    ++zoom_flights_;
     alpha_ = 0.0F;
     start_.reset();
     radar_rate_ = 1.5F; // WGUI-65: explicit commands use the fixed radar animation rate.

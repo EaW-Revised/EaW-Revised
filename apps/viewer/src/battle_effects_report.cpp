@@ -119,6 +119,9 @@ void BattleEffects::write_report(std::ostream& output) const {
     depth_sample("first_beam", first_beam_depth_);
     output << '}';
     output << ", \"shield_leech_beams_drawn\": " << leech_beams_drawn_;
+    output << ", \"laser_continuation_beams\": " << laser_continuation_beams_
+           << ", \"laser_continuation_ticks\": " << laser_continuation_ticks_.size()
+           << ", \"laser_beams_before_fire\": " << laser_beams_before_fire_;
     output << ", \"energy_beams_drawn\": " << energy_beams_drawn_ << ", \"tractor_beams_drawn\": " << tractor_beams_drawn_
            << ", \"defence_beams_drawn\": " << defence_beams_drawn_;
     // TBF-01/05: preserve float mesh coordinates when a contract measures the

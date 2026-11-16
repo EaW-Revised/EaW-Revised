@@ -2,6 +2,8 @@
 #include "eawr/assets/geometry_stripped.hpp"
 
 #include "renderer_internal.hpp"
+#include "lighting_propagation.hpp"
+#include <cstring>
 #include "texture_budget.hpp"
 #include "particle_culling.hpp"
 #include "global_shadow_quality.hpp"
@@ -70,7 +72,7 @@ CachedShader::~CachedShader() {
 GodotShaderCache::GodotShaderCache() : impl_(std::make_unique<Impl>()) {}
 GodotShaderCache::~GodotShaderCache() = default;
 GodotShaderCache::Stats GodotShaderCache::stats() const noexcept {
-    return {impl_->entries.size(), impl_->source_bytes};
+    return {impl_->entries.size(), impl_->source_bytes, impl_->refused_full};
 }
 
 GodotRenderer::Impl::Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders, const bool attach_scene)
@@ -251,14 +253,20 @@ void GodotRenderer::Impl::set_lighting(const GodotRenderer::LightingState& light
         sun_instance_ = RID();
         sun_light_ = RID();
     }
+    // Every material is configured under the lighting current at that moment, so a repeat of the values the materials
+    // read (the compose of each arriving slot sets the same lighting again, only its shadow distance moves) leaves them
+    // as they are: the pass over every resource and fog consumer is skipped, the light below is still updated.
+    const bool materials_need = detail::materials_need_lighting(lighting_, lighting);
     lighting_ = lighting;
-    for (const auto& [asset, resource] : resources_) {
-        static_cast<void>(asset);
-        if (resource.material.is_valid()) apply_lighting_params(*rendering, resource.material);
-    }
-    for (const auto& [asset, consumer] : fog_consumers_) {
-        static_cast<void>(asset);
-        if (consumer.shader.is_valid()) apply_lighting_params(*rendering, consumer.material);
+    if (materials_need) {
+        for (const auto& [asset, resource] : resources_) {
+            static_cast<void>(asset);
+            if (resource.material.is_valid()) apply_lighting_params(*rendering, resource.material);
+        }
+        for (const auto& [asset, consumer] : fog_consumers_) {
+            static_cast<void>(asset);
+            if (consumer.shader.is_valid()) apply_lighting_params(*rendering, consumer.material);
+        }
     }
     if (!attach_scene_) return;
     if (!sun_light_.is_valid()) {
@@ -549,6 +557,18 @@ GodotRenderer::PreparedSkinPose GodotRenderer::prepare_skin_pose(
     return result;
 }
 
+bool GodotRenderer::same_skin_pose(const PreparedSkinPose& left, const PreparedSkinPose& right) noexcept {
+    if (!left.data_ || !right.data_ || !left.data_->palette || !right.data_->palette) return false;
+    if (left.data_ == right.data_ || left.data_->palette == right.data_->palette) return true;
+    const auto& a = *left.data_->palette;
+    const auto& b = *right.data_->palette;
+    // Bytes, not ==: -0 and +0 compare equal but are different uploads, and a NaN never reaches a palette.
+    return a.palette.size() == b.palette.size() && a.model_transforms.size() == b.model_transforms.size()
+        && std::memcmp(a.palette.data(), b.palette.data(), a.palette.size() * sizeof(animation::Matrix)) == 0
+        && std::memcmp(a.model_transforms.data(), b.model_transforms.data(),
+               a.model_transforms.size() * sizeof(Transform3D)) == 0;
+}
+
 core::Result<void> GodotRenderer::set_prepared_skin_pose(const sim::EntityId entity_id,
     const sim::AssetId asset_id, const PreparedSkinPose& pose, const std::uint64_t shared_idle_group) {
     return impl_->set_prepared_skin_pose(entity_id, asset_id, pose.data_ ? pose.data_->palette : nullptr, shared_idle_group);
@@ -565,6 +585,15 @@ void GodotRenderer::prepare_shared_idle_surface(const std::uint64_t group,
 
 SkinPoseWork GodotRenderer::end_skin_batch() {
     return impl_->end_skin_batch();
+}
+
+std::array<std::uint64_t, 9> GodotRenderer::idle_skin_disturbance_reasons() const {
+    return impl_->idle_reasons_;
+}
+
+void GodotRenderer::take_idle_skin_disturbance(std::vector<std::uint64_t>& groups) {
+    groups.insert(groups.end(), impl_->idle_disturbed_.begin(), impl_->idle_disturbed_.end());
+    impl_->idle_disturbed_.clear();
 }
 
 core::Result<void> GodotRenderer::set_skin_pose(
@@ -676,6 +705,14 @@ bool GodotRenderer::scene_bloom_active() const noexcept { return impl_->scene_bl
 
 void GodotRenderer::set_casts_shadows(const sim::AssetId asset_id, const bool casts) {
     impl_->set_casts_shadows(asset_id, casts);
+}
+
+void GodotRenderer::set_play_uploads(const bool enabled) noexcept {
+    impl_->play_uploads_ = enabled;
+}
+
+bool GodotRenderer::play_uploads() const noexcept {
+    return impl_->play_uploads_;
 }
 
 std::size_t GodotRenderer::shadow_receiving_materials() const noexcept {

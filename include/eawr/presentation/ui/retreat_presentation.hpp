@@ -19,6 +19,7 @@ struct RetreatFactionPresentation {
     std::array<std::string, 3> reason;       // Space_Retreat_Not_Allowed_Reason_1..3_SFXEvent
     std::string countdown_text_id;           // Space_Retreat_Countdown_Text_ID
     std::array<std::uint8_t, 4> colour{255, 255, 255, 255}; // Space_Retreat_Countdown_Color_RGBA
+    std::string exit_hyperspace;             // SFXEvent_Exit_Into_Hyperspace (FC-R05: the jump sound without a type cue)
 };
 
 // RP-02: the retreat start cue is heard by the retreating player (type cue of the first roster

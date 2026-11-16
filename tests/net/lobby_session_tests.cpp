@@ -1,10 +1,15 @@
 #include "eawr/net/lobby_session.hpp"
+#include "eawr/net/galactic_lobby.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "fake_transport.hpp"
 #include "setup_test_support.hpp"
 #include "eawr/skirmish/start.hpp"
+#include "eawr/units/unit_tables.hpp"
+#include "eawr/mods/save_description.hpp"
+#include "../../apps/viewer/src/checkpoint_lobby_model.hpp"
 #include "../support/temp_dir.hpp"
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -45,12 +50,16 @@ struct Room {
     unsigned offer_calls{};
     bool concurrent_prepare{}, bad_offer{};
     std::string bad_input_domain, bad_state_domain;
+    // The preparation inputs are the skirmish's real match identity; with `old_sandbox_peer`, peer 1 claims the previous Lua sandbox policy.
+    bool skirmish_inputs{}, old_sandbox_peer{};
     unsigned bad_mounts{};
     bool alias_mount_names{};
+    std::vector<std::uint8_t> host_mods; // The mod description the host opens its room with.
     std::map<unsigned, unsigned> offers_by_peer, discarded;
-    explicit Room(unsigned count = 2, std::size_t workers = 1, net::LobbyLimits limits = {}, bool early = false, bool concurrent = false)
+    explicit Room(unsigned count = 2, std::size_t workers = 1, net::LobbyLimits limits = {}, bool early = false, bool concurrent = false,
+        std::vector<std::uint8_t> initial_host_mods = {})
         : network(count), executor(std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers)), streams(count, nullptr), early_lock(early) {
-        concurrent_prepare = concurrent;
+        concurrent_prepare = concurrent; host_mods = std::move(initial_host_mods);
         for (unsigned peer = 0; peer < count; ++peer) transports.push_back(std::make_unique<eawr::testing::FakeTransport>(network, peer));
         sessions.push_back(require(net::LobbySession::host(*transports[0], "test-room", std::min(count, net::max_lobby_seats),
             selection(0), 1, {"data/art/maps/test.ted", {0}}, hooks(0), limits)));
@@ -64,6 +73,7 @@ struct Room {
     std::uint64_t revision() { return host().snapshot().revision; }
     net::LobbyHooks hooks(unsigned peer) {
         net::LobbyHooks value;
+        if (peer == 0) value.mounted_mods = host_mods;
         if (concurrent_prepare) {
             value.preparation_mounts = [this, peer](const net::LobbySnapshot&, const net::SetupOffer* prepared) {
                 std::vector<eawr::core::ContentLayerIdentity> layers{
@@ -77,6 +87,13 @@ struct Room {
                 return Result<std::vector<eawr::core::ContentLayerIdentity>>::success(std::move(layers));
             };
             value.preparation_inputs = [this, peer](const net::LobbySnapshot&, const std::vector<net::SetupSeat>&) {
+                if (skirmish_inputs) {
+                    eawr::units::UnitTables tables;
+                    eawr::skirmish::StartInputs inputs;
+                    inputs.map = "data/art/maps/test.ted"; inputs.map_sha256 = std::string(64, 'a'); inputs.tables = &tables;
+                    if (peer == 1 && old_sandbox_peer) inputs.sandbox_policy = "eawr-lua-sandbox-v3";
+                    return Result<std::vector<sim::IdentityDomain>>::success(eawr::skirmish::match_identity(inputs).domains);
+                }
                 sim::MatchIdentity identity;
                 for (const auto* domain : {"build", "mod-order", "mod-bytes", "roster", "seats", "seed", "options", "rules"})
                     identity.domains.push_back(sim::identity_domain(domain, peer == 1 && bad_input_domain == domain ? "different" : "same"));
@@ -231,7 +248,8 @@ void codec() {
         net::LobbySetupFrame{"test-room", snapshot.revision, {net::setup_start_kind}},
         net::LobbyCancel{{"test-room", snapshot.revision, net::LobbyReason::not_ready, "not ready"}},
         net::LobbyClosed{{"test-room", snapshot.revision, net::LobbyReason::host_closed, "closed"}},
-        net::LobbyRejected{{"test-room", snapshot.revision, net::LobbyReason::stale_revision, "stale"}}
+        net::LobbyRejected{{"test-room", snapshot.revision, net::LobbyReason::stale_revision, "stale"}},
+        net::LobbyModsRefresh{"test-room", {3, 1, 0, 0, 0, 0}}
     };
     for (const auto& frame : frames) {
         auto bytes = require(net::encode_lobby_frame(frame));
@@ -239,6 +257,8 @@ void codec() {
         for (std::size_t size = 0; size < bytes.size(); ++size) expect(!net::decode_lobby_frame(std::span(bytes).first(size)), "truncated room frame refused");
         bytes.push_back(0); expect(!net::decode_lobby_frame(bytes), "trailing room bytes refused");
     }
+    expect(!net::encode_lobby_frame(net::LobbyModsRefresh{"test-room", {}}), "an empty host mod refresh is refused");
+    expect(!net::encode_lobby_frame(net::LobbyModsRefresh{"test-room", {9, 1, 0, 0, 0, 0}}), "an invalid host mod refresh is refused");
     expect(!net::decode_lobby_frame(Bytes(net::max_lobby_frame_bytes + 1)), "oversized frame rejected before allocation");
     auto bytes = require(net::encode_lobby_frame(snapshot)); bytes[1] = 1;
     expect(!net::decode_lobby_frame(bytes), "unsupported frame version");
@@ -1147,6 +1167,22 @@ void concurrent_campaign_preparation() {
             && room.host().notice()->message.find("peer 1") != std::string::npos, "mismatch diagnostic identifies peer and domain");
         expect(room.discarded[0] && room.discarded[1], "mismatch discards both candidates");
     }
+    // Policy v4: the same comparison with the skirmish's own identity; a peer on the previous sandbox policy is refused.
+    for (const bool old_peer : {false, true}) {
+        Room room(2, 1, {}, false, true);
+        room.skirmish_inputs = true; room.old_sandbox_peer = old_peer;
+        room.all_ready(); require(room.host().start(room.revision())); room.rounds(12);
+        if (old_peer) {
+            expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.builds == 0, "a peer on another sandbox policy cancels the start");
+            expect(room.host().notice() && room.host().notice()->message.find("sandbox") != std::string::npos
+                && room.host().notice()->message.find("peer 1") != std::string::npos, "the lobby names the sandbox domain and the peer");
+        } else {
+            expect(room.host().snapshot().phase != net::LobbyPhase::staging || room.host().start_pending(),
+                "peers on one sandbox policy are not cancelled");
+            expect(!room.host().notice() || room.host().notice()->message.find("sandbox") == std::string::npos,
+                "no sandbox mismatch between peers on one policy");
+        }
+    }
     for (const auto bad : {1U, 2U, 3U}) {
         Room room(2, 1, {}, false, true); room.bad_mounts = bad;
         room.all_ready(); require(room.host().start(room.revision())); room.rounds(12);
@@ -1351,7 +1387,7 @@ void preparation_codec() {
             expect(!net::decode_lobby_frame(std::span(bytes).first(size)), "truncated preparation frame is refused");
         auto old = bytes; old[1] = 2;
         const auto refused = net::decode_lobby_frame(old);
-        expect(!refused && refused.error().message.find("version 3") != std::string::npos, "mixed lobby protocol refuses explicitly");
+        expect(!refused && refused.error().message.find("version 4") != std::string::npos, "mixed lobby protocol refuses explicitly");
         auto trailing = bytes; trailing.push_back(0); expect(!net::decode_lobby_frame(trailing), "trailing preparation bytes are refused");
     }
     expect(frames.size() >= 2, "both preparation frame kinds were exercised");
@@ -1375,8 +1411,142 @@ void preparation_codec() {
     expect(!net::encode_lobby_frame(claim), "duplicate or unordered claim domains are refused");
 }
 
+
+// The host's mod digests may finish after its room opened. The host then refreshes its description for the guests, who compare
+// again once both sides are ready. Display only: no revision, no readiness change, no wait for Start.
+namespace refresh_support {
+using Digest32 = std::array<std::uint8_t, 32>;
+Digest32 digest(std::uint8_t value) { Digest32 out{}; out[0] = value; return out; }
+// The same path-and-size tree on both sides: only the content digest can tell a same-size edit apart.
+eawr::mods::ModDescription describe(std::optional<std::uint8_t> content) {
+    namespace mods = eawr::mods;
+    mods::DescriptionEntry entry;
+    entry.kind = mods::DescriptionKeyKind::workshop; entry.key = "workshop:alpha"; entry.name = "Alpha"; entry.version = "1";
+    entry.portable_tree = digest(1);
+    if (content) entry.checksum = digest(*content);
+    return mods::ModDescription{true, {entry}};
+}
+std::vector<std::uint8_t> encoded(const eawr::mods::ModDescription& description) {
+    auto bytes = eawr::mods::encode_description(description);
+    expect(bytes.has_value(), "the test mod description encodes");
+    return bytes.value_or(std::vector<std::uint8_t>{});
+}
+std::string message(const std::vector<std::uint8_t>& host_bytes, const eawr::mods::ModDescription& local) {
+    const auto host = eawr::mods::decode_description(host_bytes);
+    expect(host.has_value(), "the host description decodes");
+    return host ? eawr::viewer::mod_mismatch_message(*host, local) : std::string("undecodable");
+}
+}
+void host_mod_description_refresh() {
+    using namespace refresh_support;
+    const auto local = describe(9);
+    const auto unready = encoded(describe(std::nullopt));
+    {   // Same-size content mismatch: invisible until the host digest arrives, then reported to the guest in the lobby.
+        Room room(2, 1, {}, false, false, unready);
+        expect(room.client().snapshot().mounted_mods == unready && room.client().mounted_mods_refreshes() == 0, "the guest starts from the room-open description");
+        expect(message(room.client().snapshot().mounted_mods, local).empty(), "a missing host digest cannot show a content mismatch yet");
+        room.all_ready();
+        const auto revision = room.revision();
+        const auto late = encoded(describe(5));
+        require(room.host().refresh_mounted_mods(late)); room.rounds(2);
+        expect(room.client().mounted_mods_refreshes() == 1 && room.client().snapshot().mounted_mods == late, "the late host digest reaches the guest");
+        expect(room.host().snapshot().mounted_mods == late, "later admissions see the refreshed description in the host snapshot");
+        expect(room.revision() == revision && room.client().snapshot().revision == revision, "a refresh does not advance the room revision");
+        expect(std::all_of(room.host().snapshot().seats.begin(), room.host().snapshot().seats.end(), [](const auto& seat) { return seat.ready; })
+            && std::all_of(room.client().snapshot().seats.begin(), room.client().snapshot().seats.end(), [](const auto& seat) { return seat.ready; }),
+            "a refresh keeps every seat ready");
+        const auto warning = message(room.client().snapshot().mounted_mods, local);
+        expect(warning.find("Alpha") != std::string::npos, "the refreshed host digest exposes the same-size content mismatch");
+        require(room.host().refresh_mounted_mods(late)); room.rounds(2);
+        expect(room.client().mounted_mods_refreshes() == 1, "an unchanged description is not sent again");
+        // Never blocks: the room still starts and commits with the refreshed description.
+        require(room.host().start(room.revision())); room.rounds(3);
+        require(room.client().accept_setup());
+        for (unsigned i = 0; i < 50 && room.client().snapshot().phase != net::LobbyPhase::committed; ++i) room.round();
+        expect(room.host().snapshot().phase == net::LobbyPhase::committed && room.client().snapshot().phase == net::LobbyPhase::committed,
+            "a mod refresh never blocks Start");
+        expect(!room.host().refresh_mounted_mods(encoded(describe(6))), "a committed room takes no refresh");
+    }
+    {   // Matching content stays quiet.
+        Room room(2, 1, {}, false, false, unready);
+        require(room.host().refresh_mounted_mods(encoded(describe(9)))); room.rounds(2);
+        expect(room.client().mounted_mods_refreshes() == 1, "the matching host digest still arrives");
+        expect(message(room.client().snapshot().mounted_mods, local).empty(), "matching content raises no warning");
+    }
+    {   // Only the host sends it, only valid descriptions, and only while staging.
+        Room room(3, 1, {}, false, false, unready);
+        expect(!room.client().refresh_mounted_mods(encoded(describe(5))), "a guest cannot refresh the host description");
+        expect(!room.host().refresh_mounted_mods({}) && !room.host().refresh_mounted_mods({9, 1, 0, 0, 0, 0}), "empty and invalid descriptions are refused");
+        room.inject(1, 2, net::LobbyModsRefresh{"test-room", encoded(describe(5))}); room.rounds(2);
+        expect(room.sessions[2].mounted_mods_refreshes() == 0 && room.sessions[2].snapshot().mounted_mods == unready
+            && room.sessions[2].dropped_frames() > 0, "a refresh from another guest is dropped");
+        room.all_ready(); require(room.host().start(room.revision())); room.rounds(3);
+        expect(!room.host().refresh_mounted_mods(encoded(describe(5))), "a starting room takes no refresh");
+    }
+}
+
+// #6468: the host's settled list that cannot be sent gets its own accurate reason (the host sees it in a message box), and a refused
+// refresh is retried with a growing pause and a cap instead of every frame.
+void host_mod_list_not_shared() {
+    namespace mods = eawr::mods;
+    using eawr::viewer::host_mod_list_unsendable_reason;
+    expect(host_mod_list_unsendable_reason(std::nullopt).find("could not be prepared") != std::string::npos,
+        "no encoding: the list could not be prepared");
+    const std::vector<std::uint8_t> huge(eawr::net::max_lobby_mod_description_bytes + 1, 0);
+    const auto too_big = host_mod_list_unsendable_reason(huge);
+    expect(too_big.find("too large") != std::string::npos && too_big.find(std::to_string(huge.size())) != std::string::npos
+        && too_big.find(std::to_string(eawr::net::max_lobby_mod_description_bytes)) != std::string::npos,
+        "an over-size list names its size and the limit");
+    mods::ModDescription plain;
+    plain.complete = true;
+    plain.entries.push_back({mods::DescriptionKeyKind::manual, "", "Plain Mod", std::nullopt, std::nullopt});
+    const auto fine = mods::encode_description(plain);
+    expect(fine && host_mod_list_unsendable_reason(fine).empty(), "an ordinary list is sendable");
+    auto marked = plain;
+    marked.entries.front().name = "Mod" "\xE2\x80\x8E";
+    const auto refused = mods::encode_description(marked);
+    const auto codec = refused ? host_mod_list_unsendable_reason(refused) : std::string{};
+    expect(refused && !codec.empty() && codec.find("too large") == std::string::npos && codec.find("cannot carry") != std::string::npos,
+        "text the room codec refuses gets its own reason, not 'too large'");
+
+    using Clock = std::chrono::steady_clock;
+    eawr::viewer::HostModRefreshRetry retry;
+    const auto t0 = Clock::now();
+    expect(retry.ready(t0), "a first try is never delayed");
+    bool capped = false;
+    auto now = t0;
+    std::chrono::milliseconds previous{0}, longest{0};
+    for (unsigned attempt = 1; attempt <= eawr::viewer::HostModRefreshRetry::max_attempts; ++attempt) {
+        capped = retry.refused(now);
+        expect(capped == (attempt == eawr::viewer::HostModRefreshRetry::max_attempts), "only the last allowed refusal reports the cap");
+        const auto pause = std::chrono::duration_cast<std::chrono::milliseconds>(retry.next - now);
+        expect(pause >= previous && pause.count() > 0, "the pause between tries never shrinks");
+        expect(!retry.ready(now) && retry.ready(retry.next), "no retry before the pause is over, one after it");
+        previous = pause; longest = std::max(longest, pause);
+        now = retry.next;
+    }
+    expect(capped && longest <= std::chrono::milliseconds(3200), "the retry gives up after a few tries and the pause stays bounded");
+}
+
+// #7198: the wait text and the room's preparation deadline come from one constant; neither carries its own number.
+void preparation_bound_has_one_source() {
+    const auto bound = std::to_string(net::preparation_timeout_minutes) + " minutes";
+    expect(net::preparation_timeout_minutes >= 10, "the bound covers the slowest measured chain with margin (never under 10 minutes)");
+    expect(net::LobbyLimits{}.preparation_timeout_ms == net::preparation_timeout_minutes * 60'000, "the default deadline equals the constant");
+    const auto host = net::galactic_prepare_wait_text(true, "3 min so far");
+    const auto guest = net::galactic_prepare_wait_text(false, "3 min so far");
+    expect(host.find("take up to " + bound + ".") != std::string::npos, "the host line names the constant's value");
+    expect(guest.find("take up to " + bound + ".") != std::string::npos, "the client line names the constant's value");
+    expect(host.find("3 min so far") != std::string::npos && host.find("The room is locked") != std::string::npos
+        && guest.find("3 min so far") != std::string::npos, "the lines keep their progress and locked-room text");
+    expect(host.find("20 minutes") == std::string::npos && guest.find("20 minutes") == std::string::npos, "no stale second number");
+}
+
 int main() {
     try {
+        preparation_bound_has_one_source();
+        host_mod_description_refresh();
+        host_mod_list_not_shared();
         concurrent_campaign_preparation(); concurrent_preparation_locks_once(); concurrent_preparation_cleanup(); preparation_codec();
         asynchronous_host_start(); asynchronous_guest_setup();
         revised_layer_join(); early_freeze_cancellation(); cancellation_during_roster_confirmation(); asynchronous_roster_lock(); credential_delivery_retry(); atomic_game_configuration(); codec(); authority_and_revisions(); chat_contracts(); recovery_and_budgets(); send_failures_and_envelopes();

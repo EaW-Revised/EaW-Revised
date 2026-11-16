@@ -88,6 +88,23 @@ void test_projectile_observer_hide() {
            "appearance queries current fog without a stale pre-delay transition");
     delayed.advance(31, false, false, [] { return false; });
     expect(delayed.drawn(), "a paused presentation does not change projectile admission");
+    // The viewer observes the newest tick once per frame: a repeat at the same tick is a no-op, in a
+    // transition and settled alike, and asks the query nothing.
+    live::ProjectileHide repeat;
+    fog_clear = true;
+    repeat.advance(0, false, false, query);
+    fog_clear = false;
+    repeat.advance(1, false, false, query); // settled, 1 frame: no query yet
+    for (const int tick : {30, 31, 32}) {
+        repeat.advance(tick, false, false, query); // 30 rechecks and starts the fade out, 31 and 32 keep easing
+        const int before_queries = queries;
+        const float opacity = repeat.opacity();
+        const bool revealed = repeat.revealed();
+        repeat.advance(tick, false, false, query);
+        repeat.advance(tick, false, false, query);
+        expect(queries == before_queries && repeat.opacity() == opacity && repeat.revealed() == revealed,
+               "a second observation at the same tick changes nothing and queries nothing");
+    }
 }
 
 // FW-16, FW-17: a unit already held before that is revealed later eases up from zero instead of

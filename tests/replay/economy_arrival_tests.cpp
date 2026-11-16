@@ -192,6 +192,12 @@ void hero_deployment() {
                     expect(view && !view->garrison_unit,
                         "WU-37: purchased hyperspace teams are unmarked from their birth");
                 }
+                // WU-37/39a (#6931): neither the starting force nor a purchased single ship carries the mark,
+                // so no bracket flag is drawn for them (a hangar birth is the only marked path).
+                for (const auto& unit : stepped.value().snapshot->instances()) {
+                    if (deployed != ship_type || unit.type_id != ship_type) continue;
+                    expect(!unit.garrison_unit, "WU-37: starting and purchased units are unmarked from their birth");
+                }
             }
             const auto live = world.units();
             const auto found = std::find_if(live.begin(), live.end(), [](const auto& unit) { return unit.purchase_type == ship_type; });

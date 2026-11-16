@@ -1,4 +1,5 @@
 #include "eawr/data/ui/cursors.hpp"
+#include "eawr/assets/asset_name_resolver.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/data/xml.hpp"
@@ -17,15 +18,11 @@ std::string trim(std::string_view value) {
 core::Diagnostic invalid(std::string message) {
     return {"EAWR-UI-CURSOR-0001", core::Severity::error, std::move(message), {}, {}, {}, {}};
 }
-std::string texture_path(const vfs::Vfs& filesystem, std::string name) {
-    if (!name.starts_with("data/")) name = "data/art/textures/" + name;
-    if (filesystem.stat(name)) return name;
-    const auto dot = name.find_last_of('.');
-    if (dot != std::string::npos && detail::iequals(std::string_view(name).substr(dot), ".tga")) {
-        name.replace(dot, std::string::npos, ".dds");
-        if (filesystem.stat(name)) return name;
-    }
-    return {};
+// The shared asset-name rule (ANR-01). The first frame of a pointer is an authored name and a miss is reported;
+// the end of a numbered sequence is the first gap (CU-01), which is expected and is not a missing name.
+std::string texture_path(const vfs::Vfs& filesystem, const std::string& name, const bool sequence_probe) {
+    return sequence_probe ? assets::probe_texture(filesystem, name)
+                          : assets::resolve_texture(filesystem, name, "cursor texture");
 }
 }
 
@@ -69,7 +66,7 @@ core::Result<CursorCatalog> load_cursors(const vfs::Vfs& filesystem) {
                     name[slot] = static_cast<char>('0' + frame / 10);
                     name[slot + 1] = static_cast<char>('0' + frame % 10);
                 }
-                auto path = texture_path(filesystem, std::move(name));
+                auto path = texture_path(filesystem, name, frame > 0);
                 if (path.empty()) break;
                 pointer.frames.push_back(std::move(path));
             }

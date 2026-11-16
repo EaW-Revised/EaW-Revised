@@ -120,11 +120,15 @@ void BattleAudio::write_report(std::ostream& output) const {
         allocation_first = false;
     }
     output << "}";
+    std::uint64_t cinematic_focus_active = 0;
+    for (const auto& [handle, state] : event_states_)
+        if (state.reason == "engine_cinematic_focus" && events_.active(handle)) ++cinematic_focus_active;
     output << ", \"engines\": {\"idle_speed\": " << engine_idle_speed_
            << ", \"visits\": " << engine_visits_ << ", \"sources\": " << engine_states_.size()
            << ", \"peak_sources\": " << engine_peak_ << ", \"transitions\": " << engine_transitions_
            << ", \"stops\": " << engine_stops_ << ", \"retired\": " << engine_retired_
            << ", \"hidden_updates\": " << engine_hidden_updates_ << ", \"fade_updates\": " << engine_fade_updates_
+           << ", \"cinematic_focus_active\": " << cinematic_focus_active
            << ", \"detached\": " << engine_detached_ << "}";
     output << ", \"self_destruct_sound_stops\": " << self_destruct_sound_stops_;
     output << ", \"ambient\": {\"visits\": " << ambient_visits_
@@ -151,6 +155,9 @@ void BattleAudio::write_report(std::ostream& output) const {
            << ", \"ducked_starts\": " << ducked_starts_ << ", \"ducked_updates\": " << ducked_updates_
            << ", \"attract_silent\": " << (options_.attract_silent ? "true" : "false")
            << ", \"attract_refused\": " << attract_refused_
+           << ", \"begin_held_frames\": " << begin_held_frames_
+           << ", \"began_while_waiting\": " << (began_while_waiting_ ? "true" : "false")
+           << ", \"held_ticks_skipped\": " << held_ticks_skipped_
            << ", \"voice_starts\": " << speech_class_starts_ << "}";
     counts("requested", requested_);
     output << ", \"base_warning\": {\"delay_frames\": " << base_warning_delay_frames_
@@ -306,7 +313,8 @@ void BattleAudio::write_report(std::ostream& output) const {
            << json(!music_ ? "none" : music_->mode() == audio::MusicDirector::Mode::battle ? "battle"
                    : music_->mode() == audio::MusicDirector::Mode::ambient ? "ambient"
                    : music_->mode() == audio::MusicDirector::Mode::victory ? "victory"
-                   : music_->mode() == audio::MusicDirector::Mode::defeat ? "defeat" : "none");
+                   : music_->mode() == audio::MusicDirector::Mode::defeat ? "defeat"
+                   : music_->mode() == audio::MusicDirector::Mode::superweapon ? "superweapon" : "none");
     strings("music", music_log_);
     strings("music_streams", music_stream_log_);
     strings("responses", response_log_);

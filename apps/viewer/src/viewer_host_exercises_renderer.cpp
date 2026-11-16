@@ -257,8 +257,40 @@ void fragment() {
             status_message_ = "cached shader skipped binding admission or release damaged a live shader";
             return false;
         }
+        // One cache serves several renderers (a campaign session's galaxy layers and its battles) that come
+        // and go independently: a program is compiled once, a hit in another renderer adds no entry, and a
+        // program outlives the renderer that introduced it and any hold the cache's creator had on it.
+        {
+            const auto before = shaders->stats();
+            auto second = std::make_unique<GodotRenderer>(*this, shaders, false);
+            const auto introduced = runtime_material(RenderPass::opaque,
+                std::string(opaque) + "\n// introduced by the second renderer");
+            const bool hit = second->upload(60, model, texture, materials[1])
+                && shaders->stats().entries == before.entries;
+            const bool added = second->upload(61, model, texture, introduced)
+                && shaders->stats().entries == before.entries + 1;
+            second.reset();
+            auto third = std::make_unique<GodotRenderer>(*this, shaders, false);
+            const bool outlived = hit && added && shaders->stats().entries == before.entries + 1
+                && third->upload(62, model, texture, introduced) && third->upload(63, model, texture, materials[1])
+                && shaders->stats().entries == before.entries + 1 && third->resources().size() == 2;
+            third.reset();
+            auto own = std::make_shared<GodotShaderCache>();
+            auto fourth = std::make_unique<GodotRenderer>(*this, own, false);
+            const bool owned = fourth->upload(64, model, texture, materials[0]) && own->stats().entries == 1;
+            own.reset(); // The renderer's handle keeps the cache, and the program its material uses, alive.
+            const bool kept = owned && fourth->upload(65, model, texture, materials[0])
+                && fourth->release(64) && fourth->upload(66, model, texture, materials[1]);
+            fourth.reset();
+            if (!outlived || !kept || shaders->stats().entries != before.entries + 1) {
+                status_message_ = "shared shader cache lost a program to a renderer or owner release";
+                return false;
+            }
+            UtilityFunctions::print("EAWR runtime: shared shader cache programs outlive renderers and owners");
+        }
         // Exact source keys must distinguish changes even when only a comment
         // differs. Overflow falls back, keeping retained shader work bounded.
+        const auto refused_before = shaders->stats().refused_full;
         for (std::size_t index = 0; index < GodotShaderCache::entry_limit + 4; ++index) {
             const auto unique = runtime_material(RenderPass::opaque,
                 std::string(opaque) + "\n// cache variant " + std::to_string(index));
@@ -268,7 +300,8 @@ void fragment() {
             }
         }
         if (shaders->stats().entries != GodotShaderCache::entry_limit
-            || shaders->stats().source_bytes > GodotShaderCache::source_byte_limit) {
+            || shaders->stats().source_bytes > GodotShaderCache::source_byte_limit
+            || shaders->stats().refused_full <= refused_before) {
             status_message_ = "shader retention exceeded its budget";
             return false;
         }

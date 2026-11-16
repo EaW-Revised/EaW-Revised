@@ -20,6 +20,9 @@ struct CloudflareTurnConfig {
     std::string key_id;
     std::string api_token;
     std::chrono::milliseconds timeout{5000};
+    // The operator's own coturn issued next to Cloudflare (RelayServerOptions::turn_fallback_*); empty uri = off.
+    std::string fallback_uri;
+    std::string fallback_secret;
     // Fixed production endpoint; the overrides exist for contracts with a local
     // fake HTTPS endpoint and are not configuration keys.
     std::string host{"rtc.live.cloudflare.com"};
@@ -36,6 +39,12 @@ bool cloudflare_api_token_valid(std::string_view token);
 // `turn:` URL (`turns:` and TCP transports are skipped) and keeps up to two URLs,
 // without their query, comma-joined in the same wire field coturn uses.
 core::Result<GnsTurnCredentials> cloudflare_credentials(const HttpsResponse& response, std::chrono::seconds ttl);
+
+// Adds the operator's own coturn after Cloudflare: one server list with one user and password per server (the wire fields hold
+// comma lists, see GnsTurnCredentials). The first username stays Cloudflare's, the one the relay revokes. Returns `primary`
+// unchanged when the fallback is off, its credential cannot be made or the lists would not fit the wire limits
+// (512 / 256 / 256 bytes), so a fallback can never take Cloudflare away. The client chooses the order it tries (GnsTurnProvider).
+GnsTurnCredentials with_fallback(const CloudflareTurnConfig& config, GnsTurnCredentials primary);
 
 // Blocking calls for the worker thread.
 core::Result<GnsTurnCredentials> cloudflare_generate(const CloudflareTurnConfig& config, std::chrono::seconds ttl, std::stop_token stop);

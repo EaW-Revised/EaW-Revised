@@ -1,10 +1,15 @@
 #include "galactic_ai_selection_content.hpp"
 #include "galactic_ai_selection_work.hpp"
+#include "eawr/core/gc_profile.hpp"
 
 #include <algorithm>
 #include <limits>
+#include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
+#include <tuple>
 
 namespace eawr::script::foc::ai {
 namespace {
@@ -260,37 +265,85 @@ core::Result<std::vector<GalacticSelectionGarrison>> galactic_proposal_garrisons
 bool galactic_hero_stage_applies(bool authored_hero, bool named_hero, bool special_weapon, bool authors_script) noexcept {
     return authored_hero && (named_hero || special_weapon || authors_script);
 }
+class SelectionInputCache {
+public:
+    using Key = std::tuple<tactical::PlayerId, gc::PlanetId, const GoalType*, const PlanDef*>;
+    [[nodiscard]] std::shared_ptr<const GalacticSelectionInput> find(const std::shared_ptr<const void>& snapshot,
+        const std::shared_ptr<const void>& world, const Key& key) const {
+        const std::scoped_lock lock(mutex_);
+        if (snapshot_ != snapshot || world_ != world) return {};
+        const auto at = inputs_.find(key);
+        return at == inputs_.end() ? nullptr : at->second;
+    }
+    void store(const std::shared_ptr<const void>& snapshot, const std::shared_ptr<const void>& world, const Key& key,
+        std::shared_ptr<const GalacticSelectionInput> input) {
+        const std::scoped_lock lock(mutex_);
+        // The kept pointers own the objects, so an address can never be reused while it is compared.
+        if (snapshot_ != snapshot || world_ != world) { inputs_.clear(); snapshot_ = snapshot; world_ = world; }
+        inputs_[key] = std::move(input);
+    }
+private:
+    mutable std::mutex mutex_;
+    std::shared_ptr<const void> snapshot_, world_;
+    std::map<Key, std::shared_ptr<const GalacticSelectionInput>> inputs_;
+};
+std::shared_ptr<SelectionInputCache> make_selection_input_cache() { return std::make_shared<SelectionInputCache>(); }
+namespace {
+// The facts of a plan the stock input cannot supply; with any of them the input is returned unfinished, before the contrast.
+std::vector<std::string> unsupplied_stock_facts(const galactic_goals::GalacticPlanConstraints& authored, const PlanDef& plan,
+    gc::PlanetId target, bool freestore_present) {
+    std::vector<std::string> missing;
+    if (authored.additional_cost.value_or(Real{}) != Real{})
+        missing.push_back("stock nonzero AdditionalCost retained roster and paid-cost initialization");
+    if (plan.magic) missing.push_back("stock magic live lock, unlock, disable and named space hero admission");
+    if (target && !plan.ignore_target && !plan.galactic_contrast_qualified)
+        missing.push_back("stock plan-authored target contrast lists");
+    if (plan.allow_free_store && !plan.magic && !freestore_present)
+        missing.push_back("stock freestore membership, AI usability, loss state and path producer");
+    return missing;
+}
+}
 GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const GalacticSelectionContent> content,
     std::shared_ptr<const galactic_goals::MaterializedPlanCatalog> plans, std::shared_ptr<const GalacticWorld> world,
     std::shared_ptr<const Engine> engine, std::function<std::shared_ptr<const gc::GalacticSnapshot>()> snapshot,
-    GalacticHeroSelectionProvider heroes, GalacticFreestoreSelectionProvider freestore) {
+    GalacticHeroSelectionProvider heroes, GalacticFreestoreSelectionProvider freestore, std::shared_ptr<SelectionInputCache> cache) {
     auto prepared = prepare_content_index(content);
     return [content = std::move(content), prepared = std::move(prepared), plans = std::move(plans), world = std::move(world),
-            engine = std::weak_ptr<const Engine>(engine), snapshot = std::move(snapshot), heroes = std::move(heroes), freestore = std::move(freestore)]
+            engine = std::weak_ptr<const Engine>(engine), snapshot = std::move(snapshot), heroes = std::move(heroes), freestore = std::move(freestore), cache = std::move(cache)]
         (tactical::PlayerId player, gc::PlanetId target, const GoalType& goal, const PlanDef& plan)
         -> core::Result<std::shared_ptr<const GalacticSelectionInput>> {
         using Result = core::Result<std::shared_ptr<const GalacticSelectionInput>>;
+        std::optional<gc_profile::Scope> part;
+        part.emplace(gc_profile::Phase::sel_world);
         const auto manager = engine.lock(); const auto state = snapshot ? snapshot() : nullptr;
         const auto input = world ? world->copy_input() : nullptr;
         if (!manager || !content || !plans || !world || !state || !input || !state->production() || !state->player_economy())
             return Result::failure(unavailable("stock selection requires completed world, content and production owners"));
+        const std::shared_ptr<const void> epoch_snapshot = state, epoch_world = input;
+        const SelectionInputCache::Key cache_key{player, target, &goal, &plan};
+        if (cache) if (auto kept = cache->find(epoch_snapshot, epoch_world, cache_key)) {
+            if (!(plan.allow_free_store && !plan.magic)) return Result::success(std::move(kept)); // nothing live in this input
+            auto fresh = std::make_shared<GalacticSelectionInput>(*kept);
+            const auto copied = freestore(player, target, plan);
+            if (!copied) return Result::failure(copied.error());
+            fresh->freestore = copied.value();
+            return Result::success(std::move(fresh));
+        }
+        bool live_weights{};
         auto out = std::make_shared<GalacticSelectionInput>();
         const auto authored = plans->constraints.find(plan.name);
         if (authored == plans->constraints.end()) return Result::failure(unavailable("stock plan constraints missing"));
-        if (authored->second.additional_cost.value_or(Real{}) != Real{})
-            out->missing_facts.push_back("stock nonzero AdditionalCost retained roster and paid-cost initialization");
-        if (plan.magic) out->missing_facts.push_back("stock magic live lock, unlock, disable and named space hero admission");
-        if (target && !plan.ignore_target && !plan.galactic_contrast_qualified)
-            out->missing_facts.push_back("stock plan-authored target contrast lists");
+        out->missing_facts = unsupplied_stock_facts(authored->second, plan, target, static_cast<bool>(freestore));
         if (plan.allow_free_store && !plan.magic) {
-            if (!freestore) out->missing_facts.push_back("stock freestore membership, AI usability, loss state and path producer");
-            else {
+            part.emplace(gc_profile::Phase::sel_freestore);
+            if (freestore) {
                 const auto copied = freestore(player, target, plan);
                 if (!copied) return Result::failure(copied.error());
                 out->freestore = copied.value();
             }
         }
         if (!out->missing_facts.empty()) return Result::success(std::move(out));
+        part.emplace(gc_profile::Phase::sel_contrast);
         if (target && !plan.ignore_target) {
             PlayerAi selected; selected.player = player;
             const auto context = world->goal_context(selected, manager->target_of_object(target));
@@ -315,6 +368,7 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
         if (population != state->population().end()) out->remaining_population = to_single(numeric::from_fixed(population->capacity) - numeric::from_fixed(population->used));
         const auto destination = std::find_if(input->targets.begin(), input->targets.end(), [&](const auto& row) { return row.planet == target; });
         if (target && destination == input->targets.end()) return Result::failure(unavailable("stock selection target absent"));
+        part.emplace(gc_profile::Phase::sel_sites);
         const AllowedProductionSites allowed_sites(input, player);
         std::size_t site_index{};
         for (const auto& site : input->targets) {
@@ -346,6 +400,7 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
         // evaluating the admission of every other planet's offers.
         std::vector<gc::PlanetId> site_order = out->production_sites;
         std::sort(site_order.begin(), site_order.end());
+        part.emplace(gc_profile::Phase::sel_producers);
         std::vector<galactic_ai::ProducerInput> site_rows;
         if (!requested.empty()) for (const auto site : site_order) {
             auto read = input->producers.read(player, site, requested);
@@ -378,6 +433,7 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
                 out->remaining_structure_slots_by_channel[channel] = static_cast<std::uint32_t>(std::max<std::int64_t>(slots - occupied, 0));
             }
         }
+        part.emplace(gc_profile::Phase::sel_facts);
         const auto planet = content->planets.find(target);
         for (const auto id : proposals) {
             const auto original = content->types.find(id);
@@ -427,6 +483,8 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
                     break;
                 }
             if (facts.hero && heroes) {
+                gc_profile::Scope hero_scope(gc_profile::Phase::sel_heroes);
+                live_weights = true;
                 const auto weights = heroes(player, target, id, plan); if (!weights) return Result::failure(weights.error());
                 facts.hero_weight = weights.value().target_weight; facts.escort_weight = weights.value().escort_weight;
                 facts.hero_minimum_cost = weights.value().minimum_cost; facts.hero_maximum_cost = weights.value().maximum_cost;
@@ -435,7 +493,42 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
             out->types.emplace(id, std::move(facts));
         }
         out->complete = true;
+        if (cache && !live_weights) {
+            auto pure = std::make_shared<GalacticSelectionInput>(*out);
+            pure->freestore.clear();
+            cache->store(epoch_snapshot, epoch_world, cache_key, std::move(pure));
+        }
         return Result::success(std::move(out));
+    };
+}
+GalacticFreestoreSelectionProvider stock_freestore_reader(std::shared_ptr<const galactic_goals::MaterializedPlanCatalog> plans,
+    std::shared_ptr<const GalacticWorld> world, std::shared_ptr<const Engine> engine, GalacticFreestoreSelectionProvider freestore) {
+    return [plans = std::move(plans), world = std::move(world), engine = std::weak_ptr<const Engine>(engine), freestore = std::move(freestore)]
+        (tactical::PlayerId player, gc::PlanetId target, const PlanDef& plan) -> core::Result<std::vector<GalacticSelectionObject>> {
+        using Result = core::Result<std::vector<GalacticSelectionObject>>;
+        const auto manager = engine.lock();
+        if (!manager || !plans || !world) return Result::failure(unavailable("stock selection requires completed world, content and production owners"));
+        const auto authored = plans->constraints.find(plan.name);
+        if (authored == plans->constraints.end()) return Result::failure(unavailable("stock plan constraints missing"));
+        const bool has_freestore = plan.allow_free_store && !plan.magic && freestore;
+        const auto missing = unsupplied_stock_facts(authored->second, plan, target, static_cast<bool>(freestore));
+        std::vector<GalacticSelectionObject> rows;
+        if (has_freestore) {
+            gc_profile::Scope part(gc_profile::Phase::sel_freestore);
+            auto copied = freestore(player, target, plan);
+            if (!copied) return Result::failure(copied.error());
+            rows = std::move(copied).value();
+        }
+        if (!missing.empty()) return Result::success(std::move(rows));
+        if (target && !plan.ignore_target) {
+            // The contrast reads are cached perception reads: they publish the world's cache and visibility rows.
+            gc_profile::Scope part(gc_profile::Phase::sel_contrast);
+            PlayerAi selected; selected.player = player;
+            const auto context = world->goal_context(selected, manager->target_of_object(target));
+            const auto contrast = galactic_target_contrast(*world, context, plan.galactic_contrast_order, real(1));
+            if (!contrast) return Result::failure(contrast.error());
+        }
+        return Result::success(std::move(rows));
     };
 }
 }

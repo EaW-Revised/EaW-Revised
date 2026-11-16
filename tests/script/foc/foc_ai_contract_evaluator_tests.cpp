@@ -45,6 +45,21 @@ std::map<std::string, std::string> corpus() {
         {"Data/Scripts/Evaluators/Reach.lua", base +
             "function Evaluate()\n  local station = PlayerObject.Get_Space_Station()\n  return Target.Get_Distance(station.Get_Position())\nend\n"},
         {"Data/Scripts/Evaluators/Broken.lua", "this is not lua (\n"},
+        // A cache write of a table, as the mounted Remake team helper makes: refused everywhere (L-55), not a failure.
+        {"Data/Scripts/Evaluators/TableCache.lua", base +
+            "function Evaluate()\n  GlobalValue.Set('Teams', {1, 2})\n  return 7\nend\n"},
+        // The shape of the mounted Remake team count: the distinct teams of the players, read through Get_Team and
+        // cached with a table write. Written for this test.
+        {"Data/Scripts/Evaluators/TeamCount.lua", base +
+            "function Evaluate()\n  local seen = {}\n  local teams = {}\n  local count = 0\n"
+            "  for _, name in pairs({'REBEL', 'EMPIRE', 'NO_SUCH_FACTION'}) do\n"
+            "    local player = Find_Player(name)\n"
+            "    if player then\n      local team = player.Get_Team()\n"
+            "      if not seen[team] then\n        seen[team] = true\n        count = count + 1\n        table.insert(teams, team)\n      end\n    end\n  end\n"
+            "  GlobalValue.Set('Teams', teams)\n  return count\nend\n"},
+        // A scalar write is still a command an evaluator may not issue.
+        {"Data/Scripts/Evaluators/ScalarWrite.lua", base +
+            "function Evaluate()\n  GlobalValue.Set('Count', 5)\n  return 7\nend\n"},
         // Not directly under the evaluator directory, and not Lua: never evaluators.
         {"Data/Scripts/Evaluators/Sub/Deep.lua", "function Evaluate() return 1 end\n"},
         {"Data/Scripts/Evaluators/Notes.txt", "not a module\n"},
@@ -66,6 +81,9 @@ constexpr char equations_xml[] =
     "<BoundEq>Script_Bound.Evaluate</BoundEq>"
     "<ReachEq>Script_Reach.Evaluate</ReachEq>"
     "<BrokenEq>Script_Broken.Evaluate</BrokenEq>"
+    "<TableCacheEq>Script_TableCache.Evaluate</TableCacheEq>"
+    "<ScalarWriteEq>Script_ScalarWrite.Evaluate</ScalarWriteEq>"
+    "<TeamCountEq>Script_TeamCount.Evaluate</TeamCountEq>"
     "<MissingEq>Script_Nope.Evaluate</MissingEq>"
     "<DeepEq>Script_Deep.Evaluate</DeepEq>"
     "</Root>";
@@ -126,7 +144,7 @@ void numeric_and_failures() {
     EvaluatorRig rig;
     if (!rig.evaluators) return;
     const auto names = rig.evaluators->names();
-    expect(names == std::vector<std::string>({"BOOM", "BOUND", "BROKEN", "COUNTER", "ECHO", "REACH", "SUM", "WORDS", "ZERO"}),
+    expect(names == std::vector<std::string>({"BOOM", "BOUND", "BROKEN", "COUNTER", "ECHO", "REACH", "SCALARWRITE", "SUM", "TABLECACHE", "TEAMCOUNT", "WORDS", "ZERO"}),
         "WGA-453: the catalogue is the Lua modules directly under the evaluator directory");
     expect(rig.evaluators->known("SUM") && rig.evaluators->known("BROKEN") && !rig.evaluators->known("DEEP")
         && !rig.evaluators->known("NOTES"), "WGA-453: nested files and non-Lua files are not evaluators");
@@ -139,6 +157,12 @@ void numeric_and_failures() {
     expect(!rig.eval("BrokenEq").has_value() && !rig.eval("BrokenEq").has_value(),
         "WGA-453: a module that does not load fails every lookup");
     expect(rig.eval("SumEq") == ai::real(5), "WGA-453: one broken module leaves the others working");
+    // RGC-211: the refused table write is dropped and the evaluation keeps its value; any other command still fails it.
+    expect(rig.eval("TableCacheEq") == ai::real(7) && rig.eval("TableCacheEq", 1) == ai::real(7),
+        "RGC-211: an evaluator's refused GlobalValue.Set of a table does not fail the evaluation");
+    expect(rig.eval("TeamCountEq") == ai::real(2),
+        "RGC-210/211: a team count built from Get_Team and cached with a table write evaluates (two teams in the fixture)");
+    expect(!rig.eval("ScalarWriteEq").has_value(), "RGC-211: a scalar GlobalValue.Set from an evaluator is still a command and fails it");
 }
 
 void retained_state_and_cleanup() {

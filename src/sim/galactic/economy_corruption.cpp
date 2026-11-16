@@ -142,8 +142,7 @@ core::Result<Fixed> GalacticSession::set_technology_price_modifier(const Technol
     if (write.first_expired_frame) impl.technology_price_expiry.emplace(*write.first_expired_frame, write.player, write.source);
     player->technology_price_modifiers = std::move(rows); player->tech_purchase_multiplier = multiplier.value();
     impl.dirty[static_cast<std::size_t>(StateSection::economy_corruption)] = true;
-    const auto events = impl.snapshot->events();
-    impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    impl.refresh_snapshot();
     return multiplier;
 }
 core::Result<void> GalacticSession::Impl::replay_technology_price(GalacticSession& world, const NativeEffect& effect) {

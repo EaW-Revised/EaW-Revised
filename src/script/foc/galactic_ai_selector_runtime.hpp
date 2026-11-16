@@ -70,6 +70,10 @@ struct GalacticSelectionInput {
 };
 using GalacticSelectionProvider = std::function<core::Result<std::shared_ptr<const GalacticSelectionInput>>(
     sim::galactic::PlayerId, sim::galactic::PlanetId, const GoalType&, const PlanDef&)>;
+// Only the free-store part of the selector input: what the execution service reads when it attaches a unit to a task. The
+// whole input (producer rows, proposal facts, allowed sites) is not needed for that and cost most of the execution service (#7056).
+using GalacticFreestoreReader = std::function<core::Result<std::vector<GalacticSelectionObject>>(
+    sim::galactic::PlayerId, sim::galactic::PlanetId, const PlanDef&)>;
 
 // Later completion is supplied by the producer owner using the admitted build
 // identity, never inferred from a type count or entity-ID floor (GFD-A05/07).

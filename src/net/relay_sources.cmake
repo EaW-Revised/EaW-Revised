@@ -6,6 +6,7 @@ set(EAWR_RELAY_TLS_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/relay_stream.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/relay_prefix.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/relay_https.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/relay_rtt.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/relay_tls.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/relay_tls_windows.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../platform/relay_credentials.cpp")

@@ -111,7 +111,7 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
         std::shared_ptr<const assets::Texture> texture;
         if (!effect_missing && !texture_path.empty()) {
             // #5989: a single-level hull texture of an opaque ship material gets its mip chain from the texture read-ahead.
-            const scene::TextureProcessing processing = texture_processing_for(selector);
+            const scene::TextureProcessing processing = space_base_processing_for(selector);
             texture = textures.get(ComposeTextureCache::key(texture_path, processing), [&]() -> std::optional<assets::Texture> {
                 auto decoded = textures.decode(filesystem, texture_path, processing);
                 return decoded ? std::move(decoded.value()) : placeholder_texture();
@@ -139,13 +139,14 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
             material.bindings.push_back({"Colorization", scene::colorization_binding(material.program, *colour)});
         }
         profile.emplace(core::load_profile::Phase::surface_texture_prepare);
-        // #5989: the declared textures of the family's normal-map bindings, for the opaque ship materials that get chains.
-        std::vector<std::string> normal_maps;
-        if (!effect_missing && texture_processing_for(selector) != scene::TextureProcessing::none) {
-            for (const std::string_view slot : normal_binding_names(selector)) {
-                const MaterialBinding* binding = legacy::bindings::find(material, slot);
+        // #5989, #6725: the declared textures of the family's sampled bindings with the chain each gets: the normal chain
+        // for the flat-normal bindings, the plain chain for gloss, specular, wave, distortion and cloud textures.
+        std::vector<std::pair<std::string, scene::TextureProcessing>> binding_chains;
+        if (!effect_missing) {
+            for (const SampledBinding& slot : sampled_bindings(selector)) {
+                const MaterialBinding* binding = legacy::bindings::find(material, slot.name);
                 if (const auto* declared = binding == nullptr ? nullptr : std::get_if<std::string>(&binding->value))
-                    normal_maps.push_back(*declared);
+                    binding_chains.emplace_back(*declared, binding_processing_for(slot.normal));
             }
         }
         const std::vector<GodotRenderer::BindingTexture> family_textures = family_binding_textures(material,
@@ -153,9 +154,10 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
                 const std::string path = probe(cache, "data/art/textures/", declared, texture_suffixes);
                 if (path.empty()) return std::nullopt;
                 if (MenuTimeline::enabled()) MenuTimeline::detail_add("family texture " + path);
-                const scene::TextureProcessing processing =
-                    std::find(normal_maps.begin(), normal_maps.end(), declared) != normal_maps.end()
-                        ? scene::TextureProcessing::normal_mip_chain : scene::TextureProcessing::none;
+                scene::TextureProcessing processing = scene::TextureProcessing::none;
+                for (const auto& [name, chain] : binding_chains) {
+                    if (name == declared) { processing = chain; break; }
+                }
                 const auto held = textures.get(ComposeTextureCache::key(path, processing), [&]() -> std::optional<assets::Texture> {
                     auto decoded = textures.decode(filesystem, path, processing);
                     if (!decoded) return std::nullopt;
@@ -180,12 +182,22 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
                                        + core::format_diagnostic(uploaded.error()));
             return std::nullopt;
         }
+        profile.reset();
+        const sim::AssetId asset = next_asset++;
+        const bool translated = renderer.translated_asset(asset);
+        return register_surface_upload(asset, model, mesh_index, submesh_index,
+            translated ? RenderPass::opaque : material.pass, !translated && legacy::reads_effect_time(material));
+    }
+
+SpacePopulation::SurfaceUpload SpacePopulation::register_surface_upload(const sim::AssetId asset, const assets::Model& model,
+    const std::uint32_t mesh_index, const std::uint32_t submesh_index, const RenderPass pass, const bool effect_clock) {
+        const assets::Submesh& submesh = model.meshes[mesh_index].submeshes[submesh_index];
+        std::optional<core::load_profile::Scope> profile;
         SurfaceUpload upload;
-        upload.renderer_asset = next_asset++;
+        upload.renderer_asset = asset;
         uploaded_.push_back(upload.renderer_asset);
-        const bool translated = renderer.translated_asset(upload.renderer_asset);
-        if (!translated && legacy::reads_effect_time(material)) effect_clock_assets_.push_back(upload.renderer_asset);
-        passes_.emplace(upload.renderer_asset, translated ? RenderPass::opaque : material.pass);
+        if (effect_clock) effect_clock_assets_.push_back(upload.renderer_asset);
+        passes_.emplace(upload.renderer_asset, pass);
         ++surfaces_uploaded_;
         profile.emplace(core::load_profile::Phase::surface_pose_bounds);
         const std::int32_t bone = model.meshes[mesh_index].bone;
@@ -212,9 +224,83 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
         return upload;
     }
 
+
+std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_planet_surface(
+    GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
+    ComposeTextureCache& textures, sim::AssetId& next_asset,
+    const std::string_view model_path, const std::uint32_t mesh_index, const std::uint32_t submesh_index,
+    const std::span<const scene::TextureBinding> resolved, const std::string& identity, std::string& skipped) {
+        const auto loaded = cache.shared_model(model_path);
+        if (!loaded) {
+            upload_failures_.push_back(identity + ": " + core::format_diagnostic(loaded.error()));
+            return std::nullopt;
+        }
+        const assets::Model& model = *loaded.value();
+        std::optional<core::load_profile::Scope> profile;
+        profile.emplace(core::load_profile::Phase::surface_material_build);
+        // The scene light of the legacy hull materials (the same state the renderer is given) feeds the planner. The
+        // effect clock stays unread: the t0 fallback samples no scrolling cloud.
+        const GodotRenderer::LightingState light = space_populate_detail::lighting_state(options_, 0.0F);
+        space::EnvironmentEffectInputs inputs;
+        inputs.id = "space-battle-light-0";
+        inputs.time_seconds = 0.0F;
+        inputs.light_scale = {1.0F, 1.0F, 1.0F, 1.0F};
+        inputs.light_direction = {light.toward_light[0], light.toward_light[1], light.toward_light[2]};
+        inputs.ambient_light = {light.ambient[0], light.ambient[1], light.ambient[2]};
+        inputs.diffuse_light = {light.sun_diffuse[0], light.sun_diffuse[1], light.sun_diffuse[2]};
+        inputs.specular_light = {light.specular[0], light.specular[1], light.specular[2]};
+        const space::EnvironmentEffectPlan plan =
+            space::plan_environment_effect(model, mesh_index, submesh_index, "t0", inputs);
+        if (plan.status != space::EnvironmentEffectStatus::ready) {
+            skipped = "plan " + std::string(space::to_string(plan.status)) + ": " + plan.detail;
+            return std::nullopt;
+        }
+        profile.emplace(core::load_profile::Phase::surface_texture_prepare);
+        // Every environment texture takes the plain colour chain (the backdrop and galaxy planets do too).
+        std::shared_ptr<const assets::Texture> primary;
+        std::vector<GodotRenderer::BindingTexture> extra;
+        for (const auto& [binding, declared] : plan.textures) {
+            // The scene builder already resolved every texture the surface names (its reference probe).
+            std::string path;
+            for (const scene::TextureBinding& named : resolved)
+                if (ieq(named.parameter, binding)) path = named.resolved;
+            if (path.empty()) {
+                skipped = binding + " " + declared + " is not in the VFS";
+                return std::nullopt;
+            }
+            if (MenuTimeline::enabled()) MenuTimeline::detail_add("planet texture " + path);
+            const auto held = textures.get(ComposeTextureCache::key(path, scene::TextureProcessing::colour_mip_chain),
+                [&]() -> std::optional<assets::Texture> {
+                    auto decoded = textures.decode(filesystem, path, scene::TextureProcessing::colour_mip_chain);
+                    if (!decoded) return std::nullopt;
+                    return std::move(decoded.value());
+                });
+            if (!held) {
+                skipped = binding + " " + path + " did not decode";
+                return std::nullopt;
+            }
+            if (ieq(binding, "BaseTexture")) primary = held;
+            else extra.push_back({binding, *held});
+        }
+        if (!primary) {
+            skipped = "the surface binds no BaseTexture";
+            return std::nullopt;
+        }
+        profile.emplace(core::load_profile::Phase::surface_renderer_upload);
+        const auto uploaded = renderer.upload(next_asset,
+            ModelUpload{loaded.value(), ModelSurface{mesh_index, submesh_index, false}}, *primary, plan.material, extra);
+        if (!uploaded) {
+            upload_failures_.push_back(identity + " shader Planet.fx: " + core::format_diagnostic(uploaded.error()));
+            return std::nullopt;
+        }
+        profile.reset();
+        const sim::AssetId asset = next_asset++;
+        return register_surface_upload(asset, model, mesh_index, submesh_index, plan.material.pass, false);
+    }
+
 std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_shell(
     GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
-    sim::AssetId& next_asset, const std::string_view model_path, const std::uint32_t mesh_index,
+    ComposeTextureCache& textures, sim::AssetId& next_asset, const std::string_view model_path, const std::uint32_t mesh_index,
     const std::uint32_t submesh_index, std::string& status, const bool neutral_distortion) {
         const auto loaded = cache.shared_model(model_path);
         if (!loaded) {
@@ -265,7 +351,10 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_shell(
                 status = std::string(binding) + " " + (name == nullptr ? std::string("missing") : *name + " unresolved");
                 return std::nullopt;
             }
-            auto decoded = assets::load_texture(filesystem, path);
+            // #6725: the shell's three textures get the plain chain from the initial compose's read-ahead (its loader
+            // builds it for a texture nobody offered); a shell composed during the battle has no read-ahead and keeps the
+            // texture as decoded.
+            auto decoded = textures.decode(filesystem, path, scene::TextureProcessing::colour_mip_chain);
             if (!decoded) {
                 status = std::string(binding) + " " + path + ": " + core::format_diagnostic(decoded.error());
                 return std::nullopt;

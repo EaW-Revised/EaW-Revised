@@ -12,3 +12,7 @@ eawr_add_test_case(
 eawr_add_python_contract(python_presentation_renderer_galactic_reference_pages_runtime
     tests.presentation.renderer.test_viewer_galactic_reference_pages_runtime)
 set_tests_properties(python_presentation_renderer_galactic_reference_pages_runtime PROPERTIES LABELS gpu)
+# Legacy #7265: the first droid hint reaches the advisor line and the Droid Log page.
+eawr_add_python_contract(python_presentation_renderer_galactic_advisor_hints_runtime
+    tests.presentation.renderer.test_viewer_galactic_advisor_hints_runtime)
+set_tests_properties(python_presentation_renderer_galactic_advisor_hints_runtime PROPERTIES LABELS gpu)

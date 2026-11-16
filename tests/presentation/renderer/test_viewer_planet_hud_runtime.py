@@ -23,7 +23,7 @@ class PlanetHudRuntime(unittest.TestCase):
                 self.assertTrue(controls[name]["visible"])
         self.assertTrue(controls["b_story_arc_g"]["enabled"])
         self.assertTrue(controls["b_option_g"]["enabled"])
-        self.assertFalse(controls["b_camera_g"]["enabled"])
+        self.assertTrue(controls["b_camera_g"]["enabled"])  # #6291: the camera button starts the galactic tour
 
     def test_localized_date_and_technology_readouts_keep_their_case(self):
         data, _ = self.capture("Sandbox_Equal_Footing_Rebel")
@@ -172,6 +172,36 @@ class PlanetHudRuntime(unittest.TestCase):
                              for icon in data["hud"]["status_icons"]))
         self.assertTrue(any(icon["kind"] == "corruption_info" and icon["visible"]
                             for icon in data["hud"]["status_icons"]), "foreign planets keep the information icon")
+
+    def test_home_planet_shows_its_faction_hero_icon(self):
+        # #4375 / WGSI-1..3: the Empire's named heroes stand on Coruscant at the start, so its status row leads with the
+        # Empire hero icon (kind effect_9 = the evil side's hero icon); the red/green look icons (effect_6/7) are absent.
+        data, _ = self.capture("Sandbox_Equal_Footing_Empire")
+        home = data["hud"]["selected"]
+        self.assertNotEqual(home, 0)
+        icons = [icon for icon in data["hud"]["status_icons"] if icon["planet"] == home and icon["visible"]]
+        hero = [icon for icon in icons if icon["kind"] == "effect_9"]
+        self.assertEqual(len(hero), 1, f"the home planet shows the Empire hero icon once: {icons}")
+        for other in icons:
+            if other is not hero[0]:
+                self.assertLessEqual(hero[0]["rect"][0], other["rect"][0], f"hero icons lead the row: {icons}")
+        self.assertFalse(any(icon["visible"] and icon["kind"] in ("effect_6", "effect_7")
+                             for icon in data["hud"]["status_icons"]))
+
+    def test_weather_icons_follow_the_third_map_filter(self):
+        # #2987 / WGFI-1: every planet's weather icon shows only while the third filter bit is on, below-left of the
+        # planet's point (g_weather offset -20 -31); the retail start has every filter off.
+        off, _ = self.capture("Sandbox_Equal_Footing_Empire")
+        self.assertFalse(any(icon["kind"] == "weather" and icon["visible"] for icon in off["hud"]["status_icons"]))
+        data, _ = self.capture("Sandbox_Equal_Footing_Empire", "--eawr-galactic-filters", "4")
+        weather = [icon for icon in data["hud"]["status_icons"] if icon["kind"] == "weather" and icon["visible"]]
+        self.assertGreater(len(weather), 3, "stock planets carry weather icons")
+        for icon in weather:
+            if "anchor" not in icon:
+                continue
+            x, y, w, h = icon["rect"]
+            self.assertLess(x + w / 2, icon["anchor"][0], f"the weather icon sits left of the planet point: {icon}")
+            self.assertGreater(y + h / 2, icon["anchor"][1], f"the weather icon sits below the planet point: {icon}")
 
     def test_synthetic_observer_fixture_uses_faction_colours(self):
         data, capture = self.capture("synthetic")

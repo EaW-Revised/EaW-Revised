@@ -13,9 +13,9 @@ from space_map_test_support import (
 
 class SpaceSourceCases:
     def test_additive2x_variant_matches_the_shared_shader(self):
-        stock = read("apps/viewer/src/space_environment_internal.hpp").split(
+        stock = read("apps/viewer/src/sky_additive.hpp").split(
             'meshadditive_sky_shader = R"GODOT(', 1)[1].split(')GODOT";', 1)[0]
-        variant = read("apps/viewer/src/space_environment_surfaces.cpp").split(
+        variant = read("apps/viewer/src/sky_additive.hpp").split(
             "meshadditive2x_sky_shader() {", 1)[1].split("\n}", 1)[0]
         original = json.loads(variant.split("constexpr std::string_view from = ", 1)[1].split(";", 1)[0])
         replacement = json.loads(variant.split("constexpr std::string_view to = ", 1)[1].split(";", 1)[0])
@@ -138,7 +138,10 @@ class SpaceSourceCases:
         self.assertIn("state.space->ready(host, map", population)
         # A space map's frame is the space view's (then the #82 battle input's), never the land loop.
         live = (ROOT / "apps/viewer/src/map_mode_live.cpp").read_text(encoding="utf-8")
-        self.assertRegex(live, r"if \(state\.space\) \{\s*const std::optional<int> finished = state\.space->process\(delta\);")
+        # The only thing allowed between the branch and the space view's process() is the one-time live
+        # finalize-camera install (#6557); the frame is still the space view's.
+        self.assertRegex(live, r"if \(state\.space\) \{\s*(?:if \(!state\.finalize_camera_installed\) \{(?:[^{}]|\{[^{}]*\})*\}\s*)?"
+                               r"const std::optional<int> finished = state\.space->process\(delta\);")
         # Space options on a land map are refused rather than ignored.
         self.assertIn("apply only to a kind-2 (space) map", source)
         # The pure builder keeps rejecting space maps.

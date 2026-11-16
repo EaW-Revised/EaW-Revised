@@ -478,6 +478,17 @@ bool LiveSessionView::special_fire(const sim::EntityId source, const sim::Entity
     return issue_economy(command_sink(), intent);
 }
 
+bool LiveSessionView::superweapon_request(const sim::EntityId unit, const sim::tactical::TswStage stage) {
+    if (phase_ != Phase::running || (controller_policy_enabled() && !can_control(unit))) return false;
+    ui::TacticalIntent intent;
+    intent.verb = ui::TacticalVerb::tactical_superweapon;
+    intent.units = {unit};
+    intent.tsw_stage = stage;
+    intent.origin = ui::CommandOrigin::hud_button;
+    if (command_pending(intent)) return false; // the same click is already waiting for its tick
+    return issue_economy(command_sink(), intent);
+}
+
 bool LiveSessionView::hardpoint_repair_allowed(const sim::EntityId station, const std::uint32_t hardpoint) const {
     ui::TacticalIntent pending; pending.verb = ui::TacticalVerb::repair_hardpoint; pending.units = {station}; pending.hardpoint = hardpoint;
     if (command_pending(pending)) return false;
@@ -570,13 +581,25 @@ bool LiveSessionView::rotate_reinforcement(const double detents) {
 }
 
 bool LiveSessionView::reinforce(const tactical::TypeId type, const sim::math::Vec3& point) {
-    // WR-15: drop checks placement before room. A busy preview query has no authority;
-    // the cached same-point verdict may be used, and the command independently rechecks state.
-    const auto valid = session_ ? session_->reinforcement_point(player_, type, point, deployment_facing_) : std::optional<bool>{false};
-    const bool cached = preview_type_ == type && preview_point_ == point && preview_valid_;
-    if (!reinforcement_allowed() || !valid.value_or(cached) || !reinforcement_room(type)) {
-        ++economy_requests_.refused;
-        return false;
+    // #7190: on land the simulation alone admits a company (cap, then the whole company at the point); a drop it refuses comes
+    // back as an order-rejected event with its own reason, which the reinforcement pane shows. So only the pool entry is
+    // checked here, and the command carries the click whatever the preview said.
+    if (land_terrain() != nullptr) {
+        const auto* pooled = local_economy();
+        if (!reinforcement_allowed() || pooled == nullptr
+            || std::find(pooled->pool.begin(), pooled->pool.end(), type) == pooled->pool.end()) {
+            ++economy_requests_.refused;
+            return false;
+        }
+    } else {
+        // WR-15: drop checks placement before room. A busy preview query has no authority;
+        // the cached same-point verdict may be used, and the command independently rechecks state.
+        const auto valid = session_ ? session_->reinforcement_point(player_, type, point, deployment_facing_) : std::optional<bool>{false};
+        const bool cached = preview_type_ == type && preview_point_ == point && preview_valid_;
+        if (!reinforcement_allowed() || !valid.value_or(cached) || !reinforcement_room(type)) {
+            ++economy_requests_.refused;
+            return false;
+        }
     }
     ui::TacticalIntent intent;
     intent.verb = ui::TacticalVerb::reinforce;
@@ -651,6 +674,23 @@ std::uint32_t LiveSessionView::population_of(const tactical::TypeId type) const 
 std::vector<tactical::TypeId> LiveSessionView::reinforcement_pool() const {
     const auto* ledger = local_economy();
     return ledger ? ledger->pool : std::vector<tactical::TypeId>{};
+}
+
+std::vector<LiveSessionView::LandDeployRing> LiveSessionView::land_deploy_rings() const {
+    std::vector<LandDeployRing> rings;
+    const auto& latest = battle_frame_.latest;
+    if (!land_content_ || !latest) return rings;
+    const auto& rules = land_content_->land.reinforcement;
+    if (!rules.enabled || !rules.use_points) return rings;
+    const auto scale = static_cast<double>(sim::math::Fixed::scale);
+    for (const auto& instance : latest->instances()) {
+        const auto* point = rules.point(instance.type_id);
+        if (point == nullptr || point->enabling_radius.raw() <= 0 || !is_ally_of_local(instance.owner)) continue;
+        rings.push_back({static_cast<double>(instance.fixed_transform.rows[0][3].raw()) / scale,
+            static_cast<double>(instance.fixed_transform.rows[1][3].raw()) / scale,
+            static_cast<double>(point->enabling_radius.raw()) / scale});
+    }
+    return rings;
 }
 
 std::size_t LiveSessionView::pending_reinforcements() const {

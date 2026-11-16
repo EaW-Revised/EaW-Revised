@@ -269,6 +269,10 @@ struct PlanetaryWeapon {
 
 struct TacticalSuperWeapon {
     Fixed start_distance{}, attack_distance{}, z_adjust{};
+    // TSW-02..TSW-05: the sequence timings as authored (seconds, then frame counts); the session truncates them to
+    // whole frames (units::combat_table). Absent tags are zero.
+    Fixed power_up_countdown_seconds{}, attack_clip_seconds{};
+    Fixed explosion_debris_creation_frame_delay{}, post_destruction_wait_frames{};
     bool start_pos_match_target_z{};
     bool operator==(const TacticalSuperWeapon&) const = default;
 };

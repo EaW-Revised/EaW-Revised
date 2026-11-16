@@ -1,4 +1,5 @@
 #include "front_end_mode.hpp"
+#include "render_profile_viewport.hpp"
 #include "eawr/core/build_identity.hpp"
 #include "eawr/core/build_label.hpp"
 #include "eawr/core/gc_load_trace.hpp"
@@ -32,6 +33,8 @@
 #include "eawr/presentation/ui/front_end.hpp"
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/presentation/ui/loading_screen.hpp"
+#include "eawr/presentation/ui/named_picture.hpp"
+#include "eawr/presentation/ui/skirmish_setup.hpp"
 #include "eawr/presentation/ui/theme.hpp"
 
 #include <godot_cpp/classes/audio_server.hpp>
@@ -430,7 +433,7 @@ struct FrontEndMode::State final {
     std::string restore_saved(const model::SavedGameRequest& request);
     void begin_campaign();
     void start_campaign(const model::CampaignStartRequest& request);
-    void show_notice(const char* caption_key, const std::string& reason);
+    void show_notice(const char* caption_key, const std::string& reason, const std::string& scrollable = {});
     [[nodiscard]] bool notice_open() const;
     std::optional<int> poll_campaign();
     std::optional<int> run_campaign_test();
@@ -474,6 +477,7 @@ bool FrontEndMode::State::write_report() const {
     output << std::boolalpha
         << "{\n  \"schema_version\": 1,\n  \"status\": " << json(report_failure.empty() ? "ok" : "failed")
         << ",\n  \"failure\": " << json(report_failure)
+        << ",\n  \"render_profile\": " << render_profile_report()
         << ",\n  \"front_end_ready\": " << front_end_ready
         << ",\n  \"current_screen\": " << json(model::to_string(nav.current()))
         << ",\n  \"attract_started\": " << attract_started
@@ -633,12 +637,13 @@ bool FrontEndMode::State::build() {
     // text is rasterised at the scale it is drawn at, not at the canvas size and stretched (#3176).
     root->set_oversampling_with_scale(CanvasItem::OVERSAMPLING_WITH_SCALE_ENABLED);
     backdrop->add_child(root);
-    // The build line: the kit label and short commit of this build, in the lower-left corner of every menu.
+    // The build line: the kit label and short commit of this build, in the upper-left corner of every menu. The
+    // lower-left corner is the menus' own: a mod's dialog places its text there (outside the dialog's left edge).
     auto* build_line = memnew(EawrUiLabel);
     build_line->set_role("L_Text");
     build_line->set_text(text(core::build_label(core::build_identity())));
     build_line->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-    build_line->set_position(Vector2(12.0F, canvas_height - 28.0F));
+    build_line->set_position(Vector2(12.0F, 8.0F));
     build_line->set_size(Vector2(400.0F, 20.0F));
     root->add_child(build_line);
     fade = memnew(ColorRect);
@@ -674,21 +679,21 @@ void FrontEndMode::State::load_overlay() {
         notes.push_back("game constants name no menu overlay for " + options.language);
         return;
     }
-    // A texture reference is looked up as a .tga or a .dds of its stem under Data/Art/Textures.
-    std::string stem = lower(name);
-    if (const auto dot = stem.rfind('.'); dot != std::string::npos) stem.resize(dot);
-    for (const char* extension : {".tga", ".dds"}) {
-        auto texture = assets::load_texture(*resources.filesystem, "data/art/textures/" + stem + extension);
-        if (!texture) continue;
-        std::string problem;
-        Ref<Image> image = texture_image(texture.value(), problem);
-        if (image.is_valid()) {
-            overlay->set_texture(ImageTexture::create_from_image(image));
-            return;
-        }
-        notes.push_back("menu overlay " + name + ": " + problem);
+    // The overlay name goes through the shared asset-name rule: as authored, then its stem with the sibling
+    // extensions, so a name that ships as another image file still loads. A miss is reported once as
+    // EAWR-ASSET-NAME-0001.
+    const model::NamedPicture picture = model::load_named_picture(*resources.filesystem, name, "main menu overlay");
+    if (!picture.texture) {
+        notes.push_back("menu overlay " + name + (picture.logical_path.empty() ? " is not in the data" : ": " + picture.problem));
+        return;
     }
-    notes.push_back("menu overlay " + name + " is not in the data");
+    std::string problem;
+    Ref<Image> image = texture_image(*picture.texture, problem);
+    if (image.is_valid()) {
+        overlay->set_texture(ImageTexture::create_from_image(image));
+        return;
+    }
+    notes.push_back("menu overlay " + name + ": " + problem);
 }
 
 void FrontEndMode::State::build_menu(const model::FrontEndScreen screen) {
@@ -919,6 +924,7 @@ std::string FrontEndMode::State::restore_saved(const model::SavedGameRequest& re
 // MNU-34, WGP-29: the demo battle stops, then the host starts the chosen campaign.
 void FrontEndMode::State::start_campaign(const model::CampaignStartRequest& request) {
     core::gc_load::trace.begin("sp_start", true);
+    core::gc_load::detail = OS::get_singleton()->get_cmdline_user_args().has("--eawr-load-detail");
     stop_attract("campaign start");
     campaign_launching = true;
     const std::string refusal = options.campaign_launcher
@@ -939,8 +945,11 @@ bool FrontEndMode::State::notice_open() const {
     return notice_box != nullptr && UtilityFunctions::is_instance_id_valid(notice_id);
 }
 
-void FrontEndMode::State::show_notice(const char* caption_key, const std::string& reason) {
-    if (notice_open()) return;
+void FrontEndMode::State::show_notice(const char* caption_key, const std::string& reason, const std::string& scrollable) {
+    if (notice_open()) {
+        UtilityFunctions::printerr("EAWR front end notice dropped (another is open): ", text(reason));
+        return;
+    }
     MessageBoxContext boxes{resources.dialogs, resources.theme_model, text_lookup ? &*text_lookup : nullptr,
                             resources.theme, host->get_viewport()->get_visible_rect().size};
     model::MessageBoxRequest request;
@@ -955,6 +964,8 @@ void FrontEndMode::State::show_notice(const char* caption_key, const std::string
         notice_box = nullptr;
         return;
     }
+    // A long failure text wraps in the box's text area (the setup screen's refusal box does the same).
+    if (!scrollable.empty()) notice_box->set_scrollable_text(scrollable);
     notice_id = static_cast<int64_t>(notice_box->get_instance_id());
 }
 
@@ -968,8 +979,8 @@ void FrontEndMode::State::build_campaign_screen() {
     inputs.dialogs = resources.dialogs;
     inputs.theme_model = resources.theme_model;
     inputs.text = text_lookup ? &*text_lookup : nullptr;
-    // WGP-190: the host applies accepted technology options; difficulty remains authored.
-    const model::CampaignHostSupport support{false, true};
+    // WGP-190: the host applies accepted technology options. CGS-26: it carries the chosen level into the AI players.
+    const model::CampaignHostSupport support{true, true};
     if (!screen->build(*root, inputs, support)) {
         campaign_problem = screen->failure();
         notes.push_back("campaign staging: " + campaign_problem);
@@ -1630,6 +1641,20 @@ void FrontEndMode::return_to_main_menu() {
 
 void FrontEndMode::show_load_failure(const std::string& reason) {
     state_->show_notice("TEXT_BUTTON_LOAD_GAME", reason);
+}
+
+// #6611, #6880: a battle that stopped with an error (a refused save, a load that failed after it started) leaves the
+// player on the main menu with the failure's headline, code and first line, as the setup screen's box does.
+std::string FrontEndMode::launch_campaign(const presentation::ui::CampaignStartRequest& request) {
+    auto& options = state_->options;
+    return options.campaign_launcher ? options.campaign_launcher(request) : "The campaign launcher is unavailable.";
+}
+
+void FrontEndMode::show_refusal(const std::string& reason, const std::string_view headline) {
+    const auto refusal = model::setup_start_refusal(reason, headline);
+    UtilityFunctions::printerr(String::utf8(("EAWR front end battle refused: " + refusal.first_line).c_str()));
+    state_->show_notice("TEXT_BUTTON_LOAD_GAME", refusal.lines[0],
+                        refusal.lines[0] + "\n" + refusal.lines[1] + "\n" + refusal.lines[2]);
 }
 
 bool FrontEndMode::owns_frame() const {

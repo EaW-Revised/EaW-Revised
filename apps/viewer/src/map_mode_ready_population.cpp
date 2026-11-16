@@ -3,6 +3,7 @@
 #include "gpu_memory_trace.hpp"
 #include "texture_census_journal.hpp"
 #include "texture_prefetch_policy.hpp"
+#include "texture_volumes.hpp"
 #include "battle_content.hpp"
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
@@ -31,26 +32,6 @@
 #include "eawr/units/simulation_model.hpp"
 
 namespace eawr::presentation::godot_backend {
-namespace {
-// The texture read-ahead's reader count rule (as the model read-ahead's): more than one reader only when every volume the
-// game data comes from reported no seek penalty.
-bool texture_volumes_solid_state(const std::vector<std::filesystem::path>& roots) {
-    std::vector<units::DiskKind> kinds;
-    for (const auto& root : roots) {
-        std::error_code error;
-        const auto absolute = std::filesystem::absolute(root, error);
-        kinds.push_back(error ? units::DiskKind::unknown : units::volume_disk_kind(absolute.root_name().wstring()));
-    }
-    return units::slowest_disk(kinds) == units::DiskKind::solid_state;
-}
-
-// The roots the game data comes from: the game folder and, when a mod is loaded, the mod folder.
-std::vector<std::filesystem::path> texture_roots(const std::filesystem::path& game_root, const std::filesystem::path& mod_root) {
-    std::vector<std::filesystem::path> roots{game_root};
-    if (!mod_root.empty()) roots.push_back(mod_root);
-    return roots;
-}
-} // namespace
 
 
 bool MapMode::State::prepare_live_population(Node3D& host, const assets::Map& map, std::optional<eawr::viewer::MapCameraSource>& space_camera_source, std::vector<std::uint32_t>& session_records, const EnqueueLoadStep* queue) {
@@ -247,7 +228,8 @@ bool MapMode::State::prepare_live_population(Node3D& host, const assets::Map& ma
     // Attract: the sample loading is steps of its own (one batch of files each), queued here; the stage report waits
     // for the last of them so the stage still ends when the audio is ready.
     state.battle_audio->prepare(*state.live_session->tables(), *state.live_session->combat(),
-                                state.live_session->local_faction(), state.live_session->audio_preload_types(), queue_copy ? &queue_copy : nullptr);
+                                state.live_session->local_faction(), state.live_session->audio_preload_types(), queue_copy ? &queue_copy : nullptr,
+                                state.live_session->tsw_setup());
     if (!queue_copy) state.load_report(presentation::ui::load_stage_effects, 5, 5);
         return true;
     })) return false;
@@ -445,6 +427,8 @@ SpacePopulateHook MapMode::State::make_population_hook() {
                         // #84: the frame's sounds and the unit responses to the player's gestures (taken in the pre phase).
                         if (!sound) return false;
                         FrameTimer timer(map_state->perf_trace ? &map_state->audio_ms : nullptr, true);
+                        sound->set_cinematic_focus(map_state->space && map_state->space->live_camera_movie()
+                            ? map_state->movie_subject : sim::invalid_entity_id);
                         return sound->frame_before_combat(*live_session, map_state->battle ? map_state->battle->take_acknowledgements()
                                                                       : std::vector<BattleInput::Acknowledgement>{},
                                      std::move(ability_clicks), camera, delta, std::move(reinforcement_feedback));
@@ -551,7 +535,8 @@ SpacePopulateHook MapMode::State::make_population_hook() {
                                 return effects ? effects->projectile_model_birth(ship, *input->latest,
                                     [input](const std::uint64_t tick) { return input->snapshot_at(tick); })
                                     : std::nullopt;
-                            });
+                            },
+                            [live_session](const sim::EntityId entity) { return live_session->engine_brightness_override(entity); });
                     };
                     // #80: the frame's shots, hits and explosions, from the snapshots only. L1.2: near/far from the camera
                     // frame as the pre phase read it (one value per frame).
@@ -809,6 +794,12 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
     const assets::ObjectTypeCatalog& placement_catalog, const std::string& catalog_failure,
     const EnqueueLoadStep& enqueue) {
     State& state = *this;
+    state.read_retreat_entry(map); // FS-R07: the marker the retreat cinematic is framed from
+    if (!state.options.attract) {
+        // #6972: the scene is told to the render profile (render_settings); the menu's attract is not a space battle.
+        enter_render_scene(RenderScene::space_battle);
+        state.render_scene_entered = true;
+    }
 
         if (state.effect_animation_idle()) {
             return state.fail_ready("--eawr-map-effect-animation idle applies only to land maps");
@@ -911,7 +902,7 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 .release_compose_pins = true,
                 .texture_prefetch = population_uses_texture_prefetch(live, state.live_options.texture_prefetch),
                 .texture_prefetch_solid_state = population_uses_texture_prefetch(live, state.live_options.texture_prefetch)
-                    && texture_volumes_solid_state(texture_roots(state.options.game_root, state.options.mod_root)),
+                    && game_data_volumes_solid_state(ViewerPath::utf8(state.options.game_root), ViewerPath::utf8(state.options.mod_root)),
                 .texture_prefetch_readers = state.live_options.texture_prefetch_readers,
             });
         } else if (state.space_place_object || !state.space_hardpoint_states.empty()) {
@@ -937,6 +928,8 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
             if (!state.attached_animation_failure.empty()) return state.fail_ready(state.attached_animation_failure);
             if (!state.attached_plan.records.empty()) {
                 state.particles = std::make_unique<MapParticleProvider>(host, *state.filesystem);
+                state.particles->set_drop_unpreparable(true);
+                state.particles->set_reject_resource_for_test(state.particle_reject_resource_test);
                 if (!state.particles->prepare_attached(state.attached_plan, *state.scene)) {
                     return state.fail_ready("space attached effect preparation failed");
                 }
@@ -970,6 +963,7 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
             .clock_hold_ticks = state.options.particle_frames,
             .clock_offset = state.idle_offset.value_or(0U),
             .camera = state.space_camera,
+            .sweep = state.space_sweep,
             .saved_camera = state.attract_camera,
             .control = state.space_control,
             .map_camera = std::move(space_camera_source),
@@ -1029,7 +1023,16 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                             << ", \"seed\": " << placed[index].seed
                             << ", \"capacity\": " << placed[index].capacity
                             << ", \"particles\": " << placed[index].stats.particles
-                            << ", \"particle_hash\": " << placed[index].stats.hash << "}";
+                            << ", \"particle_hash\": " << placed[index].stats.hash;
+                        // Only a placement that has causes (a dropped effect, a skipped
+                        // emitter) lists them, so the usual report keeps its shape.
+                        if (!placed[index].causes.empty()) {
+                            output << ", \"causes\": [";
+                            for (std::size_t cause = 0; cause < placed[index].causes.size(); ++cause)
+                                output << (cause ? ", " : "") << json(placed[index].causes[cause]);
+                            output << "]";
+                        }
+                        output << "}";
                     }
                     output << "]},\n";
                 },

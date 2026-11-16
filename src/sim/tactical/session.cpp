@@ -193,13 +193,16 @@ core::Result<void> TacticalSession::submit(const PlayerCommand& command) {
         && !std::holds_alternative<PadBuildPayload>(command.payload)
         && !std::holds_alternative<PadSellPayload>(command.payload)
         && !std::holds_alternative<ReinforcePayload>(command.payload)
+        && !std::holds_alternative<RevealAllPayload>(command.payload)
         && !std::holds_alternative<LandGarrisonPayload>(command.payload)
-        && !std::holds_alternative<LandUnloadPayload>(command.payload)))
+        && !std::holds_alternative<LandUnloadPayload>(command.payload)
+        && !std::holds_alternative<AbilityPayload>(command.payload)
+        && !std::holds_alternative<AreaAbilityPayload>(command.payload)))
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
-            "land sessions accept move, stop, attack, garrison, unload and the buy, cancel, pad and reinforce routes only; attack-move and guard are not supported"));
-    if (impl_->land) if (const auto* move = std::get_if<MovePayload>(&command.payload); move && (move->append || move->through_hazards))
+            "land sessions accept move, stop, attack, garrison, unload, reveal-all, ability and the buy, cancel, pad and reinforce routes only; attack-move and guard are not supported"));
+    if (impl_->land) if (const auto* move = std::get_if<MovePayload>(&command.payload); move && (move->append || move->through_hazards || move->final_yaw))
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
-            "land move does not support waypoints or hazard overrides"));
+            "land move does not support waypoints, hazard overrides or a final facing"));
     if (impl_->object_turn_running) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
             "submit during an object-turn provider call"));
@@ -217,7 +220,8 @@ core::Result<void> TacticalSession::submit(const PlayerCommand& command) {
                 "human controller cannot issue an engine-only tactical route"));
     }
     const auto context = command_context(command.key);
-    const auto shape = detail::validate_command_shape(command, impl_->setup.players, context, {});
+    const auto shape = detail::validate_command_shape(command, impl_->setup.players, context, {},
+        impl_->setup.domain == BattleDomain::land);
     if (!shape) {
         return shape;
     }
@@ -285,6 +289,15 @@ void TacticalSession::set_commit_observer(std::function<void(std::string_view, b
 TacticalSession::TickWork TacticalSession::tick_work() const noexcept { return impl_->tick_work; }
 
 std::uint64_t TacticalSession::completed_tick() const noexcept { return impl_->completed_tick; }
+std::optional<TswState> TacticalSession::tsw_state(const EntityId id) const {
+    const auto found = impl_->tsw_states.find(id);
+    return found == impl_->tsw_states.end() ? std::nullopt : std::optional<TswState>(found->second);
+}
+TswWorld TacticalSession::tsw_world() const { return impl_->tsw_world; }
+bool TacticalSession::tsw_planet_destroyed() const noexcept { return impl_->tsw_world.planet_destroyed; }
+bool TacticalSession::tsw_gate_open() const noexcept {
+    return impl_->setup.tsw && ::eawr::sim::tactical::tsw_gate_open(impl_->setup.tsw->conflict) && !impl_->tsw_world.planet_destroyed;
+}
 BattleDomain TacticalSession::domain() const noexcept { return impl_->setup.domain; }
 EntityId TacticalSession::next_entity_id() const noexcept { return impl_->next_id; }
 std::uint64_t TacticalSession::rng_state() const noexcept { return impl_->rng_state; }
@@ -369,6 +382,8 @@ core::Result<bool> TacticalSession::reinforcement_point(const PlayerId player, c
     if (impl_->outcome || impl_->economy.disabled_types.contains(type)) {
         return core::Result<bool>::success(false);
     }
+    // #7190: a land battle answers with the land rules (reinforcement points, whole-company fit, cap), not the space ones.
+    if (impl_->land) return impl_->land_reinforcement_point(player, type, point);
     UnitStage staged(impl_->sorted_live());
     return impl_->placement_valid(player, type, point, staged, impl_->completed_tick, nullptr, work, nullptr, facing_yaw);
 }

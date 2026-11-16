@@ -57,6 +57,9 @@ struct MpLocalContent {
     std::function<std::array<std::string, 3>(std::string_view player_type)> ai_levels;
     // This build's batch limits (net::max_batch_commands / max_batch_bytes); the offer must carry the same.
     std::uint32_t command_quota{}, byte_quota{};
+    // Test seam: the Lua sandbox policy identity this peer claims in the rules domain, to stand in for a peer on another
+    // build. Empty (always, in production): this build's script::authoritative::sandbox_policy_identity.
+    std::string sandbox_policy;
     // Production plans through plan_live_campaign_setup (fiscal policy, difficulty); the default is
     // plan_campaign_setup over the same data.
     std::function<core::Result<CampaignSetupPlan>(const CampaignSetupOptions&, std::string_view campaign,

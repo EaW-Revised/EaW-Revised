@@ -147,6 +147,161 @@ void checkpoint_barrier_contracts() {
     }
 }
 
+// A control that names a LATER barrier sits in the early queue until that barrier begins: replaying the queue at an earlier
+// barrier must neither fail the session nor consume it (it used to be refused as "overlapping save epochs").
+void checkpoint_early_queue_keeps_later_barriers(const bool flood = false) {
+    FakeNetwork network(2);
+    std::array<OpaqueAdapter, 2> adapters;
+    std::array<unsigned, 2> commits{}, refusals{};
+    std::vector<std::unique_ptr<FakeTransport>> transports;
+    std::vector<net::LockstepSession> sessions;
+    const std::vector<net::PeerSeat> seats{{{1}, true}, {{2}, true}};
+    for (unsigned peer = 0; peer < 2; ++peer) {
+        adapters[peer].checkpoint_at = 5;
+        net::SessionOptions options; options.final_tick_count = 25; options.completeness_timeout_ms = 500;
+        transports.push_back(std::make_unique<FakeTransport>(network, peer));
+        sessions.push_back(require(net::LockstepSession::create(adapters[peer], *transports.back(), seats, options)));
+        net::CheckpointCallbacks callbacks;
+        callbacks.capture = [&, peer](const auto&) {
+            const auto digest = eawr::core::sha256(adapters[peer].canonical_state());
+            return eawr::core::Result<net::CheckpointProof>::success({digest, digest, digest});
+        };
+        callbacks.commit = [&, peer] { ++commits[peer]; return eawr::core::Result<void>::success(); };
+        callbacks.refused = [&, peer](auto) { ++refusals[peer]; };
+        sessions.back().enable_checkpoint_barrier(std::move(callbacks));
+    }
+    // The host's drain control for a second barrier (epoch 7) reaches peer 1 before peer 1 has begun the first (epoch 5).
+    // A drain control is the kind byte, then the epoch and a second value (7, as before) as two 8-byte little-endian words. The frame is
+    // built at its full size so the byte writes below stay inside it (a push_back-built copy makes GCC warn about an overflow).
+    const auto drain_frame = [](const std::uint64_t epoch) {
+        std::vector<std::uint8_t> frame(1 + 2 * sizeof(std::uint64_t), 0);
+        frame[0] = net::checkpoint_drain_kind;
+        for (unsigned i = 0; i < 8; ++i) {
+            frame[1 + i] = static_cast<std::uint8_t>(epoch >> (8 * i));
+            frame[9 + i] = static_cast<std::uint8_t>(std::uint64_t{7} >> (8 * i));
+        }
+        return frame;
+    };
+    network.deliver(0, 1, drain_frame(7));
+    // A full early queue (stacked later barriers) is not a violation either: the nearest barriers' controls are kept.
+    if (flood) for (unsigned i = 0; i < 24; ++i)
+        network.deliver(0, 1, drain_frame(6 + i % 3)); // epochs 6..8, all inside the sealed horizon
+    for (std::uint64_t round = 0; round < 400 && !(adapters[0].tick == 25 && adapters[1].tick == 25); ++round) {
+        network.round = round;
+        for (unsigned peer = 0; peer < 2; ++peer) require(sessions[peer].pump(round));
+    }
+    expect(adapters[0].tick == 25 && adapters[1].tick == 25 && commits[0] == 1 && commits[1] == 1 && refusals[0] == 0 && refusals[1] == 0,
+        std::string("a later barrier's control in the early queue neither fails the session nor the earlier barrier")
+        + (flood ? " (queue flooded)" : ""));
+}
+
+// The host refuses a barrier (its completeness timeout) before a lagging non-host peer has begun it, so the refusal waits in
+// that peer's early queue. Flooding the queue with nearer controls must never evict it: a peer that loses the host's refusal
+// would sit in the barrier with no timeout of its own.
+void checkpoint_host_refusal_survives_a_full_early_queue() {
+    FakeNetwork network(2);
+    std::array<OpaqueAdapter, 2> adapters;
+    std::array<unsigned, 2> commits{}, refusals{};
+    std::vector<std::unique_ptr<FakeTransport>> transports;
+    std::vector<net::LockstepSession> sessions;
+    const std::vector<net::PeerSeat> seats{{{1}, true}, {{2}, true}};
+    for (unsigned peer = 0; peer < 2; ++peer) {
+        adapters[peer].checkpoint_at = 6;
+        net::SessionOptions options; options.input_delay = 8; options.final_tick_count = 40; options.completeness_timeout_ms = peer == 0 ? 500 : 5000; // only the host decides on its deadline
+        transports.push_back(std::make_unique<FakeTransport>(network, peer));
+        sessions.push_back(require(net::LockstepSession::create(adapters[peer], *transports.back(), seats, options)));
+        net::CheckpointCallbacks callbacks;
+        callbacks.capture = [&, peer](const auto&) {
+            const auto digest = eawr::core::sha256(adapters[peer].canonical_state());
+            return eawr::core::Result<net::CheckpointProof>::success({digest, digest, digest});
+        };
+        callbacks.commit = [&, peer] { ++commits[peer]; return eawr::core::Result<void>::success(); };
+        callbacks.refused = [&, peer](auto) { ++refusals[peer]; };
+        sessions.back().enable_checkpoint_barrier(std::move(callbacks));
+    }
+    // Peer 1 seals its first batches and then stalls; the host runs ahead to the trigger tick, waits for the lagging peer's
+    // drain, and refuses the barrier when its completeness deadline passes.
+    std::uint64_t round = 0;
+    for (; round < 3; ++round) { network.round = round; require(sessions[1].pump(round)); }
+    for (; round < 2000 && refusals[0] == 0; ++round) { network.round = round; require(sessions[0].pump(round)); }
+    expect(refusals[0] == 1 && !sessions[0].checkpoint_pending(), "the host refused the barrier its peer never joined");
+    // Flood the lagging peer's inbox with nearer ordinary controls behind the host's drain and refusal: more than the queue holds.
+    for (unsigned i = 0; i < 40; ++i) {
+        std::vector<std::uint8_t> frame{net::checkpoint_drain_kind};
+        for (const auto value : {std::uint64_t{1 + i % 5}, std::uint64_t{100 + i}}) for (unsigned byte = 0; byte < 8; ++byte)
+            frame.push_back(static_cast<std::uint8_t>(value >> (8 * byte)));
+        network.deliver(0, 1, frame);
+    }
+    for (; round < 6000 && !(adapters[0].tick == 40 && adapters[1].tick == 40); ++round) {
+        network.round = round;
+        for (unsigned peer = 0; peer < 2; ++peer) require(sessions[peer].pump(round));
+    }
+    expect(adapters[0].tick == 40 && adapters[1].tick == 40 && !sessions[1].checkpoint_pending(),
+        "the lagging peer leaves the barrier and finishes the match: the host's refusal was never evicted");
+    expect(refusals[0] == 1 && refusals[1] == 1 && commits[0] == 0 && commits[1] == 0,
+        "the barrier is refused on both peers and nothing is committed");
+}
+
+// The early save queue is sized from the protocol and never evicts: a peer that loses any control of a barrier the host decided
+// would wait in it with no timeout of its own. A lagging non-host peer holds, from the host, at most input_horizon() x 4 = 72
+// controls (delay 8): with the queue exactly at that bound (the host's own drain for the barrier among them, plus its refusal on
+// the refuse path) the peer still leaves the barrier on both the accept and the refuse path; one sender beyond the bound is a
+// protocol violation refused as malformed, loudly.
+void checkpoint_early_queue_at_the_bound(const bool accept, const unsigned synthetic, const bool violation) {
+    FakeNetwork network(2);
+    std::array<OpaqueAdapter, 2> adapters;
+    std::array<unsigned, 2> commits{}, refusals{};
+    std::vector<std::unique_ptr<FakeTransport>> transports;
+    std::vector<net::LockstepSession> sessions;
+    const std::vector<net::PeerSeat> seats{{{1}, true}, {{2}, true}};
+    for (unsigned peer = 0; peer < 2; ++peer) {
+        adapters[peer].checkpoint_at = 6;
+        net::SessionOptions options; options.input_delay = 8; options.final_tick_count = 40; options.completeness_timeout_ms = peer == 0 ? 500 : 5000; // only the host decides on its deadline
+        transports.push_back(std::make_unique<FakeTransport>(network, peer));
+        sessions.push_back(require(net::LockstepSession::create(adapters[peer], *transports.back(), seats, options)));
+        net::CheckpointCallbacks callbacks;
+        callbacks.capture = [&, peer](const auto&) {
+            const auto digest = eawr::core::sha256(adapters[peer].canonical_state());
+            return eawr::core::Result<net::CheckpointProof>::success({digest, digest, digest});
+        };
+        callbacks.commit = [&, peer] { ++commits[peer]; return eawr::core::Result<void>::success(); };
+        callbacks.refused = [&, peer](auto) { ++refusals[peer]; };
+        sessions.back().enable_checkpoint_barrier(std::move(callbacks));
+    }
+    const std::string mode = std::string(accept ? "accept" : "refuse") + (violation ? " beyond the bound" : " at the bound");
+    std::uint64_t round = 0;
+    for (; round < 3; ++round) { network.round = round; require(sessions[1].pump(round)); }
+    // The host runs ahead to the trigger tick and begins the barrier (its drain waits in the lagging peer's queue). On the refuse
+    // path it then times out and refuses; on the accept path the lagging peer resumes at once.
+    for (; round < 2000 && !sessions[0].checkpoint_pending() && refusals[0] == 0; ++round) { network.round = round; require(sessions[0].pump(round)); }
+    expect(sessions[0].checkpoint_pending(), "the host began the barrier (" + mode + ")");
+    if (!accept) for (; round < 2000 && refusals[0] == 0; ++round) { network.round = round; require(sessions[0].pump(round)); }
+    // Fill the lagging peer's queue from the host with distinct drain controls of the barrier before the trigger tick.
+    for (unsigned i = 0; i < synthetic; ++i) {
+        std::vector<std::uint8_t> frame{net::checkpoint_drain_kind};
+        for (const auto value : {std::uint64_t{5}, std::uint64_t{100 + i}}) for (unsigned byte = 0; byte < 8; ++byte)
+            frame.push_back(static_cast<std::uint8_t>(value >> (8 * byte)));
+        network.deliver(0, 1, frame);
+    }
+    std::string failure;
+    for (; round < 6000 && failure.empty() && !(adapters[0].tick == 40 && adapters[1].tick == 40); ++round) {
+        network.round = round;
+        for (unsigned peer = 0; peer < 2; ++peer) {
+            const auto pumped = sessions[peer].pump(round);
+            if (!pumped && failure.empty()) failure = pumped.error().code;
+        }
+    }
+    if (violation) {
+        expect(failure == net::session_errors::malformed, "a sender beyond the bound is refused as malformed (" + mode + "): " + failure);
+        return;
+    }
+    expect(failure.empty() && adapters[0].tick == 40 && adapters[1].tick == 40 && !sessions[1].checkpoint_pending(),
+        "the lagging peer leaves the barrier and the match finishes (" + mode + "): " + failure);
+    expect(accept ? (commits[0] == 1 && commits[1] == 1 && refusals[0] == 0 && refusals[1] == 0)
+                  : (commits[0] == 0 && commits[1] == 0 && refusals[0] == 1 && refusals[1] == 1),
+        "both peers reach the same outcome (" + mode + ")");
+}
+
 void checkpoint_release_contracts() {
     // Delayed release, closed host before capture, dropped release, closed host
     // after proofs, and ordinary release all use the same real session pump.
@@ -530,7 +685,7 @@ struct AdaptiveOpaque {
     std::vector<net::LockstepSession> sessions;
     explicit AdaptiveOpaque(std::uint64_t timeout = 1000, bool override_provider = true,
         std::function<eawr::core::Result<void>(std::uint64_t, std::span<const std::uint8_t>)> retain = {},
-        std::uint64_t initial_delay = 4, unsigned peers = 2)
+        std::uint64_t initial_delay = 4, unsigned peers = 2, bool hold_on_expiry = false, std::uint32_t max_deferrals = 4)
         : network(peers), adapters(peers) {
         net::SessionOptions options;
         options.input_delay = initial_delay;
@@ -540,6 +695,8 @@ struct AdaptiveOpaque {
         options.completeness_timeout_ms = timeout;
         options.adaptive_timing = net::AdaptiveTiming{0, true, [](auto) { return std::optional<std::uint64_t>{330}; }};
         if (!override_provider) options.adaptive_timing->rtt_ms = {};
+        options.adaptive_timing->hold_on_expiry = hold_on_expiry;
+        options.adaptive_timing->max_deferrals = max_deferrals;
         transports.reserve(peers);
         std::vector<net::PeerSeat> roster;
         for (unsigned peer = 0; peer < peers; ++peer) {
@@ -833,6 +990,80 @@ void adaptive_wire_and_gate() {
     }
 }
 
+// A timing vote that outlives its deadline while every voter stream is open keeps the current delay and keeps
+// waiting (hold_on_expiry), then completes when the vote arrives; a closed voter stream still fails closed.
+void adaptive_hold_on_expiry() {
+    enum class Case { release, closed, connecting, no_holds };
+    for (const auto mode : {Case::release, Case::closed, Case::connecting, Case::no_holds}) {
+        AdaptiveOpaque match(100, true, {}, 4, 2, true, mode == Case::no_holds ? 0U : 4U);
+        bool released{};
+        match.network.fault = [&released](auto from, auto to, auto bytes) {
+            FakeDelivery delivery;
+            delivery.drop = !released && from == 1 && to == 0 && bytes.front() == net::timing_ready_kind;
+            return delivery;
+        };
+        bool failed{};
+        std::string code;
+        std::uint64_t round{};
+        // The vote clock starts when the agreement opens, ahead of the event tick, so it expires before the input
+        // wait at the event tick does: that window is where a late vote used to end the match.
+        for (; round < 450 && !failed && (mode != Case::release || match.sessions[0].timing_deferrals() == 0); ++round) {
+            match.network.round = round;
+            if (mode == Case::closed && round == 300) match.network.open[1] = false;
+            if (mode == Case::connecting && round == 150) match.network.connecting_peer = 1;
+            for (auto& session : match.sessions) {
+                const auto pumped = session.pump(round);
+                if (!pumped) { failed = true; code = pumped.error().code; }
+            }
+        }
+        if (mode == Case::closed) {
+            expect(failed, "a closed timing voter stream still fails closed with hold_on_expiry");
+            continue;
+        }
+        if (mode == Case::connecting) {
+            expect(failed && code == net::timing_errors::timeout && match.sessions[0].timing_deferrals() == 0,
+                "a voter stream that is still connecting is not open: the expired vote fails closed, never held");
+            continue;
+        }
+        if (mode == Case::no_holds) {
+            expect(failed && code == net::timing_errors::timeout && match.sessions[0].timing_deferrals() == 0,
+                "the hold is bounded by max_deferrals: with none left the expired vote fails closed");
+            continue;
+        }
+        expect(!failed && match.sessions[0].timing_deferrals() >= 1,
+            "an expired timing vote on an open stream is counted, not fatal");
+        expect(match.sessions[0].input_delay() == 4, "the held vote keeps the current delay");
+        released = true;
+        match.network.deliver(1, 0, timing_frame(net::timing_ready_kind, 165, 8));
+        for (std::uint64_t later = round; later < 1500; ++later) {
+            match.network.round = later;
+            for (auto& session : match.sessions) require(session.pump(later));
+            if (match.adapters[0].tick == 500 && match.adapters[1].tick == 500) break;
+        }
+        expect(match.adapters[0].tick == 500 && match.adapters[1].tick == 500
+            && match.sessions[0].input_delay() == 8 && match.sessions[1].input_delay() == 8,
+            "the held vote completes and applies the proposed delay on both peers");
+    }
+}
+
+// An adaptive session offers a recovery frontier that carries the delay in force: never while a change is pending
+// or its old-delay horizon is still immutable, and the delay it names is always the session's own.
+void adaptive_frontier_carries_the_delay() {
+    AdaptiveOpaque match(1000, true, {}, 4, 2);
+    std::uint64_t refused{}, offered_before{}, offered_after{};
+    for (std::uint64_t round = 0; round < 450; ++round) {
+        match.network.round = round;
+        for (auto& session : match.sessions) require(session.pump(round));
+        const auto frontier = match.sessions[0].recovery_frontier();
+        if (!frontier) { ++refused; continue; }
+        expect(frontier.value().input_delay == match.sessions[0].input_delay(), "the frontier names the delay in force");
+        (match.sessions[0].input_delay() == 4 ? offered_before : offered_after) += 1;
+    }
+    expect(match.sessions[0].input_delay() == 8, "the host's proposal was agreed and applied");
+    expect(offered_before > 0 && offered_after > 0, "a frontier is offered both before and after the change");
+    expect(refused > 0, "no frontier is offered while the change is pending or its old horizon is immutable");
+}
+
 void mode_neutral_eight_peer_observer() {
     FakeNetwork network(8);
     std::vector<net::PeerSeat> roster;
@@ -1014,6 +1245,12 @@ int main() {
         script_hash_only_on_exchange_ticks();
         object_turn_only_command_log();
         checkpoint_barrier_contracts();
+        checkpoint_early_queue_keeps_later_barriers();
+        checkpoint_early_queue_keeps_later_barriers(true);
+        checkpoint_host_refusal_survives_a_full_early_queue();
+        checkpoint_early_queue_at_the_bound(true, 71, false);
+        checkpoint_early_queue_at_the_bound(false, 70, false);
+        checkpoint_early_queue_at_the_bound(true, 80, true);
         checkpoint_release_contracts();
         chained_departures();
         target_timing_controls();
@@ -1072,6 +1309,10 @@ int main() {
         }
         adaptive_policy_and_refusals();
         adaptive_wire_and_gate();
+        adaptive_hold_on_expiry();
+        adaptive_frontier_carries_the_delay();
+        adaptive_high_rtt_recovers();
+        adaptive_save_load_sweep();
         adaptive_settled_departure();
         adaptive_settled_departure(true);
         adaptive_settled_departure(false, true);

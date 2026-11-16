@@ -134,6 +134,10 @@ struct Owner {
 using namespace selector_test;
 namespace eawr::script::foc::ai {
 struct EngineContractAccess {
+    static bool service_owners_match(const Engine& e, const auth::ScriptScheduler* scripts,
+        const eawr::sim::PartitionExecutor* executor) {
+        return e.scripts_ == scripts && e.perception_executor_ == executor;
+    }
     static const void* build_cache(const Engine& e) { return e.galactic_build_cache_.get(); }
     static PlayerAi& player(Engine& e) { return e.players_.front(); }
     static gc::funding::GoalRequest funding_request(Engine& e, bool running = false) {
@@ -234,8 +238,54 @@ struct EngineContractAccess {
         std::vector<Goal> kept; e.maintain_category(p, "OFFENSIVE", kept);
         p.active = std::move(kept); p.proposed.clear();
     }
+    static void zero_desire_maintenance(Engine& e, bool competing, unsigned scenario) {
+        const auto write = e.native_record_scope();
+        auto& p = player(e);
+        e.native_records_changed(p.player, {2, 3, 22}); e.mark_native_state_changed();
+        e.data_.equations = must(EquationSet::parse({{"fixture.xml",
+            "<Equations><Positive>1</Positive><Zero>0</Zero></Equations>"}}, {}));
+        p.functions.front().equation = e.data_.equations.find("ZERO");
+        auto& running = p.running.at(p.active.front().plan);
+        running.removable = scenario == 1;
+        running.exited = scenario == 2;
+        if (scenario == 4) p.active.front().potential->valid = false;
+        p.proposed.clear();
+        if (competing) {
+            auto proposed = p.active.front(); proposed.id = p.next_goal_id++;
+            proposed.plan = 0; proposed.active = false; proposed.exclusions_registered = false;
+            proposed.potential->valid = false; proposed.desire = real(2);
+            p.proposed.push_back(std::move(proposed));
+        }
+        e.begin_galactic_maintenance(p);
+        e.maintain(p); // Exercise refreshed desire as well as both category paths.
+    }
     static TaskForce& force(Engine& e) { return player(e).taskforces.at(player(e).running.at(player(e).active.front().plan).taskforces.front()); }
+    static void unsettled_member_removal(Engine& e, sim::EntityId actor) {
+        const auto write = e.native_record_scope();
+        auto& p = player(e); auto& tf = force(e);
+        e.native_records_changed(p.player, {14}); e.native_record_changed(p.player, 21, tf.id);
+        e.mark_native_state_changed();
+        // Reproduce the old removal window independently of the corrected callback.
+        tf.units.erase(std::remove(tf.units.begin(), tf.units.end(), actor), tf.units.end());
+        p.assigned.erase(actor);
+    }
     static Block& retained_block(Engine& e, std::uint64_t id) { return player(e).blocks.at(id); }
+    // An invasion block of the running plan naming `request`, the shape a plan's invade step leaves behind.
+    static std::uint64_t add_invasion_block(Engine& e, std::uint64_t plan, std::uint64_t request) {
+        const auto write = e.native_record_scope();
+        auto& p = player(e);
+        const auto& running = p.running.at(plan);
+        Block block; block.id = block_id(running.instance, 9000); block.instance = running.instance;
+        block.taskforce = running.taskforces.empty() ? 0 : running.taskforces.front(); block.kind = Block::Kind::galactic_invade; block.galactic_request = request;
+        const auto id = block.id;
+        if (p.blocks.emplace(id, std::move(block)).second) Engine::index_runtime(e.runtime_index_.blocks, id, p.player);
+        e.native_record_changed(Engine::native_all_players, 23, id); e.mark_native_state_changed();
+        return id;
+    }
+    static void service_blocks(Engine& e) { e.service_blocks(); }
+    static void finish_running_plan(Engine& e, std::uint64_t plan, authoritative::ScriptScheduler& scripts) {
+        e.finish_plan(player(e), plan, scripts, true);
+    }
     // Fixture writes use the same semantic record boundaries as native writers.
     static void drop_goal(Engine& e) {
         const auto write = e.native_record_scope();

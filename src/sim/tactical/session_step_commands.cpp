@@ -807,6 +807,10 @@ core::Result<void> session_detail::Tick::commands() {
             if (auto applied = lanes.apply_retreat(command, retreat, issuer); !applied) return applied;
             continue;
         }
+        if (const auto* tsw = std::get_if<TacticalSuperweaponPayload>(&command.payload)) {
+            if (auto applied = tsw_command(command, *tsw, issuer); !applied) return applied;
+            continue;
+        }
         if (const auto* special = std::get_if<SpecialFirePayload>(&command.payload)) {
             if (auto applied = handlers.special_fire(command, *special, issuer); !applied) return applied;
             continue;

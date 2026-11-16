@@ -159,6 +159,39 @@ destinations inside occupied space.
 - **MV-33** (project, space-hardpoints HD-11) A unit whose engines are lost plans with its
   maximum speed, acceleration and deceleration times the durability speed factor at the time
   it plans.
+- **MV-40** (debug build; the arrival is UNVERIFIED) A move may carry a final facing: a yaw in degrees in
+  [0, 360), 0 along +X, quantised to 0.1 degree by the issuer. It is the move the compass drag of
+  [battle selection](foc-battle-selection.md) gives. The destination, path, speed and slot mapping are the
+  plain move's: the angle changes none of them, and every ship of a group is given the same angle. Our order
+  keeps the angle (`Order.final_yaw`, each queued leg its own) until any other order replaces it, a stop,
+  attack, face, guard, attack-move or plain move, and it is part of the authoritative state (replay opcode 38,
+  state block `MVYW`, queued-leg flag bit 2, checkpoint domain +4: [replay format](../replay-format.md)).
+  The arrival turn is the project policy MV-41 below; its exact retail timing remains unverified.
+  `FinalFormationFacingMinimumAngle` and `FinalFormationFacingDeltaCoefficient` stay unapplied. A fighter
+  squadron's container keeps the angle too and flies its plain move. A land session rejects the command (its
+  formations take no heading yet, [land movement](land-movement.md) owns that half). The facing-only turn in
+  place of a drag that starts on a selected ship is the face order (MV-20), not this rule.
+- **MV-41** (project, interim move-with-facing arrival policy; retail timing UNVERIFIED) A space ship completes its
+  ordinary move, including deceleration and MV-32's last sampled position, then turns in place to the ordered
+  heading. The arrival frame starts a normal MV-20/MV-21 turn; the next movement frame begins rotating, with
+  no translation or further braking. The shortest signed heading difference divided by the authored rate of
+  turn, times the authored layer slowdown, gives the duration. The goal stays in degrees throughout the
+  planner, so making a synthetic direction ray cannot round it again. No new threshold or turn-rate constant
+  is introduced. A successful zero-distance or short move starts the turn when its plan is installed; an
+  exhausted search keeps its retry wait and does not count as arrival. A pending formation replacement cannot
+  start the new heading from the old path's completion. Each formation member turns independently at its
+  unchanged slot; its queued next leg waits for the turn to finish, following FS-37/FC-66 and FD-61. A new
+  move, stop, attack, face, guard or attack-move replaces the heading and cancels an active arrival turn;
+  an appended leg preserves it until completion. Interruption observes MV-02's existing movement-before-command
+  boundary. The turn plan and its progress use the existing motion state and checkpoint fields.
+  Debug-build evidence E6968A-01..07: the stopped ship service only levels roll and clears speed, the path-pop
+  operation removes a path and refreshes tracking, and the sampled path faces along its velocity; none of
+  these inspected paths reads the formation facing ramp. The trivial-path builder can use an explicit end
+  facing, but its connection to the compass order was not established. These readings do **not** prove a
+  post-arrival turn, its start during braking, or its exact replacement-order policy in retail. A matched
+  retail arrival/interruption recording remains on the fidelity list; MV-41 is an explicit interim project
+  decision rather than a claimed original-game fact. Moves without a final heading retain their existing
+  planning, motion, hashes and replay bytes.
 
 ## Banking in turns
 

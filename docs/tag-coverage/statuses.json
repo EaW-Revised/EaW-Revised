@@ -47,6 +47,7 @@
     "WMV-41": "debug build: ordinary layered ship path flight has no Min_Speed floor; the coordinator fetches it but uses minimum-speed ratios only in its no-layer formation merge branch (docs/behaviour/walks/movement.md WMV-41).",
     "WMV-42": "debug build: craft flight uses Max_Thrust rather than OverrideAcceleration or OverrideDeceleration; ordinary ship flight consumes the overrides (docs/behaviour/walks/movement.md WMV-42). OverrideDeceleration also bounds no-layer formation correction using member-type data; its formation default is zero with no ordinary-flight fallback.",
     "WMV-43": "debug build: Minimum_Follow_Distance and Out_Of_Combat_Defense_Adjustment are consumed by craft following and flight states, never ordinary ship flight (docs/behaviour/walks/movement.md WMV-43, WSQ-33, DG-26).",
+    "WSPL-09": "debug build: the super laser handler's own tag table has no Alternate_Description_Text row; only the Unit_Ability table reads it (docs/behaviour/walks/abilities.md WSPL-09)",
     "WSU-66": "WSU-66 (debug build): Select_Box_Z_Adjust moves only the select billboard model, not the space selection ring; the ring stays at the unit's position, so the tag has no effect on what we draw (docs/behaviour/walks/sensors-ui.md)"
   },
   "rows": [

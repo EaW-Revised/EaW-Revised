@@ -167,6 +167,31 @@ void EawrBattleOverlay::show_countdown(const String& text, const Color& colour, 
     layout_countdown();
 }
 
+void EawrBattleOverlay::show_countdown_lines(std::vector<CountdownLine> lines, const double x_share, const double y_share,
+                                             const double spacing_share) {
+    if (lines_ == lines && lines_x_ == x_share && lines_y_ == y_share && lines_spacing_ == spacing_share) return;
+    lines_ = std::move(lines); lines_x_ = x_share; lines_y_ = y_share; lines_spacing_ = spacing_share;
+    layout_countdown_lines();
+}
+
+void EawrBattleOverlay::layout_countdown_lines() {
+    const Vector2 size = get_size();
+    while (lines_text_.size() < lines_.size()) lines_text_.emplace_back();
+    for (std::size_t index = 0; index < lines_text_.size(); ++index) {
+        if (index >= lines_.size() || size.x <= 0.0F || size.y <= 0.0F) {
+            lines_text_[index].draw(*this, KitTextStyle{}, String(), Rect2(), HORIZONTAL_ALIGNMENT_LEFT, false, false, 1.0F, 1.0F);
+            continue;
+        }
+        int pixels = 0;
+        const KitTextStyle style = text_style(style_.banner, lines_[index].colour, pixels);
+        const float width = text_width(style_.banner, pixels, lines_[index].text);
+        const float height = style.font.is_valid() ? style.font->get_height(style.size) : 0.0F;
+        const Rect2 rect(static_cast<float>(lines_x_) * size.x,
+            static_cast<float>(lines_y_ + lines_spacing_ * static_cast<double>(index)) * size.y, width, height);
+        lines_text_[index].draw(*this, style, lines_[index].text, rect, HORIZONTAL_ALIGNMENT_LEFT, false, false, size.y / 720.0F, 1.0F);
+    }
+}
+
 void EawrBattleOverlay::layout_countdown() {
     const Vector2 size = get_size();
     countdown_rect_ = Rect2();
@@ -184,6 +209,13 @@ void EawrBattleOverlay::layout_countdown() {
 void EawrBattleOverlay::set_pause_notice(const String& text) {
     if (pause_notice_ == text) return;
     pause_notice_ = text; relayout(); queue_redraw();
+}
+
+void EawrBattleOverlay::set_resume_enabled(const bool enabled) {
+    resume_enabled_ = enabled;
+    if (resume_ == nullptr) return;
+    resume_->set_mouse_filter(enabled ? MOUSE_FILTER_STOP : MOUSE_FILTER_IGNORE);
+    resume_->set_modulate(enabled ? Color(1, 1, 1, 1) : Color(0.5F, 0.5F, 0.5F, 1.0F));
 }
 
 void EawrBattleOverlay::show_paused(const bool paused) {
@@ -380,6 +412,7 @@ void EawrBattleOverlay::relayout() {
     if (size.x <= 0.0F || size.y <= 0.0F || size == laid_out_ || resume_ == nullptr) return;
     laid_out_ = size;
     layout_countdown();
+    layout_countdown_lines();
     if (result_dialog_ && result_dialog_->frame != nullptr && result_dialog_->frame->get_size() != size) {
         result_dialog_->frame->queue_free();
         result_dialog_.reset();
@@ -461,7 +494,7 @@ void EawrBattleOverlay::relayout() {
             resume_style.outline = style_.button_outline;
         }
         resume_->set_caption(resume_style, button_caption, scale);
-        if (paused_ && !ready_) {
+        if (paused_ && !ready_ && style_.offer_quit) {
             const float quit_width = text_width(style_.button, button_pixels, style_.quit_text) + 16.0F * scale;
             quit_->set_position(Vector2((size.x - quit_width) * 0.5F,
                 resume_->get_position().y + resume_->get_size().y + 4.0F * scale));
@@ -472,6 +505,7 @@ void EawrBattleOverlay::relayout() {
         banner_text_.draw(*this, KitTextStyle{}, String(), Rect2(), HORIZONTAL_ALIGNMENT_LEFT, false, false, 1.0F, 1.0F);
     }
     resume_->set_visible(banner);
+    set_resume_enabled(resume_enabled_);
     // BEP-03: the end panel.
     panel_rect_ = Rect2();
     if (ended_) {
@@ -580,7 +614,7 @@ void EawrBattleOverlay::relayout() {
     }
     panel_->set_visible(ended_.has_value());
     quit_->set_mouse_filter(ended_ && result_dialog_ ? MOUSE_FILTER_IGNORE : MOUSE_FILTER_STOP);
-    quit_->set_visible(ended_.has_value() || (paused_ && !ready_));
+    quit_->set_visible(ended_.has_value() || (paused_ && !ready_ && style_.offer_quit));
     queue_redraw();
 }
 
@@ -610,10 +644,14 @@ std::string EawrBattleOverlay::report_json() const {
     } else {
         output << "null";
     }
-    output << ", \"begin_visible\": " << (ready_ ? "true" : "false")
+    output << ", \"production_countdowns\": [";
+    for (std::size_t index = 0; index < lines_.size(); ++index)
+        output << (index ? ", " : "") << json(utf8(lines_[index].text));
+    output << "], \"begin_visible\": " << (ready_ ? "true" : "false")
            << ", \"quit_visible\": " << (quit_ && quit_->is_visible() ? "true" : "false")
            << ", \"authored_pause_shell\": " << (!style_.pause_meshes.empty() && style_.pause_text && style_.pause_button ? "true" : "false")
            << ", \"resume_rect\": " << rect_json(Rect2(resume_->get_position(), resume_->get_size()))
+           << ", \"resume_enabled\": " << (resume_enabled_ ? "true" : "false")
            << ", \"paused_banner\": " << (paused_ && !ended_ ? "{\"text\": " + json(utf8(pause_notice_.is_empty() ? style_.paused_text : pause_notice_))
                                                                  + ", \"rect\": " + rect_json(banner_rect_) + "}"
                                                            : std::string("null"))

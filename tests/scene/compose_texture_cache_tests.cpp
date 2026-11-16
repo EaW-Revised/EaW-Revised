@@ -1,4 +1,5 @@
 #include "compose_texture_cache.hpp"
+#include "family_textures.hpp"
 
 #include "bc3_fixture.hpp"
 #include "texture_prefetch_policy.hpp"
@@ -209,6 +210,43 @@ void ship_materials_choose_their_chain() {
            "the held key tells the three forms of one file apart");
 }
 
+// #6725: the alpha-blended base textures and every sampled family binding besides the normal maps are chained too.
+void other_bindings_and_alpha_blended_textures_choose_their_chain() {
+    using eawr::presentation::godot_backend::binding_processing_for;
+    using eawr::presentation::godot_backend::sampled_bindings;
+    using eawr::presentation::godot_backend::space_base_processing_for;
+    using eawr::presentation::godot_backend::texture_processing_for;
+    using eawr::scene::TextureProcessing;
+    std::size_t blended = 0;
+    for (const auto& selector : eawr::scene::legacy_selectors()) {
+        const bool additive = selector.program == "MeshAdditive.fx" || selector.program == "MeshAdditive2x.fx"
+            || selector.program == "MeshAdditiveOffset.fx" || selector.program == "MeshAdditiveVColor.fx"
+            || selector.program == "RSkinAdditive.fx";
+        if (selector.transparent && !additive) {
+            ++blended;
+            expect(space_base_processing_for(selector) == TextureProcessing::colour_mip_chain,
+                   "an alpha-blended material's base texture gets the plain chain in the space compose: " + std::string(selector.program));
+            expect(texture_processing_for(selector) == TextureProcessing::none,
+                   "the shared policy the galaxy scene uses keeps no chain for it: " + std::string(selector.program));
+        }
+    }
+    expect(blended > 0, "the selector table has alpha-blended materials");
+    expect(binding_processing_for(true) == TextureProcessing::normal_mip_chain, "a normal map gets the normal chain");
+    expect(binding_processing_for(false) == TextureProcessing::colour_mip_chain, "any other sampled texture gets the plain chain");
+    std::size_t gloss_like = 0, normals = 0;
+    for (const auto& selector : eawr::scene::legacy_selectors()) {
+        for (const auto& binding : sampled_bindings(selector)) {
+            (binding.normal ? normals : gloss_like) += 1;
+        }
+    }
+    expect(gloss_like > 0, "some family samples a gloss, specular, wave or distortion texture besides the normal maps");
+    expect(normals > 0, "some family samples a normal map");
+    const auto* gloss = eawr::scene::find_legacy_selector("MeshGlossColorize.fx");
+    expect(gloss != nullptr && sampled_bindings(*gloss).size() == 1 && !sampled_bindings(*gloss)[0].normal
+               && sampled_bindings(*gloss)[0].name == "GlossTexture",
+           "the gloss family's GlossTexture is a non-normal sampled binding");
+}
+
 void hull_textures_reach_the_renderer_with_a_full_chain() {
     using eawr::presentation::godot_backend::texture_processing_for;
     using eawr::scene::TextureProcessing;
@@ -287,6 +325,34 @@ void hull_textures_reach_the_renderer_with_a_full_chain() {
         const auto base = upload_texture(cache, base_path, texture_processing_for(*hull));
         expect(base && base->mips.size() == 1, "without a read-ahead the texture is returned as decoded");
     }
+    {
+        // #6725 shield and cloak shells: nobody offered the texture, so the read-ahead's loader builds the chain.
+        eawr::scene::TexturePrefetchOptions options;
+        options.fixed_readers = 1;
+        eawr::scene::TexturePrefetch prefetch(vfs, options);
+        ComposeTextureCache cache;
+        cache.set_prefetch(&prefetch);
+        const auto shell = cache.decode(vfs, base_path, TextureProcessing::colour_mip_chain);
+        expect(shell && shell.value().mips.size() == 9 && shell.value().mips[0].bytes == colour.mips[0].bytes,
+               "an unplanned shell texture arrives with a full chain and its authored top level");
+        prefetch.finish();
+        expect(prefetch.stats().chained_by_loader == 1, "and the loader built it");
+    }
+    {
+        // #6725 fog-of-war unit surfaces: the compose without a read-ahead completes the chain itself, load time only.
+        using eawr::presentation::godot_backend::load_texture_chained;
+        const auto plain = load_texture_chained(vfs, base_path, TextureProcessing::colour_mip_chain);
+        expect(plain && plain.value().mips.size() == 9 && plain.value().mips[0].bytes == colour.mips[0].bytes,
+               "the fog-unit load gives a single-level base texture all nine levels, top level byte for byte");
+        const auto lit = load_texture_chained(vfs, base_path, TextureProcessing::compensated_light_mip_chain);
+        expect(lit && lit.value().mips.size() == 9, "the compensated chain kind is built too");
+        const auto norm = load_texture_chained(vfs, normal_path, TextureProcessing::normal_mip_chain);
+        expect(norm && norm.value().mips.size() == 9, "a normal map gets the normal chain");
+        const auto none = load_texture_chained(vfs, base_path, TextureProcessing::none);
+        expect(none && none.value().mips.size() == 1, "without processing the texture stays as decoded");
+        expect(!load_texture_chained(vfs, "data/art/textures/missing.dds", TextureProcessing::colour_mip_chain),
+               "a missing texture is an error, not a chain");
+    }
 }
 
 } // namespace
@@ -320,6 +386,7 @@ void every_live_session_gets_the_read_ahead_on_the_separate_render_thread() {
 int main() {
     every_live_session_gets_the_read_ahead_on_the_separate_render_thread();
     ship_materials_choose_their_chain();
+    other_bindings_and_alpha_blended_textures_choose_their_chain();
     hull_textures_reach_the_renderer_with_a_full_chain();
     unbounded_holds_everything();
     bounded_release_keeps_the_budget();

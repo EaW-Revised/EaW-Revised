@@ -585,6 +585,39 @@ core::Result<void> parse_header_extensions(
                 return fail<Parsed>(diagnostic_codes::malformed, "replay header extension tags must increase", logical_path);
             }
             previous_tag = tag;
+            if (tag == replay_extension_tactical_superweapon) {
+                // TSW-03/04: version 1 = target list, then the conflict flags; every byte accounted for.
+                Reader body(bytes.subspan(reader.offset(), length));
+                std::uint32_t version{}, target_count{};
+                if (!body.read_u32(version) || version != 1)
+                    return fail<Parsed>(diagnostic_codes::version, "invalid super weapon extension version", logical_path);
+                if (!body.read_u32(target_count) || target_count > tsw_max_targets || target_count > body.remaining() / 56U)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid super weapon target count", logical_path);
+                TswSetup tsw;
+                tsw.targets.resize(target_count);
+                for (auto& target : tsw.targets) {
+                    std::uint32_t pad{};
+                    std::int64_t x{}, y{}, z{}, yaw{};
+                    if (!body.read_u32(target.record) || !body.read_u32(pad) || pad != 0 || !body.read_u64(target.faction)
+                        || !body.read_u64(target.type) || !body.read_i64(x) || !body.read_i64(y) || !body.read_i64(z)
+                        || !body.read_i64(yaw))
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid super weapon target", logical_path);
+                    target.position = {math::Fixed::from_raw(x), math::Fixed::from_raw(y), math::Fixed::from_raw(z)};
+                    target.yaw_degrees = math::Fixed::from_raw(yaw);
+                }
+                std::uint32_t conflict_flags{}, tsw_defender{};
+                if (!body.read_u32(conflict_flags) || !body.read_u32(tsw_defender)
+                    || conflict_flags > 7U || ((conflict_flags & 1U) == 0U && (conflict_flags != 0U || tsw_defender != 0U))
+                    || body.remaining() != 0)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid super weapon conflict flags", logical_path);
+                if ((conflict_flags & 1U) != 0U)
+                    tsw.conflict = TswConflictSetup{tsw_defender, (conflict_flags & 2U) != 0U, (conflict_flags & 4U) != 0U};
+                std::vector<std::uint8_t> consumed(length);
+                if (!reader.read_bytes(consumed))
+                    return fail<Parsed>(diagnostic_codes::malformed, "truncated super weapon extension", logical_path);
+                replay.setup.tsw = std::move(tsw);
+                continue;
+            }
             if (tag == replay_extension_market_purchases) {
                 if (!replay.setup.campaign || replay.setup.campaign->market_abilities)
                     return fail<Parsed>(diagnostic_codes::malformed, "market purchases require a campaign", logical_path);
@@ -786,7 +819,7 @@ core::Result<void> parse_header_extensions(
                 && replay.setup.cinematic_seats.empty() && !replay.setup.match_identity
                 && !replay.setup.departure_policy && replay.setup.beacon_rules.empty()
                 && !replay.setup.attract_pool && !replay.setup.native_scene && object_turn_count == 0
-                && replay.setup.domain == BattleDomain::space)) {
+                && replay.setup.domain == BattleDomain::space && !replay.setup.tsw)) {
             return fail<Parsed>(diagnostic_codes::malformed, "invalid replay header extension length", logical_path);
         }
     }

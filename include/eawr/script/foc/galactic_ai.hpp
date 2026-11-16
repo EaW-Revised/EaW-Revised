@@ -8,6 +8,7 @@
 #include "eawr/core/result.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/script/authoritative/galactic_bridge.hpp"
+#include "eawr/script/foc/galactic_ai_write_probe.hpp"
 #include "eawr/sim/galactic/ai_funding.hpp"
 #include "eawr/sim/galactic/commands.hpp"
 #include "eawr/sim/galactic/production.hpp"
@@ -254,6 +255,10 @@ public:
     [[nodiscard]] virtual core::Result<NativeState> capture() const = 0;
     [[nodiscard]] virtual core::Result<void> restore(const NativeState&) = 0;
     [[nodiscard]] virtual core::Result<std::string> state_hash() const = 0;
+    // The opt-in per-tick correctness trace (EAWR_GALACTIC_NATIVE_ORACLE) captures the full AI state. Async AI step 2c-3: on the async
+    // schedule that read belongs to the ticks where the AI ran (its windows), so the lifecycle owner says whether `completed_tick` is one.
+    // Every other contributor, and the synchronous reference schedule, capture on every tick.
+    [[nodiscard]] virtual bool oracle_capture_due(std::uint64_t completed_tick) const noexcept { static_cast<void>(completed_tick); return true; }
     // Cheap per-tick composition. Unqualified contributors retain the full path.
     [[nodiscard]] virtual core::Result<std::string> sync_hash() const { return state_hash(); }
     // Empty opts an external contributor into canonical payload fingerprinting.
@@ -291,9 +296,15 @@ public:
 class TrackedStateContributor : public StateContributor {
 public:
     [[nodiscard]] std::optional<std::uint64_t> state_revision() const noexcept override { return revision_; }
-    void mark_state_changed() const noexcept { if (++revision_ == 0) std::terminate(); }
+    void mark_state_changed() const noexcept {
+        if (write_probe_) write_probe_->note(GalacticAiWriteProbe::Writer::tracked);
+        if (++revision_ == 0) std::terminate();
+    }
+    // Observer only: counts writes outside the async window body (the step 2 exit counter).
+    void bind_write_probe(std::shared_ptr<GalacticAiWriteProbe> probe) noexcept { write_probe_ = std::move(probe); }
 private:
     mutable std::uint64_t revision_{1};
+    std::shared_ptr<GalacticAiWriteProbe> write_probe_;
 };
 struct ServiceInput {
     gc::PlayerId player{};
@@ -444,11 +455,22 @@ public:
     [[nodiscard]] ServicePeriods service_periods() const noexcept;
     [[nodiscard]] core::Result<void> after_service(authoritative::ServiceReport&) override;
     void set_admission(Admission) noexcept;
+    // The lifecycle's current admission (default {galactic, processing, no auto-resolve}). Nothing in a production run sets another one
+    // (set_admission is used by tests only; pause, battle and held ticks reach the AI through the world's tick), which the async runtime counts.
+    [[nodiscard]] Admission admission() const noexcept;
     [[nodiscard]] LifecycleState lifecycle() const;
     [[nodiscard]] bool provider_retired(gc::PlayerId) const noexcept;
     [[nodiscard]] std::optional<gc::PlayerId> faulted_provider() const noexcept;
     [[nodiscard]] bool provider_threw() const noexcept;
     [[nodiscard]] core::Result<void> retire_provider(gc::PlayerId, NativeProviderFault);
+    // #6917 (the control-switch reward): the player's current AI player type, upper case; empty for a player the manager does not run.
+    [[nodiscard]] std::string player_type(gc::PlayerId) const;
+    // Whether the loaded data defines this AI player type (any case) with every galactic template it names.
+    [[nodiscard]] bool knows_player_type(std::string_view) const;
+    // Replaces one player's AI with a fresh instance of `type` (the same level): the lifecycle row restarts (uninitialized, deadlines,
+    // templates, policy), so the next service initializes it like a new manager. Only between windows, never while serving or in a phase.
+    // Refuses an unknown type or player and leaves the row unchanged.
+    [[nodiscard]] core::Result<void> replace_player_type(gc::PlayerId, std::string_view type);
     [[nodiscard]] std::vector<core::LoadNote> retirement_notes() const;
     [[nodiscard]] core::Result<void> restore_lifecycle(const LifecycleState&);
     [[nodiscard]] core::Result<std::string> lifecycle_hash() const;
@@ -457,6 +479,7 @@ public:
     [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override;
     [[nodiscard]] core::Result<void> restore(const NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
+    [[nodiscard]] bool oracle_capture_due(std::uint64_t completed_tick) const noexcept override;
     [[nodiscard]] const std::vector<ServiceTrace>& trace() const noexcept;
     [[nodiscard]] std::uint64_t trace_dropped() const noexcept;
     [[nodiscard]] PolicySnapshotStats policy_snapshot_stats() const noexcept;

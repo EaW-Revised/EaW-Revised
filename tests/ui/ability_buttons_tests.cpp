@@ -245,9 +245,77 @@ void test_hotkeys() {
     expect(!ui::ability_hotkey('S', {}), "plain S stays the stop key");
 }
 
+// #7186, CU-09, WHE-14: the pointer asks the aimed ability's authored filter, per ability family.
+sim::tactical::SpecialAbilityProfile handler(const sim::tactical::SpecialAbilityKind kind,
+                                             const std::uint64_t applicable, const std::uint64_t excluded = 0) {
+    sim::tactical::SpecialAbilityProfile profile;
+    profile.kind = kind;
+    profile.filter.applicable_categories = applicable;
+    profile.filter.excluded_categories = excluded;
+    return profile;
+}
+
+void test_target_filter() {
+    using Kind = sim::tactical::SpecialAbilityKind;
+    constexpr std::uint32_t tractor_beam = 30, energy_weapon = 31, lucky_shot = 34, concentrate_fire = 37, super_laser = 55;
+    constexpr std::uint64_t capital = 1, corvette = 2, frigate = 4, fighter = 8, bomber = 16;
+    constexpr sim::tactical::TypeId fighter_type = 77, falcon_type = 78;
+    const std::vector<sim::tactical::SpecialAbilityProfile> piett_like{
+        handler(Kind::energy_weapon, capital | corvette | frigate)};
+    expect(ui::ability_target_admitted(piett_like, energy_weapon, 1, frigate),
+        "#7186: a category the beam lists is aimable");
+    expect(!ui::ability_target_admitted(piett_like, energy_weapon, fighter_type, fighter),
+        "#7186: a craft whose category the beam does not list is refused under the pointer");
+    expect(!ui::ability_target_admitted(piett_like, energy_weapon, fighter_type, fighter | bomber),
+        "#7186: a multi-category craft with no listed category stays refused");
+
+    const std::vector<sim::tactical::SpecialAbilityProfile> stock_like{
+        handler(Kind::energy_weapon, capital | corvette | frigate | fighter | bomber)};
+    expect(ui::ability_target_admitted(stock_like, energy_weapon, fighter_type, fighter),
+        "a filter that lists Fighter admits a fighter, as the authored data says");
+
+    auto tractor = handler(Kind::tractor_beam, corvette | frigate);
+    tractor.filter.applicable_types = {falcon_type};
+    tractor.filter.excluded_types = {falcon_type};
+    const std::vector<sim::tactical::SpecialAbilityProfile> tractor_like{tractor};
+    expect(ui::ability_target_admitted(tractor_like, tractor_beam, falcon_type, fighter),
+        "WHE-14: an explicit type admits ahead of the categories and the exclusions");
+    expect(!ui::ability_target_admitted(tractor_like, tractor_beam, fighter_type, fighter),
+        "the tractor beam refuses an unlisted craft");
+
+    const std::vector<sim::tactical::SpecialAbilityProfile> excluded{
+        handler(Kind::leech_shields, capital | frigate, frigate)};
+    expect(!ui::ability_target_admitted(excluded, 58, 1, frigate), "an excluded category refuses");
+
+    expect(!ui::ability_target_admitted(std::vector{handler(Kind::super_laser, capital)}, super_laser, 1, fighter),
+        "SUPER_LASER reads its own handler filter");
+    expect(ui::ability_target_admitted(std::vector{handler(Kind::super_laser, capital | frigate)}, super_laser, 1, capital),
+        "the super-laser switch click aims at a capital ship its handler lists");
+    expect(ui::ability_target_admitted(std::vector{handler(Kind::energy_weapon, frigate)}, super_laser, 1, fighter),
+        "a holder with no SUPER_LASER handler leaves the order to the sim, never refused under the pointer");
+    expect(!ui::ability_target_admitted(std::vector{handler(Kind::lucky_shot, frigate)}, lucky_shot, 1, fighter),
+        "LUCKY_SHOT reads its own handler filter");
+    expect(!ui::ability_target_admitted(std::vector{handler(Kind::concentrate_fire, 0)}, concentrate_fire, 1, fighter),
+        "CONCENTRATE_FIRE reads its own handler filter (empty categories admit nothing)");
+    expect(!ui::ability_target_admitted(std::vector{handler(Kind::ion_cannon_shot, frigate)}, ion_cannon_shot, 1, fighter),
+        "ION_CANNON_SHOT reads its own handler filter");
+
+    // No handler of the aimed kind: nothing to apply here, the order stays the authority.
+    expect(ui::ability_target_admitted(piett_like, tractor_beam, fighter_type, fighter),
+        "another ability's handler is not this ability's filter");
+    expect(ui::ability_target_admitted({}, energy_weapon, fighter_type, fighter), "no handler admits");
+    expect(ui::ability_target_admitted(piett_like, defend, fighter_type, fighter), "a non-object ability admits");
+
+    // Two handlers of one kind: any admitting one is enough.
+    const std::vector<sim::tactical::SpecialAbilityProfile> two{
+        handler(Kind::energy_weapon, capital), handler(Kind::energy_weapon, fighter)};
+    expect(ui::ability_target_admitted(two, energy_weapon, fighter_type, fighter), "any handler of the kind may admit");
+}
+
 } // namespace
 
 int main() {
+    test_target_filter();
     test_buttons();
     test_m2_roster_marks_resolve_icons();
     test_active_dial();

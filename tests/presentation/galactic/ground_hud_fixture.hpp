@@ -14,7 +14,7 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
     // structures. The production helper resets the fleet and observer tables, so it runs first.
     const bool structures = name.starts_with("ground-structures");
     const bool sale_units = name == "ground-unit-sale";
-    if (structures || sale_units || name == "ground-representative") configure_synthetic_hud_production(setup,local);
+    if (structures || sale_units || name == "ground-representative" || name == "ground-tray") configure_synthetic_hud_production(setup,local);
     configure_fleet_hud_fixture(setup,local,"fleet-drag",traits,visibility,names);
     const auto enemy = local == 1 ? 2U : 1U;
     const bool representative = name == "ground-representative";
@@ -23,8 +23,9 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
     const bool unseen = name == "ground-unseen";
     const auto owner = (name == "ground-count" || representative) || name == "ground-foreign" || name == "ground-structures-hidden" || unseen ? enemy : local;
     std::erase_if(setup.fleets, [local](const auto& row) { return row.owner != local; });
-    setup.fleet_control->types[0].transport = true;
-    if (name == "ground-launch-move" || name == "ground-transfer" || name == "ground-slot-return") {
+    // "ground-no-lander": the same accessible surface, but no fleet type carries ground forces, so nothing can land (GPD-29).
+    setup.fleet_control->types[0].transport = name != "ground-no-lander";
+    if (name == "ground-launch-move" || name == "ground-tray" || name == "ground-transfer" || name == "ground-slot-return") {
         setup.planets[1].position = setup.planets[0].position;
         setup.planets[1].position.x = sim::math::Fixed::from_raw(setup.planets[0].position.x.raw()
             + 4 * sim::math::Fixed::scale);
@@ -55,6 +56,17 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
         control.planets.push_back(p);
     }
     for (const auto& route : setup.routes) control.routes.push_back({route.id,{}});
+    if (name == "ground-noncombat") {
+        // GGS-11: explicit synthetic transport with a noncombat passenger, as in the captured hero teams.
+        // Combat power and stay-in-transport flags must not block linking to this allied surface.
+        control.ground_capability_types = {{1000, {}, true, false}, {1001, {}, false, true},
+            {1002, {}, false, false}, {1003, {}, false, false}};
+        control.planets[0].ground_base = {local, 1};
+        for (auto& type : setup.movement->types) if (type.type == 1000) type.transport = true;
+        sim::EntityId passenger = 9001;
+        for (const auto id : {7001ULL, 7002ULL, 7004ULL, 8001ULL, 8002ULL, 8003ULL})
+            setup.movement->contents.push_back({id, {{passenger++, 1001}}});
+    }
     for (auto& player : setup.observer->players)
         if (name == "ground-foreign" && player.player == local) player.allies.push_back(enemy);
     for (auto& planet : setup.observer->planets) if (planet.planet == 101) {

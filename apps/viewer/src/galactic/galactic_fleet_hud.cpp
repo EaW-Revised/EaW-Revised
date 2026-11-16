@@ -1,4 +1,10 @@
 #include <span>
+#include "transit_reveal.hpp"
+#include "eawr/data/tag_trace.hpp"
+#include <pugixml.hpp>
+#include <cmath>
+#include <cstdlib>
+#include <set>
 #include "eawr/data/ui/text_database.hpp"
 #include <godot_cpp/classes/center_container.hpp>
 #include <godot_cpp/classes/color_rect.hpp>
@@ -197,10 +203,15 @@ void GalacticMode::State::open_planet_info() {
     if (!planet->weather.icon.empty() || !planet->weather.name.empty()) {
         auto* row = memnew(HBoxContainer);
         planet_info_content->add_child(row);
-        if (const auto art = command_texture(planet->weather.icon); art.is_valid()) {
+        if (const auto art = command_texture(galactic_view::planet_info_weather_picture(planet->weather.icon)); art.is_valid()) {
             auto* icon = memnew(TextureRect);
             icon->set_texture(art);
-            icon->set_stretch_mode(TextureRect::STRETCH_KEEP);
+            // #6756: the dialog's weather picture is a picture gadget of a fixed 128 x 128 slot in the 975 x 718
+            // dialog: the art is stretched to it, whatever its own size (a mod may author a full loading picture).
+            const float slot = 128.0F * layout.panel_width / 975.0F;
+            icon->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+            icon->set_stretch_mode(TextureRect::STRETCH_SCALE);
+            icon->set_custom_minimum_size(Vector2(slot, slot));
             row->add_child(icon);
         }
         auto* head = memnew(Label);
@@ -738,7 +749,7 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
     if (displayed_snapshot->fleet_control())
         galactic_view::apply_fleet_transport_traits(display_traits, displayed_snapshot->fleet_control()->types);
     fleet_intelligence = sim::galactic::observed_fleets(*displayed_snapshot, galaxy->local.player,
-        display_traits, capacity, fleet_visibility, image_rank, indices);
+        display_traits, capacity, fleet_visibility, image_rank, indices, hero_preference.rank);
     if (displayed_snapshot->fleet_control())
         galactic_view::apply_local_transport_traits(fleet_intelligence.cards, displayed_snapshot->fleets(), displayed_snapshot->fleet_control()->types);
     ++fleet_projection_rebuilds;
@@ -961,10 +972,13 @@ void GalacticMode::State::update_fleet_controls(const presentation::ui::ShellPla
             }
         }
         const sim::galactic::ObservedFleet* card = name.ends_with("_fleet") ? shown_fleet_cards[slot] : shown_panel_cards[slot];
-        // The leading frame is drawn on every panel; it only acts on a local panel (the disabled state falls back to its
-        // blank art, which is the empty rounded frame).
+        // The leading frame is drawn on every panel; it only acts on a local panel. On another owner's panel it is
+        // disabled (drawn with its disabled art, the empty rounded frame) and takes no pointer, so a click on it
+        // reaches whatever lies beneath instead of being swallowed (#4029 follow-up).
         const bool inert_frame = slot < 3 && name.ends_with("_0000") && !(card && card->local);
         button->set_disabled(!map_input.gates.hud_enabled || map_input.gates.tutorial_locked || inert_frame);
+        if (slot < 3 && name.ends_with("_0000"))
+            button->set_mouse_filter(inert_frame ? Control::MOUSE_FILTER_IGNORE : Control::MOUSE_FILTER_STOP);
         if (const auto mark = fleet_stealth_marks.find(name); mark != fleet_stealth_marks.end()) {
             // Only the stealth alternate has a producer (card.all_stealth); the raid alternate has none yet.
             const auto* style = command_catalog.find("icon_fleet0" + std::string(1, name[1]));
@@ -997,6 +1011,7 @@ void GalacticMode::State::update_fleet_controls(const presentation::ui::ShellPla
             button->set_cell_portrait_box({centre - size * 0.5F, size});
             const auto& resources = fleet_cell_resources.at(name);
             HudButtonArt art; art.normal = resources.normal; art.pressed = resources.pressed;
+            art.disabled = resources.disabled; // the inert frame's authored disabled art (#4029 follow-up)
             if (!resources.hover.empty()) art.hover = resources.hover.front();
             button->set_cell_state_art(std::move(art), centre, static_cast<float>(placement.scale));
             button->set_tooltip_text(inert_frame ? String{} : String::utf8(battle_text("TEXT_TOOLTIP_PATHFINDER").c_str()));
@@ -1161,6 +1176,7 @@ void GalacticMode::State::update_fleet_hud() {
     update_fleet_controls(placement, changed);
     update_advanced_open_button(placement);
     update_planet_info(placement);
+    update_planet_info_card(placement);
     if (changed) update_fleet_captions(placement);
     service_fleet_stack_popup();
 }
@@ -1403,6 +1419,137 @@ void GalacticMode::State::write_fleet_report(std::ostream& output) const {
             << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
     }
     output << "]}";
+}
+
+namespace {
+// An authored range in world units; anything not a finite nonnegative number is no range.
+std::optional<double> authored_range(std::string_view text) {
+    constexpr std::string_view blank = " \t\r\n";
+    const auto first = text.find_first_not_of(blank);
+    if (first == std::string_view::npos) return std::nullopt;
+    const std::string value(text.substr(first, text.find_last_not_of(blank) - first + 1));
+    char* end{};
+    const double range = std::strtod(value.c_str(), &end);
+    if (end != value.c_str() + value.size() || !std::isfinite(range) || range < 0) return std::nullopt;
+    return range;
+}
+galactic_view::RevealPoint reveal_point(const sim::math::Vec3& value) {
+    const auto real = [](sim::math::Fixed part) {
+        return static_cast<double>(part.raw()) / static_cast<double>(sim::math::Fixed::scale);
+    };
+    return {real(value.x), real(value.y), real(value.z)};
+}
+} // namespace
+
+void GalacticMode::State::refresh_transit_visibility(const sim::galactic::GalacticSnapshot& shown) {
+    transit_visibility.clear();
+    if (!galaxy || !shown.observer()) return;
+    const auto local = galaxy->local.player;
+    // WGUI-112: the authored ranges, resolved once from the type and planet data; zero or absent registers nothing.
+    if (!reveal_type_ranges) {
+        reveal_type_ranges.emplace();
+        if (audio_catalog) {
+            for (const auto& [id, name] : production_names)
+                if (const auto type = audio_catalog->resolve(name, data::Category::game_object))
+                    if (const auto* field = type.value().value("Hyperspace_Fleet_Reveal_Range")) {
+                        data::tag_trace::used(field->value);
+                        if (const auto range = authored_range(field->value.raw_text); range && *range > 0)
+                            reveal_type_ranges->emplace(id, *range);
+                    }
+            for (const auto& planet : metadata.planets)
+                if (const auto type = audio_catalog->resolve(planet.name, data::Category::game_object))
+                    if (const auto* field = type.value().value("Hyperspace_Fleet_Reveal_Range")) {
+                        data::tag_trace::used(field->value);
+                        if (const auto range = authored_range(field->value.raw_text); range && *range > 0)
+                            reveal_planet_ranges.emplace(planet.id, *range);
+                    }
+        }
+        if (filesystem) if (auto constants = filesystem->open("data/xml/gameconstants.xml")) {
+            pugi::xml_document document;
+            if (document.load_buffer(constants.value().data(), constants.value().size()))
+                bribery_reveal_range = authored_range(
+                    document.document_element().child("Bribery_Fleet_Reveal_Range").text().as_string());
+        }
+    }
+    // WGUI-31/32: the view applies own, view-all, own-destination, superweapon and stealth first; every other
+    // travelling fleet gets a row from this range/path predicate.
+    std::map<sim::galactic::PlanetId, galactic_view::RevealPoint> planet_points;
+    for (const auto& planet : shown.planets()) planet_points.emplace(planet.id, reveal_point(planet.position));
+    const auto fleet_point = [&](const sim::galactic::Fleet& fleet) {
+        const auto orbit = planet_points.find(fleet.orbit);
+        return galactic_view::fleet_reveal_point(fleet.motion.transit.has_value(), reveal_point(fleet.motion.position),
+            orbit == planet_points.end() ? std::nullopt : std::optional<galactic_view::RevealPoint>(orbit->second));
+    };
+    std::vector<galactic_view::RevealTransit> travelling;
+    const auto& humans = shown.observer()->human_observers;
+    for (const auto& fleet : shown.fleets()) {
+        if (!fleet.motion.transit || fleet.owner == local) continue;
+        const auto& path = fleet.motion.transit->path;
+        const auto hop = static_cast<std::size_t>(fleet.motion.transit->hop);
+        galactic_view::RevealTransit row;
+        row.fleet = fleet.id;
+        row.position = fleet_point(fleet);
+        row.ai_owned = fleet.owner != 0 && std::find(humans.begin(), humans.end(), fleet.owner) == humans.end();
+        // WGUI-111: AI fleets keep their enroute (final) planet; human/ownerless fleets the planet left and the one ahead.
+        if (!path.empty()) row.enroute = path.back();
+        if (hop < path.size()) row.previous = path[hop];
+        if (hop + 1 < path.size()) row.next = path[hop + 1];
+        travelling.push_back(row);
+    }
+    if (travelling.empty()) return;
+    // WGUI-112: local-owned objects (fleet members with nested contents, planet objects) and local-owned planets whose
+    // type authors a positive range. WGUI-110: with a corruption player in the game, every bribed planet joins with the
+    // bribery range; intimidated planet candidates are skipped.
+    std::vector<galactic_view::RevealCandidate> candidates;
+    std::map<sim::galactic::PlanetId, sim::galactic::corruption_fixture::Type> corruption;
+    bool corrupt_player{};
+    if (const auto* state = shown.economy_corruption()) {
+        for (const auto& row : state->planets) corruption.emplace(row.planet, row.corruption);
+        corrupt_player = std::any_of(state->players.begin(), state->players.end(), [](const auto& row) { return row.benefits; });
+    }
+    const auto corrupted_as = [&](sim::galactic::PlanetId planet, sim::galactic::corruption_fixture::Type kind) {
+        const auto at = corruption.find(planet);
+        return at != corruption.end() && at->second == kind;
+    };
+    std::map<sim::EntityId, const sim::galactic::MovementContents*> contents;
+    if (shown.movement()) for (const auto& row : shown.movement()->contents) contents.emplace(row.container, &row);
+    const auto add_type = [&](sim::galactic::TypeId type, const galactic_view::RevealPoint& at) {
+        const auto range = reveal_type_ranges->find(type);
+        if (range != reveal_type_ranges->end()) candidates.push_back({at, range->second});
+    };
+    for (const auto& fleet : shown.fleets()) {
+        if (fleet.owner != local) continue;
+        const auto at = fleet_point(fleet);
+        const auto visit = [&](auto&& self, const sim::galactic::FleetMember& member, std::size_t depth) -> void {
+            add_type(member.type, at);
+            const auto children = contents.find(member.id);
+            if (children != contents.end() && depth < 32)
+                for (const auto& child : children->second->children) self(self, child, depth + 1);
+        };
+        for (const auto& member : fleet.members) visit(visit, member, 0);
+    }
+    if (shown.production())
+        for (const auto& planet : shown.production()->planets) {
+            const auto at = planet_points.find(planet.planet);
+            if (at == planet_points.end()) continue;
+            for (const auto& object : planet.objects) if (object.owner == local) add_type(object.type, at->second);
+        }
+    for (const auto& planet : shown.planets()) {
+        if (corrupted_as(planet.id, sim::galactic::corruption_fixture::Type::intimidation)) continue;
+        const auto at = planet_points.at(planet.id);
+        if (planet.owner == local)
+            if (const auto range = reveal_planet_ranges.find(planet.id); range != reveal_planet_ranges.end())
+                candidates.push_back({at, range->second});
+        if (corrupt_player && bribery_reveal_range
+            && corrupted_as(planet.id, sim::galactic::corruption_fixture::Type::bribery))
+            candidates.push_back({at, *bribery_reveal_range});
+    }
+    std::set<sim::galactic::PlanetId> discovered;
+    for (const auto& record : shown.observer()->records)
+        if (record.player == local && record.discovered) discovered.insert(record.planet);
+    for (const auto& row : galactic_view::transit_reveal(travelling, candidates,
+            [&](std::uint64_t planet) { return discovered.contains(planet); }))
+        transit_visibility.push_back({row.fleet, row.visible});
 }
 
 } // namespace eawr::presentation::godot_backend

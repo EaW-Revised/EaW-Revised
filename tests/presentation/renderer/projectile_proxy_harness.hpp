@@ -36,6 +36,7 @@ struct RenderingServer {
     void instance_geometry_set_cast_shadows_setting(RID, int) {}
     std::uint64_t mesh_get_surface_count(RID) { return 1; }
 };
+enum class IdleDisturbance : std::uint8_t { missing_instance, bind_failed, asset_mismatch, billboard, other_bind, cleared, copied, removed, replaced };
 class GodotRenderer {
 public:
     using ProxyOutcome = presentation::ProxyOutcome;
@@ -47,6 +48,7 @@ public:
             std::uint64_t category_surfaces{};
             render_categories::Role category_role{render_categories::Role::unknown};
             bool category_casts{true};
+            std::uint64_t idle_group{};
         };
         using InstanceMap = std::unordered_map<sim::EntityId, Instance>;
         struct Resource { RID mesh{1000}; bool skinned{}; std::size_t bone_count{}; };
@@ -76,6 +78,8 @@ public:
             if (resource.skinned && resource.bone_count) instance.skeleton = server.skeleton_create();
         }
         void batch_forget(RenderingServer*, sim::EntityId, Instance&) {} // Proxies are never batched.
+        void note_idle_unbound(Instance& instance, IdleDisturbance) { instance.idle_group = 0; } // Proxies are never idle-bound.
+        void note_idle_unposed(Pending&, IdleDisturbance) {}
         static void release_instance_skeleton(RenderingServer* server, Instance& instance) {
             if (server && instance.skeleton.is_valid()) server->free_rid(instance.skeleton);
             instance.skeleton = {};

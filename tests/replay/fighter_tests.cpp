@@ -149,6 +149,7 @@ int main() {
     test_squadron_attack_move();
     test_squadron_hunt();
     test_squadron_guard();
+    test_guard_speed();
     test_idle_cell_claim();
     test_map_box_grids();
     test_idle_grid();

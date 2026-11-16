@@ -15,8 +15,11 @@
 namespace {
 using namespace setup_test;
 using Clock = std::chrono::steady_clock;
+// The waits cover loopback handshakes, short battles and deliberately delayed relay streams; on an idle host each takes
+// a few seconds at most. The ceiling only bounds a real hang: it was 15 s, which a loaded nightly host exceeded while
+// the same binary passed alone.
 template<class F> void until(F predicate) {
-    const auto deadline = Clock::now() + std::chrono::seconds(15);
+    const auto deadline = Clock::now() + std::chrono::seconds(60);
     while (!predicate()) {
         expect(Clock::now() < deadline, "mesh test deadline expired");
         std::this_thread::sleep_for(std::chrono::milliseconds(1));

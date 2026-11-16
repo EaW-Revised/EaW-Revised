@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
 
 namespace eawr::vfs { class Vfs; }
 namespace eawr::data { class Catalog; }
@@ -56,6 +58,9 @@ public:
     [[nodiscard]] std::shared_ptr<LanMatch> lan_match() const;
     [[nodiscard]] const std::filesystem::path& gc_acceptance_directory() const;
     void show(std::string message = {});
+    // A start the battle load refused: the setup screen with the error code and the first line of the error in
+    // its status line and in a message box, and the full text in the viewer log (#6816).
+    void show_refusal(const std::string& reason, std::string_view headline = "The battle could not start.");
     void hide();
     // MNU-21: the staging's Cancel button. A shell that owns the screen calls route_cancel() once and then
     // polls take_cancel(); without a shell Cancel quits the stand-alone screen, as closing its window does.

@@ -272,7 +272,8 @@ TacticalSnapshot::TacticalSnapshot(
     std::vector<RetreatView> retreat_views,
     std::vector<GarrisonTimerView> garrison_timers,
     std::vector<BeaconState> beacons,
-    std::optional<BattleControllerPolicy> controllers)
+    std::optional<BattleControllerPolicy> controllers,
+    std::vector<TswView> tsw_views)
     : completed_tick_(completed_tick), players_(std::move(players)), instances_(std::move(instances)),
       events_(std::move(events)), combat_events_(std::move(combat_events)), projectiles_(std::move(projectiles)),
       outcome_(outcome), spinning_(std::move(spinning)), squadron_targets_(std::move(squadron_targets)),
@@ -280,6 +281,7 @@ TacticalSnapshot::TacticalSnapshot(
       losses_(std::move(losses)), productions_(std::move(productions)), manual_clocks_(std::move(manual_clocks)),
       economy_cues_(std::move(economy_cues)) {
     retreat_views_ = std::move(retreat_views);
+    tsw_views_ = std::move(tsw_views);
     ability_spawns_ = std::move(ability_spawns);
     garrison_timers_ = std::move(garrison_timers);
     beacons_ = std::move(beacons);

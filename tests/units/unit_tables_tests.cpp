@@ -42,6 +42,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -520,7 +521,7 @@ void space_unit_guard_selection() {
     expect(!unrelated && unrelated.error().code == "EAWR-XML-0008",
         "Remake guard selection does not repair an unrelated authored defect");
 
-    // CGS-22: the shared stock-name resolution skips exactly the absent-base case, once per name, however many sites ask
+    // CGS-22: the shared stock-name resolution skips exactly the absent-base and undefined-name cases, once per name, however many sites ask
     // (space-entry type table, planet locations, the unit-table name set), and a skipped name stays in one shared set.
     {
         eawr::campaign::StockNameSkips skips;
@@ -539,8 +540,14 @@ void space_unit_guard_selection() {
             "CGS-22 negative control: a resolvable type is returned, not skipped");
         const auto absent = eawr::campaign::resolve_stock_name(catalog, "Guard_Not_Defined_Anywhere",
             eawr::data::Category::game_object, "planet", skips);
-        expect(!absent && !skips.contains("Guard_Not_Defined_Anywhere") && skips.notes.size() == 1,
-            "CGS-22 negative control: any other resolve failure still fails and is not recorded as skipped");
+        expect(absent && !absent.value() && skips.contains("Guard_Not_Defined_Anywhere") && skips.notes.size() == 2
+            && skips.notes.back().code == "EAWR-XML-0007" && skips.notes.back().action == eawr::core::LoadAction::skipped_object
+            && skips.notes.back().object == "Guard_Not_Defined_Anywhere",
+            "CGS-22: a name defined in no loaded object file is skipped with one load note (undefined-name code)");
+        const auto absent_again = eawr::campaign::resolve_stock_name(catalog, "Guard_Not_Defined_Anywhere",
+            eawr::data::Category::game_object, "stock type name", skips);
+        expect(absent_again && !absent_again.value() && skips.notes.size() == 2,
+            "CGS-22: an undefined name asked by a second site is still one load note");
         // F1: the AI selection content (prepare_ai_selection_content) and the auto-resolve/AI planet sites decide a planet
         // with the same predicate on the same resolve; a dangling planet base is skipped, any other failure is not.
         const auto planet_skipped = [&](const char* name) {
@@ -551,8 +558,8 @@ void space_unit_guard_selection() {
             "CGS-22: a planet whose variant base is absent is skipped by the AI selection content path");
         expect(!planet_skipped("Guard_Intact_Planet") && catalog.resolve("Guard_Intact_Planet", eawr::data::Category::game_object),
             "CGS-22 negative control: a planet with a resolvable base is kept");
-        expect(!planet_skipped("Guard_Not_Defined_Anywhere") && !catalog.resolve("Guard_Not_Defined_Anywhere", eawr::data::Category::game_object),
-            "CGS-22 negative control: an undefined planet name is not skippable and still refuses");
+        expect(planet_skipped("Guard_Not_Defined_Anywhere") && !catalog.resolve("Guard_Not_Defined_Anywhere", eawr::data::Category::game_object),
+            "CGS-22: a planet name defined in no loaded object file is skipped like a dangling base");
     }
 }
 
@@ -561,8 +568,11 @@ void space_unit_guard_selection() {
 // ally's purchase must pass the session's production query. The Remake base maps all declare capacity 1, so the
 // fixture uses a loose Remake map found by name; on its new-marker layout two allies share one faction (team 0)
 // and an enemy holds team 1 (validate_setup_slots).
-int remake_ally_shipyard(const std::filesystem::path& game, const std::filesystem::path& mod, const std::string& map_stem,
-                         const std::string& team_faction, const std::string& enemy_faction, const std::string& producer) {
+// `mod` is the Remake chain as the owner plays it (EAWR_REMAKE_MOD_CHAIN, leaf first) or, on a host that cannot hand the
+// chain over, the single base item (`chained` false): the Holdouts layer's maps are then out of reach and the skip says so.
+int remake_ally_shipyard(const std::filesystem::path& game, const std::filesystem::path& mod, const bool chained,
+                         const std::string& map_stem, const std::string& team_faction, const std::string& enemy_faction,
+                         const std::string& producer) {
     const auto fail = [](const eawr::core::Diagnostic& diagnostic) {
         std::cerr << eawr::core::format_diagnostic(diagnostic) << '\n';
         return 1;
@@ -570,9 +580,15 @@ int remake_ally_shipyard(const std::filesystem::path& game, const std::filesyste
     auto roots = eawr::vfs::mod_chain_roots(mod);
     for (const auto& [name, root] : roots) {
         if (!std::filesystem::is_directory(root)) {
-            std::cout << "SKIP: Remake chain layer is not installed: " << name << '\n';
+            if (root.empty()) std::cout << "SKIP: empty entry in EAWR_REMAKE_MOD_CHAIN (" << name << ")\n";
+            else std::cout << "SKIP: Remake chain layer is not installed: " << name << " (" << root.string() << ")\n";
             return 77;
         }
+    }
+    std::string mounted_layers;
+    for (const auto& [name, root] : roots) {
+        const auto item = root.filename() == "Data" ? root.parent_path().filename() : root.filename();
+        mounted_layers += (mounted_layers.empty() ? "" : ", ") + item.string();
     }
     roots.emplace_back("expansion", game / "corruption" / "Data");
     roots.emplace_back("base", game / "GameData" / "Data");
@@ -592,7 +608,13 @@ int remake_ally_shipyard(const std::filesystem::path& game, const std::filesyste
         return path == "data/art/maps/" + map_stem + ".ted";
     });
     if (map_record == map_records.value().end()) {
-        std::cout << "SKIP: the Remake chain has no map " << map_stem << '\n';
+        std::cout << "SKIP: the mounted Remake layers (" << mounted_layers << (chained ? ", the chain" : ", the base item only")
+                  << ") have no map " << map_stem;
+        // This test's map ships in the Holdouts layer: name it only when that layer is the one missing.
+        if (map_stem == "_mp_space_sco_geonosis" && mounted_layers.find("2794270450") == std::string::npos)
+            std::cout << "; it ships in the Holdouts layer (workshop item 2794270450), which is not mounted"
+                      << (chained ? "" : ": run on a host that hands over the whole chain (EAWR_REMAKE_MOD_CHAIN is unset here)");
+        std::cout << '\n';
         return 77;
     }
     eawr::skirmish::FixtureOptions options;
@@ -804,12 +826,13 @@ int main(const int argc, char** argv) {
     }
     if (argc == 2 && std::string_view(argv[1]) == "--remake-ally-shipyard") {
         const auto game = eawr::testing::environment("EAWR_EAW_GAME_ROOT");
-        const auto mod = eawr::testing::environment("EAWR_REMAKE_MOD_ROOT");
-        if (!game || game->empty() || !mod || mod->empty()) {
-            std::cout << "SKIP: Remake chain not configured; set EAWR_EAW_GAME_ROOT and EAWR_REMAKE_MOD_ROOT\n";
+        const auto mount = eawr::testing::remake_mount();
+        if (!game || game->empty() || !mount) {
+            std::cout << "SKIP: Remake chain not configured; set EAWR_EAW_GAME_ROOT and EAWR_REMAKE_MOD_CHAIN (or EAWR_REMAKE_MOD_ROOT)\n";
             return 77;
         }
-        return remake_ally_shipyard(*game, *mod, "_mp_space_sco_geonosis", "Rebel", "Empire", "Rebel_Capital_Shipyard");
+        return remake_ally_shipyard(*game, std::filesystem::path(mount->mod_root), mount->chain, "_mp_space_sco_geonosis", "Rebel",
+            "Empire", "Rebel_Capital_Shipyard");
     }
     // A selected installed-mod battle, using the same faction dependency closure as the viewer.
     // Arguments supply all installed paths, the playable map and both faction names.
@@ -987,6 +1010,10 @@ int main(const int argc, char** argv) {
         if (!active) { std::cerr << "Each AI must issue production and attack orders\n"; return 1; }
         return 0;
     }
+    if (argc == 2 && (std::string_view(argv[1]) == "--name-index-stock" || std::string_view(argv[1]) == "--name-index-mod"))
+        return unit_name_index_installed(std::string_view(argv[1]) == "--name-index-mod");
+    if (argc == 2 && (std::string_view(argv[1]) == "--name-index-gc-stock" || std::string_view(argv[1]) == "--name-index-gc-mod"))
+        return unit_name_index_gc_start(std::string_view(argv[1]) == "--name-index-gc-mod");
     if (argc == 2 && std::string_view(argv[1]) == "--fire-bones-installed") {
         const auto root = eawr::testing::environment("EAWR_EAW_GAME_ROOT");
         if (!root || root->empty()) return 77;
@@ -1173,6 +1200,31 @@ int main(const int argc, char** argv) {
         return failures == 0 ? 0 : 1;
     }
     if (argc != 1) return 1;
+    for (const auto& [authored, expected] : std::vector<std::pair<std::string, int>>{
+            {"12", 12}, {"0", 0}, {"-1", -1}, {"12tail", 12}, {"True", 0}, {"TBD", 5}, {"", 5}}) {
+        TempTree tree;
+        write_fixture(tree.root, units_xml("3600", "Queue_Test"));
+        const auto path = tree.root / "XML" / "GameConstants.xml";
+        std::ifstream file(path);
+        std::string constants((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        file.close();
+        if (!authored.empty()) constants.insert(constants.rfind("</GameConstants>"),
+            "<Max_Build_Queue>" + authored + "</Max_Build_Queue>");
+        write(path, constants);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "PU-14: authored queue integer loads through the unit-table XML path");
+        if (!loaded.tables) continue;
+        const auto& scalars = loaded.tables->constants.scalars;
+        const auto limit = std::find_if(scalars.begin(), scalars.end(), [](const auto& row) { return row.tag == "Max_Build_Queue"; });
+        if (authored.empty() || authored == "TBD") {
+            expect(limit == scalars.end(), "PU-14: absent/placeholder queue limit preserves stock content identity");
+        } else {
+            expect(limit != scalars.end() && limit->value && limit->value->trunc_to_integer() == expected,
+                "PU-14 / AU-82: the queue limit uses signed integer parsing, including trailing text");
+        }
+        expect(!has_row(loaded.tables->unresolved, "GameConstants", "Max_Build_Queue"),
+            "PU-14: the optional queue override creates no missing-constant gap");
+    }
     {
         for (const bool authored : {false, true}) {
             TempTree tree;
@@ -1240,6 +1292,7 @@ int main(const int argc, char** argv) {
         }
     }
     synthetic_tables();
+    unit_name_index_contracts();
     community_structure_tables();
     for (const std::string value : {"", "Yes", "true", "1", "no", "0"}) {
         TempTree tree;

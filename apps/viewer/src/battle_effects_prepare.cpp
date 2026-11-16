@@ -1,6 +1,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "battle_effects.hpp"
+#include "particle_texture_load.hpp"
 #include "eawr/data/tag_trace.hpp"
 
 #include "eawr/presentation/space/space.hpp"
@@ -143,7 +144,7 @@ const assets::Texture* BattleEffects::resolve_texture(const std::string_view aut
         for (const std::string& candidate : {"data/art/textures/" + name, "data/art/textures/" + stem + ".tga",
                                              "data/art/textures/" + stem + ".dds"}) {
             if (!filesystem_->stat(candidate)) continue;
-            if (auto loaded = assets::load_texture(*filesystem_, candidate)) {
+            if (auto loaded = load_particle_texture(*filesystem_, candidate)) {
                 decoded = std::move(loaded.value());
                 break;
             }
@@ -538,7 +539,13 @@ void BattleEffects::prewarm_effect_programs() {
             std::chrono::steady_clock::now() - lookup_start).count(), !cached && type != nullptr && bool(type->system));
         if (type != nullptr && type->system) {
             for (const auto& plan : particles::plan_system(*type->system)) {
-                if (plan.drawable) static_cast<void>(backend_->prewarm_program(plan));
+                if (!plan.drawable) continue;
+                static_cast<void>(backend_->prewarm_program(plan));
+                // MT-03: every texture this battle's effects can draw is decoded, and its mip chain completed, here, so
+                // the first detonation or hit in the battle only takes a cache hit.
+                static_cast<void>(resolve_texture(plan.texture));
+                if (plan.blend == particles::Blend::bump_alpha && !plan.normal_texture.empty())
+                    static_cast<void>(resolve_texture(plan.normal_texture));
             }
         }
         if (!cached) particle_types_.erase(name);

@@ -4,22 +4,120 @@
 
 | Status | Space skirmish | Everything |
 |---|---:|---:|
-| applied | 374 | 374 |
-| partial | 337 | 337 |
-| todo | 316 | 316 |
+| applied | 413 | 413 |
+| partial | 359 | 359 |
+| todo | 1465 | 1465 |
 | presentation-later | 0 | 0 |
 | foc-ignores | 64 | 64 |
 | deferred | 6 | 6 |
 | by-design | 0 | 0 |
 | land-or-galactic | 0 | 11 |
 | multiplayer | 0 | 3 |
-| **Total** | **1097** | **1111** |
+| **Total** | **2307** | **2321** |
 
 Tables group the exact object class families listed together in the registry. Object kinds
 are station, ship, squadron or craft when specified; an empty kind list means the whole
 listed class. Each consumer retains its own kinds and rule IDs. Rule IDs are plain text:
 the registry does not supply public link targets. Tickets refer to the private tracker
 and are plain numbers. Code locations are repository paths without identifier anchors.
+
+## Abilities
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Battlefield_Modifier_Ability/Capture_Point_Time_Multiplier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Battlefield_Modifier_Ability/Enable_Planetary_Bombardment | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Black_Market_Ability/Tech_Level_Adjustment | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_Ability/Activation_Style | applied | corruption ability profile (src/campaign/live_setup.cpp) | WGCH-01, WGCH-03 | 6909 | src/campaign/live_setup.cpp | The live ability setup reads both authored forms of the corruption action (Corruption_Ability and the older Corrupt_Planet_Ability) and binds the one the game constants route by name.; GCA-01; basis: reviewed |
+| Corruption_Ability/Initially_Enabled | applied | corruption ability profile (src/campaign/live_setup.cpp) | WGCH-01, WGCH-03 | 6909 | src/campaign/live_setup.cpp | The live ability setup reads both authored forms of the corruption action (Corruption_Ability and the older Corrupt_Planet_Ability) and binds the one the game constants route by name.; GCA-01; basis: reviewed |
+| Galactic_Sabotage_Ability/Activation_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Sabotage_Ability/Can_Destroy_Special_Structure | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Sabotage_Ability/Initially_Enabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Sabotage_Ability/Sabotage_Cost_Increase_Factor | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Stealth_Ability/Activation_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Stealth_Ability/Evade_Detection_Chance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Stealth_Ability/Initially_Enabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Hero_Protection_Ability/Neutralization_Cost_Multiplier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Ability/Activation_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Ability/Base_Income_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Ability/Base_Interval_In_Secs | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Ability/Full_Amount_To_Everyone | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Ability/Initially_Enabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Ability/Split_Favors_Owner | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Ability/Split_Income_With_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Mod_Ability/Activation_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Mod_Ability/Affects_All_Allied_Sources | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Mod_Ability/Income_Additive_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Mod_Ability/Income_Multiplier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Mod_Ability/Initially_Enabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Mod_Ability/Interval_Multiplier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Mod_Ability/Reverse_Application_Logic | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Income_Stream_Mod_Ability/Stacking_Category | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Neutralize_Hero_Ability/Cost_Mod_By_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Neutralize_Hero_Ability/Cost_Mod_By_Planetary_Corruption_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Neutralize_Hero_Ability/Cost_Mod_By_Previous_Neutralizations | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Neutralize_Hero_Ability/General_Major_Hero_Cost_Mod | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Neutralize_Hero_Ability/General_Minor_Hero_Cost_Mod | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Destruction_Ability/Activation_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control_Protection_Ability/Activation_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Transition_Bonus_Ability/Stacking_Category | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Transition_Bonus_Ability/Time_Reduction_Percentage | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Price_Ability/Applicable_Unit_Categories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Price_Ability/Applicable_Unit_Types | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Price_Ability/Price_Reduction_Percentage | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Price_Ability/Stacking_Category | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Price_Ability/Unit_Strength_Category | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Remove_Corruption_Ability/Activation_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Remove_Corruption_Ability/Initially_Enabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Siphon_Credits_Ability/Activation_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Siphon_Credits_Ability/Initially_Enabled | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Siphon_Credits_Ability/Max_Siphon_Percentage | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Siphon_Credits_Ability/Min_Siphon_Percentage | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Siphon_Credits_Ability/Siphon_Duration_In_Cycles | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Slicer_Ability/Chance_Modifier_By_Planet_Difficulty | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Slicer_Ability/Cost_Affinity_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Slicer_Ability/Cost_Multiplier_By_Planet_Tech_Availability | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| System_Spy_Ability/See_Credit_Income | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| System_Spy_Ability/See_Credit_Income_Breakdown | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| System_Spy_Ability/See_Current_Production | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| System_Spy_Ability/See_Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| System_Spy_Ability/See_Political_Control_Breakdown | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## AIGoalType
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Time_Delay_Tolerance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Assistance_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| IsBuildable | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## AssistanceCompany
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Land_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Reduced_By_Multiple_Factories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## Audio
 
@@ -32,6 +130,16 @@ and are plain numbers. Code locations are repository paths without identifier an
 | SFXEvent_Planet_Capture_Bonus_Reward | applied | local committed first-capture award (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-53 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
 | SFXEvent_Planet_Revealed | partial | galactic semantic cue adapter (apps/viewer/src/galactic/galactic_audio.cpp); missing: session producer integration for this galactic notification | WGP-27 | 4532 | apps/viewer/src/galactic/galactic_audio.cpp | Audio: SFX / speech / music — Remaining: session producer integration for this galactic notification. The galactic adapter resolves and applies the authored cue on a semantic notification; the owning gameplay service has not published this notification yet.; basis: reviewed |
 
+## BlackMarketItem
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Base_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Faction | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tutorial_Base_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tutorial_Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## BlackMarketItems
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
@@ -39,6 +147,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Item/@Name | todo | application not recorded | — | 1130 | — | Items are enumerated by index; the item name and its granted ability names are not kept or applied.; basis: reviewed |
 | Item/Ability_Names | todo | application not recorded | — | 1130 | — | Items are enumerated by index; the item name and its granted ability names are not kept or applied.; basis: reviewed |
 | Item/Base_Cost_Credits | applied | galactic corruption economy (src/sim/galactic/corruption_model.cpp) | WGEP-58 | — | src/sim/galactic/corruption_model.cpp | basis: reviewed |
+| Item/Faction | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Item/Icon_Name | applied | whole class (apps/viewer/src/galactic/black_market_hud.cpp) | WGEP-141, WGEP-143 | — | apps/viewer/src/galactic/black_market_hud.cpp | Copied item menu and encyclopedia metadata; three authored beneficiary icons. Retail layout remains GHUD-C09.; basis: reviewed |
 | Item/Localized_Description | applied | whole class (apps/viewer/src/galactic/black_market_hud.cpp) | WGEP-141, WGEP-143 | — | apps/viewer/src/galactic/black_market_hud.cpp | Copied item menu and encyclopedia metadata; three authored beneficiary icons. Retail layout remains GHUD-C09.; basis: reviewed |
 | Item/Localized_Name | applied | whole class (apps/viewer/src/galactic/black_market_hud.cpp) | WGEP-141, WGEP-143 | — | apps/viewer/src/galactic/black_market_hud.cpp | Copied item menu and encyclopedia metadata; three authored beneficiary icons. Retail layout remains GHUD-C09.; basis: reviewed |
@@ -60,10 +169,13 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Camera_Shift_X | todo | application not recorded | — | 1157 | — | Family: Galactic UI / camera / map. WGP-74/92: stored campaign camera metadata; the inspected overview, initializer and preview do not read it. Qualify the remaining reader before implementing a camera effect; no whole-tag ignored verdict.; basis: reviewed |
 | Camera_Shift_Y | todo | application not recorded | — | 1157 | — | Family: Galactic UI / camera / map. WGP-74/92: stored campaign camera metadata; the inspected overview, initializer and preview do not read it. Qualify the remaining reader before implementing a camera effect; no whole-tag ignored verdict.; basis: reviewed |
 | Campaign_Set | applied | whole class (src/presentation/ui/campaign_setup.cpp); whole class (src/presentation/ui/campaign_setup.cpp) | WGP-65; WGP-29 | — | src/presentation/ui/campaign_setup.cpp | Family: Campaign setup / planet data. WGP-29/65: the solo staging model groups campaign representatives by set, then selects the chosen faction variant from the same set; the viewer passes mounted campaign_set values into that model.; basis: reviewed |
+| Corruption_Level_Override | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Empire_Story_Name | applied | active players' plots (src/campaign/story_plots.cpp) | WGS-07 | — | src/campaign/story_plots.cpp | basis: reviewed |
 | Good_Victory_Planet_Names | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | Home_Location | partial | initial overview position and home selection (apps/viewer/src/galactic/galactic_mode.cpp); first home object for the local faction (apps/viewer/src/galactic/scene_content.cpp); authored campaign startup requests (src/campaign/setup.cpp); missing: dynamic home-reference lifecycle beyond authored startup and observer initialization | WGP-41, WGP-42; WGP-42; WGS-09 | 1149 | apps/viewer/src/galactic/galactic_mode.cpp; apps/viewer/src/galactic/scene_content.cpp; src/campaign/setup.cpp | Family: Campaign setup / planet data. WGS-09 and WGP-41/42 apply authored startup homes and the initial local camera/selection. setup.cpp also initializes per-human observer homes; dynamic home changes and downstream home-reference lifecycle remain outside this startup slice.; basis: reviewed |
 | Human_Victory_Conditions | applied | galactic victory (src/campaign/setup.cpp) | WGS-15, WGS-16, WGS-78, WGS-83 | — | src/campaign/setup.cpp | basis: reviewed |
+| Human_Victory_Faction_Names | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Human_Victory_Galactic_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Human_Victory_Planet_Names | applied | galactic victory (src/campaign/setup.cpp) | WGS-15, WGS-16, WGS-78, WGS-83 | — | src/campaign/setup.cpp | basis: reviewed |
 | Is_Autoresolve_Allowed | applied | whole class (src/platform/galactic/live_game_session.cpp) | WAR-10, WAR-65, WAR-75 | 1115 | src/platform/galactic/live_game_session.cpp | Read-only retained campaign retreat policy publication; native midbattle solver remains unavailable and no tactical state/hash/codec changes are made.; basis: reviewed |
 | Is_Multiplayer | applied | whole class (apps/viewer/src/campaign_setup_screen.cpp) | WGP-65 | — | apps/viewer/src/campaign_setup_screen.cpp | basis: reviewed |
@@ -71,7 +183,11 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Is_Story_Campaign | partial | prepared galactic AI Game.IsStoryCampaign input (src/campaign/ai_perception_content.cpp); missing: story activation, dialogs and other non-AI consumers | WGA-423, WGS-10 | 1149 | src/campaign/ai_perception_content.cpp | Family: Story / campaign scripting. WGA-423 applies immutable campaign story state to AI; WGP-65 excludes story from ordinary staging through Is_Listed, not this flag. Other story activation/dialog consumers remain outside the AI reader.; basis: reviewed |
 | Locations | partial | authored campaign startup requests (src/campaign/galaxy.cpp); authored campaign startup requests (src/campaign/setup.cpp); missing: neutral ordered planet/scene requests and campaign graph; scene-only instantiation requires the owning location provider | WGM-16; WGS-09 | 1149 | src/campaign/galaxy.cpp; src/campaign/setup.cpp | Family: Campaign setup / planet data. WGM-16/WGS-09 create the campaign graph and ordered neutral location requests; live placement validates catalog presence. Generic nonplanet scene-object instantiation remains the location/presentation provider seam.; basis: reviewed |
 | Markup_Filename | applied | whole class (src/campaign/ai_perception_content.cpp) | WGA-426, WGA-464 | — | src/campaign/ai_perception_content.cpp | First faction match loads authored markup and hint-set defaults per player; unreadable files retain diagnostics and leave that player's hint branch unavailable.; basis: reviewed |
+| Max_Custom_Starting_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Max_Custom_Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Max_Tech_Level | partial | single-player advanced campaign technology options (apps/viewer/src/campaign_setup_screen.cpp); authored campaign player setup (src/campaign/setup.cpp); missing: Production/story tech side effects require the typed owning provider. | WGP-190, WGP-69, WGP-74; WGS-13 | 1149 | apps/viewer/src/campaign_setup_screen.cpp; src/campaign/setup.cpp | Family: Campaign setup / planet data. WGS-13/73 apply authored/custom startup maximum tech and retain player limits; WGP-69/74/190 apply advanced-menu tech options. Typed production/story tech side effects remain outside those setup consumers.; basis: reviewed |
+| Min_Custom_Starting_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Min_Custom_Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Planet_Auto_Reveal | applied | whole class (src/campaign/setup.cpp) | WGS-04, WGUI-04 | — | src/campaign/setup.cpp | basis: reviewed |
 | Rebel_Story_Name | applied | active players' plots (src/campaign/story_plots.cpp) | WGS-07 | — | src/campaign/story_plots.cpp | basis: reviewed |
 | Show_Completed_Tab | todo | application not recorded | — | 1149 | — | Family: Galactic UI / camera / map. Parsed campaign flag has no live completed-objective-tab consumer. WGS-10 copies the setting into mode state; implement that objective UI gate rather than treating parsing as application.; basis: reviewed |
@@ -93,11 +209,31 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | File | applied | whole class (src/data/galactic/galactic_world.cpp); whole class (src/data/xml.cpp) | none recorded; none recorded | — | src/data/galactic/galactic_world.cpp; src/data/xml.cpp | The campaign and trade-route registries list their files through this tag; both loaders follow it.; basis: reviewed |
 
+## CaptureableShip
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## CIN_GroundInfantry, GroundInfantry, GroundVehicle, HeroUnit, Props_Story
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Stealth_Capable | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+
+## CIN_SpaceUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Maintenance_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## CIN_SpaceUnit, MOV_Cinematic, SpaceUnit, UniqueUnit
 
@@ -120,7 +256,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Build_Texture_Name | applied | whole class (src/presentation/ui/hud_shell.cpp) | AB-05 | — | src/presentation/ui/hud_shell.cpp | matched by the field's name; the loader is table-driven; basis: auto |
 | Can_Drag_Stack | partial | Pad_00..09 (apps/viewer/src/galactic/ground_hud.cpp); missing: other command-bar components | WGUI-41, WGUI-53, WGUI-54 | 654 | apps/viewer/src/galactic/ground_hud.cpp | HUD / command bar / radar / FOW / tactical camera — Remaining: other command-bar components. Applied to ground organization components; other consumers retain their provider seams.; basis: reviewed |
 | Font_Point_Size | applied | authored black-market menu and encyclopedia (apps/viewer/src/galactic/black_market_hud.cpp); g_special_ability (apps/viewer/src/galactic/destruction_hud.cpp); i_main_organize, q1_0000..q3_0406, q1_fleet..q4_fleet, text_fleet1..3 (apps/viewer/src/galactic/galactic_fleet_hud.cpp); g_planet_name (apps/viewer/src/galactic/galactic_hud.cpp); encyclopedia_back, encyclopedia_header_text, encyclopedia_text (apps/viewer/src/galactic/galactic_hud.cpp); GHUD-S01 command-bar components (apps/viewer/src/galactic/galactic_hud.cpp); g_planet_value (apps/viewer/src/galactic/galactic_hud.cpp); GHUD-S09 ground organization components (apps/viewer/src/galactic/ground_hud.cpp); bm_close, bm_frame, bm_text_steal, bm_title, bm_title01, h_close, h_title, hero-action menu option components, target_type_back (apps/viewer/src/galactic/hero_action_hud.cpp); attack_button_single, choice_button_left, choice_button_right, text_attack_choice, text_attack_single (apps/viewer/src/galactic/pending_battle_hud.cpp); whole class (src/presentation/godot/ui/tactical_hud_build.cpp); whole class (src/presentation/godot/ui/tactical_hud_build.cpp); whole class (src/presentation/godot/ui/tactical_hud_build.cpp); whole class (src/presentation/godot/ui/tactical_hud_build.cpp); generic_flytext (src/presentation/ui/hud_shell.cpp) | WGEP-141, WGEP-143; WGCH-151, WGCH-154; WGUI-42, WGUI-72, WGUI-73; WGUI-96; WGUI-70, WGUI-81; WGUI-33, WGUI-34, WGUI-35, WGUI-80, WGUI-94; WGUI-39; WGUI-41, WGUI-53, WGUI-54; WGUI-47; WGM-174, WGM-175; HCB-65; HCB-65; HCB-65; HCB-65; HCB-64 | — | apps/viewer/src/galactic/black_market_hud.cpp; apps/viewer/src/galactic/destruction_hud.cpp; apps/viewer/src/galactic/galactic_fleet_hud.cpp; apps/viewer/src/galactic/galactic_hud.cpp; apps/viewer/src/galactic/ground_hud.cpp; apps/viewer/src/galactic/hero_action_hud.cpp; apps/viewer/src/galactic/pending_battle_hud.cpp; src/presentation/godot/ui/tactical_hud_build.cpp; src/presentation/ui/hud_shell.cpp | matched by the field's name; the loader is table-driven HCB-64 applies the shared XML readout style to caller-prepared generic_flytext; bounty accounting remains outside presentation.; basis: reviewed |
-| Max_Bar_Level | applied | whole class (src/presentation/ui/hud_shell.cpp) | L-9 | — | src/presentation/ui/hud_shell.cpp | matched by the field's name; the loader is table-driven; basis: auto |
+| Max_Bar_Level | partial | s_health_00..47 and s_shield_00..47 card bars (src/presentation/godot/ui/unit_cards_view.cpp); s_health_00..47 and s_shield_00..47 card bars (src/presentation/ui/hud_shell.cpp); missing: st_health_bar | L-9; L-9 | 828 | src/presentation/godot/ui/unit_cards_view.cpp; src/presentation/ui/hud_shell.cpp | Existing consumers are retained. Current world-UI consumers still use fixed Max_Bar_Level (st_health_bar): src/presentation/ui/world_ui.cpp&#35;bar_level. Reading a component or material name elsewhere does not cover these authored values.; basis: reviewed |
 | Size | partial | authored black-market menu and encyclopedia (apps/viewer/src/galactic/black_market_hud.cpp); encyclopedia_back, encyclopedia_header_text, encyclopedia_text (apps/viewer/src/galactic/galactic_hud.cpp); g_radar_view (apps/viewer/src/galactic/galactic_radar_hud.cpp); missing: other command-bar components | WGEP-141, WGEP-143; WGUI-70, WGUI-81; WGUI-56, WGUI-90 | 654 | apps/viewer/src/galactic/black_market_hud.cpp; apps/viewer/src/galactic/galactic_hud.cpp; apps/viewer/src/galactic/galactic_radar_hud.cpp | HUD / command bar / radar / FOW / tactical camera — Remaining: other command-bar components. Galactic encyclopedia consumes authored pane/text sizes and radar consumes the authored view icon size; other command-bar component uses remain untraced.; basis: reviewed |
 | Stackable | todo | application not recorded | — | 654 | — | HUD / command bar / radar / FOW / tactical camera — No qualified Stackable consumer for the listed classes; retain the implementation gap. Review: parsed into the command-bar catalog (src/data/ui/command_bar.cpp) but no widget reads it.; basis: reviewed |
 
@@ -131,9 +267,18 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Permanent_Weapon_Swap_Ability/Must_Be_Bought_On_Black_Market | todo | application not recorded | — | 3239 | — | land swap is authored on the unit but no code reads Must_Be_Bought_On_Black_Market on origin/main; not a galactic-only gate in code; basis: reviewed |
 | Abilities/Proximity_Mines_Ability/Must_Be_Bought_On_Black_Market | todo | application not recorded | — | 1130 | — | Black-market purchase gate is not applied to this carrier; kept galactic (PR &#35;4993). Overlaps PR &#35;4965 and branch Thom-Ernst/gc-tag-corruption-blackmarket: not claimed done here.; basis: reviewed |
 | Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — The generic production limit consumer exists, but this Container class has no qualified live production closure (WPR-33). Review: read in the production profile but containers are not purchase options.; basis: reviewed |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Build_Limit_Lifetime_Per_Player | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-25 | 4532 | src/campaign/live_setup.cpp; src/campaign/setup.cpp | Production / build / tech / skirmish economy — Remaining: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams.; other objects and consumers outside the live galactic closure. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+| Galactic_Fleet_Override_Icon_Index | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Galactic_Model_Name | partial | Galactic_Fleet container marker (apps/viewer/src/galactic/galactic_scene.cpp); missing: Other container presentation paths remain outside the galactic fleet marker. | WGP-16 | 650 | apps/viewer/src/galactic/galactic_scene.cpp | Galactic UI / camera / map — Remaining: Other container presentation paths remain outside the galactic fleet marker. The Galactic_Fleet marker draws its authored model and applies its authored Z offset. Fleet model overrides remain a separate provider seam.; basis: reviewed |
 | Is_Indigenous_Unit_Corruptible | todo | application not recorded | — | 3776 | — | WLEN-52 marks it missing in code.; basis: reviewed |
+| Land_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Space_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Tactical_Build_Cost_Multiplayer | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — The generic loaded-menu consumer exists, but production for the listed class remains unqualified (WPR-33). Review: skirmish purchase options are built for ship, squadron and unique types; containers are not purchased.; basis: reviewed |
 | Tactical_Build_Prerequisites | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — The prerequisite consumer exists for loaded menu types; this Container class still lacks a qualified production closure (WPR-33). Review: skirmish purchase options are built for ship, squadron and unique types; containers are not purchased.; basis: reviewed |
 | Tactical_Build_Time_Seconds | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — The generic loaded-menu consumer exists, but production for the listed class remains unqualified (WPR-33). Review: skirmish purchase options are built for ship, squadron and unique types; containers are not purchased.; basis: reviewed |
@@ -234,11 +379,60 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Cheap_Bribe_Cost | partial | galactic fleet members (src/campaign/fleets.cpp); galactic fleet movement (src/sim/galactic/movement.cpp); galactic fleet movement (src/sim/galactic/movement.cpp); missing: the container or squadron type's own cost: only its flattened members contribute | WGM-85; WGM-84, WGM-85; WGM-84 | 4005 | src/campaign/fleets.cpp; src/sim/galactic/movement.cpp | Container and squadron members count through their leaf ships; a cost authored on the container or squadron type itself is not summed. Movement admission only: a corruption-benefiting mover pays, before departure, the summed original-type cost of the flattened departing members for each intermediate path planet its owner holds, unless the mover holds that orbit; AI difficulty multiplier and the AI bribe request stay with &#35;3981.; basis: reviewed |
 | Expensive_Bribe_Cost | partial | galactic fleet members (src/campaign/fleets.cpp); galactic fleet movement (src/sim/galactic/movement.cpp); galactic fleet movement (src/sim/galactic/movement.cpp); missing: the container or squadron type's own cost: only its flattened members contribute | WGM-85; WGM-84, WGM-85; WGM-84 | 4005 | src/campaign/fleets.cpp; src/sim/galactic/movement.cpp | Container and squadron members count through their leaf ships; a cost authored on the container or squadron type itself is not summed. Movement admission only: a corruption-benefiting mover pays, before departure, the summed original-type cost of the flattened departing members for each intermediate path planet its owner holds, unless the mover holds that orbit; AI difficulty multiplier and the AI bribe request stay with &#35;3981.; basis: reviewed |
 
+## CorruptPlanetAbility
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Required_Corruption_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## DCUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Death_Clone
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Deathclone
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Debug_Objects
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| DebugUnit/Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Build_Tab_Heroes | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Galactic_Influence_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| DebugUnit/Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## Decal
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Random_Size_Offset | todo | application not recorded | — | 654 | — | VFX / models / particles / environment — No qualified Random_Size_Offset consumer for the listed classes; retain the implementation gap.; basis: reviewed |
+
+## DetectHeroAbility
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Detect_Credit_Siphon_Effects | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## Difficulty_Adjustment
 
@@ -251,11 +445,67 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Galactic_Build_Time_Multiplier | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-28, WGEP-32, WGUI-18 | 654 | src/campaign/live_setup.cpp | Production / build / tech / skirmish economy — Remaining: other objects and consumers outside the live galactic closure.; basis: reviewed |
 | Space_Build_Time_Multiplier | applied | ship, station (src/campaign/space_rules.cpp); ship, station (src/sim/tactical/economy.cpp); ship (src/sim/tactical/economy.cpp); ship, station (src/skirmish/economy.cpp) | WBP-15, WTA-45; WTA-45; WBP-15, WTA-45; WTA-45 | — | src/campaign/space_rules.cpp; src/sim/tactical/economy.cpp; src/skirmish/economy.cpp | Skirmish AI slots resolve their difficulty level; campaign AI accounts use the selected campaign difficulty. The recorded player multiplier scales tactical queue frames and whole pad-construction seconds. Human timing is unscaled. The tactical plan build-time estimate is zero (SAE-09).; basis: reviewed |
 
+## Dummy
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Maintenance_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## DummyStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Reduced_By_Multiple_Factories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Icon_Index | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| GalacticBehavior | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Maintenance_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Neutralization_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Faction | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Orbiting_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Sabotage_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Space_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## Faction
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Automatic_Planetary_Corruption_Upgrade_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 4532 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
+| Base_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Bombardment_Blob_Size | todo | application not recorded | — | 654 | — | GC &lt;-&gt; space battle bridge — Orbital-support target-area presentation has no consumer; do not infer it from projectile scatter. |
 | Bombardment_Required_Orbital_Ships | todo | application not recorded | — | 654 | — | GC &lt;-&gt; space battle bridge — The campaign-orbit eligibility test for land support remains absent (LC-64). |
 | Can_Control_Planets | applied | GC map-owner factions (src/campaign/conflict_entry.cpp); whole class (src/campaign/setup.cpp) | WGT-121; WGEP-03 | — | src/campaign/conflict_entry.cpp; src/campaign/setup.cpp | basis: reviewed |
@@ -278,7 +528,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | SFXEvent_Bunker_Garrisoned | todo | application not recorded | — | 654 | — | Audio: SFX / speech / music — No qualified SFXEvent_Bunker_Garrisoned consumer for the listed classes; retain the implementation gap. |
 | SFXEvent_Corruption_Removed | applied | local due corruption completion (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-54 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
 | SFXEvent_Enemy_Fleet_Approaching_Planet | applied | local faction approach cue (apps/viewer/src/galactic/galactic_audio.cpp); committed fleet enroute assignment (src/sim/galactic/movement.cpp) | WGP-27; WGUI-114, WGUI-122 | — | apps/viewer/src/galactic/galactic_audio.cpp; src/sim/galactic/movement.cpp | Accepted enroute assignment qualifies the exact local recipient from current allegiance, explicit enemy relation, combat-skip and local orbital presence; retained runtime delivery applies the per-player wall-clock guard and resolves the authored faction cue.; basis: reviewed |
-| SFXEvent_Exit_Into_Hyperspace | todo | application not recorded | — | 653 | — | Galactic faction cue is not played by the galactic audio adapter.; basis: reviewed |
+| SFXEvent_Exit_Into_Hyperspace | partial | tactical retreat jump sound (apps/viewer/src/battle_audio_events.cpp); missing: galactic exit cue | RC-08, RP-11 | 653 | apps/viewer/src/battle_audio_events.cpp | RC-08: the faction cue is the tactical retreat jump sound of a ship without a type cue; the galactic faction cue is not played by the galactic audio adapter.; basis: reviewed |
 | SFXEvent_GUI_Start_Campaign | todo | application not recorded | — | 653 | — | Galactic faction cue is not played by the galactic audio adapter.; basis: reviewed |
 | SFXEvent_HUD_Lost_Tactical_Corruption_Mission | todo | application not recorded | — | 653 | — | Galactic faction cue is not played by the galactic audio adapter.; basis: reviewed |
 | SFXEvent_HUD_Won_Tactical_Corruption_Mission | todo | application not recorded | — | 653 | — | Galactic faction cue is not played by the galactic audio adapter.; basis: reviewed |
@@ -307,12 +557,58 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Maintenance_Cost | partial | galactic AI perception (src/script/foc/galactic_ai_economy.cpp); missing: other maintenance consumers | WGA-291 | 654 | src/script/foc/galactic_ai_economy.cpp | Campaign setup / planet data — Remaining: other maintenance consumers. AI perception uses original fleet breakdown maintenance; this does not debit fiscal credits.; basis: reviewed |
 
+## FlagshipTemplate
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## FlagshipUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Freighter
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Cheap_Bribe_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Expensive_Bribe_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Neutralization_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Space_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## Galactic_Markup
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Planets/*/Chokepoint | applied | whole class (src/campaign/ai_perception_content.cpp); whole class (src/script/foc/galactic_ai_markup.cpp) | WGA-427, WGA-428, WGA-464; WGA-464 | — | src/campaign/ai_perception_content.cpp; src/script/foc/galactic_ai_markup.cpp | basis: reviewed |
 | Planets/*/PriorityTarget | applied | whole class (src/campaign/ai_perception_content.cpp); whole class (src/script/foc/galactic_ai_markup.cpp) | WGA-427, WGA-428, WGA-464; WGA-464 | — | src/campaign/ai_perception_content.cpp; src/script/foc/galactic_ai_markup.cpp | basis: reviewed |
+
+## GalacticSabotageAbility
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Can_Cancel_Production | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Can_Halt_Credit_Production | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Duration_Of_Credit_Halt | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## GameConstants
 
@@ -321,7 +617,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Activated_Black_Market_Ability_Names | todo | application not recorded | — | 1130 | — | The activated black-market name list is not read; the host finds the buyer by the ability element.; basis: reviewed |
 | Activated_Corrupt_Planet_Ability_Names | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); live AI corruption choice admission and synchronized selection (src/sim/galactic/ability_corruption.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72; WGCH-03, WGCH-49, WGCH-50 | 4532 | src/campaign/corruption_setup.cpp; src/sim/galactic/ability_corruption.cpp | Family: GC corruption + black market. WGCH-49/72/124/161..173 apply the prepared live corruption host; ordinary unnamed selector activation, equal-weight qualification, militia revolt and external completion/presentation owners remain separate seams.; basis: reviewed |
 | Activated_Destroy_Planet_Ability_Names | partial | live galactic destruction ability routing (src/campaign/live_setup.cpp); missing: authored target effect, model refresh and sound consumers | WGCH-137, WGCH-157, WGCH-183 | 760 | src/campaign/live_setup.cpp | Family: GC planet abilities + income. WGCH-137/157/183 route named destruction into the live host; target effects, model refresh and sound consumers remain missing.; basis: reviewed |
-| Activated_Remove_Corruption_Ability_Names | todo | application not recorded | — | 1130 | — | The activated remove-corruption name list is not read; removal is not bound in the live host.; basis: reviewed |
+| Activated_Remove_Corruption_Ability_Names | applied | ground-activated hero removal (apps/viewer/src/galactic/ability_drop.hpp); corrupt-militia removal revolt and retreat (src/sim/galactic/ability_corruption.cpp) | WGCH-18, WGCH-189, WGCH-190; WGCH-17 | 1130 | apps/viewer/src/galactic/ability_drop.hpp; src/sim/galactic/ability_corruption.cpp | Authored preview routing and removal price are consumed by the live hero path; a corrupt-militia removal runs the revolt at completion (structures, retreats, political modifiers, neutral allegiance, WGCH-17). WGCH-192 finds no non-ground or multi-record removal authoring in stock and eight target profiles; this does not classify other styles as ignored.; WGCH-192; basis: reviewed |
 | Activated_Sabotage_Ability_Names | applied | whole class (src/sim/galactic/ability_sabotage.cpp) | WGCH-97 | — | src/sim/galactic/ability_sabotage.cpp | basis: reviewed |
 | Activated_Siphon_Credits_Ability_Names | todo | application not recorded | — | 1143 | — | The activated name list is not read; the live host binds the ability by its element.; basis: reviewed |
 | Activated_Slice_Ability_Names | todo | application not recorded | — | 1143 | — | The activated name list is not read; the live host binds the ability by its element.; basis: reviewed |
@@ -363,6 +659,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Credits_Accumulation_Factor_Rebel | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | Credits_Display_Font_Name | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | Credits_Display_Font_Size | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
+| Credits_Rows | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | CurrentPathCostCoefficientSpace | applied | whole class (src/units/unit_motion.cpp) | AV-13 | — | src/units/unit_motion.cpp | &#35;852 reassessment: the valid halved perturbation changes structural tables but proves no battle effect. Doubling fails battle construction because avoidance rules are out of range; the check retries with half (AV-13).; CHECK-842; basis: reviewed |
 | Debug_Hot_Key_Load_Campaign | todo | application not recorded | — | 653 | — | Debug hotkey: no reader under src/apps/viewer (same finding as the sibling Debug_Hot_Key_Load_Map rows).; basis: reviewed |
 | Default_Bounty_By_Category_MP | applied | whole class (src/skirmish/economy.cpp) | WGCH-65, WGP-189 | — | src/skirmish/economy.cpp | WGCH-65/WGP-189: loaders read this only with campaign_scene enabled; campaign space economy applies current-type bounty. The standalone M2 skirmish cannot observe this consumer; strategic and auto-resolve death consumers remain separate.; basis: reviewed |
@@ -376,7 +673,9 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Fiscal_Cycle_Time_In_Secs | applied | whole class (src/campaign/setup.cpp) | WGEP-02, WGS-05 | — | src/campaign/setup.cpp | basis: reviewed |
 | Galactic_Zoom_Acceleration | todo | application not recorded | — | 1157 | — | Family: Galactic UI / camera / map. WGP-91: ordinary camera endpoints and dispatch do not consume this authored constant; no remake consumer exists. Qualify a separate reader before wiring acceleration into ordinary planet flights.; basis: reviewed |
 | Galactic_Zoom_In_Station_Offset | todo | application not recorded | — | 1157 | — | Family: Galactic UI / camera / map. GHUD-S78 and WGP-186 use the planet model station anchor, not this vector, for focused station placement. No other reader is qualified and no remake consumer exists; retain a reader-qualification gap, not a replacement-anchor task.; basis: reviewed |
-| Garrisoned_Max_Attack_Distance_Multiplier | todo | application not recorded | — | 3776 | — | Shared garrison weapon range missing; no reader on main; basis: reviewed |
+| Game_Play_UI_Credit_Font_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Game_Play_UI_Credit_Font_Size | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Garrisoned_Max_Attack_Distance_Multiplier | applied | land garrison structure occupants (src/sim/tactical/session_land_combat.cpp); land (src/units/unit_support.cpp) | LC-102; LC-102 | — | src/sim/tactical/session_land_combat.cpp; src/units/unit_support.cpp | basis: reviewed |
 | Good_Fleet_Maintenance_Cost_Factor | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | Good_Starship_Maintenance_Cost_Factor | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | GUI_Darken_Level | todo | application not recorded | — | 654 | — | HUD / command bar / radar / FOW / tactical camera — No qualified GUI_Darken_Level consumer for the listed classes; retain the implementation gap.; basis: reviewed |
@@ -387,6 +686,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Hack_Super_Weapon_Required_Type | applied | live exact current-type orbit match (src/sim/galactic/ability_hack.cpp) | WGCH-109, WGCH-110, WGCH-111, WGCH-112, WGCH-139, WGCH-180, WGCH-181, WGCH-182, WGCH-57, WGCH-66 | — | src/sim/galactic/ability_hack.cpp | basis: reviewed |
 | Income_Redistribution | foc-ignores | application not recorded | — | — | — | no getter reference in the debug build; galactic fiscal tag; the inspected fiscal path does not read it (docs/behaviour/walks/gc-economy-production.md WGEP-15); basis: reviewed |
 | Large_Coin_Stack_Size | todo | application not recorded | — | 654 | — | Audio: SFX / speech / music — No qualified Large_Coin_Stack_Size consumer for the listed classes; retain the implementation gap. |
+| Max_Build_Queue | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Max_Galactic_Zoom_Distance | todo | application not recorded | — | 1157 | — | Family: Galactic UI / camera / map. WGP-91: inspected ordinary camera paths add no maximum-distance clamp and do not read this constant. No remake consumer exists; qualify another reader before treating the authored value as an ordinary zoom bound.; basis: reviewed |
 | Max_Galactic_Zoom_Speed | todo | application not recorded | — | 1157 | — | Family: Galactic UI / camera / map. WGP-91: inspected keyboard/wheel and ordinary camera paths do not read this constant. No remake consumer exists; reader qualification remains before any speed wiring.; basis: reviewed |
 | Max_Skirmish_Credits | applied | staging credits slider arrow positions (src/presentation/ui/skirmish_setup.cpp); staging credits slider upper bound (src/skirmish/inputs.cpp) | WSS-25; WSS-25 | — | src/presentation/ui/skirmish_setup.cpp; src/skirmish/inputs.cpp | basis: reviewed |
@@ -457,7 +757,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | RetreatAutoResolveLoserAttrition | applied | whole class (src/campaign/auto_resolve_round.cpp) | WAR-29, WAR-39 | — | src/campaign/auto_resolve_round.cpp | Validated galactic data supplies authored values; the round consumer supplies only sourced omission defaults.; debug build: read by the galactic auto-resolve solver or its conflict service for the combat round's loser attrition during a retreat (WAR-29, WAR-39) (docs/behaviour/walks/gc-autoresolve.md); basis: reviewed |
 | RetreatAutoResolveWinnerAttrition | applied | whole class (src/campaign/auto_resolve_round.cpp) | WAR-29, WAR-39 | — | src/campaign/auto_resolve_round.cpp | Validated galactic data supplies authored values; the round consumer supplies only sourced omission defaults.; debug build: read by the galactic auto-resolve solver or its conflict service for the combat round's winner attrition during a retreat (WAR-29, WAR-39) (docs/behaviour/walks/gc-autoresolve.md); basis: reviewed |
 | Sabotage_Particle_Effect | todo | application not recorded | — | 653 | — | The sabotage particle effect is not played.; basis: reviewed |
-| Saliency_Size | todo | application not recorded | — | 654 | — | HUD / command bar / radar / FOW / tactical camera — No qualified Saliency_Size consumer for the listed classes; retain the implementation gap. |
+| Saliency_Size | partial | space battle camera (apps/viewer/src/map_mode_hud.cpp); missing: other cinematic modes and complete hardpoint target inputs | BCAM-07 | 3005 | apps/viewer/src/map_mode_hud.cpp | Space battlecam reads authored weights; other modes and complete target activity remain open.; basis: reviewed |
 | Ships_Per_Stack | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 | Skirmish_Buy_Credits | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — Legacy purchase-screen budget is unwired; do not equate it with starting credits (WSS-52).; basis: reviewed |
 | Space_Auto_Resolve_Delay_Seconds | todo | application not recorded | — | 2006 | — | The conflict dialog auto-resolve timer and the space capture countdown are not read.; basis: reviewed |
@@ -473,14 +773,71 @@ and are plain numbers. Code locations are repository paths without identifier an
 | WaitOperatorCostCoefficient | applied | whole class (src/sim/tactical/motion.cpp) | AV-12 | — | src/sim/tactical/motion.cpp | &#35;852 reassessment: the 9000-tick M2 check changes structural tables but observes no battle change; the cited application remains, and this scenario does not prove its effect.; CHECK-842; basis: reviewed |
 | Win_Lose_Message_Font_Size | applied | whole class (src/presentation/ui/battle_messages.cpp) | BE-03 | — | src/presentation/ui/battle_messages.cpp | basis: reviewed |
 
+## GameObjectType
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Capture_Point_Reward_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_2_Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_3_Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Encyclopedia_Planet_Ability_Icon | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Max_Political_Control_For_Faction | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Vigilance | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Prevents_Minor_Credit_Siphons | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Prevents_Minor_Political_Assassinations | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## GC_Dummy
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Land_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Influence_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Orbiting_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Generic_Structure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Station | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Sabotage_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## GenericHeroUnit
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Abilities/Corruption_Ability/@Name | todo | application not recorded | — | 4532 | — | Authored only on ground-model saboteur objects; no reader for this per-ability tag was found in the galactic ability host (activation is selected through the activated-name lists).; basis: reviewed |
-| Abilities/Corruption_Ability/Activation_Style | todo | application not recorded | — | 4532 | — | Authored only on ground-model saboteur objects; no reader for this per-ability tag was found in the galactic ability host (activation is selected through the activated-name lists).; basis: reviewed |
+| Abilities/Corruption_Ability/@Name | applied | corruption ability profile (src/campaign/live_setup.cpp) | WGCH-01, WGCH-03 | 6909 | src/campaign/live_setup.cpp | The live ability setup reads both authored forms of the corruption action (Corruption_Ability and the older Corrupt_Planet_Ability) and binds the one the game constants route by name.; GCA-01; basis: reviewed |
+| Abilities/Corruption_Ability/Activation_Style | applied | corruption ability profile (src/campaign/live_setup.cpp) | WGCH-01, WGCH-03 | 6909 | src/campaign/live_setup.cpp | The live ability setup reads both authored forms of the corruption action (Corruption_Ability and the older Corrupt_Planet_Ability) and binds the one the game constants route by name.; GCA-01; basis: reviewed |
 | Abilities/Corruption_Ability/Causes_Despawn | todo | application not recorded | — | 4532 | — | Authored only on ground-model saboteur objects; no reader for this per-ability tag was found in the galactic ability host (activation is selected through the activated-name lists).; basis: reviewed |
-| Abilities/Corruption_Ability/Initially_Enabled | todo | application not recorded | — | 4532 | — | Authored only on ground-model saboteur objects; no reader for this per-ability tag was found in the galactic ability host (activation is selected through the activated-name lists).; basis: reviewed |
+| Abilities/Corruption_Ability/Initially_Enabled | applied | corruption ability profile (src/campaign/live_setup.cpp) | WGCH-01, WGCH-03 | 6909 | src/campaign/live_setup.cpp | The live ability setup reads both authored forms of the corruption action (Corruption_Ability and the older Corrupt_Planet_Ability) and binds the one the game constants route by name.; GCA-01; basis: reviewed |
 | Abilities/Corruption_Ability/SFXEvent_Activate | todo | application not recorded | — | 653 | — | The activation cue of this galactic ability is not played by the galactic ability host.; basis: reviewed |
 | Abilities/Enhance_Defense_Ability/Stacking_Category | partial | GC space scene (src/campaign/space_rules.cpp); missing: other modes and persistent story/corruption producer | WGT-49, WGT-50, WGT-51 | 760 | src/campaign/space_rules.cpp | Space abilities (unit + hero) — Remaining: other modes and persistent story/corruption producer. Mixed ground/space, space carriers on GenericHeroUnit: Generic_Fleet_Commander_Empire, Generic_Fleet_Commander_Rebel. GC space scene consumer: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
 | Abilities/Galactic_Sabotage_Ability/@Name | todo | application not recorded | — | 760 | — | Authored only on ground-model saboteur objects; the type table parses the ability (src/units/galactic_types.cpp) but no live consumer of this tag was found.; basis: reviewed |
@@ -508,11 +865,24 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/System_Spy_Ability/See_Political_Control_Breakdown | partial | automatic unit/structure spy influence (src/sim/galactic/ability_auto_spy.cpp); ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: fleet-member versus non-fleet influencing source distinction (WGUI-101) | WGCH-41, WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-23; WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_auto_spy.cpp; src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence applies to the source's current owner at its current planet (nearby planets for a positive influence range) and is removed on loss, departure, type change or owner change; the fleet-member versus non-fleet influencing-source split of WGUI-101 is not separated yet. |
 | Abilities/System_Spy_Ability/See_Special_Structures | partial | automatic unit/structure spy influence (src/sim/galactic/ability_auto_spy.cpp); ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: fleet-member versus non-fleet influencing source distinction (WGUI-101) | WGCH-41, WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-23; WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_auto_spy.cpp; src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence applies to the source's current owner at its current planet (nearby planets for a positive influence range) and is removed on loss, departure, type change or owner change; the fleet-member versus non-fleet influencing-source split of WGUI-101 is not separated yet. |
 | Blob_Shadow_Below_Detail_Level | todo | application not recorded | — | 3776 | — | no code reads this tag on origin/main (exact and case-insensitive grep); basis: reviewed |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Can_Hyperspace_Without_Activating_Ability | applied | whole class (src/campaign/fleets.cpp) | WGM-83 | — | src/campaign/fleets.cpp | basis: reviewed |
 | CanCellStack | todo | application not recorded | — | 1458 | — | CanCellStack is read nowhere on origin/main; basis: reviewed |
+| Destroy_When_Used_As_Corruption_Prereq | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Icon_Index | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| GalacticBehavior | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| IsBuildable | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | No_Reflection_Below_Detail_Level | todo | application not recorded | — | 3776 | — | no code reads this tag on origin/main (exact and case-insensitive grep); basis: reviewed |
 | No_Refraction_Below_Detail_Level | todo | application not recorded | — | 3776 | — | no code reads this tag on origin/main (exact and case-insensitive grep); basis: reviewed |
+| Political_Faction | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Ranking_In_Category | partial | live galactic fleet member response ranking (apps/viewer/src/galactic/galactic_audio.cpp); data-resolved ranked fleet move response (src/presentation/audio/galactic.cpp); missing: hero-ranking preference in fleet-icon representative selection (GHUDL-16) | BA-20, WGP-181; BA-20, WGP-181 | 654 | apps/viewer/src/galactic/galactic_audio.cpp; src/presentation/audio/galactic.cpp | Other unit/game data: GenericHeroUnit ranking is applied by live fleet-move audio, including the generic smuggler and commander class. Generic heroes are intentionally absent from the named-hero map bar; that is not a missing generic map-bar consumer.; basis: reviewed |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## GenericHeroUnit, HeroUnit
 
@@ -551,6 +921,162 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | */Build_Time_Delay_Tolerance | partial | space tactical goals (src/script/foc/ai_engine.hpp); missing: galactic and land goals | SAE-05, SAE-09 | 737 | src/script/foc/ai_engine.hpp | Tactical AI — Remaining: galactic and land goals. Space tactical activation applies the limit; the tactical estimate remains an explicitly unverified conservative policy.; basis: reviewed |
 
+## Ground_Structure_Goauld
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Influences_Capture_Point | partial | loaded land objects (src/sim/tactical/pads.cpp); missing: objects outside loaded land sessions | LC-53, WBP-02 | 6215 | src/sim/tactical/pads.cpp | Land capture applies loaded static type flags.; basis: reviewed |
+| Minimum_Time_Before_Pad_Can_Build_Again | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Respects_Skirmish_Pre_Build_Bases_Option | partial | land marker pads (src/skirmish/land_start.cpp); missing: non-land or non-pad types, pending selection outside single-entry fallback | LC-95 | 6215 | src/skirmish/land_start.cpp | basis: reviewed |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Ground_Structure_Indigenous
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Ground_Structure_Neutral
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Influences_Capture_Point | partial | loaded land objects (src/sim/tactical/pads.cpp); missing: objects outside loaded land sessions | LC-53, WBP-02 | 6215 | src/sim/tactical/pads.cpp | Land capture applies loaded static type flags.; basis: reviewed |
+| Minimum_Time_Before_Pad_Can_Build_Again | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Ground_Structure_Other
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Influences_Capture_Point | partial | loaded land objects (src/sim/tactical/pads.cpp); missing: objects outside loaded land sessions | LC-53, WBP-02 | 6215 | src/sim/tactical/pads.cpp | Land capture applies loaded static type flags.; basis: reviewed |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Prevents_Blockade_Run_Attrition | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Sabotage_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tutorial_Sabotage_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Ground_Structure_Tauri
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Influences_Capture_Point | partial | loaded land objects (src/sim/tactical/pads.cpp); missing: objects outside loaded land sessions | LC-53, WBP-02 | 6215 | src/sim/tactical/pads.cpp | Land capture applies loaded static type flags.; basis: reviewed |
+| Minimum_Time_Before_Pad_Can_Build_Again | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Respects_Skirmish_Pre_Build_Bases_Option | partial | land marker pads (src/skirmish/land_start.cpp); missing: non-land or non-pad types, pending selection outside single-entry fallback | LC-95 | 6215 | src/skirmish/land_start.cpp | basis: reviewed |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Ground_Structure_Unused
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Requires_Initial_Placement | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Influences_Capture_Point | partial | loaded land objects (src/sim/tactical/pads.cpp); missing: objects outside loaded land sessions | LC-53, WBP-02 | 6215 | src/sim/tactical/pads.cpp | Land capture applies loaded static type flags.; basis: reviewed |
+| Minimum_Time_Before_Pad_Can_Build_Again | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Sabotage_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Ground_Structure_Wraith
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Influences_Capture_Point | partial | loaded land objects (src/sim/tactical/pads.cpp); missing: objects outside loaded land sessions | LC-53, WBP-02 | 6215 | src/sim/tactical/pads.cpp | Land capture applies loaded static type flags.; basis: reviewed |
+| Minimum_Time_Before_Pad_Can_Build_Again | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Respects_Skirmish_Pre_Build_Bases_Option | partial | land marker pads (src/skirmish/land_start.cpp); missing: non-land or non-pad types, pending selection outside single-entry fallback | LC-95 | 6215 | src/skirmish/land_start.cpp | basis: reviewed |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## GroundBuildable
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Requires_Initial_Placement | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Faction_Anim_Subindex | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Override_Bounty_MP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Sabotage_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
 ## GroundBuildable, GroundStructure, Props_Generic, Props_Story, SecondaryStructure, SpaceBuildable, SpaceStructure, SpecialStructure
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
@@ -563,6 +1089,31 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Tactical_Sell_Credits | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 
+## GroundCompany
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Limit_Lifetime_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Hero | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Heroes | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Space_Station | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Is_Buildable | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Land_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Reduce_Production_Time_Ability/Applicable_Unit_Categories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Reduce_Production_Time_Ability/Applicable_Unit_Types | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Reduce_Production_Time_Ability/Excluded_Unit_Types | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Reduce_Production_Time_Ability/Stacking_Category | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Reduce_Production_Time_Ability/Time_Reduction_Percentage | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Reduce_Production_Time_Ability/Unit_Strength_Category | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
 ## GroundCompany, GroundInfantry, HeroCompany, HeroUnit, Indigenous_Unit, Props_Story, Slave_Unit, SpaceUnit, Squadron, StarBase
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
@@ -574,6 +1125,91 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Slice_Cost_Credits | partial | live registered theft types (src/sim/galactic/ability_theft.cpp); missing: AI action routing, ordinary selector activation | WGCH-33, WGCH-54 | 1143 | src/sim/galactic/ability_theft.cpp | basis: reviewed |
+
+## GroundInfantry
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Destroy_When_Used_As_Corruption_Prereq | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| GalacticBehavior | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Neutralization_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Override_Bounty_MP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Political_Faction | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## GroundStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Read on land into the placed static row with the type constructor default (200 radius, 2 s) when absent (debug build, out/ls/pad-loader-retail.md U1); no consumer for a structure that is not a reinforcement point (no capture service for it on land). The space decode still requires both tags. Owning lane: LS.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Read on land into the placed static row with the type constructor default (200 radius, 2 s) when absent (debug build, out/ls/pad-loader-retail.md U1); no consumer for a structure that is not a reinforcement point (no capture service for it on land). The space decode still requires both tags. Owning lane: LS.; basis: auto |
+| Override_Bounty_MP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## GroundVehicle
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Heroes | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Destroy_When_Used_As_Corruption_Prereq | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| GalacticBehavior | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| IsBuildable | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Minimum_Time_Before_Pad_Can_Build_Again | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Neutralization_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## GroundWarCompany
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## GroundWarFormation
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## GroundWarTemplate
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Reduced_By_Multiple_Factories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Maintenance_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Space_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
 
 ## GUIDialogs
 
@@ -604,6 +1240,42 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Repair_Cost_Per_Frame | applied | whole class (src/sim/tactical/durability.cpp); whole class (src/units/unit_durability.cpp) | WSL-41, WSL-42; HR-01 | — | src/sim/tactical/durability.cpp; src/units/unit_durability.cpp | Live station command and partitioned repair service apply the authored values; zero amount still pays without gain.; CHECK-842; basis: reviewed |
 
+## Hero_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| IsBuildable | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## HeroCompany
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Text_ID | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Text_RGBA | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Timer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Land_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Station | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Destroy_When_Used_As_Corruption_Prereq | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Icon_Index | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Is_Buildable | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Maintenance_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Neutralization_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_MP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Orbiting_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Orbiting_Units/Required_Orbiting_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Space_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## HeroUnit
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
@@ -629,7 +1301,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Political_Transition_Bonus_Ability/Time_Reduction_Percentage | applied | whole class (src/campaign/control.cpp) | GPC-01, GPC-02 | 2359 | src/campaign/control.cpp | Live galactic automatic control profiles use canonical actor/ability sources; unsupported activation styles refuse explicitly.; basis: reviewed |
 | Abilities/Reduce_Production_Price_Ability/Applicable_Unit_Categories | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | 760 | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
 | Abilities/Reduce_Production_Price_Ability/Applicable_Unit_Types | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | 760 | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
-| Abilities/Remove_Corruption_Ability/SFXEvent_Activate | todo | application not recorded | — | 653 | — | The activation cue of this galactic ability is not played by the galactic ability host.; basis: reviewed |
+| Abilities/Remove_Corruption_Ability/SFXEvent_Activate | applied | ground-activated hero removal (apps/viewer/src/galactic/galactic_mode.cpp); corrupt-militia removal revolt and retreat (src/sim/galactic/ability_corruption.cpp) | WGCH-18, WGCH-189, WGCH-19, WGCH-190, WGCH-191; WGCH-17 | 1130 | apps/viewer/src/galactic/galactic_mode.cpp; src/sim/galactic/ability_corruption.cpp | Named removal binds through authored routing and ground membership; local activation cue, cost/time, saved lifecycle and success-only consumption are wired. WGCH-192 finds no non-ground or multi-record removal authoring in stock and eight target profiles; this does not classify other styles as ignored.; WGCH-192; basis: reviewed |
 | Abilities/Siphon_Credits_Ability/@Name | todo | application not recorded | — | 1143 | — | The siphon ability is not bound in the live ability host (no siphon ability kind or loader); the sim helper in hero_actions.cpp is not wired to authored data. Only the Han_Solo ground-model object authors it.; basis: reviewed |
 | Abilities/Siphon_Credits_Ability/Activation_Style | todo | application not recorded | — | 1143 | — | The siphon ability is not bound in the live ability host (no siphon ability kind or loader); the sim helper in hero_actions.cpp is not wired to authored data. Only the Han_Solo ground-model object authors it.; basis: reviewed |
 | Abilities/Siphon_Credits_Ability/Causes_Despawn | todo | application not recorded | — | 1143 | — | The siphon ability is not bound in the live ability host (no siphon ability kind or loader); the sim helper in hero_actions.cpp is not wired to authored data. Only the Han_Solo ground-model object authors it.; basis: reviewed |
@@ -654,17 +1326,30 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/System_Spy_Ability/See_Political_Control | partial | automatic unit/structure spy influence (src/sim/galactic/ability_auto_spy.cpp); ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: fleet-member versus non-fleet influencing source distinction (WGUI-101) | WGCH-41, WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-23; WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_auto_spy.cpp; src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence applies to the source's current owner at its current planet (nearby planets for a positive influence range) and is removed on loss, departure, type change or owner change; the fleet-member versus non-fleet influencing-source split of WGUI-101 is not separated yet. |
 | Abilities/System_Spy_Ability/See_Political_Control_Breakdown | partial | automatic unit/structure spy influence (src/sim/galactic/ability_auto_spy.cpp); ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: fleet-member versus non-fleet influencing source distinction (WGUI-101) | WGCH-41, WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-23; WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_auto_spy.cpp; src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence applies to the source's current owner at its current planet (nearby planets for a positive influence range) and is removed on loss, departure, type change or owner change; the fleet-member versus non-fleet influencing-source split of WGUI-101 is not separated yet. |
 | Abilities/System_Spy_Ability/See_Special_Structures | partial | automatic unit/structure spy influence (src/sim/galactic/ability_auto_spy.cpp); ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: fleet-member versus non-fleet influencing source distinction (WGUI-101) | WGCH-41, WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-23; WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_auto_spy.cpp; src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence applies to the source's current owner at its current planet (nearby planets for a positive influence range) and is removed on loss, departure, type change or owner change; the fleet-member versus non-fleet influencing-source split of WGUI-101 is not separated yet. |
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Blob_Shadow_Below_Detail_Level | todo | application not recorded | — | 3776 | — | no code reads this tag on origin/main (exact and case-insensitive grep); basis: reviewed |
 | Bribe_Modifier_On_Corrupted_Planets | todo | application not recorded | — | 4005 | — | Bribe tuning (reveal range or planet-state price modifier) is not read; the bribe path does not apply it.; basis: reviewed |
 | Bribe_Modifier_On_Uncorrupted_Planets | todo | application not recorded | — | 4005 | — | Bribe tuning (reveal range or planet-state price modifier) is not read; the bribe path does not apply it.; basis: reviewed |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Heroes | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | CanCellStack | todo | application not recorded | — | 1458 | — | CanCellStack is read nowhere on origin/main; basis: reviewed |
 | Destroy_When_Used_As_Corruption_Prereq | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 4532 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
 | Energy_Capacity | todo | application not recorded | — | 3776 | — | no land consumer of energy capacity; basis: reviewed |
+| Land_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Maintenance_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_MP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Prevents_Story_Campaign_Autoresolve | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Ranking_In_Category | partial | live galactic fleet member response ranking (apps/viewer/src/galactic/galactic_audio.cpp); locally owned named galactic heroes (apps/viewer/src/galactic/hero_map_bar.hpp); missing: hero-ranking preference in fleet-icon representative selection (GHUDL-16) | BA-20, WGP-181; WGUI-89 | 654 | apps/viewer/src/galactic/galactic_audio.cpp; apps/viewer/src/galactic/hero_map_bar.hpp | Other unit/game data: named-hero map bar and live fleet response audio apply the rank (WGUI-89, BA-20, WGP-181); fleet-icon hero preference remains missing (GHUDL-16).; basis: reviewed |
 | SFXEvent_Tactical_Build_Cancelled | todo | application not recorded | — | 3776 | — | only space battle_audio_prepare reads the build cue; basis: reviewed |
 | SFXEvent_Tactical_Build_Complete | todo | application not recorded | — | 3776 | — | only space battle_audio_prepare reads the build cue; basis: reviewed |
 | SFXEvent_Tactical_Build_Started | todo | application not recorded | — | 3776 | — | only space battle_audio_prepare reads the build cue; basis: reviewed |
 | Spawn_Planet | todo | application not recorded | — | 1116 | — | The hero spawn planet is not read; respawn placement uses its own choice.; basis: reviewed |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Unit_Abilities_Data/Unit_Ability/Must_Be_Bought_On_Black_Market | todo | application not recorded | — | 1130 | — | Black-market purchase gate is not applied to this carrier; kept galactic (PR &#35;4993). Overlaps PR &#35;4965 and branch Thom-Ernst/gc-tag-corruption-blackmarket: not claimed done here.; basis: reviewed |
 
 ## HeroUnit, SecondaryStructure, SpaceBuildable, SpaceUnit, SpecialStructure, UniqueUnit
@@ -712,12 +1397,51 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Reduce_Production_Price_Ability/Price_Reduction_Percentage | applied | whole class (src/sim/galactic/income.cpp) | WGEP-31, WGEP-54, WGEP-74 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
 | Abilities/Reduce_Production_Price_Ability/Stacking_Category | applied | whole class (src/sim/galactic/income.cpp) | WGEP-31, WGEP-54, WGEP-74 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
 | Abilities/Reduce_Production_Price_Ability/Unit_Strength_Category | todo | application not recorded | — | 760 | — | GC planet abilities + income — The production reduction loader handles applicable categories but omits this distinct category input (WGEP-31/54). Stock hero nodes are empty; Applicable_Unit_Categories is a distinct supported input. |
-| Abilities/Remove_Corruption_Ability/@Name | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on HeroUnit: Commander_Akbar, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo. Mixed ground/space, space carriers on HeroUnit: Commander_Akbar. |
-| Abilities/Remove_Corruption_Ability/Activation_Style | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on HeroUnit: Commander_Akbar, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo. Mixed ground/space, space carriers on HeroUnit: Commander_Akbar. |
-| Abilities/Remove_Corruption_Ability/Causes_Despawn | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on HeroUnit: Commander_Akbar, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo. Mixed ground/space, space carriers on HeroUnit: Commander_Akbar. |
-| Abilities/Remove_Corruption_Ability/Corruption_Removal_Cost_Multiplier | todo | application not recorded | — | 1130 | — | Removal cost and time overrides are not read; the shared corruption-removal effect uses a fixed value.; basis: reviewed |
-| Abilities/Remove_Corruption_Ability/Corruption_Removal_Time_In_Secs | todo | application not recorded | — | 1130 | — | Removal cost and time overrides are not read; the shared corruption-removal effect uses a fixed value.; basis: reviewed |
-| Abilities/Remove_Corruption_Ability/Initially_Enabled | todo | application not recorded | — | 760 | — | Mixed ground/space, space carriers on HeroUnit: Commander_Akbar, Darth_Vader, Darth_Vader_Bounty_Hunter_Immune, Darth_Vader_Expansion, Han_Solo. Mixed ground/space, space carriers on HeroUnit: Commander_Akbar. |
+| Abilities/Remove_Corruption_Ability/@Name | applied | corrupt-militia removal revolt and retreat (src/sim/galactic/ability_corruption.cpp); ground-activated hero removal (src/sim/galactic/ability_corruption.cpp) | WGCH-17; WGCH-18, WGCH-189, WGCH-19, WGCH-190, WGCH-191 | 1130 | src/sim/galactic/ability_corruption.cpp | Named removal binds through authored routing and ground membership; local activation cue, cost/time, saved lifecycle and success-only consumption are wired. WGCH-192 finds no non-ground or multi-record removal authoring in stock and eight target profiles; this does not classify other styles as ignored.; WGCH-192; basis: reviewed |
+| Abilities/Remove_Corruption_Ability/Activation_Style | applied | corrupt-militia removal revolt and retreat (src/sim/galactic/ability_corruption.cpp); ground-activated hero removal (src/sim/galactic/ability_host.cpp) | WGCH-17; WGCH-18, WGCH-189, WGCH-19, WGCH-190, WGCH-191 | 1130 | src/sim/galactic/ability_corruption.cpp; src/sim/galactic/ability_host.cpp | Named removal binds through authored routing and ground membership; local activation cue, cost/time, saved lifecycle and success-only consumption are wired. WGCH-192 finds no non-ground or multi-record removal authoring in stock and eight target profiles; this does not classify other styles as ignored.; WGCH-192; basis: reviewed |
+| Abilities/Remove_Corruption_Ability/Causes_Despawn | applied | corrupt-militia removal revolt and retreat (src/sim/galactic/ability_corruption.cpp); ground-activated hero removal (src/sim/galactic/ability_corruption.cpp) | WGCH-17; WGCH-18, WGCH-189, WGCH-19, WGCH-190, WGCH-191 | 1130 | src/sim/galactic/ability_corruption.cpp | Named removal binds through authored routing and ground membership; local activation cue, cost/time, saved lifecycle and success-only consumption are wired. WGCH-192 finds no non-ground or multi-record removal authoring in stock and eight target profiles; this does not classify other styles as ignored.; WGCH-192; basis: reviewed |
+| Abilities/Remove_Corruption_Ability/Corruption_Removal_Cost_Multiplier | applied | corrupt-militia removal revolt and retreat (src/sim/galactic/ability_corruption.cpp); ground-activated hero removal (src/sim/galactic/ability_corruption.cpp) | WGCH-17; WGCH-18, WGCH-189, WGCH-19, WGCH-190, WGCH-191 | 1130 | src/sim/galactic/ability_corruption.cpp | Named removal binds through authored routing and ground membership; local activation cue, cost/time, saved lifecycle and success-only consumption are wired. WGCH-192 finds no non-ground or multi-record removal authoring in stock and eight target profiles; this does not classify other styles as ignored.; WGCH-192; basis: reviewed |
+| Abilities/Remove_Corruption_Ability/Corruption_Removal_Time_In_Secs | applied | corrupt-militia removal revolt and retreat (src/sim/galactic/ability_corruption.cpp); ground-activated hero removal (src/sim/galactic/ability_corruption.cpp) | WGCH-17; WGCH-18, WGCH-189, WGCH-19, WGCH-190, WGCH-191 | 1130 | src/sim/galactic/ability_corruption.cpp | Named removal binds through authored routing and ground membership; local activation cue, cost/time, saved lifecycle and success-only consumption are wired. WGCH-192 finds no non-ground or multi-record removal authoring in stock and eight target profiles; this does not classify other styles as ignored.; WGCH-192; basis: reviewed |
+| Abilities/Remove_Corruption_Ability/Initially_Enabled | applied | corrupt-militia removal revolt and retreat (src/sim/galactic/ability_corruption.cpp); ground-activated hero removal (src/sim/galactic/ability_host.cpp) | WGCH-17; WGCH-18, WGCH-189, WGCH-19, WGCH-190, WGCH-191 | 1130 | src/sim/galactic/ability_corruption.cpp; src/sim/galactic/ability_host.cpp | Named removal binds through authored routing and ground membership; local activation cue, cost/time, saved lifecycle and success-only consumption are wired. WGCH-192 finds no non-ground or multi-record removal authoring in stock and eight target profiles; this does not classify other styles as ignored.; WGCH-192; basis: reviewed |
+
+## HomeWorldObjects
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| HomeWorldObject/Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Required_Orbiting_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Indigenous_Passive
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Is_Indigenous_Passive_Corruptible | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Is_Indigenous_Unit_Corruptible | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Tech_Structure | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Indigenous_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| GalacticBehavior | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
 
 ## Indigenous_Unit, Squadron
 
@@ -725,19 +1449,35 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Required_Tech_Structure | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 
+## Item
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Base_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Faction | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tutorial_Base_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tutorial_Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## LandBombingUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
 ## Marker
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Capture_Point_Radius | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — Capture-point profiles consume this for loaded CAPTURE_POINT types; Marker class admission is not qualified (WBP-33/34). Review: Marker objects are excluded from the unit tables (unit_tables.cpp), so the capture rule never sees them.; basis: reviewed |
-| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — Capture-point profiles consume this for loaded CAPTURE_POINT types; Marker class admission is not qualified (WBP-33/34). Review: Marker objects are excluded from the unit tables, so the capture rule never sees them.; basis: reviewed |
+| Capture_Point_Radius | applied | whole class (src/sim/tactical/session_land_reinforce.cpp) | LC-52, LC-53 | — | src/sim/tactical/session_land_reinforce.cpp | basis: reviewed |
+| Capture_Point_Transition_Time_Seconds | applied | whole class (src/sim/tactical/session_land_reinforce.cpp) | LC-52, LC-53 | — | src/sim/tactical/session_land_reinforce.cpp | basis: reviewed |
 | Cash_Point_Credits_Per_Second | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — No cash-point accrual consumer; completed mine Income_Stream_Ability is a separate path (WBP-22).; basis: reviewed |
-
-## Marker, MiscObject, Projectile
-
-| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
-|---|---|---|---|---|---|---|
-| Influences_Capture_Point | todo | application not recorded | — | 654 | — | Other unit/game data — Loaded unit capture influence exists; Marker, MiscObject and Projectile class consumers remain unqualified (WBP-50/51). Review: markers are excluded from the unit tables and projectiles are not capture influencers; MiscObject is read for Dummy_Barrage_Target into the influence rules (src/sim/tactical/pads.cpp&#35;influences).; basis: reviewed |
+| Influences_Capture_Point | partial | loaded land objects (src/sim/tactical/pads.cpp); missing: markers outside loaded land sessions | LC-53, WBP-02 | 654 | src/sim/tactical/pads.cpp | Land capture applies loaded marker type flags.; basis: reviewed |
+| Minimum_Time_Before_Pad_Can_Build_Again | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## Marker, MiscObject, SecondaryStructure, SpaceBuildable, SpaceProp, SpaceStructure, SpaceUnit, SpecialStructure, StarBase, UniqueUnit
 
@@ -776,18 +1516,126 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Is_Community_Property | partial | active tactical originals queried by HasUnit (src/script/foc/ai_perception.cpp); missing: selection and ownership-sharing routes outside tactical HasUnit | PE-34 | 654 | src/script/foc/ai_perception.cpp | Tactical HasUnit applies community ownership to active originals (PE-34); selection and ownership-sharing coverage remains incomplete for these classes.; basis: reviewed |
 
+## MarkerMisc
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Cash_Point_Credits_Per_Second | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Cash_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## MarkerMode
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## MarkerReinforcement
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Faction_Anim_Subindex | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Minimum_Time_Before_Pad_Can_Build_Again | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## MarkerSecondary
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## MarkerToRemove
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## MenuObject
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## MilitiaMarker
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## MiscObject
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Advances_Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | CanCellStack | todo | application not recorded | — | 3240 | — | proximity mine cancel stack; CanCellStack read nowhere on origin/main; basis: reviewed |
+| Galactic_Influence_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_MP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Orbiting_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## MiscObject, Projectile
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Influences_Capture_Point | todo | application not recorded | — | 654 | — | Other unit/game data — Loaded unit capture influence exists; Marker, MiscObject and Projectile class consumers remain unqualified (WBP-50/51). Review: markers are excluded from the unit tables and projectiles are not capture influencers; MiscObject is read for Dummy_Barrage_Target into the influence rules (src/sim/tactical/pads.cpp&#35;influences).; basis: reviewed |
+
+## Mission_Object
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Station | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## Mobile_Defense_Unit
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Blob_Shadow_Below_Detail_Level | todo | application not recorded | — | 3776 | — | no code reads this tag on origin/main (exact and case-insensitive grep); basis: reviewed |
-| Capture_Point_Radius | todo | application not recorded | — | 1458 | — | decoded for pads; no land consumer; basis: reviewed |
+| Capture_Point_Radius | todo | application not recorded | — | 1458 | — | decoded for pads; the land step now runs the shared pad services on authored profiles (LC-54..57, session_land_economy.cpp), but no land reader supplies this row yet (&#35;1458 loader work); basis: reviewed |
 | Influences_Capture_Point | todo | application not recorded | — | 1458 | — | influences_capture decoded; no land consumer; basis: reviewed |
 | No_Reflection_Below_Detail_Level | todo | application not recorded | — | 3776 | — | no code reads this tag on origin/main (exact and case-insensitive grep); basis: reviewed |
 | No_Refraction_Below_Detail_Level | todo | application not recorded | — | 3776 | — | no code reads this tag on origin/main (exact and case-insensitive grep); basis: reviewed |
@@ -797,8 +1645,8 @@ and are plain numbers. Code locations are repository paths without identifier an
 | SFXEvent_Tactical_Build_Complete | todo | application not recorded | — | 3776 | — | only space battle_audio_prepare reads the build cue; basis: reviewed |
 | SFXEvent_Tactical_Build_Started | todo | application not recorded | — | 3776 | — | only space battle_audio_prepare reads the build cue; basis: reviewed |
 | Size_Value | todo | application not recorded | — | 3776 | — | tag is not read anywhere on origin/main; basis: reviewed |
-| Tactical_Build_Attachment_Bone_Name | todo | application not recorded | — | 3776 | — | build_attachment decoded; no land consumer; basis: reviewed |
-| Tactical_Buildable_Objects_Multiplayer | todo | application not recorded | — | 1458 | — | skirmish economy buildable (space); no land reader; basis: reviewed |
+| Tactical_Build_Attachment_Bone_Name | partial | land build pads loaded through load_land_pad (src/skirmish/economy.cpp); land build pads loaded through load_land_pad (src/units/unit_tables_land.cpp); missing: a Mobile_Defense_Unit as a placed land pad: no stock land map starts one, so the attachment is read but not exercised | WBP-13; WBP-13 | 3776 | src/skirmish/economy.cpp; src/units/unit_tables_land.cpp | read for a land pad with a model and carried in the pad profile; the pad build puts the child at the attachment; basis: reviewed |
+| Tactical_Buildable_Objects_Multiplayer | todo | application not recorded | — | 1458 | — | skirmish economy buildable (space); the land step builds on authored pad menus through the shared economy (LC-54..57, session_land_economy.cpp), but no land reader supplies the menus yet (&#35;1458 loader work); basis: reviewed |
 
 ## Mobile_Defense_Unit, SecondaryStructure, SpaceBuildable, SpecialStructure, StarBase
 
@@ -806,10 +1654,17 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Tactical_Buildable_Objects_Campaign | applied | retained campaign upgrade holders (src/campaign/space_entry.cpp); whole class (src/skirmish/economy.cpp); whole class (src/units/unit_tables_profiles.cpp) | WGT-116; WGT-26; WGT-26 | — | src/campaign/space_entry.cpp; src/skirmish/economy.cpp; src/units/unit_tables_profiles.cpp | Applied to loaded campaign space producers and upgrades; ground battle admission and individual upgrade abilities belong to their owning subsystems.; basis: reviewed |
 
+## NestedAbilityDispatch
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Corrupt_Planet_Ability | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## Particle
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | No_Particle_Below_Detail_Level | todo | application not recorded | — | 654 | — | VFX / models / particles / environment — No qualified No_Particle_Below_Detail_Level consumer for the listed classes; retain the implementation gap.; basis: reviewed |
 
 ## Planet
@@ -887,6 +1742,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Corruption_2_Required_Unit_Count | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 4532 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
 | Corruption_2_Required_Unit_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 4532 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
 | Corruption_2_Success_Bink_Hologram_Name | todo | application not recorded | — | 4528 | — | No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation. |
+| Corruption_2_Success_Credit_Bonus | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Corruption_2_Success_Speech_Event | todo | application not recorded | — | 4528 | — | No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation. |
 | Corruption_2_Success_Unlock_Unit_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 4532 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
 | Corruption_2_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 4532 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
@@ -899,16 +1755,18 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Corruption_3_Required_Unit_Count | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 4532 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
 | Corruption_3_Required_Unit_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 4532 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
 | Corruption_3_Success_Bink_Hologram_Name | todo | application not recorded | — | 4528 | — | No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation. |
+| Corruption_3_Success_Credit_Bonus | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Corruption_3_Success_Speech_Event | todo | application not recorded | — | 4528 | — | No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation. |
+| Corruption_3_Success_Unlock_Unit_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Corruption_3_Type | partial | live prepared corruption missions/transitions and planet reward inputs (src/campaign/corruption_setup.cpp); missing: completion sounds and external source-ability consumers, M4 land/map builder, ordinary unnamed/selector activation | GFS-C-02, WGCH-01, WGCH-04, WGCH-05, WGCH-08, WGCH-10, WGCH-12, WGCH-124, WGCH-13, WGCH-161, WGCH-162, WGCH-163, WGCH-165, WGCH-168, WGCH-171, WGCH-172, WGCH-173, WGCH-49, WGCH-72 | 4532 | src/campaign/corruption_setup.cpp | Live exact prepared queue, saved mission/transition host, debit-before-refusal, shared return consumption, current beneficiary credits, all-player planet upgrades and local unlocks; equal-weight boundary and militia revolt remain explicit seams.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice.; basis: reviewed |
 | Describe_Advantage | partial | selected advanced-map planet bonus encyclopedia (apps/viewer/src/galactic/galactic_hud.cpp); campaign space loading (src/presentation/ui/loading_screen.cpp); missing: full planet-info dialog and ordinary planet encyclopedia, land and other mission loading | WGUI-167, WGUI-168; WGP-31 | 4532 | apps/viewer/src/galactic/galactic_hud.cpp; src/presentation/ui/loading_screen.cpp | Family: Galactic UI / camera / map. WGP-31 applies campaign-space loading; WGUI-167/168 apply the selected advanced-map bonus encyclopedia. Ordinary planet-info/encyclopedia and land/other mission-loading consumers remain missing.; basis: reviewed |
 | Describe_Tactical | partial | campaign space loading (src/presentation/ui/loading_screen.cpp); missing: land and other mission loading | WGP-31 | 4532 | src/presentation/ui/loading_screen.cpp | Family: GC &lt;-&gt; space battle bridge. WGP-31 applies localized planet description in campaign-space loading. The remaining scope is land and other mission loading; this row does not identify a missing campaign-space loading consumer.; basis: reviewed |
 | Describe_Wildlife | todo | application not recorded | — | 653 | — | Planet encyclopedia text for wildlife and weather is not shown in the galactic encyclopedia.; basis: reviewed |
 | Destroyed_Galactic_Model_Name | applied | whole class (src/platform/galactic/live_game_session.cpp) | WGP-08 | — | src/platform/galactic/live_game_session.cpp | basis: reviewed |
 | Destroyed_Space_Tactical_Map | todo | application not recorded | — | 4532 | — | Family: GC &lt;-&gt; space battle bridge. Stored in galactic_world.cpp and content identity only; WGT-55..57 qualify generic map choice and destroyed backdrop replacement, whose admitted producer still refuses. Wire the destroyed-map provider before claiming application.; basis: reviewed |
-| Encyclopedia_Text | partial | selected advanced-map planet bonus encyclopedia (apps/viewer/src/galactic/galactic_hud.cpp); missing: full planet-info dialog and ordinary planet encyclopedia | WGUI-167, WGUI-168 | 4532 | apps/viewer/src/galactic/galactic_hud.cpp | Family: Galactic UI / camera / map. WGUI-167/168 apply the first authored entry in the selected advanced-map bonus encyclopedia; full planet-info and ordinary encyclopedia consumers remain missing.; basis: reviewed |
-| Encyclopedia_Weather_Info | todo | application not recorded | — | 653 | — | Planet encyclopedia text for wildlife and weather is not shown in the galactic encyclopedia.; basis: reviewed |
-| Encyclopedia_Weather_Name | todo | application not recorded | — | 653 | — | Planet encyclopedia text for wildlife and weather is not shown in the galactic encyclopedia.; basis: reviewed |
+| Encyclopedia_Text | partial | selected advanced-map planet bonus encyclopedia (apps/viewer/src/galactic/galactic_hud.cpp); focused planet information card (apps/viewer/src/galactic/planet_info_card.cpp); missing: full planet-info dialog and ordinary planet encyclopedia | WGUI-167, WGUI-168; GPI-08 | 4532 | apps/viewer/src/galactic/galactic_hud.cpp; apps/viewer/src/galactic/planet_info_card.cpp | Family: Galactic UI / camera / map. WGUI-167/168 apply the first authored entry in the selected advanced-map bonus encyclopedia; GPI-08 lists every entry on the focused planet card; the full planet-info dialog and ordinary encyclopedia consumers remain missing.; basis: reviewed |
+| Encyclopedia_Weather_Info | partial | advanced-map weather icon and hover text (apps/viewer/src/galactic/galactic_radar_hud.cpp); missing: galactic encyclopedia panel | none recorded | 653 | apps/viewer/src/galactic/galactic_radar_hud.cpp | Shown as the hover text of the advanced planetary map weather icon (not yet in the galactic encyclopedia panel).; basis: reviewed |
+| Encyclopedia_Weather_Name | partial | advanced-map weather icon and hover text (apps/viewer/src/galactic/galactic_radar_hud.cpp); missing: galactic encyclopedia panel | none recorded | 653 | apps/viewer/src/galactic/galactic_radar_hud.cpp | Shown as the hover text of the advanced planetary map weather icon (not yet in the galactic encyclopedia panel).; basis: reviewed |
 | Force_Strength | applied | galactic (src/campaign/live_setup.cpp); galactic (src/sim/galactic/income.cpp) | CGS-16; WGEP-75 | — | src/campaign/live_setup.cpp; src/sim/galactic/income.cpp | Shared fiscal payment and forecast contribution (WGEP-06..09/75). |
 | Galactic_Influence_Range | partial | planet-self automatic spy influence (src/sim/galactic/observer_service.cpp); missing: other galactic influence consumers | WGUI-101, WGUI-102, WGUI-24 | 4532 | src/sim/galactic/observer_service.cpp | Family: Galactic AI. WGUI-24/101/102 apply authored range to planet-self event-time automatic spy influence. The row does not cover the other WGS-09 influence-source lifecycle consumers.; basis: reviewed |
 | Galactic_Position | applied | whole class (apps/viewer/src/galactic/galactic_scene.cpp); whole class (src/campaign/galaxy.cpp) | WGP-04; WGM-16 | — | apps/viewer/src/galactic/galactic_scene.cpp; src/campaign/galaxy.cpp | basis: reviewed |
@@ -919,16 +1777,16 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Max_Space_Base | applied | whole class (src/campaign/live_setup.cpp) | WGS-90 | — | src/campaign/live_setup.cpp | basis: reviewed |
 | Name_Adjust | todo | application not recorded | — | 1157 | — | Galactic planet or fleet display tuning is decoded or ignored: no placement, fade, flash or lighting rule applies it.; basis: reviewed |
 | Planet_Ability_Description | deferred | application not recorded | — | 4532 | — | Parsed and preserved; no retail reader found: all-symbol search plus direct displacement scan (WGUI-167). Distinct from Describe_Advantage and first Encyclopedia_Text, which supply the bonus popup.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice. |
-| Planet_Ability_Icon | partial | selected advanced-map planet bonus encyclopedia (apps/viewer/src/galactic/galactic_hud.cpp); missing: galaxy ability filter, quick reference and production summary | WGUI-167, WGUI-168 | 2987 | apps/viewer/src/galactic/galactic_hud.cpp | Family: Galactic UI / camera / map. WGUI-167/168 apply the selected advanced-map bonus icon. Galaxy ability filtering, quick reference and production-summary icon consumers remain outside that slice.; basis: reviewed |
+| Planet_Ability_Icon | partial | selected advanced-map planet bonus encyclopedia (apps/viewer/src/galactic/galactic_hud.cpp); galaxy-map planet bonus icon and hover text (apps/viewer/src/galactic/galactic_hud.cpp); missing: quick reference and production summary | WGUI-167, WGUI-168; GHUDL-18 | 2987 | apps/viewer/src/galactic/galactic_hud.cpp | Family: Galactic UI / camera / map. WGUI-167/168 apply the selected advanced-map bonus icon. Quick reference and production-summary icon consumers remain outside that slice.; basis: reviewed |
 | Planet_Ability_Name | deferred | application not recorded | — | 4532 | — | Parsed and preserved; no retail reader found: all-symbol search plus direct displacement scan (WGUI-167). Distinct from Describe_Advantage and first Encyclopedia_Text, which supply the bonus popup.; Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice. |
 | Planet_Black_Market_Influences | applied | galactic corruption economy (src/sim/galactic/economy_corruption.cpp) | WGEP-14 | — | src/sim/galactic/economy_corruption.cpp | basis: reviewed |
 | Planet_Black_Market_Modifier | applied | galactic corruption economy (src/sim/galactic/economy_corruption.cpp) | WGEP-58 | — | src/sim/galactic/economy_corruption.cpp | basis: reviewed |
 | Planet_Capture_Bonus_Reward | applied | explicit galactic control inputs (src/campaign/control.cpp); whole class (src/campaign/live_setup.cpp); whole class (src/sim/galactic/session.cpp) | WGM-76; WGM-76, WGS-90; WGM-75, WGM-76 | — | src/campaign/control.cpp; src/campaign/live_setup.cpp; src/sim/galactic/session.cpp | Family: GC planet abilities + income. WGM-76: live setup binds the authored first-capture reward; control emits it once and session control service credits the current owner with fiscal multiplier and cap before notification.; basis: reviewed |
-| Planet_Corruption_Removal_Base_Cost | todo | application not recorded | — | 1130 | — | The planet base corruption removal cost is not read.; basis: reviewed |
+| Planet_Corruption_Removal_Base_Cost | applied | corrupt-militia removal revolt and retreat (src/sim/galactic/ability_corruption.cpp); ground-activated hero removal (src/sim/galactic/ability_corruption.cpp) | WGCH-17; WGCH-18, WGCH-189, WGCH-190 | 1130 | src/sim/galactic/ability_corruption.cpp | Authored preview routing and removal price are consumed by the live hero path; a corrupt-militia removal runs the revolt at completion (structures, retreats, political modifiers, neutral allegiance, WGCH-17).; basis: reviewed |
 | Planet_Credit_Value | applied | whole class (src/campaign/setup.cpp); whole class (src/sim/galactic/session.cpp) | WGEP-05; WGEP-03, WGEP-05 | — | src/campaign/setup.cpp; src/sim/galactic/session.cpp | read into the galactic data tables (src/data/galactic, docs/galactic-data.md); applied by the ticket Opt-in base-income fiscal service; remaining income modifiers and production are separate services.; basis: reviewed |
 | Planet_Destroyed_Credit_Value | partial | live ruined planet base income input (src/campaign/live_setup.cpp); fiscal base income of a ruined planet (src/sim/galactic/ability_ruins.cpp); missing: initial startup destroyed value is carried by the setup base, omitted-value default unverified | WGCH-143, WGCH-176; WGCH-143, WGCH-176, WGEP-05 | 4532 | src/campaign/live_setup.cpp; src/sim/galactic/ability_ruins.cpp | Family: GC planet abilities + income. WGCH-143/176 and WGEP-05 apply authored ruined-planet fiscal base income; initial destroyed-start binding and the omitted destroyed-value default remain separately unqualified.; basis: reviewed |
 | Planet_Groundbase_Stealth | applied | whole class (src/campaign/setup.cpp) | WGUI-10, WGUI-103 | — | src/campaign/setup.cpp | basis: reviewed |
-| Planet_Is_Destroyable_By_TSW | todo | application not recorded | — | 760 | — | The planet flag that allows the superweapon to destroy it is not read.; basis: reviewed |
+| Planet_Is_Destroyable_By_TSW | partial | conflict planet gate fact copied into the conflict record at entry (src/campaign/space_entry_stock.cpp); missing: The tactical superweapon firing gate that consumes the conflict fact | WGT-100 | 760 | src/campaign/space_entry_stock.cpp | Read into ConflictRecord.planet_destroyable_by_tsw (absent = destroyable: the debug build's planet type constructor sets the flag true before the XML is read, so only the three stock planets authoring No are refused; the surveyed mods leave the tag unauthored on nearly every planet). The firing gate that applies it belongs to the tactical superweapon work.; SCOPE-GALACTIC; basis: reviewed |
 | Planet_Is_Mining_Colony | applied | whole class (src/campaign/setup.cpp) | WGEP-10 | — | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
 | Planet_Restricted_Unit_Categories | partial | galactic AI free-store selection (src/campaign/ai_selection_content.cpp); missing: player-side production restriction | none recorded | 1965 | src/campaign/ai_selection_content.cpp | The galactic AI free-store selection filters candidate types by the planet restriction; whether the human build menu enforces it is not verified.; basis: reviewed |
 | Planet_Restricted_Unit_Types | partial | galactic AI free-store selection (src/campaign/ai_selection_content.cpp); missing: player-side production restriction | none recorded | 1965 | src/campaign/ai_selection_content.cpp | The galactic AI free-store selection filters candidate types by the planet restriction; whether the human build menu enforces it is not verified.; basis: reviewed |
@@ -941,6 +1799,12 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Political_Control | applied | explicit galactic control inputs (src/campaign/control.cpp); whole class (src/campaign/live_setup.cpp); whole class (src/sim/galactic/session.cpp) | WGM-69; WGM-69, WGS-90; WGM-69 | — | src/campaign/control.cpp; src/campaign/live_setup.cpp; src/sim/galactic/session.cpp | Family: Campaign setup / planet data. WGM-69: live prepare_context resolves Political_Faction and authored leaning, bind_control_data retains them, and the session control service applies the resulting political transitions.; basis: reviewed |
 | Potential_Indigenous_Power | partial | galactic enemy raw-ground force (src/script/foc/galactic_ai_forces.cpp); missing: Get_Affiliated_Indigenous_Type Lua query, HasIndigenousUnits perception query | WGA-184, WGA-273, WGA-274 | 4532 | src/script/foc/galactic_ai_forces.cpp | Family: Galactic AI. WGA-184/272..274 apply ordered authored potential powers to enemy raw-ground strength. HasIndigenousUnits and Get_Affiliated_Indigenous_Type consumers remain missing (WGA-275/276). WGS-166 proves no campaign-start spawning pass: tactical spawner/survivor state is not a missing consumer of this tag.; basis: reviewed |
 | Pre_Lit | todo | application not recorded | — | 1157 | — | Galactic planet or fleet display tuning is decoded or ignored: no placement, fade, flash or lighting rule applies it.; basis: reviewed |
+| Reduce_Production_Time_Ability/Applicable_Unit_Categories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Time_Ability/Applicable_Unit_Types | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Time_Ability/Galaxy_Wide | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Time_Ability/Stacking_Category | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Time_Ability/Time_Reduction_Percentage | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Time_Ability/Unit_Strength_Category | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Space_Tactical_Map | partial | prepared campaign space entry (src/campaign/space_entry_stock.cpp); missing: Unsupported scene and qualification boundaries in docs/behaviour/galactic-space-entry.md | WGT-04 | 2006 | src/campaign/space_entry_stock.cpp | Family: GC &lt;-&gt; space battle bridge. WGT-04 resolves the authored campaign space map for ordinary prepared conflict entry. Generic map-choice/cache, destroyed backdrop and the documented scene qualification boundaries remain separate.; basis: reviewed |
 | Special_Structures | todo | application not recorded | — | 1149 | — | Planet data field is not read by the galactic loader.; basis: reviewed |
 | Special_Structures_Land | applied | whole class (src/campaign/live_setup.cpp) | WGS-90 | — | src/campaign/live_setup.cpp | basis: reviewed |
@@ -948,12 +1812,167 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Terrain | partial | live galactic auto-resolve (src/campaign/auto_resolve_live.cpp); missing: other tactical consumers | WAR-18, WAR-35 | 1965 | src/campaign/auto_resolve_live.cpp | Family: GC &lt;-&gt; space battle bridge. WAR-18/35 apply effective planet terrain to live galactic auto-resolve. Land tactical/map terrain consumers remain outside that adapter; auto-resolve application does not prove them.; basis: reviewed |
 | The_Force | applied | galactic (src/sim/galactic/income.cpp) | WGEP-75 | — | src/sim/galactic/income.cpp | Shared fiscal payment and forecast contribution (WGEP-06..09/75). |
 
+## PoliticalControlBonusAbility
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Political_Change | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## Projectile
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | CanCellStack | todo | application not recorded | — | 654 | — | Other unit/game data — No projectile stack/cell policy consumer.; basis: reviewed |
 | Projectile_Ion_Stun_Stack_Duration | applied | whole class (src/units/unit_combat.cpp) | DG-01, IS-01 | — | src/units/unit_combat.cpp | basis: auto |
+
+## Prop_Forest
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Prop_Hoth
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Prop_Industrial
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Prop_Jungle
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Is_Indigenous_Unit_Corruptible | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Prop_Misc
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Prop_Terrain
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Prop_Townbuilding
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Prop_Vehicle
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Prop_Wildlife
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Is_Indigenous_Unit_Corruptible | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Tech_Structure | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Props_Base
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Props_BBS
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Props_Desert
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Is_Indigenous_Unit_Corruptible | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Props_For_Mappers
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Props_For_Mappers/Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Props_Industrial
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Props_PortedAotR
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Is_Indigenous_Unit_Corruptible | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Props_Stargate
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Loads_When_Faction_Present | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## Props_Story, SecondaryStructure, SpaceUnit, SpecialStructure
 
@@ -961,11 +1980,66 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Is_Interdictor | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
 
+## Props_Urban
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Props_Village
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Is_Indigenous_Unit_Corruptible | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Props_Wave
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Station | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Cheap_Bribe_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Expensive_Bribe_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Maintenance_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## RemoveCorruptionAbility
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Num_Corruption_Levels_To_Remove | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## SabotagePoliticalControlAbility
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Political_Change | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## SecondaryStructure
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Base_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); StarBase (src/script/foc/ai_perception.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure, SecondaryStructure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-24, WGEP-41; SAE-02 | 4532 | src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/script/foc/ai_perception.cpp | Production / build / tech / skirmish economy — Remaining: SecondaryStructure; Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams.; other objects and consumers outside the live galactic closure. The AI reads the owned live starbase level; secondary structure consumers remain deferred. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Maximum_Destruction_Survivor_Count | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — No secondary-structure destruction-survivor limit consumer.; basis: reviewed |
 | Next_Level_Base | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — The station replacement consumer exists, but this SecondaryStructure class has no qualified next-level route (WPR-52). Review: the skirmish level-up chain is built for StarBase types only.; basis: reviewed |
 | Reinforcement_Prevention_Radius | todo | application not recorded | — | 654 | — | Fighters / spawn / reinforcement — The ordinary loaded unit consumer does not qualify the listed structure classes. Review: the skirmish economy applies the prevention radius to station types; this class does not reach that path.; basis: reviewed |
@@ -998,15 +2072,99 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Prev_Level_Base | applied | whole class (src/script/foc/ai_perception.cpp) | SAE-02 | — | src/script/foc/ai_perception.cpp | Qualifying station actors resolve predecessor metadata for damage-derived allied base-level perception.; basis: reviewed |
 
+## SkirmishSpaceUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## SkirmishSquadron
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## SkirmishUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## SlaveCompany
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Space_Indigenous_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Tech_Structure | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Space_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## SpaceBuildable
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Abilities/Income_Stream_Ability/Owner_Income_Percentage | todo | application not recorded | — | 760 | — | GC planet abilities + income — The stream loader and payout profile omit the authored owner percentage (WBP-23). Stock extractor nodes are empty; retain mod support as a gap rather than declaring the tag ignored.; basis: reviewed |
+| Abilities/Income_Stream_Ability/Owner_Income_Percentage | applied | whole class (src/sim/tactical/session_step_economy.cpp) | PU-09 | — | src/sim/tactical/session_step_economy.cpp | Debug build; Owner-favoured payment reserves the authored fraction and divides the remainder by all recipients (PU-09).; basis: reviewed |
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Station | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Influence_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_MP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Tactical_Build_Cost_Multiplayer | applied | whole class (src/script/foc/ai_execution.cpp); whole class (src/sim/tactical/session_economy.cpp); SpaceBuildable (src/sim/tactical/session_economy.cpp) | WAS-26, WBP-47, WBP-48; WBP-10, WBP-11; WBP-30, WBP-31, WBP-32 | — | src/script/foc/ai_execution.cpp; src/sim/tactical/session_economy.cpp | basis: reviewed |
 | Tactical_Build_Time_Seconds | applied | whole class (src/skirmish/economy.cpp) | WBP-15 | — | src/skirmish/economy.cpp | basis: reviewed |
 | Tactical_Buildable_Constructed | applied | SpaceBuildable (src/sim/tactical/session_economy.cpp); whole class (src/sim/tactical/session_step_economy.cpp) | WBP-30, WBP-31, WBP-32; WBP-18, WBP-19 | — | src/sim/tactical/session_economy.cpp; src/sim/tactical/session_step_economy.cpp | basis: reviewed |
 | Tactical_Buildable_Objects_Multiplayer | applied | whole class (src/skirmish/economy.cpp); N_Orbital_Construction_Pod (src/skirmish/economy.cpp) | WBP-06; WBP-33, WBP-34, WPR-33 | — | src/skirmish/economy.cpp | basis: reviewed |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## SpaceBuildable, SpaceUnit, UniqueUnit
 
@@ -1024,11 +2182,11 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Abilities/Income_Stream_Ability/@Name | todo | application not recorded | — | 760 | — | GC planet abilities + income — The nested ability name is parsed or retained but has no qualified identity-dependent consumer for these classes. |
+| Abilities/Income_Stream_Ability/@Name | applied | whole class (src/sim/tactical/session_step_economy.cpp) | PU-08 | — | src/sim/tactical/session_step_economy.cpp | Debug build; Authored initial flag and exact nested name resolve through retained owner/type/name locks (PU-08).; basis: reviewed |
 | Abilities/Income_Stream_Ability/Base_Income_Value | applied | whole class (src/skirmish/economy.cpp) | WBP-22, WPR-11 | — | src/skirmish/economy.cpp | basis: reviewed |
 | Abilities/Income_Stream_Ability/Base_Interval_In_Secs | applied | whole class (src/skirmish/economy.cpp) | WBP-22, WPR-11 | — | src/skirmish/economy.cpp | basis: reviewed |
 | Abilities/Income_Stream_Ability/Full_Amount_To_Everyone | applied | whole class (src/sim/tactical/session_step_economy.cpp) | WBP-23, WPR-12 | — | src/sim/tactical/session_step_economy.cpp | basis: reviewed |
-| Abilities/Income_Stream_Ability/Split_Favors_Owner | todo | application not recorded | — | 760 | — | GC planet abilities + income — The stream loader and payout profile omit the owner-favoured split policy (WBP-23).; basis: reviewed |
+| Abilities/Income_Stream_Ability/Split_Favors_Owner | applied | whole class (src/sim/tactical/session_step_economy.cpp) | PU-09 | — | src/sim/tactical/session_step_economy.cpp | Debug build; Owner-favoured payment reserves the authored fraction and divides the remainder by all recipients (PU-09).; basis: reviewed |
 | Abilities/Income_Stream_Ability/Split_Income_With_Allies | applied | whole class (src/sim/tactical/session_step_economy.cpp) | WBP-23, WPR-12 | — | src/sim/tactical/session_step_economy.cpp | basis: reviewed |
 
 ## SpaceBuildable, UpgradeObject
@@ -1037,11 +2195,53 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Tactical_Build_Cost_Campaign | applied | whole class (src/skirmish/economy.cpp); whole class (src/units/unit_tables_profiles.cpp) | WGT-26; WGT-26 | — | src/skirmish/economy.cpp; src/units/unit_tables_profiles.cpp | Applied to loaded campaign space producers and upgrades; ground battle admission and individual upgrade abilities belong to their owning subsystems.; basis: reviewed |
 
+## SpaceFauna
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Space_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## SpaceHero
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Neutralization_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## SpaceProp
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Collidable_By_Projectile_Living | partial | map object (src/sim/tactical/pads.cpp); loaded map props (src/units/unit_tables_decode.cpp); missing: projectile damage to map-only props outside combat profiles | WBP-50; WSU-13 | 649 | src/sim/tactical/pads.cpp; src/units/unit_tables_decode.cpp | Movement / collision / formation / layers — Remaining: projectile damage to map-only props outside combat profiles. WBP-50: effective living-projectile collision admits loaded map props to capture and palette queries; default false excludes stock hazard volumes while their movement/damage services remain active. Projectile damage outside combat profiles remains deferred. Loaded map props apply the same mouse admission before picking: neutral noncollidable fields pass a right click through to the move point; impassable asteroids retain contacts.; basis: reviewed |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## SpaceProp_Obstacle
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## SpaceStructure
 
@@ -1057,29 +2257,40 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Leech_Shields_Ability/Must_Be_Bought_On_Black_Market | todo | application not recorded | — | 1130 | — | The black-market purchase gate on an ability is not applied: a GC-launched single-player battle does not require the owner to hold the purchase.; basis: reviewed |
 | Abilities/Planet_Destruction_Ability/@Name | applied | live galactic destruction ability binding (src/campaign/live_setup.cpp) | WGCH-137, WGCH-157, WGCH-183 | — | src/campaign/live_setup.cpp | basis: reviewed |
 | Abilities/Planet_Destruction_Ability/Activation_Style | partial | galactic ground-activated abilities (src/sim/galactic/ability_host.cpp); missing: activation groups outside galactic ground deployment | WGCH-157, WGM-34 | 760 | src/sim/galactic/ability_host.cpp | GC &lt;-&gt; space battle bridge — Remaining: activation groups outside galactic ground deployment. Authored ground activation membership is bound by the campaign loader and checked against the live service on final arrival.; basis: reviewed |
-| Abilities/Planet_Destruction_Ability/SFXEvent_Target_Affected | todo | application not recorded | — | 760 | — | GC &lt;-&gt; space battle bridge — Planet destruction does not dispatch this target presentation field.; basis: reviewed |
+| Abilities/Planet_Destruction_Ability/SFXEvent_Target_Affected | applied | whole class (apps/viewer/src/galactic/galactic_scene.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-193; WGP-193 | — | apps/viewer/src/galactic/galactic_scene.cpp; apps/viewer/src/galactic/scene_content.cpp | Successful GC destruction resolves the named source ability and presents its authored target effect once per observer (WGP-193).; basis: reviewed |
 | Abilities/Planet_Destruction_Ability/Target_Particle_Bone_Name | todo | application not recorded | — | 760 | — | GC &lt;-&gt; space battle bridge — Planet destruction does not dispatch this target presentation field.; basis: reviewed |
-| Abilities/Planet_Destruction_Ability/Target_Particle_Effect | todo | application not recorded | — | 760 | — | GC &lt;-&gt; space battle bridge — Planet destruction does not dispatch this target presentation field.; basis: reviewed |
-| Build_Countdown_Text_ID | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — No countdown text overlay consumes the authored text identifier.; basis: reviewed |
-| Build_Countdown_Text_RGBA | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — No countdown text overlay consumes the authored colour.; basis: reviewed |
-| Build_Countdown_Timer | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — No production countdown request service applies the enabling flag (WGEP-95/98).; basis: reviewed |
-| Build_Music_Completed | todo | application not recorded | — | 654 | — | Audio: SFX / speech / music — Production completion does not dispatch the authored music cue (SND-35/43).; basis: reviewed |
+| Abilities/Planet_Destruction_Ability/Target_Particle_Effect | applied | whole class (apps/viewer/src/galactic/galactic_scene.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-193; WGP-193 | — | apps/viewer/src/galactic/galactic_scene.cpp; apps/viewer/src/galactic/scene_content.cpp | Successful GC destruction resolves the named source ability and presents its authored target effect once per observer (WGP-193).; basis: reviewed |
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Text_ID | applied | the strategic production countdown line text (apps/viewer/src/galactic/pause_banner_widget.cpp) | WGEP-173 | 654 | apps/viewer/src/galactic/pause_banner_widget.cpp | Production / build / tech / skirmish economy - the localized text starts each strategic countdown line.; debug build (strategic countdown display); basis: reviewed |
+| Build_Countdown_Text_RGBA | applied | the strategic production countdown line colour (apps/viewer/src/galactic/pause_banner_widget.cpp) | WGEP-173 | 654 | apps/viewer/src/galactic/pause_banner_widget.cpp | Production / build / tech / skirmish economy - the colour of each strategic countdown line.; debug build (strategic countdown display); basis: reviewed |
+| Build_Countdown_Timer | applied | the countdown speech request (apps/viewer/src/galactic/galactic_audio.cpp); the strategic production countdown line (apps/viewer/src/galactic/pause_banner_widget.cpp) | WGEP-95; WGEP-173 | 654 | apps/viewer/src/galactic/galactic_audio.cpp; apps/viewer/src/galactic/pause_banner_widget.cpp | Production / build / tech / skirmish economy - the flag enables the countdown speech request and the strategic countdown line.; debug build GUW5-E02; debug build (strategic countdown display); basis: reviewed |
+| Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Music_Completed | partial | space units authoring the tag (apps/viewer/src/galactic/galactic_audio.cpp); missing: behaviour after the cue ends is the ordinary track-end rule, unverified | WGEP-172 | 654 | apps/viewer/src/galactic/galactic_audio.cpp | Audio: SFX / speech / music - the finished type's music starts as an interrupting cue for any builder.; debug build (production completion branch); basis: reviewed |
 | Build_Speech_Completed | partial | loaded space tactical production types (apps/viewer/src/battle_audio_events.cpp); galactic production types (apps/viewer/src/galactic/galactic_audio.cpp); missing: tactical land production | BA-60, BA-73, BA-74, SND-35; WGEP-96, WGEP-97, WGP-183, WGP-63 | 654 | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/galactic/galactic_audio.cpp | Audio: SFX / speech / music — Remaining: tactical land production. English speech queues precede tactical/generic SFX; failed stream playback does not fall back. Galactic production queues the local builder's authored speech before the type SFX (WGP-183).; basis: reviewed |
-| Build_Speech_Countdowns | todo | application not recorded | — | 654 | — | Audio: SFX / speech / music — No production countdown prefix/request service; stock availability and generated requests are separate (WGEP-95/98).; basis: reviewed |
+| Build_Speech_Countdowns | partial | space units with the countdown timer (src/presentation/audio/galactic.cpp); missing: the advisor text the helper adds after a queued line | WGEP-95, WGEP-98 | 654 | src/presentation/audio/galactic.cpp | Audio: SFX / speech / music - the request is made from the prefix and queued when an active definition exists; stock has none (WGEP-98).; debug build GUW5-E02; effective XML GUW5-X01; basis: reviewed |
 | Build_Speech_Stopped | partial | loaded space tactical production types (apps/viewer/src/battle_audio_events.cpp); galactic production types (apps/viewer/src/galactic/galactic_audio.cpp); missing: tactical land production | BA-61, BA-73, BA-74, SND-38; WGEP-96, WGEP-97, WGP-183, WGP-63 | 654 | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/galactic/galactic_audio.cpp | Audio: SFX / speech / music — Remaining: tactical land production. English speech queues precede tactical/generic SFX; failed stream playback does not fall back. Galactic production queues the local builder's authored speech before the type SFX (WGP-183).; basis: reviewed |
 | Build_Speech_Underway | partial | loaded space tactical production types (apps/viewer/src/battle_audio_events.cpp); galactic production types (apps/viewer/src/galactic/galactic_audio.cpp); missing: tactical land production | BA-60, BA-73, BA-74, SND-35; WGEP-96, WGEP-97, WGP-183, WGP-63 | 654 | apps/viewer/src/battle_audio_events.cpp; apps/viewer/src/galactic/galactic_audio.cpp | Audio: SFX / speech / music — Remaining: tactical land production. English speech queues precede tactical/generic SFX; failed stream playback does not fall back. Galactic production queues the local builder's authored speech before the type SFX (WGP-183).; basis: reviewed |
+| Build_Tab_Heroes | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Station | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Reduced_By_Multiple_Factories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Destroy_When_Used_As_Corruption_Prereq | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Disallows_Hyperspace_Retreat | todo | application not recorded | — | 2006 | — | Hyperspace retreat disallow flag is not honoured by the retreat rules.; basis: reviewed |
 | Expensive_Bribe_Cost | applied | galactic fleet members (src/campaign/fleets.cpp); galactic fleet movement (src/sim/galactic/movement.cpp); galactic fleet movement (src/sim/galactic/movement.cpp) | WGM-85; WGM-84, WGM-85; WGM-84 | — | src/campaign/fleets.cpp; src/sim/galactic/movement.cpp | Movement admission only: a corruption-benefiting mover pays, before departure, the summed original-type cost of the flattened departing members for each intermediate path planet its owner holds, unless the mover holds that orbit; AI difficulty multiplier and the AI bribe request stay with &#35;3981.; basis: reviewed |
-| Galactic_Fleet_Override_Icon_Index | todo | application not recorded | — | 1157 | — | Fleet override model and icon are not read; the galactic fleet uses the stock model.; basis: reviewed |
-| Galactic_Fleet_Override_Model_Name | todo | application not recorded | — | 1157 | — | Fleet override model and icon are not read; the galactic fleet uses the stock model.; basis: reviewed |
+| Galactic_Fleet_Override_Icon_Index | todo | application not recorded | — | 1157 | — | The icon index is not applied: what retail does with it is unread (U-05); the override model is applied (see Galactic_Fleet_Override_Model_Name).; basis: reviewed |
+| Galactic_Fleet_Override_Model_Name | partial | galaxy-map fleet marker of a fleet holding a type that authors the override (apps/viewer/src/galactic/galactic_scene.cpp); missing: Which member decides in a fleet of mixed types is unread (U-05): the first overriding member is used. | WGP-16 | 1157 | apps/viewer/src/galactic/galactic_scene.cpp | The marker of a fleet that holds a type with this tag draws the authored model instead of the stock fleet marker; read from the object definition, so mods supply their own.; basis: reviewed |
+| Galactic_Influence_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Neutralization_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Piracy_Value_Credits | applied | galactic fleet members (src/campaign/fleets.cpp); galactic fleet departure (src/sim/galactic/movement.cpp) | WGCH-60, WGM-150; WGEP-113, WGM-150 | — | src/campaign/fleets.cpp; src/sim/galactic/movement.cpp | Departure accounting only: the summed original-type value of the flattened departing members is added to the left planet's accrued piracy income; payment and reset stay with the fiscal corruption service.; basis: reviewed |
+| Required_Orbiting_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Tech_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); whole class (src/script/foc/ai_selection.cpp); all registered galactic types: automatic technology unlocks (src/sim/galactic/production.cpp); whole class (src/skirmish/ai.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-147; WGEP-19, WGEP-22; PL-20; WGEP-130, WGEP-147, WGEP-42; PL-20, PL-30, PU-11, PU-13 | 4532 | src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/script/foc/ai_selection.cpp; src/sim/galactic/production.cpp; src/skirmish/ai.cpp | Production / build / tech / skirmish economy — Remaining: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams.; other objects and consumers outside the live galactic closure. PL-20: tactical AI team selection weights each proposed type by Tech_Level / 5 * 2. The 450-tick M2 perturbation changes full tables and the battle at completed tick 140, with matching 1/4-worker outcomes, after GS-11 restores real build-pad classification in the fixed-force world without economy. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
 
 ## SpaceUnit, Squadron
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Abilities/Sensor_Jamming_Ability/Must_Be_Bought_On_Black_Market | todo | application not recorded | — | 1130 | — | The black-market purchase gate on an ability is not applied: a GC-launched single-player battle does not require the owner to hold the purchase.; basis: reviewed |
+| Abilities/Sensor_Jamming_Ability/Must_Be_Bought_On_Black_Market | partial | campaign space tactical abilities (src/sim/tactical/abilities.cpp); missing: land and other unqualified ability consumers | WGEP-145 | 6241 | src/sim/tactical/abilities.cpp | WGEP-145: campaign space entitlement uses ordered item identities and the current owner; other domains remain open.; basis: reviewed |
 | Override_Bounty_MP | applied | whole class (src/skirmish/economy.cpp) | WGCH-65, WGP-189 | — | src/skirmish/economy.cpp | WGCH-65/WGP-189: loaders read this only with campaign_scene enabled; campaign space economy applies current-type bounty. The standalone M2 skirmish cannot observe this consumer; strategic and auto-resolve death consumers remain separate.; basis: reviewed |
 | Override_Bounty_SP | applied | whole class (src/skirmish/economy.cpp) | WGCH-65, WGP-189 | — | src/skirmish/economy.cpp | WGCH-65/WGP-189: loaders read this only with campaign_scene enabled; campaign space economy applies current-type bounty. The standalone M2 skirmish cannot observe this consumer; strategic and auto-resolve death consumers remain separate.; basis: reviewed |
 
@@ -1120,6 +2331,23 @@ and are plain numbers. Code locations are repository paths without identifier an
 |---|---|---|---|---|---|---|
 | Build_Limit_Current_Per_Player | partial | whole class (include/eawr/presentation/ui/production.hpp); whole class (include/eawr/sim/tactical/economy.hpp); reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WPR-61, WPR-62, WPR-63; WPR-33; WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-25 | 4532 | include/eawr/presentation/ui/production.hpp; include/eawr/sim/tactical/economy.hpp; src/campaign/live_setup.cpp; src/campaign/setup.cpp | Production / build / tech / skirmish economy — Remaining: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams.; other objects and consumers outside the live galactic closure. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
 
+## Special_Tags
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Galactic_Influence_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Space_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Special_Unit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## SpecialStructure
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
@@ -1142,10 +2370,34 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Planet_Income_Gambling_Ability/Evaluation_Interval_In_Secs | applied | whole class (src/sim/galactic/income.cpp) | GFC-09, WGEP-11, WGEP-76, WGEP-77 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
 | Abilities/Planet_Income_Gambling_Ability/Max_Income_Modifier | applied | whole class (src/sim/galactic/income.cpp) | GFC-09, WGEP-11, WGEP-76, WGEP-77 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
 | Abilities/Planet_Income_Gambling_Ability/Min_Income_Modifier | applied | whole class (src/sim/galactic/income.cpp) | GFC-09, WGEP-11, WGEP-76, WGEP-77 | 760 | src/sim/galactic/income.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Text_ID | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Text_RGBA | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Timer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Build_Max_Instances_Per_Planet | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34 | 654 | src/campaign/live_setup.cpp | Production / build / tech / skirmish economy — Remaining: other objects and consumers outside the live galactic closure.; basis: reviewed |
 | Build_Requires_Initial_Placement | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); authored campaign startup requests (src/campaign/setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure, startup special-placement marks only; production admission remains legacy &#35;654 | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGS-70; WGEP-26 | 654 | src/campaign/live_setup.cpp; src/campaign/setup.cpp | Production / build / tech / skirmish economy — Remaining: startup special-placement marks only; production admission remains legacy &#35;654; Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams.; other objects and consumers outside the live galactic closure. startup special-placement marks only; production admission remains legacy &#35;654 Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+| Build_Tab_Space_Station | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Destroy_When_Used_As_Corruption_Prereq | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Energy_Capacity | applied | whole class (src/units/unit_durability.cpp) | EN-01, WCC-46, WCC-80 | — | src/units/unit_durability.cpp | WSW-01/14/21: planetary SPECIAL_WEAPON sources do not use ordinary space-body inputs.; basis: auto |
+| Faction_Anim_Subindex | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| IsBuildable | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Percentage_Income_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Time_Ability/Applicable_Unit_Categories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Time_Ability/Applicable_Unit_Types | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Time_Ability/Excluded_Unit_Types | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Time_Ability/Galaxy_Wide | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Time_Ability/Stacking_Category | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Time_Ability/Time_Reduction_Percentage | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Reduce_Production_Time_Ability/Unit_Strength_Category | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Reinforcement_Prevention_Radius | todo | application not recorded | — | 654 | — | Fighters / spawn / reinforcement — The ordinary loaded unit consumer does not qualify the listed structure classes. Review: the skirmish economy applies the prevention radius to station types; this class does not reach that path.; basis: reviewed |
+| Required_Orbiting_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Sabotage_Cost_Credits | applied | whole class (src/campaign/live_setup.cpp); whole class (src/sim/galactic/ability_sabotage.cpp) | WGCH-28; WGCH-28, WGCH-97 | — | src/campaign/live_setup.cpp; src/sim/galactic/ability_sabotage.cpp | Ordinary structure sabotage price reads this value; below one credit the structure is not offered.; basis: reviewed |
 | Shield_Upgraded_Color | todo | application not recorded | — | 654 | — | VFX / models / particles / environment — No qualified Shield_Upgraded_Color consumer for the listed classes; retain the implementation gap.; basis: reviewed |
 | SpaceAutoResolveHitRate | foc-ignores | application not recorded | — | — | — | Read and stored for the auto-resolve solver; only unreachable routines use it; WAR-73. Re-read in the Focumentation cross-check (the wiki lists the name only); static reading, a runtime check may be wanted.; WAR-73 |
@@ -1180,11 +2432,48 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/System_Spy_Ability/See_Political_Control_Breakdown | partial | automatic unit/structure spy influence (src/sim/galactic/ability_auto_spy.cpp); ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: fleet-member versus non-fleet influencing source distinction (WGUI-101) | WGCH-41, WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-23; WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_auto_spy.cpp; src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence applies to the source's current owner at its current planet (nearby planets for a positive influence range) and is removed on loss, departure, type change or owner change; the fleet-member versus non-fleet influencing-source split of WGUI-101 is not separated yet. |
 | Abilities/System_Spy_Ability/See_Special_Structures | partial | automatic unit/structure spy influence (src/sim/galactic/ability_auto_spy.cpp); ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: fleet-member versus non-fleet influencing source distinction (WGUI-101) | WGCH-41, WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-23; WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_auto_spy.cpp; src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence applies to the source's current owner at its current planet (nearby planets for a positive influence range) and is removed on loss, departure, type change or owner change; the fleet-member versus non-fleet influencing-source split of WGUI-101 is not separated yet. |
 
+## SpecialStructures
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| HomeWorldObject/Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| OrbitalStructure/Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| OrbitalStructure/Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| OrbitalStructure/Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| OrbitalStructure/Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| OrbitalStructure/Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| OrbitalStructure/Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| StagStructure/Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| StagStructure/Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| StagStructure/Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| StagStructure/Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| StagStructure/Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| StagStructure/Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| StagStructure/Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## Squadron
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Heroes | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Station | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Reduced_By_Multiple_Factories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Destroy_When_Used_As_Corruption_Prereq | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Icon_Index | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Maintenance_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Piracy_Value_Credits | partial | galactic fleet members (src/campaign/fleets.cpp); galactic fleet departure (src/sim/galactic/movement.cpp); missing: the squadron type's own value: only its flattened fighters contribute | WGCH-60, WGM-150; WGEP-113, WGM-150 | 4905 | src/campaign/fleets.cpp; src/sim/galactic/movement.cpp | GC bribe + piracy — Remaining: the squadron type's own value: only its flattened fighters contribute. Squadron members count through their leaf fighters; a value authored on the squadron type itself is not summed. Departure accounting only: the summed original-type value of the flattened departing members is added to the left planet's accrued piracy income; payment and reset stay with the fiscal corruption service.; basis: reviewed |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Orbiting_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Space_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## Squadron, UniqueUnit, UpgradeObject
 
@@ -1196,21 +2485,36 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Abilities/Income_Stream_Ability/Activation_Style | todo | application not recorded | — | 760 | — | GC planet abilities + income — The stream payout path does not apply this lifecycle field (WBP-22/23). Review: the income stream loader reads Base_Income_Value, Base_Interval_In_Secs and the split flags only; this tag is not read.; basis: reviewed |
-| Abilities/Income_Stream_Ability/Initially_Enabled | todo | application not recorded | — | 760 | — | GC planet abilities + income — The stream payout path does not apply this lifecycle field (WBP-22/23). Review: the income stream loader reads Base_Income_Value, Base_Interval_In_Secs and the split flags only; this tag is not read.; basis: reviewed |
-| Abilities/Income_Stream_Mod_Ability/@Name | partial | station supply dock bonus (Skirmish_*_Star_Base_1..5) (src/skirmish/economy.cpp); missing: Affects_All_Allied_Sources: the dock bonus is applied to the owning station only; whether the debug build also adds it to allied stations of the same type is not walked, Income_Multiplier, Interval_Multiplier, Stacking_Category and Reverse_Application_Logic are not read on the station path (every stock dock bonus authors 1.0, 1.0, 0 and No) | PU-04 | 760 | src/skirmish/economy.cpp | Station supply dock (PU-04): the bonus ability is enabled by the standing Supply_Dock hardpoint whose Special_Ability_Name equals the ability's Name; Initially_Enabled No is therefore carried by the hardpoint gate. The loaded space-upgrade modifier path (WBP-25) is separate and does not cover this carrier. Settled for &#35;4990: the StarBase rows are partial, the SpecialStructure rows are ground. @Name binds the hardpoint's Special_Ability_Name to the ability.; basis: reviewed |
-| Abilities/Income_Stream_Mod_Ability/Activation_Style | partial | station supply dock bonus (Skirmish_*_Star_Base_1..5) (src/skirmish/economy.cpp); missing: Affects_All_Allied_Sources: the dock bonus is applied to the owning station only; whether the debug build also adds it to allied stations of the same type is not walked, Income_Multiplier, Interval_Multiplier, Stacking_Category and Reverse_Application_Logic are not read on the station path (every stock dock bonus authors 1.0, 1.0, 0 and No) | PU-04 | 760 | src/skirmish/economy.cpp | Station supply dock (PU-04): the bonus ability is enabled by the standing Supply_Dock hardpoint whose Special_Ability_Name equals the ability's Name; Initially_Enabled No is therefore carried by the hardpoint gate. The loaded space-upgrade modifier path (WBP-25) is separate and does not cover this carrier. Settled for &#35;4990: the StarBase rows are partial, the SpecialStructure rows are ground.; basis: reviewed |
+| Abilities/Income_Stream_Ability/Activation_Style | partial | automatic tactical income handlers (src/sim/tactical/session_step_economy.cpp); Take_Damage tactical income streams (src/sim/tactical/session_step_economy.cpp); missing: Special_Attack and User_Input starts (WIS-03/04: no production trigger yet) and the galactic event styles | PU-08; WIS-01, WIS-02 | 6266 | src/sim/tactical/session_step_economy.cpp | Debug build; context-appropriate automatic styles apply; Take_Damage starts its stream on a live hit that carries no damage-source object (WIS-02); the other event styles wait for a trigger source (WIS-03/04).; basis: reviewed |
+| Abilities/Income_Stream_Ability/Initially_Enabled | applied | whole class (src/sim/tactical/session_step_economy.cpp) | PU-08 | — | src/sim/tactical/session_step_economy.cpp | Debug build; Authored initial flag and exact nested name resolve through retained owner/type/name locks (PU-08).; basis: reviewed |
+| Abilities/Income_Stream_Mod_Ability/@Name | applied | whole class (src/sim/tactical/session_step_economy.cpp) | PU-08 | — | src/sim/tactical/session_step_economy.cpp | Debug build; Authored initial flag and exact nested name resolve through retained owner/type/name locks (PU-08).; basis: reviewed |
+| Abilities/Income_Stream_Mod_Ability/Activation_Style | partial | automatic tactical income handlers (src/sim/tactical/session_step_economy.cpp); missing: explicit and event-triggered income activation dispatch | PU-08 | 6266 | src/sim/tactical/session_step_economy.cpp | Debug build; context-appropriate automatic styles apply; nonautomatic styles stay dormant pending their explicit trigger dispatch (PU-08).; basis: reviewed |
 | Abilities/Income_Stream_Mod_Ability/Affects_All_Allied_Sources | partial | station supply dock bonus (Skirmish_*_Star_Base_1..5) (src/skirmish/economy.cpp); missing: Affects_All_Allied_Sources: the dock bonus is applied to the owning station only; whether the debug build also adds it to allied stations of the same type is not walked, Income_Multiplier, Interval_Multiplier, Stacking_Category and Reverse_Application_Logic are not read on the station path (every stock dock bonus authors 1.0, 1.0, 0 and No) | PU-04 | 760 | src/skirmish/economy.cpp | Station supply dock (PU-04): the bonus ability is enabled by the standing Supply_Dock hardpoint whose Special_Ability_Name equals the ability's Name; Initially_Enabled No is therefore carried by the hardpoint gate. The loaded space-upgrade modifier path (WBP-25) is separate and does not cover this carrier. Settled for &#35;4990: the StarBase rows are partial, the SpecialStructure rows are ground.; basis: reviewed |
 | Abilities/Income_Stream_Mod_Ability/Income_Additive_Value | partial | station supply dock bonus (Skirmish_*_Star_Base_1..5) (src/skirmish/economy.cpp); missing: Affects_All_Allied_Sources: the dock bonus is applied to the owning station only; whether the debug build also adds it to allied stations of the same type is not walked, Income_Multiplier, Interval_Multiplier, Stacking_Category and Reverse_Application_Logic are not read on the station path (every stock dock bonus authors 1.0, 1.0, 0 and No) | PU-04 | 760 | src/skirmish/economy.cpp | Station supply dock (PU-04): the bonus ability is enabled by the standing Supply_Dock hardpoint whose Special_Ability_Name equals the ability's Name; Initially_Enabled No is therefore carried by the hardpoint gate. The loaded space-upgrade modifier path (WBP-25) is separate and does not cover this carrier. Settled for &#35;4990: the StarBase rows are partial, the SpecialStructure rows are ground.; basis: reviewed |
 | Abilities/Income_Stream_Mod_Ability/Income_Multiplier | partial | station supply dock bonus (Skirmish_*_Star_Base_1..5) (src/skirmish/economy.cpp); missing: Affects_All_Allied_Sources: the dock bonus is applied to the owning station only; whether the debug build also adds it to allied stations of the same type is not walked, Income_Multiplier, Interval_Multiplier, Stacking_Category and Reverse_Application_Logic are not read on the station path (every stock dock bonus authors 1.0, 1.0, 0 and No) | PU-04 | 760 | src/skirmish/economy.cpp | Station supply dock (PU-04): the bonus ability is enabled by the standing Supply_Dock hardpoint whose Special_Ability_Name equals the ability's Name; Initially_Enabled No is therefore carried by the hardpoint gate. The loaded space-upgrade modifier path (WBP-25) is separate and does not cover this carrier. Settled for &#35;4990: the StarBase rows are partial, the SpecialStructure rows are ground.; basis: reviewed |
-| Abilities/Income_Stream_Mod_Ability/Initially_Enabled | partial | station supply dock bonus (Skirmish_*_Star_Base_1..5) (src/skirmish/economy.cpp); missing: Affects_All_Allied_Sources: the dock bonus is applied to the owning station only; whether the debug build also adds it to allied stations of the same type is not walked, Income_Multiplier, Interval_Multiplier, Stacking_Category and Reverse_Application_Logic are not read on the station path (every stock dock bonus authors 1.0, 1.0, 0 and No) | PU-04 | 760 | src/skirmish/economy.cpp | Station supply dock (PU-04): the bonus ability is enabled by the standing Supply_Dock hardpoint whose Special_Ability_Name equals the ability's Name; Initially_Enabled No is therefore carried by the hardpoint gate. The loaded space-upgrade modifier path (WBP-25) is separate and does not cover this carrier. Settled for &#35;4990: the StarBase rows are partial, the SpecialStructure rows are ground.; basis: reviewed |
+| Abilities/Income_Stream_Mod_Ability/Initially_Enabled | applied | whole class (src/sim/tactical/session_step_economy.cpp) | PU-08 | — | src/sim/tactical/session_step_economy.cpp | Debug build; Authored initial flag and exact nested name resolve through retained owner/type/name locks (PU-08).; basis: reviewed |
 | Abilities/Income_Stream_Mod_Ability/Interval_Multiplier | partial | station supply dock bonus (Skirmish_*_Star_Base_1..5) (src/skirmish/economy.cpp); missing: Affects_All_Allied_Sources: the dock bonus is applied to the owning station only; whether the debug build also adds it to allied stations of the same type is not walked, Income_Multiplier, Interval_Multiplier, Stacking_Category and Reverse_Application_Logic are not read on the station path (every stock dock bonus authors 1.0, 1.0, 0 and No) | PU-04 | 760 | src/skirmish/economy.cpp | Station supply dock (PU-04): the bonus ability is enabled by the standing Supply_Dock hardpoint whose Special_Ability_Name equals the ability's Name; Initially_Enabled No is therefore carried by the hardpoint gate. The loaded space-upgrade modifier path (WBP-25) is separate and does not cover this carrier. Settled for &#35;4990: the StarBase rows are partial, the SpecialStructure rows are ground.; basis: reviewed |
 | Abilities/Income_Stream_Mod_Ability/Reverse_Application_Logic | partial | station supply dock bonus (Skirmish_*_Star_Base_1..5) (src/skirmish/economy.cpp); missing: Affects_All_Allied_Sources: the dock bonus is applied to the owning station only; whether the debug build also adds it to allied stations of the same type is not walked, Income_Multiplier, Interval_Multiplier, Stacking_Category and Reverse_Application_Logic are not read on the station path (every stock dock bonus authors 1.0, 1.0, 0 and No) | PU-04 | 760 | src/skirmish/economy.cpp | Station supply dock (PU-04): the bonus ability is enabled by the standing Supply_Dock hardpoint whose Special_Ability_Name equals the ability's Name; Initially_Enabled No is therefore carried by the hardpoint gate. The loaded space-upgrade modifier path (WBP-25) is separate and does not cover this carrier. Settled for &#35;4990: the StarBase rows are partial, the SpecialStructure rows are ground.; basis: reviewed |
 | Abilities/Income_Stream_Mod_Ability/Stacking_Category | partial | station supply dock bonus (Skirmish_*_Star_Base_1..5) (src/skirmish/economy.cpp); missing: Affects_All_Allied_Sources: the dock bonus is applied to the owning station only; whether the debug build also adds it to allied stations of the same type is not walked, Income_Multiplier, Interval_Multiplier, Stacking_Category and Reverse_Application_Logic are not read on the station path (every stock dock bonus authors 1.0, 1.0, 0 and No) | PU-04 | 760 | src/skirmish/economy.cpp | Station supply dock (PU-04): the bonus ability is enabled by the standing Supply_Dock hardpoint whose Special_Ability_Name equals the ability's Name; Initially_Enabled No is therefore carried by the hardpoint gate. The loaded space-upgrade modifier path (WBP-25) is separate and does not cover this carrier. Settled for &#35;4990: the StarBase rows are partial, the SpecialStructure rows are ground.; basis: reviewed |
 | Abilities/Income_Stream_Mod_Ability/Target_Stream_Source | partial | station supply dock bonus (Skirmish_*_Star_Base_1..5) (src/skirmish/economy.cpp); missing: Affects_All_Allied_Sources: the dock bonus is applied to the owning station only; whether the debug build also adds it to allied stations of the same type is not walked, Income_Multiplier, Interval_Multiplier, Stacking_Category and Reverse_Application_Logic are not read on the station path (every stock dock bonus authors 1.0, 1.0, 0 and No) | PU-04 | 760 | src/skirmish/economy.cpp | Station supply dock (PU-04): the bonus ability is enabled by the standing Supply_Dock hardpoint whose Special_Ability_Name equals the ability's Name; Initially_Enabled No is therefore carried by the hardpoint gate. The loaded space-upgrade modifier path (WBP-25) is separate and does not cover this carrier. Settled for &#35;4990: the StarBase rows are partial, the SpecialStructure rows are ground.; basis: reviewed |
 | Base_Level | partial | station display preload (apps/viewer/src/galactic/scene_content.cpp); reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); prepared campaign space entry (src/campaign/space_entry_stock.cpp); StarBase (src/script/foc/ai_perception.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | none recorded; WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-24, WGEP-41; WGT-09; SAE-02 | 4532 | apps/viewer/src/galactic/scene_content.cpp; src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/campaign/space_entry_stock.cpp; src/script/foc/ai_perception.cpp | Production / build / tech / skirmish economy — Remaining: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams.; other objects and consumers outside the live galactic closure. The AI reads the owned live starbase level; secondary structure consumers remain deferred. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter. Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md. Station display follows HUD recipe GHUD-S78 in docs/behaviour/gc-hud-inventory.md; this inventory recipe is not a numeric-rule ID.; basis: reviewed |
+| Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Build_Tab_Space_Station | applied | observer-local galactic production choices (apps/viewer/src/galactic/planet_hud.cpp); station display preload (apps/viewer/src/galactic/scene_content.cpp) | WGUI-91; none recorded | — | apps/viewer/src/galactic/planet_hud.cpp; apps/viewer/src/galactic/scene_content.cpp | The authored flag admits station display assets and, after higher-priority category flags, station build choices; GUI_Row independently selects the row.; basis: reviewed |
+| Build_Tab_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Next_Level_Base | applied | whole class (src/sim/tactical/session_step_economy.cpp) | WPR-52 | — | src/sim/tactical/session_step_economy.cpp | basis: reviewed |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Default_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Sabotage_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Tech_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); whole class (src/script/foc/ai_selection.cpp); all registered galactic types: automatic technology unlocks (src/sim/galactic/production.cpp); whole class (src/skirmish/ai.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-147; WGEP-19, WGEP-22; PL-20; WGEP-130, WGEP-147, WGEP-42; PL-20, PL-30, PU-11, PU-13 | 4532 | src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/script/foc/ai_selection.cpp; src/sim/galactic/production.cpp; src/skirmish/ai.cpp | Production / build / tech / skirmish economy — Remaining: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams.; other objects and consumers outside the live galactic closure. &#35;852 reassessment: full structural tables change and AI type setup copies the value (PU-11, PL-20); this scenario proves no resulting effect. The earlier tables-identical/read-and-dropped claim is false. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
 
 ## Story
@@ -1230,21 +2534,21 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Event/Perpetual | applied | live campaign story plots (src/sim/galactic/story_engine.cpp) | WST-22 | — | src/sim/galactic/story_engine.cpp | basis: reviewed |
 | Event/Prereq | applied | live campaign story plots (src/sim/galactic/story_engine.cpp) | WST-06, WST-21 | — | src/sim/galactic/story_engine.cpp | basis: reviewed |
 | Event/Reward_Param | foc-ignores | application not recorded | — | — | — | DB-NOTAG |
-| Event/Reward_Param1 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param10 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param11 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param12 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param13 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param14 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param2 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param3 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param4 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param5 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param6 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param7 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param8 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Param9 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
-| Event/Reward_Type | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL and CREDITS (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param1 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param10 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param11 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param12 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param13 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param14 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param2 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param3 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param4 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param5 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param6 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param7 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param8 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Param9 | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
+| Event/Reward_Type | partial | BUILDABLE_UNIT, CREDITS, LOCK_UNIT, PLANET_FACTION, SET_MAX_TECH_LEVEL, SET_TECH_LEVEL, SPAWN_HERO, UNIQUE_UNIT (src/campaign/story_rewards_live.cpp); graph and flag rewards (src/sim/galactic/story_engine.cpp); missing: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md) | WST-40, WST-41, WST-42, WST-64; WST-24, WST-25, WST-26, WST-27, WST-46 | 4532 | src/campaign/story_rewards_live.cpp; src/sim/galactic/story_engine.cpp | Story / campaign scripting — Remaining: rewards of WST-40..45 and WST-47..49 other than SPAWN_HERO, UNIQUE_UNIT, BUILDABLE_UNIT, LOCK_UNIT, SET_TECH_LEVEL, SET_MAX_TECH_LEVEL, CREDITS and PLANET_FACTION (declined by name, docs/gc-story-engine.md). graph and flag rewards run in the engine; the unit, unlock, tech and credit rewards are applied by the session (journaled native effects); every other reward is declined by name; basis: reviewed |
 | Event/Story_Chapter | applied | galactic story dialog goals (src/campaign/game_session.cpp) | WST-58 | — | src/campaign/game_session.cpp | the intro holocron goal and its summary request; the quiet-path advisor line and sound stay sink stubs; basis: reviewed |
 | Event/Story_Dialog | applied | galactic story dialog goals (src/campaign/game_session.cpp) | WST-58 | — | src/campaign/game_session.cpp | the intro holocron goal and its summary request; the quiet-path advisor line and sound stay sink stubs; basis: reviewed |
 | Event/Story_Dialog_Popup | applied | galactic story dialog goals (src/campaign/game_session.cpp) | WST-58 | — | src/campaign/game_session.cpp | the intro holocron goal and its summary request; the quiet-path advisor line and sound stay sink stubs; basis: reviewed |
@@ -1258,19 +2562,272 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Lua_Script | todo | application not recorded | — | 1951 | — | Story / campaign scripting — Plot metadata retains the script name, but the subplot Lua runtime/continuation is not integrated (WST-53..58).; basis: reviewed |
 | Suspended_Plot | applied | live campaign story plots (src/campaign/story_plots.cpp) | WST-02, WST-03 | — | src/campaign/story_plots.cpp | basis: reviewed |
 
+## StoryParser
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Prereq | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Story_Chapter | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Story_Dialog | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Story_Dialog_Popup | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Story_Incoming | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Story_Tag | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Story_Var | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Sundered_Heart
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Space_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## SurvivalSpaceUnit
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Tactical_Capturable
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Minimum_Time_Before_Pad_Can_Build_Again | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Respects_Skirmish_Pre_Build_Bases_Option | partial | land marker pads (src/skirmish/land_start.cpp); missing: non-land or non-pad types, pending selection outside single-entry fallback | LC-95 | 6215 | src/skirmish/land_start.cpp | basis: reviewed |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Tactical_Structure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_MP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
 ## TechBuilding
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Build_Advances_Tech_Level | partial | galactic production offers (src/campaign/setup.cpp); missing: other production consumers (legacy &#35;654) | WGEP-42 | 654 | src/campaign/setup.cpp | Production / build / tech / skirmish economy — Remaining: other production consumers (legacy &#35;654). Numeric target level is retained from authoring and applied to galactic production offers, including checkpoint persistence; zero means no upgrade.; basis: reviewed |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Text_ID | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Text_RGBA | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Timer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Build_Limit_Current_Per_Player | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-25 | 4532 | src/campaign/live_setup.cpp; src/campaign/setup.cpp | Production / build / tech / skirmish economy — Remaining: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams.; other objects and consumers outside the live galactic closure. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
 | Build_Time_Reduced_By_Multiple_Factories | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34 | 654 | src/campaign/live_setup.cpp | Production / build / tech / skirmish economy — Remaining: other objects and consumers outside the live galactic closure.; basis: reviewed |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## TechBuilding, UniqueUnit
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Tech_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/campaign/live_setup.cpp); opt-in galactic production offers (src/campaign/setup.cpp); whole class (src/script/foc/ai_selection.cpp); all registered galactic types: automatic technology unlocks (src/sim/galactic/production.cpp); whole class (src/skirmish/ai.cpp); missing: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams., other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-147; WGEP-19, WGEP-22; PL-20; WGEP-130, WGEP-147, WGEP-42; PL-20, PL-30, PU-11, PU-13 | 4532 | src/campaign/live_setup.cpp; src/campaign/setup.cpp; src/script/foc/ai_selection.cpp; src/sim/galactic/production.cpp; src/skirmish/ai.cpp | Production / build / tech / skirmish economy — Remaining: Live modifier/filter providers, AI task budgets and nested result placement remain owning-service seams.; other objects and consumers outside the live galactic closure. Galactic queues consume explicitly prepared validated inputs; missing data is never defaulted by this adapter.; basis: reviewed |
+
+## Template
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Always_Instantiate_Galactic | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Text_ID | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Text_RGBA | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Timer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Requires_Initial_Placement | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Heroes | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Land_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Station | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Reduced_By_Multiple_Factories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Cheap_Bribe_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_1_Credit_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_1_Failure_Bink_Hologram_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_1_Mission_Briefing | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_1_Required_Mission_Count | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_1_Required_Mission_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_1_Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_1_Required_Unit_Count | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_1_Required_Unit_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_1_Success_Bink_Hologram_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_1_Success_Credit_Bonus | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_1_Success_Unlock_Unit_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corruption_1_Type | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Describe_History | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Describe_Population | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Destroy_When_Used_As_Corruption_Prereq | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Destroyed_Galactic_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Expensive_Bribe_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Influence_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Position | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| GalacticBehavior | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| IsBuildable | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Loads_When_Faction_Present | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Maintenance_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Minimum_Time_Before_Pad_Can_Build_Again | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Neutralization_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_MP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Ability_Icon | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Ability_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Black_Market_Influences | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Black_Market_Modifier | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Capture_Bonus_Reward | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Corruption_Removal_Base_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Credit_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Destroyed_Credit_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Groundbase_Stealth | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Is_Destroyable_By_TSW | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Is_Mining_Colony | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Restricted_Unit_Categories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Restricted_Unit_Types | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Retains_Residual_Influence | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Slice_Affinity_Types | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Slice_Difficulty_Rating | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Starbase_Stealth | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Surface_Accessible | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Planet_Tech_Availability_Rating | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Prevents_Blockade_Run_Attrition | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Prevents_Story_Campaign_Autoresolve | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Orbiting_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Tech_Structure | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Sabotage_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Space_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tutorial_Sabotage_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Template_Data
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Template/Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Build_Limit_Current_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Build_Limit_Lifetime_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Build_Tab_Heroes | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Build_Tab_Land_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Build_Time_Reduced_By_Multiple_Factories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Cheap_Bribe_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Destroy_When_Used_As_Corruption_Prereq | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Expensive_Bribe_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/GalacticBehavior | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/IsBuildable | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Maintenance_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Neutralization_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Prevents_Story_Campaign_Autoresolve | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Required_Orbiting_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Required_Tech_Structure | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Template/Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Template_Ground_Structure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Max_Instances_Per_Planet | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Tab_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Galactic_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Override_Bounty_MP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Prevents_Blockade_Run_Attrition | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Sabotage_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Template_GroundBase
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## TIE_Bomber
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| HomeWorldObject/Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## TIE_Fighter
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| HomeWorldObject/Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| HomeWorldObject/Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## TradeRoute
 
@@ -1286,10 +2843,67 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
+| Build_Can_Be_Unlocked_By_Slicer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Current_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Heroes | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Tab_Space_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Cheap_Bribe_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Energy_Capacity | todo | application not recorded | — | 650 | — | Other unit/game data — The energy profile exists for loaded battle units; the listed classes still lack a qualified battle consumer. Review: transport hulls are not deployed as space bodies in a skirmish (WHE-07/49 keep them as metadata); the generic body loader would apply it.; basis: reviewed |
+| Expensive_Bribe_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Icon_Index | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Maintenance_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Override_Bounty_MP | applied | whole class (src/skirmish/economy.cpp) | WGCH-65, WGP-189 | — | src/skirmish/economy.cpp | Campaign space current-type bounty value; the galactic auto-resolve NalHutta payout reads only the SP pair (WAR-127); the strategic branch remains separate. |
 | Override_Bounty_SP | applied | whole class (src/skirmish/economy.cpp) | WGCH-65, WGP-189 | — | src/skirmish/economy.cpp | Campaign space current-type bounty value; the galactic auto-resolve NalHutta payout reads it too (WAR-127); the strategic branch remains separate. |
+| Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Space_Override_Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Tech_Level | partial | reachable stock galactic startup/production objects (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/campaign/live_setup.cpp); all registered galactic types: automatic technology unlocks (src/sim/galactic/production.cpp); missing: other objects and consumers outside the live galactic closure | WGEP-18, WGEP-19, WGEP-21, WGEP-22, WGEP-23, WGEP-25, WGEP-29, WGEP-32, WGEP-34; WGEP-147; WGEP-130, WGEP-147, WGEP-42 | 650 | src/campaign/live_setup.cpp; src/sim/galactic/production.cpp | Production / build / tech / skirmish economy — Remaining: other objects and consumers outside the live galactic closure. WHE-07/49: the M2 company resolver touches carried hero or unselected transport metadata without deploying its body; the generic loader consumer for other classes is not applied to these scene objects.; basis: reviewed |
+
+## UGC_CE_Object
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## UGC_CE_Planets
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| UGC_CE_Planet/Behavior | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Death_By_TSW_Replacements | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Death_Explosions | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Exclude_From_Distance_Fade | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Idle_Anim_00_Rate_Mod | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Is_Decoration | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Is_Discardable | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Is_Visible_On_Radar | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Loop_Idle_Anim_00 | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Radar_Icon_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Scale_Factor | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Sort_Order_Adjust | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Space_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| UGC_CE_Planet/Text_ID | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## UnderConstructionShip
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Initially_Locked | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Capture_Point_Transition_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## UniqueUnit
 
@@ -1305,8 +2919,54 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Maximum_Firepower_Attack_Ability/SFXEvent_Activate | todo | application not recorded | — | 3240 | — | Shared unit-table loader parses this field; no land session path applies this ability on land (no ability hook in session_land*.cpp).; basis: reviewed |
 | Abilities/Reduce_Production_Price_Ability/Applicable_Unit_Categories | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | — | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
 | Abilities/Reduce_Production_Price_Ability/Applicable_Unit_Types | applied | whole class (src/campaign/setup.cpp) | WGEP-73 | — | src/campaign/setup.cpp | GC authored profiles apply through the opt-in campaign income provider. Missing authored defaults, external ability lifecycle/restore delivery and live queue rebinding remain named U-04/U-08/GFS-U05/08 seams; retained queue values follow WGEP-44.; basis: reviewed |
-| Abilities/Remove_Corruption_Ability/SFXEvent_Activate | todo | application not recorded | — | 653 | — | The activation cue of this galactic ability is not played by the galactic ability host.; basis: reviewed |
+| Abilities/Remove_Corruption_Ability/SFXEvent_Activate | applied | ground-activated hero removal (apps/viewer/src/galactic/galactic_mode.cpp); corrupt-militia removal revolt and retreat (src/sim/galactic/ability_corruption.cpp) | WGCH-18, WGCH-189, WGCH-19, WGCH-190, WGCH-191; WGCH-17 | 1130 | apps/viewer/src/galactic/galactic_mode.cpp; src/sim/galactic/ability_corruption.cpp | Named removal binds through authored routing and ground membership; local activation cue, cost/time, saved lifecycle and success-only consumption are wired. WGCH-192 finds no non-ground or multi-record removal authoring in stock and eight target profiles; this does not classify other styles as ignored.; WGCH-192; basis: reviewed |
+| Additional_Population_Capacity | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Text_ID | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Text_RGBA | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Countdown_Timer | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Build_Limit_Lifetime_For_All_Allies | applied | whole class (include/eawr/presentation/ui/production.hpp); whole class (include/eawr/sim/tactical/economy.hpp) | WPR-61, WPR-62, WPR-63; WPR-33 | — | include/eawr/presentation/ui/production.hpp; include/eawr/sim/tactical/economy.hpp | basis: reviewed |
+| Build_Tab_Heroes | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Reduced_By_Multiple_Factories | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Destroy_When_Used_As_Corruption_Prereq | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Expensive_Bribe_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Icon_Index | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Fleet_Override_Model_Name | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Galactic_Influence_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| GalacticBehavior | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| IsBuildable | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_MP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Piracy_Value_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Orbiting_Units | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Slice_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Unit_Abilities_Data
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Corrupt_Systems_Ability/Activation_Max_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corrupt_Systems_Ability/Activation_Min_Range | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corrupt_Systems_Ability/Activation_Style | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corrupt_Systems_Ability/Duration_In_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corrupt_Systems_Ability/Inaccuracy_Radius | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Corrupt_Systems_Ability/Owner_Particle_Effect | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## UnregognizedObject
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| IsBuildable | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Neutralization_Cost | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Score_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 
 ## UpgradeObject
 
@@ -1325,7 +2985,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Garrison_Upgrade_Ability/@Name | todo | application not recorded | — | 760 | — | GC planet abilities + income — No garrison upgrade handler applies this field; land garrison work remains separate (WLAB-76). |
 | Abilities/Garrison_Upgrade_Ability/Activation_Style | todo | application not recorded | — | 760 | — | GC planet abilities + income — No garrison upgrade handler applies this field; land garrison work remains separate (WLAB-76). |
 | Abilities/Garrison_Upgrade_Ability/Apply_To_All_Allies | todo | application not recorded | — | 760 | — | GC planet abilities + income — No garrison upgrade handler applies this field; land garrison work remains separate (WLAB-76). |
-| Abilities/Income_Stream_Mod_Ability/@Name | todo | application not recorded | — | 760 | — | GC planet abilities + income — The nested ability name is parsed or retained but has no qualified identity-dependent consumer for these classes. |
+| Abilities/Income_Stream_Mod_Ability/@Name | applied | whole class (src/sim/tactical/session_economy.cpp) | PU-08 | — | src/sim/tactical/session_economy.cpp | Debug build; Authored initial flag and exact nested name resolve through retained owner/type/name locks (PU-08).; basis: reviewed |
 | Abilities/Income_Stream_Mod_Ability/Affects_All_Allied_Sources | partial | ES_Increased_Supplies_L1_Upgrade, ES_Increased_Supplies_L2_Upgrade, RS_Increased_Supplies_L1_Upgrade, RS_Increased_Supplies_L2_Upgrade, UL_Extort_Cash_L1_Upgrade, UL_Extort_Cash_L2_Upgrade (src/sim/tactical/session_economy.cpp); missing: ground-target modifier abilities, upgrade objects outside the loaded space source closure | WBP-25, WBP-44, WBP-45, WBP-46 | 760 | src/sim/tactical/session_economy.cpp | GC planet abilities + income — Remaining: ground-target modifier abilities; upgrade objects outside the loaded space source closure. Loaded space-source modifiers apply to matching streams; ground-target abilities remain outside the space consumer. Stock mine modifier nodes omit Activation_Style.; basis: reviewed |
 | Abilities/Income_Stream_Mod_Ability/Income_Additive_Value | partial | ES_Increased_Supplies_L1_Upgrade, ES_Increased_Supplies_L2_Upgrade, RS_Increased_Supplies_L1_Upgrade, RS_Increased_Supplies_L2_Upgrade, UL_Extort_Cash_L1_Upgrade, UL_Extort_Cash_L2_Upgrade (src/sim/tactical/session_economy.cpp); missing: ground-target modifier abilities, upgrade objects outside the loaded space source closure | WBP-25, WBP-44, WBP-45, WBP-46 | 760 | src/sim/tactical/session_economy.cpp | GC planet abilities + income — Remaining: ground-target modifier abilities; upgrade objects outside the loaded space source closure. Loaded space-source modifiers apply to matching streams; ground-target abilities remain outside the space consumer. Stock mine modifier nodes omit Activation_Style.; basis: reviewed |
 | Abilities/Income_Stream_Mod_Ability/Income_Multiplier | partial | ES_Increased_Supplies_L1_Upgrade, ES_Increased_Supplies_L2_Upgrade, RS_Increased_Supplies_L1_Upgrade, RS_Increased_Supplies_L2_Upgrade, UL_Extort_Cash_L1_Upgrade, UL_Extort_Cash_L2_Upgrade (src/sim/tactical/session_economy.cpp); missing: ground-target modifier abilities, upgrade objects outside the loaded space source closure | WBP-25, WBP-44, WBP-45, WBP-46 | 760 | src/sim/tactical/session_economy.cpp | GC planet abilities + income — Remaining: ground-target modifier abilities; upgrade objects outside the loaded space source closure. Loaded space-source modifiers apply to matching streams; ground-target abilities remain outside the space consumer. Stock mine modifier nodes omit Activation_Style.; basis: reviewed |
@@ -1335,11 +2995,132 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Income_Stream_Mod_Ability/Target_Stream_Source | partial | ES_Increased_Supplies_L1_Upgrade, ES_Increased_Supplies_L2_Upgrade, RS_Increased_Supplies_L1_Upgrade, RS_Increased_Supplies_L2_Upgrade, UL_Extort_Cash_L1_Upgrade, UL_Extort_Cash_L2_Upgrade (src/sim/tactical/session_economy.cpp); missing: ground-target modifier abilities, upgrade objects outside the loaded space source closure | WBP-25, WBP-44, WBP-45, WBP-46 | 760 | src/sim/tactical/session_economy.cpp | GC planet abilities + income — Remaining: ground-target modifier abilities; upgrade objects outside the loaded space source closure. Loaded space-source modifiers apply to matching streams; ground-target abilities remain outside the space consumer. Stock mine modifier nodes omit Activation_Style.; basis: reviewed |
 | Abilities/Starbase_Upgrade_Ability/@Name | todo | application not recorded | — | 760 | — | Space abilities (unit + hero) — The nested ability name is parsed or retained but has no qualified identity-dependent consumer for these classes. |
 | Abilities/Starbase_Upgrade_Ability/Activation_Style | applied | whole class (src/sim/tactical/session_step_economy.cpp) | WPR-52 | — | src/sim/tactical/session_step_economy.cpp | basis: reviewed |
+| Build_Advances_Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_For_All_Allies | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Limit_Lifetime_Per_Player | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Destroy_Previous_Upgrade_Level | applied | whole class (src/sim/tactical/session_step_economy.cpp) | WPR-22 | — | src/sim/tactical/session_step_economy.cpp | basis: reviewed |
+| Population_Value | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Previous_Upgrade_Level_Type | applied | campaign galaxy-upgrade first-level admission (src/campaign/space_entry.cpp); whole class (src/sim/tactical/session_step_economy.cpp) | WGT-117; WPR-22 | — | src/campaign/space_entry.cpp; src/sim/tactical/session_step_economy.cpp | basis: reviewed |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
 | Show_In_Sidebar_While_Building | partial | tactical allied UpgradeObject ledgers (src/presentation/ui/team_dock.cpp); missing: non-ledger campaign and land-only callers | HCB-30, WPR-70, WPR-72, WPR-73 | 654 | src/presentation/ui/team_dock.cpp | Production / build / tech / skirmish economy — Remaining: non-ledger campaign and land-only callers. The tactical research dock reads inherited sidebar flags through the resolved presentation catalog; no simulation schema change. Unrelated corruption trays remain deferred.; basis: reviewed |
 | Tactical_Build_Cost_Multiplayer | applied | whole class (src/script/foc/ai_execution.cpp) | WAS-26 | — | src/script/foc/ai_execution.cpp | The generic tactical cost consumes accepted AI production funds independently of the queue-calculated selection price.; basis: reviewed |
 | Tactical_Build_Increments_Tech_Level | applied | whole class (src/sim/tactical/session_step_economy.cpp) | WPR-22 | — | src/sim/tactical/session_step_economy.cpp | basis: reviewed |
 | Tactical_Build_Time_Seconds | partial | loaded space production upgrade objects (src/skirmish/economy.cpp); missing: upgrade objects outside the loaded space production closure | WPR-33, WPR-50 | 654 | src/skirmish/economy.cpp | Production / build / tech / skirmish economy — Loaded space upgrades now receive authored queue duration; upgrades outside that closure remain unqualified. Stock RS_Level_Two_Starbase_Upgrade is admitted by the station production menu (WPR-50).; basis: reviewed |
 | Tactical_Destruction_Decrements_Tech_Level | todo | application not recorded | — | 654 | — | Production / build / tech / skirmish economy — Destruction does not apply the authored technology decrement; completion increments are separate (WPR-22).; basis: reviewed |
 | Tactical_Production_Queue | partial | loaded space production upgrade objects (src/skirmish/economy.cpp); missing: upgrade objects outside the loaded space production closure | WPR-33, WPR-50 | 654 | src/skirmish/economy.cpp | Production / build / tech / skirmish economy — Loaded space upgrades now receive authored queue selection; upgrades outside that closure remain unqualified. Stock RS_Level_Two_Starbase_Upgrade is admitted by the station production menu (WPR-50).; basis: reviewed |
+| Tech_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Upkeep
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Template/Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## W_Props_Defunct
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Is_Indigenous_Passive_Corruptible | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Tech_Structure | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Yoden_GroundStructure
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Yoden_Model_Hero
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Yoden_Model_Infantry
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Yoden_Moving_Hero
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Is_Indigenous_Unit_Corruptible | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Tech_Structure | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Yoden_Moving_Infantry
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Is_Indigenous_Unit_Corruptible | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Tech_Structure | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: LS.; basis: auto |
+
+## Yoden_Moving_Vehicle
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Cost_Credits | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Build_Time_Seconds | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Influences_Capture_Point | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Is_Indigenous_Unit_Corruptible | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Political_Control | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Ground_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Planets | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Special_Structures | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Star_Base_Level | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Tech_Structure | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Required_Timeline | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Yoden_Props_Generic
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+| Override_Bounty_SP | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Yoden_Props_Story
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |
+
+## Yoden_SpaceProp
+
+| Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
+|---|---|---|---|---|---|---|
+| Affiliation | todo | application not recorded | — | 6215 | — | Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.; basis: auto |

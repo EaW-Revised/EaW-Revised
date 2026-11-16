@@ -231,6 +231,9 @@ std::vector<PeerIndex> DesyncMonitor::waiting_for_peers() const {
 }
 
 core::Result<void> DesyncMonitor::on_input_delay(std::uint64_t delay, std::uint64_t retained_delay) {
+    // A failed monitor already holds its first failure; the session re-reports every agreed delay, so a second
+    // failure here would mask the real cause.
+    if (failed_) return core::Result<void>::success();
     if (!valid_ || failed_ || delay == 0 || delay > max_window || retained_delay < delay || retained_delay > max_window)
         return fail("invalid agreed input delay");
     options_.input_delay = delay;

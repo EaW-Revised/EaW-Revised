@@ -1,5 +1,6 @@
 #include "battle_input.hpp"
 #include "battle_selection_settings.hpp"
+#include "space_populate.hpp"
 
 #include "camera_input.hpp"
 #include "settings_store.hpp"
@@ -57,6 +58,7 @@ BattleInput::BattleInput(Node3D& host) : host_(&host), world_ui_(std::make_uniqu
 }
 
 BattleInput::~BattleInput() {
+    if (compass_population_ && compass_renderer_) compass_population_->release(*compass_renderer_);
     RenderingServer* rendering = RenderingServer::get_singleton();
     if (rendering != nullptr && canvas_item_.is_valid()) rendering->free_rid(canvas_item_);
 }
@@ -67,6 +69,62 @@ void BattleInput::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
     world_ui_->prepare(filesystem, catalog, live, shaders);
     cursor_.prepare(filesystem);
     beacon_delay_ = ui::beacon_place_delay(filesystem);
+    // O-2: use the authored prop through the ordinary XML/model/material path.
+    // The identity selects the UI prop; its model, scale and textures remain moddable.
+    if (live.land_terrain() == nullptr && catalog.find("Space_Movement_Compass", data::Category::game_object)) {
+        compass_renderer_ = std::make_unique<GodotRenderer>(*host_, shaders, false);
+        SpacePopulation::Options options;
+        options.catalog = &catalog;
+        BattleScene::PlacedUnit arrow;
+        arrow.object_id = "Space_Movement_Compass";
+        arrow.live_entity = 1;
+        options.placed_ships.push_back(std::move(arrow));
+        compass_population_ = std::make_unique<SpacePopulation>(std::move(options));
+        assets::Map map;
+        map.kind = assets::MapKind::space;
+        if (!compass_population_->compose(*compass_renderer_, map, filesystem, FixedCamera{}, {}, 1, 1)) {
+            note("compass: " + compass_population_->failure());
+        }
+        hide_compass();
+    }
+}
+
+void BattleInput::hide_compass() noexcept {
+    compass_drawn_ = false;
+    if (compass_renderer_) compass_renderer_->submit(std::make_shared<const sim::RenderSnapshot>());
+}
+
+void BattleInput::compass_frame(const LiveSessionView& live) {
+    if (!compass_population_ || !compass_renderer_) return;
+    if (!right_start_) { if (compass_drawn_) hide_compass(); return; }
+    const auto* input = live.order_input();
+    const bool ships = !selection_.empty() && std::none_of(units_.begin(), units_.end(), [&](const auto& unit) {
+        return selection_.contains(unit.entity) && unit.part != sim::invalid_entity_id;
+    });
+    const auto mode = input ? input->mode() : ui::OrderMode::attack;
+    const bool available = ships && right_press_allows_compass_ && !right_double_click_ && !placing_ && !beacon_targeting_
+        && !ability_target_ && !special_target_source_
+        && (mode == ui::OrderMode::none || mode == ui::OrderMode::move);
+    if (!available || !pointer_ || !ui::compass_visible(right_start_, *pointer_, right_held_seconds_) || !right_press_ray_ || !scene_) {
+        if (compass_drawn_) hide_compass();
+        return;
+    }
+    const auto press = ground_point(*right_press_ray_);
+    const auto cursor_ray = ray((*pointer_)[0], (*pointer_)[1]);
+    const auto cursor = cursor_ray ? ground_point(*cursor_ray) : std::nullopt;
+    const auto yaw = press && cursor ? ui::compass_yaw(*press, *cursor) : std::nullopt;
+    if (!yaw) { if (compass_drawn_) hide_compass(); return; }
+    const auto x = scene::fixed_from_binary32((*press)[0]);
+    const auto y = scene::fixed_from_binary32((*press)[1]);
+    if (!x || !y) { if (compass_drawn_) hide_compass(); return; }
+    BattleScene::LivePose pose;
+    pose.position = {x.value(), y.value(), {}};
+    pose.yaw_degrees = *yaw;
+    if (!compass_population_->pose_live(std::span(&pose, 1))) { hide_compass(); return; }
+    const auto& instances = compass_population_->instances();
+    compass_renderer_->submit(std::make_shared<const sim::RenderSnapshot>(0, instances));
+    compass_drawn_ = !instances.empty();
+    if (compass_drawn_) ++compass_frames_;
 }
 
 void BattleInput::note(std::string text) {
@@ -166,9 +224,23 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
     own_selection_ = false;
     movable_selection_ = false;
     const auto& squadron_of = live.squadron_of();
+    // #6992: on land, the entities that have a pick volume this frame (for a pad that carries a structure, below).
+    const bool land = live.land_terrain() != nullptr;
+    std::vector<sim::EntityId> boxed;
+    if (land) {
+        for (const LiveSessionView::VisibleUnit& visible : live.visible_units())
+            if (population.live_ship_box(visible.ship)) boxed.push_back(visible.entity);
+        std::sort(boxed.begin(), boxed.end());
+    }
     for (const LiveSessionView::VisibleUnit& visible : live.visible_units()) {
         const auto box = population.live_ship_box(visible.ship);
-        if (!box) continue;  // not drawn: nothing to point at
+        if (!box) continue;  // no pick volume (not drawn, or effect-only like a projectile): nothing to point at
+        // #6992: a land pad that carries a structure stays drawn under it; the click belongs to the structure (or its
+        // construction) when that has a pick volume in this list (pad_yields_to_structure), else the pad stays the target.
+        if (land) if (const auto* pad = live.pad_view(visible.entity);
+            pad != nullptr && ui::pad_yields_to_structure(pad->state.under_construction, pad->state.constructed,
+                [&](const sim::EntityId id) { return std::binary_search(boxed.begin(), boxed.end(), id); }))
+            continue;
         ui::BattleUnit unit;
         unit.entity = visible.entity;
         unit.type = visible.type;
@@ -309,7 +381,12 @@ void BattleInput::cancel() noexcept {
     placing_.reset();
     left_.reset();
     right_start_.reset();
+    hide_compass();
     ignore_left_release_ = false;
+}
+
+void BattleInput::clear_selection() noexcept {
+    selection_.clear();
 }
 
 void BattleInput::observe_pointer(const Ref<InputEvent>& event) {
@@ -553,6 +630,8 @@ void BattleInput::frame(LiveSessionView& live, const BattleScene& population, Ba
 void BattleInput::cursor_frame(const LiveSessionView& live, const BattleCamera& space,
     const double delta, const bool capture) {
     beacon_remaining_ = std::max(0.0, beacon_remaining_ - std::max(delta, 0.0));
+    if (right_start_) right_held_seconds_ += std::max(delta, 0.0);
+    compass_frame(live);
     ui::CursorInput input;
     input.dragging = left_ && left_->moved
         && (ui::drag_extent(left_->start, left_->end) > ui::minimum_drag_select_distance || selection_.empty());
@@ -568,6 +647,9 @@ void BattleInput::cursor_frame(const LiveSessionView& live, const BattleCamera& 
         input.passable = (*hover_point_)[0] >= to_float(bounds[0]) && (*hover_point_)[1] >= to_float(bounds[1])
             && (*hover_point_)[0] <= to_float(bounds[2]) && (*hover_point_)[1] <= to_float(bounds[3]);
     }
+    // During a movie shot (the super weapon's power-up, the arrival cinematic) the world under the pointer is not the
+    // player's: the ground ray of the shot's camera can leave the playable area, which showed the no-entry pointer.
+    if (space.live_camera_movie()) input.passable = true;
     if (auto* engine = Input::get_singleton()) {
         input.ctrl = engine->is_physical_key_pressed(KEY_CTRL);
         input.alt = engine->is_physical_key_pressed(KEY_ALT);
@@ -588,9 +670,12 @@ void BattleInput::cursor_frame(const LiveSessionView& live, const BattleCamera& 
             || kind == sim::tactical::AbilityKind::weaken_enemy || kind == sim::tactical::AbilityKind::buzz_droids
             || kind == sim::tactical::AbilityKind::corrupt_systems;
         input.ability = point_target ? ui::CursorTarget::space_position : ui::CursorTarget::enemy;
-        // CU-09 limitation: object abilities currently classify hostile contacts only; the
-        // full ability admission query remains unwired (foc-cursors.md, Scope).
-        input.ability_valid = point_target ? pointer_ && ability_point(*pointer_, live).has_value() : hovered_hostile_;
+        // CU-09: an object ability's pointer is valid over a hostile contact that the aimed ability's authored
+        // target filter admits (#7186, WHE-14); the rest of the order admission stays with the simulation.
+        const auto hover_target = hovered_ ? (units_[*hovered_].part != sim::invalid_entity_id
+            ? units_[*hovered_].part : units_[*hovered_].entity) : sim::invalid_entity_id;
+        input.ability_valid = point_target ? pointer_ && ability_point(*pointer_, live).has_value()
+            : hovered_hostile_ && (hover_target == sim::invalid_entity_id || ability_filter_admits(hover_target, live));
         // CU-12: movement passability must not replace the point ability's invalid pointer.
         if (point_target) input.passable = true;
     }

@@ -87,6 +87,8 @@ public:
     // their C-side work to it too (docs/lua-sandbox.md, costs).
     void set_budget(::std::int64_t instructions) noexcept;
     [[nodiscard]] ::std::int64_t budget() const noexcept;
+    // The host-side work charged to the budget since it was set; what remains is the script's own steps.
+    [[nodiscard]] ::std::uint64_t host_work() const noexcept;
     [[nodiscard]] SandboxFault fault() const noexcept;
 
     // Protects every current global of the state and freezes the library tables.
@@ -137,6 +139,10 @@ public:
     // the caller raises it once those objects are gone.
     void begin_host_call() noexcept;
     void end_host_call() noexcept;
+    // Host-side work of a binding (bytes copied across the binding boundary, objects scanned for a query) debits the
+    // same instruction budget as the script's own steps, in deterministic units. Exhaustion is recorded, not raised:
+    // the binding's caller raises it once its C++ objects are gone, exactly as for a memory quota fault.
+    void charge_host_work(::std::uint64_t units) noexcept;
 
 private:
     friend struct PersistAccess; // sflua_persist.cpp

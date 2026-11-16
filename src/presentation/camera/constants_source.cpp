@@ -107,6 +107,8 @@ constexpr std::array camera_optional{
     Field{"Location_Height_Up_Smooth_Time", &Constants::location_height_up_smooth_time},
     Field{"Location_Height_Down_Smooth_Time", &Constants::location_height_down_smooth_time},
     Field{"Min_Height_Above_Terrain", &Constants::min_height_above_terrain},
+    Field{"Object_Fade_Begin", &Constants::object_fade_begin},
+    Field{"Object_Fade_End", &Constants::object_fade_end},
 };
 
 constexpr std::array scroll_required{

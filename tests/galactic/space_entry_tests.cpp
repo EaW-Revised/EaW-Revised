@@ -11,6 +11,11 @@ int case_galactic_space_entry_tests(int argc, char** argv) {
         catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
         return galactic_test::failures ? 1 : 0;
     }
+    if (argc > 1 && std::string_view(argv[1]) == "--installed-facts") {
+        try { installed(false, false, false, false, false, false, false, true); }
+        catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+        return galactic_test::failures ? 1 : 0;
+    }
     if (argc > 1 && std::string_view(argv[1]) == "--installed-orphan-rider") {
         try { installed(false, false, false, false, false, false, true); }
         catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

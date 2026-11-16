@@ -177,7 +177,7 @@ enum class CaptionKind : std::uint8_t { empty, text_key, missing_key, literal };
 
 // True when a standalone texture of that name exists.
 using TextureProbe = std::function<bool(std::string_view texture)>;
-// Probes Data/Art/Textures/<stem>.tga and .dds, as texture references do.
+// Probes Data/Art/Textures/<name> through the shared asset-name resolver, as texture references resolve.
 [[nodiscard]] TextureProbe vfs_texture_probe(const vfs::Vfs& filesystem);
 
 struct TextureAudit final {

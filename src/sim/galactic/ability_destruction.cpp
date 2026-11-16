@@ -83,6 +83,19 @@ void GalacticSession::Impl::prepare_destruction(const GameCommand& command, cons
     touch_abilities(); events.push_back(event);
 }
 
+std::vector<TypeId> GalacticSession::Impl::landed_current_types(const std::size_t index) const {
+    std::vector<TypeId> landed;
+    if (!control || index >= control->planets.size()) return landed;
+    for (const auto& force : control->planets[index].landed) {
+        const auto* contents = movement_inputs ? find(movement_inputs->contents, force.id, [](const auto& r) { return r.container; }) : nullptr;
+        if (!contents) continue;
+        for (const auto& child : contents->children) {
+            const auto row = actor_records.find(child.id);
+            landed.push_back(row == actor_records.end() ? child.type : row->second.current_type);
+        }
+    }
+    return landed;
+}
 void GalacticSession::Impl::execute_destruction(const GameCommand& command, const CensusObject& supplied,
     const PreparedAbility& prepared, std::uint64_t tick, std::vector<GalacticEvent>& events) {
     GalacticEvent event{tick, GalacticEventKind::command_rejected, command.key.seat, supplied.id, command.key.sequence};
@@ -121,15 +134,7 @@ void GalacticSession::Impl::execute_destruction(const GameCommand& command, cons
         }
     }
     // WGCH-114: exact current-type match inside landed transport contents, read at the CURRENT controller.
-    std::vector<TypeId> landed_types;
-    for (const auto& force : surface->landed) {
-        const auto* contents = movement_inputs ? find(movement_inputs->contents, force.id, [](const auto& r) { return r.container; }) : nullptr;
-        if (!contents) continue;
-        for (const auto& child : contents->children) {
-            const auto row = actor_records.find(child.id);
-            landed_types.push_back(row == actor_records.end() ? child.type : row->second.current_type);
-        }
-    }
+    const auto landed_types = landed_current_types(index);
     auto leader_kill = planet_destruction_victory(bearer->owner, control->state[index].current_player, landed_types);
     if (!leader_kill) { failed = true; return; }
     auto cleaned = execute_planet_ruins(*ruins);

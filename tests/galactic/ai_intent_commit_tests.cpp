@@ -533,15 +533,69 @@ void refusal_consequences() {
         "refusal consequences are idempotent");
     ga::IntentOutcome foreign = outcome; foreign.player = 2;
     expect(!take(ga::refusal::finish(actions, finish)(foreign)), "another player's refusal cannot fail the purchase");
+    {   // Async step 2: with a sink that queues the consequence for the AI's window start, the world side writes nothing, and the AI
+        // ends in the same state after the drain as after the direct write (credits exact across the delay: the refusal fails the purchase
+        // row only; the mark refunds at the goal's next service). Three identical fixtures: direct, queued then drained, declining sink.
+        struct Rig {
+            std::unique_ptr<gc::GalacticSession> world;
+            std::shared_ptr<eawr::script::foc::ai::GalacticFunding> funding;
+            std::unique_ptr<ga::NativeActions> actions;
+            ga::ActionReceipt purchase;
+        };
+        const auto make = [&]() {
+            Rig rig;
+            rig.world = std::make_unique<gc::GalacticSession>(take(gc::GalacticSession::create(commit_fixture())));
+            rig.funding = std::make_shared<eawr::script::foc::ai::GalacticFunding>();
+            take(rig.funding->initialize(1, policy, f(200))); take(rig.funding->reserve(1, {7, 1, f(100), {}, {}, {}}));
+            rig.actions.reset(new ga::NativeActions(*rig.world, rig.funding, {}, {{1, f(1)}}, {}, &executor,
+                [](auto) { return eawr::core::Result<Fixed>::success(f(4)); }));
+            rig.actions->bind_handlers();
+            rig.purchase = take(rig.actions->admit_paid(request, 7));
+            return rig;
+        };
+        auto direct = make(); auto queued_rig = make(); auto declined_rig = make();
+        expect(direct.purchase.admitted && queued_rig.purchase.admitted && declined_rig.purchase.admitted,
+            "the build is admitted in all three identical fixtures");
+        if (!direct.purchase.admitted || !queued_rig.purchase.admitted || !declined_rig.purchase.admitted) return;
+        const auto record = [&](const Rig& rig) {
+            return Shadow::IntentRecord{Shadow::ProductionRequest{production_request,
+                {gc::ProductionAdmission::allowed, rig.purchase.request, f(4)}}, rig.purchase.request, rig.purchase.request + 1, 1, 1};
+        };
+        ga::refusal::Consequence queued;
+        const auto sink = [&](const ga::refusal::Consequence& consequence) { queued = consequence; return true; };
+        const auto declining = [](const ga::refusal::Consequence&) { return false; };
+        const auto ledger_before = *queued_rig.funding->ledger(1);
+        const auto revision_before = queued_rig.actions->build_state_revision();
+        expect(take(ga::refusal::production(*direct.actions, record(direct))(outcome)) && direct.actions->purchases().at(direct.purchase.request).failed,
+            "the direct write fails the purchase row");
+        expect(take(ga::refusal::production(*queued_rig.actions, record(queued_rig), sink)(outcome)),
+            "a queued refusal still counts as a persisted consequence (the commit's tally)");
+        expect(!queued_rig.actions->purchases().at(queued_rig.purchase.request).failed && queued_rig.actions->build_state_revision() == revision_before
+            && *queued_rig.funding->ledger(1) == ledger_before, "a queued refusal consequence writes no AI row and no ledger");
+        expect(queued.kind == ga::refusal::Consequence::Kind::purchase && queued.player == 1 && queued.id == queued_rig.purchase.request,
+            "the queued consequence names the purchase");
+        expect(take(ga::refusal::apply(*queued_rig.actions, queued)) && queued_rig.actions->purchases().at(queued_rig.purchase.request).failed,
+            "applying the queued consequence at the window start fails the purchase");
+        expect(queued_rig.actions->purchases().at(queued_rig.purchase.request) == direct.actions->purchases().at(direct.purchase.request)
+            && queued_rig.actions->build_state_revision() == direct.actions->build_state_revision()
+            && *queued_rig.funding->ledger(1) == *direct.funding->ledger(1),
+            "after the drain the AI holds the same purchase row, revision and credits as after the direct write");
+        expect(!take(ga::refusal::apply(*queued_rig.actions, queued)), "applying it twice is a no-op");
+        expect(take(ga::refusal::production(*declined_rig.actions, record(declined_rig), declining)(outcome))
+            && declined_rig.actions->purchases().at(declined_rig.purchase.request).failed
+            && *declined_rig.funding->ledger(1) == *direct.funding->ledger(1), "a sink that declines leaves the direct write, with the same credits");
+    }
 
     // A refused hop ends the player's movement block for that fleet.
     auto mover = take(gc::GalacticSession::create(movement_fixture()));
+    // A pending global conflict holds every hop (the block stays open, the fleet stays in orbit), so several movements of one fleet can be admitted in a row.
+    const bool hold_conflict = true;
     ga::NativeActions moves(mover, std::make_shared<eawr::script::foc::ai::GalacticFunding>(), ga::NativeActions::Placement{},
         std::map<gc::PlayerId, Fixed>{});
     moves.bind_admission_gate([] { return false; });
     moves.bind_movement([](gc::PlayerId player, const gc::GalacticSnapshot& snapshot) {
         return eawr::core::Result<ga::NativeActions::MovementInput>::success(movement_input(player, snapshot));
-    }, [] { return false; }, [&](auto player, auto actor) { return mover.recheck_native_orbit(player, actor); });
+    }, [&] { return hold_conflict; }, [&](auto player, auto actor) { return mover.recheck_native_orbit(player, actor); });
     ga::ActionRequest move; move.kind = ga::ActionKind::move; move.player = 1; move.object = 10; move.target = 3;
     move.plan = 7; move.taskforce = 8; move.block = 9; move.members = {20, 21, 22};
     const auto moved = take(moves.admit(move));
@@ -552,6 +606,24 @@ void refusal_consequences() {
     expect(take(ga::refusal::fleet(moves, hop)(outcome)) && moves.movements().at(moved.request).finished,
         "a refused hop finishes the player's movement block");
     expect(!take(ga::refusal::fleet(moves, hop)(outcome)), "a finished movement block is left alone");
+    {   // Review: a deferred movement consequence resolves only the blocks that existed when the world refused, never a later movement of the same fleet.
+        ga::refusal::Consequence queued;
+        const auto sink = [&](const ga::refusal::Consequence& consequence) { queued = consequence; return true; };
+        const auto second = take(moves.admit(move));
+        expect(second.admitted, "a second movement of the same fleet is admitted");
+        if (!second.admitted) return;
+        expect(take(ga::refusal::fleet(moves, hop, sink)(outcome)) && !moves.movements().at(second.request).finished
+            && queued.kind == ga::refusal::Consequence::Kind::movement && queued.requests == std::vector<std::uint64_t>{second.request},
+            "the queued consequence names the movement block that was open, and writes nothing");
+        const auto later = take(moves.admit(move));
+        expect(later.admitted, "a third movement of the same fleet is admitted before the drain");
+        if (!later.admitted) return;
+        expect(take(ga::refusal::apply(moves, queued)) && moves.movements().at(second.request).finished && !moves.movements().at(later.request).finished,
+            "the drain finishes the refused movement only, a later movement of the fleet stays open");
+        expect(!take(ga::refusal::apply(moves, queued)), "applying it twice is a no-op");
+        expect(take(ga::refusal::fleet(moves, hop)(outcome)) && moves.movements().at(later.request).finished,
+            "a refusal after the drain finishes the later movement (the checks below start with every block closed)");
+    }
     const Shadow::IntentRecord merge{Shadow::FleetRequest{1, gc::MergeFleets{10, 11}, false, {true, 0, {}}}, hop.first_id, hop.first_id, 1, 1};
     expect(!take(ga::refusal::fleet(moves, merge)(outcome)), "a refused merge has no persisted consequence");
     expect(!take(ga::refusal::for_intent(moves, hop)(outcome)), "for_intent selects the fleet handler");
@@ -559,6 +631,122 @@ void refusal_consequences() {
     expect(static_cast<bool>(hooks.on_refused) && !hooks.force_builder, "standard hooks carry only the refusal handler");
 }
 
+
+// #6684: a bill is limited by the queue entry's own price. The last slice of rounded pro-rata bills pays exactly what is left (never
+// past the price); only a bill for a build already billed past its price is refused (nothing paid, no ledger effect, a diagnostic
+// text) rather than failing the session; a recorded row that lags the entry's price does not refuse a bill the entry's price covers.
+gc::GalacticSession::NativeProductionNotice bill_notice(const Fixed amount, const Fixed price) {
+    gc::GalacticSession::NativeProductionNotice input;
+    input.kind = gc::GalacticSession::NativeProductionNotice::Kind::billed;
+    input.player = 1; input.build = 5; input.amount = amount; input.price = price; input.remaining = f(1);
+    return input;
+}
+ga::BillRow bill_row_of(const Fixed price, const Fixed billed) {
+    ga::BillRow bill; bill.player = 1; bill.goal = 7; bill.price = price; bill.billed = billed;
+    return bill;
+}
+gc::funding::Ledger bill_ledger() {
+    gc::funding::Ledger ledger;
+    gc::funding::Goal goal; goal.cost = f(1000); goal.capital = f(1000);
+    ledger.goals.emplace(7, goal);
+    return ledger;
+}
+void bill_overrun_is_refused() {
+    const auto ledger = bill_ledger();
+    const ga::BillLedgers ledgers = [&](gc::PlayerId player) -> const gc::funding::Ledger* { return player == 1 ? &ledger : nullptr; };
+    const std::vector<gc::ProductionPlayer> players;
+    auto past = ga::decide_bill(bill_row_of(f(100), f(101)), bill_notice(f(5), f(100)), ledgers, players);
+    expect(static_cast<bool>(past) && !past.value().payment.accepted && past.value().effect.kind == ga::BillEffect::Kind::none
+        && past.value().refusal.find("player=1 build=5") != std::string::npos,
+        "a bill for a build already billed past its price is refused with a diagnostic, not a session failure");
+    auto last = ga::decide_bill(bill_row_of(f(100), f(99)), bill_notice(f(5), f(100)), ledgers, players);
+    expect(static_cast<bool>(last) && last.value().payment.accepted && last.value().payment.amount == f(1) && last.value().refusal.empty(),
+        "the last slice pays exactly what is left of the price");
+    auto exact = ga::decide_bill(bill_row_of(f(100), f(95)), bill_notice(f(5), f(100)), ledgers, players);
+    expect(static_cast<bool>(exact) && exact.value().payment.accepted && exact.value().payment.amount == f(5) && exact.value().refusal.empty(),
+        "a bill that reaches the price exactly is paid in full");
+    auto spent = ga::decide_bill(bill_row_of(f(100), f(100)), bill_notice(f(5), f(100)), ledgers, players);
+    expect(static_cast<bool>(spent) && spent.value().payment.accepted && spent.value().payment.amount == f(0) && spent.value().refusal.empty(),
+        "a slice after the price is fully billed pays nothing and does not stall the build");
+    auto lagging = ga::decide_bill(bill_row_of(f(90), f(95)), bill_notice(f(5), f(100)), ledgers, players);
+    expect(static_cast<bool>(lagging) && lagging.value().payment.accepted && lagging.value().payment.amount == f(5) && lagging.value().refusal.empty(),
+        "a recorded row below the entry's price does not refuse a bill the entry's price covers");
+    auto lower = ga::decide_bill(bill_row_of(f(120), f(96)), bill_notice(f(5), f(100)), ledgers, players);
+    expect(static_cast<bool>(lower) && lower.value().payment.accepted && lower.value().payment.amount == f(4),
+        "the entry's price is the limit even when the recorded row is higher");
+}
+
+// The rounded pro-rata slices of a build whose price does not divide evenly never bill past the price, and every slice is paid:
+// nothing is refused and no slice stalls the build.
+void bill_slices_never_pass_the_price() {
+    for (const auto price : {Fixed::from_raw(7 * Fixed::scale + 1), Fixed::from_raw(Fixed::scale), Fixed::from_raw(3), Fixed::from_raw(64013)}) {
+        const auto full = Fixed::from_raw(3 * Fixed::scale + 17);
+        const auto ledger = bill_ledger();
+        const ga::BillLedgers ledgers = [&](gc::PlayerId player) -> const gc::funding::Ledger* { return player == 1 ? &ledger : nullptr; };
+        const std::vector<gc::ProductionPlayer> players;
+        auto row = bill_row_of(price, Fixed{});
+        auto last_remaining = full;
+        bool all_paid = true, never_past = true;
+        // Slices of a few raw units of build time, as many as the frames of a long build.
+        for (std::int64_t step = 1; step < 400; ++step) {
+            const auto current = Fixed::from_raw(full.raw() - step * (full.raw() / 400));
+            const auto elapsed = eawr::sim::math::subtract(last_remaining, current).value();
+            const auto due = eawr::sim::math::multiply(price, eawr::sim::math::divide(elapsed, full).value()).value();
+            const auto decided = ga::decide_bill(row, bill_notice(due, price), ledgers, players);
+            if (!decided || !decided.value().refusal.empty() || !decided.value().payment.accepted) { all_paid = false; break; }
+            ga::apply_bill_row(row, decided.value().effect);
+            if (row.billed > price) never_past = false;
+            last_remaining = current;
+        }
+        expect(all_paid && never_past, "pro-rata slices of price raw " + std::to_string(price.raw()) + " are all paid and never pass the price");
+    }
+}
+
+// #6684: the canonical admission's price becomes the purchase row's price, and the bills of the entry then complete with no refusal.
+void adopted_price_bills_to_completion() {
+    const eawr::sim::InlineExecutor executor;
+    auto world = take(gc::GalacticSession::create(commit_fixture()));
+    auto funding = std::make_shared<eawr::script::foc::ai::GalacticFunding>();
+    const std::array policy{eawr::script::foc::ai::EvaluatedFundingTemplate{1, {{1, f(1)}}, {}}};
+    take(funding->initialize(1, policy, f(200))); take(funding->reserve(1, {7, 1, f(100), {}, {}, {}}));
+    ga::NativeActions actions(world, funding, {}, {{1, f(1)}}, {}, &executor,
+        [](auto) { return eawr::core::Result<Fixed>::success(f(4)); });
+    actions.bind_handlers();
+    ga::ActionRequest request; request.kind = ga::ActionKind::produce; request.player = 1; request.target = 2; request.type = 1;
+    const auto accepted = take(actions.admit_paid(request, 7));
+    expect(accepted.admitted && actions.purchases().contains(accepted.request), "the build is retained by the native owner");
+    if (!accepted.admitted) return;
+    const auto build = accepted.request;
+    const auto shadow_price = actions.purchases().at(build).price;
+    const auto entry_price = eawr::sim::math::add(shadow_price, f(1)).value(); // the canonical entry is dearer than the AI's view
+    const Shadow::IntentRecord production{Shadow::ProductionRequest{production_request,
+        {gc::ProductionAdmission::allowed, build, shadow_price}}, build, build + 1, 1, 1};
+    const auto hooks = ga::refusal::standard_hooks(actions, production);
+    expect(static_cast<bool>(hooks.on_admitted), "an admitted production intent adopts the canonical price");
+    if (!hooks.on_admitted) return;
+    ga::IntentOutcome outcome; outcome.player = 1; outcome.kind = ga::IntentKind::production; outcome.fate = ga::IntentFate::admitted;
+    outcome.object = build; outcome.actual = entry_price;
+    const auto revision = actions.build_state_revision();
+    take(hooks.on_admitted(outcome));
+    expect(actions.purchases().at(build).price == entry_price && actions.build_state_revision() != revision, "the purchase row takes the entry's price");
+    const auto settled = actions.build_state_revision();
+    take(hooks.on_admitted(outcome));
+    expect(actions.purchases().at(build).price == entry_price && actions.build_state_revision() == settled, "adopting the same price again changes nothing");
+    // The entry bills its whole price in slices: all accepted, none refused.
+    const auto ledger = bill_ledger();
+    const ga::BillLedgers ledgers = [&](gc::PlayerId player) -> const gc::funding::Ledger* { return player == 1 ? &ledger : nullptr; };
+    const std::vector<gc::ProductionPlayer> players;
+    auto row = ga::NativeActions::bill_row(actions.purchases().at(build));
+    row.billed = Fixed{};
+    const auto slice = Fixed::from_raw(entry_price.raw() / 4);
+    bool refused = false;
+    for (int i = 0; i < 6; ++i) {
+        const auto decided = ga::decide_bill(row, bill_notice(slice, entry_price), ledgers, players);
+        if (!decided || !decided.value().refusal.empty() || !decided.value().payment.accepted) refused = true;
+        else ga::apply_bill_row(row, decided.value().effect);
+    }
+    expect(!refused && row.billed == entry_price, "the entry's bills complete at exactly its price with no refusal");
+}
 
 // Async AI A2.2: the outbox keeps a batch's intents per virtual tick and releases them at their apply tick.
 // The async-lane determinism counts: the standard set plus 10 sim workers, as every W1 lane step proves.
@@ -1349,6 +1537,9 @@ int case_galactic_ai_intent_commit_tests() {
         barrier_commit();
         refusal_consequences();
         refusal_after_completion();
+        bill_overrun_is_refused();
+        bill_slices_never_pass_the_price();
+        adopted_price_bills_to_completion();
         outbox_slices();
         identity_block_exhaustion();
         invasion_block();

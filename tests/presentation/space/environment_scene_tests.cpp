@@ -306,6 +306,43 @@ void test_default_camera() {
            "environment far plane");
 }
 
+void test_authored_sky_scale() {
+    eawr::data::EffectiveObject primary;
+    eawr::data::EffectiveObject secondary;
+    eawr::data::EffectiveValue value;
+    value.value.name = "Scale_Factor";
+    value.value.raw_text = "20";
+    secondary.values.push_back(value);
+    const auto a = space::sky_object_scale(primary);
+    const auto b = space::sky_object_scale(secondary);
+    expect(a && near(*a, 1.0F), "missing sky scale defaults to one");
+    expect(b && near(*b, 20.0F), "secondary sky uses its authored scale");
+    if (a && b) {
+        const auto primary_point = space::transform_point(space::object_transform({}, {}, *a), {100.0F, 0.0F, 0.0F});
+        const auto secondary_point = space::transform_point(space::object_transform({}, {}, *b), {10.0F, 0.0F, 0.0F});
+        expect(near(std::hypot(primary_point.x, primary_point.y), 100.0F)
+                   && near(std::hypot(secondary_point.x, secondary_point.y), 200.0F),
+               "unequal sky models retain their authored relative radii");
+    }
+    secondary.values.front().value.raw_text = "1";
+    expect(space::sky_object_scale(secondary) == 1.0F, "explicit unit scale stays one");
+    secondary.values.front().value.raw_text = "not-a-number";
+    expect(!space::sky_object_scale(secondary), "malformed scale is rejected");
+    for (const char* text : {"0", "0.0", "-1", "-25.5"}) {
+        secondary.values.front().value.raw_text = text;
+        expect(!space::sky_object_scale(secondary), "a non-positive scale is rejected, not drawn collapsed or mirrored");
+    }
+    secondary.values.front().value.raw_text = "0.5";
+    expect(space::sky_object_scale(secondary) == 0.5F, "a small positive scale stays valid");
+    // AU-80/AU-81: a blank or `TBD` Scale_Factor is a placeholder, not an authored value, so the sky keeps the
+    // default scale of one rather than being rejected as zero or malformed.
+    for (const char* text : {"TBD", " TBD ", ""}) {
+        secondary.values.front().value.raw_text = text;
+        const auto placeholder = space::sky_object_scale(secondary);
+        expect(placeholder && near(*placeholder, 1.0F), "a placeholder Scale_Factor defaults the sky scale to one");
+    }
+}
+
 void test_camera_relative_sky() {
     eawr::presentation::FixedCamera camera;
     camera.far_plane = 7000.0F;
@@ -338,7 +375,7 @@ void test_config_free_laser_camera() {
     tactical.near_clip = 10.0F;
     tactical.far_clip = 7000.0F;
     const auto laser = space::environment_laser_camera(render, tactical);
-    expect(render.far_plane == 60000.0F && laser.near_plane == 10.0F && laser.far_plane == 7000.0F,
+    expect(render.far_plane == 100000.0F && laser.near_plane == 10.0F && laser.far_plane == 7000.0F,
            "config-free laser camera uses tactical planes while render keeps the sky range");
     expect(laser.eye == render.eye && laser.target == render.target && laser.up == render.up
                && laser.vertical_fov_degrees == render.vertical_fov_degrees
@@ -361,6 +398,7 @@ int main() {
     test_skydome_surface();
     test_sunlight_glow_offset();
     test_default_camera();
+    test_authored_sky_scale();
     test_camera_relative_sky();
     test_config_free_laser_camera();
     if (failures != 0) {

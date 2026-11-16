@@ -1,4 +1,4 @@
-#include "land_locomotion_clips.hpp"
+#include "eawr/presentation/animation/land_locomotion_clips.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -55,6 +55,17 @@ LandClipChoice select_land_clip(const LandClipInputs& i) noexcept {
         }
         return {clip, 1, std::min(i.infantry_turn_blend, i.turn_duration), LandStartFrame::zero, false};
     }
+    // UA-04: a member standing still that fired lately plays ATTACK once per shot (0.1 s blend from an attack clip) and
+    // otherwise holds ATTACKIDLE (looped); a model without ATTACKIDLE returns to idle when ATTACK has ended.
+    if (i.motion == LandMotion::stopped && i.ticks_since_shot <= land_attack_hold_ticks) {
+        const bool in_attack = i.active == LandClip::attack, in_stance = i.active == LandClip::attack_idle;
+        if (i.has_attack && (i.ticks_since_shot == 0 || (in_attack && !i.attack_finished)))
+            return {LandClip::attack, 1, in_attack || in_stance ? 0.1F : i.attack_blend, LandStartFrame::zero, false};
+        if (i.has_attack_idle)
+            return {LandClip::attack_idle, 1, in_attack ? 0.1F : i.attack_idle_blend, LandStartFrame::random, true};
+    }
+    if (i.motion == LandMotion::stopped && (i.active == LandClip::attack || i.active == LandClip::attack_idle))
+        result.blend_seconds = i.attack_idle_blend; // the stance ends: back to idle over the stance blend
     if (i.motion != LandMotion::moving && i.motion != LandMotion::stopping) return result;
     if (!i.walk_transition && i.speed <= 0 && i.turn_fraction <= 0) return result;
     result.kind = !i.walk_transition && i.spread_out && i.has_crouch ? LandClip::crouch :
@@ -71,6 +82,10 @@ LandClipChoice select_land_clip(const LandClipInputs& i) noexcept {
     if (!i.walk_transition && i.active == LandClip::idle)
         result.blend_seconds = result.kind == LandClip::crouch ? i.crouch_idle_walk_blend : i.idle_walk_blend;
     return result;
+}
+float land_clip_speed(const float member_speed, const float team_speed, const bool has_team_speed) noexcept {
+    // Only while the squad moves: a halted squad has speed 0 while its members still walk to their slots.
+    return has_team_speed && std::isfinite(team_speed) && team_speed > 0.0F ? team_speed : member_speed;
 }
 float land_bike_roll(float current, float rate, float limit, LandClip active) noexcept {
     rate = std::max(rate, 0.0F);

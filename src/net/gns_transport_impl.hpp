@@ -51,6 +51,9 @@ struct GnsTransport::Impl {
     unsigned recv_budget{64}, send_budget{64};
     // Route of this connection, sampled by pump.
     GnsRoute route{GnsRoute::unknown};
+    GnsRelayProvider relay_provider{GnsRelayProvider::none};
+    GnsLossHint loss_hint;
+    std::optional<std::string> own_turn; // the operator's own entries of `turn` (nullopt: the endpoint does not classify)
 #if EAWR_HAS_GNS
     struct Runtime {
         ISteamNetworkingSockets* sockets{};
@@ -85,6 +88,8 @@ struct GnsTransport::Impl {
     std::optional<GnsTurnCredentials> turn;
     // GNS wants one user and password per listed TURN server, comma separated.
     std::string turn_users, turn_passwords;
+    // The STUN list config() hands to GNS when the caller set none (GNS reads the pointer during the create call).
+    mutable std::string derived_stun;
     std::shared_ptr<SignallingState> signalling_state;
     Clock::time_point started{Clock::now()}, last_receive{started}, last_write{started};
     GnsLinkWatchdog link_watchdog;

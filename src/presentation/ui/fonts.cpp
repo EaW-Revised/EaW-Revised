@@ -100,6 +100,13 @@ std::optional<SystemFace> match_system_face(const std::string_view face, const s
     if (face.size() > bold.size() && ieq(face.substr(face.size() - bold.size()), bold)) {
         if (const std::string* stem = family(face.substr(0, face.size() - bold.size()))) return SystemFace{*stem, true};
     }
+    // A host that lists only the base family (Windows folds Arial Black into Arial) still has the face as that family's
+    // heaviest weight: the authored list face of the story summary, among others (legacy #6681). A whole family name,
+    // when the host does list it, was taken above.
+    constexpr std::string_view black = " Black";
+    if (face.size() > black.size() && ieq(face.substr(face.size() - black.size()), black)) {
+        if (const std::string* stem = family(face.substr(0, face.size() - black.size()))) return SystemFace{*stem, true};
+    }
     return std::nullopt;
 }
 
@@ -121,6 +128,19 @@ ResolvedFont resolve_font(const FontRequest& request, const std::string_view lan
     std::vector<std::string_view> chain;
     if (!unicode_only) chain.push_back(request.face);
     chain.push_back(unicode_face);
+    // UI-F5 (legacy #6721): the original asks the OS font mapper for a face by name, and for a Latin request the mapper's
+    // usual pick when the face is not installed is Arial, in the weight asked. So an installed system face that is absent is
+    // replaced by Arial (Arial Bold for a bold or black request) before the last resort, not by the all-caps title face. Only
+    // when the authored face is absent: a host that has the face, or the Unicode face (tried first), resolves as before. Not for
+    // an embedded face (its substitute is the cache), nor for the Russian and Japanese requests (the Unicode face or nothing).
+    std::string mapper_pick;
+    if (!unicode_only && !request.face.empty() && !is_embedded_face(request.face)) {
+        const auto ends_with = [&](const std::string_view suffix) {
+            return request.face.size() > suffix.size() && ieq(request.face.substr(request.face.size() - suffix.size()), suffix);
+        };
+        mapper_pick = ends_with(" Bold") || ends_with(" Black") ? std::string(mapper_pick_face) + " Bold" : std::string(mapper_pick_face);
+        chain.push_back(mapper_pick);
+    }
     chain.push_back(last_resort_face);
     for (std::size_t index = 0; index < chain.size(); ++index) {
         const std::string_view face = chain[index];

@@ -20,7 +20,8 @@ struct ProfileLocks {
 };
 
 // A missing state file, a state without a profile id (a vanilla instance), or one whose process is gone (dead PID,
-// or a reused PID with another creation time) holds nothing. A state file that EXISTS but cannot be opened, is
+// or a reused PID with another creation time, or a state that does not record the creation time and so cannot be
+// told from a reused PID) holds nothing. A state file that EXISTS but cannot be opened, is
 // oversized or malformed is not "free": which profile it names is unknown, so its instance is reported in
 // `unreadable` and callers fail closed (the same rule as for an unreadable launcher claim).
 [[nodiscard]] ProfileLocks read_profile_locks(const mods::steam::fs::path& user_data);

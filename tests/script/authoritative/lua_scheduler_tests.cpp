@@ -1,14 +1,24 @@
 #include "lua_sandbox_support.hpp"
 #include "../../support/reverse_partition_executor.hpp"
 
+#include <new>
+#include <stdexcept>
+
 namespace lua_sandbox_test_support {
 
 namespace {
 struct WalletShadow final : auth::ImmediateEffectState {
+    // Work counters of the host-work contracts: every copy of a shadow, and the units a query reports scanning.
+    static inline unsigned clones = 0;
+    static inline std::uint64_t scan_cost = 0;
+    static inline std::uint64_t clone_weight = 1; // what one copy of this shadow costs the instance that makes it
     std::int64_t balance{};
     std::uint64_t next_id{1};
     std::vector<std::uint64_t> objects;
-    std::unique_ptr<auth::ImmediateEffectState> clone() const override { return std::make_unique<WalletShadow>(*this); }
+    mutable std::uint64_t pending_work{};
+    std::unique_ptr<auth::ImmediateEffectState> clone() const override { ++clones; return std::make_unique<WalletShadow>(*this); }
+    std::uint64_t clone_units() const noexcept override { return clone_weight; }
+    std::uint64_t take_query_work() noexcept override { return std::exchange(pending_work, std::uint64_t{0}); }
     eawr::core::Result<auth::ValueList> apply(std::string_view action, const auth::ValueList& args) override {
         using Result = eawr::core::Result<auth::ValueList>;
         if (action == "spawn") {
@@ -23,6 +33,7 @@ struct WalletShadow final : auth::ImmediateEffectState {
         return Result::success({});
     }
     eawr::core::Result<auth::ValueList> query(std::string_view name, const auth::ValueList&) const override {
+        pending_work += scan_cost;
         return eawr::core::Result<auth::ValueList>::success({auth::Value::number(LuaNumber(
             name == "count" ? static_cast<std::int64_t>(objects.size()) : balance))});
     }
@@ -32,6 +43,7 @@ struct WalletHost final : auth::ImmediateEffectHost {
     unsigned publications{};
     mutable unsigned captures{};
     bool refuse{};
+    bool explode{}; // publication throws a bad allocation after taking the batch (memory exhaustion in the host)
     std::function<void(std::string_view)> observe;
     eawr::core::Result<std::unique_ptr<auth::ImmediateEffectState>> capture() const override {
         if (observe) observe("capture");
@@ -40,6 +52,7 @@ struct WalletHost final : auth::ImmediateEffectHost {
     }
     eawr::core::Result<void> publish(std::unique_ptr<auth::ImmediateEffectState> shadow) override {
         if (observe) observe("publish");
+        if (explode) throw std::bad_alloc();
         if (refuse) {
             eawr::core::Diagnostic error; error.code = "test.publish"; error.message = "publication refused";
             return eawr::core::Result<void>::failure(error);
@@ -128,9 +141,69 @@ Register_Event('Bad', DispatchFailure)
         event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Good";
         expect(static_cast<bool>(session.scheduler->submit_event(event)), "post refused publish");
         const auto refused = session.scheduler->service(executor);
-        expect(!refused && refused.error().code == auth::codes::session_abort && host->state.balance == 11 && host->state.next_id == 3,
-            "failed atomic publication aborts without leaking native effects");
-        expect(!session.scheduler->service(executor), "native publication failure is terminal");
+        expect(static_cast<bool>(refused) && host->state.balance == 11 && host->state.next_id == 3
+            && refused.value().removed_instances == std::vector<std::uint64_t>{1, 3} && refused.value().commands.empty()
+            && refused.value().diagnostics.size() == 2 && refused.value().diagnostics.front().code == auth::codes::script_error
+            && refused.value().diagnostics.front().message.find("could not be published") != std::string::npos,
+            "a refused publication retires its whole chain (the contributor and the instance serviced beside it), each with a diagnostic, and leaks nothing");
+        host->refuse = false;
+        expect(static_cast<bool>(session.scheduler->create_instance(3, "Main.lua")), "recreate the retired chain member");
+        auth::ScriptEvent next; next.key = {3, auth::first_simulation_producer, 3, 0};
+        next.target = 3; next.kind = auth::ScriptEvent::Kind::call; next.name = "Good";
+        expect(static_cast<bool>(session.scheduler->submit_event(next)), "post after the refusal");
+        expect(static_cast<bool>(session.scheduler->service(executor)) && host->state.balance == 14,
+            "the session goes on after the refusal and a fresh instance works");
+    }
+    // A refused publication retires the whole chain: an instance that ran after a contributor saw its dropped effects, and
+    // one that ran before it is in the same batch's chain. Whichever side the reader is on, both are retired and nothing
+    // of either is published.
+    for (const bool reader_first : {false, true}) {
+        Session session = script_session("function Contribute() Add(1) end function Peek() Test_Report(Read()) end");
+        auto host = std::make_shared<WalletHost>();
+        expect(static_cast<bool>(session.scheduler->register_binding("Add", [](auth::BindingContext& context, const auth::ValueList& args) {
+            return context.apply_immediate("add", args);
+        })), "register chain action");
+        expect(static_cast<bool>(session.scheduler->register_binding("Read", [](auth::BindingContext& context, const auth::ValueList& args) {
+            return context.query_immediate("credits", args);
+        })), "register chain query");
+        expect(static_cast<bool>(session.scheduler->set_immediate_effect_host(host, 4)), "chain host");
+        for (const std::uint64_t id : {1U, 3U}) expect(static_cast<bool>(session.scheduler->create_instance(id, "Main.lua")), "chain instance");
+        const std::uint64_t writer = reader_first ? 3 : 1, reader = reader_first ? 1 : 3;
+        const auto post = [&](std::uint64_t id, std::string name) {
+            auth::ScriptEvent event; event.key = {1, auth::first_simulation_producer, id, 0};
+            event.target = id; event.kind = auth::ScriptEvent::Kind::call; event.name = std::move(name);
+            expect(static_cast<bool>(session.scheduler->submit_event(std::move(event))), "post chain event");
+        };
+        post(writer, "Contribute"); post(reader, "Peek");
+        host->refuse = true;
+        const eawr::sim::InlineExecutor executor;
+        const auto refused = session.scheduler->service(executor);
+        const auto reader_note = refused ? std::find_if(refused.value().diagnostics.begin(), refused.value().diagnostics.end(),
+            [&](const auto& row) { return row.instance == reader; }) : decltype(refused.value().diagnostics.end()){};
+        expect(static_cast<bool>(refused) && refused.value().removed_instances == std::vector<std::uint64_t>{1, 3}
+            && refused.value().commands.empty() && host->state.balance == 0 && refused.value().diagnostics.size() == 2
+            && reader_note != refused.value().diagnostics.end()
+            && reader_note->message.find("chain is retired") != std::string::npos,
+            std::string("a refused publication retires every instance of its chain, ") + (reader_first ? "the reader first" : "the reader after the writer"));
+    }
+    // An exception out of the host's publication (memory exhaustion while it changes the world) is the one terminal path: the
+    // world may be half published, so the service fails with the session-abort code instead of carrying on.
+    {
+        Session session = script_session("function Contribute() Add(1) end");
+        auto host = std::make_shared<WalletHost>();
+        expect(static_cast<bool>(session.scheduler->register_binding("Add", [](auth::BindingContext& context, const auth::ValueList& args) {
+            return context.apply_immediate("add", args);
+        })), "register publication action");
+        expect(static_cast<bool>(session.scheduler->set_immediate_effect_host(host, 4)), "publication host");
+        expect(static_cast<bool>(session.scheduler->create_instance(1, "Main.lua")), "publication instance");
+        auth::ScriptEvent event; event.key = {1, auth::first_simulation_producer, 1, 0};
+        event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Contribute";
+        expect(static_cast<bool>(session.scheduler->submit_event(std::move(event))), "post publication event");
+        host->explode = true;
+        const eawr::sim::InlineExecutor executor;
+        const auto exploded = session.scheduler->service(executor);
+        expect(!exploded && exploded.error().code == auth::codes::session_abort,
+            "an exception out of the host's publication ends the service with the session-abort code");
     }
     {
         Session session = script_session("function Main() Add(5) coroutine.yield(true) Add(999) error('resume rollback') end Create_Thread('Main')");
@@ -208,7 +281,7 @@ Register_Event('Bad', DispatchFailure)
         // Creating an instance captures too; only the service's own captures count.
         const unsigned captured_before = host->captures, published_before = host->publications;
         auto result = session.scheduler->service(executor, options);
-        expect(static_cast<bool>(result) != refuse_publication, "chained service reports the actual publication result");
+        expect(static_cast<bool>(result), "a refused publication fails its instances, never the service");
         expect(!active_owner, "service releases its last scope on success and failure");
         ChainRun run;
         run.succeeded = static_cast<bool>(result);
@@ -259,14 +332,63 @@ Register_Event('Bad', DispatchFailure)
         expect(scoped_writes.scope_events == std::vector<std::string>({"begin:10", "capture:10", "publish:10", "end:10",
             "begin:20", "capture:20", "publish:20", "end:20"}), "each scope includes its canonical publication");
         const auto refused_scope = run_chains(inline_executor, true, chain_source, true, true);
-        expect(!refused_scope.succeeded && refused_scope.scope_events == std::vector<std::string>({
-            "begin:10", "capture:10", "publish:10", "end:10"}), "a failed publication releases the player scope before aborting");
+        expect(refused_scope.succeeded && refused_scope.commands.empty() && refused_scope.scope_events == std::vector<std::string>({
+            "begin:10", "capture:10", "publish:10", "end:10", "begin:20", "capture:20", "publish:20", "end:20"}),
+            "a refused publication releases its player scope, drops its instances' output and the next chain still runs");
         const auto refused_tail = run_chains(inline_executor, false, chain_source, true, true);
-        expect(!refused_tail.succeeded && refused_tail.scope_events == std::vector<std::string>({
-            "begin:0", "capture:0", "publish:0", "end:0"}), "a failed final publication also releases the unowned tail scope");
+        expect(refused_tail.succeeded && refused_tail.commands.empty() && refused_tail.scope_events == std::vector<std::string>({
+            "begin:0", "capture:0", "publish:0", "end:0"}), "a refused final publication also releases the unowned tail scope");
         for (const std::size_t workers : eawr::platform::determinism_worker_counts()) {
             const eawr::platform::ThreadWorkerAdapter executor(workers);
             expect(run_chains(executor, true, readonly_source) == readonly, "the read-only chains equal the inline run on every determinism worker count");
+        }
+    }
+    // A C++ exception out of a binding (here a plain error and a bad allocation) fails that instance with a diagnostic, on
+    // the partitioned service and on the ordered immediate one, and the session goes on; the result is the same on every
+    // worker count.
+    for (const bool immediate : {false, true}) {
+        std::vector<std::string> baseline;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            // Each body runs in a thread of its instance: the exception is the service's, not a failed creation.
+            Session session = make_session({
+                {"Boom.lua", "function main() Test_Report('before') Boom() Test_Report('after') end Create_Thread('main')"},
+                {"Fine.lua", "function main() Test_Report('fine') Add(1) end Create_Thread('main')"},
+                {"Alloc.lua", "function main() Alloc() end Create_Thread('main')"},
+                // A write is staged and then the binding throws in the same instance: the copy-on-write shadow of the
+                // failed instance is never adopted, so the write reaches nobody.
+                {"Partial.lua", "function main() Add(100) Boom() end Create_Thread('main')"}});
+            const std::string label = std::string(immediate ? "immediate" : "partitioned") + " service, " + std::to_string(workers) + " workers: ";
+            auto host = std::make_shared<WalletHost>();
+            expect(static_cast<bool>(session.scheduler->register_binding("Boom", [](auth::BindingContext&, const auth::ValueList&)
+                -> eawr::core::Result<auth::ValueList> { throw std::runtime_error("binding broke"); })), "register throwing binding");
+            expect(static_cast<bool>(session.scheduler->register_binding("Alloc", [](auth::BindingContext&, const auth::ValueList&)
+                -> eawr::core::Result<auth::ValueList> { throw std::bad_alloc(); })), "register allocating binding");
+            expect(static_cast<bool>(session.scheduler->register_binding("Add", [immediate](auth::BindingContext& context, const auth::ValueList& args) {
+                return immediate ? context.apply_immediate("add", args) : eawr::core::Result<auth::ValueList>::success({});
+            })), "register action");
+            if (immediate) expect(static_cast<bool>(session.scheduler->set_immediate_effect_host(host, 4)), "exception host");
+            for (const std::uint64_t id : {1U, 2U, 3U, 4U}) {
+                const char* module = id == 1 ? "Boom.lua" : id == 2 ? "Fine.lua" : id == 3 ? "Alloc.lua" : "Partial.lua";
+                expect(static_cast<bool>(session.scheduler->create_instance(id, module)), label + "create");
+            }
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            auto result = session.scheduler->service(executor);
+            expect(static_cast<bool>(result), label + "a binding exception does not fail the service");
+            if (!result) continue;
+            std::vector<std::string> commands;
+            for (const auto& command : result.value().commands) commands.push_back(text(command));
+            const auto thrown = std::count_if(result.value().diagnostics.begin(), result.value().diagnostics.end(), [](const auto& diagnostic) {
+                return diagnostic.code == auth::codes::script_error && diagnostic.message.find("binding failed on the host") != std::string::npos;
+            });
+            expect(thrown == 3, label + "each throwing instance has a diagnostic");
+            expect(result.value().removed_instances == std::vector<std::uint64_t>{1, 3, 4}
+                && commands == std::vector<std::string>{"2#0 report fine"},
+                label + "only the throwing instances end and their output is dropped: " + joined(commands));
+            expect(!immediate || host->state.balance == 1,
+                label + "the other instance's immediate write publishes and the failed instance's earlier write does not");
+            expect(static_cast<bool>(session.scheduler->service(executor)), label + "the next service runs");
+            if (baseline.empty()) baseline = commands;
+            expect(commands == baseline, label + "same result on every worker count");
         }
     }
     {
@@ -277,6 +399,150 @@ Register_Event('Bad', DispatchFailure)
         const auto rejected = session.scheduler->create_instance(1, "Main.lua");
         expect(!rejected && rejected.error().message.find(auth::codes::missing_api) != std::string::npos, "unconfigured profile fails explicitly");
     }
+}
+// Host-side work is charged and capped like script steps: a script cannot make the host copy, stage or scan without
+// bound inside one service. Each loop below ends in a fault diagnostic (never a session failure) within a fixed bound
+// counted in deterministic units, and the session serves the next tick.
+void host_work_contracts() {
+    const auto bind_host_bindings = [](Session& session) {
+        expect(static_cast<bool>(session.scheduler->register_binding("Emit", [](auth::BindingContext& context, const auth::ValueList& args) {
+            context.issue_command("emit", args);
+            return eawr::core::Result<auth::ValueList>::success({});
+        })), "register staging binding");
+        expect(static_cast<bool>(session.scheduler->register_binding("Sink", [](auth::BindingContext&, const auth::ValueList&) {
+            return eawr::core::Result<auth::ValueList>::success({});
+        })), "register argument sink");
+        expect(static_cast<bool>(session.scheduler->register_binding("Warn", [](auth::BindingContext& context, const auth::ValueList&) {
+            context.report(auth::codes::script_warning, "advisory");
+            return eawr::core::Result<auth::ValueList>::success({});
+        })), "register diagnostic binding");
+    };
+    // The scripts run in a thread of the instance: the fault is the service's, not a failed creation.
+    const auto in_thread = [](const std::string& body) { return "function main() " + body + " end Create_Thread('main')"; };
+    const auto faults_with = [&](const std::string& label, const std::string& source, std::string_view code) {
+        Session session = script_session(in_thread(source));
+        bind_host_bindings(session);
+        const auto created = run_script(session);
+        expect(created.empty(), label + ": " + created);
+        expect(session.removed == std::vector<std::uint64_t>{1}, label + ": the instance is removed");
+        expect(any_contains(session.diagnostics, code), label + ": " + std::string(code) + "\n" + joined(session.diagnostics));
+        expect(session.commands.empty(), label + ": the faulted service publishes nothing");
+        // The session is still usable.
+        const eawr::sim::InlineExecutor executor;
+        expect(static_cast<bool>(session.scheduler->service(executor)), label + ": the next service runs");
+    };
+    // A staging loop stops at the per-service cap, long before the instruction budget.
+    faults_with("command loop", "while true do Emit(1) end", auth::codes::logical_quota);
+    faults_with("post loop", "while true do Test_Signal(1, 0, 'Later') end", auth::codes::logical_quota);
+    faults_with("diagnostic loop", "while true do Warn() end", auth::codes::logical_quota);
+    // Bytes copied across the boundary are charged: a 1 MB name copied in a loop pays 1 MB of budget per call.
+    faults_with("large name loop", "local name = string.rep('x', 1048576) while true do Emit(name) end", auth::codes::instruction_budget);
+    faults_with("table argument loop", "local t = {} for i = 1, 1000 do t[i] = i end while true do Sink(t) end", auth::codes::instruction_budget);
+    // The cap is a count: a script under it is untouched.
+    {
+        Session session = script_session(in_thread("for i = 1, 4000 do Emit(i) end Test_Report('done')"));
+        bind_host_bindings(session);
+        expect(run_script(session).empty() && session.removed.empty() && session.commands.size() == 4001,
+            "4,000 staged commands fit the per-service cap\n" + joined(session.diagnostics));
+    }
+    // The cap boundary is exact: 4,096 staged commands fit, the 4,097th is the logical-quota fault, and so for 1,024 and
+    // 1,025 diagnostics.
+    {
+        Session session = script_session(in_thread("for i = 1, 4096 do Emit(i) end"));
+        bind_host_bindings(session);
+        expect(run_script(session).empty() && session.removed.empty() && session.commands.size() == 4096,
+            "exactly 4,096 staged commands fit\n" + joined(session.diagnostics));
+    }
+    faults_with("4,097 commands", "for i = 1, 4097 do Emit(i) end", auth::codes::logical_quota);
+    faults_with("1,025 diagnostics", "for i = 1, 1025 do Warn() end", auth::codes::logical_quota);
+    // A rollback after earlier admitted actions rebuilds the working copy by replaying them, and that rebuild is charged: one
+    // call adds 5,000 actions, then every failing call adds one more and rolls back to the 5,000, so a stream of failing calls
+    // ends at the budget (a few dozen rebuilds of 5,000 replays) before the 1,024-diagnostic cap.
+    {
+        Session session = make_session({{"Main.lua", "function Fill() for i = 1, 5000 do Add(1) end end function Bad() Add(1) error('x') end"}});
+        auto host = std::make_shared<WalletHost>();
+        expect(static_cast<bool>(session.scheduler->register_binding("Add", [](auth::BindingContext& context, const auth::ValueList& args) {
+            return context.apply_immediate("add", args);
+        })), "register rollback action");
+        expect(static_cast<bool>(session.scheduler->set_immediate_effect_host(host, 4)), "rollback host");
+        expect(static_cast<bool>(session.scheduler->create_instance(1, "Main.lua")), "rollback instance");
+        std::uint64_t sequence{};
+        const auto call = [&](const char* name) {
+            auth::ScriptEvent event; event.key = {1, auth::first_simulation_producer, 1, sequence++};
+            event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = name;
+            expect(static_cast<bool>(session.scheduler->submit_event(std::move(event))), "post rollback call");
+        };
+        call("Fill");
+        for (int index = 0; index < 1500; ++index) call("Bad");
+        const eawr::sim::InlineExecutor executor;
+        const auto report = session.scheduler->service(executor);
+        expect(report && report.value().removed_instances == std::vector<std::uint64_t>{1}
+            && std::any_of(report.value().diagnostics.begin(), report.value().diagnostics.end(),
+                [](const auto& row) { return row.code == auth::codes::instruction_budget; }),
+            "a rollback that replays 5,000 actions is charged: the failing-call stream ends at the budget");
+        expect(host->state.balance == 0, "and nothing of the faulted instance publishes");
+    }
+    // A refused action rebuilds the working copy too, and is priced by the copy it makes (not only by the actions it replays):
+    // with a copy that costs 100,000 units a loop of refusals ends within a few dozen of them.
+    {
+        Session session = script_session(in_thread("Add(1) while true do Count() pcall(Fail, 1) end"));
+        auto host = std::make_shared<WalletHost>();
+        static std::uint64_t refusals = 0;
+        refusals = 0;
+        expect(static_cast<bool>(session.scheduler->register_binding("Add", [](auth::BindingContext& context, const auth::ValueList& args) {
+            return context.apply_immediate("add", args);
+        })), "register refusal action");
+        expect(static_cast<bool>(session.scheduler->register_binding("Fail", [](auth::BindingContext& context, const auth::ValueList& args) {
+            return context.apply_immediate("fail", args);
+        })), "register refused action");
+        expect(static_cast<bool>(session.scheduler->register_binding("Count", [](auth::BindingContext&, const auth::ValueList&) {
+            ++refusals;
+            return eawr::core::Result<auth::ValueList>::success({});
+        })), "register refusal counter");
+        expect(static_cast<bool>(session.scheduler->set_immediate_effect_host(host, 4)), "refusal host");
+        WalletShadow::clone_weight = 100'000;
+        const auto created = run_script(session);
+        WalletShadow::clone_weight = 1;
+        expect(created.empty() && session.removed == std::vector<std::uint64_t>{1}
+            && any_contains(session.diagnostics, auth::codes::instruction_budget) && refusals >= 1 && refusals <= 41,
+            "refusals are priced by the copy they make: " + std::to_string(refusals) + " refusals\n" + joined(session.diagnostics));
+    }
+    // A query's scan is charged: a loop of queries that each report scanning many records ends at the budget.
+    {
+        Session session = script_session(in_thread("while true do Read() end"));
+        auto host = std::make_shared<WalletHost>();
+        expect(static_cast<bool>(session.scheduler->register_binding("Read", [](auth::BindingContext& context, const auth::ValueList& args) {
+            return context.query_immediate("credits", args);
+        })), "register scanning query");
+        expect(static_cast<bool>(session.scheduler->set_immediate_effect_host(host, 4)), "scan host");
+        WalletShadow::scan_cost = 100'000;
+        const auto created = run_script(session);
+        WalletShadow::scan_cost = 0;
+        expect(created.empty() && session.removed == std::vector<std::uint64_t>{1}
+            && any_contains(session.diagnostics, auth::codes::instruction_budget),
+            "a query loop that scans 100,000 records per call ends at the budget\n" + joined(session.diagnostics));
+    }
+    // A service of k immediate actions copies the shadow a fixed number of times, not k times.
+    std::vector<unsigned> copies;
+    for (const int actions : {100, 1000, 4000}) {
+        Session session = script_session(in_thread("for i = 1, " + std::to_string(actions) + " do Add(1) end Test_Report(Read())"));
+        auto host = std::make_shared<WalletHost>();
+        expect(static_cast<bool>(session.scheduler->register_binding("Add", [](auth::BindingContext& context, const auth::ValueList& args) {
+            return context.apply_immediate("add", args);
+        })), "register counting action");
+        expect(static_cast<bool>(session.scheduler->register_binding("Read", [](auth::BindingContext& context, const auth::ValueList& args) {
+            return context.query_immediate("credits", args);
+        })), "register counting query");
+        expect(static_cast<bool>(session.scheduler->set_immediate_effect_host(host, 4)), "counting host");
+        WalletShadow::clones = 0;
+        const auto created = run_script(session);
+        copies.push_back(WalletShadow::clones);
+        expect(created.empty() && session.commands == std::vector<std::string>{"1#0 report " + std::to_string(actions)}
+            && host->state.balance == actions, "the actions all land: " + joined(session.diagnostics));
+    }
+    expect(copies.size() == 3 && copies[0] == copies[1] && copies[1] == copies[2],
+        "the shadow is copied a fixed number of times however many actions a service takes: " + std::to_string(copies.at(0)) + ", "
+            + std::to_string(copies.at(1)) + ", " + std::to_string(copies.at(2)));
 }
 } // namespace
 
@@ -635,6 +901,7 @@ void object_turn_workers() {
 
 void run_scheduler() {
     immediate_contracts();
+    host_work_contracts();
     object_turn_contracts();
     const eawr::sim::InlineExecutor inline_executor;
     {

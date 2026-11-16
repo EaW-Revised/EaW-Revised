@@ -16,7 +16,9 @@ HARNESS = r'''
 #include "__HEADER__"
 #include "__CAMPAIGN_HEADER__"
 #include "__RESTORED_HEADER__"
+#include "__HANGAR_HEADER__"
 #include <iostream>
+#include <map>
 using namespace eawr;
 using namespace presentation;
 int main() {
@@ -128,6 +130,62 @@ int main() {
         "only the shortfall over the planned launch rows is added; purchases do not count as launch capacity");
     check(delta.fresh.size() == 2 && delta.fresh[0].second == "interceptor" && delta.fresh[1].first == 2,
         "only types the plan never named need a recipe read at load");
+    // #5097 PR 2: the hangars of ships queued, pooled or called in, planned once per owner, type and tech level.
+    {
+        std::map<std::string, CampaignWarmType> table{
+            {"carrier", {1, "carrier", {{"fighter", 12}, {"bomber", 6}, {"tender", 1}}}},
+            {"tender", {1, "tender", {{"drone", 4}}}}};
+        const auto lookup = [&](const sim::tactical::PlayerId owner, const std::string& type, const std::uint32_t tech)
+            -> std::optional<CampaignWarmType> {
+            const auto found = table.find(type);
+            if (found == table.end()) return std::nullopt;
+            auto hangar = found->second;
+            hangar.owner = owner;
+            if (tech >= 3) for (auto& [craft, count] : hangar.hangar) if (craft == "fighter") count = 20;
+            return hangar;
+        };
+        const std::map<std::pair<sim::tactical::PlayerId, std::string>, std::size_t> none;
+        auto warm = plan_hangar_warm({1, "carrier", 0}, lookup, none);
+        check(warm.complete && warm.wants.size() == 4 && warm.wants[0].craft == "fighter" && warm.wants[0].slots == 12
+            && warm.wants[1].craft == "bomber" && warm.wants[1].slots == 6 && warm.wants[2].craft == "tender"
+            && warm.wants[3].craft == "drone" && warm.wants[3].slots == 4 && warm.wants[3].owner == 1,
+            "a ship's hangar expands to every craft it launches, nested hangars included, in authored order");
+        const std::map<std::pair<sim::tactical::PlayerId, std::string>, std::size_t> some{{{1, "fighter"}, 12}, {{1, "bomber"}, 2}, {{2, "drone"}, 9}};
+        warm = plan_hangar_warm({1, "carrier", 0}, lookup, some);
+        check(warm.wants.size() == 3 && warm.wants[0].craft == "bomber" && warm.wants[0].have == 2 && warm.wants[0].slots == 6
+            && warm.wants[2].craft == "drone" && warm.wants[2].have == 0,
+            "slots that exist are not planned again, and another owner's slots do not count");
+        warm = plan_hangar_warm({1, "carrier", 3}, lookup, none);
+        check(warm.wants[0].craft == "fighter" && warm.wants[0].slots == 20, "the roster follows the owner's tech level");
+        warm = plan_hangar_warm({1, "carrier", 0}, lookup, none, 8);
+        check(warm.wants[0].slots == 8 && warm.wants[1].slots == 6, "one ship claims at most the slot cap per craft");
+        table["tender"].hangar = {{"carrier", 1}};
+        warm = plan_hangar_warm({1, "carrier", 0}, lookup, none);
+        check(!warm.complete && warm.wants.size() >= 3, "a cyclic hangar keeps its bounded prefix and says so");
+        warm = plan_hangar_warm({1, "frigate", 0}, lookup, none);
+        check(warm.complete && warm.wants.empty(), "a ship without a hangar plans nothing");
+        // A planning failure abandons the jobs: their tickets must go back, or the next recipe waits behind them for good.
+        struct FakeJob { std::uint64_t ticket{}; };
+        struct FakeScene {   // the scene's read-ahead: one ticket reads at a time, the oldest first
+            std::map<std::uint64_t, bool> tickets;
+            std::size_t released{};
+            bool ready(std::uint64_t ticket) const { return !tickets.empty() && tickets.begin()->first == ticket; }
+            void release(std::uint64_t ticket) { released += tickets.erase(ticket); }
+        } scene;
+        std::deque<FakeJob> jobs;
+        for (std::uint64_t ticket = 1; ticket <= 3; ++ticket) { scene.tickets[ticket] = true; jobs.push_back({ticket}); }
+        jobs.push_back({});   // a job that never started holds no ticket
+        scene.tickets[4] = true;
+        check(!scene.ready(4), "a later ticket waits while an older one is outstanding");
+        abandon_hangar_jobs(jobs, [&](std::uint64_t ticket) { scene.release(ticket); });
+        check(jobs.empty() && scene.released == 3 && scene.tickets.size() == 1, "abandoned jobs release exactly their tickets");
+        check(scene.ready(4), "the next recipe's ticket is ready once the abandoned ones are released");
+        std::deque<FakeJob> none_left;
+        abandon_hangar_jobs(none_left, [&](std::uint64_t) { check(false, "no job, no release"); });
+        HangarWarmSeen seen;
+        check(seen.note(1, 5, 0) && !seen.note(1, 5, 0) && seen.note(1, 5, 1) && seen.note(2, 5, 0) && seen.size() == 3,
+            "a ship type is planned once per owner and tech level");
+    }
     return failed;
 }
 '''
@@ -148,10 +206,19 @@ class ReserveWarmPlanner(unittest.TestCase):
             header = (ROOT / 'apps/viewer/src/reserve_warm_plan.hpp').as_posix()
             campaign_header = (ROOT / 'apps/viewer/src/campaign_warm_arrivals.hpp').as_posix()
             restored_header = (ROOT / 'apps/viewer/src/restored_roster_warm.hpp').as_posix()
-            source.write_text(HARNESS.replace('__HEADER__', header).replace('__CAMPAIGN_HEADER__', campaign_header).replace('__RESTORED_HEADER__', restored_header), encoding='utf-8')
+            hangar_header = (ROOT / 'apps/viewer/src/hangar_warm_plan.hpp').as_posix()
+            source.write_text(HARNESS.replace('__HEADER__', header).replace('__CAMPAIGN_HEADER__', campaign_header).replace('__RESTORED_HEADER__', restored_header).replace('__HANGAR_HEADER__', hangar_header), encoding='utf-8')
             compile_fixture(toolchain, source, executable)
             ran = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+
+    def test_planning_failure_hands_back_the_tickets(self):
+        # The production catch path must use the helper the harness exercises (a bare clear() leaks the scene's oldest ticket).
+        source = (ROOT / 'apps/viewer/src/live_session_fighters.cpp').read_text(encoding='utf-8')
+        catch = source[source.index('} catch (const std::bad_alloc&) {', source.index('void LiveSessionView::pump_hangar_warm')):]
+        catch = catch[:catch.index('return;')]
+        self.assertIn('abandon_hangar_jobs(hangar_warm_jobs_', catch)
+        self.assertNotIn('hangar_warm_jobs_.clear()', catch)
 
 
 if __name__ == '__main__':

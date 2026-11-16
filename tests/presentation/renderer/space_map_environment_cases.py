@@ -492,13 +492,13 @@ def test_planet_map_marker_models_are_not_environment(self):
     self.assertTrue(planets and all(item["status"] == "drawn" for item in planets), planets)
 
 
-def _place_at(self, ship):
+def _place_at(self, *ships):
     root = pathlib.Path(os.environ["EAWR_EAW_GAME_ROOT"])
+    places = [argument for ship in ships for argument in ("--eawr-space-place-at", ship)]
     with tempfile.TemporaryDirectory(prefix="eawr-death-star-") as temporary:
         code, result, _ = self._run(root, "data/art/maps/_space_planet_nalhutta_01.ted",
                                     pathlib.Path(temporary), "nalhutta",
-                                    ("--eawr-populate", "--eawr-map-effects", "off",
-                                     "--eawr-space-place-at", ship))
+                                    ("--eawr-populate", "--eawr-map-effects", "off", *places))
         self.assertEqual(code, 0, result["failure"])
     return result
 
@@ -519,6 +519,27 @@ def test_background_authored_space_unit_is_drawn_at_its_pose(self):
     surfaces = result["space"]["surfaces"]
     self.assertTrue(surfaces)
     self.assertFalse([item for item in surfaces if item["object"].lower() == "death_star_position"])
+
+
+@unittest.skipUnless(os.environ.get("EAWR_EAW_GAME_ROOT"),
+                     "set EAWR_EAW_GAME_ROOT for the Nal Hutta Death Star placement")
+def test_stock_planet_shaded_death_stars_draw_their_shells(self):
+    # The stock sphere shell and dish of both Death Stars use Planet.fx. The unit/prop route draws that
+    # material through the environment planet adapter (CEM-13): both shells and the dish are drawn and
+    # nothing is reported unsupported, skipped or failed. Before it only the alpha-blended girders of the
+    # second Death Star drew and the first drew nothing.
+    result = self._place_at("Death_Star@-1328,-762,-3100,0", "Death_Star_II@1328,762,-3100,0")
+    populate = result["populate"]
+    self.assertEqual(populate["placed_ships"], 2)
+    self.assertEqual(populate["upload_failures"], [])
+    ships = {item["object"].lower(): item for item in populate["placements"]
+             if item["object"].lower() in ("death_star", "death_star_ii")}
+    self.assertEqual(sorted(ships), ["death_star", "death_star_ii"], populate["placements"])
+    for name, item in ships.items():
+        self.assertEqual(item["role"], "drawn", name)
+        self.assertGreaterEqual(item["drawn_surfaces"], 2, name)
+        self.assertFalse([line for line in item["missing"]
+                          if "Planet.fx" in line or "planet_material_skipped" in line], (name, item["missing"]))
 
 
 @unittest.skipUnless(os.environ.get("EAWR_EAW_GAME_ROOT"),

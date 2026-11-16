@@ -8,12 +8,15 @@
 
 #include <array>
 #include <atomic>
+#include <cctype>
+#include <charconv>
 #include <cstdlib>
 #include <fstream>
 #include <span>
 #include <algorithm>
 #include <exception>
 #include <map>
+#include <system_error>
 #include <tuple>
 #include <utility>
 
@@ -182,6 +185,20 @@ core::Result<void> GameSession::Impl::story_notice(GameStoryNotice notice) {
     return core::Result<void>::success();
 }
 
+namespace {
+[[nodiscard]] bool is_objective_reward(std::string_view type) noexcept {
+    return type == "ADD_OBJECTIVE" || type == "REMOVE_OBJECTIVE" || type == "OBJECTIVE_COMPLETE" || type == "OBJECTIVE_FAILED"
+        || type == "UPDATE_OBJECTIVE" || type == "REMOVE_ALL_OBJECTIVES" || type == "ENABLE_OBJECTIVE_DISPLAY";
+}
+[[nodiscard]] std::string trimmed_token(const galactic::story::Triggered& record, std::size_t slot) {
+    if (slot >= record.reward_params.size() || record.reward_params[slot].empty()) return {};
+    auto text = record.reward_params[slot].front();
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) text.erase(text.begin());
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.pop_back();
+    return text;
+}
+} // namespace
+
 // The engine's queue is applied only here, at the end of the galaxy step's story service, never from inside a notice
 // (the world is mid-service then). A reward can notify the engine again (a tech change), so the queue is drained until
 // it is empty. A record already refused, or run by the engine itself, is only published.
@@ -206,8 +223,15 @@ core::Result<void> GameSession::Impl::apply_story_rewards() {
                 if (record.engine_applied) record.outcome = "applied by the engine";
                 else if (!record.refusal.empty()) record.outcome = "refused: " + record.refusal; // already diagnosed by the engine
                 else if (record.reward_type.empty()) record.outcome = "no reward";
+                else if (is_objective_reward(record.reward_type)) declined = !story_objective_request(record); // WST-47/65/66: story state, applied in a replay too like the holocron goals
+                else if (record.reward_type == "STORY_GOAL_COMPLETED" || record.reward_type == "REMOVE_STORY_GOAL")
+                    declined = !story_goal_request(record); // WST-47/58/68: holocron goal state, applied in a replay too
                 else if (replaying) record.outcome = "replayed from the native journal";
+                else if (record.reward_type == "LOAD_CAMPAIGN") declined = !campaign_switch_request(record); // WST-95: the host acts on it
+                else if (record.reward_type == "SCREEN_TEXT") declined = !story_text_request(record); // WST-48: the HUD shows the line
                 else if (record.reward_type == "FORCE_CLICK_GUI") declined = !force_click_request(record); // WST-75: the HUD owns the click
+                else if (record.reward_type == "FLASH_GUI" || record.reward_type == "LOCK_CONTROLS" || record.reward_type == "SCROLL_LOCK")
+                    declined = !story_hud_request(record); // WST-75: local HUD state, never simulation state
                 else if (!story_rewards || !executor) { record.outcome = "refused: no reward provider is bound"; declined = true; }
                 else {
                     world().note_native_output_published();
@@ -216,7 +240,10 @@ core::Result<void> GameSession::Impl::apply_story_rewards() {
                     record.outcome = applied.value().applied ? "applied" : "refused: " + applied.value().note;
                     declined = !applied.value().applied;
                 }
-                if (declined) { // once per reward type and reason, not once per event
+                if (declined && record.reward_type == "LOAD_CAMPAIGN") { // a script warning, once per reason
+                    auto text = campaign_switch_warning(record.outcome.substr(std::string_view("refused: ").size()));
+                    if (story_reported.insert(text).second) script_warnings.push_back(std::move(text));
+                } else if (declined) { // once per reward type and reason, not once per event
                     auto text = record.reward_type + " not applied: " + record.outcome.substr(std::string_view("refused: ").size());
                     if (story_reported.insert(text).second) story_notes.push_back(std::move(text));
                 }
@@ -256,6 +283,34 @@ void GameSession::Impl::apply_story_dialog(const galactic::story::Triggered& rec
         record.remove_after_viewed}, local, queue));
 }
 
+// WST-95: LOAD_CAMPAIGN (Reward_Param1 campaign, 2 side, 3 difficulty, 4 technology marker) only records the request. The
+// session never restarts itself: the request leaves in the step's output and the host settles it between ticks. A
+// multiplayer game refuses the reward; a request already pending keeps the first one.
+bool GameSession::Impl::campaign_switch_request(galactic::story::Triggered& record) {
+    if (world().multiplayer()) {
+        record.outcome = "refused: a multiplayer game cannot switch campaigns";
+        return false;
+    }
+    if (campaign_switch) {
+        record.outcome = "refused: a switch to campaign " + campaign_switch->campaign + " is already pending";
+        return false;
+    }
+    CampaignSwitchRequest request;
+    request.campaign = trimmed_token(record, 0);
+    request.side = trimmed_token(record, 1);
+    request.difficulty = trimmed_token(record, 2);
+    request.tech = trimmed_token(record, 3);
+    request.tick = tick + 1;
+    if (request.campaign.empty()) {
+        record.outcome = "refused: the reward names no campaign (Reward_Param1)";
+        return false;
+    }
+    campaign_switch = request;
+    campaign_switch_fresh = std::move(request);
+    record.outcome = "applied";
+    return true;
+}
+
 // WST-49/75: FORCE_CLICK_GUI names one HUD component (parameter 1). The click itself belongs to the local HUD, which
 // presses its own authored control and so sends the click on the seat's command stream like a human press; here the
 // request becomes a presentation event for the plot owner's seat. Local rendering input only: never saved, hashed or
@@ -273,6 +328,140 @@ bool GameSession::Impl::force_click_request(galactic::story::Triggered& record) 
     story_presentation.push_back({record.owner, st::ConsumerRequest{st::Consumer::gui, "FORCE_CLICK_GUI", {std::move(component)}}});
     record.outcome = "applied";
     return true;
+}
+
+// WST-47/65/66: the objective rewards change the plot owner's objective list (story state: saved in the owner tail,
+// outside the state digest like the holocron goals). Parameter 1 is the text identity (UPDATE_OBJECTIVE: 1 old, 2 new);
+// ENABLE_OBJECTIVE_DISPLAY: empty shows, integer zero hides, any other integer shows. A missing identity is refused with
+// the reason (the original does nothing); an identity that matches no entry changes nothing and is not an error.
+bool GameSession::Impl::story_objective_request(galactic::story::Triggered& record) {
+    namespace st = galactic::story;
+    st::ObjectiveReward reward;
+    const auto& type = record.reward_type;
+    const auto first = trimmed_token(record, 0);
+    if (type == "ADD_OBJECTIVE") { reward.action = st::ObjectiveAction::add; reward.objective.text_id = first; } // append, suggestion false
+    else if (type == "REMOVE_OBJECTIVE") { reward.action = st::ObjectiveAction::remove; reward.identity = first; }
+    else if (type == "OBJECTIVE_COMPLETE") { reward.action = st::ObjectiveAction::complete; reward.identity = first; }
+    else if (type == "OBJECTIVE_FAILED") { reward.action = st::ObjectiveAction::fail; reward.identity = first; }
+    else if (type == "UPDATE_OBJECTIVE") {
+        reward.action = st::ObjectiveAction::replace; reward.identity = first; reward.objective.text_id = trimmed_token(record, 1);
+        if (reward.objective.text_id.empty()) { record.outcome = "refused: UPDATE_OBJECTIVE needs the new identity as parameter 2"; return false; }
+    } else if (type == "REMOVE_ALL_OBJECTIVES") reward.action = st::ObjectiveAction::remove_all;
+    else {
+        reward.action = st::ObjectiveAction::display;
+        if (!first.empty()) {
+            std::int64_t value{};
+            const auto* end = first.data() + first.size();
+            const auto* begin = first.data() + (first.front() == '+' ? 1 : 0);
+            const auto [stop, error] = std::from_chars(begin, end, value);
+            if (error != std::errc{} || stop != end) { record.outcome = "refused: ENABLE_OBJECTIVE_DISPLAY needs an integer or nothing as parameter 1"; return false; }
+            reward.visible = value != 0;
+        }
+    }
+    if (reward.action != st::ObjectiveAction::remove_all && reward.action != st::ObjectiveAction::display && first.empty()) {
+        record.outcome = "refused: " + type + " needs a text identity as parameter 1";
+        return false;
+    }
+    auto at = story_goals.try_emplace(record.owner, record.owner).first;
+    StoryPresentationQueue queue(story_presentation);
+    record.outcome = at->second.apply(reward, queue) ? "applied" : "applied: no objective matched";
+    return true;
+}
+
+// WST-47/58/68: STORY_GOAL_COMPLETED marks the plot owner's holocron goal with the tag in parameter 1 completed (it is kept and
+// moves to the Completed tab); REMOVE_STORY_GOAL deletes it. The first exact tag match from the newest goal is used; a tag that
+// matches nothing changes nothing and is not an error (the original does nothing). An empty tag is refused with the reason.
+bool GameSession::Impl::story_goal_request(galactic::story::Triggered& record) {
+    namespace st = galactic::story;
+    const auto tag = trimmed_token(record, 0);
+    if (tag.empty()) { record.outcome = "refused: " + record.reward_type + " needs a goal tag as parameter 1"; return false; }
+    st::GoalReward reward;
+    reward.action = record.reward_type == "REMOVE_STORY_GOAL" ? st::GoalAction::remove : st::GoalAction::complete;
+    reward.tag = tag;
+    auto at = story_goals.try_emplace(record.owner, record.owner).first;
+    StoryPresentationQueue queue(story_presentation);
+    record.outcome = at->second.apply(reward, queue) ? "applied" : "applied: no goal matched";
+    return true;
+}
+
+// WST-48: SCREEN_TEXT is a request to the HUD for the plot owner's seat (local presentation, never saved, hashed or
+// replayed). Positional parameters 1 text id, 2 seconds, 3 object type for the text variable, 4 any text removes the
+// line, 5 teletype, 6 colour (three numbers), 7 style word; the HUD reads them, empty ones keep their defaults.
+bool GameSession::Impl::story_text_request(galactic::story::Triggered& record) {
+    namespace st = galactic::story;
+    std::vector<std::string> parameters;
+    for (std::size_t slot = 0; slot < 7; ++slot) parameters.push_back(trimmed_token(record, slot));
+    if (parameters.front().empty()) { record.outcome = "refused: SCREEN_TEXT needs a text id as parameter 1"; return false; }
+    story_presentation.push_back({record.owner, st::ConsumerRequest{st::Consumer::text, "SCREEN_TEXT", std::move(parameters)}});
+    record.outcome = "applied";
+    return true;
+}
+
+// WST-49/75: FLASH_GUI (parameter 1 the component name, optional parameter 2 an auxiliary string), LOCK_CONTROLS and
+// SCROLL_LOCK (parameter 1 an integer, zero unlocks, nonzero locks) are requests to the local HUD for the plot owner's
+// seat. Like FORCE_CLICK_GUI they are local presentation input: never saved, hashed or replayed, so a locked HUD or a
+// flashing button can never change a simulation result or consume Lua's random numbers. A request the original would not
+// act on (no component, no integer) is refused with the reason, never an abort; a component the HUD does not have is
+// reported by the HUD. DUAL_FLASH and the other WST-49 HUD rewards stay declined until their effects are read (WST-U09).
+bool GameSession::Impl::story_hud_request(galactic::story::Triggered& record) {
+    namespace st = galactic::story;
+    const auto trimmed = [](std::string text) {
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) text.erase(text.begin());
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.pop_back();
+        return text;
+    };
+    const auto first = [&](std::size_t slot) { return record.reward_params[slot].empty() ? std::string() : trimmed(record.reward_params[slot].front()); };
+    if (record.reward_type == "FLASH_GUI") {
+        auto component = first(0);
+        if (component.empty() || component.size() > galactic::max_gui_component_name) {
+            record.outcome = "refused: FLASH_GUI needs one component name as parameter 1";
+            return false;
+        }
+        std::vector<std::string> parameters{std::move(component)};
+        if (auto aux = first(1); !aux.empty()) parameters.push_back(std::move(aux));
+        story_presentation.push_back({record.owner, st::ConsumerRequest{st::Consumer::gui, "FLASH_GUI", std::move(parameters)}});
+    } else {
+        const auto text = first(0);
+        std::int64_t value{};
+        const auto* begin = text.data();
+        const auto* end = begin + text.size();
+        if (begin != end && *begin == '+') ++begin;
+        const auto [stop, error] = std::from_chars(begin, end, value);
+        if (text.empty() || error != std::errc{} || stop != end) {
+            record.outcome = "refused: " + record.reward_type + " needs an integer as parameter 1";
+            return false;
+        }
+        story_presentation.push_back({record.owner, st::ConsumerRequest{st::Consumer::control, record.reward_type, {value != 0 ? "1" : "0"}}});
+        // The lock belongs to the plot that set it; an explicit unlock from any plot clears the claim.
+        std::erase_if(story_locks, [&](const auto& held) { return std::get<0>(held) == record.owner && std::get<2>(held) == record.reward_type; });
+        if (value != 0) story_locks.emplace(record.owner, record.subplot, record.reward_type);
+    }
+    record.outcome = "applied";
+    return true;
+}
+
+// #236: a lock never outlives the plot that set it. When the plot has been suspended or is gone, the seat gets the same
+// release request an explicit unlock publishes (parameter 0), once. Local presentation, like the lock itself.
+void GameSession::Impl::release_ended_story_locks() {
+    namespace st = galactic::story;
+    if (story_locks.empty() || !story_engine) return;
+    const auto& plots = story_engine->state().subplots;
+    // A sub-plot whose script was retired (budget or quota fault) or had a thread end in an uncaught error will not
+    // unlock what it locked: the lock ends with the script (thread), like one whose plot ended. A script that merely
+    // finished keeps its plot's locks.
+    std::set<std::string> retired_plots = std::move(failed_story_plots);
+    failed_story_plots.clear();
+    if (scripts && story_scripts) {
+        for (const auto id : scripts->story_scheduler().retired_instances())
+            for (const auto& entry : story_scripts->entries())
+                if (entry.instance == id) retired_plots.insert(entry.subplot);
+    }
+    for (auto held = story_locks.begin(); held != story_locks.end();) {
+        const auto plot = std::find_if(plots.begin(), plots.end(), [&](const auto& row) { return row.name == std::get<1>(*held); });
+        if (plot != plots.end() && plot->active && !retired_plots.contains(std::get<1>(*held))) { ++held; continue; }
+        story_presentation.push_back({std::get<0>(*held), st::ConsumerRequest{st::Consumer::control, std::get<2>(*held), {"0"}}});
+        held = story_locks.erase(held);
+    }
 }
 
 core::Result<void> GameSession::Impl::forward_story_calls() {
@@ -313,7 +502,9 @@ core::Result<void> GameSession::Impl::service_story() {
         auto time = sim::math::Fixed::from_ratio(static_cast<std::int64_t>(clock.galactic_frame), galactic::galactic_frames_per_second);
         if (!time) return core::Result<void>::failure(time.error());
         if (auto served = story_engine->service(time.value(), clock.pause_depth != 0); !served) return served;
-        return apply_story_rewards();
+        if (auto applied = apply_story_rewards(); !applied) return applied;
+        release_ended_story_locks();
+        return core::Result<void>::success();
     };
     auto result = run();
     if (!result) output->record_fault();
@@ -403,7 +594,9 @@ core::Result<std::string> GameSession::Impl::native_hash() const {
         const auto* option = std::getenv("EAWR_GALACTIC_NATIVE_ORACLE"); return option ? std::string(option) : std::string{};
 #endif
     }();
-    if (!oracle_path.empty()) {
+    // Async AI step 2c-3 (R5): on the async schedule the full capture belongs to the ticks where the AI ran (its windows); the trace
+    // carries the tick, so a parent and a child trace line up on those. The synchronous reference schedule captures every tick.
+    if (!oracle_path.empty() && native_ai.state->oracle_capture_due(world().completed_tick())) {
         static std::atomic<std::uint64_t> sessions{};
         if (!native_oracle_session) native_oracle_session = sessions.fetch_add(1, std::memory_order_relaxed);
         auto captured = native_ai.state->capture(); if (!captured) return core::Result<std::string>::failure(captured.error());
@@ -715,6 +908,7 @@ BattleResult GameSession::Impl::result() const {
     out.conflict = conflict.id; out.winner = world.outcome()->winner;
     out.station_level = conflict.station_level;
     out.tactical_frames = world.completed_tick();
+    out.planet_destroyed = world.tsw_planet_destroyed();
     const auto units = world.units();
     for (const auto& force : conflict.forces) {
         const bool survived = (force.role == ForceRole::reinforcement && !child->killers.contains(force.id))
@@ -773,7 +967,7 @@ GameSession::GameSession(galactic::GalacticSession galaxy) : impl_(std::make_uni
         for (auto at = entries.first; at != entries.second; ++at)
             if (at->second.conflict.corruption_request == mission.request && at->second.conflict.corruption_mission)
                 return R::success(true); // the recorded tail owns admission and allocator reservation
-        if (!owner->corruption_mission_service || choice.mode != 2) return R::success(false); // M4 land/map builder seam
+        if (!owner->corruption_mission_service || choice.mode != 2) return R::success(false); // the space mission builder seam; land choices take the timed route (WGCH-198)
         auto built = owner->corruption_mission_service(*owner->world().snapshot(), mission, choice, owner->world().next_entity_id());
         if (!built) return R::failure(built.error());
         if (!built.value()) return R::success(false);
@@ -785,6 +979,14 @@ GameSession::GameSession(galactic::GalacticSession galaxy) : impl_(std::make_uni
         admission.conflict.corruption_request = mission.request;
         auto queued = owner->queue_conflict(std::move(admission.conflict), admission.arbitration);
         return queued ? R::success(true) : R::success(false); // WGCH-08: prepaid queue refusal, not campaign failure
+    });
+    impl_->world().set_corruption_mission_probe([owner = impl_.get()](const auto& choice, const std::optional<std::uint64_t> request) {
+        if (request) {
+            const auto entries = owner->replay_admissions.equal_range(owner->tick);
+            for (auto at = entries.first; at != entries.second; ++at)
+                if (at->second.conflict.corruption_request == *request && at->second.conflict.corruption_mission) return true;
+        }
+        return owner->corruption_mission_service && choice.mode == 2; // only the space mission seam is routed here; land is timed (WGCH-198)
     });
     impl_->world().set_corruption_completion_handler([owner = impl_.get()](galactic::PlanetId planet, galactic::corruption_fixture::Type old, galactic::corruption_fixture::Type next, galactic::CorruptionCompletionPhase phase, std::span<const galactic::PlanetAbilityEntitlements> entitlements) -> core::Result<void> {
         if (phase == galactic::CorruptionCompletionPhase::state_committed) {
@@ -946,15 +1148,16 @@ core::Result<void> GameSession::restore_galactic_ai(const GalacticAiSave& save) 
     return impl_->native_ai.state->restore(*save.state);
 }
 core::Result<void> GameSession::install_galactic_scripts(authoritative::ScriptScheduler ai,
-    authoritative::ScriptScheduler story, const std::optional<authoritative::GalacticScriptSave>& saved) {
+    authoritative::ScriptScheduler story, const std::optional<authoritative::GalacticScriptSave>& saved,
+    std::optional<authoritative::ScriptScheduler> objects) {
     if (impl_->scripts || impl_->failure || (!saved && impl_->tick != 0))
         return fail<void>("install galactic scripts once at creation or at a restored barrier");
     auto fresh = galactic::GalacticSession::create(impl_->galaxy.setup());
     if (!fresh) return core::Result<void>::failure(fresh.error());
     auto host = saved ? authoritative::ScriptedGalacticSession::restore_preserving(
                             impl_->galaxy, std::move(ai), std::move(story), *saved,
-                            impl_->conflict_pause || impl_->summary_conflict != 0 || impl_->child.has_value() || impl_->staged.has_value())
-                      : authoritative::ScriptedGalacticSession::create(std::move(fresh).value(), std::move(ai), std::move(story));
+                            impl_->conflict_pause || impl_->summary_conflict != 0 || impl_->child.has_value() || impl_->staged.has_value(), std::move(objects))
+                      : authoritative::ScriptedGalacticSession::create(std::move(fresh).value(), std::move(ai), std::move(story), std::move(objects));
     if (!host) return core::Result<void>::failure(host.error());
     if (!saved) host.value().parent_world() = std::move(impl_->galaxy);
     // WGP-146: bind service ownership to the adopted world as well as the shell.
@@ -992,8 +1195,9 @@ void GameSession::set_state_hasher(std::shared_ptr<sim::StateHasher> hasher) noe
 void GameSession::set_control_effects_handler(galactic::GalacticSession::ControlEffectsHandler handler) { impl_->control_observer = std::move(handler); }
 void GameSession::set_story_notice_handler(StoryNoticeHandler handler) { impl_->story_handler = std::move(handler); }
 void GameSession::set_story_identities(std::map<galactic::PlanetId, std::string> planets,
-    std::map<galactic::PlayerId, std::string> factions) {
+    std::map<galactic::PlayerId, std::string> factions, std::map<galactic::TypeId, std::string> types, std::set<galactic::TypeId> heroes) {
     impl_->story_planets = std::move(planets); impl_->story_factions = std::move(factions);
+    impl_->story_types = std::move(types); impl_->story_heroes = std::move(heroes);
 }
 std::vector<GameStoryNotice> GameTick::observer_story_notices(galactic::PlayerId player) const {
     std::vector<GameStoryNotice> notices;
@@ -1031,6 +1235,11 @@ core::Result<galactic::HeroSchedule> GameSession::schedule_hero_defeat(const gal
 void GameSession::set_hero_placement(galactic::HeroPlacement placement) { impl_->hero_placement = std::move(placement); }
 void GameSession::set_live_hero_returns(LiveHeroReturns services) { impl_->live_hero_returns = std::move(services); }
 void GameSession::set_story_rewards(StoryRewardApplier applier) { impl_->story_rewards = std::move(applier); }
+std::shared_ptr<GameSession::AiControlSwitch> GameSession::ai_control_switch_slot() { return impl_->ai_control_switch; }
+const std::optional<CampaignSwitchRequest>& GameSession::pending_campaign_switch() const noexcept { return impl_->campaign_switch; }
+std::optional<CampaignSwitchRequest> GameSession::settle_campaign_switch() noexcept {
+    return std::exchange(impl_->campaign_switch, std::nullopt);
+}
 const TacticalReturnState& GameSession::return_state() const noexcept { return impl_->return_state; }
 core::Result<std::vector<std::uint8_t>> GameSession::save_return_state() const {
     if (impl_->failure) return core::Result<std::vector<std::uint8_t>>::failure(*impl_->failure);
@@ -1344,6 +1553,73 @@ core::Result<void> GameSession::install_story(galactic::story::Config config, st
     auto engine = galactic::story::Engine::create(config, std::move(plots), std::move(subplots));
     if (!engine) return core::Result<void>::failure(engine.error());
     impl_->story_engine.emplace(std::move(engine).value());
+    // WST-31: jump arrivals and bounces reach the plots as STORY_ENTER / STORY_FLEET_BOUNCED, already in a fixed order;
+    // an arrival also reaches them once per hero in the fleet or its transports as STORY_MOVE (heroes in ascending type id).
+    // The world hook is installed only when a plot holds such an event, so a game without them pays nothing per arrival and
+    // publishes no notice for it.
+    const auto& installed = *impl_->story_engine;
+    if (installed.has_event_type("STORY_ENTER") || installed.has_event_type("STORY_MOVE") || installed.has_event_type("STORY_FLEET_BOUNCED")
+        || installed.has_event_type("STORY_INVASION_BOUNCED"))
+        impl_->world().set_fleet_story_handler([owner = impl_.get()](const galactic::GalacticSession::FleetStoryNotice& arrival) -> core::Result<void> {
+            const auto name = owner->story_planets.find(arrival.planet);
+            galactic::story::TravelNotice notice;
+            notice.kind = arrival.kind == galactic::GalacticSession::FleetStoryNotice::Kind::arrived
+                ? galactic::story::Travel::enter : galactic::story::Travel::fleet_bounced;
+            notice.planet = name == owner->story_planets.end() ? std::string{} : name->second;
+            notice.fleet.owner = arrival.owner; notice.fleet.stealth = arrival.stealth; notice.fleet.direct_members = arrival.direct_members;
+            if (arrival.cyclic) { // reported once, with the next step's diagnostics
+                std::string text = "a fleet's contents form a containment cycle (malformed data); the story saw each object once";
+                if (owner->story_reported.insert(text).second) owner->story_notes.push_back(std::move(text));
+            }
+            for (const auto type : arrival.types)
+                if (const auto known = owner->story_types.find(type); known != owner->story_types.end()) notice.fleet.types.push_back(known->second);
+            if (notice.kind != galactic::story::Travel::enter) return owner->story_notice({std::nullopt, std::move(notice), 0, 0, arrival.planet});
+            auto done = owner->story_notice({std::nullopt, notice, 0, 0, arrival.planet});
+            if (!done) return done;
+            std::vector<std::string> heroes; // STORY_MOVE: once per hero type; arrival.types is sorted and unique, so ascending id
+            for (const auto type : arrival.types) {
+                if (owner->story_heroes.count(type) == 0) continue;
+                if (const auto known = owner->story_types.find(type); known != owner->story_types.end()) heroes.push_back(known->second);
+            }
+            for (auto& moved : galactic::story::hero_moves(notice, heroes))
+                if (done = owner->story_notice({std::nullopt, std::move(moved), 0, 0, arrival.planet}); !done) return done;
+            return done;
+        });
+    // WST-33: a completed build reaches the plots as STORY_CONSTRUCT (every plot, the owner filter decides) and, for a
+    // starbase, as STORY_CONSTRUCT_LEVEL (the builder's plots). Installed only when a plot holds such an event.
+    if (installed.has_event_type("STORY_CONSTRUCT") || installed.has_event_type("STORY_CONSTRUCT_LEVEL"))
+        impl_->world().set_construct_story_handler([owner = impl_.get()](const galactic::GalacticSession::ConstructStoryNotice& built) -> core::Result<void> {
+            const auto name = owner->story_planets.find(built.planet);
+            const auto type = owner->story_types.find(built.type);
+            galactic::story::EconomyNotice notice;
+            const bool level = built.kind == galactic::GalacticSession::ConstructStoryNotice::Kind::base_level;
+            notice.kind = level ? galactic::story::Economy::construct_level : galactic::story::Economy::construct;
+            notice.value = level ? built.level : 1;
+            notice.type = type == owner->story_types.end() ? std::string{} : type->second;
+            notice.planet = name == owner->story_planets.end() ? std::string{} : name->second;
+            notice.base = built.space ? galactic::story::BaseKind::space : galactic::story::BaseKind::ground;
+            notice.object_owner = built.owner;
+            return owner->story_notice({level ? std::optional<galactic::PlayerId>{built.owner} : std::nullopt, std::move(notice), 0, 0, built.planet});
+        });
+    // WST-34: a battle loss reaches the plots as STORY_DESTROY once for the type and once more for the original type
+    // when they differ (every plot, the owner filter decides); WST-35: a lost named hero also reaches them as
+    // STORY_DEFEAT_HERO. Installed only when a plot holds one of those events.
+    if (installed.has_event_type("STORY_DESTROY") || installed.has_event_type("STORY_DEFEAT_HERO"))
+        impl_->world().set_loss_story_handler([owner = impl_.get()](const galactic::GalacticSession::LossStoryNotice& lost) -> core::Result<void> {
+            const auto name = owner->story_planets.find(lost.planet);
+            const auto type = owner->story_types.find(lost.type), original = owner->story_types.find(lost.original_type);
+            const auto text = [&](const auto& at) { return at == owner->story_types.end() ? std::string{} : at->second; };
+            for (auto& notice : galactic::story::destruction(text(type), text(original),
+                    name == owner->story_planets.end() ? std::string{} : name->second, lost.owner))
+                if (auto told = owner->story_notice({std::nullopt, std::move(notice), 0, 0, lost.planet}); !told) return told;
+            if (owner->story_heroes.count(lost.original_type) != 0 && original != owner->story_types.end()) {
+                galactic::story::LossNotice hero;
+                hero.kind = galactic::story::Loss::hero_defeat; hero.type = original->second; hero.object_owner = lost.owner;
+                hero.planet = name == owner->story_planets.end() ? std::string{} : name->second;
+                if (auto told = owner->story_notice({std::nullopt, std::move(hero), 0, 0, lost.planet}); !told) return told;
+            }
+            return core::Result<void>::success();
+        });
     // One line per loader note and engine refusal; refused or evaluator-less events are counted per kind and reason.
     impl_->story_notes = std::move(notes);
     for (const auto& row : impl_->story_engine->diagnostics())
@@ -1357,6 +1633,7 @@ const galactic::story::GoalsState* GameSession::story_goals(const galactic::stor
     const auto at = impl_->story_goals.find(owner);
     return at == impl_->story_goals.end() ? nullptr : &at->second.state();
 }
+const std::set<galactic::TypeId>& GameSession::story_heroes() const noexcept { return impl_->story_heroes; }
 const galactic::story::Engine* GameSession::story_engine() const noexcept {
     return impl_->story_engine ? &*impl_->story_engine : nullptr;
 }
@@ -1418,7 +1695,29 @@ core::Result<void> GameSession::connect_story_link(const std::shared_ptr<Galacti
         return fail<void>("the story link needs the installed plots and galactic schedulers");
     link->bind(impl_->story_engine->definitions(), std::make_unique<StoryScriptSink>(*impl_->story_engine, story_plot_applier(),
         [impl = impl_.get()] { impl->world().note_native_output_published(); }, std::weak_ptr<const bool>(impl_->story_plot_alive)));
-    impl_->scripts->set_story_command_committer([link](script::authoritative::ServiceReport& report) { return link->commit(report); });
+    impl_->scripts->set_story_command_committer([link, impl = impl_.get()](script::authoritative::ServiceReport& report) {
+        // A story script thread that ended in an error releases the control locks its plot set (the plot's own lock
+        // list is local presentation state; the failure list is deterministic, in ascending instance order).
+        if (!report.thread_failures.empty() && impl->story_scripts)
+            for (auto& plot : impl->story_scripts->subplots_of(report.thread_failures)) impl->failed_story_plots.insert(std::move(plot));
+        // legacy #6634: Letter_Box_In / Letter_Box_Out become a local presentation request for the calling plot's owner (the
+        // viewer draws the bands). Unhashed, unsaved and not made in a replay, like the other story HUD requests; the commands
+        // leave the report here, in command order, so the plot verbs below are unaffected.
+        std::erase_if(report.commands, [&](const script::authoritative::ScriptCommand& command) {
+            if (command.verb != verb_letter_box) return false;
+            const auto* direction = command.arguments.size() == 2 ? std::get_if<std::string>(&command.arguments[0].data) : nullptr;
+            const auto* seconds = command.arguments.size() == 2 ? std::get_if<std::string>(&command.arguments[1].data) : nullptr;
+            if (!direction || !seconds || !impl->story_scripts || !impl->story_engine || impl->world().replaying_native_effects()) return true;
+            const std::uint64_t issuer[]{command.issuer};
+            for (const auto& plot : impl->story_scripts->subplots_of(issuer))
+                for (const auto& definition : impl->story_engine->definitions())
+                    if (definition.name == plot)
+                        impl->story_presentation.push_back({definition.owner, galactic::story::ConsumerRequest{
+                            galactic::story::Consumer::camera, *direction == "in" ? "LETTER_BOX_IN" : "LETTER_BOX_OUT", {*seconds}}});
+            return true;
+        });
+        return link->commit(report);
+    });
     return core::Result<void>::success();
 }
 void GameSession::set_feedback_notice_handler(sim::galactic::GalacticSession::FeedbackNoticeHandler handler) {

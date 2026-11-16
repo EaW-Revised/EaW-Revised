@@ -40,13 +40,18 @@ class SpaceGraphicalCases:
         test_planet_map_marker_models_are_not_environment,
         _place_at,
         test_background_authored_space_unit_is_drawn_at_its_pose,
+        test_stock_planet_shaded_death_stars_draw_their_shells,
         test_ordinary_space_unit_is_not_a_background_scene_object,
         test_coruscant_default_pose_is_the_tactical_opening_pose,
         test_foc_reference_map_is_default_on_foc_install,
     )
 
     from space_map_sky_cases import (
+        test_primary_sky_texture_named_with_source_art_suffix_uses_the_shipped_dds,
+        test_primary_sky_texture_dotted_name_follows_the_first_dot_token_rule,
         test_synthetic_primary_sky_draws_each_surface_with_its_own_texture,
+        test_secondary_sky_authored_scale_changes_its_visible_contribution,
+        test_sky_between_old_and_retail_far_plane_is_drawn,
         test_rigid_parent_sky_moves_in_predeclared_regions_repeatably,
         test_texture_swap_changes_only_that_surface,
         test_negative_controls_invalidate_their_evidence,

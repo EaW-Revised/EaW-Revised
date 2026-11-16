@@ -1,5 +1,6 @@
 #include "eawr/units/simulation_model.hpp"
 #include "eawr/units/domain_tags.hpp"
+#include "eawr/assets/model_facts.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/vfs/vfs.hpp"
@@ -20,6 +21,9 @@
 #include <utility>
 
 namespace eawr::units {
+
+assets::Model simulation_projection(const assets::Model& full) { return assets::simulation_projection(full); }
+
 namespace {
 
 std::int64_t now_ns() { return core::host::monotonic_ns(); }
@@ -111,7 +115,8 @@ const assets::Model* SharedModelPreparation::model(const std::string_view logica
     // An initial entry decoded during gameplay has no stored hash; preserve the legacy lazy hash read for it.
     if (!digest.empty()) state_->digests.emplace(identity, std::move(digest));
     if (!full) { state_->failed.insert(identity); return nullptr; }
-    auto projected = simulation_projection(*full.value());
+    core::load_profile::Scope projection_scope(core::load_profile::Phase::model_projection);
+    auto projected = units::simulation_projection(*full.value());
     state_->stats.projection_bytes += assets::payload_capacity(projected).total_bytes();
     ++state_->stats.projections;
     return &state_->projected.emplace(identity, std::move(projected)).first->second;
@@ -135,32 +140,6 @@ SharedModelPreparation::Stats SharedModelPreparation::stats() const {
     if (result.bounded && !state_->window->active()) {
         result.bounded = false;
         result.fallback_reason = "a battle load ended the bound: new paths use full models; existing projections remain";
-    }
-    return result;
-}
-
-assets::Model simulation_projection(const assets::Model& full) {
-    assets::Model result;
-    result.source = full.source;
-    result.bones = full.bones;
-    for (const auto& mesh : full.meshes) {
-        if (!mesh.collidable) continue;
-        assets::Mesh kept;
-        kept.name = mesh.name;
-        kept.bounds_min = mesh.bounds_min;
-        kept.bounds_max = mesh.bounds_max;
-        kept.visible = mesh.visible;
-        kept.collidable = true;
-        kept.bone = mesh.bone;
-        kept.submeshes.reserve(mesh.submeshes.size());
-        for (const auto& submesh : mesh.submeshes) {
-            assets::Submesh part;
-            part.vertices = submesh.vertices;
-            part.indices = submesh.indices;
-            part.skin_bones = submesh.skin_bones;
-            kept.submeshes.push_back(std::move(part));
-        }
-        result.meshes.push_back(std::move(kept));
     }
     return result;
 }
@@ -269,7 +248,7 @@ void SimulationModelStore::decode(Slot& slot) {
             ++stats_.live_full;
             stats_.peak_full = std::max(stats_.peak_full, stats_.live_full);
         }
-        slot.model = std::make_unique<const assets::Model>(simulation_projection(decoded->value()));
+        slot.model = std::make_unique<const assets::Model>(units::simulation_projection(decoded->value()));
         decoded.reset();
         projected = true;
     }

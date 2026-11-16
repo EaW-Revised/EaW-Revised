@@ -70,6 +70,7 @@ BA-10 presentation policy: the stock numbers are authored values, with no source
 | BA-11 | A 3D sample's minimum distance is its `Volume_Saturation_Distance` times the saturation factor (at least 1), its maximum distance 15000, and the driver's rolloff factor the rolloff factor. The gain is Miles' inverse-distance law: 1 inside the minimum distance, then `min / (min + rolloff * (d - min))`. Past the maximum distance the sound is silent (library behaviour, unverified: MSS may hold the gain there instead; at 15000 it is already below 2 %). | AU-06, AU-09; MSS documentation |
 | BA-12 | The listener stands where the camera's view line meets the plane z = 60, pulled back along the line to `|camera z - 60|` from the camera when that point is farther. It faces the camera's forward flattened onto the plane (FoC passes up (0, 0, -1) to Miles' left-handed frame; the viewer keeps screen left on the left). During a cinematic it would be the camera itself (not used). | AU-10, AU-11, AU-12 |
 | BA-13 | A sound's volume is its drawn volume times the object's visibility (0 when fogged or hidden). While a speech stream is retained without an active GUI dialog, starting SFX gain is capped at 0.3 before category/master gain. Ongoing ordinary 2D and attached spatial gain writes apply the same ceiling; fixed-position spatial sounds keep their starting gain outside their separate fade path. WAV unit responses alone do not activate the cap. | AU-13; SND-61 |
+| BA-85 | **Project deviation (PA-01), not a retail rule.** A cue the project data marks never falls below a floor of -9 dB (0.355) on the BA-11 distance law, so a far arrival stays audible. The data (`apps/viewer/project/config/project-audio.xml`) holds the level (`Distance_Gain_Floor_Db`) and the marked SFX events (one `Distance_Gain_Floor_Event` per event name; the stock file marks `Unit_Ship_Hyperspace_Enter` and `Unit_Ship_Hyperspace_Exit`, the events behind the faction hyperspace arrival and exit cues). The code names no event: when it plays any event it asks the data for that event's floor, so the marking follows the data and a mod that renames its hyperspace events lists the new names. The floor applies after the distance law and before event volume and the BA-13 speech cap. It also holds past the maximum distance: BA-11's silence beyond 15000 units does not apply to a marked cue (stated rule, tested). `Max_Instances` (BA-05), priority (BA-09) and fog silence (BA-07) are unchanged. Reason: arrivals happen at the map edge, 6000 to 9000 units from the fight, where the law gives -17 to -21 dB (the sample itself is full scale); the floor only bites beyond about 3000 units. Only the arrival cue plays today; the exit cue (SND-70) is not implemented in tactical, so its marked event is inert until it is. A missing or invalid file turns the floor off and reports EAWR-AUDIO-0303. | Owner ruling in the ticket (legacy EAWR-5603): retail loudness is overruled for a clearly too quiet cue; measurement: 1900 u = -3.7 dB, 5000 u = -15 dB, 9000 u = -21 dB under BA-11 |
 
 ### Battle events
 
@@ -220,10 +221,17 @@ object do not restart it. The request has no owner gate; ordinary attached-sound
 visibility applies. Only loop events are admitted; their authored loop fade-in
 and fade-out times apply. The viewer follows its existing published beam state
 and uses the superlaser fire-delay seam, which does not model the original's
-attack-animation and fire-frame gate. Endpoint cancellation and
-simultaneous different-event interactions still need capture; stealth's nested
-activation cue has no verified caller and remains deferred. Evidence: debug build;
-WHE-26/27, WSPL-04, WLS-05, SND-04/11.
+attack-animation and fire-frame gate. Each handler stops the loop at both
+endpoints when the effect is removed (release, cancel, target loss) and while its service no longer
+admits the beam; the object holds one loop slot, so a repeated request for the same event does nothing.
+In the original, a request for a different loop event while the slot is busy stops the running loop
+and starts nothing until a release clears the slot (debug build; unverified in play: it needs two
+different loop events on one object, which no stock pairing is known to produce). The remake
+deliberately differs: `ability_loop_audio::reconcile` stops the old loop and starts the newest event
+in the same pass, the least visible choice. The tractor loop is requested only while the ability is on and enabled and
+the target is outside a nebula, which the simulation's own admission already enforces (WHZ-25).
+Stealth's nested activation cue is never played by the original (WST-14, EST-18). Evidence: debug build;
+WHE-26/27, WSPL-04, WLS-05, SND-04/11, EST-18.
 
 ### Ability payload cues and superweapon scope
 
@@ -231,7 +239,7 @@ WHE-26/27, WSPL-04, WLS-05, SND-04/11.
 |---|---|---|
 | BA-53 | A valid player confirmation of a targeted ability requests the first source object's `SFXEvent_Target_Ability`, attached to that source, rather than the target or terrain point. Arming, cancelling, deactivating and autofire changes do not request it. Invalid targeting uses BA-28. The event's authored 2D/3D mode, admission and sample rules remain in force. This acknowledgement precedes simulation success; it is not an activation notification for every affected unit or for AI/script beam commands. | debug build: targeted action acknowledgement; effective XML |
 | BA-54 | A successful spawned-object ability also requests its source's `SFXEvent_Target_Ability` on the source object, including script/AI activation. Owner deviation (2026-10-10): ability voice lines are heard only for the local player's orders, decided per viewer seat. The resolved event's `Localize`, `Is_Unit_Response_VO`, `Is_HUD_VO` or `Is_Ambient_VO` flags identify speech; other world/effect cues remain audible for AI. This applies to buzz droids, harmonic bomb, weaken enemy, cluster bomb, reveal ping, corrupt systems, blast and self-destruct start, including craft-authored cues used by squadron containers. Suppress this request if that same event is already playing anywhere, so player confirmation and the spawn do not double it. The viewer observes changes to the existing `started_tick` of HARMONIC_BOMB and WEAKEN_ENEMY through each retained logical snapshot; inactive instant slots still carry the birth. The zero-position fallback controls where the payload spawns, not where this cue attaches. | debug build: spawned-object ability execution; WHE-61; effective XML; owner ability-voice decision (legacy EAWR-2870) |
-| BA-55 | No implemented M2 action invokes cluster-bomb or maximum-firepower payload effects; point-laser defense is implemented (WLD-05, WLD-12: its zap sound is started on the Crusader at each shot it shoots down, its on/off voice lines are BA-52). Space stealth is implemented (WST-01 to WST-15); its on and off voice lines are the ordinary ability presentation and its reveal cue is WST-14, while the handler's own `SFXEvent_Activate` stays deferred (whether the handler plays it is not traced; the Vengeance authors it empty). Maximum-firepower authoring belongs to the land AT-AT; merely recognizing its nested type does not implement its action. Their effect cues have explicit deferred or land scope, rather than being treated as applied. None of the reachable nested concentrate/beam/ion payloads authors `SFXEvent_Activate`. | effective XML survey; implemented ability consumers in `src/sim/tactical/abilities.cpp` and `src/sim/tactical/session_step_commands.cpp`; debug-build payload type lookup |
+| BA-55 | No implemented M2 action invokes cluster-bomb or maximum-firepower payload effects; point-laser defense is implemented (WLD-05, WLD-12: its zap sound is started on the Crusader at each shot it shoots down, its on/off voice lines are BA-52). Space stealth is implemented (WST-01 to WST-15); its on and off voice lines are the ordinary ability presentation and its reveal cue is WST-14, and the handler's own `SFXEvent_Activate` is never played (WST-14, EST-18: the original's cloak handler requests no sound, so the Phantom's authored projectile-block event stays silent and the Vengeance's blank one is moot). Maximum-firepower authoring belongs to the land AT-AT; merely recognizing its nested type does not implement its action. Their effect cues have explicit deferred or land scope, rather than being treated as applied. None of the reachable nested concentrate/beam/ion payloads authors `SFXEvent_Activate`. | effective XML survey; implemented ability consumers in `src/sim/tactical/abilities.cpp` and `src/sim/tactical/session_step_commands.cpp`; debug-build payload type lookup |
 | BA-56 | TSW button feedback belongs to a tactical superweapon stage request. On an in-range, ready, destroyable-target power-up transition, activation voice and weapon power-up start as unattached SFX, followed by the authored music override. Approach, 60/30/15/5-second warnings and arrival in range use the local faction's speech entries, selected for the owner or enemy relationship. Special-weapon readiness is separate: after its ready frame, with battlefield special weapons enabled, local/allied sources use their own `SFXEvent_Special_Weapon_Ready`, else the local faction's indexed `SFXEvent_HUD_Special_Weapon_Ready`; enemies use the indexed enemy entry. Stock space skirmish authors planetary ion-cannon and hypervelocity use upgrades at higher station levels, and land has its own weapons. M2 has the superweapon option and purchase filtering, but no implemented weapon firing/readiness or TSW stage. Existing upgrade-completion audio remains BA-60; a purchase never synthesizes TSW power-up or a second readiness cue. | debug build: stage request, power-up, approach speech and special-weapon service routes; effective XML; current space command consumers |
 
 Reachable ability cue audit (effective XML, including the expanded M2 hero roster):
@@ -340,6 +348,7 @@ by the M2 viewer on the strength of their presence in the global registries.
 | ID | Rule | Evidence |
 |---|---|---|
 | BA-45 | The volume sliders (master, music, speech, SFX) start at 0.75, and a channel plays at its slider times the master's: every sound at 0.5625 of its data volume, so the data alone balances the SFX against the music. The viewer has no slider UI yet and plays the defaults: the 3D SFX, the unit responses and the music each go to their own bus at 0.75 into a mix bus at 0.75. A hard limiter at -0.3 dBFS on the mix bus is a viewer choice, not FoC's (Miles' clamping was not traced), for the rare peaks of many shots over loud music. | AU-30, AU-31 |
+| BA-46 | The tactical super weapon's music mode. The power-up of the super weapon (docs/behaviour/space-tactical-superweapon.md, TSW-15) starts the object's `TSW_MusicEvent_Activation_Start` event (a single non-looping track in stock). While the mode runs, neither the quiet count (BA-43) nor a weapon fire (BA-42) changes the music. When the activation track ends, the local faction's `Music_Event_Space_Battle_Super_Weapon` event takes over as the battle's music, looping through its files (BA-40), until a victory or defeat result replaces it; a faction without that tag goes straight to the battle playlist. When the super weapon battle track ends and does not loop, the music continues the way battle music does, from the battle playlist (a looping track loops; with no playlist the track repeats), and never ends in silence; the mode itself stays until a result, so the quiet count and the shots still do not pick the music. A second power-up (two super weapons) does not restart the mode. Unverified: the debug-build played runs saw the super weapon's battle music start about 570 frames after the click, which is the activation track's length as the remake plays it; what the original does when that track ends before the battle does (a return to ambient after peace, or a repeat) is not settled, so the remake keeps the battle music going from the playlist (coordinator decision 11-15). | Debug build (played run TSW-C4); XML (musicevents, factions). |
 
 <a id="viewer-notes-443"></a>
 
@@ -471,9 +480,27 @@ processing and notification; tactical tech completion requests neither (SND-68).
   Custom space map beds remain unverified; stock space has no configured bed (SND-47).
 - Exact backend panning law, distance/clipping parity and an audible retail loop/chain comparison
   remain unverified (SND-U02); lifecycle tests establish timing and stage order.
-- A volume slider UI (the defaults of BA-45 play) and the superweapon music override.
+- A volume slider UI (the defaults of BA-45 play). The super weapon's music mode (BA-46) keeps battle music (its own track, then the battle playlist) to the end of the battle.
 - BA-24's leader resolution reads `LiveSessionView::squadron_members()`, built once from the
   start's tick-zero squadrons (battle world UI and squadron selection): a squadron a spawner launches after tick zero (space-fighters
   FL rules) is not in that map yet, so selecting one plays no response line until the viewer tracks
   launched squadrons the same way the selection and world UI already need to (shared gap, not new
   here).
+
+### Cinematic focus and friendly control cues
+
+[BCAM-23](walks/battlecam.md) binds the focused subject's
+`SFXEvent_Engine_Cinematic_Focus_Loop` independently of ordinary engine loops.
+The presentation frame switches or clears the attached loop even when no
+logical tick advances; ordinary pause, fog and attached-source lifecycle
+admission still apply. A refused request is not retried while focus is unchanged.
+Both focus transitions request the authored ambient-moving event. Non-loop
+focus events are reported and silenced.
+
+[WHZ-48](walks/hazards.md) binds repeated faction type/event pairs for
+`SFXEvent_Tactical_Gain_Friendly_Control` and
+`SFXEvent_Tactical_Lose_Friendly_Control`. Capture completion uses the local
+faction and exact captured type, preserves first-match and blank-match silence,
+and gives an allied previous owner's loss precedence. The cue has no position.
+Build-pad HUD capture/loss playback remains a separate request. Space capture
+and the local battle camera are covered; land and enemy-control cues remain open.

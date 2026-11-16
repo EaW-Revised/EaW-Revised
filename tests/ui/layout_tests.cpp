@@ -657,6 +657,33 @@ void scroll_panel_contracts() {
     expect(layout::scroll_panel_layout({0, 0}, story).panel == PixelRect{}, "#6065: a zero viewport gives an empty layout");
 }
 
+// UI-B1: a state's art taller than the resting art grows round the rectangle's centre line.
+void button_art_contracts() {
+    const auto same = layout::button_art_band(32.0, 32.0);
+    expect(same.height == 32.0 && same.top == 0.0 && same.caption_height == 32.0,
+           "UI-B1: equal art draws on the rectangle and the caption centres in it (retail draws as before)");
+    const auto glow = layout::button_art_band(32.0, 64.0);
+    expect(glow.height == 64.0 && glow.top == -16.0 && glow.caption_height == 32.0,
+           "UI-B1: taller art grows equally above and below; the caption keeps the rectangle's height");
+    expect(near(glow.top + glow.height / 2.0, glow.caption_height / 2.0, 1e-9),
+           "UI-B1: the art's centre line is the caption's centre line");
+    const auto odd = layout::button_art_band(33.0, 64.0);
+    expect(near(odd.top, -15.5, 1e-9) && near(odd.top + odd.height / 2.0, 16.5, 1e-9),
+           "UI-B1: an odd size difference splits equally (half units)");
+    const auto smaller = layout::button_art_band(32.0, 16.0);
+    expect(smaller.height == 16.0 && smaller.top == 8.0 && smaller.caption_height == 32.0,
+           "UI-B1: a smaller state's art stays on the centre line");
+    const auto none = layout::button_art_band(32.0, 0.0);
+    expect(none.height == 32.0 && none.top == 0.0 && none.caption_height == 32.0,
+           "UI-B1: a state without art uses the resting height");
+    const auto bare = layout::button_art_band(0.0, 64.0);
+    expect(bare.height == 64.0 && bare.top == 0.0 && bare.caption_height == 64.0,
+           "UI-B1: with no resting art the state's art is the whole button and the caption centres in it");
+    const auto empty = layout::button_art_band(0.0, 0.0);
+    expect(empty.height == 0.0 && empty.top == 0.0 && empty.caption_height == 0.0, "UI-B1: no art at all draws nothing");
+}
+
+
 } // namespace
 
 void layout_contracts() {
@@ -768,7 +795,16 @@ void layout_contracts() {
         expect(clamped <= 80 && clamped > 0, "a popup also fits a smaller viewport");
         expect(layout::combo_popup_height(0, scale, 8, 15, 720) > 300 * scale,
             "controls with closed-only geometry keep a usable viewport-bounded list");
+        expect(layout::combo_popup_has_budget(95, scale, 8, 15) && !layout::combo_popup_has_budget(0, scale, 8, 15)
+            && !layout::combo_popup_has_budget(10, scale, 8, 15),
+            "UI-COMBO-01: a budget holding a complete row keeps the box height; none, or less, shrinks to the list");
+        expect(layout::combo_popup_height(10, scale, 8, 15, 720) > 300 * scale,
+            "a list rectangle that cannot hold one complete row is a closed box: viewport-bounded list");
+        const int stock = layout::combo_popup_height(115 - 20.0, scale, 8, 15, 720 * scale);
+        expect(stock > 15 * scale && stock <= 95 * scale && stock < 300 * scale,
+            "a combo without WS_VSCROLL keeps its authored list budget (no style gate in the builder)");
     }
+    button_art_contracts();
     command_bar_offset_contracts();
     reference_space_table();
     aspect_correct_table();

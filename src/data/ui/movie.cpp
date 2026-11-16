@@ -72,16 +72,27 @@ std::string_view to_string(const MovieFormat format) noexcept {
     return "unknown";
 }
 
-core::Result<HudMovie> resolve_hud_movie(const vfs::Vfs& filesystem, const std::string_view name) {
+namespace {
+// The selected declaration's fields, read while its document is alive.
+struct Declaration {
+    std::string file, alpha, offset;
+    bool cannot_skip{}, has_credits{};
+};
+bool authored_true(const std::string& value) {
+    return detail::iequals(value, "true") || detail::iequals(value, "yes") || value == "1";
+}
+core::Result<Declaration> declaration(const vfs::Vfs& filesystem, const std::string_view name) {
     const std::string registry(movies_xml_path);
     const auto record = filesystem.stat(registry);
     const auto bytes = filesystem.open(registry);
-    if (!record || !bytes) return failure(diagnostic_codes::movie_catalog, "movies.xml is missing", registry);
+    if (!record || !bytes) {
+        return core::Result<Declaration>::failure(failure(diagnostic_codes::movie_catalog, "movies.xml is missing", registry).error());
+    }
     auto parsed = parse_document(bytes.value(), record.value());
     if (!parsed) {
         core::Diagnostic error = parsed.error();
         error.code = std::string(diagnostic_codes::movie_catalog);
-        return core::Result<HudMovie>::failure(std::move(error));
+        return core::Result<Declaration>::failure(std::move(error));
     }
 
     pugi::xml_node selected;
@@ -91,15 +102,35 @@ core::Result<HudMovie> resolve_hud_movie(const vfs::Vfs& filesystem, const std::
         }
     }
     if (!selected) {
-        return failure(diagnostic_codes::movie_unknown, "movie \"" + std::string(name) + "\" is not declared",
-            registry, record.value().source_id);
+        return core::Result<Declaration>::failure(failure(diagnostic_codes::movie_unknown,
+            "movie \"" + std::string(name) + "\" is not declared", registry, record.value().source_id).error());
     }
 
-    const std::string file = child_text(selected, "Movie_File");
-    if (file.empty()) {
-        return failure(diagnostic_codes::movie_file, "movie \"" + std::string(name) + "\" names no Movie_File",
-            registry, record.value().source_id);
+    Declaration found;
+    found.file = child_text(selected, "Movie_File");
+    if (found.file.empty()) {
+        return core::Result<Declaration>::failure(failure(diagnostic_codes::movie_file,
+            "movie \"" + std::string(name) + "\" names no Movie_File", registry, record.value().source_id).error());
     }
+    found.alpha = child_text(selected, "Alpha");
+    found.offset = child_text(selected, "Commandbar_Offset");
+    found.cannot_skip = authored_true(child_text(selected, "Cannot_Skip"));
+    found.has_credits = authored_true(child_text(selected, "Has_Credits"));
+    return core::Result<Declaration>::success(std::move(found));
+}
+} // namespace
+
+core::Result<MovieDefinition> resolve_movie_definition(const vfs::Vfs& filesystem, const std::string_view name) {
+    auto found = declaration(filesystem, name);
+    if (!found) return core::Result<MovieDefinition>::failure(found.error());
+    return core::Result<MovieDefinition>::success(MovieDefinition{
+        std::string(name), std::move(found.value().file), found.value().cannot_skip, found.value().has_credits});
+}
+
+core::Result<HudMovie> resolve_hud_movie(const vfs::Vfs& filesystem, const std::string_view name) {
+    auto found = declaration(filesystem, name);
+    if (!found) return core::Result<HudMovie>::failure(found.error());
+    const std::string& file = found.value().file;
     auto source = filesystem.stat(file);
     const auto movie_bytes = filesystem.open(file);
     if (!source || !movie_bytes) {
@@ -117,9 +148,8 @@ core::Result<HudMovie> resolve_hud_movie(const vfs::Vfs& filesystem, const std::
             "movie \"" + movie.name + "\" is " + std::string(to_string(movie.format)) + ", not Bink 1",
             movie.source.canonical_path, movie.source.source_id);
     }
-    const std::string alpha = child_text(selected, "Alpha");
-    movie.alpha = detail::iequals(alpha, "true") || detail::iequals(alpha, "yes") || alpha == "1";
-    std::istringstream offset(child_text(selected, "Commandbar_Offset"));
+    movie.alpha = authored_true(found.value().alpha);
+    std::istringstream offset(found.value().offset);
     if (!(offset >> movie.offset_x >> movie.offset_y)) movie.offset_x = movie.offset_y = 0.0F;
 
     const auto& content = movie_bytes.value();

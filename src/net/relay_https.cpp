@@ -1,4 +1,5 @@
 #include "relay_https.hpp"
+#include "turn_lists.hpp"
 
 #include <algorithm>
 #include <array>
@@ -206,6 +207,99 @@ core::Result<HttpsResponse> https_request(const HttpsRequest& request, std::stop
         if (received.value() == TlsStep::closed) eof = true;
         else raw.append(reinterpret_cast<const char*>(buffer.data()), count);
     }
+}
+namespace {
+// "turn:a.b.c.d:port" -> address and port, for IPv4 entries only.
+bool ipv4_entry(const std::string& uri, std::string& address, std::uint16_t& port) {
+    if (!uri.starts_with("turn:") || uri.find('[') != std::string::npos) return false;
+    const auto colon = uri.rfind(':');
+    if (colon == std::string::npos || colon <= 5) return false;
+    unsigned parsed{};
+    const auto digits = uri.substr(colon + 1);
+    const auto converted = std::from_chars(digits.data(), digits.data() + digits.size(), parsed);
+    if (converted.ec != std::errc{} || converted.ptr != digits.data() + digits.size() || parsed == 0 || parsed > 65535) return false;
+    address = uri.substr(5, colon - 5); port = static_cast<std::uint16_t>(parsed);
+    return socket::numeric_ip(address, false);
+}
+std::optional<int> probe_ms(const RttProbe& probe, const std::string& uri, std::chrono::milliseconds cap, std::stop_token stop) {
+    std::string address; std::uint16_t port{};
+    if (!ipv4_entry(uri, address, port)) return std::nullopt;
+    const auto rtt = probe(address, port, cap, stop);
+    if (!rtt) return std::nullopt;
+    return static_cast<int>(std::max<std::int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(*rtt).count()));
+}
+} // namespace
+TurnStrings numeric_turn_credentials(const TurnStrings& listed, GnsTurnProvider provider, const TurnHostResolver& resolver,
+        std::chrono::milliseconds budget, std::stop_token stop, const RttProbe& probe, TurnOrder* order) {
+    const auto deadline = Clock::now() + budget;
+    const auto entries = gns_detail::turn_entries(listed.uri, listed.username, listed.password);
+    if (entries.empty()) return listed;
+    std::vector<gns_detail::TurnEntry> numeric;
+    std::vector<bool> cloudflare; // parallel to `numeric`: the entry came from a Cloudflare host name
+    for (const auto& entry : gns_detail::for_provider(entries, provider)) {
+        if (stop.stop_requested()) break;
+        const auto left = std::max(std::chrono::milliseconds{}, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()));
+        for (auto& uri : gns_detail::split_commas(numeric_turn_uris(entry.uri, resolver, left, stop))) {
+            const bool known = std::any_of(numeric.begin(), numeric.end(), [&](const auto& other) { return other.uri == uri; });
+            if (!uri.empty() && !known && numeric.size() < 8) {
+                numeric.push_back({std::move(uri), entry.username, entry.password});
+                cloudflare.push_back(gns_detail::cloudflare_server(entry.uri));
+            }
+        }
+    }
+    // The operator's own entries, taken before any reordering (the order inside a provider never changes).
+    std::string own_uris;
+    for (std::size_t i = 0; i < numeric.size(); ++i)
+        if (!cloudflare[i]) own_uris += (own_uris.empty() ? "" : ",") + numeric[i].uri;
+    if (provider == GnsTurnProvider::automatic && probe && !stop.stop_requested()
+        && std::find(cloudflare.begin(), cloudflare.end(), true) != cloudflare.end()
+        && std::find(cloudflare.begin(), cloudflare.end(), false) != cloudflare.end()) {
+        // Our server: its first IPv4 entry (coturn answers STUN on its TURN port). Cloudflare: its public STUN name.
+        std::string own_uri;
+        for (std::size_t i = 0; i < numeric.size(); ++i)
+            if (!cloudflare[i] && own_uri.empty()) own_uri = numeric[i].uri;
+        const auto left = std::max(std::chrono::milliseconds{}, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()));
+        const auto cloudflare_entries = gns_detail::split_commas(numeric_turn_uris("turn:stun.cloudflare.com:3478", resolver, left, stop));
+        const auto own = probe_ms(probe, own_uri, turn_probe_cap, stop);
+        const auto edge = probe_ms(probe, cloudflare_entries.empty() ? std::string{} : cloudflare_entries.front(), turn_probe_cap, stop);
+        TurnOrder result;
+        result.probed = true;
+        if (own) result.own_ms = *own;
+        if (edge) result.cloudflare_ms = *edge;
+        result.own_first = own ? (!edge || *own <= *edge + turn_own_bias.count()) : !edge;
+        if (!result.own_first) {
+            // Cloudflare's entries first; the order inside each provider stays.
+            std::vector<std::size_t> index(numeric.size());
+            for (std::size_t i = 0; i < index.size(); ++i) index[i] = i;
+            std::stable_partition(index.begin(), index.end(), [&](std::size_t i) { return cloudflare[i]; });
+            std::vector<gns_detail::TurnEntry> sorted;
+            for (const auto i : index) sorted.push_back(numeric[i]);
+            numeric = std::move(sorted);
+        }
+        if (order) *order = result;
+    }
+    if (order) { order->classified = true; order->own_uris = std::move(own_uris); }
+    TurnStrings result;
+    const auto same = [&](auto member) {
+        return std::all_of(numeric.begin(), numeric.end(), [&](const auto& entry) { return entry.*member == numeric.front().*member; });
+    };
+    for (std::size_t i = 0; i < numeric.size(); ++i) result.uri += (i ? "," : "") + numeric[i].uri;
+    if (!numeric.empty()) { result.username = numeric.front().username; result.password = numeric.front().password; }
+    if (!same(&gns_detail::TurnEntry::username)) {
+        result.username.clear();
+        for (std::size_t i = 0; i < numeric.size(); ++i) result.username += (i ? "," : "") + numeric[i].username;
+    }
+    if (!same(&gns_detail::TurnEntry::password)) {
+        result.password.clear();
+        for (std::size_t i = 0; i < numeric.size(); ++i) result.password += (i ? "," : "") + numeric[i].password;
+    }
+    return result;
+}
+void log_turn_order(const TurnOrder& order, const TurnLog& log) {
+    if (!order.probed || !log) return;
+    const auto rtt = [](int ms) { return ms < 0 ? std::string("no answer") : std::to_string(ms) + " ms"; };
+    log("turn", std::string("relay order: ") + (order.own_first ? "own first" : "cloudflare first")
+        + " (own " + rtt(order.own_ms) + ", cloudflare " + rtt(order.cloudflare_ms) + ")");
 }
 std::string numeric_turn_uris(std::string_view list, const TurnHostResolver& custom, std::chrono::milliseconds budget, std::stop_token stop) {
     const auto deadline = Clock::now() + budget;

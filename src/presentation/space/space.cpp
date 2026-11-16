@@ -299,6 +299,13 @@ assets::Vec4f meshgloss_fragment(const MeshGlossVertex& vertex, const assets::Ve
             vertex.diffuse.w};
 }
 
+assets::Vec3f unlit_meshgloss_gain(const MeshGlossMaterial& material) noexcept {
+    // Any normal, eye and position give the same answer under the unlit policy.
+    const MeshGlossVertex vertex = meshgloss_vertex(material, unlit_sky_policy(), {0.0F, 0.0F, 1.0F},
+                                                    {0.0F, 0.0F, 0.0F}, {0.0F, 0.0F, 1.0F});
+    return {2.0F * vertex.diffuse.x, 2.0F * vertex.diffuse.y, 2.0F * vertex.diffuse.z};
+}
+
 std::span<const MaterialRouteRow> meshadditive_material_routes() noexcept {
     static const std::vector<MaterialRouteRow> rows = [] {
         std::vector<MaterialRouteRow> result(material_routes().begin(), material_routes().end());

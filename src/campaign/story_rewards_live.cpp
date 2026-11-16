@@ -22,6 +22,8 @@ namespace {
 // Journal payloads of native effect kind 20 (story_reward): an operation byte, then little-endian fields.
 constexpr std::uint8_t op_spawn = 1;   // uint32 player, uint64 planet, uint64 type
 constexpr std::uint8_t op_credits = 2; // uint32 player, int64 Q24 raw amount
+constexpr std::uint8_t op_switch_control = 3; // uint32 player, uint32 type length, the type name's bytes (#6917)
+constexpr std::uint8_t op_planet_faction = 4; // uint32 new owner player, uint64 planet
 
 template<class T> core::Result<T> failure(std::string message) {
     core::Diagnostic d; d.code = std::string(gc::diagnostic_codes::invalid_setup);
@@ -74,6 +76,7 @@ struct Rewards {
     std::map<std::string, gc::PlanetId> planets; // upper-case planet name -> its first instance (lowest id)
     std::string good_side;                       // GameConstants Good_Side_Name (WST-64)
     std::shared_ptr<const StartingForceInputs> force; // rebuilt from the live authoring on first use
+    std::shared_ptr<GameSession::AiControlSwitch> ai_control; // filled when a native AI is installed (#6917)
 
     [[nodiscard]] std::optional<gc::TypeId> type(std::string_view name) const {
         const auto at = types.find(upper(trimmed(name)));
@@ -110,6 +113,8 @@ private:
     core::Result<Outcome> lock(gc::GalacticSession&, const st::Triggered&);
     core::Result<Outcome> tech(gc::GalacticSession&, const st::Triggered&, bool maximum_only);
     core::Result<Outcome> credits(gc::GalacticSession&, const st::Triggered&);
+    core::Result<Outcome> switch_control(gc::GalacticSession&, const st::Triggered&);
+    core::Result<Outcome> planet_faction(gc::GalacticSession&, const st::Triggered&);
     core::Result<std::optional<gc::PlanetId>> destination(const gc::GalacticSnapshot&, gc::PlayerId,
         std::optional<gc::PlanetId> named, std::string& reason) const;
     core::Result<bool> spawn_one(gc::GalacticSession&, gc::PlayerId, gc::PlanetId, gc::TypeId, const sim::PartitionExecutor&);
@@ -124,6 +129,8 @@ core::Result<Outcome> Rewards::apply(gc::GalacticSession& world, const st::Trigg
     if (kind == "SET_TECH_LEVEL") return tech(world, record, false);
     if (kind == "SET_MAX_TECH_LEVEL") return tech(world, record, true);
     if (kind == "CREDITS") return credits(world, record);
+    if (kind == "SWITCH_CONTROL") return switch_control(world, record);
+    if (kind == "PLANET_FACTION") return planet_faction(world, record);
     return declined("this reward type has no live owner yet");
 }
 
@@ -287,6 +294,50 @@ core::Result<Outcome> Rewards::credits(gc::GalacticSession& world, const st::Tri
     return applied();
 }
 
+// WST-42: PLANET_FACTION (1 planet, 2 faction; both required) gives the named planet to the named faction's player
+// after clearing its structures, starbase, previous owner's forces and political modifiers. Any planet and faction
+// the galaxy knows are valid: no name is special. An empty planet parameter is refused rather than guessed (its
+// event-object meaning is unverified, WST-U19). A request is journaled once it has applied, never when it was refused.
+core::Result<Outcome> Rewards::planet_faction(gc::GalacticSession& world, const st::Triggered& record) {
+    if (token(record, 0).empty() || token(record, 1).empty()) return declined("needs a planet and a faction (WST-42)");
+    const auto planet = planets.find(upper(token(record, 0)));
+    if (planet == planets.end()) return declined("planet " + std::string(token(record, 0)) + " is not in the galaxy");
+    const auto owner = player_of(token(record, 1));
+    if (!owner) return declined("no active player of faction " + std::string(token(record, 1)));
+    // Apply first and journal only what applied: a refused reward leaves no journal entry for a replay to trip over.
+    auto changed = world.set_planet_faction(planet->second, *owner);
+    if (!changed) return core::Result<Outcome>::failure(changed.error());
+    if (!changed.value()) return declined("the galaxy cannot give the planet away now: no political control for it, or a native barrier is open (WST-42)");
+    std::vector<std::uint8_t> bytes{op_planet_faction};
+    put(bytes, *owner, 4); put(bytes, planet->second, 8);
+    if (auto recorded = world.append_native_effect(gc::NativeEffectKind::story_reward, std::move(bytes)); !recorded)
+        return core::Result<Outcome>::failure(recorded.error());
+    return applied();
+}
+
+// WST-49/75 (SWITCH_CONTROL), WGS-136: parameter 1 the faction, 2 the AI player type name. The sim side only records the change and hands
+// it to the AI runtime, which applies it at its next window start; it never touches the AI's own state here. A faction without an
+// active player, a missing parameter, or no native AI installed leaves everything as it is (declined by name).
+core::Result<Outcome> Rewards::switch_control(gc::GalacticSession& world, const st::Triggered& record) {
+    if (token(record, 0).empty() || token(record, 1).empty()) return declined("needs a faction and an AI player type (WGS-136)");
+    const auto player = player_of(token(record, 0));
+    if (!player) return declined("no active player of faction " + std::string(token(record, 0)));
+    if (!ai_control || !*ai_control) return declined("no native AI is installed");
+    const std::string type(token(record, 1));
+    if (type.size() > 256) return declined("the AI player type name is too long");
+    // A declined switch changed nothing, so it leaves no journal entry; an accepted one is journaled right after the hand-over, within the
+    // same reward, so a replay that binds the slot hands the same change over in the same order.
+    auto handed = (*ai_control)(*player, type);
+    if (!handed) return core::Result<Outcome>::failure(handed.error());
+    if (!handed.value().empty()) return declined(std::move(handed).value());
+    std::vector<std::uint8_t> bytes{op_switch_control};
+    put(bytes, *player, 4); put(bytes, type.size(), 4);
+    bytes.insert(bytes.end(), type.begin(), type.end());
+    if (auto recorded = world.append_native_effect(gc::NativeEffectKind::story_reward, std::move(bytes)); !recorded)
+        return core::Result<Outcome>::failure(recorded.error());
+    return applied();
+}
+
 core::Result<void> Rewards::replay(gc::GalacticSession& world, const gc::NativeEffect& effect, const sim::PartitionExecutor& executor) {
     Cursor in{effect.payload};
     std::uint64_t op{}, player{}, a{}, b{};
@@ -301,12 +352,30 @@ core::Result<void> Rewards::replay(gc::GalacticSession& world, const gc::NativeE
         if (!in.read(a, 8) || !in.done()) return failure<void>("invalid story credits journal");
         return credit(world, static_cast<gc::PlayerId>(player), Fixed::from_raw(static_cast<std::int64_t>(a)));
     }
+    if (op == op_planet_faction) {
+        if (!in.read(a, 8) || !in.done()) return failure<void>("invalid story planet faction journal");
+        auto changed = world.set_planet_faction(a, static_cast<gc::PlayerId>(player));
+        return changed ? core::Result<void>::success() : core::Result<void>::failure(changed.error());
+    }
+    if (op == op_switch_control) {
+        if (!in.read(a, 4)) return failure<void>("invalid story control-switch journal");
+        const auto size = static_cast<std::size_t>(a);
+        if (size > 256 || size != effect.payload.size() - in.at) return failure<void>("invalid story control-switch journal");
+        const std::string type(reinterpret_cast<const char*>(effect.payload.data()) + in.at, size);
+        // The journal carries the AI's decisions: a pure replay (no native AI bound) applies nothing; a bound runtime takes the
+        // change through its own inbox like a live reward.
+        if (ai_control && *ai_control) {
+            auto handed = (*ai_control)(static_cast<gc::PlayerId>(player), type);
+            if (!handed) return core::Result<void>::failure(handed.error());
+        }
+        return core::Result<void>::success();
+    }
     return failure<void>("unknown story reward journal operation");
 }
 } // namespace
 
 core::Result<void> bind_story_rewards(GameSession& game, const CampaignSetupPlan& plan, const data::galactic::GalacticData& data) {
-    auto state = std::make_shared<Rewards>(Rewards{plan, {}, {}, {}, {}});
+    auto state = std::make_shared<Rewards>(Rewards{plan, {}, {}, {}, {}, game.ai_control_switch_slot()});
     for (const auto& binding : plan.type_bindings()) state->types.emplace(upper(binding.original_type), binding.id);
     for (const auto& location : plan.locations()) {
         if (!location.planet) continue;

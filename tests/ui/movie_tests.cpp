@@ -40,6 +40,9 @@ void synthetic() {
   <Movie Name="Bink2"><Movie_File>Data\Art\Movies\Binked\two.bk2</Movie_File></Movie>
   <Movie Name="Theora"><Movie_File>Data\Art\Movies\Binked\named.bik</Movie_File></Movie>
   <Movie Name="Junk"><Movie_File>Data\Art\Movies\Binked\junk.bik</Movie_File></Movie>
+  <Movie Name="Roll"><Movie_File>Data\Art\Movies\Binked\absent.bik</Movie_File><Has_Credits> true </Has_Credits></Movie>
+  <Movie Name="Locked"><Movie_File>Data\Art\Movies\Binked\plain.bik</Movie_File><Cannot_Skip>Yes</Cannot_Skip>
+    <Has_Credits>false</Has_Credits></Movie>
 </Movies>)");
     test::ui::write_text(tree.root / "parent/art/movies/binked/portrait.bik", "BIKi parent bytes");
     test::ui::write_text(tree.root / "leaf/art/movies/binked/portrait.bik", "BIKi leaf bytes");
@@ -110,6 +113,22 @@ void synthetic() {
         expect(fails_with(ui::resolve_hud_movie(chain.value(), name), ui::diagnostic_codes::movie_format),
             std::string(name) + ": a file that is not Bink 1 is EAWR-UI-0704, whatever its extension");
     }
+
+    // WGP-107..110: the full-screen request's declaration, without opening the file.
+    const auto roll = ui::resolve_movie_definition(chain.value(), "roll");
+    expect(roll && roll.value().has_credits && !roll.value().cannot_skip
+            && roll.value().file == R"(Data\Art\Movies\Binked\absent.bik)",
+        "a padded Has_Credits reads true; the declaration does not need the file");
+    const auto locked = ui::resolve_movie_definition(chain.value(), "Locked");
+    expect(locked && locked.value().cannot_skip && !locked.value().has_credits, "Cannot_Skip Yes reads true");
+    const auto plain_definition = ui::resolve_movie_definition(chain.value(), "Plain");
+    expect(plain_definition && !plain_definition.value().cannot_skip && !plain_definition.value().has_credits,
+        "absent flags are false");
+    const auto undeclared = ui::resolve_movie_definition(chain.value(), "Unknown");
+    expect(!undeclared && undeclared.error().code == ui::diagnostic_codes::movie_unknown, "an undeclared name is EAWR-UI-0702");
+    const auto empty_definition = ui::resolve_movie_definition(chain.value(), "Empty");
+    expect(!empty_definition && empty_definition.error().code == ui::diagnostic_codes::movie_file,
+        "an empty Movie_File is EAWR-UI-0703");
 
     test::ui::write_text(tree.root / "broken/xml/movies.xml", "<Movies><Movie Name=\"x\">");
     const std::array broken{vfs::MountSpec{"broken", tree.root / "broken", "data", {}}};

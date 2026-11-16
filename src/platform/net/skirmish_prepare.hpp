@@ -4,6 +4,7 @@
 #include "eawr/units/unit_tables.hpp"
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <set>
 namespace eawr::scene { class ModelPrefetch; }
@@ -35,34 +36,39 @@ struct PreparedSkirmish {
     PreparedSkirmish& operator=(const PreparedSkirmish&) = delete;
 };
 [[nodiscard]] std::optional<units::UnitTables> load_start_tables(const vfs::Vfs&, const data::Catalog&,
-    std::string& failure, const std::string& map, const std::set<std::string>& additional_types = {},
+    std::string& failure, const std::string& map,
+    bool use_model_facts, // required: false for every multiplayer entry (the model facts store is neither read nor written)
+    const std::set<std::string>& additional_types = {},
     scene::ModelPrefetch* prefetch = nullptr, // prefetch: decode-ahead for the unit models, attract load only
     const std::atomic<bool>* cancel = nullptr); // cancel: the attract worker's stop flag (the load fails as cancelled)
 using skirmish::missing_start_types;
-[[nodiscard]] core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture&, const vfs::Vfs&, const data::Catalog&);
+[[nodiscard]] core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture&, const vfs::Vfs&, const data::Catalog&,
+    bool use_model_facts); // required, as for load_start_tables
 // The same preparation from unit tables and a data identity the caller already built: the tables are the default (pinned
 // M2) closure of `fixture.map`, `identity` is read_data_identity of the same Vfs. Reloads the tables only for the
 // starting types they lack.
 [[nodiscard]] core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture&, const vfs::Vfs&, const data::Catalog&,
-    units::UnitTables tables, const skirmish::DataIdentity& identity);
+    units::UnitTables tables, const skirmish::DataIdentity& identity, bool use_model_facts);
 [[nodiscard]] core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture&, units::UnitTables, skirmish::StartInputs);
 // A saved skirmish battle prepared once: the recorded fixture and its tables, inputs and start. The viewer's queue step
 // validates it, then hands it to the battle's first load stage, which takes it instead of building all of it again. The
 // stage takes it only for the same mounted Vfs/Catalog instance and the same save path (the exact inputs), never across
-// mod chains.
+// mod chains. The preparation owns the Vfs and Catalog it was built from, so their addresses cannot be freed and reused by
+// another mount while a preparation that names them is alive.
 struct SavedBattlePreparation final {
     skirmish::Fixture fixture;
     PreparedSkirmish prepared;
-    const vfs::Vfs* filesystem{};
-    const data::Catalog* catalog{};
+    std::shared_ptr<const vfs::Vfs> filesystem;
+    std::shared_ptr<const data::Catalog> catalog;
     std::string save_path; // UTF-8 path of the save it was built from; set by the owner of the queue step
     bool consumed{};
-    SavedBattlePreparation(skirmish::Fixture recorded, PreparedSkirmish built, const vfs::Vfs& files, const data::Catalog& types)
-        : fixture(std::move(recorded)), prepared(std::move(built)), filesystem(&files), catalog(&types) {}
+    SavedBattlePreparation(skirmish::Fixture recorded, PreparedSkirmish built, std::shared_ptr<const vfs::Vfs> files,
+        std::shared_ptr<const data::Catalog> types)
+        : fixture(std::move(recorded)), prepared(std::move(built)), filesystem(std::move(files)), catalog(std::move(types)) {}
 };
 // Builds the unit tables and the data identity once for a saved battle's setup (docs: the saved-battle load path).
-[[nodiscard]] core::Result<SavedBattlePreparation> prepare_saved_battle(const vfs::Vfs&, const data::Catalog&,
-    const sim::tactical::TacticalSetup& setup);
+[[nodiscard]] core::Result<SavedBattlePreparation> prepare_saved_battle(std::shared_ptr<const vfs::Vfs>,
+    std::shared_ptr<const data::Catalog>, const sim::tactical::TacticalSetup& setup);
 // How often this process built the pieces prepare_skirmish and prepare_saved_battle share: the default unit tables, the
 // tables extended with missing starting types, and the data identity (a hash of every mounted XML and Lua file).
 // Diagnostics and a contract test counter; never part of a result.

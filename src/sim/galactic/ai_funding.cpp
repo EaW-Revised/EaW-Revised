@@ -33,7 +33,7 @@ struct Arithmetic {
 };
 Amount positive(Amount value) { return std::max(zero, value); }
 bool references_valid(const Ledger& l) {
-    if (l.dead_budget < zero || l.last_service_income < zero) return false;
+    if (l.dead_budget < zero) return false;
     for (const auto& [id, g] : l.goals) {
         if (!l.categories.contains(g.category) || l.dead_goals.contains(id)) return false;
     }
@@ -339,7 +339,9 @@ core::Result<Ledger> fiscal(Ledger l, Amount actual_credits, Amount income, Amou
     Arithmetic a;
     if (!references_valid(l)) return a.fail<Ledger>(diagnostic_codes::invalid_state, "invalid goal/category references");
     if (seconds <= zero) return a.finish(std::move(l)); // WGA-13
-    if (actual_credits < zero || income < zero) return a.fail<Ledger>(diagnostic_codes::negative_input, "negative fiscal input");
+    // CGS-19: the income is signed (a negative Planet_Credit_Value makes a negative total) and debits the account; only the
+    // resulting balance, which the owner floors at zero before it reaches the ledger, is never negative.
+    if (actual_credits < zero) return a.fail<Ledger>(diagnostic_codes::negative_input, "negative fiscal balance");
     l.last_interval = seconds;
     l.last_service_income = a.quotient(income, seconds); // WGA-293
     const auto funding = distribute(l, income, a, true);
@@ -350,6 +352,9 @@ core::Result<Ledger> fiscal(Ledger l, Amount actual_credits, Amount income, Amou
             (void)gid;
             if (g.category != id) continue;
             auto increment = a.times(funding.at(id), a.quotient(g.reserved_income, reserved));
+            // Retail clamps a goal's per-cycle increment at zero before the minimum step, so a negative income (CGS-19) debits the
+            // category cash but never takes a goal's accumulated income below zero.
+            increment = std::max(increment, zero);
             if (increment > zero) increment = std::max(increment, a.checked(Amount::from_ratio(1, 10000)));
             g.accumulated = a.plus(g.accumulated, increment);
             g.cost = std::max(g.cost, g.marked);

@@ -35,6 +35,17 @@ void sandbox_charge_steps(lua_State* L, ::eawr::script::sflua_metering::StepUnit
 
 #define METER(ms, units) sandbox_charge_steps((ms)->L, static_cast<::eawr::script::sflua_metering::StepUnits>(units))
 
+// Recursion depth of the matcher. Every nesting level is a C frame, and the
+// instruction budget alone allows far more levels than a worker thread's stack
+// holds, so the depth is bounded too: a deterministic count of levels (never a
+// stack measurement), the same on every target. The state is the upstream
+// MatchState plus the counter; each matcher entry point below builds one.
+static const int METERED_MAX_MATCH_DEPTH = 200;
+
+struct MeteredMatchState : MatchState {
+  int depth;
+};
+
 static const char *metered_match (MatchState *ms, const char *s, const char *p);
 
 
@@ -122,7 +133,20 @@ static const char *metered_match_capture (MatchState *ms, const char *s, int l) 
 }
 
 
+static const char *metered_match_level (MatchState *ms, const char *s, const char *p);
+
 static const char *metered_match (MatchState *ms, const char *s, const char *p) {
+  MeteredMatchState *state = static_cast<MeteredMatchState *>(ms);
+  if (state->depth >= METERED_MAX_MATCH_DEPTH)
+    luaL_error(ms->L, "pattern too complex");
+  state->depth++;
+  const char *res = metered_match_level(ms, s, p);
+  state->depth--;
+  return res;
+}
+
+
+static const char *metered_match_level (MatchState *ms, const char *s, const char *p) {
   init: /* using goto's to optimize tail recursion */
   METER(ms, 1);
   switch (*p) {
@@ -240,7 +264,7 @@ static int metered_str_find (lua_State *L) {
     }
   }
   else {
-    MatchState ms;
+    MeteredMatchState ms;
     int anchor = (*p == '^') ? (p++, 1) : 0;
     const char *s1=s+init;
     ms.L = L;
@@ -249,6 +273,7 @@ static int metered_str_find (lua_State *L) {
     do {
       const char *res;
       ms.level = 0;
+      ms.depth = 0;
       if ((res=metered_match(&ms, s1, p)) != NULL) {
         lua_pushnumber(L, (lua_Number)(s1-s+1));  /* start */
         lua_pushnumber(L, (lua_Number)(res-s));   /* end */
@@ -262,7 +287,7 @@ static int metered_str_find (lua_State *L) {
 
 
 static int metered_gfind_aux (lua_State *L) {
-  MatchState ms;
+  MeteredMatchState ms;
   const char *s = lua_tostring(L, lua_upvalueindex(1));
   size_t ls = lua_strlen(L, lua_upvalueindex(1));
   const char *p = lua_tostring(L, lua_upvalueindex(2));
@@ -275,6 +300,7 @@ static int metered_gfind_aux (lua_State *L) {
        src++) {
     const char *e;
     ms.level = 0;
+    ms.depth = 0;
     if ((e = metered_match(&ms, src, p)) != NULL) {
       int newstart = (int)(e-s);
       if (e == src) newstart++;  /* empty match? go at least one position */
@@ -355,7 +381,7 @@ static int metered_str_gsub (lua_State *L) {
   int max_s = luaL_optint(L, 4, srcl+1);
   int anchor = (*p == '^') ? (p++, 1) : 0;
   int n = 0;
-  MatchState ms;
+  MeteredMatchState ms;
   luaL_Buffer b;
   luaL_argcheck(L,
     lua_gettop(L) >= 3 && (lua_isstring(L, 3) || lua_isfunction(L, 3)),
@@ -367,6 +393,7 @@ static int metered_str_gsub (lua_State *L) {
   while (n < max_s) {
     const char *e;
     ms.level = 0;
+    ms.depth = 0;
     e = metered_match(&ms, src, p);
     if (e) {
       n++;

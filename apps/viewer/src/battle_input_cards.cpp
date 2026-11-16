@@ -70,6 +70,7 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
     }
     if (card_slots_ == 0 || (selection_.empty() && !inspect_) || !latest || tables == nullptr) {
         build_buttons_.clear();
+        build_diagnostics_.clear();
         pad_palette_.close();
         ability_bar_ = {};
         return;
@@ -115,15 +116,30 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
                 for (std::size_t queue = 0; queue < sizes.size(); ++queue) sizes[queue] = economy->queues[queue].size();
             }
             production_station_ = entity;
+            // One state query per entry (the button layout needs it anyway); the report keeps the answer by entry.
+            build_diagnostics_.assign(menu->options.size(), {});
             ui::update_build_buttons(build_buttons_, *menu, economy != nullptr ? economy->credits : sim::math::Fixed{},
                 sizes, live.economy().max_queue, card_slots_,
-                [&](const auto& option) { return live.build_menu_state(option); });
+                [&](const auto& option) {
+                    const auto state = live.build_menu_state(option);
+                    const auto limit = [](const std::optional<std::uint32_t>& value) {
+                        return value ? static_cast<std::int64_t>(*value) : std::int64_t{-1};
+                    };
+                    build_diagnostics_[static_cast<std::size_t>(&option - menu->options.data())] = {
+                        option.available, state.visible, state.enabled, static_cast<std::uint8_t>(option.kind),
+                        static_cast<std::uint8_t>(option.queue),
+                        {limit(option.requirements.lifetime_player), limit(option.requirements.current_player),
+                         limit(option.requirements.lifetime_allies), limit(option.requirements.current_allies)},
+                        option.requirements.prerequisites.size()};
+                    return state;
+                });
             ability_bar_ = {};
             return;
         }
     }
 
     build_buttons_.clear();
+    build_diagnostics_.clear();
     const auto type_of = [&](const sim::tactical::TacticalInstance& instance) -> const units::UnitType* {
         const auto found = card_types_.find(instance.type_id);
         return found == card_types_.end() ? nullptr : found->second;
@@ -146,6 +162,7 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
     // controls, and the cards never select it (card_click refuses while inspecting).
     if (inspect_) {
         build_buttons_.clear();
+        build_diagnostics_.clear();
         pad_palette_.close();
         std::vector<ui::SelectedUnit> inspected;
         if (const auto* instance = instances.instance(*inspect_)) {
@@ -405,6 +422,31 @@ void BattleInput::NoteCommands::request(const ui::AbilityRequest& request) {
     for (const sim::EntityId unit : request.units) units += (units.empty() ? "" : ",") + std::to_string(unit);
     owner->note("ability " + std::string(ui::to_string(request.kind)) + " " + std::string(ui::ability_name(request.ability))
                 + (request.targeted ? " (targeted)" : "") + " units " + units + ": no-op until the simulation has abilities (#76)");
+}
+
+ui::SuperlaserSwitchView BattleInput::superlaser_switch(const LiveSessionView& live) const {
+    const auto& snapshot = live.battle_frame().latest;
+    if (!snapshot || !ability_state_ || live.phase() != LiveSessionView::Phase::running) return {};
+    const bool deathstar_active = !snapshot->tsw_views().empty();
+    return ui::superlaser_switch_view(snapshot->instances(), live.local_player(), *ability_state_,
+        !live.options().land, live.options().tactical_production, deathstar_active);
+}
+
+bool BattleInput::superlaser_click(LiveSessionView& live) {
+    const auto request = ui::superlaser_switch_click(superlaser_switch(live));
+    if (!request || !ability_commands_ || !live.can_control(request->units.front())) {
+        negative_feedback();
+        return false;
+    }
+    cancel_special_target("super laser");
+    cancel_ability_target("super laser");
+    beacon_targeting_ = false;
+    if (placing_) cancel_placement(live);
+    if (auto* input = live.order_input()) input->cancel_mode();
+    ++ability_requests_;
+    ability_target_ = *request;
+    note("ability SUPER_LASER: pick a target");
+    return true;
 }
 
 bool BattleInput::ability_click(const std::size_t index, const bool right, const LiveSessionView& live) {

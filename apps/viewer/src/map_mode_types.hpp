@@ -1,18 +1,27 @@
 #pragma once
 
 #include "eawr/platform/tactical_feed.hpp"
+#include "eawr/presentation/camera/arrival_camera.hpp"
+#include "eawr/presentation/camera/retreat_camera.hpp"
+#include "eawr/presentation/camera/tsw_camera.hpp"
+#include "eawr/presentation/camera/retreat_flight.hpp"
 #include "eawr/presentation/ui/time_controls.hpp"
+#include "eawr/sim/tactical/retreat.hpp"
 #include "attract_camera.hpp"
 #include "battlecam_chase.hpp"
+#include "battlecam_rotation_filter.hpp"
 #include "battlecam_selection.hpp"
 #include "battlecam_shots.hpp"
 #include "battlecam_tec.hpp"
 #include "land_battle_scene.hpp"
 #include "land_overlay_view.hpp"
+#include "land_deploy_zone_view.hpp"
 #include "map_mode_assets.hpp"
 #include "options_screen.hpp"
 #include "load_job.hpp"
 #include <chrono>
+#include <map>
+#include <set>
 #include <string>
 
 namespace eawr::core::tick_profile { struct Recording; }
@@ -60,12 +69,30 @@ struct MapMode::State final {
     std::unique_ptr<LandBattleScene> land_population;
     // Land movement debug overlay (F4; default off): order targets, paths, slot targets by squad state.
     std::unique_ptr<LandOverlayView> land_overlay;
+    std::unique_ptr<LandDeployZoneView> land_deploy_zones; // #7190: the legal ground while a company is dragged
     std::vector<sim::RenderInstance> land_static_instances;
     std::vector<std::string> land_pose_trace;
+    std::uint64_t land_deploy_zone_frames{}; // #7190: frames a company drag drew the legal ground, and the most rings drawn
+    std::size_t land_deploy_zone_rings{};
+    std::vector<LandDeployZoneView::Ring> land_deploy_cache; // the rings of the drag in progress, rebuilt at its start and once a second
+    bool land_deploy_dragging{};
+    std::uint64_t land_deploy_cache_tick{};
     std::optional<std::uint64_t> land_trace_tick;
+    // Report counters (#5835 PR2): member-ticks that showed the ATTACK / ATTACKIDLE clip, counted once per presented tick.
+    std::uint64_t land_attack_samples{}, land_attack_idle_samples{};
+    std::optional<std::uint64_t> land_clip_tick;
+    // #6144: the land session (loading screen, prepare, start) runs before the static composition so the composition can
+    // see the start's removed records. ready_land_live then continues from the prepared session.
+    [[nodiscard]] bool ready_land_session(Node3D&, const assets::Map&);
     [[nodiscard]] bool ready_land_live(Node3D&, const assets::Map&, std::vector<sim::RenderInstance>&, sim::AssetId&, sim::EntityId&);
-    [[nodiscard]] std::optional<int> process_land_live(double delta);
+    [[nodiscard]] std::optional<int> process_land_live(double delta, const core::tick_profile::Recording& ui_recording);
+    // Land submit cost for the perf trace (space reads its own view's): the snapshot copy plus renderer submit this frame,
+    // and the transforms that submit sent. Only written with --eawr-perf-trace.
+    double land_submit_ms{};
+    std::uint64_t land_submit_sent{};
+    std::size_t land_submit_pieces{};
     bool space_populate_reject_upload_test{};
+    bool particle_reject_resource_test{};
     std::optional<SpacePopulation::Options::DebugShip> space_place_object;
     // --eawr-space-place-at, repeatable (#70 movement evidence).
     std::vector<SpacePopulation::Options::PlacedShip> space_place_at;
@@ -120,6 +147,8 @@ struct MapMode::State final {
     std::unique_ptr<DebrisProps> debris_props;  // #391
     std::unique_ptr<LiveFogView> live_fog;      // #494
     std::string space_camera;
+    std::string space_sweep;  // --eawr-space-sweep (evidence only, #6972)
+    bool render_scene_entered{};  // this battle set the viewport's space scene (#6972); the destructor leaves it
     std::string space_control;
     // --eawr-space-fog-admit (repeatable): the caller-declared XML element
     // types a space fog run composes as synthetic units (P1-07 #28).
@@ -320,8 +349,75 @@ struct MapMode::State final {
     std::array<std::array<float, 3>, 3> movie_tec_rotation{};
     std::array<float, 3> movie_anchor{};
     double movie_elapsed{};
+    // #6563: the battlecam's low-passed subject rotation (battlecam_rotation_filter.hpp). `mutable`: movie_pose is a pure
+    // read of the frame's poses; the filter is the camera's own frame-to-frame state, committed once per frame.
+    mutable BattlecamRotationFilter movie_rotation_filter;
+    mutable sim::EntityId movie_rotation_subject{};
+    double movie_rotation_dt{}; // this frame's presentation step for the filter; 0 while the battle is paused
     bool movie_key_down{}, movie_tab_down{};
     bool movie_preview{}, preview_key_down{};
+    // FS-R07..FS-R09, FC-R03: the campaign retreat cinematic. The marker geometry is read from the map when the space
+    // battle is built; the Unlocked camera data on first use. Presentation only: the simulation owns the frame k.
+    struct RetreatCinematic final {
+        std::optional<presentation::camera::RetreatCameraInput> geometry; // entry marker, no station yet
+        std::optional<presentation::camera::Constants> unlocked;
+        bool unlocked_tried{};
+        bool active{};
+        std::optional<std::array<float, 3>> station; // the station point, kept after the station is destroyed (FS-R09 cache)
+        std::uint32_t frame{};
+        std::uint64_t tick{}; // the battle tick that published `frame`
+        bool roster{true}; // a ship shot plays (the retreat roster is not empty)
+        // FC-R04: the retreating faction's flight numbers, read once per retreating player.
+        presentation::camera::RetreatFlightRates rates;
+        std::optional<sim::tactical::PlayerId> rates_player;
+    } retreat_cinematic;
+    [[nodiscard]] presentation::camera::RetreatFlightRates read_retreat_flight_rates(const std::string& faction) const;
+    void apply_retreat_flight(const sim::tactical::RetreatState& state);
+    void read_retreat_entry(const assets::Map& map);
+    [[nodiscard]] bool retreat_cinematic_ready();
+    void update_retreat_cinematic(const sim::tactical::RetreatState& state, std::uint64_t tick);
+    void end_retreat_cinematic();
+    bool apply_retreat_pose();
+    // SK-ARR-01..SK-ARR-14: the campaign arrival cinematic at the start of a space battle. Presentation only: the camera
+    // is a function of the presented battle tick; the simulation neither reads nor hears of it.
+    struct ArrivalCinematic final {
+        bool active{};
+        bool finished{}; // played, refused or ended for this battle: it never restarts
+        std::optional<presentation::camera::ArrivalCameraInput> input;
+        std::optional<std::uint32_t> frame; // the presented frame of the last pose applied
+        std::uint32_t focus_losses{};       // focus(false) calls while it played: the camera must stay focused (SK-ARR-06)
+    } arrival_cinematic;
+    [[nodiscard]] bool arrival_cinematic_ready();
+    void update_arrival_cinematic(const MapMode::ArrivalRequest& request, std::uint64_t tick);
+    void end_arrival_cinematic();
+    bool apply_arrival_pose();
+    // TSW-16: the tactical super weapon's power-up cinematic. Started by the sequence's `tsw_power_up_started` event, a function
+    // of the presented battle tick from the event's tick; it needs the object drawn (its model box) and ends by itself.
+    // Presentation only: the simulation neither reads nor hears of it.
+    // The model's first fire bone in the model's own space: its position and the direction of its first axis. Resolved once
+    // per super weapon object when the battle shows it (not at the power-up, so the shot starts without a model read).
+    struct TswDishBone final {
+        std::array<float, 3> position{};
+        std::array<float, 3> forward{};
+    };
+    struct TswCinematic final {
+        std::map<sim::tactical::TypeId, std::optional<TswDishBone>> bones; // by object type; nullopt: no such bone
+        std::set<sim::EntityId> seen;                                      // the super weapon objects already resolved
+        bool active{};
+        std::uint64_t start_tick{};         // the battle tick the power-up was accepted in (cinematic frame 0)
+        std::uint64_t handled_tick{};       // the newest power-up event tick already looked at
+        std::optional<presentation::camera::TswCameraInput> input;
+    } tsw_cinematic;
+    void update_tsw_cinematic();
+    void resolve_tsw_dish_bones();
+    [[nodiscard]] static std::optional<TswDishBone> read_tsw_dish_bone(const LiveSessionView& live,
+        sim::tactical::TypeId type, const vfs::Vfs& filesystem);
+    bool apply_tsw_pose();
+    void end_tsw_cinematic();
+    // A campaign or super weapon cinematic owns the camera, the battle UI and the world input.
+    [[nodiscard]] bool cinematic_owns_camera() const noexcept {
+        return retreat_cinematic.active || arrival_cinematic.active || tsw_cinematic.active;
+    }
     // --eawr-perf-movers diagnostics (report path only; nothing reads it without the trace): what aimed the drawn camera.
     struct PerfCameraNote final {
         std::optional<std::array<double, 3>> input; // the subject position the camera was last aimed at (SOURCE)
@@ -362,6 +458,10 @@ struct MapMode::State final {
     std::string skydome_model_hash;
     std::string skydome_status{"absent"};
     bool skydome_drawn{};
+    std::size_t skydome_dome_surfaces{};
+    std::size_t skydome_sun_surfaces{};
+    // Surfaces of the sky model the land sky path did not draw, each with its cause.
+    std::vector<std::string> skydome_skipped;
 
     std::string water_status{"unsupported"};
     std::string water_cause;
@@ -510,6 +610,8 @@ struct MapMode::State final {
     std::uint64_t surfaces_unsupported{};
     std::uint64_t surfaces_failed{};
     std::uint64_t unit_instances{};
+    std::size_t removed_land_placements{}; // #6144: scene placements the live land start removed
+    std::size_t session_owned_land_placements{}; // #6992: marker placements the session draws as owned pads and structures
     std::uint64_t skinned_instances{};
     std::string first_surface_failure;
     // #32 team colour: a colorizing surface is uploaded once per team colour

@@ -185,8 +185,18 @@ struct IncomeProfile {
     bool automatic{true};
     bool split_favors_owner{};
     math::Fixed owner_income_percentage{};
+    // Not none: the stream pays only after its trigger (WIS-01..03); the source is not an earner until then.
+    IncomeEventStyle event_style{IncomeEventStyle::none};
     friend bool operator==(const IncomeProfile&, const IncomeProfile&) = default;
 };
+
+// WIS-01..03: whether an event starts an event-styled stream. The trigger must be the stream's own style, and the
+// stream's handler refuses any request that carries a target object, whatever the style: a Special_Attack
+// command with a target, or a Take_Damage hit that has a damage-source object, starts nothing.
+[[nodiscard]] inline bool income_event_admits(const IncomeProfile& stream, const IncomeEventStyle trigger,
+    const bool has_target_object) noexcept {
+    return trigger != IncomeEventStyle::none && stream.event_style == trigger && !has_target_object;
+}
 
 // WBP-44: absence is distinct from zero, so a category containing only negative
 // contributions retains its greatest signed value. Neutral contributions do not register.
@@ -285,7 +295,7 @@ struct EconomyRules {
     std::vector<std::pair<TypeId, std::uint32_t>> campaign_population; // WGT-19/28; no ship menu needed
     std::vector<FactionId> campaign_playable_factions; // WGT-116: includes background allies without a command seat
     TypeFlags disabled_types;                 // RG-04: indexed flags, sorted IDs for validation
-    std::uint32_t max_queue{5};                // PU-14: a human player's queue length
+    std::uint32_t max_queue{5};                // PU-14: human queue limit; 0 denies human purchases
     // PU-31: the playable bounds in the plane, when the map declares them.
     std::optional<std::array<math::Fixed, 4>> bounds; // min x, min y, max x, max y
     math::Fixed vulnerability{};               // PU-38: the arrival's defense modifier (FoC -3)
@@ -307,6 +317,8 @@ struct EconomyRules {
     // (the purchase gate's rule, also for an allied buyer); a construction pad lists the builder's.
     [[nodiscard]] const StationMenu* producer_menu(TypeId producer, FactionId owner_faction, FactionId buyer_faction) const noexcept;
     [[nodiscard]] const IncomeProfile* stream(TypeId source) const noexcept;
+    // The stream a source pays from its creation: an event-styled stream joins the earners when triggered.
+    [[nodiscard]] const IncomeProfile* earner_stream(TypeId source) const noexcept;
     [[nodiscard]] const PadSaleProfile* pad_sale(TypeId type) const noexcept;
     [[nodiscard]] const PreventionProfile* prevention_of(TypeId type) const noexcept;
     [[nodiscard]] const FootprintProfile* footprint_of(TypeId type) const noexcept;
@@ -321,7 +333,7 @@ struct EconomyRules {
 
 // Fails with EAWR-SIM-0305 unless every economy player is a declared player, the lists are
 // strictly increasing, credits, amounts and radii are nonnegative and bounded, every available
-// option has a positive price and build time, max_queue is positive and the bounds are ordered.
+// option has a positive price and build time, and the bounds are ordered.
 [[nodiscard]] std::vector<IncomeCategory> initial_income_categories(const EconomyRules& rules, std::size_t partitions);
 
 namespace economy_load {

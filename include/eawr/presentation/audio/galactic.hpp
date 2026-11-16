@@ -52,6 +52,13 @@ struct GalacticBuildFeedback {
 [[nodiscard]] GalacticBuildFeedback galactic_build_feedback(GalacticBuildCue cue,
     std::span<const Field> type, bool local_builder);
 
+// WGEP-95: the speech request a build countdown makes when an entry's remaining seconds change from `previous` to
+// `remaining` (the caller checks that the type enables the countdown timer; an empty `prefix` makes no request). A minute
+// bucket (`remaining` >= 60) requests prefix + (int(remaining)/60 + 1) + "_Minutes" when the bucket changed; from 10 to
+// below 60 a changed tens bucket requests prefix + (int(remaining) + 1) + "_Seconds"; below 10 a changed whole second
+// does. A skipped interval makes only the current sample's request. Empty means no request.
+[[nodiscard]] std::string galactic_build_countdown_request(std::string_view prefix, float previous, float remaining);
+
 // WGP-181: rank live transported/flagship contents along with fleet members.
 // Squadron responses still belong to their leading authored craft (BA-24).
 [[nodiscard]] std::vector<sim::galactic::FleetMember> galactic_fleet_move_members(
@@ -71,7 +78,8 @@ struct GalacticBuildFeedback {
 class GalacticMusicDirector final {
 public:
     enum class Mode { none, strategic_ambient, strategic_win, strategic_lose,
-        tactical, superweapon_attack, demo_finale, scripted, battle_pending, battle_load, battle_summary };
+        tactical, superweapon_attack, demo_finale, scripted, battle_pending, battle_load, battle_summary,
+        constructed_super_unit }; // WGEP-172: a finished build's authored Build_Music_Completed, interrupting
     struct Cue {
         const MusicEvent* event{};
         std::string file;

@@ -157,6 +157,7 @@ struct Planet {
     std::optional<Fixed> force_strength;
     std::string political_faction;
     std::optional<bool> planet_retains_residual_influence;
+    std::optional<bool> planet_is_destroyable_by_tsw; // WGT-100: authored No on three stock planets; absent = destroyable
     std::optional<Fixed> planet_credit_value;
     std::optional<Fixed> planet_destroyed_credit_value;
     std::optional<std::int64_t> max_space_base;
@@ -175,6 +176,8 @@ struct Planet {
     // The Planet Info dialog texts (Describe_*; text keys, presentation only).
     std::string describe_tactical{}, describe_history{}, describe_weather{}, describe_terrain{}, describe_population{};
     std::vector<std::string> encyclopedia_text{};
+    // Corruption_N_Success_Speech_Event / _Bink_Hologram_Name for choice slots 1..3 (WGCH-09/128; presentation only).
+    std::array<std::string, 3> corruption_success_speech_event{}, corruption_success_hologram_name{};
     std::string destroyed_galactic_model_name;
     std::optional<Fixed> scale_factor; // WGM-128: effective model/world bounds scale
     std::string space_tactical_map;
@@ -221,6 +224,7 @@ struct Faction {
     std::optional<std::int64_t> base_population_capacity;
     std::optional<bool> ai_uses_galactic_pop_cap;
     std::vector<std::string> allies, enemies; // WGS-85: directional fresh player relations
+    std::string tech_tree_dialog_name; // WGP-147: authored galactic tech-tree dialog
     std::string basic_ai; // GCMP-AI-01: authored controller for playable multiplayer AI factions.
 };
 

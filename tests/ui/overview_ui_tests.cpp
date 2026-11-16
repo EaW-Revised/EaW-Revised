@@ -36,7 +36,7 @@ void test_reinforcement_during_movie() {
         bool dragging = true;
         const auto update = [&](bool movie) {
             const auto shell = ui::overview_ui(movie).tactical_shell;
-            ui::apply_reinforcement_availability(ui::reinforcement_available(true, shell, movie, false),
+            ui::apply_reinforcement_availability(ui::reinforcement_available(true, shell, movie),
                 [&] { pane_open = false; }, [&] { dragging = false; });
             return shell && pane_open;
         };
@@ -46,9 +46,10 @@ void test_reinforcement_during_movie() {
         ui::apply_reinforcement_availability(false, [&] { pane_open = false; }, [&] { dragging = false; });
         expect(!pane_open && !dragging, "lost eligibility closes the pane and cancels the drag");
     }
-    expect(!ui::reinforcement_available(true, false, false, false), "overview still closes the pane");
-    expect(!ui::reinforcement_available(false, false, true, false), "movie does not override game restrictions");
-    expect(!ui::reinforcement_available(true, false, true, true), "movie does not enable land reinforcement");
+    expect(!ui::reinforcement_available(true, false, false), "overview still closes the pane");
+    expect(!ui::reinforcement_available(false, false, true), "movie does not override game restrictions");
+    // #7190: a land battle is no longer excluded; its pane follows the same permission, shell and movie rules.
+    expect(ui::reinforcement_available(true, true, false), "the tactical shell shows the pane, in space and on land");
 }
 
 void test_fade() {

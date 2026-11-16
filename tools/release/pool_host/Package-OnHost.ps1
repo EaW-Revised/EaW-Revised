@@ -135,6 +135,11 @@ if ($PlanSha256) {
     $python = Get-Command python -ErrorAction SilentlyContinue
     if (-not $python) { $python = Get-Command python3 -ErrorAction Stop }
     $receiptArgs = @((Join-Path $src 'tools/release/host_package.py'), 'receipt', '--tree', $src, '--kit-sha', $Sha, '--plan-sha256', $PlanSha256, '--inputs', $InputDir, '--build-dir', $buildSrc, '--out', $out, '--host', $env:COMPUTERNAME)
+    # The relay viewer's own build tree (windows_viewer_build.ps1), in the slot that built it: the receipt counts its land define.
+    $viewerRoot = if ($ViewerTree) { $ViewerTree } else { $src }
+    foreach ($vd in 'out\build\viewer-clang-relay-ninja', 'out\build\viewer-relay-ninja') {
+        if (Test-Path -LiteralPath (Join-Path $viewerRoot "$vd\build.ninja")) { $receiptArgs += '--viewer-build-dir', (Join-Path $viewerRoot $vd); break }
+    }
     if ($Public) { $receiptArgs += '--public' }
     $ErrorActionPreference = 'Continue'
     & $python.Source @receiptArgs 2>&1 | ForEach-Object { Say "$_" }

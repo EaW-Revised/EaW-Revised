@@ -1,4 +1,5 @@
 #include "galactic_ai_world.hpp"
+#include "ai_script_evaluators.hpp"
 #include "eawr/core/gc_profile.hpp"
 
 #include <algorithm>
@@ -121,6 +122,14 @@ struct GalacticWorld::Evaluator final : LookupResolver {
             Evaluator evaluator(world, engine, context, depth + 1, mode, timeline);
             evaluator.root_equation = root_equation;
             return run(*nested, evaluator, random);
+        }
+        if (head.starts_with("SCRIPT_") && lookup.tokens.size() == 2 && lookup.tokens[1] == "EVALUATE") {
+            // GGL-03/PE-29: resolve mounted modules through the current chain's Lua owner.
+            auto* scripts = engine.script_evaluators();
+            const auto value = scripts ? scripts->evaluate(head.substr(7), context.player, context.target, bindings).value : std::nullopt;
+            if (!value) if (const auto observer = failure_observer.load(std::memory_order_relaxed))
+                observer(root_equation, context.player, context.target ? context.target->object : 0, lookup.tokens);
+            return value;
         }
         const auto value = world.lookup(context, lookup, bindings, mode);
         if (!value) if (const auto observer = failure_observer.load(std::memory_order_relaxed))
@@ -303,10 +312,11 @@ thread_local tactical::PlayerId GalacticWorld::active_player_{};
 struct GalacticWorld::PhaseSavepoint::Saved {
     struct Header {
         bool original{true};
-        std::size_t cache{}, visibility{}, flags{}, hints{};
+        std::size_t cache{}, visibility{}, flags{}, hints{}, space_conflicts{};
         std::map<std::size_t, GalacticInternedValue> cache_rows;
         std::map<std::size_t, GalacticVisibility> visibility_rows;
         std::map<std::size_t, GalacticStoryFlag> flag_rows;
+        std::map<std::size_t, GalacticSpaceConflict> conflict_rows;
     };
     struct Graph { PathCoefficientInput input; std::map<galactic::PlanetId, Real> values; };
     GalacticWorld* owner{};
@@ -338,6 +348,7 @@ GalacticWorld::PhaseSavepoint::Work GalacticWorld::PhaseSavepoint::work() const 
     for (const auto& [player, header] : saved_->players) {
         static_cast<void>(player); work.cache_rows += header.cache_rows.size();
         work.visibility_rows += header.visibility_rows.size(); work.flag_rows += header.flag_rows.size();
+        work.conflict_rows += header.conflict_rows.size();
     }
     return work;
 }
@@ -376,6 +387,7 @@ core::Result<void> GalacticWorld::PhaseSavepoint::rollback() {
             restore_rows(shard.cache, header.cache, header.cache_rows);
             restore_rows(shard.visibility, header.visibility, header.visibility_rows);
             restore_rows(shard.flags, header.flags, header.flag_rows);
+            restore_rows(shard.space_conflicts, header.space_conflicts, header.conflict_rows);
             shard.hints.resize(header.hints);
             shard.cache_index.clear(); shard.visibility_index.clear(); shard.index_dirty = true;
             shard.force_rows.clear(); shard.first_connected = std::numeric_limits<std::size_t>::max();
@@ -423,6 +435,7 @@ core::Result<std::unique_ptr<GalacticWorld::PhaseSavepoint>> GalacticWorld::begi
         auto& header = saved->players[player];
         header.cache = shard.cache.size(); header.visibility = shard.visibility.size();
         header.flags = shard.flags.size(); header.hints = shard.hints.size();
+        header.space_conflicts = shard.space_conflicts.size();
     }
     for (const auto& [player, graph] : path_coefficients_) { static_cast<void>(graph); saved->path_players.insert(player); }
     auto phase = std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(std::move(saved)));
@@ -439,6 +452,7 @@ void GalacticWorld::retain_phase_row(tactical::PlayerId player, std::uint32_t ki
     if (kind == 1 && index < header.cache && !header.cache_rows.contains(index)) header.cache_rows.emplace(index, mine.cache.at(index));
     else if (kind == 2 && index < header.visibility && !header.visibility_rows.contains(index)) header.visibility_rows.emplace(index, mine.visibility.at(index));
     else if (kind == 3 && index < header.flags && !header.flag_rows.contains(index)) header.flag_rows.emplace(index, mine.flags.at(index));
+    else if (kind == 5 && index < header.space_conflicts && !header.conflict_rows.contains(index)) header.conflict_rows.emplace(index, mine.space_conflicts.at(index));
 }
 void GalacticWorld::retain_path_graph(tactical::PlayerId player, std::size_t graph) {
     if (!phase_ || phase_->graphs.contains({player, graph})) return;
@@ -758,7 +772,7 @@ std::optional<Real> GalacticWorld::uncached(const GalacticQueryKey& key, ReadMod
             "HASUNIT", "HASTECHTOPRODUCE", "CANADVANCETECH", "MAINTENANCE",
             "MAINTENANCEUNNORMALIZED", "GROSSINCOMEUNNORMALIZED", "NETINCOMEUNNORMALIZED",
             "BUDGETFRACTIONTOBUILD", "SPACETOTALUNNORMALIZED", "GROUNDTOTALUNNORMALIZED",
-            "PLANETSCONTROLLED", "PLANETSCONTROLLEDUNNORMALIZED"};
+            "PLANETSCONTROLLED", "PLANETSCONTROLLEDUNNORMALIZED", "SPACEDEFENDEDPLANETS", "GROUNDDEFENDEDPLANETS"};
         if (economy_tokens.contains(token)) return player_economy_token(key, *id, token, mode);
         if (token == "AVERAGEAGEOFSPACEINTELLIGENCE" || token == "AVERAGEAGEOFGROUNDINTELLIGENCE") {
             // WGA-263: selected evaluator only, all nonallied planet targets,
@@ -854,6 +868,21 @@ std::optional<Real> GalacticWorld::uncached(const GalacticQueryKey& key, ReadMod
         if (bound().snapshot_->observer()) if (const auto* facts = sorted_find(bound().snapshot_->observer()->planets, key.planet,
             [](const auto& row) { return row.planet; })) return real(facts->target_owner);
         return {};
+    }
+    if (token == "OPENGROUNDCOMPANYSLOTS") {
+        // GGL-01: the live list size includes every entry; do not clamp an overfull planet.
+        if (!bound().snapshot_->control() || !bound().snapshot_->observer()) return {};
+        const auto* facts = sorted_find(bound().snapshot_->observer()->planets, key.planet,
+            [](const auto& at) { return at.planet; });
+        return facts ? std::optional{real(bound().snapshot_->control()->max_ground_forces)
+            - real(static_cast<std::int64_t>(facts->landed_transports.size()))} : std::nullopt;
+    }
+    if (token == "TIMESINCESPACECONFLICT") {
+        // GGL-02: synchronization time, not elapsed galactic mode time. The inverse FPS is binary32.
+        const auto& stamps = shard(key.player).space_conflicts;
+        const auto at = std::find_if(stamps.begin(), stamps.end(), [&](const auto& stamp) { return stamp.planet == key.planet; });
+        if (at == stamps.end()) return to_single(real(1000000000000000000LL));
+        return (real(bound().synchronized_frame_) - real(at->frame)) * to_single(real(1) / real(setup_.logical_fps));
     }
     if (token == "TYPE.TOKEN") return row->facts.type ? std::optional{real(static_cast<std::int64_t>(row->facts.type))} : std::nullopt;
     if (token == "TYPE.ISTYPE") { const auto type = parameter_text(key.bindings, "PARAMETER_TYPE"); return type ? std::optional{boolean_value(*type == row->facts.name)} : std::nullopt; }
@@ -1038,6 +1067,7 @@ GalacticPerceptionState GalacticWorld::state() const {
         out.visibility.insert(out.visibility.end(), owner.visibility.begin(), owner.visibility.end());
         out.flags.insert(out.flags.end(), owner.flags.begin(), owner.flags.end());
         out.hints.insert(out.hints.end(), owner.hints.begin(), owner.hints.end());
+        out.space_conflicts.insert(out.space_conflicts.end(), owner.space_conflicts.begin(), owner.space_conflicts.end());
         out.cache.reserve(out.cache.size() + owner.cache.size());
         for (const auto& row : owner.cache) out.cache.push_back({expand_key(row.key), row.value, row.interval, row.frame});
     }
@@ -1046,6 +1076,7 @@ GalacticPerceptionState GalacticWorld::state() const {
     std::sort(out.visibility.begin(), out.visibility.end(), [](const auto& a, const auto& b) { return std::tie(a.player, a.planet, a.mask) < std::tie(b.player, b.planet, b.mask); });
     std::sort(out.flags.begin(), out.flags.end(), [](const auto& a, const auto& b) { return std::tie(a.player, a.planet, a.name) < std::tie(b.player, b.planet, b.name); });
     std::sort(out.hints.begin(), out.hints.end(), [](const auto& a, const auto& b) { return std::tie(a.player, a.planet, a.name) < std::tie(b.player, b.planet, b.name); });
+    std::sort(out.space_conflicts.begin(), out.space_conflicts.end(), [](const auto& a, const auto& b) { return std::tie(a.player, a.planet) < std::tie(b.player, b.planet); });
     return out;
 }
 void GalacticWorld::rebuild_row_index(Shard& owner) const {
@@ -1094,6 +1125,11 @@ core::Result<void> GalacticWorld::restore(GalacticPerceptionState state) {
     std::set<std::tuple<tactical::PlayerId, galactic::PlanetId, std::uint32_t>> visibility_keys;
     std::set<std::tuple<tactical::PlayerId, galactic::PlanetId, std::string>> flag_keys;
     std::set<std::tuple<tactical::PlayerId, std::string, std::string>> hint_keys;
+    std::set<std::pair<tactical::PlayerId, galactic::PlanetId>> conflict_keys;
+    for (const auto& row : state.space_conflicts)
+        if (!player(row.player) || !planet(row.planet) || row.frame > bound().synchronized_frame_
+            || !conflict_keys.emplace(row.player, row.planet).second)
+            return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "invalid space conflict stamp"));
     for (std::size_t i = 0; i < state.cache.size(); ++i) {
         const auto& row = state.cache[i];
         const auto interval = setup_.cache_intervals.find(compile_perception_token(row.key.tokens)->chain);
@@ -1150,7 +1186,7 @@ core::Result<void> GalacticWorld::restore(GalacticPerceptionState state) {
         owner.bindings.clear(); owner.bindings.emplace_back(); owner.binding_ids.clear();
         owner.memo_bindings.clear(); owner.memo_bindings.emplace_back(); owner.memo_binding_ids.clear();
         owner.memo_bindings_frame.reset();
-        owner.visibility.clear(); owner.flags.clear(); owner.hints.clear(); owner.visibility_index.clear();
+        owner.visibility.clear(); owner.flags.clear(); owner.hints.clear(); owner.space_conflicts.clear(); owner.visibility_index.clear();
         owner.economy = {}; owner.records = {};
         ++owner.visibility_stamp; owner.index_dirty = true;
     }
@@ -1161,12 +1197,29 @@ core::Result<void> GalacticWorld::restore(GalacticPerceptionState state) {
     for (auto& row : state.visibility) shard(row.player).visibility.push_back(row);
     for (auto& row : state.flags) shard(row.player).flags.push_back(std::move(row));
     for (auto& row : state.hints) shard(row.player).hints.push_back(std::move(row));
+    for (const auto& row : state.space_conflicts) shard(row.player).space_conflicts.push_back(row);
     // WGA-65/258: restored rows belong to the last admitted perception publication,
     // which can precede the completed world used to construct this load. Its
     // process-local generation does not prove these archived rows were observed.
     bound().observations_restored_at_ = bound().synchronized_frame_;
     rebuild_records(); records_ready_ = true;
     return core::Result<void>::success();
+}
+void GalacticWorld::space_conflict_ended(galactic::PlanetId id, std::uint64_t frame) {
+    const auto lock = query_lock();
+    if (!planet(id)) return;
+    // One delivery to each pre-existing player evaluator, never a tick/entity scan.
+    for (auto& [player, mine] : shards_) {
+        const auto at = std::find_if(mine.space_conflicts.begin(), mine.space_conflicts.end(),
+            [&](const auto& row) { return row.planet == id; });
+        std::size_t index = static_cast<std::size_t>(at - mine.space_conflicts.begin());
+        if (at != mine.space_conflicts.end()) {
+            if (at->frame >= frame) continue;
+            retain_phase_row(player, 5, index); at->frame = frame;
+        } else mine.space_conflicts.push_back({player, id, frame});
+        ++mine.revision; update_record(player, 5, index);
+    }
+    mark_state_changed();
 }
 bool GalacticWorld::insert_hint(GalacticHint hint) {
     hint.planet = upper_case(hint.planet); hint.name = upper_case(hint.name);

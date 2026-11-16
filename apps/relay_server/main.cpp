@@ -24,7 +24,8 @@ using Config = std::map<std::string, std::string>;
 Config defaults() {
     return {{"listen_address", "127.0.0.1"}, {"port", "27020"}, {"certificate_file", ""}, {"key_file", ""},
         {"access_token", ""}, {"require_access_token", "0"}, {"room_aliases", "0"}, {"failed_guesses_per_minute", "100"}, {"turn_uri", ""}, {"turn_secret", ""},
-        {"turn_provider", "coturn"}, {"cloudflare_turn_key_id", ""}, {"cloudflare_turn_api_token", ""},
+        {"turn_provider", "coturn"}, {"turn_fallback_uri", ""}, {"turn_fallback_secret", ""},
+        {"cloudflare_turn_key_id", ""}, {"cloudflare_turn_api_token", ""},
         {"cloudflare_turn_calls_per_minute", "120"}, {"cloudflare_turn_timeout_ms", "4000"}, {"max_connections", "1024"}, {"max_sessions", "512"},
         {"connections_per_ip", "18"}, {"accepts_per_minute", "30"}, {"operations_per_minute", "120"},
         {"unpaired_sessions_per_ip", "2"},
@@ -67,6 +68,7 @@ eawr::net::RelayServerOptions options(const Config& c) {
     if (provider == "coturn") o.turn_provider = eawr::net::TurnProvider::coturn;
     else if (provider == "cloudflare") o.turn_provider = eawr::net::TurnProvider::cloudflare;
     else throw ConfigError(1555, "Unknown turn_provider; use coturn or cloudflare");
+    o.turn_fallback_uri = c.at("turn_fallback_uri"); o.turn_fallback_secret = c.at("turn_fallback_secret");
     o.cloudflare_key_id = c.at("cloudflare_turn_key_id"); o.cloudflare_api_token = c.at("cloudflare_turn_api_token");
     o.cloudflare_calls_per_minute = number(c, "cloudflare_turn_calls_per_minute");
     o.cloudflare_timeout = milliseconds(number(c, "cloudflare_turn_timeout_ms"));
@@ -143,7 +145,7 @@ int main(int argc, char** argv) {
             if (arg != "--config") {
                 // Secrets on argv show up in process listings and shell history.
                 const auto name = normalize(arg.substr(2));
-                if (name == "cloudflare_turn_key_id" || name == "cloudflare_turn_api_token")
+                if (name == "cloudflare_turn_key_id" || name == "cloudflare_turn_api_token" || name == "turn_fallback_secret")
                     throw ConfigError(1555, ("Set " + name + " in the environment or a protected config file, not on the command line").c_str());
                 put(config, arg.substr(2), argv[i + 1]);
             }

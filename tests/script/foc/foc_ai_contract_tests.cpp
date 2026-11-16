@@ -2293,6 +2293,7 @@ int main(int argc, char** argv) {
         else if (mode == "--spending-pad-refunds") spending_pad_refunds();
         else if (mode == "--reachable-target") { reachable_target_contract(); find_target_reach_contract(); }
         else if (mode == "--installed-galactic-freestore") installed_galactic_freestore();
+        else if (mode == "--installed-tsw-plan") installed_stock_fire_death_star();
         else if (mode == "--script-evaluators") script_evaluator_contracts();
         else if (mode == "--object-build") object_build_contracts();
         else if (mode == "--player-streams") tactical_player_streams();
@@ -2312,6 +2313,7 @@ int main(int argc, char** argv) {
     equations();
     random_and_hash();
     game_random_forms();
+    plan_scan_is_charged();
     running_target_contrast();
     running_reservation_contrast();
     retiring_pool_reservations();
@@ -2321,12 +2323,15 @@ int main(int argc, char** argv) {
     capture_target_application();
     forced_object_fog();
     collect_free_categories();
+    test_target_contrast_binding();
+    goal_type_name_binding();
     freestore_unit_service();
     time_till_dead_bindings();
     type_range_and_hero_bindings();
     order_destinations();
     special_weapon_bindings();
     manual_special_weapon_binding();
+    tactical_superweapon_bindings();
     special_weapon_attachment();
     selection_team_starts();
     threat_grid();
@@ -2370,6 +2375,7 @@ int main(int argc, char** argv) {
     faction_controller_inventory();
     proximity_contracts();
     reveal_all_contracts();
+    letter_box_contracts();
     economy_inputs();
     campaign_defender_fallback();
     campaign_retreat_inputs();

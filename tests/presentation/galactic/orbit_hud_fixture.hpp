@@ -5,7 +5,7 @@
 namespace eawr::viewer::galactic {
 // Explicit faction models and cursor colours; never used for a live campaign.
 inline void configure_orbit_scene_fixture(GalaxySnapshotStub& snapshot, std::string_view fixture) {
-    if (fixture == "ground-launch-move") {
+    if (fixture == "ground-launch-move" || fixture == "ground-tray") {
         snapshot.planets[1].position = snapshot.planets[0].position;
         snapshot.planets[1].position[0] = sim::math::Fixed::from_raw(snapshot.planets[0].position[0].raw()
             + 4 * sim::math::Fixed::scale);

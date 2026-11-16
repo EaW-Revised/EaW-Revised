@@ -790,6 +790,12 @@ template <> struct Fields<::eawr::sim::galactic::story::AiFlag> {
     }
 };
 
+template <> struct Fields<::eawr::sim::galactic::story::EventCounter> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.subplot, v.event, v.values);
+    }
+};
+
 template <> struct Fields<::eawr::sim::galactic::story::SubPlotState> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.name, v.owner, v.active, v.events);
@@ -816,7 +822,7 @@ template <> struct Fields<::eawr::sim::galactic::story::Goal> {
 
 template <> struct Fields<::eawr::sim::galactic::story::GoalsState> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.objectives, v.goals, v.objectives_visible);
+        a(v.objectives, v.goals, v.objectives_visible, v.next_number);
     }
 };
 

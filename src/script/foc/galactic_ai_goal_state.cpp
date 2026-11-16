@@ -245,6 +245,17 @@ void admission_configuration(Archive& ar, const AiSetup& setup) {
 }
 
 struct GoalStateCodec {
+    static std::uint32_t block_owner(const Engine& engine, const Block& block) {
+        // A TaskForce block retains the force's plan ownership, independently of its storage shard.
+        if (block.taskforce) {
+            const auto* force = engine.taskforce(block.taskforce);
+            const auto* plan = force ? engine.plan(force->plan) : nullptr;
+            return plan ? plan->player : std::uint32_t{};
+        }
+        // GAR-03: global blocks belong to the plan instance without a TaskForce.
+        const auto* plan = engine.plan_of_instance(block.instance);
+        return plan ? plan->player : std::uint32_t{};
+    }
     static std::string configuration(Engine& engine) {
         if (!engine.native_configuration_.empty()) return engine.native_configuration_;
         Archive ar;
@@ -253,6 +264,12 @@ struct GoalStateCodec {
             engine.data_.templates, engine.data_.constants);
         for (auto& setup : engine.host_->setup.players) ar.fields(setup.player, setup.faction, setup.neutral, setup.ai, setup.player_type, setup.human);
         admission_configuration(ar, engine.host_->setup);
+        // TCFA-11: immutable policy belongs to configuration, not the grid's saved mutable state.
+        // The stock False policy retains the existing configuration bytes.
+        if (engine.host_->setup.domain == tactical::BattleDomain::space && engine.data_.constants.uses_fog_space) {
+            std::string fog_domain = "eawr-space-ai-fog-v1";
+            ar.item(fog_domain);
+        }
         // Parsed function code is part of the native configuration too. The
         // required external closure digest covers all transitive XML/Lua/type inputs.
         for (const auto& [name, functions] : engine.data_.function_sets) {
@@ -379,7 +396,7 @@ struct GoalStateCodec {
             return found == instance_owners.end() ? nullptr : found->second;
         };
         rows<Block>(ar, v, &PlayerAi::blocks, [&](auto, const Block& row) { return owner_of_instance(row.instance); },
-            23, [&](const auto& row) { const auto* force = v.taskforce(row.taskforce); return force ? plan_owner(force->plan) : std::uint32_t{}; });
+            23, [&](const auto& row) { return block_owner(v, row); });
         rows<std::uint64_t>(ar, v, &PlayerAi::plan_of_instance, [&](auto instance, auto) { return owner_of_instance(instance); },
             24, [&](const auto& id) { return plan_owner(id); });
         if (ar.reading) v.rebuild_runtime_index();
@@ -529,7 +546,7 @@ struct GoalStateCodec {
         map(engine.targets_, 20, shared);
         owned_map(&PlayerAi::taskforces, engine.runtime_index_.taskforces, 21, [&](const auto& row) { return plan_owner(row.plan); });
         owned_map(&PlayerAi::running, engine.runtime_index_.plans, 22, [](const auto& row) { return row.player; });
-        owned_map(&PlayerAi::blocks, engine.runtime_index_.blocks, 23, [&](const auto& row) { const auto* force = engine.taskforce(row.taskforce); return force ? plan_owner(force->plan) : std::uint32_t{}; });
+        owned_map(&PlayerAi::blocks, engine.runtime_index_.blocks, 23, [&](const auto& row) { return block_owner(engine, row); });
         owned_map(&PlayerAi::plan_of_instance, engine.runtime_index_.instances, 24, [&](const auto& id) { return plan_owner(id); });
         map(engine.threats_, 25, shared); map(engine.last_hits_, 26, shared); map(engine.globals_, 27, shared);
         emit(0, 28, std::uint64_t{}, [&](Archive& ar) { ar.item(engine.pending_attach_); });
@@ -685,7 +702,7 @@ struct GoalStateCodec {
         destination.mark_galactic_tasks_changed();
         destination.perception_executor_ = nullptr; destination.scripts_ = nullptr;
     }
-    static void grid(Archive& ar, ThreatGrid& g) {
+    static void grid(Archive& ar, ThreatGrid& g, const Constants& configuration) {
         if (ar.reading) {
             g.clear_queries();
             g.slots_dirty_ = true;
@@ -693,6 +710,7 @@ struct GoalStateCodec {
         }
         ar.fields(g.left_, g.top_, g.right_, g.bottom_, g.cell_width_, g.cell_height_, g.min_radius_,
             g.x_cells_, g.y_cells_, g.constants_, g.cells_, g.setup_scanned_, g.setup_limit_);
+        if (ar.reading) g.constants_.uses_fog_space = configuration.uses_fog_space;
         const auto size = ar.count(g.tracked_.size());
         if (!ar.reading) for (auto& [id, row] : g.tracked_) {
             auto copied = id; ar.fields(copied, row.entries, row.next_service, row.last_position, row.has_position);
@@ -1033,7 +1051,8 @@ core::Result<void> GoalStateContributor::validate(const Engine& e, const detail:
                     && p.next_instance_local <= galactic_instance_counter_limit);
             }
             const auto setup = e.host_->players.find(p.player); check(setup != e.host_->players.end());
-            check(upper_case(setup->second->player_type) == upper_case(p.type->name));
+            // A galactic player's type is its current controller: a control-switch story reward replaces the authored one (#6917).
+            check(galactic || upper_case(setup->second->player_type) == upper_case(p.type->name));
             if (!galactic) {
                 const auto& templates = mode_templates(*p.type, e.host_->setup.domain);
                 const auto selected = templates.empty() ? e.data_.templates.end() : e.data_.templates.find(templates.front());
@@ -1161,16 +1180,19 @@ core::Result<void> GoalStateContributor::validate(const Engine& e, const detail:
             const auto& b = *entry;
             check((!b.galactic_request || (galactic && (b.kind == Block::Kind::move || b.kind == Block::Kind::galactic_invade)))
             && (galactic || b.kind <= Block::Kind::reinforce)
-            && (!b.galactic_actor || (galactic && b.galactic_actor < object_limit)) && id && id == b.id && b.kind <= Block::Kind::galactic_invade && b.order <= Block::Order::guard
-            && instances.contains(b.instance) && taskforces.contains(b.taskforce)
-            && instances.at(b.instance) == taskforces.at(b.taskforce)->plan
+            && (!b.galactic_actor || (galactic && b.galactic_actor < object_limit)) && id && id == b.id && b.kind <= Block::Kind::galactic_starbase && b.order <= Block::Order::guard
+            && instances.contains(b.instance)
+            && (b.kind == Block::Kind::galactic_starbase ? (!b.taskforce && b.destination_object && b.side >= 0 && b.side <= 5)
+                : (taskforces.contains(b.taskforce) && instances.at(b.instance) == taskforces.at(b.taskforce)->plan))
             && (!b.waiting_on || (b.waiting_on != id && blocks.contains(b.waiting_on) && !blocks.at(b.waiting_on)->waiting_on)));
             if (b.kind == Block::Kind::galactic_invade && b.galactic_request) {
                 const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(e.host_->galactic_execution.get());
                 const auto* invasion = actions ? actions->invasion_status(b.galactic_request) : nullptr;
-                // Async lane: an invasion decided by the lane whose slice has not applied yet is not in the world's table.
+                // Absent from the world's table: either decided by the lane and its slice not applied yet, or refused by the world
+                // when it applied and not yet seen by the AI (its next service finishes the block as a failed invasion). Both are
+                // valid saved states; a present record must still name this block's fleet and invader.
                 check((invasion && invasion->fleet == b.galactic_actor && invasion->invader == running.at(instances.at(b.instance))->player)
-                    || (!invasion && actions && actions->invasion_pending(b.galactic_request)));
+                    || (!invasion && actions));
             }
         }
         const auto has_goal = [&](tactical::PlayerId player, std::uint64_t id) {
@@ -1241,7 +1263,7 @@ core::Result<Bytes> GoalStateContributor::encode(Engine& engine) const {
         Archive ar; ar.galactic_tasks = true;
         // The saved identity is the digest, then (when this load knows them) the digests of the groups it is made of, so a
         // later load that refuses can say which group changed. Only the digest decides; the groups only word the refusal.
-        std::string tag(domain), identity(content_identity_ + (identity_detail_.empty() ? std::string() : " " + identity_detail_)), configuration = GoalStateCodec::configuration(engine); std::uint32_t version{17};
+        std::string tag(domain), identity(content_identity_ + (identity_detail_.empty() ? std::string() : " " + identity_detail_)), configuration = GoalStateCodec::configuration(engine); std::uint32_t version{18};
         ar.fields(tag, version, identity, configuration);
         auto credits = engine.host_->credit_changes;
         GoalStateCodec::runtime(ar, engine, credits);
@@ -1274,7 +1296,7 @@ core::Result<void> GoalStateContributor::restore(const galactic_ai::NativeState&
         std::string tag, identity, configuration; std::uint32_t version{};
         ar.fields(tag, version, identity, configuration);
         // Four separate causes, each named: they used to share one check that reported only an encoding line number.
-        if (tag != domain || version != 17)
+        if (tag != domain || version != 18)
             return fail<void>("the saved AI goal state is a different record (tag or version " + std::to_string(version)
                 + "): it was written by another EAWR version than the one that loads it");
         const auto split = identity.find(' ');
@@ -1321,7 +1343,7 @@ core::Result<Bytes> Engine::save_tactical_native(std::string_view identity,
         ar.fields(source.staggered_clock_.paused_frames, source.staggered_clock_.held_since, source.staggered_seeded_);
         auto credits = host_->credit_changes;
         GoalStateCodec::runtime(ar, source, credits);
-        GoalStateCodec::grid(ar, source.grid_);
+        GoalStateCodec::grid(ar, source.grid_, source.data_.constants);
         GoalStateCodec::positioning(ar, source);
         global_scalar_tail(ar, source.globals_);
         return core::Result<Bytes>::success(std::move(ar.bytes));
@@ -1344,7 +1366,7 @@ core::Result<void> Engine::restore_tactical_native(std::span<const std::uint8_t>
             && (staged.staggered() || (!staged.staggered_seeded_ && !staged.staggered_clock_.held_since
                 && staged.staggered_clock_.paused_frames == 0)));
         std::map<tactical::PlayerId, math::Fixed> credits;
-        GoalStateCodec::runtime(ar, staged, credits); GoalStateCodec::grid(ar, staged.grid_);
+        GoalStateCodec::runtime(ar, staged, credits); GoalStateCodec::grid(ar, staged.grid_, data_.constants);
         GoalStateCodec::positioning(ar, staged);
         global_scalar_tail(ar, staged.globals_);
         ar.check(ar.input.empty() && (!staged.initialized_ || staged.frame_ == static_cast<std::int64_t>(barrier)));

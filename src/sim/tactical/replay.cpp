@@ -62,13 +62,15 @@ namespace {
 
 } // namespace
 
-void resolve_cinematic_seats(TacticalSetup& setup, const std::span<const EconomyPlayer> players) {
+// WR-50 / FC-R02 (#4444): the debug build plays the retreat cinematic for whichever side retreats, gated only by the
+// in-game cinematics setting, so every seat the battle creation does not already state resolves to enabled, an AI
+// seat included. An enabled seat's escape ends at start + duration (FC-R02), not at initialization.
+void resolve_cinematic_seats(TacticalSetup& setup, const std::span<const EconomyPlayer>) {
     for (const auto& player : setup.players) {
         const auto at = std::lower_bound(setup.cinematic_seats.begin(), setup.cinematic_seats.end(), player.player_id,
             [](const auto& row, const PlayerId id) { return row.player < id; });
         if (at != setup.cinematic_seats.end() && at->player == player.player_id) continue;
-        const auto role = std::find_if(players.begin(), players.end(), [&](const auto& row) { return row.player == player.player_id; });
-        setup.cinematic_seats.insert(at, {player.player_id, role == players.end() || !role->ai});
+        setup.cinematic_seats.insert(at, {player.player_id, true});
     }
 }
 
@@ -246,6 +248,12 @@ core::Result<void> validate_setup(const TacticalSetup& setup) {
         }
     }
     constexpr std::string_view path{};
+    if (setup.tsw) {
+        // TSW-03: the nearest-target tie rule is list order, so the list is bound as given; only its size is bounded.
+        if (setup.tsw->targets.size() > tsw_max_targets)
+            return fail<void>(diagnostic_codes::invalid_setup, "super weapon targets exceed "
+                + std::to_string(tsw_max_targets), path);
+    }
     if (setup.first_free_entity_id && (*setup.first_free_entity_id == invalid_entity_id
         || std::any_of(setup.units.begin(), setup.units.end(), [&](const UnitState& unit) {
             return unit.entity_id >= *setup.first_free_entity_id;
@@ -557,7 +565,8 @@ core::Result<void> validate_replay(const TacticalReplay& replay) {
                 label + " does not strictly follow the previous (tick, player, sequence)", path);
         }
         if (auto provenance = validate_command_provenance(command, replay.setup); !provenance) return provenance;
-        const auto shape = detail::validate_command_shape(command, replay.setup.players, label, path);
+        const auto shape = detail::validate_command_shape(command, replay.setup.players, label, path,
+            replay.setup.domain == BattleDomain::land);
         if (!shape) {
             return shape;
         }

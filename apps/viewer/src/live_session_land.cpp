@@ -106,6 +106,10 @@ skirmish::LandContentInputs read_bindings(const std::filesystem::path& path) {
     return result;
 }
 
+// WLAN-10..12: the authored locomotor class of the speeder bike (a bike lean, fixed move rate and roll limit); the member's
+// locomotor class name is the data's, compared by type id.
+constexpr std::string_view bike_locomotor = "BIKE_LOCOMOTOR";
+
 } // namespace
 
 bool LiveSessionView::prepare_land(const vfs::Vfs& filesystem, const data::Catalog& catalog,
@@ -180,6 +184,24 @@ bool LiveSessionView::prepare_land(const vfs::Vfs& filesystem, const data::Catal
         content_.emplace(); // Land P1 has no combat, fog or economy UI; the AI (G1-b) is mounted above.
         economy_ = land_content_->economy; victory_ = land_content_->victory;
         tables_ = std::move(tables).value();
+        // #6992: the viewer's tables hold the company types only; the owned pads, their menu structures and the pre-built
+        // children are decoded in the start inputs. Merge them (the start build does the same for the bindings) so the
+        // presentation, the pick shapes and the slot growth below know their models and selection flags.
+        skirmish::merge_land_pad_types(*tables_, inputs.value().pad_tables);
+        // #6992: the structure types a pad can complete into (the under-construction type and the finished one) get a draw
+        // slot when they first appear; the slot growth for a land session reads this set (grow_launch_slot).
+        land_structure_types_.clear();
+        for (const auto& menu : economy_.menus) {
+            if (economy_.pads.point(menu.station) == nullptr) continue;
+            for (const auto& option : menu.options) {
+                const auto* child = economy_.pads.child(option.type);
+                if (child == nullptr) continue;
+                land_structure_types_.insert(child->type);
+                land_structure_types_.insert(child->constructed);
+            }
+        }
+        arrival_slots_.filesystem = &filesystem;
+        arrival_slots_.catalog = &catalog;
         player_ = options_.player.value_or(std::find_if(fixture.slots.begin(), fixture.slots.end(),
             [](const auto& slot) { return slot.human; })->slot); // the first human (one exists, checked above)
         if (std::none_of(setup_->players.begin(), setup_->players.end(), [&](const auto& p) { return p.player_id == player_; }))
@@ -193,6 +215,7 @@ bool LiveSessionView::prepare_land(const vfs::Vfs& filesystem, const data::Catal
 
 void LiveSessionView::bind_land_roster(const platform::LiveSession& session) {
     land_playback_.clear();
+    land_last_shot_.clear();
     land_playback_tick_ = 0;
     land_playback_started_ = false;
     const auto zero = session.frame().latest;
@@ -215,7 +238,7 @@ void LiveSessionView::bind_land_roster(const platform::LiveSession& session) {
             for (std::size_t index = 0; index < company.members.size() && index < company.locomotion.size(); ++index) {
                 if (skirmish::type_id(company.members[index].type) != found->type_id) continue;
                 playback.data = company.locomotion[index];
-                playback.bike = skirmish::type_id(company.members[index].locomotor) == skirmish::type_id("BIKE_LOCOMOTOR");
+                playback.bike = skirmish::type_id(company.members[index].locomotor) == skirmish::type_id(bike_locomotor);
                 playback.team = company.members.size() > 1 || company.members.front().create_team;
                 found_member = true;
                 break;
@@ -231,6 +254,34 @@ void LiveSessionView::bind_land_roster(const platform::LiveSession& session) {
         if (owner != start_->players.end() && owner->colour) placed.team_colour = owner->colour->rgb;
         ship_of_entity_[member] = placed_ships_.size();
         placed_ships_.push_back(std::move(placed));
+    }
+    // #6992: the owned pads and the pre-built structures stand in the start as station units. They are drawn from the
+    // session like the space path's start units (a ship bound to the entity), so each has a pick volume and a click can
+    // select it or open a pad's palette. The map's own marker records are dropped from the static composition
+    // (strip_session_owned_placements) so a structure is not drawn twice.
+    // The binding is the space path's (battle_source_local, every start unit): the same containers, one ship per entity. It is
+    // built here instead of shared because the pose comes from the tick-zero snapshot instance (as for the roster members above,
+    // so the drawn pose is the simulated one), not from the start unit; the colour is the owner's, and there is no map-record
+    // colour fallback. The record list (land_session_records_) names only what was bound.
+    std::map<sim::EntityId, std::uint32_t> structures; // entity -> the map record it started on
+    for (const auto& unit : start_->units) if (unit.role == battle::UnitRole::station) structures.emplace(unit.state.entity_id, unit.record);
+    land_session_records_.clear();
+    for (const auto& instance : zero->instances()) {
+        if (!structures.contains(instance.entity_id) || ship_of_entity_.contains(instance.entity_id)) continue;
+        const auto type = std::find_if(tables_->units.begin(), tables_->units.end(),
+            [&](const auto& row) { return skirmish::type_id(row.id) == instance.type_id; });
+        if (type == tables_->units.end()) continue; // no table row: it keeps its map record's own drawing
+        BattleScene::PlacedUnit placed;
+        placed.object_id = type->id; placed.live_entity = instance.entity_id;
+        placed.position = {live_session_detail::to_float(instance.fixed_transform.rows[0][3]), live_session_detail::to_float(instance.fixed_transform.rows[1][3]),
+            live_session_detail::to_float(instance.fixed_transform.rows[2][3])};
+        placed.yaw_degrees = static_cast<float>(live::instance_yaw_degrees(instance.fixed_transform));
+        const auto owner = std::find_if(start_->players.begin(), start_->players.end(),
+            [&](const auto& p) { return p.player.player_id == instance.owner; });
+        if (owner != start_->players.end() && owner->colour) placed.team_colour = owner->colour->rgb;
+        ship_of_entity_[instance.entity_id] = placed_ships_.size();
+        placed_ships_.push_back(std::move(placed));
+        land_session_records_.push_back(structures.at(instance.entity_id));
     }
 }
 
@@ -248,18 +299,34 @@ float land_heading_error(const platform::LiveLandMemberMotion& member) {
     return static_cast<float>(std::remainder(std::atan2(dy, dx) * radians_to_degrees
         - static_cast<double>(motion_value(member.facing)) * 360.0, 360.0));
 }
+// The clip type each LandClip choice plays (WLAN-03..05, 10, 11); the numbers are the named clip types.
 std::size_t land_clip_type(const animation::LandClip kind, const std::uint32_t stop_index) {
+    namespace types = animation::clip_types;
     using enum animation::LandClip;
     switch (kind) {
-    case move: return 2; case walk: return 66; case crouch: return 67; case start: return 16;
-    case stop: return 17 + std::min(stop_index, 3U); case turn_left: return 3; case turn_right: return 4;
-    case turn_left_quarter: return 22; case turn_right_quarter: return 24;
-    case turn_left_half: return 21; case turn_right_half: return 23;
-    case turn_left_begin: return 12; case turn_left_end: return 13;
-    case turn_right_begin: return 14; case turn_right_end: return 15; default: return 0;
+    case move: return types::move; case walk: return types::walk_move; case crouch: return types::crouch_move;
+    case start: return types::move_start;
+    case stop: return types::move_end_first + std::min<std::size_t>(stop_index, types::move_end_last - types::move_end_first);
+    case turn_left: return types::turn_left; case turn_right: return types::turn_right;
+    case turn_left_quarter: return types::turn_left_quarter; case turn_right_quarter: return types::turn_right_quarter;
+    case turn_left_half: return types::turn_left_half; case turn_right_half: return types::turn_right_half;
+    case turn_left_begin: return types::turn_left_begin; case turn_left_end: return types::turn_left_end;
+    case turn_right_begin: return types::turn_right_begin; case turn_right_end: return types::turn_right_end;
+    case attack: return types::attack; case attack_idle: return types::attack_idle;
+    default: return types::idle;
     }
 }
 } // namespace
+
+void LiveSessionView::note_land_shots(const std::uint64_t tick) {
+    const auto snapshot = snapshot_at(tick);
+    if (!snapshot) return;
+    for (const auto& event : snapshot->combat_events()) {
+        if (event.kind != tactical::CombatEventKind::weapon_fired) continue;
+        auto& latest = land_last_shot_[event.shooter];
+        latest = std::max(latest, event.tick);
+    }
+}
 
 void LiveSessionView::advance_land_playback(BattleScene& population, const platform::LiveLandMotion& motion) {
     constexpr std::uint32_t subdivisions = 1024;
@@ -269,6 +336,11 @@ void LiveSessionView::advance_land_playback(BattleScene& population, const platf
             [&](const auto& row) { return row.tag == name; });
         return found == tables_->land_animation_constants.end() ? 0.0F : authored(found->value);
     };
+    // N9: the constants do not change while the view lives; read them once per call, not once per member.
+    const float walk_cutoff = constant("WalkAnimationCutoff"), move_blend = constant("MoveBlendTime"),
+        crouch_blend = constant("CrouchMoveBlendTime"), team_move_blend = constant("TeamMoveBlendTime"),
+        team_crouch_blend = constant("TeamCrouchMoveBlendTime"), infantry_turn_blend = constant("InfantryTurnBlendTime"),
+        idle_walk_blend = constant("IdleWalkBlendTime"), crouch_idle_walk_blend = constant("CrouchIdleWalkBlendTime");
     for (const auto& member : motion.members) {
         const auto entry = land_playback_.find(member.entity);
         const auto ship = ship_of_entity_.find(member.entity);
@@ -319,7 +391,8 @@ void LiveSessionView::advance_land_playback(BattleScene& population, const platf
         }
         if (member.turning || playback.phase == animation::LandTurnPhase::end) input.motion = animation::LandMotion::turning;
         input.active = playback.active; input.turn_phase = playback.phase;
-        input.speed = motion_value(member.speed); input.maximum_speed = motion_value(member.maximum_speed);
+        input.speed = animation::land_clip_speed(motion_value(member.speed), motion_value(member.team_speed), member.has_team_speed);
+        input.maximum_speed = motion_value(member.maximum_speed);
         if (!playback.bike && input.speed > 0.0F && input.motion == animation::LandMotion::turning)
             input.motion = animation::LandMotion::moving;
         input.heading_degrees = member.has_motion_input ? motion_value(member.heading_error) * 360.0F
@@ -332,36 +405,52 @@ void LiveSessionView::advance_land_playback(BattleScene& population, const platf
         if (playback.bike) input.heading_degrees = facing_delta * 360.0F;
         input.move_speed = authored(playback.data.movement_animation_speed); input.walk_speed = authored(playback.data.walk_animation_speed);
         input.crouch_speed = authored(playback.data.crouch_animation_speed); input.rotation_speed = authored(playback.data.rotation_animation_speed);
-        input.stopped_turn_rate = authored(playback.data.stopped_rate_of_turn); input.cutoff = constant("WalkAnimationCutoff");
-        input.move_blend = constant("MoveBlendTime"); input.crouch_blend = constant("CrouchMoveBlendTime");
-        input.squad_move_blend = constant("TeamMoveBlendTime"); input.squad_crouch_blend = constant("TeamCrouchMoveBlendTime");
-        input.infantry_turn_blend = constant("InfantryTurnBlendTime");
+        input.stopped_turn_rate = authored(playback.data.stopped_rate_of_turn); input.cutoff = walk_cutoff;
+        input.move_blend = move_blend; input.crouch_blend = crouch_blend;
+        input.squad_move_blend = team_move_blend; input.squad_crouch_blend = team_crouch_blend;
+        input.infantry_turn_blend = infantry_turn_blend;
         input.turn_duration = turn_rate_limit > 0.0F
             ? std::abs(input.heading_degrees) / (360.0F * turn_rate_limit) : 0.0F;
-        input.idle_walk_blend = constant("IdleWalkBlendTime"); input.crouch_idle_walk_blend = constant("CrouchIdleWalkBlendTime");
+        input.idle_walk_blend = idle_walk_blend; input.crouch_idle_walk_blend = crouch_idle_walk_blend;
         input.bike = playback.bike; input.team = playback.team; input.walk_transition = playback.data.walk_transition;
         input.pre_turn = playback.data.has_pre_turn_animation; input.spread_out = member.spread_out;
         input.stop_point = member.stop_point; input.blending = playback.blending;
-        input.has_walk = population.land_clip(ship->second, 66) != nullptr;
-        input.has_crouch = population.land_clip(ship->second, 67) != nullptr;
-        constexpr std::array<std::size_t, 10> turn_types{3, 4, 12, 13, 14, 15, 21, 22, 23, 24};
+        input.has_walk = population.land_clip(ship->second, animation::clip_types::walk_move) != nullptr;
+        input.has_crouch = population.land_clip(ship->second, animation::clip_types::crouch_move) != nullptr;
+        namespace types = animation::clip_types;
+        constexpr std::array<std::size_t, 10> turn_types{types::turn_left, types::turn_right, types::turn_left_begin,
+            types::turn_left_end, types::turn_right_begin, types::turn_right_end, types::turn_left_half, types::turn_left_quarter,
+            types::turn_right_half, types::turn_right_quarter};
         input.has_turn = (member.has_path_target || input.turn_phase == animation::LandTurnPhase::end)
             && std::any_of(turn_types.begin(), turn_types.end(),
                 [&](const auto type) { return population.land_clip(ship->second, type) != nullptr; });
         if (input.pre_turn && input.turn_phase == animation::LandTurnPhase::begin
-            && !population.land_clip(ship->second, input.heading_degrees < 0 ? 12 : 14)) {
+            && !population.land_clip(ship->second, input.heading_degrees < 0 ? types::turn_left_begin : types::turn_right_begin)) {
             playback.phase = input.turn_phase = animation::LandTurnPhase::main;
         }
         if (input.pre_turn && input.turn_phase == animation::LandTurnPhase::end
             && !population.land_clip(ship->second, playback.active == animation::LandClip::turn_left
                 || playback.active == animation::LandClip::turn_left_quarter || playback.active == animation::LandClip::turn_left_half
-                || playback.active == animation::LandClip::turn_left_begin ? 13 : 15)) {
+                || playback.active == animation::LandClip::turn_left_begin ? types::turn_left_end : types::turn_right_end)) {
             playback.phase = input.turn_phase = animation::LandTurnPhase::main;
             input.motion = animation::LandMotion::stopped;
         }
-        for (std::size_t type = 17; type <= 20 && population.land_clip(ship->second, type); ++type) ++input.stop_clip_count;
+        for (std::size_t type = types::move_end_first; type <= types::move_end_last && population.land_clip(ship->second, type); ++type) ++input.stop_clip_count;
         if (previous && previous->playable_frames()) input.cycle_phase = static_cast<float>(playback.position)
             / static_cast<float>(static_cast<std::uint64_t>(previous->playable_frames()) * subdivisions);
+        // UA-04 on land: the member's latest shot drives its ATTACK / ATTACKIDLE choice (presentation only; the model's
+        // clips decide: none bound, no change).
+        const auto shot = land_last_shot_.find(member.entity);
+        const bool fresh_shot = shot != land_last_shot_.end() && shot->second != playback.shot_seen;
+        input.ticks_since_shot = shot == land_last_shot_.end() ? animation::land_no_shot
+            : fresh_shot || shot->second >= motion.tick ? 0U
+            : static_cast<std::uint32_t>(std::min<std::uint64_t>(motion.tick - shot->second, animation::land_no_shot - 1));
+        input.has_attack = population.land_clip(ship->second, types::attack) != nullptr;
+        input.has_attack_idle = population.land_clip(ship->second, types::attack_idle) != nullptr;
+        input.attack_finished = playback.active == animation::LandClip::attack && finished;
+        input.attack_blend = 0.4F; // retail's global attack blend (its initial engine value, read from the debug build)
+        // Retail draws the stance blend from the synchronized generator in [0.2, 0.75] s; a fixed spread by entity here.
+        input.attack_idle_blend = 0.2F + 0.55F * static_cast<float>((member.entity * 2654435761ULL) % 1000) / 1000.0F;
         auto choice = animation::select_land_clip(input);
         auto selected = land_clip_type(choice.kind, choice.stop_index);
         if (!population.land_clip(ship->second, selected)) {
@@ -382,7 +471,11 @@ void LiveSessionView::advance_land_playback(BattleScene& population, const platf
             else if (choice.start_frame == animation::LandStartFrame::normalized && previous && previous->playable_frames())
                 playback.position = playback.position * player->playable_frames() / previous->playable_frames();
             if (end) playback.position %= end;
+        } else if (choice.kind == animation::LandClip::attack && fresh_shot) {
+            // A further shot restarts the ATTACK clip from its first frame.
+            playback.position = 0; playback.blending = false;
         }
+        if (shot != land_last_shot_.end()) playback.shot_seen = shot->second;
         if (selected == 0 && idle_position) playback.position = idle_units();
         if (choice.kind == animation::LandClip::start && selected == 16) {
             const auto end = static_cast<std::uint64_t>(player->playable_frames()) * subdivisions;

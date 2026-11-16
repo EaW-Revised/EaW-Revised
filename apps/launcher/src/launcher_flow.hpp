@@ -29,6 +29,7 @@ struct Options {
     std::optional<fs::path> viewer_user_data; // Injectable Godot user:// folder; independent of --user-data
     fs::path launcher_dir;                 // the folder holding the launcher exe
     bool allow_unknown_build = false;      // --allow-unknown-build: passed to the viewer as --eawr-allow-unknown-build
+    bool no_fog = false;                   // --no-fog: passed to the viewer as --eawr-no-fog (a profile's launch.no_fog does the same)
     std::optional<bool> safe_render_thread;       // Explicit CLI mode: --render-thread safe|separate; --safe-render-thread aliases Safe
     bool choose_game = false;              // --choose-game (or Shift held): ask even if a choice is saved
     bool no_dialogs = false;               // --no-dialogs: errors go to the log and stderr, nothing is asked (tests, scripts)

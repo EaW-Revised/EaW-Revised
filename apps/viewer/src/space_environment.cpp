@@ -1,6 +1,7 @@
 #include "space_environment.hpp"
 #include "space_environment_internal.hpp"
 #include "settings_store.hpp"
+#include "eawr/assets/asset_names.hpp"
 
 namespace eawr::presentation::godot_backend {
 namespace {
@@ -65,6 +66,17 @@ namespace space_environment_detail {
         if (filesystem.stat(candidate)) return candidate;
     }
     return std::nullopt;
+}
+
+// An environment texture reference follows the asset layer's texture rule (RGC-122): the authored
+// name first, then its first dot-token with .dds (a model naming W_Skydome_Sunset.jpg loads the
+// shipped W_Skydome_Sunset.dds). The suffix-only probe above does not strip a .jpg/.png/.tif name.
+std::optional<std::string> probe_texture(const vfs::Vfs& filesystem, const std::string_view root,
+                                         const std::string_view name) {
+    std::string path = assets::resolve_texture_name(
+        root, name, [&](const std::string_view candidate) { return static_cast<bool>(filesystem.stat(candidate)); });
+    if (path.empty()) return std::nullopt;
+    return path;
 }
 
 [[nodiscard]] std::optional<space::Rgb8Image> rgb_of(const std::vector<std::byte>& png) {

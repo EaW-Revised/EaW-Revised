@@ -118,6 +118,9 @@ public:
     [[nodiscard]] bool set_text_control(const std::string& id, const std::string& value);
     // Presses a button as a click would. False when it is missing or disabled.
     [[nodiscard]] bool press(const std::string& id);
+    // Delivers a physical key chord ("Q", "Ctrl+Y") to a waiting binding capture as a key press would.
+    // False when no capture is waiting or the chord is not a letter.
+    [[nodiscard]] bool press_key(const std::string& chord);
 
     // The controls of the page as the player sees them.
     [[nodiscard]] std::vector<ControlState> control_states() const;
@@ -159,6 +162,10 @@ private:
     void on_viewport_resized();
 
     void handle_button(const std::string& id);
+    // #5131: press-to-bind for the selection hotkeys (the Controls page's only rebindable rows).
+    void begin_capture(std::size_t action);
+    void end_capture();
+    void capture_key(char letter, bool ctrl);
     void commit_page(bool leave);
     void cancel_page();
     void defaults_page();
@@ -187,6 +194,8 @@ private:
     std::string failure_;
     Page page_{Page::hub};
     int keyboard_page_{1};
+    std::optional<std::size_t> capturing_; // the selection action waiting for a key
+    std::string selection_message_;        // the Controls page's binding status line
     int performance_scroll_{};
     bool file_existed_{};
     bool shown_{};

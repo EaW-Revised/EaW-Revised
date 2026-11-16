@@ -10,6 +10,7 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/movement.hpp"
 #include "eawr/vfs/vfs.hpp"
+#include "../../src/sim/galactic/fleet_contents.hpp"
 
 #include <algorithm>
 #include <array>
@@ -419,6 +420,96 @@ gc::GalacticSnapshot run(gc::GalacticSetup s, std::vector<gc::GameCommand> comma
     for (const auto& c : commands) expect(bool(game.submit(c)), "scenario command submits");
     for (std::uint64_t i = 0; i < ticks; ++i) expect(bool(game.step(executor)), "scenario movement step");
     return *game.snapshot();
+}
+// WST-31: the contents walk never loops on a containment cycle.
+void contents_walk_cycle() {
+    std::map<eawr::sim::EntityId, gc::CensusObject> records;
+    for (const auto& [id, type] : {std::pair{30U, 3U}, std::pair{31U, 4U}, std::pair{32U, 5U}}) {
+        gc::CensusObject o; o.id = id; o.original_type = type; records.emplace(id, o);
+    }
+    const std::vector<gc::FleetMember> members{{20, 1, false}};
+    bool cyclic = false;
+    auto types = gc::session_detail::contained_types(members, {{20, {30}}, {30, {31}}}, records, 10, cyclic);
+    expect(types == std::vector<gc::TypeId>{1, 3, 4} && !cyclic, "nested contents are flattened, sorted and unique");
+    types = gc::session_detail::contained_types(members, {{20, {30}}, {30, {20, 31, 32}}, {31, {30}}}, records, 10, cyclic);
+    expect(types == std::vector<gc::TypeId>{1, 3, 4, 5} && cyclic, "a containment cycle is walked once, reported, and ends");
+    cyclic = false;
+    types = gc::session_detail::contained_types(members, {{20, {10, 30}}}, records, 10, cyclic);
+    expect(types == std::vector<gc::TypeId>{1, 3} && !cyclic, "the fleet itself is never its own content");
+}
+// WST-31: two jump arrivals and a bounce in one tick reach the story handler in a fixed order on every worker count.
+struct StoryRow {
+    std::uint64_t tick{};
+    gc::GalacticSession::FleetStoryNotice::Kind kind{};
+    gc::FleetId fleet{};
+    gc::PlanetId planet{};
+    gc::PlayerId owner{};
+    std::vector<gc::TypeId> types;
+    bool stealth{};
+    friend bool operator==(const StoryRow&, const StoryRow&) = default;
+};
+std::vector<StoryRow> story_rows(gc::GalacticSetup s, const std::vector<gc::GameCommand>& commands, std::size_t workers) {
+    auto game = gc::GalacticSession::create(s).value();
+    const eawr::platform::ThreadWorkerAdapter executor(workers);
+    std::vector<StoryRow> rows;
+    std::uint64_t now{};
+    game.set_fleet_story_handler([&](const gc::GalacticSession::FleetStoryNotice& n) {
+        rows.push_back({now, n.kind, n.fleet, n.planet, n.owner, n.types, n.stealth});
+        return eawr::core::Result<void>::success();
+    });
+    for (const auto& c : commands) expect(bool(game.submit(c)), "story scenario command submits");
+    for (std::uint64_t i = 0; i < 40; ++i) { now = i; expect(bool(game.step(executor)), "story scenario step"); }
+    return rows;
+}
+void fleet_story_notices() {
+    using Kind = gc::GalacticSession::FleetStoryNotice::Kind;
+    // Fleets 10 and 11 jump from planet 1 to planet 2 together and arrive in the same tick; fleet 12 stays put.
+    const gc::GameCommand first{{0, gc::SeatId{1}, 1}, gc::MoveFleet{10, {1, 2}, {}}};
+    const gc::GameCommand second{{0, gc::SeatId{1}, 2}, gc::MoveFleet{11, {1, 2}, {}}};
+    std::vector<StoryRow> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const auto rows = story_rows(setup(), {first, second}, workers);
+        expect(rows.size() == 2 && rows[0].kind == Kind::arrived && rows[1].kind == Kind::arrived
+            && rows[0].fleet == 10 && rows[1].fleet == 11 && rows[0].tick == rows[1].tick
+            && rows[0].planet == 2 && rows[0].owner == 1 && rows[0].types == std::vector<gc::TypeId>{1},
+            "two arrivals in one tick reach the story in fleet order with their planet, owner and member types");
+        if (workers == 1) reference = rows; else expect(rows == reference, "the story notices are equal on 1/2/4/8 workers");
+    }
+    // An inaccessible final destination bounces: the story hears the bounce, never an arrival there.
+    auto refused = setup(); refused.movement->access[2].accessible = false;
+    const gc::GameCommand toward{{0, gc::SeatId{1}, 1}, gc::MoveFleet{10, {1, 2, 3}, {}}};
+    std::vector<StoryRow> bounced_reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const auto rows = story_rows(refused, {toward}, workers);
+        const auto bounces = std::count_if(rows.begin(), rows.end(), [](const auto& r) { return r.kind == Kind::bounced && r.planet == 3; });
+        expect(bounces == 1 && std::none_of(rows.begin(), rows.end(), [](const auto& r) { return r.kind == Kind::arrived && r.planet == 3; }),
+            "a bounce is announced once and the fleet never arrives at the refused planet");
+        if (workers == 1) bounced_reference = rows; else expect(rows == bounced_reference, "bounce notices are equal on 1/2/4/8 workers");
+    }
+    // A fleet whose members all skip combat bounces as a stealth fleet: the same predicate as an arrival.
+    auto sneaking = refused; sneaking.movement->types[0].skips_combat = true;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const auto rows = story_rows(sneaking, {toward}, workers);
+        expect(std::any_of(rows.begin(), rows.end(), [](const auto& r) { return r.kind == Kind::bounced && r.stealth; })
+            && std::none_of(rows.begin(), rows.end(), [](const auto& r) { return r.kind == Kind::bounced && !r.stealth; }),
+            "a stealth fleet bounces with the stealth flag set");
+    }
+}
+// WST-34: objects lost in a battle result reach the story after the commit, in ascending object id, with the owner,
+// the planet they stood at and their type.
+void battle_loss_story_notices() {
+    auto game = gc::GalacticSession::create(setup()).value();
+    std::vector<gc::GalacticSession::LossStoryNotice> rows;
+    game.set_loss_story_handler([&](const gc::GalacticSession::LossStoryNotice& n) {
+        rows.push_back(n); return eawr::core::Result<void>::success();
+    });
+    const std::array<eawr::sim::EntityId, 2> lost{20, 22};
+    expect(bool(game.apply_battle_losses(lost)), "the losses commit");
+    expect(rows.size() == 2 && rows[0].actor == 20 && rows[0].owner == 1 && rows[0].planet == 1 && rows[0].type == 1 && rows[0].original_type == 1
+        && rows[1].actor == 22 && rows[1].owner == 2 && rows[1].planet == 2,
+        "each loss is announced once, in ascending object id, with its owner, planet and type");
+    auto quiet = gc::GalacticSession::create(setup()).value();
+    expect(bool(quiet.apply_battle_losses(lost)), "a session without a story hook commits the same losses");
 }
 void arrival() {
     const gc::GameCommand invalid_slot{{0, gc::SeatId{1}, 1}, gc::MoveFleet{10, {1, 2}, std::uint8_t{3}}};
@@ -992,7 +1083,8 @@ int case_galactic_movement_tests(int argc, const char* const argv[]) {
     try {
         if (argc == 3 && std::string_view(argv[1]) == "--generate") { generate(argv[2]); return 0; }
         if (argc == 2 && std::string_view(argv[1]) == "--installed") { installed(); return galactic_test::failures == 0 ? 0 : 1; }
-        staged_arrival_recheck_contracts(); native_movement_layers(); departure(); mixed_squadron_packing(); move_after_merge(); roundtrip_and_parity(); arrival(); orbit_placement_and_recheck(); transports(); adapter();
+
+        staged_arrival_recheck_contracts(); native_movement_layers(); departure(); mixed_squadron_packing(); move_after_merge(); roundtrip_and_parity(); arrival(); contents_walk_cycle(); fleet_story_notices(); battle_loss_story_notices(); orbit_placement_and_recheck(); transports(); adapter();
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;
 }

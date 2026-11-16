@@ -116,6 +116,7 @@ struct Difficulty {
 // gameconstants.xml values of the space perception grid and targets; engine defaults where
 // the file has no tag (PG-01 to PG-04).
 struct Constants {
+    bool uses_fog_space{};                    // AIUsesFogOfWarSpace, SK-45 / TCFA-11
     Real region_size{real(2000)};              // AI_SpaceEvaluatorRegionSize
     Real fog_cell_size{real(100)};             // DesiredSpaceFOWCellSize
     std::int64_t fog_cells_per_threat_cell{4}; // AI_FogCellsPerThreatCell

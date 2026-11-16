@@ -723,6 +723,34 @@ void projectile_effect_contracts() {
         expect(ability.role == (index == 5 || index == 6 ? SpaceRole::drawn : SpaceRole::not_drawable),
             "ability proxy owners still reject missing effects, invalid transforms and decode failures");
     }
+    // #6572/BP-70: a unit whose root model is a particle system is drawn as that effect, without
+    // being an ability proxy owner; the same shape without the root mark, or on another type, is not.
+    {
+        const auto live_role = [](const eawr::scene::Placement& candidate, const std::string_view type) {
+            eawr::scene::LiveUnitTags live_tags;
+            live_tags.type_name = std::string(type);
+            return eawr::scene::classify_live_unit(candidate, live_tags, false);
+        };
+        auto root = unit;
+        root.particle_root = true;
+        const auto drawn = live_role(root, "SpaceUnit");
+        expect(drawn.role == SpaceRole::drawn && drawn.drawn_surfaces.empty(),
+            "BP-70: a live SpaceUnit with a particle root enters the emitter path without surfaces");
+        expect(live_role(unit, "SpaceUnit").role == SpaceRole::not_drawable,
+            "BP-70: an effect-only SpaceUnit without a particle root keeps the mesh requirement");
+        expect(live_role(root, "SpaceProp").role == SpaceRole::not_drawable,
+            "BP-70: the particle-root unit route does not admit other object types");
+        auto unresolved = root;
+        unresolved.effects[0].resolved.clear();
+        auto undecodable = root;
+        undecodable.issues.push_back({Cause::model_failed_to_load, "invented_round.alo"});
+        auto unposed = root;
+        unposed.transform.reset();
+        for (const auto& bad : {unresolved, undecodable, unposed}) {
+            expect(live_role(bad, "SpaceUnit").role == SpaceRole::not_drawable,
+                "BP-70: a particle-root unit still needs its resolved effect, a decodable model and a pose");
+        }
+    }
 }
 
 int main() {

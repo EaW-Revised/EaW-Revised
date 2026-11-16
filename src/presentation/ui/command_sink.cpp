@@ -39,6 +39,7 @@ bool consumes(const TacticalIntent& pending, const TacticalIntent& request) {
     case TacticalVerb::ability: return pending.unit_ability == request.unit_ability;
     case TacticalVerb::repair_hardpoint: return pending.hardpoint == request.hardpoint;
     case TacticalVerb::special_fire:
+    case TacticalVerb::tactical_superweapon:
     case TacticalVerb::pad_build:
     case TacticalVerb::pad_sell: return true;
     default: return false; // Orders replace orders; ordinary purchases reserve count and money.
@@ -169,7 +170,7 @@ core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& int
         return Payload::success(tactical::GiftPayload{intent.gift_recipient});
     case TacticalVerb::stop: return Payload::success(tactical::StopPayload{});
     case TacticalVerb::beacon: return Payload::success(tactical::BeaconPayload{intent.destination});
-    case TacticalVerb::move: return Payload::success(tactical::MovePayload{intent.destination, intent.through_hazards, intent.append});
+    case TacticalVerb::move: return Payload::success(tactical::MovePayload{intent.destination, intent.through_hazards, intent.append, intent.final_yaw});
     case TacticalVerb::attack:
         if (intent.target == sim::invalid_entity_id) {
             return Payload::failure(failure(diagnostic_codes::invalid_intent, "an attack needs a target unit"));
@@ -179,13 +180,16 @@ core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& int
         if (intent.target == sim::invalid_entity_id || intent.units.size() != 1)
             return Payload::failure(failure(diagnostic_codes::invalid_intent, "special fire needs one source and a target"));
         return Payload::success(tactical::SpecialFirePayload{intent.target, tactical::SpecialFireAdmission::player});
+    case TacticalVerb::tactical_superweapon:
+        if (intent.units.size() != 1)
+            return Payload::failure(failure(diagnostic_codes::invalid_intent, "the super weapon switch names one object"));
+        return Payload::success(tactical::TacticalSuperweaponPayload{intent.tsw_stage, tactical::TswAdmission::player});
     case TacticalVerb::attack_move:
         return Payload::success(tactical::AttackMovePayload{intent.destination, intent.target});
     case TacticalVerb::guard:
         return Payload::success(tactical::GuardPayload{intent.destination, intent.target});
     case TacticalVerb::face:
-        return Payload::failure(failure(diagnostic_codes::unsupported_intent,
-            "face orders have no tactical command in rules v1"));
+        return Payload::success(tactical::FacePayload{intent.destination}); // MV-20: turn in place towards the point
     case TacticalVerb::ability:
         // #76: a modelled unit ability becomes an ability command (space-abilities AB-50).
         if (intent.unit_ability != tactical::AbilityKind::none) {
@@ -317,7 +321,8 @@ core::Result<void> CommandScheduler::issue(const TacticalIntent& intent) {
         queue_.back().issuing_seat = controller_seat_;
     }
     const bool reserves = economy || quitting || intent.verb == TacticalVerb::ability
-        || intent.verb == TacticalVerb::repair_hardpoint || intent.verb == TacticalVerb::special_fire;
+        || intent.verb == TacticalVerb::repair_hardpoint || intent.verb == TacticalVerb::special_fire
+        || intent.verb == TacticalVerb::tactical_superweapon;
     if (reservations_enabled_ && reserves) {
         reservations_.push_back({open_tick_, queue_.back().key.sequence, intent});
         ++reservation_revision_;
@@ -409,7 +414,7 @@ core::Result<void> OrderInput::ability(const std::uint32_t ability_crc, const Wo
 }
 
 core::Result<bool> OrderInput::world_command(const WorldPick& pick, const CommandOrigin origin,
-    const OrderModifiers modifiers) {
+    const OrderModifiers modifiers, const RightDrag* drag) {
     if (selection_.empty()) return core::Result<bool>::success(false);
     TacticalIntent intent;
     intent.origin = origin;
@@ -456,6 +461,17 @@ core::Result<bool> OrderInput::world_command(const WorldPick& pick, const Comman
             intent.destination = pick.point;
         }
         break;
+    }
+    if (drag != nullptr && (intent.verb == TacticalVerb::move || intent.verb == TacticalVerb::attack_move)) {
+        // O-2: only a point move follows the drag; the release point decided it was one.
+        if (drag->cancel) return core::Result<bool>::success(false);
+        if (drag->face_toward) {
+            intent.verb = TacticalVerb::face;
+            intent.destination = *drag->face_toward;
+        } else {
+            intent.destination = drag->press_point;
+            if (intent.verb == TacticalVerb::move) intent.final_yaw = drag->final_yaw;
+        }
     }
     intent.append = intent.verb == TacticalVerb::move && (mode == OrderMode::waypoint || (modifiers.alt && !modifiers.ctrl));
     intent.through_hazards = intent.verb == TacticalVerb::move && modifiers.through_hazards;

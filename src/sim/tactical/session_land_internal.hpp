@@ -4,6 +4,7 @@
 #include "session_types.hpp"
 
 #include "eawr/sim/tactical/land_placement.hpp"
+#include "eawr/sim/tactical/pads.hpp"
 #include "eawr/sim/world.hpp"
 
 #include <array>
@@ -88,6 +89,21 @@ struct LandFormationScratch {
     bool valid{true};
 };
 
+// WLAB-16, WLAB-17, WLAB-19 (#3239): what a land ability keeps on a unit between ticks. A record exists only while it differs from
+// the default (primary locomotor, stowed, no jump pending, first projectile type), so a battle that never uses these abilities saves none.
+struct LandAbilityMotion {
+    std::uint8_t locomotor{};      // 0 the primary locomotor, 1 the secondary one (JET_PACK on a type that uses several)
+    std::uint8_t deploy{};         // 0 stowed, 1 deployed (DEPLOY on)
+    std::uint8_t jump_phase{};     // WLAB-16 (#7084): 0 none, 1 waiting for the lift-off, 2 flying to the landing point, 3 coming down
+    math::Vec3 jump_point{};       // the point the jump was ordered to (kept only while phase 1)
+    std::uint8_t projectile{};     // 0 the first projectile type, 1 the second (SWAP_WEAPONS, the permanent swap; WLAB-19, WLAB-71)
+    std::uint32_t jump_frames{};   // phase 1: the frames waited since the order
+    math::Fixed jump_speed{};      // phase 2: the planar speed, units per second
+    math::Vec3 jump_position{};    // phases 2 and 3: the flying body's position (the movement body already stands at the landing point)
+    [[nodiscard]] bool idle() const noexcept { return locomotor == 0 && deploy == 0 && jump_phase == 0 && projectile == 0; }
+    friend bool operator==(const LandAbilityMotion&, const LandAbilityMotion&) = default;
+};
+
 // LC-51 (#5894): a bought company on its way down. Its whole timeline derives from these two frames and the content
 // rules (waiting, landing clip, unload steps); the company's objects exist from `finalize_frame` on.
 struct LandLanding {
@@ -100,6 +116,7 @@ struct LandLanding {
     std::uint64_t finalize_frame{};
     std::uint64_t pool_token{};    // the pool entry the company was bought as
     SeatId seat{};                 // the issuing seat, preferred controller of the landed objects
+    bool garrison{};               // LC-105 (G-14): a pending free-garrison entry was used; the landed objects join the free garrison
     friend bool operator==(const LandLanding&, const LandLanding&) = default;
 };
 
@@ -120,10 +137,18 @@ struct LandSession final {
     std::vector<LandWalkingFormation*> formation_work;
     std::vector<LandFormationScratch> formation_scratch;
     std::vector<std::optional<math::Fixed>> formation_speeds;
+    std::vector<std::int64_t> contact_sides; // per squad: the owner's team, or -1 when neutral or unowned (WLPA-57, #6062)
     std::vector<EntityId> formation_finished;
     // Q1/Q2: retained shared target and next opportunity scan frame for each living squad.
     LandCombatState combat_state;
     std::map<EntityId, LandGarrisonEntry> garrison_entries; // ascending entrant id
+    // WLAB-08 (#3238): the tick a Force-disabling carrier's scan last reached each unit that holds a Force-cancelled kind,
+    // ascending unit id. Saved state (section 18). An entry older than the window is dropped when the scan runs, so the map
+    // holds only units that are Force disabled now or were on the previous tick.
+    std::map<EntityId, std::uint64_t> force_disable_stamps;
+    // WLAB-16/17 (#3239): the non-default ability motion records, ascending unit id. Saved state (section 19). A record is
+    // erased when it returns to the default (undeploy); a dead unit's record stays (nothing reads it).
+    std::map<EntityId, LandAbilityMotion> ability_motion;
     // Whether `object` is a squad or member kept off the live roster inside a host.
     [[nodiscard]] const LandGarrisonEntry* garrison_hiding(const EntityId object) const {
         for (const auto& [id, entry] : garrison_entries) {
@@ -135,6 +160,8 @@ struct LandSession final {
     }
     std::map<EntityId, std::pair<TypeId, PlayerId>> bindings; // derived from setup expansion and dynamic_children, never archived
     std::map<EntityId, UnitState> static_roots; // setup poses, rederived on restore, plus the dynamic children
+    // LE-OCCUPY: the pad bodies derived from the static roots and the content, refilled each tick; never archived.
+    std::vector<LandPadBody> pad_scratch;
     // LC-55: objects the economy created after setup (a pad's construction and its completed child). They are static
     // roots with a binding; the sorted ids are archived so a restore can tell them from a setup identity.
     std::vector<EntityId> dynamic_children;
@@ -154,6 +181,17 @@ struct LandSession final {
     explicit LandSession(LandSessionContent source, LandOccupancy field)
         : content(std::move(source)), occupancy(std::move(field)) {}
 };
+
+// LE-OCCUPY (WLPA-66, FD-82, #6976): hands the movement the pads that exist now. A static root whose type has a pad body row
+// is one, except a buildable pad (one the economy tracks) that carries no building and no construction: an empty pad is no
+// body, so a squad can walk onto it and use it. A root the death commit erased, or a pad whose building is gone, is not one, so
+// it leaves discovery and the swept pair guard on the next movement step, and the retained rows that name it resolve at the
+// next contact service. False when a pose is out of range.
+[[nodiscard]] bool land_refresh_pads(LandSession& land, const std::map<EntityId, PadState>& pad_states);
+
+// WLAB-16 (#7084, land_jump.cpp): whether a member of the movement squad `squad` is jumping (waiting for the lift-off with a
+// flight row, flying or coming down). Such a squad takes no order until it has landed.
+[[nodiscard]] bool land_squad_jumping(const LandSession& land, std::size_t squad);
 
 } // namespace eawr::sim::tactical::session_detail
 

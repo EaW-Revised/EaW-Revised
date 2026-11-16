@@ -451,6 +451,14 @@ void representation_contracts(const gc::GalacticSetup& setup, std::shared_ptr<co
         return value;
     };
     const auto census_size = u32(0);
+    const auto saved_section = section;
+    const auto refused_for = [&](const std::vector<std::uint8_t>& candidate, std::string_view reason) {
+        const auto result = world.restore_actor_representations(candidate);
+        return !result && result.error().message.find(reason) != std::string::npos
+            && world.state_sha256() == before_restore && deliveries == notification_count;
+    };
+    // The untouched section (with its story AI-usage tail) is accepted: the diagnostics below are not a blanket refusal.
+    expect(bool(world.restore_actor_representations(saved_section)), "the saved section with its story AI-usage tail restores");
     auto census = gc::detail::decode_census(std::span<const std::uint8_t>(section).subspan(4, census_size));
     expect(census && census->objects.size() >= 2, "duplicate restore fixture contains two actor rows");
     if (!census || census->objects.size() < 2) return;
@@ -464,11 +472,52 @@ void representation_contracts(const gc::GalacticSetup& setup, std::shared_ptr<co
     duplicate_section.insert(duplicate_section.end(), encoded.begin(), encoded.end());
     duplicate_section.insert(duplicate_section.end(), section.begin() + 4 + census_size, section.end());
     section = std::move(duplicate_section);
-    expect(!world.restore_actor_representations(section) && world.state_sha256() == before_restore
-        && deliveries == notification_count, "duplicate saved actor identity refuses atomically");
+    expect(refused_for(section, "saved census is malformed"), "duplicate saved actor identity refuses atomically");
     section.resize(3);
-    expect(!world.restore_actor_representations(section) && world.state_sha256() == before_restore
-        && deliveries == notification_count, "malformed restore refuses without publication or callbacks");
+    expect(refused_for(section, "section is truncated"), "malformed restore refuses without publication or callbacks");
+    {
+        // Story AI-usage tail: a trailing byte, a count that does not match the rows, and a fact the live records lack.
+        auto longer = saved_section; longer.push_back(0);
+        expect(refused_for(longer, "story AI-usage tail is malformed"), "a trailing byte after the story AI-usage tail refuses");
+        auto invented = saved_section;
+        const auto tail = invented.size() - 4;
+        invented[tail] = 1;
+        for (unsigned i = 0; i < 8; ++i) invented.push_back(i == 0 ? static_cast<std::uint8_t>(actor & 0xFF) : static_cast<std::uint8_t>((actor >> (i * 8)) & 0xFF));
+        invented.push_back(2); invented.push_back(0);
+        expect(refused_for(invented, "story AI-usage facts differ from the live records"),
+            "a saved story AI-usage fact the live records lack refuses");
+        auto old_layout = saved_section; old_layout.resize(old_layout.size() - 4);
+        expect(refused_for(old_layout, "story AI-usage tail is missing"), "a census section without the story AI-usage tail refuses by name");
+    }
+    {
+        // A non-empty tail: the owner carries two story facts on one actor and the saved section lists them.
+        auto flagged = gc::GalacticSession::create(setup); expect(bool(flagged), "story-fact world constructs");
+        auto bare = gc::GalacticSession::create(setup); expect(bool(bare), "story-fact-free world constructs");
+        if (flagged && bare) {
+            auto& owner = flagged.value();
+            expect(bool(owner.set_story_ai_usage(actor, true, std::nullopt)) && bool(owner.set_story_ai_usage(actor, std::nullopt, false)),
+                "story AI-usage facts are written to the world actor");
+            const auto with_tail = census_section(owner);
+            expect(with_tail.size() == saved_section.size() + 10, "the saved section lists the one flagged actor");
+            const auto facts = [&](const gc::GalacticSession& session) {
+                for (const auto& row : session.snapshot()->actor_records())
+                    if (row.id == actor) return row.story_prevent_ai_usage == std::optional<bool>(true)
+                        && row.story_prefer_ground == std::optional<bool>(false);
+                return false;
+            };
+            const auto before_owner = owner.state_sha256();
+            const auto restored_owner = owner.restore_actor_representations(with_tail);
+            expect(bool(restored_owner) && facts(owner) && owner.state_sha256() == before_owner,
+                "a non-empty story AI-usage tail that matches the live facts restores and keeps them");
+            auto mismatched = with_tail; mismatched.back() = 2;
+            const auto refused_owner = owner.restore_actor_representations(mismatched);
+            expect(!refused_owner && refused_owner.error().message.find("story AI-usage facts differ from the live records") != std::string::npos
+                && facts(owner) && owner.state_sha256() == before_owner, "a tail whose fact differs from the live one refuses and keeps the live facts");
+            const auto refused_bare = bare.value().restore_actor_representations(with_tail);
+            expect(!refused_bare && refused_bare.error().message.find("story AI-usage facts differ from the live records") != std::string::npos
+                && !facts(bare.value()), "a fact-free owner refuses a section that lists facts");
+        }
+    }
     const gc::GalacticSession::NativeProductionRequest request{1, 1, 10, {}};
     auto private_world = gc::GalacticSession::create(setup); if (!private_world) return;
     auto& private_owner = private_world.value(); unsigned births{};

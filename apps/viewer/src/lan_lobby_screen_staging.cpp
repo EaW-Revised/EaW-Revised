@@ -135,7 +135,8 @@ void EawrLanLobby::configure_staging() {
         [content](const skirmish::FixtureOptions& options) -> core::Result<sim::tactical::TacticalSetup> {
             auto fixture = skirmish::fixture_from_options(options, *content->filesystem, *content->catalog);
             if (!fixture) return core::Result<sim::tactical::TacticalSetup>::failure(fixture.error());
-            auto prepared = prepare_skirmish(fixture.value(), *content->filesystem, *content->catalog);
+            // Multiplayer: the model facts store is neither read nor written (every option change prepares again).
+            auto prepared = prepare_skirmish(fixture.value(), *content->filesystem, *content->catalog, false);
             if (!prepared) return core::Result<sim::tactical::TacticalSetup>::failure(prepared.error());
             return core::Result<sim::tactical::TacticalSetup>::success(lan_recording_setup(fixture.value(), prepared.value().start));
         });
@@ -160,6 +161,9 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
     impl.refused = false;
     impl.mod_review_box = false;
     impl.deferred_mod_review.reset();
+    // The host's mod-refresh state and its "mod list not shared" notice are set by host_galactic_game just before this runs: leave
+    // them alone here, or a notice raised at room open (an unsendable mod list) would be dropped before it is shown (#6468).
+    impl.seen_host_mod_refreshes = 0;
     page_ = Page::staging;
     build_page(staging_dialog);
     PageState& state = *state_;
@@ -409,6 +413,8 @@ void EawrLanLobby::fill_map_list() {
 
 void EawrLanLobby::leave_staging() {
     impl_->deferred_mod_review.reset();
+    impl_->host_mod_refresh_due = false;
+    impl_->host_mod_notice.clear();
     ++impl_->checkpoint_request;
     impl_->checkpoint_store.reset();
     close_checkpoint_list();

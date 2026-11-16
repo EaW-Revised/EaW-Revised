@@ -129,6 +129,8 @@ public:
     // #535: a unit's fog fade opacity (space-fog-presentation.md FW-16), 1 when it is not fading.
     using FadeOpacity = std::function<float(sim::EntityId entity)>;
     using ProjectileOpacity = std::function<float(std::size_t ship)>;
+    // #4444 (FC-R05): the engine brightness a retreating ship is made to show, nullopt for the ship's own (BP-45).
+    using EngineBrightness = std::function<std::optional<float>(sim::EntityId entity)>;
     // One presentation frame, after SpacePopulation::pose_live. The emitter clock follows
     // `presented_tick`: projectile proxies use elapsed pose time (PS-42), while
     // other owners keep one 30 Hz sample per session tick, as battle effects do, and
@@ -148,10 +150,15 @@ public:
                              double presented_tick, bool reveal = false, const FadeOpacity& fade_opacity = {},
                              std::span<const sim::EntityId> unfogged_props = {},
                              const ProjectileOpacity& projectile_opacity = {},
-                             const BirthAt& clone_birth_at = {}, const ProjectileBirthAt& projectile_birth_at = {});
+                             const BirthAt& clone_birth_at = {}, const ProjectileBirthAt& projectile_birth_at = {},
+                             const EngineBrightness& engine_brightness = {});
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
-    void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
+    // PF particle spread (E): the same pool also runs the pure part of the per-ship loops (ordered_spread.hpp).
+    void set_workers(const particles::StepExecutor* workers) noexcept {
+        workers_ = workers;
+        registry_->set_executor(workers);
+    }
     // L1.2: the render backend, for the frame's latches (ParticleLatches); null once released.
     [[nodiscard]] GodotParticleBackend* particle_backend() noexcept { return backend_.get(); }
     void measure_particles(bool on) noexcept {
@@ -348,6 +355,36 @@ private:
                 std::uint64_t born);
     // Stands every running emitter of ship `index` at its bone on model transform `pose`.
     void place(std::size_t index, const sim::math::Mat3x4& pose);
+    // PF particle spread (E): place() in two parts. The frames of a ship's running emitters at `pose` are pure
+    // (fixed-point composes), so they are computed on the particle workers (compute_placed); the registry calls, the
+    // release of an emitter that cannot be placed and the start log stay on the calling thread, in ship order
+    // (place_prepared). Together they equal place().
+    struct PlacedEmitter final {
+        std::optional<particles::EmitterFrame> frame;
+        std::optional<particles::MeshFrame> mesh;
+    };
+    static void compute_placed(const Ship& ship, const sim::math::Mat3x4& pose, PlacedEmitter* out);
+    void place_prepared(std::size_t index, const PlacedEmitter* placed);
+    // True when update() would change nothing for this ship: it is planned for this unit, its modes and hardpoint
+    // states are those of the plan and its running emitters match the plan. Reads only the ship.
+    [[nodiscard]] static bool update_is_noop(const Ship& ship, const SpacePopulation::LiveShipEmitterView& view,
+                                             std::span<const scene::HardpointState> states, const Modes& modes);
+    // What the pure stage of one ship of a per-ship loop leaves for its commit (see frame()).
+    struct ShipPrep final {
+        std::optional<SpacePopulation::LiveShipEmitterView> view;
+        const sim::tactical::TacticalInstance* now{};
+        Modes modes;
+        std::vector<scene::HardpointState> states;  // historical samples: the states the sample's instance gives
+        std::optional<sim::math::Mat3x4> pose;      // historical samples: the sample's model transform
+        bool normal{};            // an ordinary ship the pure stage handled; false: the commit runs the full serial path
+        bool noop{};              // update_is_noop for the (states, modes) above
+        bool has_brightness{};
+        double brightness{};      // BP-45: the engine brightness the commit stores
+        std::size_t placed_first{};  // this ship's PlacedEmitter range in placed_ (its running emitters), filled when noop
+        std::size_t placed_count{};
+        bool placed{};
+        double compute_ms{};      // measure_preparation_ only: CPU time of compute_placed
+    };
     // Advances nonprojectile emitters and clones by one 30 Hz sample.
     [[nodiscard]] bool advance_sample(bool async_final = false);
     // busy_: the slots (in slot order) that run emitters or clone proxies, which every per-frame pass
@@ -414,6 +451,12 @@ private:
     GodotParticleBackend::EmitterPrewarmWork backend_warm_work_;
     std::vector<Ship> ships_;
     std::vector<std::size_t> visit_, busy_;
+    // PF particle spread (E): the pure stage's results per ship of the running per-ship loop, and the placed frames.
+    const particles::StepExecutor* workers_{};
+    std::vector<ShipPrep> prepared_;
+    std::vector<PlacedEmitter> placed_;
+    // Fewer ships than this per slice are not worth a dispatch to the workers.
+    static constexpr std::size_t min_spread_ships = 16;
     particles::CameraFrame camera_frame_{};
     std::optional<double> clock_start_;
     std::optional<double> projectile_clock_tick_;
@@ -430,6 +473,7 @@ private:
     std::map<std::string, std::uint64_t> start_failed_;   // effect: cause -> count
     std::uint64_t max_particles_{};
     std::uint64_t particles_{};
+    std::uint64_t folded_frames_{};    // frames whose catch-up folded (three or more samples due at once)
     std::uint64_t caught_up_{};        // samples run at their own tick before a frame's own
     // D-ss census (ships per multi-sample frame): kept the historical pass, took one pass, culled (one pass),
     // and the predicted error of the ships that were not culled, in bins of

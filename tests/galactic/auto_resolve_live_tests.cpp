@@ -15,6 +15,11 @@
 #include "galactic_support.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/campaign/auto_resolve_live.hpp"
+#include "eawr/campaign/ai_selection_content.hpp"
+#include "eawr/campaign/shared_unit_tables.hpp"
+#include "eawr/core/gc_load_trace.hpp"
+#include "eawr/units/unit_tables.hpp"
+#include "../../src/script/foc/galactic_ai_selection_content.hpp"
 #include "eawr/campaign/starting_forces.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/checkpoint/game.hpp"
@@ -78,6 +83,25 @@ void roster_publication() {
     expect(publication[0].queue.size() == 2 && publication[0].queue[0].current_type == "display-5"
         && publication[0].queue[1].current_type == "display-1",
         "WAR-118..120 progress reads retained allocator queue rather than gathered list or history");
+}
+// WAR-48 / CGS-22: the type an AI learns a company under is its first member's, unless that member creates a team; a first member
+// that is not in the type table (a variant base that resolves to nothing, or a type the table leaves out) never refuses the fight:
+// the company is learned under its own type.
+void learning_type_contracts() {
+    eawr::units::GalacticTypeTable table;
+    const auto add = [&](std::string name, std::vector<std::string> members, std::vector<std::string> behavior = {}) {
+        eawr::units::GalacticType type; type.name = std::move(name); type.company_units = std::move(members); type.behavior = std::move(behavior);
+        table.types.push_back(std::move(type));
+    };
+    add("Rifle_Squad", {}); add("Team_Squad", {}, {"TEAM"});
+    add("Company_Rifle", {"Rifle_Squad", "Rifle_Squad"}); add("Company_Team", {"Team_Squad"});
+    add("Company_Orphan", {"Orphan_Member_Defined_Nowhere", "Rifle_Squad"}); add("Company_Left_Out", {"Left_Out_Member"});
+    const auto learned = [&](std::string_view name) { return eawr::campaign::auto_resolve_learning_type(table, *table.find(name)); };
+    expect(learned("Rifle_Squad") == "Rifle_Squad", "a type without company members is learned under itself");
+    expect(learned("Company_Rifle") == "Rifle_Squad", "a company is learned under its first member");
+    expect(learned("Company_Team") == "Company_Team", "a first member that creates a team keeps the company's own type");
+    expect(learned("Company_Orphan") == "Company_Orphan", "an orphan first member (not in the type table) is learned under the company's own type");
+    expect(learned("Company_Left_Out") == "Company_Left_Out", "a first member the table leaves out is learned under the company's own type");
 }
 void raid_manifest() {
     cp::ConflictRecord conflict; conflict.invader = 1; conflict.defender = 2;
@@ -321,6 +345,155 @@ void installed() {
     std::sort(options.types.begin(), options.types.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
     auto plan = take(cp::plan_campaign_setup(data, types, authored.name, options));
     {
+        // One shared unit-table load answers for the resolver inputs, the AI selection content and the object-query catalog.
+        const auto shared = take(cp::prepare_shared_unit_tables(filesystem, catalog.catalog, plan));
+        const auto own_content = take(cp::prepare_ai_selection_content(filesystem, catalog.catalog, data, types, plan));
+        const auto shared_content = take(cp::prepare_ai_selection_content(filesystem, catalog.catalog, data, types, plan, shared));
+        bool same = own_content->ai.categories == shared_content->ai.categories && own_content->ai.types.size() == shared_content->ai.types.size();
+        for (std::size_t i = 0; same && i < own_content->ai.types.size(); ++i) {
+            const auto& a = own_content->ai.types[i]; const auto& b = shared_content->ai.types[i];
+            same = a.type_id == b.type_id && a.name == b.name && a.targeting == b.targeting && a.unit_ai == b.unit_ai && a.category_bits == b.category_bits;
+        }
+        expect(same, "selection content from the shared load equals the content from its own load (categories, flags, category bits)");
+        // The object-query list the AI runtime builds (content types in identity order) is the shared list, and an own load of
+        // it gives the same tables (the same content identity).
+        std::vector<std::string> query_names;
+        for (const auto& [id, row] : own_content->types) { (void)id; query_names.push_back(row.name); }
+        expect(shared->requested_exactly(query_names), "the object-query type list is the shared load's list");
+        eawr::units::LoadInput query; query.catalog = &catalog.catalog; query.filesystem = &filesystem; query.types = query_names;
+        const auto own_query = take(eawr::units::load_unit_tables(query));
+        expect(eawr::units::content_identity(own_query) == eawr::units::content_identity(shared->tables()),
+            "shared tables equal an own load of the object-query list (content identity)");
+        // The resolver reads only the category enum and, per resolvable type, three flags: they do not depend on the other types
+        // of the load, so the shared load answers for every type it covers.
+        eawr::units::LoadInput all; all.catalog = &catalog.catalog; all.filesystem = &filesystem;
+        for (const auto& type : types.types) all.types.push_back(type.name);
+        const auto own_all = take(eawr::units::load_unit_tables(all));
+        expect(own_all.categories == shared->tables().categories, "the category enum is the same in every load");
+        std::size_t compared = 0; bool flags_equal = true;
+        for (const auto& type : types.types) {
+            if (!shared->covers(type.name)) continue;
+            const auto* in_shared = shared->tables().find(type.name); const auto* in_own = own_all.find(type.name);
+            if (!in_shared || !in_own || in_shared->targeting != in_own->targeting || in_shared->unit_ai != in_own->unit_ai
+                || in_shared->selectable != in_own->selectable) flags_equal = false;
+            ++compared;
+        }
+        expect(flags_equal && compared != 0, "resolver flags (targeting, unit_ai, selectable) of every covered type equal an own load");
+        // The resolver inputs built from the shared load are accepted for the same plan like the self-built ones.
+        const auto shared_inputs = take(cp::prepare_auto_resolver_inputs(filesystem, catalog.catalog, data, types, plan, shared));
+        const auto shared_adapters = cp::make_stock_auto_resolver(filesystem, catalog.catalog, data, types, plan, {}, {}, nullptr, shared_inputs);
+        expect(shared_adapters.has_value(), "resolver inputs built from the shared load are usable");
+        if (shared_adapters) {
+            const auto own_adapters = take(cp::make_stock_auto_resolver(filesystem, catalog.catalog, data, types, plan));
+            bool bounty_equal = true;
+            for (const auto& type : types.types) {
+                const auto a = shared_adapters.value().bounty_value(type.name); const auto b = own_adapters.bounty_value(type.name);
+                if (a.has_value() != b.has_value() || (a && b && a.value().raw() != b.value().raw())) bounty_equal = false;
+            }
+            expect(bounty_equal, "bounty values of every type are the same with inputs built from the shared load");
+        }
+        // Every derived row, not only the bounty: flags, movement class, immune/unqualified, contrast, terrain, type facts.
+        const auto own_inputs = take(cp::prepare_auto_resolver_inputs(filesystem, catalog.catalog, data, types, plan));
+        expect(cp::auto_resolver_inputs_equivalent(*shared_inputs, *own_inputs),
+            "inputs built from the shared load equal inputs built from an own load in every derived row");
+    }
+    {
+        // Every consumer takes the shared load on the stock types (a lost hit would be a silent slowdown), and a shared load that is
+        // absent (its own load failed) or does not cover the types is not used: each consumer then loads for itself with the same
+        // result. The marks are the trace the viewer prints at a GC Start.
+        const auto shared = take(cp::prepare_shared_unit_tables(filesystem, catalog.catalog, plan));
+        eawr::core::gc_load::trace.begin("shared_unit_tables_hit", true);
+        const auto hit_inputs = take(cp::prepare_auto_resolver_inputs(filesystem, catalog.catalog, data, types, plan, shared));
+        const auto hit_content = take(cp::prepare_ai_selection_content(filesystem, catalog.catalog, data, types, plan, shared));
+        const auto hit_line = eawr::core::gc_load::trace.finish("test").value_or(std::string{});
+        expect(hit_line.find("prep.resolver_inputs.unit_tables.shared=hit") != std::string::npos,
+            "stock: the auto-resolver inputs take the shared unit tables (unit_tables.shared=hit)");
+        expect(hit_line.find("prep.ai_runtime.selection_content.shared=hit") != std::string::npos,
+            "stock: the AI selection content takes the shared unit tables (shared=hit)");
+        expect(hit_line.find("shared=own") == std::string::npos, "stock: no consumer of the shared load fell back to its own load");
+        // The object-query catalog (built inside the AI runtime preparation) takes the shared load on the exact selection list.
+        std::vector<std::string> query_names;
+        for (const auto& [id, row] : hit_content->types) { (void)id; query_names.push_back(row.name); }
+        expect(shared->requested_exactly(query_names), "stock: the object-query list is the shared load's exact list (shared=hit)");
+        // Fallback: a shared load that was requested with one type only covers nothing else (the same as no shared load at all).
+        const cp::SharedUnitTables partial(eawr::units::UnitTables(shared->tables()), std::vector<std::string>{types.types.front().name});
+        // The shared load also records the files and catalog it was made from: it is built for these, not for a load that is not bound to any.
+        expect(shared->built_for(filesystem, catalog.catalog) && !partial.built_for(filesystem, catalog.catalog),
+            "the shared load is built for the files and catalog it was loaded from (an unbound load is built for nothing)");
+        eawr::core::gc_load::trace.begin("shared_unit_tables_fallback", true);
+        const auto fallback_inputs = take(cp::prepare_auto_resolver_inputs(filesystem, catalog.catalog, data, types, plan,
+            std::make_shared<const cp::SharedUnitTables>(partial)));
+        const auto fallback_content = take(cp::prepare_ai_selection_content(filesystem, catalog.catalog, data, types, plan,
+            std::make_shared<const cp::SharedUnitTables>(partial)));
+        const auto absent_inputs = take(cp::prepare_auto_resolver_inputs(filesystem, catalog.catalog, data, types, plan));
+        const auto fallback_line = eawr::core::gc_load::trace.finish("test").value_or(std::string{});
+        expect(fallback_line.find("prep.resolver_inputs.unit_tables.shared=hit") == std::string::npos
+            && fallback_line.find("prep.ai_runtime.selection_content.shared=hit") == std::string::npos
+            && fallback_line.find("prep.resolver_inputs.unit_tables.shared=own") != std::string::npos
+            && fallback_line.find("prep.ai_runtime.selection_content.shared=own") != std::string::npos,
+            "a shared load that does not cover the types is not used (shared=own for both consumers)");
+        const auto bounties = [&](const std::shared_ptr<const cp::AutoResolverInputs>& inputs) {
+            std::vector<std::pair<bool, std::int64_t>> out;
+            const auto adapters = take(cp::make_stock_auto_resolver(filesystem, catalog.catalog, data, types, plan, {}, {}, nullptr, inputs));
+            for (const auto& type : types.types) {
+                const auto value = adapters.bounty_value(type.name);
+                out.emplace_back(value.has_value(), value ? value.value().raw() : 0);
+            }
+            return out;
+        };
+        const auto hit_bounties = bounties(hit_inputs);
+        expect(bounties(fallback_inputs) == hit_bounties && bounties(absent_inputs) == hit_bounties,
+            "resolver inputs are the same from the shared load, after the fallback and with no shared load");
+        // Every other field the pass derives (movement class, immune/unqualified, contrast, terrain, per-id type facts) too: a
+        // divergence between the shared pass and the own pass must not pass on the bounty alone.
+        expect(cp::auto_resolver_inputs_equivalent(*fallback_inputs, *hit_inputs) && cp::auto_resolver_inputs_equivalent(*absent_inputs, *hit_inputs),
+            "every derived row (flags, movement class, immune/unqualified, contrast, terrain, type facts) is the same after the fallback");
+        bool content_same = fallback_content->ai.categories == hit_content->ai.categories && fallback_content->ai.types.size() == hit_content->ai.types.size();
+        for (std::size_t i = 0; content_same && i < hit_content->ai.types.size(); ++i) {
+            const auto& a = fallback_content->ai.types[i]; const auto& b = hit_content->ai.types[i];
+            content_same = a.type_id == b.type_id && a.name == b.name && a.targeting == b.targeting && a.unit_ai == b.unit_ai && a.category_bits == b.category_bits;
+        }
+        expect(content_same, "selection content is the same after the fallback as from the shared load");
+        // The abandon path itself: a load bound to these files that covers only the first type is read until the first type it
+        // does not cover, then that pass is dropped and the own load runs again. Its category enum is made to differ from the
+        // real one, so a category row the abandoned pass left behind would show in the comparison.
+        auto stale_tables = eawr::units::UnitTables(shared->tables());
+        stale_tables.categories.push_back({"EAWR_STALE_CATEGORY", std::uint64_t{1} << 62});
+        const auto abandoned = std::make_shared<const cp::SharedUnitTables>(std::move(stale_tables),
+            std::vector<std::string>{types.types.front().name}, &filesystem, catalog.catalog.generation());
+        expect(abandoned->built_for(filesystem, catalog.catalog), "the partial load is bound to these files and catalog");
+        eawr::core::gc_load::trace.begin("shared_unit_tables_abandon", true);
+        const auto abandoned_inputs = take(cp::prepare_auto_resolver_inputs(filesystem, catalog.catalog, data, types, plan, abandoned));
+        const auto abandon_line = eawr::core::gc_load::trace.finish("test").value_or(std::string{});
+        expect(abandon_line.find("prep.resolver_inputs.unit_tables.shared=own") != std::string::npos
+            && abandon_line.find("prep.resolver_inputs.unit_tables.shared=hit") == std::string::npos,
+            "a bound load that stops covering the types is abandoned (shared=own)");
+        expect(cp::auto_resolver_inputs_equivalent(*abandoned_inputs, *hit_inputs),
+            "the abandoned pass leaves nothing behind: the inputs equal the shared-hit inputs in every derived row, categories included");
+    }
+    {
+        // Shared resolver inputs: the refusal path and the match check. (The success path and the restore are below.)
+        // A refused build gives the same diagnostic whether it runs ahead (the wait for space entry) or inline in the setup.
+        auto broken = data;
+        std::erase_if(broken.constants, [](const auto& row) { return row.tag == "AutoResolveDisplayTime"; });
+        broken.constants.push_back({"AutoResolveDisplayTime", "not-a-number", std::nullopt});
+        const auto early = cp::prepare_auto_resolver_inputs(filesystem, catalog.catalog, broken, types, plan);
+        const auto inline_build = cp::make_stock_auto_resolver(filesystem, catalog.catalog, broken, types, plan);
+        expect(!early && !inline_build, "a malformed resolver constant refuses the early build and the inline build");
+        if (!early && !inline_build)
+            expect(early.error().code == inline_build.error().code && early.error().message == inline_build.error().message,
+                "the early refusal carries the same diagnostic as the inline refusal");
+        // Inputs built for one campaign are refused for another (files, catalog, data, types and plan must be the same).
+        const auto inputs = take(cp::prepare_auto_resolver_inputs(filesystem, catalog.catalog, data, types, plan));
+        auto other_data = data; auto other_campaign = authored; other_campaign.name = "AdapterFixtureOther"; other_data.campaigns.push_back(other_campaign);
+        const auto other_plan = take(cp::plan_campaign_setup(other_data, types, other_campaign.name, options));
+        const auto mismatched = cp::make_stock_auto_resolver(filesystem, catalog.catalog, other_data, types, other_plan, {}, {}, nullptr, inputs);
+        expect(!mismatched && mismatched.error().message.find("other files, catalog, data, types or plan") != std::string::npos,
+            "inputs prepared for another plan are refused");
+        const auto matched = cp::make_stock_auto_resolver(filesystem, catalog.catalog, data, types, plan, {}, {}, nullptr, inputs);
+        expect(matched.has_value(), "inputs prepared for the same files, catalog, data, types and plan are accepted");
+    }
+    {
         auto fixture = battle_fixture(plan, types, false);
         fixture.setup.planets.push_back({3, {f(-10), {}, {}}, 1});
         if (fixture.setup.victory) {
@@ -526,12 +699,18 @@ void installed() {
         expect(faction && faction->is_playable.value_or(false) && !faction->benefits_from_corruption.has_value(),
             "WGS-94 real XML omits the playable battle factions' benefit flags");
     }
-    for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U}) {
-        const bool land = scenario != 0, conquest = scenario >= 2, commissioned = scenario == 3;
+    // Scenario 5: an orbital fight at a planet that starts destroyed (the owner asked that Auto-Resolve work there). It checks
+    // that the fight settles deterministically; the backdrop removal and props belong to the battle start (skirmish and space entry tests).
+    for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U, 5U}) {
+        const bool ruined = scenario == 5, land = scenario != 0 && !ruined, conquest = scenario >= 2 && !ruined, commissioned = scenario == 3;
         const auto& resolver_data = scenario == 4 ? omission_data : data;
         const auto& resolver_catalog = scenario == 4 ? omission_catalog.catalog : catalog.catalog;
         const auto& resolver_fs = scenario == 4 ? omission_fs : filesystem;
         auto fixture = battle_fixture(plan, types, land, conquest);
+        if (ruined) {  // a ruined planet: flag set, surface closed, no base level (the shape the ruins commit leaves)
+            auto& surface = fixture.setup.control->planets[0];
+            surface.destroyed = true; surface.surface_accessible = false; surface.ground_base = {};
+        }
         const auto type_id = [&](std::string_view name) {
             const auto at = std::find_if(plan.type_bindings().begin(), plan.type_bindings().end(), [&](const auto& row) { return row.original_type == name; });
             if (at == plan.type_bindings().end()) throw std::runtime_error("missing purchase fixture type");
@@ -620,6 +799,8 @@ void installed() {
             game.set_conflict_service([](const auto&, const auto&, auto) { return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({}); }, unused_tactical_content(), {}, eawr::campaign::ScriptRequirement::none);
             game.set_movement_access_provider(std::move(adapters.access));
             game.set_auto_resolver(std::move(adapters.resolve)); game.set_auto_resolve_progress_reader(std::move(adapters.progress)); game.set_auto_resolve_outcome_services(std::move(adapters.outcomes));
+            if (ruined) expect(game.galaxy().snapshot()->control()->planets[0].destroyed,
+                "a destroyed planet (flag set, surface closed, no base) is the starting state of the orbital fight");
             if (scenario == 0) {
                 // A deterministic named clock holds stock duration at initiation;
                 // this tests the real solver without claiming parent-pause pacing.
@@ -652,6 +833,34 @@ void installed() {
                 auto ready = take(eawr::checkpoint::load_game_checkpoint(initial, identities, load, executor));
                 expect(ready.session.state_sha256() == native.state_sha256() && ready.session.auto_resolve_progress()->withdraw_admitted,
                     "stock reload reinstalls progress and withdrawal before resumed input");
+                expect(!native.story_heroes().empty() && ready.session.story_heroes() == native.story_heroes(),
+                    "the STORY_MOVE hero set is derived from the type table on setup and rebuilt on load (never saved)");
+                {
+                    // The campaign's resolver inputs are built once (in the wait for the space preparation) and shared, immutable, by
+                    // the first setup and by every restore: the same session, the same saved state, the same reload.
+                    const auto shared_inputs = take(cp::prepare_auto_resolver_inputs(filesystem, catalog.catalog, data, types, plan));
+                    const auto configure_shared = [&](cp::GameSession& target) {
+                        return cp::install_live_conflict_adapters(target, filesystem, catalog.catalog, data, types, plan,
+                            unused_tactical_content(), time, {}, shared_inputs);
+                    };
+                    auto shared_native = take(cp::GameSession::create(native_setup)); check(configure_shared(shared_native));
+                    check(shared_native.queue_conflict(native_conflict, {cp::ConflictRoute::instant_auto}));
+                    (void)take(shared_native.step(executor)); (void)take(shared_native.step(executor));
+                    expect(shared_native.state_sha256() == native.state_sha256(),
+                        "resolver inputs prepared ahead give the same session state as inputs built in the setup");
+                    expect(shared_native.auto_resolve_progress() && before && shared_native.auto_resolve_progress()->initiated == before->initiated
+                        && shared_native.auto_resolve_progress()->withdraw_admitted == before->withdraw_admitted,
+                        "prepared inputs publish the same initiation and withdrawal admission");
+                    const auto shared_saved = take(eawr::checkpoint::save_game_checkpoint(shared_native, identities));
+                    expect(shared_saved == initial, "prepared inputs save byte-identical checkpoint bytes");
+                    auto shared_load = load; shared_load.configure_session = configure_shared;
+                    auto shared_ready = take(eawr::checkpoint::load_game_checkpoint(initial, identities, shared_load, executor));
+                    expect(shared_ready.session.state_sha256() == ready.session.state_sha256()
+                        && shared_ready.session.auto_resolve_progress() && shared_ready.session.auto_resolve_progress()->withdraw_admitted,
+                        "a restore that reuses the shared inputs reaches the same state and reinstalls withdrawal");
+                    check(shared_ready.session.submit({{shared_ready.session.completed_tick(), gc::SeatId{1}, 1}, gc::AutoResolveWithdraw{fixture.conflict.id}}));
+                    expect(take(shared_ready.session.step(executor)).diagnostics.empty(), "the shared-input restore accepts conflict-scoped withdrawal");
+                }
                 check(ready.session.submit({{ready.session.completed_tick(), gc::SeatId{1}, 1}, gc::AutoResolveWithdraw{fixture.conflict.id}}));
                 expect(take(ready.session.step(executor)).diagnostics.empty(), "stock reload accepts conflict-scoped withdrawal");
                 const auto after = ready.session.auto_resolve_progress();
@@ -696,7 +905,9 @@ void installed() {
             if (scenario == 4) expect(!outcome->deaths.empty() && !outcome->destroyed.empty(),
                 "WGS-94 live auto-resolve with omitted faction flags completes its death and bounty services");
             expect(std::binary_search(outcome->destroyed.begin(), outcome->destroyed.end(), losing_company), "stock losing squadron/company is confirmed absent");
-            expect(tick.galaxy->planets()[0].owner == 2, "stock defended result retains political control");
+            // A ruined planet has no controller to retain (WGCH-143); the political check is for living planets.
+            if (!ruined) expect(tick.galaxy->planets()[0].owner == 2, "stock defended result retains political control");
+            if (ruined) expect(tick.galaxy->control()->planets[0].destroyed, "auto-resolve at a destroyed planet settles the fight (deterministic on 1/2/4/8 workers) and the planet stays destroyed");
             if (!reference) { reference = *outcome; hash = tick.state_sha256; } else expect(*reference == *outcome && *hash == tick.state_sha256, "stock outcome and committed hash equal on 1/2/4/8");
             if (land && !commissioned) {
                 expect(outcome->destroyed.size() == (conquest ? 35U : 16U), "stock land attrition confirms expected company and payload losses, including winner attrition");
@@ -814,7 +1025,7 @@ void withdrawal_command() {
 
 }
 int case_galactic_auto_resolve_live_tests(int argc, char**) {
-    try { if (argc > 1) { installed(); bounty_installed(); } else { roster_publication(); withdrawal_command(); raid_manifest(); journal_selection(); retreat_return(); damage_handler_qualification(); } }
+    try { if (argc > 1) { installed(); bounty_installed(); } else { roster_publication(); learning_type_contracts(); withdrawal_command(); raid_manifest(); journal_selection(); retreat_return(); damage_handler_qualification(); } }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

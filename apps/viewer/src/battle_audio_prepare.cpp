@@ -24,6 +24,8 @@
 #include <godot_cpp/variant/vector2i.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
+#include <pugixml.hpp>
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -31,6 +33,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <span>
@@ -83,6 +87,7 @@ ui::RetreatFactionPresentation read_retreat_faction(const data::Catalog& catalog
         out.reason = {read("Space_Retreat_Not_Allowed_Reason_1_SFXEvent"), read("Space_Retreat_Not_Allowed_Reason_2_SFXEvent"),
             read("Space_Retreat_Not_Allowed_Reason_3_SFXEvent")};
         out.countdown_text_id = read("Space_Retreat_Countdown_Text_ID");
+        out.exit_hyperspace = read("SFXEvent_Exit_Into_Hyperspace"); // FC-R05
         // RP-08: four comma separated 0..255 channels; a malformed list keeps opaque white.
         const auto colour = read("Space_Retreat_Countdown_Color_RGBA");
         std::array<int, 4> channels{255, 255, 255, 255};
@@ -242,6 +247,20 @@ void BattleAudio::prepare_music_and_faction_cues(const std::string_view local_fa
     } else {
         problems_.push_back("data/xml/audio.xml: " + core::format_diagnostic(document.error()));
         problems_.push_back("EAWR-AUDIO-0301: audio.xml unavailable; spatial playback uses 2D");
+    }
+    // PA-01: the project-side audio rules. A missing or unreadable file only leaves the floor off.
+    {
+        const auto config = ViewerPath{std::string(godot::ProjectSettings::get_singleton()->globalize_path("res://config/project-audio.xml").utf8().get_data())}.native();
+        std::ifstream stream(config, std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+        pugi::xml_document document;
+        if (!stream || text.size() > (1U << 20) || !document.load_buffer(text.data(), text.size(), pugi::parse_default)) {
+            problems_.push_back("EAWR-AUDIO-0303: project-audio.xml missing or unreadable; no project distance-gain floor");
+        } else {
+            std::vector<audio::Field> fields;
+            for (const pugi::xml_node node : document.document_element().children()) fields.emplace_back(node.name(), node.text().get());
+            project_audio_ = audio::project_audio_rules(fields, problems_);
+        }
     }
     // BA-20: the command rankings.
     if (auto document = data::load_document(*filesystem_, "data/xml/gameconstants.xml")) {
@@ -469,11 +488,18 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
         sounds.ambient_moving = event(tag(value, "SFXEvent_Ambient_Moving"), where);
         sounds.engine_idle = event(tag(value, "SFXEvent_Engine_Idle_Loop"), where);
         sounds.engine_moving = event(tag(value, "SFXEvent_Engine_Moving_Loop"), where);
+        sounds.cinematic_focus = event(tag(value, "SFXEvent_Engine_Cinematic_Focus_Loop"), where);
+        if (sounds.cinematic_focus && sounds.cinematic_focus->play_count != -1) {
+            problems_.push_back(where + ": cinematic focus event must be a loop");
+            sounds.cinematic_focus = nullptr;
+            sounds.cinematic_focus_invalid = true;
+        }
         sounds.fleet_move = event(tag(value, "SFXEvent_Fleet_Move"), where);
         sounds.self_destruct_start = event(tag(value, "Selt_Destruct_SFXEvent_Start_Die"), where); // WSD-11
         // WR-44, RP-02/RP-03: the type cues that take precedence over the faction retreat cues.
         sounds.retreat_start = event(tag(value, "SFXEvent_Retreat_Start"), where);
         sounds.retreat_cancel = event(tag(value, "SFXEvent_Retreat_Cancel"), where);
+        sounds.retreat_jump = event(tag(value, "SFXEvent_Retreat_Engines_Jump"), where); // FC-R05
         for (auto* sound : {&sounds.engine_idle, &sounds.engine_moving}) {
             if (*sound && (!(*sound)->is_3d || (*sound)->play_count != -1)) {
                 problems_.push_back(where + ": engine event must be a spatial loop");
@@ -672,9 +698,69 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
     }
 }
 
+// TSW-15: the tactical super weapon's own sounds, speech and music (only a battle that has the setup prepares them).
+template <typename Event>
+void BattleAudio::prepare_tsw_cues(const units::UnitTables& tables, const tactical::TswSetup& tsw,
+                                   const std::string_view local_faction, Event& event) {
+    const auto find_music = [this](const std::string& name) -> const audio::MusicEvent* {
+        if (name.empty()) return nullptr;
+        for (const audio::MusicEvent& music : music_events_) if (same(music.name, name)) return &music;
+        problems_.push_back("music event " + name + " is not in musicevents.xml");
+        return nullptr;
+    };
+    const auto keep_music = [this](const audio::MusicEvent* music) {
+        if (music != nullptr && music_ && !options_.attract_silent) preload_music_files_.insert(music->files.begin(), music->files.end());
+    };
+    // The power-up voice and sound and the activation music of every type with the behaviour (mods rename the unit).
+    for (const auto& type : tables.units) {
+        if (!type.tactical_super_weapon) continue;
+        auto object = catalog_->resolve(type.id, data::Category::game_object);
+        if (!object) continue;
+        TswCues cues;
+        cues.voice = event(tag(object.value(), "TSW_SFXEvent_Activate_Voice"), type.id);
+        cues.power_up = event(tag(object.value(), "TSW_SFXEvent_Weapon_Power_Up"), type.id);
+        cues.fire = event(tag(object.value(), "SFXEvent_Fire"), type.id);
+        cues.activation = find_music(tag(object.value(), "TSW_MusicEvent_Activation_Start"));
+        keep_music(cues.activation);
+        tsw_cues_.insert_or_assign(battle::type_id(type.id), cues);
+    }
+    // The local faction's six speech lines, own and enemy phrasing, and its super weapon battle music.
+    if (auto faction = catalog_->resolve(local_faction, data::Category::faction)) {
+        for (const bool own : {true, false}) {
+            for (std::size_t line = 0; line < space::tsw_speech_count; ++line) {
+                const std::string key = space::tsw_speech_tag(static_cast<space::TswSpeech>(line), own);
+                const auto* field = faction.value().value(key);
+                if (field == nullptr) continue;
+                data::tag_trace::used(field->value);
+                const auto* speech = speech_event(trim(field->value.raw_text));
+                if (speech != nullptr) preload_speech_events_.insert(lower(speech->name));
+                tsw_speech_[(own ? 0U : space::tsw_speech_count) + line] = speech;
+            }
+        }
+        tsw_battle_music_ = find_music(tag(faction.value(), "Music_Event_Space_Battle_Super_Weapon"));
+        keep_music(tsw_battle_music_);
+    }
+    // Each target prop type's death sound, named by the prop's own Death_SFXEvent_Start_Die.
+    std::map<tactical::TypeId, std::string> names;
+    for (const data::Definition& definition : catalog_->definitions()) {
+        if (definition.category == data::Category::game_object) names.emplace(battle::type_id(definition.id), definition.id);
+    }
+    for (const tactical::TswTargetSetup& target : tsw.targets) {
+        tsw_target_types_.push_back(target.type);
+        if (tsw_target_death_.contains(target.type)) continue;
+        const audio::SfxEvent* death = nullptr;
+        if (const auto name = names.find(target.type); name != names.end()) {
+            if (auto object = catalog_->resolve(name->second, data::Category::game_object)) {
+                death = event(tag(object.value(), "Death_SFXEvent_Start_Die"), name->second);
+            }
+        }
+        tsw_target_death_.emplace(target.type, death);
+    }
+}
+
 void BattleAudio::prepare(const units::UnitTables& tables, const tactical::CombatTable& combat,
                           const std::string_view local_faction, std::set<tactical::TypeId> first_types,
-                          const EnqueueLoadStep* queue) {
+                          const EnqueueLoadStep* queue, const tactical::TswSetup* tsw) {
     core::load_profile::Scope load_scope(core::load_profile::Phase::audio);
     local_faction_ = std::string(local_faction);
     if (options_.preload) expand_initial_audio_types(tables, first_types);
@@ -698,6 +784,8 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         const auto cue = ui::selection_advisor_event(selection_config.actions[index], local_faction, advisors);
         if (!cue.empty()) selection_events_[index] = event(cue, std::string(local_faction));
     }
+    const auto gift_cue = ui::selection_advisor_event(selection_config.gift, local_faction, advisors);
+    if (!gift_cue.empty()) gift_event_ = event(gift_cue, std::string(local_faction));
     std::map<tactical::TypeId, const audio::SfxEvent*> spotted;
     const audio::SfxEvent* generic_spotted = nullptr;
     if (auto faction = catalog_->resolve(local_faction, data::Category::faction)) {
@@ -730,6 +818,29 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         }
     }
 
+    // WHZ-48: repeated type/event pairs, first exact type match; no generic fallback.
+    if (const auto faction = catalog_->resolve(local_faction, data::Category::faction)) {
+        for (const auto& layer : faction.value().chain) {
+            const auto* definition = catalog_->find(layer, data::Category::faction);
+            if (!definition) continue;
+            for (const auto& item : definition->root.children) {
+                auto* cues = same(item.name, "SFXEvent_Tactical_Gain_Friendly_Control") ? &gain_control_
+                    : same(item.name, "SFXEvent_Tactical_Lose_Friendly_Control") ? &lose_control_ : nullptr;
+                if (!cues) continue;
+                data::tag_trace::used(item);
+                const auto comma = item.raw_text.find(',');
+                if (comma != std::string::npos) {
+                    const auto type = trim(std::string_view(item.raw_text).substr(0, comma));
+                    if (!type.empty()) cues->try_emplace(battle::type_id(type),
+                        event(trim(std::string_view(item.raw_text).substr(comma + 1)), std::string(local_faction)));
+                } else {
+                    const auto pair = audio::split_list(item.raw_text);
+                    if (pair.size() == 2) cues->try_emplace(battle::type_id(pair[0]), event(pair[1], std::string(local_faction)));
+                }
+            }
+        }
+    }
+
     for (const units::Projectile& projectile : tables.projectiles) {
         if (auto object = catalog_->resolve(projectile.id, data::Category::game_object)) {
             projectile_detonations_.emplace(battle::type_id(projectile.id),
@@ -751,6 +862,16 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         types_.try_emplace(id, std::move(sounds));
     }
     prepare_unit_cues(tables, combat, first_types, spotted, generic_spotted, event, binding_unit, first_type);
+    // HCB-47: the Death Star switch's own press sound, named by the object's TSW_SFXEvent_GUI_Bttton_Press (sic) tag, for
+    // every type with the behaviour. A missing or unknown event leaves the press silent (the refusal cue is the generic one).
+    for (const auto& type : tables.units) {
+        if (!type.tactical_super_weapon) continue;
+        auto object = catalog_->resolve(type.id, data::Category::game_object);
+        if (!object) continue;
+        const auto name = tag(object.value(), "TSW_SFXEvent_GUI_Bttton_Press");
+        if (!name.empty()) tsw_press_events_.insert_or_assign(battle::type_id(type.id), event(name, type.id));
+    }
+    if (tsw != nullptr) prepare_tsw_cues(tables, *tsw, local_faction, event);
     start_rows_.reserve(256);
     binding_unit = false;
     // WST-14: the debug build's stealth service starts this event by name.

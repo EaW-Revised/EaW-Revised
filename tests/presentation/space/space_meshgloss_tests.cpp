@@ -411,6 +411,10 @@ void test_meshgloss_arithmetic() {
         expect(near(sky.x, 0.05F) && near(sky.y, 0.0F) && near(sky.z, 0.1F) && sky.w == 1.0F,
                "unlit sky output is 2 * Emissive.rgb * texel, opaque");
     }
+    // The folded factor the land sky dome multiplies the linear texel by.
+    const Vec3f gain = space::unlit_meshgloss_gain(material);
+    expect(near(gain.x, 0.2F) && near(gain.y, 0.0F) && near(gain.z, 0.1F),
+           "unlit_meshgloss_gain is 2 * Emissive.rgb, whatever Diffuse and Specular");
 }
 
 

@@ -10,6 +10,7 @@
 #include "eawr/vfs/vfs_fwd.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,12 +27,21 @@ struct BattleMessageLooks {
     data::ui::Rgba8 pending{255, 32, 32, 240};      // xml-fallback: Battle_Pending_Message_Color: the pause text; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
     double countdown_x{0.005};                      // xml-fallback: GUI_Tactical_Countdown_Timers_Screen_X, a share of the width; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
     double countdown_y{0.10};                       // xml-fallback: GUI_Tactical_Countdown_Timers_Screen_Y, a share of the height; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
+    double strategic_countdown_x{0.005};            // xml-fallback: GUI_Strategic_Countdown_Timers_Screen_X, a share of the width; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
+    double strategic_countdown_y{0.02};             // xml-fallback: GUI_Strategic_Countdown_Timers_Screen_Y, a share of the height; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
+    double strategic_countdown_spacing{0.05};       // xml-fallback: GUI_Strategic_Countdown_Timers_Screen_Spacing, a share of the height; load: src/presentation/ui/battle_messages.cpp#battle_message_looks
     std::vector<core::Diagnostic> diagnostics;
 };
 
 [[nodiscard]] BattleMessageLooks battle_message_looks(const data::XmlNode& constants_root);
 // Reads data/xml/gameconstants.xml.
 [[nodiscard]] BattleMessageLooks battle_message_looks(const vfs::Vfs& filesystem);
+
+// WGEP-173: one line of the strategic map's production countdown: the type's countdown label, a space, then the front's
+// remaining seconds as MM:SS (minutes and seconds each two digits, whole seconds truncated; a negative value reads 00:00).
+[[nodiscard]] std::string production_countdown_line(std::string_view label, float remaining_seconds);
+// "r, g, b, a", each 0 to 255 (the Build_Countdown_Text_RGBA tag's form); nullopt when malformed.
+[[nodiscard]] std::optional<data::ui::Rgba8> parse_countdown_colour(std::string_view text) noexcept;
 
 // BE-02 and BEP-03: the local player's result names the message and the panel's title.
 enum class BattleResult : std::uint8_t { victory, defeat };

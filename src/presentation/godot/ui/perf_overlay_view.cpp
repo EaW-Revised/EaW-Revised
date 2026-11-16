@@ -172,9 +172,12 @@ void EawrPerfOverlay::draw_overlay() {
     const float gap = unit * 0.5F;
     const float big_row = font->get_height(big) * 1.05F;
     const float small_row = font->get_height(small) * 1.05F;
+    // The degraded-route hint is built once per frame and used for both the panel height and the row.
+    const std::string route_hint = network_ ? model::net_route_hint(*network_) : std::string();
     const float height = pad * 2.0F + (big_row + small_row + graph_height + gap) * 2.0F + small_row + small_row + small_row + small_row + small_row
         + (tick_source_ ? small_row : 0.0F) + big_row
-        + (network_ ? small_row * static_cast<float>(3 + network_->peers.size()) + gap : 0.0F)
+        + (network_ ? small_row * static_cast<float>(3 + 2 * network_->peers.size() + (route_hint.empty() ? 0 : 1)) + gap : 0.0F)
+        + (degradation_.empty() ? 0.0F : small_row)
         + (render_categories::enabled ? small_row * 5.0F : 0.0F);
 
     panel_rect_ = Rect2(margin, margin, width, height);
@@ -285,8 +288,24 @@ void EawrPerfOverlay::draw_overlay() {
                                : String("rtt -"),
                  small, dim_colour, HORIZONTAL_ALIGNMENT_RIGHT);
             y += small_row;
+            // How the link is carried: direct, relayed (and by whom) or not known yet.
+            text(String("route"), small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
+            text(String(model::net_route_text(peer.route)), small,
+                 peer.route == model::NetRoute::unknown || peer.route == model::NetRoute::direct ? dim_colour : warn_colour,
+                 HORIZONTAL_ALIGNMENT_RIGHT);
+            y += small_row;
+        }
+        // A relayed link that has been lossy for a while: say so, and on which relay (observation only).
+        if (!route_hint.empty()) {
+            text(String::utf8(route_hint.c_str()), small, warn_colour, HORIZONTAL_ALIGNMENT_LEFT);
+            y += small_row;
         }
         y += gap;
+    }
+    // #6846: what the session has degraded so far (the ledger's line); no row when nothing is.
+    if (!degradation_.empty()) {
+        text(String::utf8(degradation_.c_str()), small, warn_colour, HORIZONTAL_ALIGNMENT_LEFT);
+        y += small_row;
     }
     // Render counts, and the overlay's own cost.
     text(format("draw calls %llu", static_cast<unsigned long long>(draw_calls_)), small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);

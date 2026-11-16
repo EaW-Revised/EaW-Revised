@@ -1,4 +1,5 @@
 #include "eawr/core/json_text.hpp"
+#include "eawr/presentation/ui/production.hpp"
 #include "viewer_path.hpp"
 #include "map_mode_internal.hpp"
 #include "land_battle_camera.hpp"
@@ -125,7 +126,21 @@ bool MapMode::State::write_report() const {
     if (land_population && live_session) {
         output << "  \"land_live\": {\"locomotion\":\"authored\",\"external_inputs\":\"unverified\",\"pose_trace\":[";
         for (std::size_t i = 0; i < land_pose_trace.size(); ++i) { if (i) output << ","; output << land_pose_trace[i]; }
-        output << "]},\n";
+        output << "],\"deploy_zone_frames\":" << land_deploy_zone_frames << ",\"deploy_zone_rings\":" << land_deploy_zone_rings
+               << ",\"deploy_rings\":[";
+        const auto rings = live_session->land_deploy_rings();
+        for (std::size_t i = 0; i < rings.size(); ++i)
+            output << (i ? "," : "") << "{\"x\":" << rings[i].x << ",\"y\":" << rings[i].y << ",\"radius\":" << rings[i].radius << "}";
+        std::size_t own_instances = 0;
+        if (const auto& frame_data = live_session->battle_frame(); frame_data.latest)
+            for (const auto& instance : frame_data.latest->instances()) if (instance.owner == live_session->local_player()) ++own_instances;
+        output << "],\"own_instances\":" << own_instances << ",\"reinforcement_refusal\":";
+        if (const auto& refusal = live_session->reinforcement_refusal())
+            output << "{\"reason\":" << static_cast<int>(refusal->reason) << ",\"tick\":" << refusal->tick << ",\"label\":"
+                   << json(std::string(presentation::ui::reinforcement_refusal_label(refusal->reason))) << "}";
+        else output << "null";
+        output << ",\"attack_clip_samples\":" << land_attack_samples
+               << ",\"attack_idle_clip_samples\":" << land_attack_idle_samples << "},\n";
         live_session->write_report(output);
         if (battle_effects) battle_effects->write_report(output);
         if (battle) { LandBattleCamera view(camera, map_camera.get()); battle->write_report(output, view); }

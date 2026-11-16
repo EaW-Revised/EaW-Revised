@@ -5,6 +5,8 @@
 
 #include "ai_mode.hpp"
 #include "tactical_ai_internal.hpp"
+#include "eawr/script/authoritative/manifest_pins.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -50,6 +52,13 @@ end
 
 } // namespace
 
+std::vector<std::string> contrast_script_directories() { return {"Data/Scripts/Library/"}; }
+
+core::Result<std::map<std::string, std::string>> read_contrast_modules(const vfs::Vfs& files) {
+    const auto directories = contrast_script_directories();
+    return authoritative::read_script_directories(files, directories);
+}
+
 core::Result<void> load_contrast(Host& host, const std::map<std::string, std::string>& modules) {
     authoritative::ModuleManifest manifest;
     for (const auto& [path, bytes] : modules) {
@@ -59,7 +68,7 @@ core::Result<void> load_contrast(Host& host, const std::map<std::string, std::st
     authoritative::SessionConfig config;
     config.seed = host.setup.seed;
     config.tick_duration = authoritative::TickDuration{tactical::tick_numerator, tactical::tick_denominator};
-    config.script_directories = {"Data/Scripts/Library/"};
+    config.script_directories = contrast_script_directories();
     auto scripts = ScriptScheduler::create(std::move(config), std::move(manifest));
     if (!scripts) return core::Result<void>::failure(scripts.error());
     struct Lists {

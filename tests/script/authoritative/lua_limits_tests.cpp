@@ -236,6 +236,40 @@ void run_patterns() {
         expect_fault("local ok = pcall(function() " + call + " end)\nTest_Report('absorbed', ok)\n", auth::codes::instruction_budget,
                      label);
     }
+    // Matcher nesting is bounded in levels, not only in budget units: a chain of
+    // 50,000 optional, starred or lazy items costs far less than the budget
+    // but would recurse that deep on the C stack. Each ends in an ordinary,
+    // catchable script error that names the pattern, in find, gfind and gsub
+    // alike, and the instance keeps running afterwards.
+    for (const std::string item : {"a?", "a*", "a-"}) {
+        const std::string chain = "local s, p = string.rep('a', 50000), string.rep('" + item + "', 50000)\n";
+        const std::string label = "pattern depth " + item;
+        for (const std::string call : {"string.find(s, p)", "string.gsub(s, p, 'x')", "for w in string.gfind(s, p) do end"}) {
+            Session session = script_session(
+                chain + "local ok, err = pcall(function() " + call + " end)\n"
+                "Test_Report(tostring(ok) .. ':' .. (string.find(err, 'pattern too complex', 1, 1) and 'deep' or err))\n"
+                "Test_Report(tostring(string.find('xaab', 'a+b')))\n");
+            const std::string error = run_script(session);
+            expect(error.empty(), label + ": run: " + error);
+            expect(session.commands == std::vector<std::string>{"1#0 report false:deep", "1#1 report 2"},
+                   label + ": caught by pcall, later matches work\n" + joined(session.commands) + joined(session.diagnostics));
+            expect(session.removed.empty(), label + ": the instance survives a caught depth error");
+        }
+        // Uncaught in the root chunk: an ordinary script error that names the cause, never a crash.
+        Session session = script_session(chain + "string.find(s, p)\n");
+        const std::string error = run_script(session);
+        expect(contains(error, auth::codes::script_error) && contains(error, "pattern too complex"),
+               label + " uncaught: a script error naming the cause: " + error);
+    }
+    // A deep but legal pattern still matches: depth 150 is under the bound.
+    {
+        Session session = script_session(
+            "local s, p = string.rep('a', 150), string.rep('a?', 150)\n"
+            "local first, last = string.find(s, p)\n"
+            "Test_Report(first .. '-' .. last)\n");
+        expect(run_script(session).empty() && session.commands == std::vector<std::string>{"1#0 report 1-150"},
+               "a 150-level pattern is under the bound\n" + joined(session.commands) + joined(session.diagnostics));
+    }
     // The budget counts matcher steps: an ordinary find is a handful.
     {
         auth::SessionConfig config = default_config();

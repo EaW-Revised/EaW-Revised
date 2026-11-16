@@ -1,0 +1,2 @@
+eawr_add_python_contract(python_presentation_renderer_viewer_gc_idle_gpu_runtime tests.presentation.renderer.test_viewer_gc_idle_gpu_runtime)
+set_tests_properties(python_presentation_renderer_viewer_gc_idle_gpu_runtime PROPERTIES LABELS gpu TIMEOUT 1800)

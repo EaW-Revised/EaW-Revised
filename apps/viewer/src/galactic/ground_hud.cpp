@@ -481,6 +481,20 @@ bool GalacticMode::State::request_ground_land(bool submit, galactic_view::Object
     return true;
 }
 
+bool GalacticMode::State::request_ground_land_members(bool submit, std::span<const sim::galactic::FleetMemberRef> members) {
+    if (members.empty() || !selectable(*this) || !game || !galaxy || !published_snapshot
+        || !pause_allows(presentation::GalacticPausedAction::surface_deploy) || !selected_planet) return false;
+    const auto* found = command_roster(selected_planet);
+    if (!found || !found->accessible) return false;
+    const auto units = galactic_view::dragged_units_landing(*published_snapshot, galaxy->local.player, selected_planet, members);
+    if (!units) return false;
+    if (!submit) return true;
+    if (!map_input.gates.galactic || !map_input.gates.world_allowed() || map_input.gates.tutorial_locked) return false;
+    game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, sim::galactic::LandUnits{selected_planet, *units}, {}});
+    ++submitted_orders; ++ground_hud.land_orders;
+    return true;
+}
+
 // WGUI-52/54/55 and WGCH-154: a pressed ground-force widget that moved past the rectangle threshold
 // and is released over a same-planet orbit fleet card or orbit slot launches that unit and every
 // other multiselected unit (the primary drop callback first, then the rest in selection order).
@@ -638,7 +652,8 @@ bool GalacticMode::State::ground_pad_drop(Vector2 point) {
 
 void GalacticMode::State::update_ground_hud() {
     if (!ground_hud.input || !displayed_snapshot || !galaxy) return;
-    if (!map_input.box_end || !selectable(*this) || ground_hud.planet != selected_planet)
+    // A held land-tray unit owns the shared drag art (GPD-33): its image must survive every frame the drag lasts.
+    if (!tray_drag && (!map_input.box_end || !selectable(*this) || ground_hud.planet != selected_planet))
         ground_hud.input->drag_art->cancel();
     const bool changed = ground_hud.publication != displayed_snapshot || ground_hud.planet != selected_planet
         || ground_hud.layout_dirty;
@@ -692,6 +707,14 @@ void GalacticMode::State::update_ground_hud() {
     }
     const auto placement = fleet_organize->placement();
     const auto layout = pad_layout(ground_hud, selected_planet, roster);
+    // GPD-29: the landing slot is drawn only while one of the local player's fleets in orbit here can land.
+    bool landing_offered = false;
+    if (published_snapshot && galaxy && selected_planet) {
+        for (const auto& fleet : published_snapshot->fleets()) {
+            if (fleet.owner != galaxy->local.player || fleet.orbit != selected_planet || fleet.motion.transit) continue;
+            if (galactic_view::fleet_can_land(*published_snapshot, galaxy->local.player, fleet.id)) { landing_offered = true; break; }
+        }
+    }
     std::size_t index{};
     for (const auto& [name, native] : ground_hud.buttons) {
         auto* button = static_cast<EawrHudButton*>(native);
@@ -745,7 +768,7 @@ void GalacticMode::State::update_ground_hud() {
             }
             button->set_modulate(Color(1, 1, 1, structure || roster.structures_known ? 1.0F : 128.0F / 255.0F));
         } else {
-            button->set_visible(roster.accessible);
+            button->set_visible(roster.accessible && (name != "Slot_00" || landing_offered));
             button->set_disabled(name != "Slot_00" || !request_ground_land(false));
             // GHUD-S85: ordinary focused refresh clears the smuggler drop box's placeholder portrait.
             if (name == "b_underground") button->set_icon_texture({});
@@ -798,6 +821,7 @@ void GalacticMode::State::write_ground_report(std::ostream& output) const {
         ? std::to_string(*landed->second.count) : std::string{};
     output << "{\"count\":" << json(landed_count) << ",\"caption\":" << text_json(ground_hud.caption)
         << ",\"unknown\":" << text_json(ground_hud.unknown)
+        << ",\"opener\":{\"visible\":" << (advanced_open_button && advanced_open_button->is_visible_in_tree() ? "true" : "false") << "}"
         << ",\"projection_rebuilds\":" << ground_hud.rebuilds << ",\"clicks\":" << ground_hud.clicks
         << ",\"sale_opened\":" << ground_hud.sale_opened << ",\"sales_submitted\":" << ground_hud.sales_submitted
         << ",\"sale\":{\"object\":" << ground_hud.sale_object << ",\"visible\":"
@@ -846,6 +870,84 @@ void GalacticMode::State::write_ground_report(std::ostream& output) const {
             << ",\"enabled\":" << (!button->is_disabled() ? "true" : "false")
             << ",\"alpha\":" << button->get_modulate().a << "}";
     }
+    // The advanced map: its picture and the visible pads (GPD-02/03), for placement checks.
+    const auto rect_json = [&](const Control* node) {
+        const auto rect = node ? node->get_global_rect() : Rect2{};
+        std::ostringstream text;
+        text << "[" << rect.position.x << ',' << rect.position.y << ',' << rect.size.x << ',' << rect.size.y << "]";
+        return text.str();
+    };
+    const auto* window = advanced_map_anchors.find("map_window");
+    output << "]},\"detail\":{\"open\":" << (advanced_map_shell && advanced_map_shell->is_visible_in_tree() ? "true" : "false")
+        << ",\"window_anchor\":[" << (window ? window->rect.x : 0.0F) << ',' << (window ? window->rect.y : 0.0F) << ','
+        << (window ? window->rect.width : 0.0F) << ',' << (window ? window->rect.height : 0.0F) << "]"
+        << ",\"preview\":{\"visible\":" << (advanced_map_preview && advanced_map_preview->is_visible_in_tree() ? "true" : "false")
+        << ",\"rect\":" << rect_json(advanced_map_preview) << ",\"main_thread_copy_us\":" << advanced_map_preview_copy_us
+        << "},\"black\":{\"visible\":";
+    const auto* black = advanced_map_shell && advanced_map_shell->get_parent()
+        ? Object::cast_to<Control>(advanced_map_shell->get_parent()->get_node_or_null("AdvancedMapBlack")) : nullptr;
+    // Whether the galaxy scene is still being rendered: it stops while the opened map covers the window.
+    bool galaxy_updating = galaxy_viewport && galaxy_viewport->get_update_mode() != SubViewport::UPDATE_DISABLED;
+    for (std::size_t index = 0; index < scenes.size(); ++index) {
+        const auto& layer = scenes[index];
+        galaxy_updating = galaxy_updating && layer.viewport
+            && (layer.viewport->get_update_mode() != SubViewport::UPDATE_DISABLED || (index != 0 && scene_refresh.valid(index)));
+    }
+    output << (black && black->is_visible_in_tree() ? "true" : "false") << ",\"rect\":" << rect_json(black)
+        << ",\"galaxy_updating\":" << (galaxy_updating ? "true" : "false")
+        << "},\"back\":{\"visible\":";
+    const auto* back = advanced_map_shell ? Object::cast_to<Control>(advanced_map_shell->get_node_or_null("back_button_hit")) : nullptr;
+    output << (back && back->is_visible_in_tree() ? "true" : "false") << ",\"rect\":" << rect_json(back)
+        << "},\"pads\":[";
+    n = 0;
+    // Each drawn pad also says what the layout put on it (object and type, 0 when free) and which art name resolved for it.
+    const auto pad_json = [&](const auto& pads, const auto& models, const char* kind) {
+        for (std::size_t i = 0; i < pads.size(); ++i) {
+            if (!pads[i] || !pads[i]->is_visible_in_tree()) continue;
+            const auto* model = i < models.size() ? &models[i] : nullptr;
+            const auto name = model ? production_names.find(model->type) : production_names.end();
+            const auto art = name != production_names.end() ? production_art.find(name->second) : production_art.end();
+            output << (n++ ? "," : "") << "{\"kind\":\"" << kind << "\",\"slot\":" << i
+                << ",\"icon\":" << (pads[i]->icon_shown() ? "true" : "false")
+                << ",\"object\":" << (model && model->object ? static_cast<std::uint64_t>(*model->object) : 0U)
+                << ",\"type\":" << (model ? static_cast<std::uint64_t>(model->type) : 0U)
+                << ",\"fixed\":" << (model && model->fixed ? "true" : "false")
+                << ",\"art_name\":" << json(name != production_names.end() ? name->second : std::string{})
+                << ",\"art_icon\":" << json(art != production_art.end() ? art->second.icon : std::string{})
+                << ",\"rect\":" << rect_json(pads[i]) << "}";
+        }
+    };
+    pad_json(detail_build_pads, detail_layout.builds, "build");
+    pad_json(detail_unit_pads, detail_layout.units, "unit");
+    // What the layout was given: the roster's structures and how many of them have art.
+    output << "],\"layout_input\":{\"roster_structures\":[";
+    {
+        const auto roster = ground_roster_find(selected_planet);
+        std::size_t listed = 0;
+        if (roster != ground_hud.rosters.end()) for (const auto& row : roster->second.structures) {
+            const auto name = production_names.find(row.type);
+            const auto art = name != production_names.end() ? production_art.find(name->second) : production_art.end();
+            output << (listed++ ? "," : "") << "{\"object\":" << static_cast<std::uint64_t>(row.id)
+                << ",\"type\":" << static_cast<std::uint64_t>(row.type)
+                << ",\"name\":" << json(name != production_names.end() ? name->second : std::string{})
+                << ",\"base_position\":" << json(art != production_art.end() ? art->second.base_position : std::string{}) << "}";
+        }
+    }
+    output << "]}";
+    // The marker table behind the pads: normalised position, source position and map size.
+    output << ",\"markers\":[";
+    n = 0;
+    const auto marker_json = [&](const auto& models, const char* kind) {
+        for (const auto& model : models) {
+            const auto& marker = model.marker;
+            output << (n++ ? "," : "") << "{\"group\":\"" << kind << "\",\"record\":" << marker.record
+                << ",\"kind\":" << static_cast<int>(marker.kind) << ",\"x\":" << marker.x << ",\"y\":" << marker.y
+                << ",\"pos\":[" << marker.position.x << ',' << marker.position.y << ',' << marker.position.z << "]"
+                << ",\"map\":[" << marker.map_width << ',' << marker.map_height << "]}";
+        }
+    };
+    marker_json(detail_layout.builds, "build");
+    marker_json(detail_layout.units, "unit");
     output << "]}}";
 }
 } // namespace eawr::presentation::godot_backend

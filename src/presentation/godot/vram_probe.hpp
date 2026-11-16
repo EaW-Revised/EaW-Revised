@@ -132,7 +132,10 @@ using EnumerateDeviceExtensions = std::int32_t (*)(void* device, const char* lay
         get2(physical, &properties);
         if (budget_supported) {
             const std::uint64_t bytes = device_local(properties.properties, budget.budget);
-            if (bytes != 0) return {bytes, "vulkan memory budget"};
+            std::uint64_t sizes[16]{};
+            for (std::uint32_t heap = 0; heap < properties.properties.heap_count && heap < 16; ++heap)
+                sizes[heap] = properties.properties.heaps[heap].size;
+            if (bytes != 0) return {bytes, "vulkan memory budget", device_local(properties.properties, sizes)};
         }
     }
     if (auto get1 = reinterpret_cast<GetMemoryProperties>(get(instance, "vkGetPhysicalDeviceMemoryProperties"))) {
@@ -143,7 +146,7 @@ using EnumerateDeviceExtensions = std::int32_t (*)(void* device, const char* lay
             sizes[heap] = properties.heaps[heap].size;
         }
         const std::uint64_t bytes = device_local(properties, sizes);
-        if (bytes != 0) return {bytes, "vulkan device-local heaps"};
+        if (bytes != 0) return {bytes, "vulkan device-local heaps", bytes};
     }
     return {0, "vulkan memory properties unavailable"};
 }
@@ -164,7 +167,7 @@ inline void sample_device_memory_on_render_thread() {
     device_memory_probe().publish(std::move(memory));
 }
 
-[[nodiscard]] inline std::optional<DeviceMemory> probe_device_memory() {
+[[nodiscard]] inline std::optional<DeviceMemory> probe_device_memory(const bool refresh = false) {
     auto& probe = device_memory_probe();
     return request_device_memory(probe, [&] {
         auto* rendering = godot::RenderingServer::get_singleton();
@@ -177,7 +180,7 @@ inline void sample_device_memory_on_render_thread() {
         }
     }, [] {
         godot::UtilityFunctions::push_warning("VRAM probe still pending on the render thread; device budget remains unknown");
-    });
+    }, DeviceMemoryProbe::Clock::now(), refresh);
 }
 
 } // namespace eawr::presentation::godot_backend::detail

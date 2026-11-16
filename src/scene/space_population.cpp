@@ -215,7 +215,9 @@ SpacePlacementDecision classify_object(const Placement& placement,
     decision.scene_ordinal = placement.scene_ordinal;
     decision.object_id = placement.object_id;
     if (tags) decision.type_name = tags->type_name;
-    const bool effect_owner = tags && (tags->type_name == "Projectile" || (ability_proxy_owner && tags->type_name == "SpaceUnit"))
+    // BP-70: a unit whose root model is a particle system is drawn as that effect.
+    const bool effect_owner = tags
+        && (tags->type_name == "Projectile" || (tags->type_name == "SpaceUnit" && (ability_proxy_owner || placement.particle_root)))
         && drawable_projectile_effects(placement);
     for (const Surface& surface : placement.surfaces) {
         if (is_shadow_volume_shader(surface.shader)) ++decision.shadow_volume_surfaces;
@@ -235,7 +237,7 @@ SpacePlacementDecision classify_object(const Placement& placement,
         };
         for (std::size_t index = 0; index < placement.surfaces.size(); ++index) {
             const Surface& surface = placement.surfaces[index];
-            if (!surface.supported || material_selector(surface) == nullptr) continue;
+            if (!draws_in_space(surface)) continue;
             if (const std::size_t hardpoint = decal(surface.mesh_name); hardpoint < decision.hardpoints.size()) {
                 ++decision.damage_decal_surfaces;
                 decision.damage_decals.push_back({index, hardpoint});

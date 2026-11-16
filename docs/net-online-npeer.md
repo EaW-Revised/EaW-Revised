@@ -191,6 +191,27 @@ refuses that member; there is no regrant for it. Kick is
 the host's `LobbySession` kick plus the service kick. Host connection loss before Lock
 closes the room for everyone (owner decision 4).
 
+### Room frame version and the host mod refresh
+
+Every room frame (snapshot, request, chat, setup envelope, preparation, notice) carries the room wire version after its kind
+byte. **Version 4** adds one frame, kind 102, the host mod refresh: `room:text, description:blob`, where the blob is a valid
+non-empty mod description of at most 64 KiB. A build on another version refuses the frame with a message naming version 4.
+
+The host opens its room with whatever mod description it has at that moment. When its mod content digests are not ready yet,
+that description has no digest for those mods, so a same-size content edit cannot be told apart from the guest's copy. Once
+the digests finish, the host replaces its description and sends the refresh to every seated guest; guests admitted later get it
+in their snapshot. The refresh is display only: it carries no revision, never clears readiness, is accepted only from the host
+while the room is staging (a starting or committed room keeps its frozen bytes and ignores or refuses it), and never delays a
+join. It does gate the host's Start: while the refresh is owed (the room opened before the host's digests were ready) Start is
+off with the reason "Checking mod files", and it is retried until the room accepts it, so a match never starts with a mod list
+the guests were not given to check. When the settled list cannot travel (over the 64 KiB limit, or text the room codec refuses)
+the host sees a "Mod list not shared" message that names the actual reason (the list could not be prepared, it is over the limit with its
+size, or it has text the lobby cannot carry), whether this is found when the room opens or when the digests finish, and Start is
+released, as when a room opens with a list that cannot be sent. A refresh the room refuses is retried with a growing pause and
+given up after eight tries, with the same message, so it never loops.
+A guest compares the refreshed description with its own once both digests are ready and shows the existing
+mismatch warning in the lobby; matching content stays quiet. Nothing in it reaches sim, hash or replay state.
+
 ### Build hash and setup agreement for N peers
 
 Every pair hello compares the exact `core::build_identity()`, so all 36 pairs check it,
@@ -545,7 +566,7 @@ Landed in `include/eawr/net/mesh_incident.hpp`, `src/net/mesh_incident.cpp`, `Lo
 
 Contracts of the follow-up (legacy EAWR-3697) in this slice: incident ID, shared incident time base, flapping-pair policy, decider loss mid-incident
 (fail closed, above) and the minority-side note are done. Left: automatic decider failover (a second decider could confirm a different survivor set); wiring the GNS per-peer teardown into the viewer (the adapter supplies `close_peer`, and the viewer still needs to call it);
-and the STUN list (`GnsOptions::stun_servers` stays empty because the room service does not hand out STUN URIs yet).
+and the STUN list (the adapter now derives it from the TURN list when the caller sets none, see docs/gns-transport.md "STUN").
 
 ### Slice N5 repair contract
 

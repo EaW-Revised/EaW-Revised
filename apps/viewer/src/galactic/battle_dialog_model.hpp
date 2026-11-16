@@ -222,4 +222,49 @@ inline std::vector<AdvisorLine> auto_resolve_advisor(
     return lines;
 }
 
+// WAR-64 / WGUI-120: the galactic advisor lines of one auto-resolved battle, seen by `local`. The viewer side is the local
+// player when it took part, else the winner. Hero-loss lines carry no admission; the result line needs the local player to
+// be a participant or to know fleet presence at the planet. `faction` names the viewer side's display name.
+inline std::vector<AdvisorLine> auto_resolve_notices(std::span<const CampaignRecordEntry> record, std::uint32_t local,
+    std::uint32_t invader, std::uint32_t defender, std::uint32_t winner, bool land, bool presence_known,
+    const std::function<std::string(std::uint32_t)>& faction, std::string planet,
+    const std::function<bool(std::string_view)>& named_hero,
+    const std::function<std::string(std::string_view)>& display_name) {
+    const bool involved = local != 0 && (local == invader || local == defender);
+    const std::uint32_t viewer = involved ? local : winner;
+    auto lines = auto_resolve_advisor(record, viewer, winner, land, faction ? faction(viewer) : std::string{},
+        std::move(planet), named_hero, display_name);
+    if (!involved && !presence_known && !lines.empty()) lines.pop_back();
+    return lines;
+}
+
+// The display text of an authored Text_ID, else `fallback`. Stock Text_ID values carry padding around the key and the
+// text database matches keys exactly, so the key is trimmed first; a key with no entry keeps the fallback.
+inline std::string authored_display_text(std::string_view text_id, std::string fallback,
+    const std::function<std::string(std::string_view)>& text) {
+    constexpr std::string_view blank = " \t\r\n";
+    const auto first = text_id.find_first_not_of(blank);
+    if (first == std::string_view::npos || !text) return fallback;
+    const auto key = text_id.substr(first, text_id.find_last_not_of(blank) - first + 1);
+    auto shown = text(key);
+    return shown.empty() || shown == key ? fallback : shown;
+}
+
+// WAR-64 / WGUI-120: each auto-resolved battle is announced once. The battle shown on the first look (and on the first
+// look after a load) is taken as already announced; later battles are keyed by conflict id, so a republication of the
+// same battle (a restored summary, a recovered session) is not announced again.
+struct AdvisedOutcome {
+    bool primed{};
+    std::uint64_t conflict{};
+};
+inline bool advise_outcome(AdvisedOutcome& advised, std::optional<std::uint64_t> conflict) {
+    if (!advised.primed) {
+        advised = {true, conflict.value_or(0)};
+        return false;
+    }
+    if (!conflict || *conflict == advised.conflict) return false;
+    advised.conflict = *conflict;
+    return true;
+}
+
 } // namespace eawr::viewer::galactic

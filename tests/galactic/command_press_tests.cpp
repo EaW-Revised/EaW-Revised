@@ -88,6 +88,36 @@ int case_galactic_command_press_tests() {
         assert(loud.clicks == std::vector<std::string>{"tab"});
     }
     {
+        // #5922: a production card, queue slot or help button raises the story click from its own action. A human press does, with
+        // the authored name as given; a forced press on the same control (its action runs inside the drain) raises none.
+        struct Card final : CommandPresses::Surface {
+            CommandPresses& presses; ControlStates& states; CommandPresses::Effects& effects;
+            Card(CommandPresses& p, ControlStates& s, CommandPresses::Effects& e) : presses(p), states(s), effects(e) {}
+            [[nodiscard]] CommandPresses::Target find(std::string_view) const override { return {true, false, true}; }
+            void activate(std::string_view component) override { presses.raise_from_action(states, std::string(component), effects); }
+        };
+        CommandPresses presses;
+        ControlStates states;
+        Recorder hud(presses, states);
+        hud.listened = {"b_Create_26"};
+        Card card(presses, states, hud);
+        card.activate("b_Create_26"); // the human press: the button's action
+        assert(hud.clicks == std::vector<std::string>{"b_Create_26"});
+        card.activate("b_create_01"); // nobody listens
+        assert(hud.clicks.size() == 1);
+        assert(presses.drain(std::vector<std::string>{"b_Create_26"}, card, 8, [](const CommandPresses::Drop&) { assert(false); }) == 1);
+        assert(hud.clicks.size() == 1); // the forced press raised nothing
+        card.activate("b_Create_26"); // and the next human press does again
+        assert(hud.clicks.size() == 2);
+        ControlStateRules rules; rules.forced_press_raises_story_click = true;
+        ControlStates raising(rules);
+        Recorder loud(presses, raising);
+        loud.listened = {"b_Create_26"};
+        Card allowed(presses, raising, loud);
+        presses.drain(std::vector<std::string>{"b_Create_26"}, allowed, 8, [](const CommandPresses::Drop&) { assert(false); });
+        assert(loud.clicks == std::vector<std::string>{"b_Create_26"}); // the one rule decides, for cards as for the generic path
+    }
+    {
         // Absent, hidden and disabled controls and over-budget presses are dropped, each pair reported once, never an abort.
         CommandPresses presses;
         ControlStates states;

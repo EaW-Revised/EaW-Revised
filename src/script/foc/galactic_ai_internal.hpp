@@ -17,6 +17,7 @@ struct Manager::Impl {
     LifecycleState state;
     AsyncSchedule schedule{synchronous_reference_schedule};
     std::uint32_t virtual_tick{1}; // batch driver: the 1-based virtual tick before_service serves next
+    std::uint64_t last_served_tick{}; // the world tick the lifecycle last served (before_service); diagnostics only, never saved or hashed
     std::string configuration_digest;
     core::RecordDigest records;
     void update_record(gc::PlayerId player = 0);

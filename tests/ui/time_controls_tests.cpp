@@ -60,6 +60,32 @@ void test_fast_forward() {
            "TMC-02: a second press returns to the speed setting");
 }
 
+void test_cinematic_pacing() {
+    // FC-R03: a playing cinematic runs at the nominal 30 logical frames per second whatever the player chose.
+    ui::TimeControls controls(4);
+    controls.press_fast_forward(5);
+    expect(controls.target_rate() == 120, "FC-R03 setup: fast forward is on");
+    expect(controls.set_cinematic_pacing(true, 10) && controls.target_rate() == 30 && controls.tick_factor() == 1.0,
+        "FC-R03: the cinematic overrides fast forward to 30 frames per second");
+    expect(!controls.set_cinematic_pacing(true, 11), "FC-R03: setting the same pacing twice changes nothing");
+    expect(controls.set_cinematic_pacing(false, 20) && controls.target_rate() == 120,
+        "FC-R03: the player's fast forward returns when the cinematic ends");
+    ui::TimeControls paused(2);
+    paused.set_cinematic_pacing(true, 1);
+    paused.press_pause(2);
+    expect(paused.paused() && !paused.running() && paused.tick_factor() == 0.0, "FC-R03: pause still pauses the cinematic");
+    paused.resume(3);
+    expect(paused.running() && paused.target_rate() == 30, "FC-R03: resuming keeps the cinematic pace");
+    ui::TimeControls slow(0);
+    slow.set_cinematic_pacing(true, 0);
+    expect(slow.target_rate() == 30, "FC-R03: a slow speed step is raised to 30 for the cinematic");
+    slow.set_cinematic_pacing(false, 4);
+    expect(slow.target_rate() == 10, "FC-R03: the slow step returns afterwards");
+    ui::TimeControls ended;
+    ended.end(3);
+    expect(!ended.set_cinematic_pacing(true, 4), "FC-R03: nothing changes after the battle ended");
+}
+
 void test_pause() {
     ui::TimeControls controls;
     expect(controls.press_pause(5) && controls.paused() && controls.tick_factor() == 0.0, "TM-05: pause");
@@ -104,7 +130,9 @@ void test_battle_messages() {
     root.children = {tag("Win_Message_Color", "223, 243, 255, 255"), tag("Lose_Message_Color", " 255, 244, 223, 255 "),
                      tag("Win_Lose_Message_Font", "EmpireAtWar-Bold"), tag("Win_Lose_Message_Font_Size", " 36 "),
                      tag("Win_Lose_Message_Font_Size", " 24 "), tag("Battle_Pending_Message_Color", "255, 32, 32, 240"),
-                     tag("GUI_Tactical_Countdown_Timers_Screen_X", " 0.005 "), tag("GUI_Tactical_Countdown_Timers_Screen_Y", "0.25")};
+                     tag("GUI_Tactical_Countdown_Timers_Screen_X", " 0.005 "), tag("GUI_Tactical_Countdown_Timers_Screen_Y", "0.25"),
+                     tag("GUI_Strategic_Countdown_Timers_Screen_X", "0.01"), tag("GUI_Strategic_Countdown_Timers_Screen_Y", " 0.03 "),
+                     tag("GUI_Strategic_Countdown_Timers_Screen_Spacing", "0.06")};
     const ui::BattleMessageLooks looks = ui::battle_message_looks(root);
     expect(looks.diagnostics.empty(), "the FoC constants parse without warnings");
     expect(looks.point_size == 24, "the last Win_Lose_Message_Font_Size wins");
@@ -112,10 +140,17 @@ void test_battle_messages() {
                && looks.pending == data::ui::Rgba8{255, 32, 32, 240} && looks.font == "EmpireAtWar-Bold",
            "BE-03 and TM-09 looks");
     expect(looks.countdown_x == 0.005 && looks.countdown_y == 0.25, "RP-06: the tactical countdown line position comes from GameConstants");
+    expect(looks.strategic_countdown_x == 0.01 && looks.strategic_countdown_y == 0.03 && looks.strategic_countdown_spacing == 0.06,
+           "WGEP-173: the strategic production countdown position and line spacing come from GameConstants");
+    expect(ui::parse_countdown_colour(" 64, 128, 255, 255 ") == data::ui::Rgba8{64, 128, 255, 255} && !ui::parse_countdown_colour("64, 128, 255"),
+           "WGEP-173: the countdown colour tag reads r, g, b, a");
+    expect(ui::production_countdown_line("Label", 125.9F) == "Label 02:05" && ui::production_countdown_line("Label", 59.0F) == "Label 00:59"
+               && ui::production_countdown_line("L", 3600.0F) == "L 60:00" && ui::production_countdown_line("L", -1.0F) == "L 00:00",
+           "WGEP-173: the countdown line is the label, a space and minutes:seconds, two digits each, seconds truncated"); 
     data::XmlNode broken;
     broken.children = {tag("Win_Message_Color", "223, 243, 255"), tag("Win_Lose_Message_Font_Size", "big")};
     const ui::BattleMessageLooks fallback = ui::battle_message_looks(broken);
-    expect(fallback.win == data::ui::Rgba8{223, 243, 255, 255} && fallback.point_size == 24 && fallback.diagnostics.size() == 7,
+    expect(fallback.win == data::ui::Rgba8{223, 243, 255, 255} && fallback.point_size == 24 && fallback.diagnostics.size() == 10,
            "missing or malformed constants keep the FoC values, one warning each");
     expect(ui::battle_message_key(ui::BattleResult::victory) == "TEXT_WIN_TACTICAL"
                && ui::battle_message_key(ui::BattleResult::defeat) == "TEXT_LOSE_TACTICAL",
@@ -225,6 +260,7 @@ int main() {
     test_battle_messages();
     test_speed_steps();
     test_fast_forward();
+    test_cinematic_pacing();
     test_pause();
     test_end_and_track();
     test_shared_fast_forward();

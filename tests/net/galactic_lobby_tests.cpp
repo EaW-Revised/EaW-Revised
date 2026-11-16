@@ -30,6 +30,7 @@
 #include "eawr/scene/scene.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/mods/save_description.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -442,6 +443,17 @@ void campaign_list() {
     expect(cp::list_mp_lobby_campaigns(modded.data)[0].factions.size() == 5, "a faction the campaign's records name is listed, however many there are");
     modded.data.campaigns[0].home_locations.pop_back();
     expect(cp::list_mp_lobby_campaigns(modded.data)[0].factions.size() == 4, "a faction no campaign record names is not listed");
+    // #6812 / CGS-24: several Is_Neutral factions (a mod's free-mode team slots) are all listed, as retail creates a player for
+    // every faction; the first neutral row is the root neutral.
+    {
+        auto team = *std::find_if(modded.data.factions.begin(), modded.data.factions.end(),
+            [](const auto& faction) { return faction.is_neutral.value_or(false); });
+        for (const char* name : {"NEUTRAL_TEAM_1", "NEUTRAL_TEAM_2"}) { team.name = name; modded.data.factions.push_back(team); }
+        const auto rows = cp::list_mp_lobby_campaigns(modded.data)[0].factions;
+        const auto neutrals = std::count_if(rows.begin(), rows.end(), [](const auto& row) { return row.neutral; });
+        expect(neutrals == 3 && rows.size() == 6 && !rows[3].playable && rows[3].neutral,
+            "every neutral faction is listed, unplayable, in table order");
+    }
 }
 
 // ---- the campaign list shows the authored name and description (#4553) ----
@@ -2656,11 +2668,23 @@ void preparation_content_manifest() {
         const auto catalog = require(eawr::data::load_catalog(*files, eawr::data::Profile::foc));
         std::vector<eawr::units::InputFile> receipts;
         const auto legacy = require(eawr::skirmish::read_data_identity(*files));
-        // Pre-receipt encoding at 8e18b90e9100309ed4a401dbf1cb323d29af887b, independently derived from these
-        // synthetic bytes. Comparing the two current overloads alone would miss a shared encoding regression.
-        expect(legacy.script_manifest_digest == "e1ed62965b438d0f1358926dbfc905b489482af3419c64ecdbec6f731df3c56e"
+        // Independently encode the synthetic manifest with the active sandbox policy.
+        // Comparing the two overloads alone would miss a shared encoding regression;
+        // pinning an older policy would reject an intentional sandbox version bump.
+        std::string manifest(eawr::script::authoritative::sandbox_policy_identity);
+        for (const auto& [path, source] : std::array<std::pair<std::string_view, std::string_view>, 3>{{
+                 {"DATA/SCRIPTS/LEAF.LUA", "return 3"}, {"DATA/SCRIPTS/PARENT.LUA", "return 4"},
+                 {"DATA/SCRIPTS/TEST.LUA", "return 1"}}}) {
+            for (unsigned shift = 0; shift < 64; shift += 8)
+                manifest.push_back(static_cast<char>(static_cast<std::uint64_t>(path.size()) >> shift));
+            manifest.append(path);
+            const auto digest = eawr::core::sha256(std::span(reinterpret_cast<const std::uint8_t*>(source.data()), source.size()));
+            manifest.append(reinterpret_cast<const char*>(digest.data()), digest.size());
+        }
+        expect(legacy.script_manifest_digest == eawr::core::sha256_hex(
+                   std::span(reinterpret_cast<const std::uint8_t*>(manifest.data()), manifest.size()))
             && legacy.ai_data_digest == "5d8f3c58a624c5a021eee7f6d5889e42e492f61ffbf9c1d5284c82710fc188e0",
-            "the original overload preserves its pre-receipt Lua and XML identity bytes");
+            "the original overload preserves the active-policy Lua and XML identity encoding");
         const auto collected = require(eawr::skirmish::read_data_identity(*files, &receipts));
         expect(legacy.script_manifest_digest == collected.script_manifest_digest && legacy.ai_data_digest == collected.ai_data_digest
             && !receipts.empty(), "consumed-byte receipts preserve existing XML/Lua identity bytes");
@@ -3340,6 +3364,29 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
     milestone = "ready";
     wait([&] { return host->lobby_state()->snapshot.seats[0].ready && host->lobby_state()->snapshot.seats[1].ready; });
     expect(host_backend->can_start() && !host->galactic_start(), "production adapter is installed, but no launch precedes Start");
+    {
+        // #6468: while the host's mod digests are still being computed, Start waits for the refresh to the guests. A match never starts
+        // with a mod list the guests were not given to check; the button is off with a reason, and a press does nothing.
+        milestone = "mod refresh owed";
+        host->expect_host_mod_refresh(true);
+        const auto owed = host->lobby_state();
+        expect(owed && !owed->start_enabled && owed->start_reason.find("mod") != std::string::npos,
+            "#6468 Start is off with a reason while the host's mod list refresh is owed");
+        host->start(none);
+        expect(!host->galactic_start() && host->lobby_state()->snapshot.phase == net::LobbyPhase::staging && !host->lobby_state()->start_preparing,
+            "#6468 pressing Start while the refresh is owed does not start the room");
+        eawr::mods::ModDescription settled;
+        settled.complete = true;
+        settled.entries.push_back({eawr::mods::DescriptionKeyKind::manual, "", "Refresh Mod", std::nullopt, std::nullopt});
+        const auto settled_bytes = eawr::mods::encode_description(settled);
+        // A refused refresh (bytes the room codec rejects) keeps Start off and the refresh owed, and the retry with the real list works.
+        expect(!host->refresh_host_mod_description({1, 2, 3}) && !host->lobby_state()->start_enabled
+            && host->lobby_state()->start_reason.starts_with("Checking mod files"), "#6468 a refused refresh keeps Start off and stays owed");
+        expect(!host->refresh_host_mod_description({}) && !host->lobby_state()->start_enabled, "#6468 an empty refresh is refused too");
+        expect(settled_bytes && host->refresh_host_mod_description(*settled_bytes), "#6468 the retry with the settled mod list goes out as a refresh");
+        wait([&] { return settled_bytes && guest->lobby_state()->snapshot.mounted_mods == *settled_bytes; });
+        expect(!host->lobby_state()->start_reason.starts_with("Checking mod files"), "#6468 the owed-refresh reason is gone once the refresh went out");
+    }
     milestone = "Start enabled";
     wait([&] { return host->lobby_state()->start_enabled; });
     const auto start_pressed = std::chrono::steady_clock::now();
@@ -3652,6 +3699,15 @@ void installed_observer_agreement(bool stock_only = false) {
     std::sort(campaigns.begin(), campaigns.end(), [](const auto& a, const auto& b) { return a.name < b.name; });
     expect(!campaigns.empty(), "installed data contains a multiplayer campaign");
     if (stock_only) {
+        // #7017: a solo start's staging level maps, for every stock single-player entry, to the stock adjustment of that level
+        // (Normal stays the Normal_Default every solo start used before the radios worked).
+        const auto solo_entries = cp::list_coop_sp_lobby_campaigns(*loaded.data, loaded.local.ai_levels);
+        expect(!solo_entries.empty(), "installed data contains single-player campaign entries");
+        for (const auto& solo : solo_entries)
+            for (const auto& [level, stock] : {std::pair<const char*, const char*>{"easy", "Easy_Default"},
+                     {"normal", "Normal_Default"}, {"hard", "Hard_Default"}})
+                expect(cp::solo_difficulty_entry(*loaded.data, solo.name, level, loaded.local.ai_levels) == stock,
+                    "stock solo entry " + solo.name + " runs the " + level + " level on " + stock);
         const std::array stock_names{
             "Multiplayer_Sandbox_Clusters", "Multiplayer_Sandbox_Equal_Footing", "Multiplayer_Sandbox_Gateways",
             "Multiplayer_Sandbox_Heart_Of_The_Maw", "Multiplayer_Sandbox_Origin", "Multiplayer_Sandbox_Rim_Worlds"};

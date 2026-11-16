@@ -159,6 +159,13 @@ unchanged defaults; `m2` remains the pinned fixture mode.
   loader, including their craft, hangar, hardpoint and projectile dependencies;
   a type with unsupported or missing data is reported by the normal loaders.
 - `--eawr-skirmish-seed <uint64>` sets the deterministic seed, default `67`.
+- `--eawr-skirmish-destroyed-planet on|off` (staging) starts the battle as at a destroyed planet: the map's planet backdrop is
+  dropped and its replacement props stand in its place (WGT-57); default off.
+- `--eawr-skirmish-tsw-conflict on|off` (staging) opens the skirmish super weapon's gate (TSW-04): a skirmish has no parent
+  conflict, so its super weapon never fires; `on` gives it the gate input of an attacked, destroyable planet with no
+  defender (`start.setup.tsw->conflict`), so the approach, power-up, attack and target-destroyed sequence can be captured.
+  It is the one staging flag that sets a simulation input: the sim start changes only when the flag is given, and default
+  (off) hashes are unchanged.
   These flags require `--eawr-live-session skirmish`; `--eawr-live-ai off` disables
   AI controllers for a staging run. The first human is the local player unless
   `--eawr-live-player <slot>` selects another player.
@@ -254,6 +261,14 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   what the recording does). Selection and order input still read each unit's ownership, not
   reveal, so a revealed enemy cannot be selected or ordered (
   [battle selection](../../docs/behaviour/foc-battle-selection.md)).
+
+- `--eawr-no-fog` (a bare flag; the launcher's "Fog of war: off" option, `EAWR.exe --no-fog` or a mod profile's
+  `launch.no_fog`): an owner convenience, not a retail rule. It turns on both existing draw-only reveals for the local
+  player: `--eawr-live-reveal on` in every space and land battle and `--eawr-galactic-reveal on` in the campaign (the
+  galaxy, every enemy fleet and the AI queues). Like them it never touches the simulation, the AI, saves, digests or
+  replays, so a save or a replay made with it is byte-identical to one made without and needs no marker. It is
+  single-player only: a LAN battle, a multi-human campaign and a LAN campaign refuse it with a message on the setup
+  screen instead of dropping it silently (a map hack would otherwise show one seat what the others hide).
 
 - `--eawr-live-order <tick>:<move|face>:<unit>@<x>,<y>,<z>`, `<tick>:stop:<unit>`,
   `<tick>:damage:<unit>@<amount>[,<hardpoint>]`, `<tick>:attack:<unit>@<target unit>` or
@@ -493,7 +508,9 @@ The report lists the states under `populate.debug_ship.hardpoint_states`.
 Every population report counts the damage emitters of intact and damaged hardpoints under
 `populate.attached_effects.hidden_by_hardpoint_state`, and the admitted
 emitters and those the aggregate budget turned away under `admitted` and
-`capacity_exhausted`. Populated Coruscant's own emitters fill the default
+`capacity_exhausted`, and the admitted records whose effect could not be prepared
+(data refusals: file, parse, texture, emitter) under `dropped` (their causes are in
+`map_particles`; an engine resource refusal still fails the run). Populated Coruscant's own emitters fill the default
 budget (`--eawr-map-particle-capacity 8192`, 256 particles each), so the placed
 unit's emitters start only with a larger capacity.
 
@@ -515,6 +532,9 @@ filtering. Every other run keeps the retail look, with none of them.
 `--eawr-render-profile retail|enhanced` forces either one, for example for an
 enhanced capture or a frame-time comparison; it is an internal switch, not a
 player setting. Mode reports record the applied settings as `render_profile`.
+`--eawr-msaa 0|2|4|8` and `--eawr-smaa on|off` then replace one of the two, to isolate which
+step changes a pixel (evidence runs only; the report shows `custom`).
+`--eawr-space-sweep deg_per_frame,frames[,row0,row1]` (evidence runs only, with the fixed `--eawr-space-camera`, `--eawr-capture` and `--eawr-map-timed-frames` of at least frames + 6) holds the camera 6 frames after the warm-up, then turns it about its own eye by `deg_per_frame` every frame and writes each frame's rows `row0..row1` (default all) as `<capture stem>.sNNN.png`, plus `<capture stem>.sweep.json` with the requested yaw and the read-back time of each frame.
 See [rendering policies](../../docs/rendering.md#render-profiles).
 
 ## Capture size

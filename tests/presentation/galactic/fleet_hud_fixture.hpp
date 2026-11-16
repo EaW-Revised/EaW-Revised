@@ -15,7 +15,7 @@ namespace eawr::viewer::galactic {
 }
 [[nodiscard]] inline bool fleet_hud_fixture(std::string_view name) {
     return fleet_popup_fixture_size(name) != 0 || name == "fleet-presence" || name == "fleet-presence-plain" || name == "fleet-count" || name == "fleet-contents" || name == "fleet-heroes"
-        || name == "fleet-transit" || name.starts_with("fleet-drag") || name == "fleet-slot"
+        || name == "fleet-transit" || name == "fleet-transit-plain" || name.starts_with("fleet-drag") || name == "fleet-slot"
         || name.starts_with("fleet-route-") || name.starts_with("ground-") || name.starts_with("destruction-");
 }
 // Explicit synthetic provider inputs; never a stock-campaign fallback. Enemy
@@ -46,6 +46,8 @@ inline void configure_fleet_hud_fixture(sim::galactic::GalacticSetup& setup,
     if (fixture.starts_with("destruction-")) setup.fleets[0].members = {{7001,1000}};
     // WGUI-17: an attached superweapon (either side's) grants counts under a
     // presence-only mask; the plain variant drops both Death Stars so presence stays bare.
+    // #6940: the same moving fleet without its Death Star keeps the stock marker; fleet-transit holds one and draws the override.
+    if (fixture == "fleet-transit-plain") setup.fleets[0].members = {{7001,1000},{7002,1000}};
     if (fixture == "fleet-presence-plain") {
         setup.fleets[0].members = {{7001,1000},{7002,1000}};
         setup.fleets[2].members = {{7005,1000},{7006,1001},{7007,1000}};
@@ -70,7 +72,7 @@ inline void configure_fleet_hud_fixture(sim::galactic::GalacticSetup& setup,
         setup.fleet_control->types.push_back({1004,true,true,false});
         setup.fleets[0].members = {{7001,1004}};
     }
-    if (fixture == "fleet-transit" || fixture.starts_with("fleet-drag") || fixture == "fleet-slot"
+    if (fixture == "fleet-transit" || fixture == "fleet-transit-plain" || fixture.starts_with("fleet-drag") || fixture == "fleet-slot"
         || fixture.starts_with("fleet-route-")) {
         // Explicit movement inputs. The runtime fixture submits a real move
         // after startup; tick-zero setups correctly reject seeded transit.

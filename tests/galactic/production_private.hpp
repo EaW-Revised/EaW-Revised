@@ -30,6 +30,7 @@ void refund_recipient();
 void finish_task_behind_front();
 void queue_policies();
 void base_and_tech_completion();
+void construct_story_notices();
 galactic::GalacticSetup blocker_setup();
 void live_starbase_blockers();
 void ground_structure_sale();

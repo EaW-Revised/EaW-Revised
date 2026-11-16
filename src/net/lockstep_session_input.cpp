@@ -285,7 +285,31 @@ core::Result<void> LockstepSession::broadcast_checkpoint(const Bytes& frame) {
     }
     return core::Result<void>::success();
 }
-core::Result<void> LockstepSession::abort_checkpoint(std::string message, bool broadcast) {
+namespace {
+// The barrier epoch a save control names (its first field after the kind byte); 0 for a truncated frame.
+std::uint64_t checkpoint_control_epoch(const Received& received) {
+    std::uint64_t epoch{};
+    auto body = std::span<const std::uint8_t>(received.frame);
+    if (body.empty()) return 0;
+    body = body.subspan(1);
+    return read(body, epoch, 8) ? epoch : 0;
+}
+} // namespace
+
+// Controls for this epoch (or older, which are stale) leave the early queue; those of a later barrier stay for their own
+// begin. Only this barrier's own controls are replayed, so a later barrier's control can never fail this one.
+std::vector<Received> LockstepSession::take_early_checkpoint(std::uint64_t epoch) {
+    std::vector<Received> mine;
+    std::deque<Received> later;
+    for (auto& message : std::exchange(early_checkpoint_, {})) {
+        const auto at = checkpoint_control_epoch(message);
+        if (at == epoch) mine.push_back(std::move(message));
+        else if (at > epoch) later.push_back(std::move(message));
+    }
+    early_checkpoint_ = std::move(later);
+    return mine;
+}
+core::Result<void> LockstepSession::abort_checkpoint(std::string message, bool broadcast, bool busy) {
     if (!checkpoint_) return core::Result<void>::success();
     const auto epoch = checkpoint_->epoch;
     if (broadcast && self_ != checkpoint_callbacks_->host) {
@@ -306,9 +330,9 @@ core::Result<void> LockstepSession::abort_checkpoint(std::string message, bool b
         Bytes frame{checkpoint_release_kind}; append(frame, epoch, 8); append(frame, 0, 1);
         if (auto sent = broadcast_checkpoint(frame); !sent) return sent;
     }
-    completed_checkpoint_ = epoch; checkpoint_.reset(); early_checkpoint_.clear();
+    completed_checkpoint_ = epoch; checkpoint_.reset(); static_cast<void>(take_early_checkpoint(epoch));
     if (checkpoint_callbacks_->refused)
-        checkpoint_callbacks_->refused(diagnostic(session_errors::admission, "Save failed: " + message));
+        checkpoint_callbacks_->refused(diagnostic(busy ? session_errors::capture_busy : session_errors::admission, "Save failed: " + message));
     return core::Result<void>::success();
 }
 core::Result<void> LockstepSession::begin_checkpoint() {
@@ -326,12 +350,19 @@ core::Result<void> LockstepSession::begin_checkpoint() {
         if (!barrier.voters[peer]) barrier.drains[peer] = epoch;
     }
     barrier.drains[self_] = drain; checkpoint_ = std::move(barrier);
-    if (agreement_ || held_ || resync_ || timing_ || (mesh_ && mesh_->running()))
-        return abort_checkpoint("a roster or timing transition overlaps capture");
+    if (agreement_ || held_ || resync_ || timing_ || (mesh_ && mesh_->running())) {
+        // The host may already have refused this epoch (it reaches the trigger tick first, and its timing
+        // transition spans ours): that refusal sits in the early queue and settles the barrier here. Without
+        // it a non-host peer would wait for a refusal that was sent before the barrier existed.
+        for (const auto& message : take_early_checkpoint(epoch)) {
+            if (auto accepted = receive_checkpoint(message); !accepted) return accepted;
+            if (!checkpoint_) return core::Result<void>::success();
+        }
+        return abort_checkpoint("a roster or timing transition overlaps capture", true, true);
+    }
     Bytes frame{checkpoint_drain_kind}; append(frame, epoch, 8); append(frame, drain, 8);
     if (auto sent = broadcast_checkpoint(frame); !sent) return sent;
-    auto early = std::exchange(early_checkpoint_, {});
-    for (const auto& message : early) {
+    for (const auto& message : take_early_checkpoint(epoch)) {
         if (auto accepted = receive_checkpoint(message); !accepted) return accepted;
     }
     return core::Result<void>::success();
@@ -353,10 +384,27 @@ core::Result<void> LockstepSession::receive_checkpoint(const Received& received)
     if (!checkpoint_) {
         // Another peer can finish the trigger tick before this peer. Controls
         // cannot activate a barrier: only the sealed SaveRequest can do that.
-        // The bounded queue is consumed on begin and discarded on refusal.
-        if (epoch <= adapter_->completed_tick() || epoch > adapter_->completed_tick() + input_horizon()
-            || early_checkpoint_.size() >= 4 * seats_.size())
+        // The bounded queue is consumed on begin; controls of later barriers wait in it for their own begin.
+        if (epoch <= adapter_->completed_tick() || epoch > adapter_->completed_tick() + input_horizon())
             return refused<void>(session_errors::malformed, "save control outside the pending sealed horizon");
+        // Controls of barriers this peer has already passed can never begin; they must not count against the bound.
+        std::erase_if(early_checkpoint_, [&](const Received& queued) {
+            return checkpoint_control_epoch(queued) <= adapter_->completed_tick();
+        });
+        // An identical control from the same sender is a repeat, not a new barrier's: ignore it.
+        if (std::any_of(early_checkpoint_.begin(), early_checkpoint_.end(), [&](const Received& queued) {
+                return queued.from == received.from && queued.frame == received.frame; }))
+            return core::Result<void>::success();
+        // Nothing is ever evicted: a control that goes missing from this queue strands the peer in a barrier the host decided
+        // (it has no timeout of its own), so the queue is sized from the protocol and anything beyond that is refused loudly.
+        // A sender's queued controls name distinct epochs inside the sealed horizon (the prune above and the horizon check
+        // keep them there), and one barrier carries at most a drain, a cutoff, a proof and a release per sender, so an
+        // honest sender never holds more than input_horizon() x 4 here.
+        const std::size_t sender_bound = 4 * static_cast<std::size_t>(input_horizon());
+        const auto queued_from_sender = static_cast<std::size_t>(std::count_if(early_checkpoint_.begin(), early_checkpoint_.end(),
+            [&](const Received& queued) { return queued.from == received.from; }));
+        if (queued_from_sender >= sender_bound)
+            return refused<void>(session_errors::malformed, "save controls from one sender exceed the sealed horizon");
         early_checkpoint_.push_back(received);
         return core::Result<void>::success();
     }
@@ -390,18 +438,18 @@ core::Result<void> LockstepSession::receive_checkpoint(const Received& received)
             return refused<void>(session_errors::malformed, "invalid save release");
         if (!success) {
             if (received.from == checkpoint_callbacks_->host)
-                return abort_checkpoint("the host refused capture agreement", false);
+                return abort_checkpoint("the host refused capture agreement", false, true);
             if (self_ != checkpoint_callbacks_->host)
                 return refused<void>(session_errors::malformed, "save refusal request is not addressed to the host");
-            return abort_checkpoint("a peer could not capture or agree");
+            return abort_checkpoint("a peer could not capture or agree", true, true);
         }
         barrier.release = true;
     }
     return core::Result<void>::success();
 }
 core::Result<bool> LockstepSession::service_checkpoint() {
-    const auto refuse_save = [&](std::string message) -> core::Result<bool> {
-        auto aborted = abort_checkpoint(std::move(message));
+    const auto refuse_save = [&](std::string message, bool busy = false) -> core::Result<bool> {
+        auto aborted = abort_checkpoint(std::move(message), true, busy);
         if (!aborted) return core::Result<bool>::failure(aborted.error());
         return core::Result<bool>::success(checkpoint_.has_value());
     };
@@ -444,9 +492,9 @@ core::Result<bool> LockstepSession::service_checkpoint() {
         && last_now_.value_or(0) - barrier.since_ms >= options_.completeness_timeout_ms)
         return refuse_save("capture agreement timed out");
     if (agreement_ || held_ || resync_ || timing_ || (mesh_ && mesh_->running()))
-        return refuse_save("a roster or timing transition interrupted capture");
+        return refuse_save("a roster or timing transition interrupted capture", true);
     for (PeerIndex peer = 0; peer < seats_.size(); ++peer) {
-        if (barrier.voters[peer] != timing_voter(peer)) return refuse_save("the save voter roster changed");
+        if (barrier.voters[peer] != timing_voter(peer)) return refuse_save("the save voter roster changed", true);
         if (peer != self_ && barrier.voters[peer] && transport_->link(peer) == LinkState::closed)
             return refuse_save("a required peer stream closed");
     }

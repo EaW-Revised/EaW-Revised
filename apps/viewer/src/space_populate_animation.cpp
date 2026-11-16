@@ -1,3 +1,4 @@
+#include "eawr/presentation/diagnostic_switches.hpp"
 #include "space_populate.hpp"
 #include "eawr/presentation/particles/lane_guard.hpp"
 #include "eawr/core/load_profile.hpp"
@@ -70,8 +71,12 @@ void SpacePopulation::schedule_arrival_sample() noexcept {
 void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sample,
     const particles::StepExecutor* workers) {
     if (render_categories::fighter_experiment()) render_categories::begin_fighter_frame(static_cast<std::uint64_t>(godot::Engine::get_singleton()->get_process_frames()));
+    // PF ablation ladder: the skeletons switch keeps the sampling and the bookkeeping and skips the skin uploads.
+    const bool skin_uploads_off = diagnostic_switches::active.skeletons;
     last_unit_sample_ = sample;
     idle_frame_ms_ = idle_sample_ms_ = idle_upload_ms_ = 0.0;
+    idle_uploaded_ = idle_skipped_ = idle_visited_ = idle_disturbed_ = 0;
+    idle_causes_ = {};
     idle_skin_work_ = {};
     FrameTimer frame_timer(trace_frames_ ? &idle_frame_ms_ : nullptr);
     const std::uint32_t held_sample = options_.live_clock ? sample : std::min(sample, options_.animation_frames - 1U);
@@ -86,6 +91,22 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
     }
     if (idle_placements_.empty() || animation_sample_ == held_sample) return;
     animation_sample_ = held_sample;
+    // PF idle skin: consume the renderer's disturbance reports (placements one of whose skeletons something else
+    // wrote, replaced or freed since the last upload). Only the worker path skips unchanged placements; the serial
+    // path binds without a placement group and a diagnostic switch uploads nothing, so neither can vouch for one.
+    idle_disturbed_groups_.clear();
+    renderer.take_idle_skin_disturbance(idle_disturbed_groups_);
+    idle_disturbed_ = idle_disturbed_groups_.size();
+    {
+        const auto causes = renderer.idle_skin_disturbance_reasons();
+        for (std::size_t cause = 0; cause < causes.size(); ++cause) idle_causes_[cause] = causes[cause] - idle_causes_seen_[cause];
+        idle_causes_seen_ = causes;
+    }
+    idle_clean_.resize(idle_placements_.size(), 0);
+    idle_last_palette_.resize(idle_placements_.size());
+    if (!workers || skin_uploads_off) std::fill(idle_clean_.begin(), idle_clean_.end(), std::uint8_t{0});
+    for (const std::uint64_t group : idle_disturbed_groups_)
+        if (group != 0 && group <= idle_clean_.size()) idle_clean_[group - 1U] = 0;
     const std::uint64_t tick = static_cast<std::uint64_t>(held_sample) + options_.idle_offset;
     // One participant retains the baseline serial path and allocations.
     if (!workers) {
@@ -108,6 +129,7 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
         for (const auto& [idle, ship] : idle_live_ships_) {
             if (poses[idle]) contact_bones_[ship] = poses[idle]->bones;
         }
+        if (skin_uploads_off) return;
         FrameTimer upload_timer(trace_frames_ ? &idle_upload_ms_ : nullptr);
         renderer.begin_skin_batch(trace_frames_ && PerfTrace::fine_particle_timings());
         for (const AnimatedInstance& instance : animated_instances_) {
@@ -124,7 +146,7 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
     for (auto& row : prepared) row = PreparedIdle{};
     idle_consumed_.assign(prepared.size(), 0);
     auto& consumed = idle_consumed_;
-    for (const auto& instance : animated_instances_) consumed[instance.idle] = 1;
+    if (!skin_uploads_off) for (const auto& instance : animated_instances_) consumed[instance.idle] = 1;
     const bool profile = trace_frames_ && PerfTrace::fine_particle_timings();
     FrameTimer sample_timer(trace_frames_ ? &idle_sample_ms_ : nullptr);
     const auto prepare = [&](const std::size_t index) {
@@ -141,8 +163,11 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
         row.pose = std::move(pose.value());
         fighter_sample.finish();
         FrameTimer fighter_palette(fighter ? &row.fighter_palette_ms : nullptr);
-        if (consumed[index])
+        if (consumed[index]) {
             row.palette = GodotRenderer::prepare_skin_pose(row.pose->bones, profile ? &row.work : nullptr);
+            // Read-only here: the clean flags and last palettes only change on the main thread, outside dispatch.
+            row.unchanged = idle_clean_[index] != 0 && GodotRenderer::same_skin_pose(row.palette, idle_last_palette_[index]);
+        }
     };
     // Each placement owns its sampled bones and palette; no engine call crosses dispatch.
     if (workers) {
@@ -162,6 +187,7 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
     }
     FrameTimer upload_timer(trace_frames_ ? &idle_upload_ms_ : nullptr);
     for (const auto& row : prepared) if (row.failed) ++idle_sample_failures_;
+    if (skin_uploads_off) return;
     renderer.begin_skin_batch(profile);
     struct BatchGuard {
         GodotRenderer& renderer;
@@ -169,19 +195,43 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
         ~BatchGuard() { if (active) static_cast<void>(renderer.end_skin_batch()); }
         SkinPoseWork finish() { active = false; return renderer.end_skin_batch(); }
     } batch_guard{renderer};
+    // A clean placement whose palette is byte-equal to its last upload has nothing to write: every instance
+    // still holds it (the renderer reports otherwise), so its whole instance range is skipped.
+    idle_bind_failed_.assign(prepared.size(), 0);
+    const auto uploads = [&](const AnimatedInstance& instance) {
+        const auto& row = prepared[instance.idle];
+        return row.pose && !row.unchanged;
+    };
     for (const AnimatedInstance& instance : animated_instances_) {
-        if (prepared[instance.idle].pose)
+        if (uploads(instance))
             renderer.prepare_shared_idle_surface(static_cast<std::uint64_t>(instance.idle) + 1,
                 instance.entity, instance.asset);
     }
     for (const AnimatedInstance& instance : animated_instances_) {
-        if (!prepared[instance.idle].pose) continue;
+        if (!uploads(instance)) continue;
+        ++idle_visited_;
         const auto posed = renderer.set_prepared_skin_pose(instance.entity, instance.asset,
             prepared[instance.idle].palette, static_cast<std::uint64_t>(instance.idle) + 1);
-        if (!posed) upload_failures_.push_back("entity " + std::to_string(instance.entity) + " idle pose: "
-                                               + core::format_diagnostic(posed.error()));
+        if (!posed) {
+            idle_bind_failed_[instance.idle] = 1;
+            upload_failures_.push_back("entity " + std::to_string(instance.entity) + " idle pose: "
+                                       + core::format_diagnostic(posed.error()));
+        }
     }
     idle_skin_work_ = batch_guard.finish();
+    for (std::size_t index = 0; index < prepared.size(); ++index) {
+        const auto& row = prepared[index];
+        if (!consumed[index] || !row.pose) {
+            idle_clean_[index] = 0;
+            idle_last_palette_[index] = {};
+        } else if (row.unchanged) {
+            ++idle_skipped_;
+        } else {
+            ++idle_uploaded_;
+            idle_clean_[index] = idle_bind_failed_[index] ? 0 : 1;
+            idle_last_palette_[index] = idle_bind_failed_[index] ? GodotRenderer::PreparedSkinPose{} : row.palette;
+        }
+    }
     for (const auto& row : prepared) {
         if (render_categories::fighter_experiment() && row.fighter_sample_ms > 0) {
             ++render_categories::fighter_work.idle_samples;
@@ -207,6 +257,7 @@ bool SpacePopulation::live_ship_emitter_visit(const std::size_t ship) const noex
 
 bool SpacePopulation::pose_live_turrets(GodotRenderer& renderer, const std::span<const LivePose> poses,
     const std::span<const LiveClipPose> clips, const particles::StepExecutor* workers) {
+    if (diagnostic_switches::active.turrets) return true;  // PF ablation ladder: turret animation off
     const auto rotation = [](const sim::math::Fixed degrees, const bool pitch) {
         auto matrix = animation::Player::identity_matrix();
         const auto radians = static_cast<float>(degrees.raw()) / static_cast<float>(sim::math::Fixed::scale)
@@ -616,6 +667,9 @@ void SpacePopulation::prepare_live_clip(const std::size_t index) {
 
 bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<const LiveClipPose> poses,
     const particles::StepExecutor* workers) {
+    // PF ablation ladder: the skeletons switch keeps the sampling and the held/hidden bookkeeping (death clones still
+    // hide and retire) and skips the palette builds and skin uploads.
+    const bool skin_uploads_off = diagnostic_switches::active.skeletons;
     if (render_categories::fighter_experiment()) render_categories::begin_fighter_frame(static_cast<std::uint64_t>(godot::Engine::get_singleton()->get_process_frames()));
     // Keep high-water row capacity, including bone buffers for temporarily absent requests.
     if (prepared_clips_.size() < poses.size()) prepared_clips_.resize(poses.size());
@@ -652,7 +706,7 @@ bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<c
                 >= static_cast<std::uint64_t>(row.player->playable_frames()) * request.position.subdivisions;
         const auto held = held_clips_.find(request.ship);
         row.cached = row.terminal && held != held_clips_.end() && held->second.position == request.position;
-        row.consumed = workers && !row.cached && !piece_index_.clips(request.ship).empty();
+        row.consumed = workers && !skin_uploads_off && !row.cached && !piece_index_.clips(request.ship).empty();
         if (!row.terminal || row.cached) continue;
         for (const auto piece : piece_index_.pieces(request.ship)) {
             const auto& geometry = pieces_[piece];
@@ -711,7 +765,7 @@ bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<c
             for (animation::Matrix* matrix : {&bone.skin_asset, &bone.model_asset})
                 for (std::size_t entry = 0; entry < 12; ++entry) (*matrix)[entry] = 0.0F;
         }
-        for (const auto clip : piece_index_.clips(request.ship)) {
+        if (!skin_uploads_off) for (const auto clip : piece_index_.clips(request.ship)) {
             const auto& instance = live_clip_instances_[clip];
             const auto posed = workers
                 ? renderer.set_prepared_skin_pose(instance.entity, instance.asset, row.palette)

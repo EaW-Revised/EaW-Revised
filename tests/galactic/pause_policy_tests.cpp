@@ -10,6 +10,7 @@
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/presentation/ui/story_summary.hpp"
 #include "eawr/sim/galactic/replay.hpp"
 #include "../../src/sim/galactic/encoding.hpp"
 
@@ -209,6 +210,60 @@ void paused_admission_advances_no_time() {
     expect(!world.pending_native_invasion(), "a paused landing queues no invasion work");
 }
 
+// WST-96: the popup's own token uses ordinary commands, so existing replays and
+// hashes need no UI state and an earlier player pause survives closing it.
+void story_summary_pause() {
+    using Summary = eawr::presentation::ui::StorySummary;
+    for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        for (const bool multiplayer : {false, true}) for (const bool player_paused : {false, true}) {
+            auto world = take(gc::GalacticSession::create(fixture(admit_all)));
+            auto control = take(gc::GalacticSession::create(fixture(admit_all)));
+            Summary summary;
+            std::uint64_t sequence{};
+            const auto send = [&](const gc::CommandPayload& command) {
+                const gc::GameCommand input{{world.completed_tick(), gc::SeatId{1}, ++sequence}, command};
+                done(world.submit(input));
+                done(control.submit(input));
+            };
+            const auto step = [&] {
+                expect(take(world.step(executor)).state_hash.get() == take(control.step(executor)).state_hash.get(),
+                    "WST-96 summary commands hash like the same commands without a UI model");
+            };
+            const auto publish = [&] {
+                if (const auto change = summary.galactic_pause_change(multiplayer)) {
+                    if (*change) send(gc::PauseGalaxy{}); else send(gc::ResumeGalaxy{});
+                }
+            };
+            send(depart); step(); // A live hyperspace journey must stop with the clock.
+            if (player_paused) { send(gc::PauseGalaxy{}); step(); }
+            summary.request(Summary::Request::flash_button, "intro", 1);
+            expect(!summary.galactic_pause_change(multiplayer), "WST-96 quiet notification never pauses");
+            summary.request(Summary::Request::open, "intro", 1);
+            publish(); step();
+            const auto frame = world.clock().galactic_frame;
+            const auto depth = static_cast<unsigned>(player_paused) + static_cast<unsigned>(!multiplayer);
+            expect(world.clock().pause_depth == depth, "WST-96 only SP acquires the popup's nested pause");
+            const auto fleet = *fleet_by_id(*world.snapshot(), 10);
+            summary.request(Summary::Request::refresh, "changed", 2);
+            for (int i = 0; i < 40; ++i) { publish(); step(); }
+            expect(world.clock().pause_depth == depth, "WST-96 refresh and service never nest another pause");
+            expect(world.clock().galactic_frame == frame + (depth ? 0U : 40U),
+                "WST-96 an open SP summary holds time; the MP summary leaves time running");
+            if (depth) expect(*fleet_by_id(*world.snapshot(), 10) == fleet, "WST-96 paused summary holds fleet motion");
+            summary.close(); publish(); step();
+            expect(world.clock().pause_depth == static_cast<unsigned>(player_paused),
+                "WST-96 closing releases only the popup token");
+            const auto closed = world.clock().galactic_frame;
+            summary.close();
+            expect(!summary.galactic_pause_change(multiplayer), "WST-96 repeated close never releases another token");
+            step();
+            expect(world.clock().galactic_frame == closed + (player_paused ? 0U : 1U),
+                "WST-96 closing resumes time unless an earlier pause still owns it");
+        }
+    }
+}
+
 // System holds refuse whatever the policy says; so does a non-human issuer and invasion from orbit.
 void holds_and_issuers_always_refuse() {
     eawr::platform::ThreadWorkerAdapter executor(1);
@@ -394,6 +449,7 @@ int main() {
     try {
         matrix();
         paused_admission_advances_no_time();
+        story_summary_pause();
         holds_and_issuers_always_refuse();
         combined_launch_is_atomic();
         wire_form();

@@ -1239,7 +1239,8 @@ void installed() {
         config.script_directories = {"data/scripts/library/", "data/scripts/freestore/"};
         auto scripts = auth::ScriptScheduler::create(config, std::move(manifest)).value();
         std::vector<eawr::core::Diagnostic> errors;
-        foc::tactical_ai_detail::register_globals(scripts, host, errors);
+        // The galactic freestore registers its own Find_First_Object: the tactical one is left out, as the galactic runtime does.
+        foc::tactical_ai_detail::register_globals(scripts, host, errors, true, false);
         foc::tactical_ai_detail::register_methods(scripts, host, errors);
         expect(errors.empty(), "production FoC library bindings install");
         expect(static_cast<bool>(ga::register_freestore_bindings(scripts, input, true)), "real freestore pool bindings install");

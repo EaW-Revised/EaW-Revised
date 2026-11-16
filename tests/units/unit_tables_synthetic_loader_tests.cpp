@@ -1,6 +1,7 @@
 #include "unit_tables_support.hpp"
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
+#include "eawr/sim/tactical/damage.hpp"
 #include "eawr/units/content_selection.hpp"
 #include "unit_tables_synthetic_fixtures.hpp"
 
@@ -20,6 +21,58 @@
 
 namespace unit_tables_test_support {
 void synthetic_tables() {
+    // WCC-41: vary the authored scalar and behavior through the real XML loader.
+    for (const std::string_view authored : {"2", "3.5", "0", "-1", "300", "", "invalid"}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const auto start = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+        xml.insert(xml.find("</SpaceUnit>", start),
+            "<SpaceBehavior>TACTICAL_UNDER_CONSTRUCTION</SpaceBehavior><Tactical_Buildable_Constructed>Test_Base</Tactical_Buildable_Constructed>");
+        write_fixture(tree.root, xml);
+        const auto path = tree.root / "XML" / "GameConstants.xml";
+        std::ifstream input(path);
+        std::string constants{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        input.close();
+        if (!authored.empty()) constants.insert(constants.find("</GameConstants>"),
+            "<Under_Construction_Damage_Multiplier>" + std::string(authored) + "</Under_Construction_Damage_Multiplier>");
+        write(path, constants);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "WCC-41: construction override fixture loads");
+        if (!loaded.tables) continue;
+        eawr::core::LoadNoteBuffer notes;
+        const auto bound = eawr::units::durability_table(*loaded.tables, nullptr, &notes);
+        expect(bound && bound.value().damage, "WCC-41: construction damage rules bind");
+        if (!bound || !bound.value().damage) continue;
+        if (authored.empty() || authored == "invalid" || authored == "-1" || authored == "300") {
+            eawr::core::LoadNoteCollector collector;
+            collector.merge(notes);
+            const auto reported = collector.snapshot();
+            expect(std::any_of(reported.begin(), reported.end(), [](const auto& note) {
+                return note.tag == "Under_Construction_Damage_Multiplier"
+                    && note.classification == eawr::core::LoadCategory::unknown_degrade;
+            }), "WCC-41: fallback or arithmetic clamping reports a project degradation");
+        }
+        const auto& rules = *bound.value().damage;
+        const auto* source = bound.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+        expect(source != nullptr, "WCC-41: construction recipient retains its durability profile");
+        if (!source) continue;
+        auto profile = *source;
+        profile.max_shields = {};
+        profile.destroyed_with_hardpoints = false;
+        const auto multiplier = Fixed::from_decimal(authored.empty() || authored == "invalid" ? "1"
+            : authored == "-1" ? "0" : authored == "300" ? "256" : authored).value();
+        auto state = eawr::sim::tactical::full_durability(profile);
+        eawr::sim::tactical::Hit hit;
+        hit.amount = Fixed::from_raw(raw(10));
+        const auto applied = eawr::sim::tactical::apply_hit(profile, rules, state, hit, 1);
+        expect(applied && state.hull.raw() == profile.max_hull.raw() - eawr::sim::math::multiply(hit.amount, multiplier).value().raw(),
+            "WCC-41: XML multiplier changes actual damage to construction behavior");
+        profile.type_id = eawr::assets::object_type_crc("Test_Base");
+        state = eawr::sim::tactical::full_durability(profile);
+        const auto ordinary = eawr::sim::tactical::apply_hit(profile, rules, state, hit, 1);
+        expect(ordinary && state.hull.raw() == profile.max_hull.raw() - hit.amount.raw(),
+            "WCC-41: completed structure does not inherit construction scaling");
+    }
     // AB-70: XML-authored ion filters survive both ordinary and Create_Team_Type binding.
     for (const std::string_view style : {"User_Input", "Space_Automatic", "Ground_Automatic", "Special_Attack", ""}) {
         for (const std::string_view category : {"Frigate", "Fighter", ""}) {

@@ -112,7 +112,27 @@ core::Result<void> Tick::land_economy(std::vector<LiveUnit>& live, const std::ve
             *tracked_->production_census_visits += survivors.size();
         }
         UnitStage staged(std::move(survivors));
-        const auto route = [&](const PlayerCommand& command, const bool executing_pad) -> core::Result<void> {
+        const auto route = [&](const PlayerCommand& ordered, const bool executing_pad) -> core::Result<void> {
+            // WLAI-21..23: an AI reinforcement search is resolved here, against the ground and the account the landing is then
+            // admitted in (units that moved or died this frame, companies landed by earlier commands of the frame). The recorded
+            // command takes the chosen position; a search without one is no command, so the replay holds neither.
+            PlayerCommand resolved;
+            const PlayerCommand* active = &ordered;
+            if (std::holds_alternative<ReinforcePayload>(ordered.payload) && impl_->reinforcement_searches.contains(ordered.key)) {
+                resolved = ordered;
+                const auto offered = impl_->resolve_land_reinforcement_search(
+                    ordered.key, std::get<ReinforcePayload>(resolved.payload), staged, ledgers, shares);
+                if (!offered) return core::Result<void>::failure(offered.error());
+                const auto recorded = std::find_if(impl_->executed.rbegin(), impl_->executed.rend(),
+                    [&](const PlayerCommand& entry) { return entry.key == ordered.key; });
+                if (recorded != impl_->executed.rend()) {
+                    if (offered.value()) *recorded = resolved;
+                    else impl_->executed.erase(std::next(recorded).base());
+                }
+                if (!offered.value()) return core::Result<void>::success();
+                active = &resolved;
+            }
+            const PlayerCommand& command = *active;
             Impl::EconomyStage stage{ledgers, arrivals, shares, crafts, minds, arrived_squadrons,
                 staging.born_spawners, earners, next_id, impl_->pad_stage.values, impl_->construction_stage.values,
                 pad_requests, impl_->pad_stage, impl_->construction_stage, pending_economy_cues_, &placement_work};

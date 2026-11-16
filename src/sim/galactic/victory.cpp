@@ -421,8 +421,7 @@ core::Result<void> GalacticSession::restore_victory_state(const VictoryState& sa
         if (saved.context.planets[i].planet != impl.setup.planets[i].id)
             return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "saved victory planet mismatch"));
     impl.victory = saved; impl.dirty[16] = true;
-    const auto old = impl.snapshot->events();
-    impl.snapshot = impl.make_snapshot({old.begin(), old.end()});
+    impl.refresh_snapshot();
     return core::Result<void>::success();
 }
 
@@ -448,8 +447,7 @@ void GalacticSession::sync_victory_hero_returns(std::span<const HeroReturnRecord
         if (!row.scheduled_return || !row.object) rows.push_back(row);
     if (rows == impl.victory->context.leaders) return;
     impl.victory->context.leaders = std::move(rows); impl.dirty[16] = true;
-    const auto old = impl.snapshot->events();
-    impl.snapshot = impl.make_snapshot({old.begin(), old.end()});
+    impl.refresh_snapshot();
 }
 core::Result<void> GalacticSession::apply_hero_defeat_victory(const HeroDefeat& defeat,
     std::span<const HeroReturnRecord> records, const PartitionExecutor& executor) {
@@ -503,8 +501,20 @@ core::Result<bool> GalacticSession::apply_planet_destruction_victory(PlayerId ac
     PlayerId controller, std::span<const TypeId> landed) {
     return impl_->planet_destruction_victory(actor, controller, landed);
 }
+core::Result<bool> GalacticSession::apply_tactical_obliteration_victory(PlayerId actor, PlanetId planet) {
+    auto& impl = *impl_;
+    if (impl.failed) return core::Result<bool>::failure(detail::diagnostic(
+        diagnostic_codes::invalid_setup, "tactical obliteration victory has no live owner"));
+    if (!impl.control || !impl.victory) return yes(false);
+    const auto at = std::find_if(impl.control->planets.begin(), impl.control->planets.end(),
+        [&](const auto& row) { return row.planet == planet; });
+    if (at == impl.control->planets.end()) return yes(false);
+    const auto index = static_cast<std::size_t>(at - impl.control->planets.begin());
+    const auto landed = impl.landed_current_types(index);
+    return impl.planet_destruction_victory(actor, impl.control->state[index].current_player, landed, true);
+}
 core::Result<bool> GalacticSession::Impl::planet_destruction_victory(PlayerId actor,
-    PlayerId controller, std::span<const TypeId> landed) {
+    PlayerId controller, std::span<const TypeId> landed, const bool tactical) {
     auto& impl = *this;
     if (impl.failed) return core::Result<bool>::failure(detail::diagnostic(
         diagnostic_codes::invalid_setup, "planet destruction victory has no live owner"));
@@ -512,7 +522,15 @@ core::Result<bool> GalacticSession::Impl::planet_destruction_victory(PlayerId ac
     const auto* owner = player(impl.victory->context, controller);
     if (!owner || !owner->planet_leader_type || !active(*impl.victory, VictoryKind::superweapon_kill_leader, actor)
         || std::find(landed.begin(), landed.end(), owner->planet_leader_type) == landed.end()) return yes(false);
-    // WGS-79/WGCH-158: strategic admission ignores the tactical name filter.
+    // WGS-79/WGCH-158: strategic admission ignores the tactical name filter; the tactical obliteration route (WGT-102)
+    // also requires the condition's authored leader names, case-insensitively (an empty list adds no filter).
+    if (tactical) {
+        const auto condition = std::find_if(impl.victory->installed.begin(), impl.victory->installed.end(), [&](const auto& r) {
+            return r.kind == VictoryKind::superweapon_kill_leader && r.player == actor;
+        });
+        if (condition == impl.victory->installed.end() || !matches(condition->parameters.leaders, owner->planet_leader_unit))
+            return yes(false);
+    }
     // Registration itself is direct: waits still postpone the mature reader.
     if (!register_victory(*impl.victory, VictoryKind::superweapon_kill_leader, actor,
         galactic_frames_per_second, impl.clock.galactic_frame)) return yes(false);

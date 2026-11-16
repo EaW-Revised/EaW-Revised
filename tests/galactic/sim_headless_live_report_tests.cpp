@@ -80,6 +80,12 @@ void other_stops() {
     expect(failed_at_deadline.str().find("fixture.failure") != std::string::npos
         && failed_at_deadline.str().find("timed out") == std::string::npos,
         "a stored failure remains visible when the wait also reaches its deadline");
+    // #6902: a wait no headless run can answer is named in the report, not a bare timeout.
+    std::ostringstream awaited;
+    InstalledCampaignReport(awaited).live_failure({}, false, false, 10, 3, "awaiting_input kind=galaxy_paused conflict=0 planet=0");
+    expect(awaited.str().find("no headless run can give before tick 10 (at 3): awaiting_input kind=galaxy_paused") != std::string::npos
+        && awaited.str().find("timed out") == std::string::npos,
+        "an unanswerable wait is named in the report");
 }
 } // namespace
 

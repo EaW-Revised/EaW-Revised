@@ -48,6 +48,7 @@ from eawr_python_helpers import sha256_file  # noqa: E402
 sys.path.insert(0, str(ROOT / "tools"))
 import symbol_store  # noqa: E402
 sys.path.insert(0, str(ROOT / "tools" / "release"))
+import godot_linux_import  # noqa: E402
 import launcher_artifact  # noqa: E402
 import update_manifest  # noqa: E402
 from shader_runtime_package import package as shader_runtime_package  # noqa: E402
@@ -77,9 +78,6 @@ PINNED_GODOT_SHA256 = "96c03783011f197aff146e92c1e33e0000e8975b3a873fbfcc52cd86d
 DEBUG_GUIDE = ROOT / "docs" / "debug-build.md"
 PLAYER_GUIDE = ROOT / "docs" / "player-guide.md"
 IMPORT_TIMEOUT_SECONDS = 180
-# Through a runner (Wine on a Linux host) the first run in a cold prefix is slow: the version probe alone needs up to
-# export_package.GODOT_RUNNER_VERSION_TIMEOUT_SECONDS, and the import does real work after it.
-RUNNER_IMPORT_TIMEOUT_SECONDS = 600
 # What a pre-imported project must contain so starting it never writes beside the project.
 PREIMPORT_FILES = (".godot/extension_list.cfg", ".godot/global_script_class_cache.cfg", ".godot/uid_cache.bin")
 # Nothing the game owns may ride along in the player folder.
@@ -191,10 +189,6 @@ def add_docs(archive: zipfile.ZipFile, top: str, readme: str) -> None:
     archive.write(ROOT / "tools" / "release" / readme, f"{top}/README.md")
 
 
-def import_timeout() -> int:
-    return RUNNER_IMPORT_TIMEOUT_SECONDS if os.environ.get("EAWR_GODOT_RUNNER") else IMPORT_TIMEOUT_SECONDS
-
-
 def godot_import(godot: Path, project: Path) -> Optional[str]:
     """Let the pinned Godot write the project's .godot metadata once, headless, at packaging time.
 
@@ -202,8 +196,22 @@ def godot_import(godot: Path, project: Path) -> Optional[str]:
     the files. Returns the tail of the output for its error message.
     """
     result = subprocess.run(export_package.godot_command(godot, "--headless", "--path", str(project), "--import"), capture_output=True,
-                            text=True, timeout=import_timeout(), check=False)
+                            text=True, timeout=IMPORT_TIMEOUT_SECONDS, check=False)
     return f"exit {result.returncode}: {(result.stdout + result.stderr)[-400:]}"
+
+
+def pinned_runtime_identity(godot: Path) -> tuple[str, str]:
+    """The identity of the shipped Windows exe without running it (a Linux host cannot run it, and must not need Wine).
+
+    The caller has checked the exe's SHA-256 against the pin; the fork commit that pin was built from must also be embedded
+    in the bytes, so a pin that moved without the identity constant (or the reverse) is refused.
+    """
+    commit = export_package.PINNED_GODOT_FORK_COMMIT
+    pattern = re.compile(re.escape(commit.encode("ascii")) + b"[0-9a-f]{%d}" % (40 - len(commit)))
+    with godot.open("rb") as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
+        if not pattern.search(data):
+            raise ValueError(f"{godot.name} does not embed the pinned fork commit {commit}")
+    return export_package.PINNED_GODOT_IDENTITY, export_package.PINNED_GODOT_VERSION
 
 
 def preimport_project(godot: Path, project: Path, importer: Callable[[Path, Path], Optional[str]] = godot_import) -> None:
@@ -270,8 +278,11 @@ def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Option
                  launcher_pin: Path = launcher_artifact.DEFAULT_PIN, with_mods_manager: bool = False,
                  shader_runtime: Optional[Path] = None, revised_layer: Optional[Path] = None,
                  allow_missing_revised_layer: bool = False, public: bool = False,
-                 readme_note: str = "") -> Path:
+                 readme_note: str = "", import_godot: Optional[Path] = None) -> Path:
     """The portable Windows player folder as a zip: launcher slot, pinned Godot GUI runtime, pre-imported project.
+
+    With import_godot (the pinned official Linux editor, tools/release/godot_linux_import.py) a Linux host writes the project's
+    .godot metadata with that editor; the shipped Windows exe is then only copied and identified by its pin, never run.
 
     With debug_build_dir (the Debug configuration of the root build) the same folder is written as the debug
     variant: the viewer project's current extension must be the Debug one and carry its PDB, and the headless tools
@@ -285,7 +296,11 @@ def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Option
     observed = sha256_file(godot)
     if observed != PINNED_GODOT_SHA256:
         raise ValueError(f"{godot.name} sha256 {observed} is not the pinned patched build {PINNED_GODOT_SHA256}")
-    identity, _ = export_package.validate_godot_identity(godot)
+    if import_godot is not None:
+        identity, _ = pinned_runtime_identity(godot)
+        importer = godot_linux_import.importer(import_godot)
+    else:
+        identity, _ = export_package.validate_godot_identity(godot)
     extension = VIEWER_PROJECT / "bin" / spec["extension"]
     if not extension.is_file():
         raise FileNotFoundError(f"viewer extension not built: {extension}")
@@ -390,7 +405,7 @@ def package(build_dir: Path, platform: str, version: str, out: Path, godot: Opti
             launcher_pin: Path = launcher_artifact.DEFAULT_PIN, with_mods_manager: bool = False,
             expect_identity: Optional[str] = None, shader_runtime: Optional[Path] = None,
             revised_layer: Optional[Path] = None, allow_missing_revised_layer: bool = False,
-            public: bool = False, readme_note: str = "") -> list[Path]:
+            public: bool = False, readme_note: str = "", import_godot: Optional[Path] = None) -> list[Path]:
     if (VIEWER_PROJECT / "cross-build-rig-only.json").exists():
         raise ValueError("cross-built viewer artifacts are for rig runs only")
     spec = PLATFORMS[platform]
@@ -453,7 +468,7 @@ def package(build_dir: Path, platform: str, version: str, out: Path, godot: Opti
                                   manager_artifact=manager_artifact, launcher_pin=launcher_pin,
                                   with_mods_manager=with_mods_manager, shader_runtime=shader_runtime, revised_layer=revised_layer,
                                   allow_missing_revised_layer=allow_missing_revised_layer, public=public,
-                                  readme_note=readme_note))
+                                  readme_note=readme_note, import_godot=import_godot))
     return files
 
 
@@ -463,7 +478,7 @@ def package_debug(build_dir: Path, version: str, out: Path, godot: Path, launche
                   launcher_pin: Path = launcher_artifact.DEFAULT_PIN, with_mods_manager: bool = False,
                   expect_identity: Optional[str] = None, shader_runtime: Optional[Path] = None,
                   revised_layer: Optional[Path] = None, allow_missing_revised_layer: bool = False,
-                  public: bool = False, readme_note: str = "") -> Path:
+                  public: bool = False, readme_note: str = "", import_godot: Optional[Path] = None) -> Path:
     """The Windows x64 debug variant (eaw-revised-<version>-windows-x64-debug.zip).
 
     build_dir is the root build's Debug configuration; the viewer project's bin/ must hold the Debug extension
@@ -473,7 +488,7 @@ def package_debug(build_dir: Path, version: str, out: Path, godot: Path, launche
     verify_identity(expect_identity, identity_binaries(spec, build_dir, "Debug", launcher, mods_service))
     verify_kit_label(read_kit_label(), identity_binaries(spec, build_dir, "Debug", launcher, mods_service))
     out.mkdir(parents=True, exist_ok=True)
-    return build_player(archive_stem(version, "windows-x64"), spec, out, godot, launcher, importer, build_dir, mods_service, manager_artifact, launcher_pin, with_mods_manager, shader_runtime, revised_layer, allow_missing_revised_layer, public, readme_note)
+    return build_player(archive_stem(version, "windows-x64"), spec, out, godot, launcher, importer, build_dir, mods_service, manager_artifact, launcher_pin, with_mods_manager, shader_runtime, revised_layer, allow_missing_revised_layer, public, readme_note, import_godot)
 
 
 def write_sums(files: list[Path], out: Path) -> Path:
@@ -551,6 +566,9 @@ def main(argv: list[str]) -> int:
                              "defaults to $EAWR_SYMBOL_STORE, required for windows-x64")
     parser.add_argument("--godot", type=Path,
                         help="pinned standard Godot 4.7.2 Windows GUI executable: also write the player zip")
+    parser.add_argument("--linux-import-godot", type=Path,
+                        help="the pinned official Linux Godot editor (tools/release/godot_linux_import.py): on a Linux host it writes "
+                             "the project's .godot metadata, and the shipped Windows exe is never run (no Wine)")
     parser.add_argument("--launcher", type=Path, help="the launcher exe to place at the player folder's root as EAWR.exe")
     parser.add_argument("--expect-identity", metavar="SHA",
                         help="the full commit hash every shipped binary must embed as its build identity "
@@ -619,14 +637,14 @@ def main(argv: list[str]) -> int:
                                            launcher_pin=args.launcher_pin, with_mods_manager=args.with_mods_manager,
                                            expect_identity=args.expect_identity, shader_runtime=args.shader_runtime, revised_layer=args.revised_layer,
                                            allow_missing_revised_layer=args.allow_missing_revised_layer, public=args.public,
-                                           readme_note=note)]
+                                           readme_note=note, import_godot=args.linux_import_godot)]
                 else:
                     files = package(args.build_dir, args.platform, args.version, args.out, args.godot, args.launcher,
                                     mods_service=args.mods_service, manager_artifact=args.launcher_artifact,
                                     launcher_pin=args.launcher_pin, with_mods_manager=args.with_mods_manager,
                                     expect_identity=args.expect_identity, shader_runtime=args.shader_runtime, revised_layer=args.revised_layer,
                                     allow_missing_revised_layer=args.allow_missing_revised_layer, public=args.public,
-                                    readme_note=note)
+                                    readme_note=note, import_godot=args.linux_import_godot)
             if not args.debug:
                 if not args.sums_only:
                     player = next((f for f in files if f.name.endswith("-windows-x64-player.zip")), None)

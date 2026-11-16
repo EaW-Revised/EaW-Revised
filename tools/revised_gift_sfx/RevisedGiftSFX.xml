@@ -1,0 +1,33 @@
+<?xml version='1.0' encoding='utf-8'?>
+<SFXEvents>
+  <SFXEvent Name="Revised_Selection_Empire_gift">
+    <Is_2D>Yes</Is_2D>
+    <Is_HUD_VO>Yes</Is_HUD_VO>
+    <Localize>Yes</Localize>
+    <Play_Sequentially>Yes</Play_Sequentially>
+    <Samples>Data/Audio/SFX/Revised/empire/gift_01_f0_fx.wav
+Data/Audio/SFX/Revised/empire/gift_02_f0_fx.wav
+Data/Audio/SFX/Revised/empire/gift_03_f0_fx.wav
+Data/Audio/SFX/Revised/empire/gift_04_f0_fx.wav</Samples>
+  </SFXEvent>
+  <SFXEvent Name="Revised_Selection_Rebel_gift">
+    <Is_2D>Yes</Is_2D>
+    <Is_HUD_VO>Yes</Is_HUD_VO>
+    <Localize>Yes</Localize>
+    <Play_Sequentially>Yes</Play_Sequentially>
+    <Samples>Data/Audio/SFX/Revised/rebel/gift_01_plain.wav
+Data/Audio/SFX/Revised/rebel/gift_02_plain.wav
+Data/Audio/SFX/Revised/rebel/gift_03_plain.wav
+Data/Audio/SFX/Revised/rebel/gift_04_plain.wav</Samples>
+  </SFXEvent>
+  <SFXEvent Name="Revised_Selection_Underworld_gift">
+    <Is_2D>Yes</Is_2D>
+    <Is_HUD_VO>Yes</Is_HUD_VO>
+    <Localize>Yes</Localize>
+    <Play_Sequentially>Yes</Play_Sequentially>
+    <Samples>Data/Audio/SFX/Revised/underworld/gift_01_f0_fx.wav
+Data/Audio/SFX/Revised/underworld/gift_02_f0_fx.wav
+Data/Audio/SFX/Revised/underworld/gift_03_f0_fx.wav
+Data/Audio/SFX/Revised/underworld/gift_04_f0_fx.wav</Samples>
+  </SFXEvent>
+</SFXEvents>

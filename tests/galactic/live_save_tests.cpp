@@ -244,7 +244,8 @@ void discovery_roundtrip(std::size_t workers, const std::string& directory) {
                     ++local_rows;
                     const auto planet = std::find_if(initial.planets.begin(), initial.planets.end(),
                         [&](const auto& value) { return value.id == row.planet; });
-                    expect(planet != initial.planets.end() && row.known_owner == planet->owner,
+                    expect(planet != initial.planets.end()
+                        && row.known_owner == (planet->owner ? std::optional(planet->owner) : std::nullopt),
                         "player-load refresh publishes the fixture's actual owner even at undiscovered planets");
                 }
                 expect(local_rows == initial.planets.size(), "player-load ownership check covers every local observer row");
@@ -433,8 +434,19 @@ void prebattle_autosave(std::size_t workers, const std::string& directory) {
     const auto frontier = live->completed_tick();
     live->submit(platform::LiveGameOrder{{1}, galactic::BattleChoice{fixture.conflict.id, true}, {}});
     live->advance_to(frontier + 1); expect(live->wait_for(frontier + 1, 5s), "the autosave tick runs");
-    expect(live->frame().pending_conflict && !live->frame().battle, "the choice has not entered the child during the autosave tick");
-    const auto saved_hash = live->frame().latest->sha256();
+    // The choice waits one tick behind the save and then runs on its own (a paused session steps on due input), so a frame
+    // read here may already be the next tick's. The autosave tick's state is the published snapshot of tick frontier + 1,
+    // and the choice has not entered the child in it. Under load (#7116) the reader can be late; the tick decides, not the clock.
+    const auto frame_after_save = live->frame();
+    const auto at_save_tick = [&](const std::shared_ptr<const galactic::GalacticSnapshot>& snapshot) {
+        return snapshot && snapshot->completed_tick() == frontier + 1;
+    };
+    const auto save_tick_state = at_save_tick(frame_after_save.latest) ? frame_after_save.latest : frame_after_save.previous;
+    expect(at_save_tick(save_tick_state), "the autosave tick's snapshot is published");
+    if (!at_save_tick(save_tick_state)) return;
+    if (frame_after_save.session_tick == frontier + 1)
+        expect(frame_after_save.pending_conflict && !frame_after_save.battle, "the choice has not entered the child during the autosave tick");
+    const auto saved_hash = save_tick_state->sha256();
     std::uint64_t token{};
     for (const auto& row : live->save_outcomes()) if (row.name == "Auto Save") token = row.token;
     expect(token != 0 && autosaves(*live) == 1 && live->wait_save(token, 5s), "exactly one autosave is requested and reaches disk");

@@ -27,6 +27,11 @@ struct RelayServerOptions {
     std::string turn_uri;
     std::string turn_secret;
     TurnProvider turn_provider{TurnProvider::coturn};
+    // Cloudflare provider only: also issue HMAC credentials for the operator's own coturn (turn_fallback_uri, one `turn:`
+    // URI, and turn_fallback_secret, 32..256 bytes) in the same Paired / Attached / Renewed frames, after Cloudflare's servers;
+    // each client decides which it tries first (GnsTurnProvider). Off while turn_fallback_uri is empty.
+    std::string turn_fallback_uri;
+    std::string turn_fallback_secret;
     // Secrets, used only by the cloudflare provider; never logged or placed in an error.
     std::string cloudflare_key_id;
     std::string cloudflare_api_token;

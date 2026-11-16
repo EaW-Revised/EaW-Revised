@@ -1,6 +1,7 @@
 {
   "schema_version": 2,
   "evidence": {
+    "GCA-01": "Stock authors the corruption action as the Corruption_Ability block (Saboteur_Corruption, routed by Activated_Corrupt_Planet_Ability_Names); the old Corrupt_Planet_Ability block is commented out in the stock XML. The stock actor matrix (galactic_corruption_actor_matrix_stock) checks every routed name is authored by a profile; docs/behaviour/walks/gc-corruption-heroes.md WGCH-01"
   },
   "rows": [
     {"area": "data", "basis": "auto", "classes": ["CommandBarComponent"], "note": "Coverage backlog; authoring/recognition is not application evidence. Owning lane: MM.", "status": "todo", "tag": "@Description", "ticket": 6215},
@@ -604,7 +605,7 @@
     {"area": "data", "basis": "auto", "classes": ["Template"], "note": "Coverage backlog; authoring/recognition is not application evidence. Owning lane: SK.", "status": "todo", "tag": "Corruption_1_Tactical_Script_Name", "ticket": 6215},
     {"area": "data", "basis": "auto", "classes": ["Planet"], "note": "Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.", "status": "todo", "tag": "Corruption_2_Tactical_Script_Name", "ticket": 6215},
     {"area": "data", "basis": "auto", "classes": ["Planet"], "note": "Coverage backlog; authoring/recognition is not application evidence. Owning lane: GC.", "status": "todo", "tag": "Corruption_3_Tactical_Script_Name", "ticket": 6215},
-    {"area": "data", "basis": "auto", "classes": ["Abilities"], "note": "Coverage backlog; authoring/recognition is not application evidence. Owning lane: MM.", "status": "todo", "tag": "Corruption_Ability/@Name", "ticket": 6215},
+    {"applied": [{"code": "src/campaign/live_setup.cpp#install_live_ability_services", "rules": ["WGCH-01", "WGCH-03"], "types": ["corruption ability profile"]}], "area": "data", "basis": "reviewed", "classes": ["Abilities"], "evidence": "GCA-01", "note": "The live ability setup reads both authored forms of the corruption action (Corruption_Ability and the older Corrupt_Planet_Ability) and binds the one the game constants route by name.", "status": "applied", "tag": "Corruption_Ability/@Name", "ticket": 6909},
     {"area": "data", "basis": "auto", "classes": ["GameObjectType"], "note": "Coverage backlog; authoring/recognition is not application evidence. Owning lane: MM.", "status": "todo", "tag": "Create_Additional_Object", "ticket": 6215},
     {"area": "data", "basis": "auto", "classes": ["Underworld"], "note": "Coverage backlog; authoring/recognition is not application evidence. Owning lane: MM.", "status": "todo", "tag": "DCUnit/@Name", "ticket": 6215},
     {"area": "data", "basis": "auto", "classes": ["Vehicle_Lance_Walker"], "note": "Coverage backlog; authoring/recognition is not application evidence. Owning lane: MM.", "status": "todo", "tag": "DCUnit/@Name", "ticket": 6215},

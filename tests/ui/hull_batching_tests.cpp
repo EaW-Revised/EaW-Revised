@@ -119,5 +119,26 @@ int main() {
         static_cast<void>(registry.reconcile(10001));
         expect(registry.maturing_count() == 0, "forgotten entity is pruned");
     }
+    {
+        // Census state: why a piece is not in a group (read-only view of the same bookkeeping).
+        using State = Registry::State;
+        Registry registry;
+        expect(registry.state_of(1, 0) == State::absent, "an unobserved piece is absent");
+        registry.observe(1, std::nullopt, 0);
+        expect(registry.state_of(1, 0) == State::no_key, "an observed ineligible piece has no key");
+        registry.observe(1, key(9), 0);
+        expect(registry.state_of(1, 0) == State::maturing && registry.state_of(1, 1) == State::maturing,
+            "an eligible piece matures for join_after submits");
+        expect(registry.state_of(1, 2) == State::alone, "a matured piece with no partner is alone");
+        registry.observe(2, key(9), 0);
+        static_cast<void>(registry.reconcile(2));
+        expect(registry.state_of(1, 2) == State::grouped && registry.state_of(2, 2) == State::grouped,
+            "matured identical pieces are grouped");
+        registry.observe(2, std::nullopt, 3, true);  // pose exit: sticky block
+        expect(registry.state_of(2, 4) == State::no_key, "after leaving, an ineligible piece has no key");
+        registry.observe(2, key(9), 4);
+        expect(registry.state_of(2, 5) == State::blocked && registry.state_of(2, 3 + 90) == State::alone,
+            "a piece that left by pose stays blocked for the sticky window, then is alone or joins");
+    }
     return eawr::test::ui::failures() == 0 ? 0 : 1;
 }

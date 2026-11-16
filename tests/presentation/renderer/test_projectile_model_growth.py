@@ -81,6 +81,8 @@ struct SpacePopulation {
     std::vector<AnimatedInstance> animated_instances_;
     struct IdlePlacement { std::size_t clip{}; std::uint32_t start_frame{}; };
     std::vector<IdlePlacement> idle_placements_;
+    std::vector<std::uint8_t> idle_clean_;
+    std::vector<int> idle_last_palette_;
     struct Clip { int value{}; std::uint32_t playable_frames() const { return 90; } };
     std::vector<std::shared_ptr<const Clip>> clips_;
     std::size_t map_placements_{};
@@ -101,6 +103,8 @@ struct SpacePopulation {
     bool composed_{true};
     int scheduled{};
     void schedule_arrival_sample() { ++scheduled; }
+    bool pending_append_{};
+    void complete_live_append() {}
     void prepare_compose_slots(bool) {
         const auto size = options_.placed_ships.size();
         live_decisions_.resize(size); hull_surface_assets_.resize(size); live_models_.resize(size);
@@ -243,22 +247,37 @@ class ProjectileProxyGrowth(unittest.TestCase):
             'void GodotRenderer::Impl::release_instance_skeleton(',
             'void GodotRenderer::Impl::detach_shared_idle(',
             'core::Result<void> GodotRenderer::Impl::bind_skin_pose(',
+            'void GodotRenderer::Impl::track_idle_binding(',
+            'core::Result<void> GodotRenderer::Impl::bind_skin_pose_body(',
             '[[nodiscard]] bool GodotRenderer::Impl::apply_skin_pose(',
             'void GodotRenderer::Impl::bind_instance_skin(',
             'void GodotRenderer::Impl::clear_skin_pose(',
             'void GodotRenderer::Impl::set_instance_visible(',
             'GodotRenderer::Impl::InstanceMap::iterator GodotRenderer::Impl::remove_instance(')))
+        # Both batching states: sharing must work with hull batching on (the default) and off.
+        off, harness = harness.replace('__BATCHING__', 'false'), harness.replace('__BATCHING__', 'true')
+        self.run_fixture(off)
         self.run_fixture(harness)
         self.run_fixture("#define NDEBUG 1\n" + harness)
         mutants = {
             "last_owner_free": "if (auto* rendering = RenderingServer::get_singleton(); rendering && rid.is_valid()) rendering->free_rid(rid);",
             "detach_attach": "rendering.instance_attach_skeleton(instance.rid, replacement);",
             "join_attach": "shared_rendering->instance_attach_skeleton(existing->second.rid, shared->second->rid);",
+            "compose_mark": "if (pose_moved) batch_mark(entity_id);",
+            "used_bone_filter": "pose_moved = filter_skin_palette_changes(skin_changes_, resource.skin_used_bones)",
+            "forget_on_removal": "batch_forget(rendering, instance->first, instance->second);",
         }
+        replacements = {"used_bone_filter": "pose_moved = true"}
         for name, statement in mutants.items():
             with self.subTest(mutant=name):
                 self.assertEqual(harness.count(statement), 1)
-                self.run_fixture(harness.replace(statement, "/* mutant */", 1), expected_success=False)
+                self.run_fixture(harness.replace(statement, replacements.get(name, "/* mutant */"), 1), expected_success=False)
+        # The old gate (sharing off whenever hull batching is on) must fail the batching-on fixture.
+        gate = "const bool shared_request = skin_batch_active_"
+        with self.subTest(mutant="batching_disables_sharing"):
+            self.assertEqual(harness.count(gate), 1)
+            self.run_fixture(harness.replace(gate, "const bool shared_request = !hull_batching::enabled && skin_batch_active_", 1),
+                             expected_success=False)
 
     def test_33_population_proxies_share_recipe_and_failure_keeps_old_visuals(self):
         source = (ROOT / 'apps/viewer/src/space_populate_arrivals.cpp').read_text()

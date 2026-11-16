@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <string>
+#include <string_view>
 #include <sstream>
 #include <utility>
 #include <limits>
@@ -23,7 +24,16 @@ namespace eawr::skirmish {
 namespace {
 
 namespace tactical = sim::tactical;
+
 using sim::math::Fixed;
+
+// Shown on an upgrade the project cannot apply yet (its authored effect is outside the supported set).
+inline constexpr std::string_view unsupported_upgrade_reason =
+    "Not available yet: this upgrade's effect is not supported in this version.";
+// LE-BONUS, LE-LEVELUP: a land battle applies no upgrade effect yet, so a land menu lists an upgrade as disabled rather than
+// charging for it.
+inline constexpr std::string_view land_upgrade_reason =
+    "Not available yet: upgrades are not applied in land battles in this version.";
 
 // PU-08: canonical names allow allocation-free heterogeneous WHD-05 lookup in workers.
 [[nodiscard]] std::string income_name(std::string name) {
@@ -383,8 +393,41 @@ core::Result<tactical::EconomyRules> economy_rules(
                     option.disabled_reason = roster_disabled_reason(production.next_level);
                 }
                 if (built == nullptr) {
+                    // LR4-05/06 (#6993): on land a producer's menu names companies, which are decoded as land companies, not as type rows.
+                    // Cost, time, queue, limits and prerequisites are the company object's own; a finished company joins the pool.
+                    const auto company = tables.domain != sim::tactical::BattleDomain::land ? tables.land_companies.end()
+                        : std::find_if(tables.land_companies.begin(), tables.land_companies.end(),
+                            [&](const units::LandCompany& row) { return detail::iequals(row.id, name); });
+                    if (company != tables.land_companies.end()) {
+                        const auto& costs = company->production;
+                        option.queue = detail::iequals(costs.production_queue, "Tactical_Upgrades") ? tactical::BuildQueue::upgrades
+                                                                                                      : tactical::BuildQueue::units;
+                        option.requirements = {costs.lifetime_player, costs.current_player, costs.lifetime_allies, costs.current_allies, {}};
+                        for (const auto& prerequisite : costs.prerequisites) option.requirements.prerequisites.push_back(type_id(prerequisite));
+                        option.price = costs.build_cost_multiplayer.value_or(Fixed{});
+                        if (costs.build_time_seconds) {
+                            const auto seconds = sim::math::multiply(*costs.build_time_seconds, build_multiplier);
+                            const bool invalid_time = !seconds || seconds.value().raw() <= 0
+                                || seconds.value().raw() > 86400 * Fixed::scale;
+                            if (invalid_time) {
+                                note_value(notes, "EAWR-LOAD-0355", company->id, "Tactical_Build_Time",
+                                    decimal(*costs.build_time_seconds), "unavailable offer",
+                                    "purchase build duration is out of range", core::LoadAction::skipped_object);
+                                option.disabled_reason = "Invalid purchase build time";
+                            } else option.build_frames = frames_of(seconds.value());
+                            option.ai_build_frames = option.build_frames;
+                        }
+                        option.population = company->population_value.value_or(0);
+                        option.available = option.disabled_reason.empty() && option.price.raw() > 0 && option.build_frames > 0
+                            && !company->members.empty();
+                        if (!option.available && option.disabled_reason.empty())
+                            option.disabled_reason = "Not available yet: this company has no purchase price or build time in the game data.";
+                        menu.options.push_back(option);
+                        continue;
+                    }
                     // Not a table type: an upgrade object, listed but not built in M2 (#540).
                     option.kind = tactical::BuildKind::upgrade;
+                    if (option.disabled_reason.empty()) option.disabled_reason = std::string(unsupported_upgrade_reason);
                     menu.options.push_back(option);
                     continue;
                 }
@@ -439,11 +482,27 @@ core::Result<tactical::EconomyRules> economy_rules(
                 // WPR-22/33: effect-free prerequisite tokens still complete as owned
                 // objects. Authored effects outside our implemented subsystems remain
                 // a project availability limit, rather than becoming paid no-ops.
-                const bool effect_free = built->inactive_abilities.empty() && built->abilities.empty()
+                // WPR-15/16 (#6863): an upgrade-owned income stream pays from the held upgrade object, so a
+                // valid automatic stream is not an unsupported effect (the loader below skips an invalid one, and
+                // an activated stream waits for its activation rule). Every authored ability node is also listed
+                // in inactive_abilities; the stream's own nodes are the only ones allowed there. The loader keeps one
+                // stream per source type, so an upgrade authoring several streams stays gated (a second stream would
+                // be a paid no-op).
+                const bool income_streams = costs.income.size() <= 1 && std::all_of(costs.income.begin(), costs.income.end(), [&](const auto& stream) {
+                    return stream.base_value && stream.interval_seconds && stream.interval_seconds->raw() > 0
+                        && tactical::automatic_ability_style(stream.activation_style, start.setup.domain, !campaign);
+                });
+                const bool only_stream_nodes = std::all_of(built->inactive_abilities.begin(), built->inactive_abilities.end(),
+                    [&](const std::string& node) {
+                        return income_streams && !costs.income.empty()
+                            && node.rfind("Income_Stream_Ability", 0) == 0;
+                    });
+                const bool effect_free = only_stream_nodes && built->abilities.empty()
                     && built->special_abilities.empty() && built->team_abilities.empty() && built->team_special_abilities.empty()
                     && built->special_unlocks.empty() && !built->consume_after_special_fire
-                    && costs.income.empty() && costs.income_bonuses.empty() && costs.bounties.empty()
-                    && !costs.level_up && !costs.increments_tech && costs.removes_previous.empty() && costs.next_level.empty()
+                    && costs.income_bonuses.empty() && costs.bounties.empty()
+                    && !costs.level_up && !costs.increments_tech && costs.next_level.empty()
+                    && (costs.removes_previous.empty() || !costs.income.empty()) // a next income level replaces the lower one
                     && costs.combat_bonuses.empty() && costs.stealth_duration_bonuses.empty()
                     && costs.battlefield_bonuses.empty() && costs.ability_enables.empty();
                 if (costs.upgrade_object && !effect_free && !costs.level_up && costs.combat_bonuses.empty() && costs.ability_enables.empty()
@@ -459,6 +518,12 @@ core::Result<tactical::EconomyRules> economy_rules(
                         });
                     })) {
                     option.available = false;
+                    // The icon must not look buyable (legacy #6809): the card shows its disabled state and why.
+                    if (option.disabled_reason.empty()) option.disabled_reason = std::string(unsupported_upgrade_reason);
+                }
+                if (option.kind == tactical::BuildKind::upgrade && tables.domain == sim::tactical::BattleDomain::land) {
+                    option.available = false;
+                    if (option.disabled_reason.empty()) option.disabled_reason = std::string(land_upgrade_reason);
                 }
                 menu.options.push_back(option);
             }
@@ -593,6 +658,9 @@ core::Result<tactical::EconomyRules> economy_rules(
             income.name = income_name(stream.name);
             income.initially_enabled = stream.initially_enabled;
             income.automatic = tactical::automatic_ability_style(stream.activation_style, start.setup.domain, !campaign);
+            // WIS-01: an event-styled stream pays once triggered, so its profile is otherwise an automatic one.
+            income.event_style = tactical::income_event_style(stream.activation_style);
+            if (income.event_style != tactical::IncomeEventStyle::none) income.automatic = true;
             income.split_favors_owner = stream.split_favors_owner;
             income.owner_income_percentage = stream.owner_income_percentage;
             for (const auto& bonus : production.income_bonuses) {
@@ -679,7 +747,10 @@ core::Result<tactical::EconomyRules> economy_rules(
                 Fixed::from_raw(*width / 2), Fixed::from_raw(*height / 2)};
         }
     }
-    rules.max_queue = 5; // PU-14: FoC's built-in Max_Build_Queue; its data does not set it
+    // PU-14: signed admission comparison; nonpositive authored limits deny every human buy.
+    // The effective count stays unsigned for the queue/UI consumers. Stock omits this tag.
+    const auto queue_limit = read("Max_Build_Queue");
+    rules.max_queue = queue_limit ? static_cast<std::uint32_t>(std::max<std::int64_t>(0, queue_limit->trunc_to_integer())) : 5;
     rules.vulnerability = vulnerability;
     rules.vulnerability_frames = frames_of(duration(vulnerable_seconds, notes, "EAWR-LOAD-0351",
         "GameConstants", "Space_Elevated_Vulnerability_Duration", true));

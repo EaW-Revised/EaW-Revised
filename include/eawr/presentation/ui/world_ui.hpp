@@ -179,6 +179,23 @@ inline constexpr float garrison_flag_offset_x = 15.0F;
 inline constexpr float garrison_flag_offset_y = 15.0F;
 inline constexpr float garrison_flag_width = 12.0F;
 inline constexpr float garrison_flag_height = 14.0F;
+
+// WU-39a: a marked ally unit's bracket carries the same flag, drawn flush to the right end of the
+// health-bar row: its centre is half the bar width plus half the flag's width right of the bracket
+// point, on the bracket point's row. The flag is scaled by the type's GUI bounds scale.
+struct BracketFlagRect final { float centre_x{}, centre_y{}, width{}, height{}; };
+[[nodiscard]] constexpr BracketFlagRect bracket_garrison_flag_rect(const float bracket_x, const float bracket_y,
+                                                                   const float bar_width_pixels,
+                                                                   const float gui_bounds_scale,
+                                                                   const float ui_scale) noexcept {
+    const float width = garrison_flag_width * gui_bounds_scale * ui_scale;
+    const float height = garrison_flag_height * gui_bounds_scale * ui_scale;
+    return {bracket_x + bar_width_pixels * 0.5F + width * 0.5F, bracket_y, width, height};
+}
+// WU-39a: the bracket shows the flag for a marked unit of the local player's side, never for an enemy.
+[[nodiscard]] constexpr bool bracket_garrison_flag_shown(const bool marked, const bool ally) noexcept {
+    return marked && ally;
+}
 // WSU-35/36: sliding world anchors add this share of screen height (+Y down).
 // Settled dogfight slots have no offset; their desired world anchors remove it.
 inline constexpr float squadron_icon_screen_offset_fraction = 0.048F;

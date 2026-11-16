@@ -1,5 +1,7 @@
 #include "dialog_catalog_support.hpp"
 
+#include "eawr/assets/asset_name_resolver.hpp"
+
 namespace dialog_catalog_test_support {
 
 void audit_contracts() {
@@ -59,6 +61,7 @@ void vfs_contracts() {
     eawr::test::ui::write_text(data / "Resources" / "GUIDialog" / "Resource.h", header_fixture);
     eawr::test::ui::write_text(data / "XML" / "GUIDialogs.xml", skin_fixture);
     eawr::test::ui::write_text(data / "Art" / "Textures" / "i_standalone.dds", "dds");
+    eawr::test::ui::write_text(data / "Art" / "Textures" / "i_probe_wrong.dds", "dds");
     const std::array mounts{eawr::vfs::MountSpec{"expansion", data, "data", {}}};
     auto filesystem = eawr::vfs::Vfs::mount(mounts);
     expect(static_cast<bool>(filesystem), "dialog fixture VFS mounts");
@@ -73,6 +76,16 @@ void vfs_contracts() {
     const auto probe = ui::vfs_texture_probe(filesystem.value());
     expect(probe("i_standalone.tga") && probe("I_STANDALONE") && !probe("i_missing.tga"),
            "standalone probe tries .tga then .dds");
+    // Wrong-extension fixture (#6771): a .jpg name finds the shipped .dds; one missed name is one report line.
+    eawr::assets::reset_name_misses();
+    expect(probe("i_probe_wrong.jpg") && probe("I_PROBE_WRONG.JPG"), "standalone probe finds a .jpg-named .dds");
+    expect(eawr::assets::name_miss_lines().empty(), "a resolved name is not reported");
+    expect(!probe("i_probe_gone.jpg") && !probe("i_probe_gone.jpg"), "a name no file holds is not found");
+    const auto probe_lines = eawr::assets::name_miss_lines();
+    expect(probe_lines.size() == 1U
+               && probe_lines.front().starts_with("EAWR-ASSET-NAME-0001 texture 'i_probe_gone.jpg' not found"),
+           "one missed name is one EAWR-ASSET-NAME-0001 line");
+    eawr::assets::reset_name_misses();
 
     const std::array empty_mounts{eawr::vfs::MountSpec{"expansion", tree.root / "Nothing", "data", {}}};
     std::filesystem::create_directories(tree.root / "Nothing");

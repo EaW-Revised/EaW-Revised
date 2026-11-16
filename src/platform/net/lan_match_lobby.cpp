@@ -223,6 +223,10 @@ std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
         const bool all_ready = std::all_of(state.snapshot.seats.begin(), state.snapshot.seats.end(), [](const auto& seat) { return seat.ready; });
         state.connections_pending = hosting && online_options_.has_value() && !mesh_complete;
         state.start_reason = state.ready_reason;
+        // #6468: the host's mod digests are still being computed and its refresh has not gone out yet; Start waits for it.
+        const bool refresh_owed = hosting && host_mod_refresh_owed_;
+        if (state.start_reason.empty() && refresh_owed)
+            state.start_reason = "Checking mod files. Start waits until the other players have the host's final mod list.";
         // GC: Start needs the galactic lockstep driver (GCMP-03) to install its adapter; until then Start stays off with a reason.
         const bool match_startable = net::lobby_game_mode(state.snapshot.game) != net::LobbyGameMode::galactic || (galactic_ && galactic_->can_start());
         if (state.start_reason.empty() && !match_startable)
@@ -238,7 +242,7 @@ std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
             && state.snapshot.phase == net::LobbyPhase::staging && (state.local_ready || valid);
         // An online room starts only complete: every seat present and every pair verified (docs/net-online-npeer.md, section 3).
         state.start_enabled = hosting && state.snapshot.seats.size() >= 2 && state.snapshot.phase == net::LobbyPhase::staging
-            && !start_pending && valid && match_startable
+            && !start_pending && valid && match_startable && !refresh_owed
             && mesh_complete && all_ready;
         return state;
     }
@@ -254,6 +258,17 @@ void TcpLanMatch::accept_mod_review() {
     view_.mod_review_pending = false;
     view_.host_mod_description.clear();
 }
+
+bool TcpLanMatch::refresh_host_mod_description(std::vector<std::uint8_t> description) {
+    if (!view().host || !galactic_ || !galactic_host_game_ || !net::valid_lobby_mod_description(description)) return false;
+    // Before the room opens, the new bytes simply open it; afterwards they go to the guests as a refresh (staging only).
+    if (!lobby_) { galactic_->set_mounted_mods(std::move(description)); host_mod_refresh_owed_ = false; return true; }
+    const bool sent = static_cast<bool>(lobby_->refresh_mounted_mods(std::move(description)));
+    if (sent) host_mod_refresh_owed_ = false;
+    return sent;
+}
+
+void TcpLanMatch::expect_host_mod_refresh(const bool expected) { host_mod_refresh_owed_ = expected; }
 
 bool TcpLanMatch::lobby_mutable() const { return !handed_over_ && view().phase != LanPhase::ended && lobby_ && io_->transport.tcp; }
 
@@ -516,6 +531,7 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
                 context.providers.credentials_delivered = [this] { return credential_state_->delivered(); };
             }
             context.options.session.pending_input_epoch = [this] { return pending_input_epoch(); };
+            configure_input_timing(context.options.session, online_options_.has_value(), net::lobby_game_mode(staged.game));
             if (net::lobby_game_mode(staged.game) == net::LobbyGameMode::galactic) {
                 context.options.untimed_preview_wait = true;
                 context.providers.configure_session = [this, revision = staged.frozen_revision](net::SessionOptions&, const net::SetupOffer& offer) {
@@ -612,10 +628,7 @@ std::string TcpLanMatch::galactic_prepare_status() const {
     if (progress.state == GalacticLobbyBackend::PrepareProgress::State::waiting_for_earlier)
         return "Waiting for an earlier campaign preparation to finish before this one can start (" + so_far
             + "). The window stays usable; it cannot be speeded up.";
-    if (host_waits)
-        return "Preparing the campaign for all players (" + so_far + "). A large mod chain can take up to 20 minutes. "
-            "The room is locked; Cancel stops waiting.";
-    return "Preparing your copy of the campaign (" + so_far + "). A large mod chain can take up to 20 minutes.";
+    return net::galactic_prepare_wait_text(host_waits, so_far);
 }
 
 // #6130: one line per seat when the staging checkpoint has fully arrived (host: every guest restored; guest: its own
@@ -944,6 +957,10 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
             }
         }
         auto pumped = lobby_->pump(lobby_clock_); flush_lobby_closes(); if (!pumped) { set_failure(pumped.error()); return; }
+        if (!view().host && lobby_->mounted_mods_refreshes() != view().host_mod_refreshes) {
+            const std::lock_guard lock(mutex_);
+            view_.host_mod_refresh = lobby_->snapshot().mounted_mods; view_.host_mod_refreshes = lobby_->mounted_mods_refreshes();
+        }
         settle_galactic_start();
         if (online_options_ && mesh_material_revision_ && lobby_->snapshot().phase == net::LobbyPhase::staging
             && *mesh_material_revision_ != lobby_->snapshot().revision) clear_mesh_repair_material();

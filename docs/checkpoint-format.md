@@ -157,7 +157,7 @@ skipped. IDs from 0x8000 are never part of a state hash.
 | 11 | child-state | a battle's full state | v8, below |
 | 12 | mod-list | ordered mounted mod descriptions | v1 |
 | 13 | tactical-return | persistent hero returns, upgrades and structure markers; latest tactical result and its conflict context | v1 |
-| 14 | galactic-ai | completed boundary and versioned native AI components, including retained funding and the async lane's pending slices plus, when it is not empty, the queue of world events the AI has not received yet (`galactic-async`; optional trailing block tagged `eawr-gcai-lane-inbox` v2, whose actor notifications carry the world scripts' AI-usage writes, absent when empty), followed on the async schedule by the billing view (`eawr-gcai-billing-view` v4: the visible and pending window publications, each with the AI funding ledgers, the purchase billing rows, the AI-owned native sync digests, the AI scheduler sync hash, the plan scripts' story-plot edits, the window's load diagnostics, its runtime load notes and the AI's GlobalValue writes, plus the credit and bill log since the visible one; absent while no publication exists) and the story-owned GlobalValue store (`eawr-gcai-story-globals` v1; async schedule only) | v2 (native state v2, lifecycle v3, outbox v2, lane inbox v2, billing view v4, story globals v1; an older lane inbox or billing view block no longer loads, no back-compat before 1.0) |
+| 14 | galactic-ai | completed boundary and versioned native AI components, including retained funding and the async lane's pending slices plus, when it is not empty, the queue of world events the AI has not received yet (`galactic-async`; optional trailing block tagged `eawr-gcai-lane-inbox` v4: v2 (legacy EAWR-6378) actor notifications carry the world scripts' AI-usage writes; v3 (legacy EAWR-6917) the story's AI control switches are queued until the next window start; v4 (async step 2b) refusal entries carry the consequence of a hop or purchase the world refused while a slice applied (kind 8: consequence kind, player, fleet or purchase identity, the movement requests the hop leaves open). The block is absent only when the queue is empty and no applied control switch is recorded), followed on the async schedule by the billing view (`eawr-gcai-billing-view` v4: the visible and pending window publications, each with the AI funding ledgers, the purchase billing rows, the AI-owned native sync digests, the AI scheduler sync hash, the plan scripts' story-plot edits, the window's load diagnostics, its runtime load notes and the AI's GlobalValue writes, plus the credit and bill log since the visible one; absent while no publication exists) and the story-owned GlobalValue store (`eawr-gcai-story-globals` v1; async schedule only), followed by the actors the async stage lost that the world has not yet applied or has refused (`eawr-gcai-stage-losses` v1: per actor the window's snapshot tick and the virtual tick of the slice that holds the loss; optional trailing block, zero bytes when the set is empty, so a save without a pending stage loss is unchanged) (legacy EAWR-6337) | v2 (native state v2, lifecycle v3, outbox v2, lane inbox v4, billing view v4, story globals v1, stage losses v1; an older lane inbox or billing view block no longer loads, no back-compat before 1.0) |
 | 15 | galactic-abilities | live ability preparations and lifecycle | galaxy sections |
 | 16 | campaign-scoring | ordered build, death and ownership counters | galaxy sections |
 | 17 | galactic-owner | full world/session barrier, consumed and future command/native cursors, admission queues, child owners and the story plot state, including pending actor changes and their AI-usage writes; each planet's production offer table is a pool index | galaxy v56 |
@@ -240,7 +240,7 @@ tick of the battle; `RestoreWork` counts the ticks re-simulated and the bytes re
 child-state section replaces this once a battle's full state can be restored; a reader then
 accepts both.
 
-### Land state (ID 18, version 16)
+### Land state (ID 18, version 21)
 
 Version 14 saves the locomotion profile start-clock flag and start-clip tick count.
 Version 15 retains each walking formation's centre path, surviving member slots, per-member path-node to centre-segment correspondence (`centre_segments`) and monotonic centre-segment progress. Deviances and speed caps are
@@ -255,6 +255,23 @@ the squad and its members (the full live-unit field list, so health and weapon s
 the host as carried objects in the child state. A restore refuses a record whose host is not a live garrison host of that
 type, whose entrant breaks the category or slot-cost rules, whose hidden identities are live or disagree with the content
 bindings, whose host is over capacity, or whose host's carried objects disagree with the records.
+
+Version 17 (land free garrison) ends each landing record with one flag byte: the company was landed from a pending free-garrison entry, so its
+members join the player's free garrison when it finalizes. The free garrison itself (registered objects, refill timer and pending list) is part of the
+common tactical state, not of this section.
+
+Version 18 (Force disabling) appends the Force disabling stamps after the garrison records: an ascending map from a unit id to the tick a carrier's scan last reached it.
+
+Version 19 (land ability motion, WLAB-16/17) appends the ability motion records after the stamps: an ascending map from a unit id to its locomotor in use (0 primary, 1 secondary), its deploy phase (0 stowed, 1 deployed), a pending-jump flag and the jump point (zero without a pending jump). A record is never the default one; a restore refuses a record for the invalid id, a default record, a locomotor or phase out of range, or a point with no jump pending.
+
+Version 20 (land projectile index, WLAB-19/71) ends each ability motion record with one byte: the unit's current projectile index (0 the first projectile type, 1 the second; SWAP_WEAPONS and the permanent weapon swap move it). A record is the default one only when that byte is 0 too. A restore also refuses an index above 1, and an index of 1 when the content has no type with more than one projectile type. A version 19 land section is refused (no upgrade path before 1.0).
+
+Version 21 (land jump flight, WLAB-16) replaces the pending-jump flag of each ability motion record by the jump phase byte (0 none, 1 waiting for the lift-off, 2 flying, 3 coming down) and ends the record with the frames waited (u32), the planar speed (fixed) and the flying body's position (three fixed). The point is kept only in phase 1, the frames only in phase 1, the speed and the position only in phases 2 and 3; a restore refuses a phase above 3 or a value kept outside its phase. A version 20 land section is refused (no upgrade path before 1.0).
+
+Version 18 (land Force disabling, WLAB-08) appends the Force disabling stamps after the garrison records: an ascending map from a unit id to the tick of the
+last carrier scan that reached it (u64 count, then id and tick per entry). A restore refuses a stamp for the invalid id, a stamp later than the saved tick,
+and any stamp when the content has no Force-disabling carrier. A unit killed after the scan keeps its stamp until the next scan drops it, so the roster is not compared.
+A version 18 land section is refused (no upgrade path before 1.0). A map in the section (the stamps, the ability motion records) must be strictly ascending by unit id: the state reader refuses an out-of-order or duplicate key.
 
 Land tactical checkpoints add an optional `land-state` section; space checkpoints
 omit it entirely. A land reader requires it alongside child-state and never
@@ -443,6 +460,9 @@ keys and lengths are validated by the description codec. The header mod-list dig
 zero; descriptions supply notes and do not relax content or state compatibility checks. Scripts use the
 optional host payload described below. The conflict record retains force role, galactic and tactical
 type IDs, carrier identity, structure markers and returned upgrades before its tactical setup.
+Galaxy section version **58** adds two flag bytes after the corruption request: the conflict planet's superweapon
+gate facts (the planet type allows destruction, the planet is already destroyed), read at entry. They are not part of the
+conflict digest, so no state hash or replay changes; older galaxy sections are refused.
 
 With GC conflict admission enabled, the conflicts section has an optional tail:
 u32 admission count, then per admission entry tick u64, u64-length-prefixed conflict
@@ -517,7 +537,7 @@ so those entries stay until then.
 
 ### Story plot state (galaxy v35)
 
-The campaign owner blob requires format 6. After the auto-resolve resolver bytes it ends with an optional story state
+The campaign owner blob requires format 7 (each objective stores its suggestion as a Boolean and the owner's objective list is followed by the objective numbering counter, i64; older owner blobs are refused) (legacy EAWR-236). After the auto-resolve resolver bytes it ends with an optional story state
 (presence byte, then): the started flag, the story clock (Q24), the trigger sequence (u64), the sub-plots in table order
 (name, owning player, active flag, then every event by name with its triggered, active and disabled flags, start time,
 elapsed accumulator and last-seen time, tech-level primed flag and inactivity stamp) and the flag table (name to i64, names
@@ -647,6 +667,14 @@ listeners do not decide outcomes or service the frozen parent. Tactical-credit a
 and the composed installed opponent remain consumers of this hook, rather than codec behavior.
 
 Lifecycle, perception and execution components remain supplied by their respective adapters.
+The `GALACTIC_PERCEPTION` component uses domain `eawr-galactic-perception` and u32
+version **4**. After cache, visibility, story-flag and hint sections, it stores a
+u64 space-conflict stamp count followed by rows sorted by `(player, planet)`:
+u32 player, u64 planet and u64 last completed space-conflict synchronization frame.
+Absence means no space conflict has completed for that evaluator and planet.
+The length-framed markup payload follows this section. Restore rejects duplicate
+identities, unknown player/planet references and frames beyond the rebound
+synchronization clock. Older component versions are refused (GGL-02).
 Execution persists its original node order, initialized maximum distance, route deadline and
 freestore reservations; its route matrix is derived and rebuilt after perception/world rebind
 (WGA-139). Goal/plan runtime state and active tactical AI must contribute their own native state
@@ -798,19 +826,22 @@ retail task team-index save/load asymmetry.
 Goal payload version 7 also retains the Potential target-contrast-disabled choice made by
 unstaged GC Produce_Force (WGA-341); it is independent of the authored IgnoreTarget flag.
 
-The combined campaign and tactical field inventory uses raw child-state domain 25,
+The combined campaign and tactical field inventory uses raw child-state domain 29 (21 to 28 were the layout before the super laser use state and are refused as an unsupported child state domain),
 including retained garrison tech, the manual hangar readiness flag (FL-17), and the
 appended Lucky explicit-autofire-preference and spent-lock booleans in each ability
 slot (WLK-03 to WLK-05). The existing target and optional hardpoint retain a live
 Lucky lock; the spent flag distinguishes a consumed hit awaiting recharge service.
 WJM-01 adds each nested handler's jammer initialization, active state, registration state and remaining service count.
-WFR-01 selects raw domain 26 when any live unit has a nonzero fire-range bonus:
+WFR-01 selects raw domain 30 when any live unit has a nonzero fire-range bonus:
 each unit then archives seven combat bonus values rather than six. Zero fire-range
-state uses domain 25 and six-slot bytes; domain 26 with all range
+state uses domain 29 and six-slot bytes; domain 30 with all range
 values zero is noncanonical and refused. Both domains preserve checkpoint continuation.
-TL-03 adds 2 to the domain (27 without, 28 with a fire-range bonus) when any live unit has the Lua
+TL-03 adds 2 to the domain (31 without, 32 with a fire-range bonus) when any live unit has the Lua
 `Make_Invulnerable` flag: each unit then archives one extra boolean after its position history.
-A flagged domain with no flagged unit is noncanonical and refused. These optional fields
+A flagged domain with no flagged unit is noncanonical and refused.
+MV-40 adds 4 to the domain (33 to 36) when any live unit's order or queued waypoint leg carries a final
+facing: each order then archives its optional yaw after the hazard flag, and each queued leg after its append
+flag. A facing domain with no facing is noncanonical and refused; domains above 36 are unsupported. These optional fields
 select a domain within the current format family. Earlier raw child-state domains are refused;
 the committed small skirmish save is regenerated with the format change.
 It includes the retained hardpoint of each squadron's formation attack destination,
@@ -820,10 +851,11 @@ radar publication, departure controllers, beacons, delayed blast amounts/mesh
 contacts, the two preceding positions of a moving target (PHST), and each squadron's accepted
 attack path with its route, member trackers and refresh state (SQAP), and each player's
 collected tactical salvage tally. Transform caches
-remain derived. The shared Lua scheduler uses tactical save-v4; its galactic clock profile uses `eawr-script-galactic-save-v3`.
+remain derived. The shared Lua scheduler uses tactical save-v4; its galactic clock profile uses `eawr-script-galactic-save-v4`.
 The GC scheduler blob retains ascending retired-provider IDs after its clock fields;
 its full and optimized hashes include those IDs. Older GC scheduler blobs are refused.
 The outer scripts section framing is unchanged; see [Lua persistence](lua-persistence.md).
+WSPL-08 appends eight fields to each special-ability slot after its tracked targets: four booleans (turn on, attack clip started, beam fired, continuing after the target left), the entity the unit faces (zero for none) and three u64 frames (fire start, clip start, continuation end). They are the SUPER_LASER use state; every other handler keeps them at their defaults. The canonical state hash appends them only for a slot whose state is not the default (bit 8 of the slot's flag word), so units without a super laser hash as before.
 
 ### Optional tactical controller continuation
 
@@ -1069,3 +1101,30 @@ GC replay corpus remains unchanged: none of its twelve replays contains the
 ability-host extension or embeds the full game checkpoint. Two generator runs
 produce identical existing files and pins. The stored tactical checkpoint has no
 galaxy section; its fixture and installed-game replay pins are independent.
+
+## Galactic object script host
+
+Galaxy section version **57** extends the scripts section with an optional
+GameObject scheduler graph. Its saved attachment registry, Lua threads and
+pending scheduler events are restored with the owning galactic world before
+object service resumes. The scheduler graph participates in the script barrier
+digest; an object-host presence mismatch rejects restoration. The module bytes
+and bindings are reconstructed from the mounted content identity, not from
+checkpoint data. This change does not modify the galactic replay corpus.
+
+## Raid movement and starbase waits
+
+The galactic goal payload requires version **18**. Its block kind inventory
+includes the global starbase wait (GAR-03): `destination_object` retains the
+planet, `side` retains the validated integer level 0..5, and `instance` owns the
+wait independently of a TaskForce (`taskforce` is zero). Completion reads the
+current qualified base level after restore; no timer or cached success is saved.
+
+The separate `galactic-production` payload requires version **11**. Each
+movement row appends one canonical boolean word, `raid`, after `freestore_actor`.
+The ordinary destination and goal/TaskForce/block identities still own its
+multi-hop continuation. Freestore movement cannot carry a raid choice. Earlier
+goal and production payloads are rejected; no compatibility decoder is retained.
+Both changes form one raid/starbase format update. These AI-only records do not
+alter the existing synthetic galactic replay corpus; its upgrade dry run remains
+the verification of that boundary.

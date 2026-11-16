@@ -2,6 +2,7 @@
 #include "eawr/battle/start.hpp"
 #include "eawr/campaign/conflict_entry.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
+#include "eawr/platform/model_facts.hpp"
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -59,16 +60,18 @@ int run_tactical(const Options& options, const std::vector<std::uint8_t>& bytes)
             const auto& catalog = loaded.value()->catalog->catalog;
             auto& tables = *loaded.value()->tables;
             eawr::scene::VfsAssetCache cache(filesystem);
+            eawr::platform::ModelFactsScope facts(filesystem, cache, true);
             eawr::units::LoadInput input;
             input.catalog = &catalog;
             input.filesystem = &filesystem;
-            input.model = cache.access().model;
+            input.model = facts.lookup();
             input.space_map = metadata.map;
             // CLI M2 recordings retain the legacy pinned table closure. Viewer
             // recordings use selected-map tables; resolve that closure only if
             // the already-loaded tables do not match the recorded identity.
             if (eawr::units::content_identity(tables) != setup.content_identity) {
                 auto selected_tables = eawr::units::load_unit_tables(input);
+                facts.finish();
                 if (!selected_tables) return fail(selected_tables.error());
                 tables = std::move(selected_tables).value();
             }
@@ -189,13 +192,15 @@ int run_tactical(const Options& options, const std::vector<std::uint8_t>& bytes)
                 }
                 if (!extra.empty()) {
                     eawr::scene::VfsAssetCache cache(*loaded.value()->filesystem);
+                    eawr::platform::ModelFactsScope facts(*loaded.value()->filesystem, cache, true);
                     eawr::units::LoadInput input;
                     input.catalog = &catalog;
                     input.filesystem = &*loaded.value()->filesystem;
-                    input.model = cache.access().model;
+                    input.model = facts.lookup();
                     for (const auto type : eawr::units::pinned_m2_types()) input.types.emplace_back(type);
                     input.types.insert(input.types.end(), extra.begin(), extra.end());
                     auto extended = eawr::units::load_unit_tables(input);
+                    facts.finish();
                     if (!extended) {
                         std::cerr << eawr::core::format_diagnostic(extended.error()) << '\n';
                         return 3;

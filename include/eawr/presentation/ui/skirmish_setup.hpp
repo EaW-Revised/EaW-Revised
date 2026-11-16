@@ -6,6 +6,7 @@
 // every other caption the screen sets as a text-database key, so mods and other languages show their
 // own text, and keeps the few notices the retail database has no key for apart from them.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -89,6 +90,28 @@ enum class SetupNotice : std::uint8_t {
 };
 
 [[nodiscard]] std::string_view setup_notice(SetupNotice notice) noexcept;
+
+// A start the battle load refused (the scoring script, the content manifest, the AI provider, the map, the mod
+// chain, the script sandbox ...) is never silent: the setup screen names the error code and the first line of the
+// error, and says where the full text is. `reason` is the load's own failure text; it may carry a stage prefix
+// ("authoritative scoring: ") and several lines. `code` is the first EAWR-... code in it (empty when it has none),
+// `first_line` the first non-empty line, bounded for the box, and the three `lines` are what the box shows.
+struct SetupStartRefusal final {
+    std::string code;
+    std::string first_line;
+    std::array<std::string, 3> lines;
+};
+
+// `headline` is the first box line without the code (the campaign launch and a battle that stops with an error word it
+// their own way).
+[[nodiscard]] SetupStartRefusal setup_start_refusal(std::string_view reason,
+                                                    std::string_view headline = "The battle could not start.");
+
+// A saved battle the load refused (an unsupported or corrupt checkpoint, a section the build does not read, another
+// game-data identity ...) is never silent either, whichever screen the player returns to (the main menu after a
+// front-end load, the setup screen otherwise). The headline is true for every cause; the code and first line, from the
+// load's own failure text (setup_start_refusal), say which one it was.
+inline constexpr std::string_view saved_battle_refusal_headline = "This save can't be loaded.";
 
 // MNU-22, WSS-31: the advanced dialog's win-condition choices in a space battle (a code list in the debug
 // build, so mods do not add to it). `name` is the condition the data and the replay record write

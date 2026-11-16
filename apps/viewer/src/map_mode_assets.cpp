@@ -1,4 +1,5 @@
 #include "map_mode_internal.hpp"
+#include "render_profile_viewport.hpp"
 
 namespace eawr::presentation::godot_backend {
 
@@ -36,6 +37,7 @@ MapMode::State::~State() {
         free_game_menu();
         shutdown_trace::mark("map mode teardown begins");
         land_overlay.reset();
+        land_deploy_zones.reset();
         if (land_population && renderer) {
             if (live_session) live_session->finish();
             if (battle_effects) battle_effects->release();
@@ -49,6 +51,7 @@ MapMode::State::~State() {
         shutdown_trace::mark("particles freed");
         renderer.reset();
         shutdown_trace::mark("renderer freed");
+        if (render_scene_entered) leave_render_scene();
     }
 
 void MapMode::State::refresh_fog_snapshots() {

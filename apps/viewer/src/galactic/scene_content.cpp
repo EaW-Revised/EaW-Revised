@@ -102,6 +102,7 @@ std::map<std::string, ProductionArt> load_production_art(
         auto looks = presentation::ui::unit_card_looks(definition.id, &catalog, text, false);
         ProductionArt art;
         art.galactic_model = model_path(fields.text("Galactic_Model_Name"));
+        art.fleet_override_model = model_path(fields.text("Galactic_Fleet_Override_Model_Name"));
         art.base_position = fields.text("Base_Position");
         art.every_marker_type = fields.text("Place_Other_Type_At_Every_Specific_Marker_Position");
         art.additional_structure = fields.text("Tactical_Additional_Structure_Type");
@@ -347,6 +348,7 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
             appearance.secondary = {(*font)[0] / 255.0F, (*font)[1] / 255.0F, (*font)[2] / 255.0F};
         }
         appearance.icon = fields.text("Icon_Name");
+        appearance.tech_tree_dialog = faction.tech_tree_dialog_name;
         appearance.present = true;
         players.emplace(folded(faction.name), player.id);
         result.factions.emplace(player.id, std::move(appearance));
@@ -406,11 +408,21 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
             };
             item.weather.name = localized(planet->planet_weather_name);
             item.weather.info = localized(planet->planet_weather_info);
-            item.info = {localized(planet->describe_tactical), localized(planet->describe_advantage),
-                localized(planet->describe_history), localized(planet->describe_weather),
-                localized(planet->describe_terrain), localized(planet->describe_population)};
+            item.info.tactical = localized(planet->describe_tactical);
+            item.info.advantage = localized(planet->describe_advantage);
+            item.info.history = localized(planet->describe_history);
+            item.info.weather = localized(planet->describe_weather);
+            item.info.terrain = localized(planet->describe_terrain);
+            item.info.population = localized(planet->describe_population);
+            // GPI-08: every authored entry, in order; an unresolved key draws nothing.
+            for (const auto& key : planet->encyclopedia_text)
+                if (auto line = localized(key); !line.empty()) item.info.encyclopedia.push_back(std::move(line));
         }
+        // GPI-07: the planet type's header contribution (a nonzero value draws the badge).
+        if (const auto capacity = fields.number("Additional_Population_Capacity"))
+            item.info.population_capacity = static_cast<std::int64_t>(std::llround(*capacity));
         item.model = model_path(planet->galactic_model_name);
+        item.destroyed_model = model_path(planet->destroyed_galactic_model_name);
         item.position = {planet->galactic_position->x, planet->galactic_position->y, planet->galactic_position->z};
         item.scale = sim::math::Fixed::from_raw(static_cast<std::int64_t>(std::llround(*scale * static_cast<double>(sim::math::Fixed::scale))));
         // Static owner adapter pending the ownership snapshot: use authored
@@ -421,6 +433,8 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
         }
         PlanetArt art;
         art.land_tactical_map = planet->land_tactical_map;
+        art.corruption_success_speech = planet->corruption_success_speech_event;
+        art.corruption_success_hologram = planet->corruption_success_hologram_name;
         // WGP-01b: first true layer flag wins.
         if (fields.flag("In_Background")) art.layer = SceneLayer::background;
         else if (fields.flag("In_Midground")) art.layer = SceneLayer::midground;

@@ -7,6 +7,12 @@ Use Python 3.10 or newer for these maintainer tools. Linux and Windows pool host
 2. Finish: `python tools/release/finish_kit.py --work <dir> --out-root <new-output> --layer <reviewed-layer> --reference <accepted-player-folder>`. It verifies the patched engine, embedded identities, PDB links, launcher pin, checksums and layout; adds the Revised layer and kit notes; and refuses delivery if a check fails. Review `finish-report.txt` and the final archive hash.
 3. Run the fresh-user and GPU verification on the exact finished bytes through the rig queue before delivery. That verification requires Windows and a GPU. Owner kits can be compiled and packaged on the Windows pool or on the Linux cross host (see "Linux and Windows kits" for what the two routes share and where they differ).
 
+Owner kits are cut with land skirmish ON (`EAWR_ENABLE_LAND_SKIRMISH`) until it ships on by default: the cut adds an overlay of the
+root and viewer `CMakeLists.txt` (a `set(EAWR_ENABLE_LAND_SKIRMISH ON)` line after the option, recorded as overlay files in the plan and
+named in the kit README with `Land skirmish: ON in this kit`). It is a normal variable on purpose: flipping the option default does nothing
+in a reused build tree whose cache already holds OFF. `--no-land-skirmish` keeps the base commit's default; a release package never gets
+the overlay, and an explicit `--extra` for one of the two files replaces its generated overlay.
+
 ## The kit manifest
 
 Every cut writes `<work>/kit-manifest.json` before it queues anything (`tools/release/kit_manifest.py`). Its `plan` pins the
@@ -27,12 +33,12 @@ of the operator's checkout is copied over the host tree: a tracked file that dif
 both build the one `package_release.py` command line with `host_package.packager_command` and print the `EAWR-RELEASE FILE` lines
 with `host_package.release_file_lines`. What stays route-specific, because it depends on the host, not on the kit: where the built
 binaries are (the pool stages a robocopy copy of the slot tree and takes the relay viewer from another slot; the Linux host packages
-in place and looks each binary up by unique name), the Wine runner environment on Linux, and how the output returns (log lines and
+in place and looks each binary up by unique name), the Linux Godot editor that writes the project metadata (no Wine: the shipped Windows exe is only copied), and how the output returns (log lines and
 scp on the pool, `package.tar.gz` on Linux). After
 packaging, `host_package.py receipt` checks the tree once more, hashes every output and records the toolchain (Python, clang,
-lld, Wine, PowerShell, git, Windows SDK; a tool that is not there is recorded as null). The pool prints it as one
+lld, the Linux Godot editor with its SHA-256, PowerShell, git, Windows SDK; a tool that is not there is recorded as null). The pool prints it as one
 `EAWR-HOST-RECEIPT` line in the package log and the Linux route returns it as `host-receipt.json` in `package.tar.gz`; the cut
-refuses a receipt for another plan or commit, a dirty tree, inputs that are not the engine files and launcher artifact the plan pinned, no compiler or linker, a toolchain that does not fit the route (Linux host and Wine for the cross route, Windows host and PowerShell for the pool), or one that does not list the player archive that arrived, and
+refuses a receipt for another plan or commit, a dirty tree, inputs that are not the engine files and launcher artifact the plan pinned, no compiler or linker, a toolchain that does not fit the route (Linux host and the Linux Godot editor for the cross route, Windows host and PowerShell for the pool), or one that does not list the player archive that arrived, and
 stores it in the manifest's `host` section, where `kit_manifest.py verify` checks it again. The receipt is written by the
 host and is host-attested, like the rest of the section. If the transfer of inputs fails, the client leaves a `failed` marker on
 the host, so the job fails within seconds and not after the 30-minute wait for its inputs.
@@ -68,10 +74,19 @@ A release uses the same cut, host and finish steps with `mode: "release"` in the
 must prove, and `kit_manifest.py verify --release` refuses it unless all of it holds:
 
 - **The tag.** `cut_kit.py --release-tag v<version> --layer <reviewed Revised layer> ...` runs in the checkout that holds the
-  tag and refuses unless the tag is an annotated tag object whose signature `git verify-tag` accepts (`git tag -s`), points at
+  tag and refuses unless the tag is an annotated tag object (`git tag -a`; signing is optional), points at
   `--sha` (default: the tag's commit), and equals `v` plus `config/release-version.json` at that commit. The plan records the tag,
-  the tag object, the commit and the verified signature (`plan.release`). Git tag signing is separate from the code signing of the
-  binaries, which stays outside this pipeline.
+  the tag object, the commit and the signature state (`plan.release.signature`): `unsigned` for an annotated tag without a signature
+  (no key is needed; owner decision 2026-11-11, as for v0.3.0), `good` for a signed tag whose signature `git verify-tag` accepts. A tag
+  that carries a signature which does not verify is refused, and so is a lightweight tag. Git tag signing is separate from the code
+  signing of the binaries, which stays outside this pipeline.
+- **Tooling from a later commit.** The cut and finish normally run the tagged commit's own scripts. A reviewed tool fix made after the
+  tag can be used instead: run the cut from a clean checkout of the later commit (the plan records it as `orchestrator.tooling_commit`,
+  with the hashes of the orchestrating files; "clean" means no tracked change and no untracked file anywhere under `tools/release`,
+  `tools/offload` and `tools/common`, and finish refuses `--tooling-commit` when the cut recorded a dirty checkout) and finish with `finish_kit.py --tooling-commit <that commit>`. Finish then accepts its own
+  `finish_kit.py` and `kit_manifest.py` only if they are that commit's files, the commit is the one the cut recorded and it descends from
+  the tagged commit; it records the commit under `finish.finish_tool.tooling_commit`. Without the option the old rule stands (the kit
+  commit's own copies). The host still packages from the tagged tree.
 - **Nothing added to the tag.** The label is the release version, with no suffix. `--label`, `--suffix`, `--pin`, `--extra` and
   `--allow-dirty-tooling` are refused: the kit commit differs from the tagged commit only by the label file and the tagged
   commit's own launcher pin, so the scripts that cut and package it are the tagged commit's, and the orchestrating checkout
@@ -111,8 +126,8 @@ A cut no longer pauses or holds a specific host. The pool's own FIFO slot lock i
 
 The Linux cross route produces the same player folder as the pool apart from the rebuilt binaries and the files that carry the build hash or version (`README.md`, `SHA256SUMS`, `runtime.json`); the hand-made shortcuts are not produced by either route. Both routes still need the fresh-user and GPU verification on the finished bytes.
 
-For a Linux cross-host, replace `--host any` with `--cross-host <host> --wine <base-relative-wine-executable>`; add
-`--wine-lib-dir <base-relative-directory>` when that Wine installation has private shared libraries. The client stages
+For a Linux cross-host, replace `--host any` with `--cross-host <host> --linux-godot <base-relative-editor>`: the pinned official Linux Godot 4.7.2 editor
+(`python tools/release/godot_linux_import.py fetch <dir>` provisions it under the host base without root). The client stages
 the inputs only after the VM slot is acquired, builds and packages under that slot, and fetches a hash-verified bundle
-containing the archives and private symbols. The host must have a working Wine runtime, its cross compiler, and its
+containing the archives and private symbols. The host must have that editor, its cross compiler, and its
 normal queue and toolchain setup. See `docs/releasing.md` for packaging an already completed cross-build tree.

@@ -15,15 +15,22 @@
 namespace eawr::gc_profile {
 
 // Process-local diagnostics. Never saved, hashed, or used to make a decision.
+// EAWR_GC_TICK_TRACE=<path> also turns the scopes on (see gc_tick_trace.hpp): a per-tick JSONL series for
+// hitch hunting; the counters stay cumulative either way.
 inline bool requested() {
 #ifdef _MSC_VER
     char value[2]{};
     std::size_t length{};
-    return getenv_s(&length, value, sizeof(value), "EAWR_PROFILE_GALACTIC_AI") == 0
+    char path[2]{};
+    std::size_t path_length{};
+    const bool profile = getenv_s(&length, value, sizeof(value), "EAWR_PROFILE_GALACTIC_AI") == 0
         && std::string_view(value) == "1";
+    (void)getenv_s(&path_length, path, sizeof(path), "EAWR_GC_TICK_TRACE"); // ERANGE sets the needed size; unset leaves 0
+    return profile || path_length > 1;
 #else
     const auto* value = std::getenv("EAWR_PROFILE_GALACTIC_AI");
-    return value && std::string_view(value) == "1";
+    const auto* trace = std::getenv("EAWR_GC_TICK_TRACE");
+    return (value && std::string_view(value) == "1") || (trace && *trace);
 #endif
 }
 inline std::atomic<bool> enabled{requested()};
@@ -47,7 +54,16 @@ enum class Phase : std::size_t {
     tick_galaxy_step, tick_commands, tick_discovery, tick_gather, tick_movement, tick_control, tick_income,
     tick_production, tick_conflict_tail, tick_fiscal, tick_victory, tick_population, tick_state_hash,
     tick_actor_delivery, tick_story_service, tick_game_step,
+    // Hitch hunt (#6933): the live session's own steps around and inside GameSession::step (serial, wall).
+    tick_submit_input, tick_autosave_request, tick_stage_battle, tick_process_commands, tick_step_world,
+    tick_apply_returns, tick_finish_step, tick_publish,
     snap_sorted, snap_observer, snap_menus, snap_economy_input, snap_forecast, snap_corruption, snap_offers, snap_construct,
+    // The galactic AI manager's due services (serial, wall): which lifecycle service holds the barrier (#6933).
+    svc_perception, svc_goals, svc_planning, svc_execution, svc_learning, svc_templates,
+    // Inside the goal service and the selector inputs (serial, wall), for the outlier ticks of #7056.
+    goal_propose, goal_allocate, goal_time, goal_fund, goal_maintain, goal_attach, selection_input, galactic_estimate,
+    // The selector input by caller and by step (serial, wall), #7056.
+    selection_input_goals, selection_input_exec, sel_world, sel_freestore, sel_contrast, sel_sites, sel_producers, sel_facts, sel_heroes,
     perception, perception_record_maintenance, perception_lock_wait, economy_lock_wait, count
 };
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::count)> names{
@@ -66,13 +82,20 @@ inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::co
     "tick_galaxy_step", "tick_commands", "tick_discovery", "tick_gather", "tick_movement", "tick_control", "tick_income",
     "tick_production", "tick_conflict_tail", "tick_fiscal", "tick_victory", "tick_population", "tick_state_hash",
     "tick_actor_delivery", "tick_story_service", "tick_game_step",
+    "tick_submit_input", "tick_autosave_request", "tick_stage_battle", "tick_process_commands", "tick_step_world",
+    "tick_apply_returns", "tick_finish_step", "tick_publish",
     "snap_sorted", "snap_observer", "snap_menus", "snap_economy_input", "snap_forecast", "snap_corruption", "snap_offers", "snap_construct",
+    "svc_perception", "svc_goals", "svc_planning", "svc_execution", "svc_learning", "svc_templates",
+    "goal_propose", "goal_allocate", "goal_time", "goal_fund", "goal_maintain", "goal_attach", "selection_input", "galactic_estimate",
+    "selection_input_goals", "selection_input_exec", "sel_world", "sel_freestore", "sel_contrast", "sel_sites", "sel_producers", "sel_facts", "sel_heroes",
     "perception", "perception_record_maintenance", "perception_lock_wait", "economy_lock_wait"};
 struct Values { std::uint64_t calls{}, inclusive_ns{}, exclusive_ns{}; };
 struct Counter { std::atomic<std::uint64_t> calls{}, inclusive_ns{}, exclusive_ns{}; };
 inline std::array<Counter, names.size()> counters{};
 using Snapshot = std::array<Values, names.size()>;
 inline thread_local bool in_ai{};
+// Which service asks for the selector input (trace only, #7056): 1 goals, 2 execution, 0 other. Per thread.
+inline thread_local unsigned selection_origin{};
 class Scope;
 inline thread_local Scope* current{};
 

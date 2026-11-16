@@ -24,10 +24,13 @@
 #include <godot_cpp/classes/input_event.hpp>
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace eawr::presentation::godot_backend {
 
@@ -93,6 +96,8 @@ public:
         godot::String quit_text;
         godot::String begin_text;
         godot::String loading_title;
+        // The Quit Game button under the pause banner is a project addition for a battle; the galactic map has none.
+        bool offer_quit{true};
         // The layout's reference space for UI-F1 font sizes.
         std::function<presentation::ui::ReferenceSpace()> space;
         std::function<BuiltDialog(godot::Vector2)> results_dialog;
@@ -110,8 +115,18 @@ public:
     void show_message(std::optional<bool> won);
     void show_paused(bool paused);
     void set_pause_notice(const godot::String& text);
+    // Whether the Resume Game button takes a press; a refused one is drawn grey (TM-08 tint) and ignores the pointer.
+    void set_resume_enabled(bool enabled);
     // RP-06..RP-08: the retreat countdown line at the tactical countdown position; an empty text hides it.
     void show_countdown(const godot::String& text, const godot::Color& colour, double x_share, double y_share);
+    // WGEP-173: the strategic map's stacked production countdown lines, the first at (x_share, y_share) and each next one
+    // `spacing_share` of the height lower, in the banner font; an empty vector hides them.
+    struct CountdownLine {
+        godot::String text;
+        godot::Color colour;
+        friend bool operator==(const CountdownLine&, const CountdownLine&) = default;
+    };
+    void show_countdown_lines(std::vector<CountdownLine> lines, double x_share, double y_share, double spacing_share);
     void show_begin(bool ready);
     void _input(const godot::Ref<godot::InputEvent>& event) override;
     [[nodiscard]] bool paused_shown() const { return paused_; }
@@ -132,6 +147,7 @@ protected:
 private:
     void relayout();
     void layout_countdown();
+    void layout_countdown_lines();
     void layout_results();
     void scroll_your(double value);
     void scroll_enemy(double value);
@@ -142,6 +158,7 @@ private:
     godot::String pause_notice_;
     std::optional<bool> message_;
     bool paused_{};
+    bool resume_enabled_{true};
     bool ready_{};
     std::optional<bool> ended_;
     KitText message_text_;
@@ -152,6 +169,9 @@ private:
     double countdown_x_{}, countdown_y_{};
     godot::Rect2 countdown_rect_;
     int countdown_pixels_{};
+    std::vector<CountdownLine> lines_;
+    std::deque<KitText> lines_text_; // not movable: a deque grows without moving its elements
+    double lines_x_{}, lines_y_{}, lines_spacing_{};
     KitText title_text_;
     godot::Rect2 message_rect_;
     godot::Rect2 banner_rect_;

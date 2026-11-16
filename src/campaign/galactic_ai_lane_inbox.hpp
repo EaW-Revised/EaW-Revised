@@ -6,11 +6,15 @@
 #include "eawr/sim/galactic/story_engine.hpp"
 #include "eawr/script/numeric/lua_number.hpp"
 #include "../script/foc/galactic_ai_actions.hpp"
+#include "../script/foc/galactic_ai_intent_refusal.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
+#include <set>
+#include <string_view>
 #include <utility>
 #include <span>
 #include <string>
@@ -28,14 +32,27 @@ struct GalacticAiRecordedBill {
     script::foc::galactic_ai::BillEffect effect;
     bool operator==(const GalacticAiRecordedBill&) const = default;
 };
+// #6917: a story reward changed one AI player's type (the control-switch reward). It waits here like every other world
+// notice and is applied at the next window start, so the AI's own state never changes from the story service.
+struct GalacticAiTypeSwitch {
+    sim::galactic::PlayerId player{};
+    std::string type; // the authored AI player type name, as the reward carried it
+    bool operator==(const GalacticAiTypeSwitch&) const = default;
+};
 class GalacticAiLaneInbox {
 public:
     using Entry = std::variant<script::foc::galactic_ai::NativeActions::Delivery, GalacticAiBattleFacts,
-        sim::galactic::GalacticSession::CreditNotification, GalacticAiRecordedBill>;
+        sim::galactic::GalacticSession::CreditNotification, GalacticAiRecordedBill, GalacticAiTypeSwitch,
+        script::foc::galactic_ai::refusal::Consequence>;
     void push(Entry entry) { entries_.push_back(std::move(entry)); ++generation_; }
     // Hands the queue to the caller and empties it (a failed application never leaves entries behind to apply twice).
     [[nodiscard]] std::vector<Entry> take() { ++generation_; auto taken = std::move(entries_); entries_.clear(); return taken; }
     [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
+    // #6917: the AI player types the story's control switches have set (player -> type, upper case), as the sim side applied them at a
+    // window's pre-cut. The sim-side readers of a player's difficulty (credit multipliers) derive from it, so they follow a restore
+    // without reading the AI's own state. Saved with the block (the block is absent while this and the queue are both empty).
+    void note_type(sim::galactic::PlayerId player, std::string type) { applied_types_.insert_or_assign(player, std::move(type)); ++generation_; }
+    [[nodiscard]] const std::map<sim::galactic::PlayerId, std::string>& applied_types() const noexcept { return applied_types_; }
     [[nodiscard]] const std::vector<Entry>& entries() const noexcept { return entries_; }
     // Changes whenever the queue changes (never read by gameplay).
     [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
@@ -47,6 +64,66 @@ public:
     [[nodiscard]] core::Result<std::size_t> restore_prefix(std::span<const std::uint8_t> bytes);
 private:
     std::vector<Entry> entries_;
+    std::map<sim::galactic::PlayerId, std::string> applied_types_;
+    std::uint64_t generation_{};
+};
+
+// #6337: the actors the AI lost through its own window (the async stage) that the world has not applied yet. The stage tells the AI
+// freestore at once, but the slice that really removes the actor applies D ticks later, and in between the world goes on writing
+// the live actor (a move, a relocation): that `changed` reaches an AI that already dropped it. Each entry names the slice that
+// holds the loss (the window's snapshot tick and the virtual tick it was decided in). When a world delivery is applied:
+//   - a world `lost` for an entry clears it (the freestore already lacks the actor: a no-op);
+//   - a world `changed` while that slice is still pending is ignored (the loss lands later, and its `lost` follows);
+//   - a world `changed` after that slice applied means the world refused the loss and kept the actor: the actor is born again
+//     in the AI as a fresh actor from the delivery's facts (its AI-usage writes follow as a usage-only change), and the entry clears;
+//   - a world `created` for an entry's actor clears it and applies as sent (the world made the actor itself).
+// The set never holds more than its capacity (default: the live-object bound); over it the oldest source is evicted.
+// Nothing else is relaxed: an unknown actor without an entry still refuses. Saved after the story globals, hashed with the lane;
+// an empty set adds no bytes.
+class GalacticAiStageLosses {
+public:
+    // The set never holds more entries than `capacity` (default: the live-object bound): a loss the world answers with no notice at
+    // all would otherwise stay forever. Over the bound the oldest source is evicted (ordered by snapshot tick, virtual tick, actor).
+    explicit GalacticAiStageLosses(std::size_t capacity = sim::galactic::galactic_max_objects) : capacity_(capacity) {}
+    using Change = sim::galactic::GalacticSession::NativeActorChange;
+    struct Source {
+        std::uint64_t snapshot_tick{}; // the window's snapshot tick s
+        std::uint32_t virtual_tick{};  // slice j of that batch
+        bool operator==(const Source&) const = default;
+    };
+    // Whether the slice named by the source still waits in the outbox.
+    class Pending {
+    public:
+        // Non-owning view of a callable: it must outlive the call it is passed to (a temporary argument does).
+        template<class F> Pending(const F& test) noexcept
+            : context_(&test), call_([](const void* context, const Source& source) { return (*static_cast<const F*>(context))(source); }) {}
+        [[nodiscard]] bool operator()(const Source& source) const { return call_(context_, source); }
+    private:
+        const void* context_;
+        bool (*call_)(const void*, const Source&);
+    };
+    [[nodiscard]] bool empty() const noexcept { return losses_.empty(); }
+    [[nodiscard]] std::size_t size() const noexcept { return losses_.size(); }
+    [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
+    [[nodiscard]] const std::map<sim::EntityId, Source>& entries() const noexcept { return losses_; }
+    // A `lost` the window delivered: the newest source wins (a later window loses the same actor again while the first slice waits).
+    void record(sim::EntityId actor, Source source);
+    // A window's attempt: what it recorded is undone when the attempt is abandoned (its freestore rolls back with it) and kept when the
+    // batch ends. Never saved: no save happens inside a window.
+    void begin_batch() { journal_.clear(); }
+    void end_batch() { journal_.clear(); }
+    void abandon_batch();
+    // The changes of one world delivery, rewritten as described above. Mutating: clears the entries it settles.
+    [[nodiscard]] std::vector<Change> reconcile(std::span<const Change> changes, const Pending& pending);
+    // The same rewrite on a copy: the pending-replay view of deliveries that are still queued.
+    [[nodiscard]] std::vector<Change> reconciled(std::span<const Change> changes, const Pending& pending) const;
+    void encode(std::vector<std::uint8_t>& bytes) const;
+    [[nodiscard]] core::Result<std::size_t> restore_prefix(std::span<const std::uint8_t> bytes);
+private:
+    static std::vector<Change> rewrite(std::map<sim::EntityId, Source>& losses, std::span<const Change> changes, const Pending& pending);
+    std::size_t capacity_;
+    std::map<sim::EntityId, Source> losses_;
+    std::vector<std::pair<sim::EntityId, std::optional<Source>>> journal_; // the open attempt's records, for its rollback
     std::uint64_t generation_{};
 };
 
@@ -109,6 +186,16 @@ struct GalacticAiDueOutput {
     std::vector<core::LoadNote> load_notes;
     std::vector<GalacticStoryGlobals::Write> global_writes;
 };
+// Says an isolated fiscal refusal once per AI player and refusal for the session (not saved: a loaded session says it again).
+class IsolatedFaultOnce {
+public:
+    // True the first time this player is refused with this diagnostic.
+    [[nodiscard]] bool first(sim::galactic::PlayerId player, const core::Diagnostic& fault) {
+        return seen_.emplace(player, fault.code + ": " + fault.message).second;
+    }
+private:
+    std::set<std::pair<sim::galactic::PlayerId, std::string>> seen_;
+};
 class GalacticAiBillingView {
 public:
     using Credit = sim::galactic::GalacticSession::CreditNotification;
@@ -121,6 +208,10 @@ public:
     // as before). A credit applied to the view and logged.
     [[nodiscard]] std::optional<core::Result<script::foc::galactic_ai::BillDecision>> bill(const Notice&,
         std::span<const sim::galactic::ProductionPlayer>);
+    // A fiscal cycle the view's ledger refuses is that AI player's: it is skipped for that player (the ledger keeps its previous
+    // state), reported to the sink given here, and the credit still succeeds, as in the AI's own funding owner.
+    using FaultObserver = script::foc::ai::GalacticFunding::FaultObserver;
+    void bind_fault_observer(std::weak_ptr<FaultObserver> observer) { fault_observer_ = std::move(observer); }
     [[nodiscard]] core::Result<void> credit(const Credit&);
     // Lane side: a window's publication (taken after its commit), and the switch to the newest one whose tick has come.
     void capture(GalacticAiBillingPublication);
@@ -135,6 +226,16 @@ public:
     [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }
     // W1 S4: the newest visible publication (its digests feed the per-tick hashes); null while inactive.
     [[nodiscard]] const GalacticAiBillingPublication* visible() const noexcept { return base_ ? &*base_ : nullptr; }
+    // Step 2c: what the per-tick AI scheduler hash can read. none_visible: no window publication is visible yet (the bootstrap ticks);
+    // published: the visible publication's digest; missing: a visible publication without its digest (an engine invariant the
+    // lane keeps; the world degrades to a fixed marker and reports it, it never reads the live scheduler).
+    enum class SchedulerDigest { none_visible, published, missing };
+    [[nodiscard]] SchedulerDigest scheduler_digest_state() const noexcept {
+        if (!base_) return SchedulerDigest::none_visible;
+        return base_->scheduler_digest.empty() ? SchedulerDigest::missing : SchedulerDigest::published;
+    }
+    // The deterministic stand-in every peer hashes when the digest is missing.
+    static constexpr std::string_view missing_scheduler_digest_marker = "eawr-gcai-no-published-scheduler-digest";
     // Saved after the inbox block; nothing while inactive.
     [[nodiscard]] core::Result<void> encode(std::vector<std::uint8_t>& bytes) const;
     [[nodiscard]] core::Result<void> restore(std::span<const std::uint8_t> bytes);
@@ -147,7 +248,8 @@ private:
         std::uint64_t sequence{};
         std::variant<Credit, GalacticAiRecordedBill> entry;
     };
-    static core::Result<void> replay(const LogEntry&, Ledgers& budgets, Rows& billing_rows);
+    // `fault` (optional) receives the refusal of a fiscal credit that was skipped for its player.
+    static core::Result<void> replay(const LogEntry&, Ledgers& budgets, Rows& billing_rows, std::optional<core::Diagnostic>* fault = nullptr);
     core::Result<void> rebuild();
     std::optional<GalacticAiBillingPublication> base_;
     std::vector<GalacticAiBillingPublication> pending_;
@@ -155,5 +257,6 @@ private:
     std::uint64_t next_sequence_{1}, generation_{};
     Ledgers ledgers_;
     Rows rows_;
+    std::weak_ptr<FaultObserver> fault_observer_; // never saved
 };
 } // namespace eawr::campaign

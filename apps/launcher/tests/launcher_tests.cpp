@@ -398,7 +398,31 @@ void test_launch_plan() {
         args = godot_arguments(inputs);
         CHECK(std::find(args.begin(), args.end(), L"--eawr-launcher-start") == args.end());
     }
+    // The viewer's other probe and exercise switches make an evidence run too (retail look, no saved settings).
+    for (const auto* probe : {L"--eawr-camera-mode", L"--eawr-atlas", L"--eawr-map", L"--eawr-skirmish-map",
+                              L"--eawr-live-session", L"--eawr-effect", L"--eawr-camera-interactive",
+                              L"--eawr-settings-file", L"--eawr-msaa", L"--eawr-smaa", L"--eawr-unknown-future-probe"}) {
+        inputs.extra = {probe, L"land"};
+        args = godot_arguments(inputs);
+        CHECK(std::find(args.begin(), args.end(), L"--eawr-launcher-start") == args.end());
+        CHECK(!player_start_requested(inputs.extra));
+    }
+    // A player's extra arguments keep the marker.
+    inputs.extra = {L"--eawr-render-profile", L"retail", L"--eawr-audio", L"off", L"--quit-after"};
+    CHECK(player_start_requested(inputs.extra));
+    args = godot_arguments(inputs);
+    CHECK(std::find(args.begin(), args.end(), L"--eawr-launcher-start") != args.end());
+    inputs.extra = {L"--eawr-aa", L"ss=2"};
+    CHECK(player_start_requested(inputs.extra));
+    inputs.no_fog = true;
+    args = godot_arguments(inputs);
+    CHECK(std::find(args.begin(), args.end(), L"--eawr-launcher-start") != args.end());
+    CHECK(std::find(args.begin(), args.end(), L"--eawr-no-fog") != args.end());
+    inputs.no_fog = false;
+    inputs.extra.push_back(L"--eawr-capture");
+    CHECK(!player_start_requested(inputs.extra));
     inputs.extra.clear();
+    CHECK(player_start_requested(inputs.extra));
     inputs.safe_render_thread = true;   // the opt-out puts the engine flag right after --path
     args = godot_arguments(inputs);
     CHECK(args[2] == L"--render-thread" && args[3] == L"safe" && args[4] == L"--");
@@ -414,6 +438,11 @@ void test_launch_plan() {
     CHECK(args[2] == L"--quit-after" && args[3] == L"30" && args[4] == L"--");
     CHECK(std::find(args.begin(), args.end(), std::wstring(L"--eawr-allow-unknown-build")) != args.end());
     CHECK(std::find(args.begin(), args.end(), std::wstring(L"--eawr-font-cache")) == args.end());   // the viewer extracts fonts itself
+    CHECK(std::find(args.begin(), args.end(), std::wstring(L"--eawr-no-fog")) == args.end());      // off unless asked for
+    inputs.no_fog = true;
+    const auto fog_args = godot_arguments(inputs);
+    CHECK(std::find(fog_args.begin(), fog_args.end(), std::wstring(L"--eawr-no-fog")) != fog_args.end());
+    inputs.no_fog = false;
     CHECK(args[args.size() - 2] == L"--eawr-audio" && args.back() == L"off");
 
     // The command line parses back to exactly the same arguments.
@@ -729,6 +758,42 @@ void test_flow_launch_loop() {
     };
     CHECK(f.run(options) == kExitOk);
     CHECK(f.runner.calls == 6);
+}
+
+void test_flow_launcher_screen() {
+    // Both manager handoffs forward the transient screen; malformed hints cannot become an index.
+    for (const bool stay_open : {false, true}) {
+        for (const std::string_view screen : {"0", "2", "-1", "1.5", "2147483648", "\"2\"", "null"}) {
+            FlowFixture f;
+            auto options = f.options();
+            options.game_root = f.game;
+            options.mods = true;
+            write_file(f.package / "launcher/project.godot", "manager");
+            write_file(f.package / "eawr_mods_service.exe", "service");
+            write_file(f.user_data / "mods/profiles/sample.json",
+                       R"({"format":"eawr-mod-profile","version":1,"id":"sample","launch":{"render_thread":"safe"}})");
+            const auto request = f.user_data / "launcher/next-action.json";
+            const auto publish = [&] {
+                write_file(request, std::string(R"({"action":"launch-profile","profile":"sample","screen":)")
+                           + std::string(screen) + (stay_open ? ",\"stay_open\":true}" : "}"));
+            };
+            const auto check_game = [&] {
+                const auto& args = f.runner.args;
+                const auto hint = std::find(args.begin(), args.end(), L"--eawr-launcher-screen");
+                if (screen == "0" || screen == "2") {
+                    CHECK(hint != args.end() && hint + 1 != args.end() && *(hint + 1) == widen_ascii(screen));
+                } else CHECK(hint == args.end());
+                CHECK(std::find(args.begin(), args.end(), L"--eawr-launcher-start") != args.end());
+            };
+            f.runner.on_run = [&] { if (f.runner.calls == 1) publish(); else check_game(); };
+            f.runner.on_monitored = [&](const auto& poll, const auto& started) {
+                if (poll) { publish(); poll(); }
+                else { CHECK(started && started(1234)); check_game(); }
+            };
+            CHECK(f.run(options) == kExitOk);
+            CHECK(f.runner.calls == 2);
+        }
+    }
 }
 
 void test_stale_running_state_at_start() {
@@ -1231,6 +1296,71 @@ void test_flow_unknown_build_flag_and_the_viewers_explanation() {
     CHECK(g.run(options) == 3);
     CHECK(std::find(g.runner.args.begin(), g.runner.args.end(), std::wstring(L"--eawr-allow-unknown-build")) == g.runner.args.end());
     CHECK_CONTAINS(g.ui.errors.at(0), "not a build EAWR has verified");
+}
+
+// "Fog of war: off" (an owner convenience, not retail): one game flag, from the command line or from the
+// launch options saved in a mod profile, and absent otherwise.
+void test_flow_no_fog_option() {
+    const auto has_flag = [](const FlowFixture& f) {
+        return std::find(f.runner.args.begin(), f.runner.args.end(), std::wstring(L"--eawr-no-fog")) != f.runner.args.end();
+    };
+    const auto count_flag = [](const FlowFixture& f) {
+        return std::count(f.runner.args.begin(), f.runner.args.end(), std::wstring(L"--eawr-no-fog"));
+    };
+    CHECK(parse_command_line({L"--no-fog"}).no_fog && !parse_command_line({L"--game-root", L"G"}).no_fog);
+    {
+        FlowFixture f;
+        Options options = f.options();
+        options.game_root = f.game;
+        CHECK(f.run(options) == kExitOk);
+        CHECK(!has_flag(f));   // off by default
+    }
+    {
+        FlowFixture f;
+        Options options = f.options();
+        options.game_root = f.game;
+        options.no_fog = true;
+        CHECK(f.run(options) == kExitOk);
+        CHECK(count_flag(f) == 1);
+        // It rides in the viewer's own argument list, before the report, never in the engine's.
+        const auto& args = f.runner.args;
+        CHECK(std::find(args.begin(), args.end(), L"--eawr-no-fog") > std::find(args.begin(), args.end(), L"--"));
+    }
+    // The profile's launch option is remembered per profile: sample (on) passes it, plain (off) does not.
+    const auto profile_json = [](const std::string& id, const std::string& fog) {
+        return "{\"format\":\"eawr-mod-profile\",\"version\":1,\"id\":\"" + id + "\",\"launch\":{\"render_thread\":\"separate\"" + fog + "}}";
+    };
+    for (const bool on : {true, false}) {
+        FlowFixture f;
+        Options options = f.options();
+        options.game_root = f.game;
+        options.profile = "sample";
+        write_file(f.user_data / "mods/profiles/sample.json", profile_json("sample", on ? ",\"no_fog\":true" : ""));
+        CHECK(f.run(options) == kExitOk);
+        CHECK((count_flag(f) == 1) == on && (count_flag(f) == 0) == !on);
+    }
+    {
+        // An explicit false, a wrong type and a null never turn it on.
+        for (const char* text : {",\"no_fog\":false", ",\"no_fog\":\"true\"", ",\"no_fog\":null"}) {
+            FlowFixture g;
+            Options options = g.options();
+            options.game_root = g.game;
+            options.profile = "sample";
+            write_file(g.user_data / "mods/profiles/sample.json", profile_json("sample", text));
+            CHECK(g.run(options) == kExitOk);
+            CHECK(!has_flag(g));
+        }
+    }
+    {
+        FlowFixture f;   // the command line's --no-fog stays on for a profile that does not set it
+        Options options = f.options();
+        options.game_root = f.game;
+        options.profile = "sample";
+        options.no_fog = true;
+        write_file(f.user_data / "mods/profiles/sample.json", profile_json("sample", ""));
+        CHECK(f.run(options) == kExitOk);
+        CHECK(count_flag(f) == 1);
+    }
 }
 
 void test_flow_unwritable_user_data_and_bad_command_line() {
@@ -2020,6 +2150,7 @@ int main(int argc, char** argv) {
     test_depth_prepass_precedence();
     test_flow_mods();
     test_flow_launch_loop();
+    test_flow_launcher_screen();
     test_stale_running_state_at_start();
     test_flow_stay_open();
     test_flow_stay_open_failures();
@@ -2038,6 +2169,7 @@ int main(int argc, char** argv) {
     test_flow_godot_failures();
     test_flow_unknown_build_flag_and_the_viewers_explanation();
     test_flow_unwritable_user_data_and_bad_command_line();
+    test_flow_no_fog_option();
     test_command_line_parsing();
     test_instance_ids_paths_ports();
     test_environment_block();

@@ -135,7 +135,15 @@ class AttractStructure(unittest.TestCase):
         camera = (SRC / "attract_camera.cpp").read_text(encoding="utf-8")
         self.assertNotIn("eawr/sim", header + camera)
         live = (SRC / "map_mode_live.cpp").read_text(encoding="utf-8")
-        self.assertIn("state.space->set_attract_pose(pose.eye, pose.target)", live)
+        # BCAM-17: the live frame no longer moves the attract eye; the map's saved pose is the static view
+        # until a moving view is established, so the per-frame update is an empty hook and never poses the space view.
+        hook = live[live.index("void MapMode::State::update_attract_camera("):live.index("bool MapMode::State::finalize_camera()")]
+        self.assertIn("BCAM-17", hook)
+        self.assertNotIn("set_attract_pose", live)
+        ready = (SRC / "map_mode_ready_population.cpp").read_text(encoding="utf-8")
+        self.assertIn(".saved_camera = state.attract_camera,", ready)
+        view = (SRC / "space_environment_view.cpp").read_text(encoding="utf-8")
+        self.assertIn("if (options_.saved_camera) {", view)
         self.assertIn("src/attract_camera.cpp", source_text("apps/viewer/CMakeLists.txt"))
 
     def test_stop_frees_the_battle_before_its_host_node(self):

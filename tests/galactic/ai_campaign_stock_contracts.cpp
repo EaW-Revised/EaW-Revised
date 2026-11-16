@@ -4,6 +4,7 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "../../src/campaign/galactic_ai_runtime.hpp"
 #include "galactic_ai_battle_listener.hpp"
+#include "eawr/campaign/mp_lobby_catalog.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include <algorithm>
@@ -21,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -745,6 +747,13 @@ void native_provider_isolation_contracts() {
             }
             expect(manager->provider_retired(fault) && manager->lifecycle().retired_providers.size() == 1,
                 "first/middle/last deterministic native fault retires exactly its actual provider");
+            // #6338: the retirement is visible: one warning line with the player, the tick and the diagnostic, however the fault came.
+            const auto retirement_lines = live->view.retirements ? live->view.retirements->snapshot() : std::vector<std::string>{};
+            expect(cp::galactic_ai_provider_retirements(live->view) == 1, "the campaign digest counts the one real retirement");
+            expect(retirement_lines.size() == 1 && retirement_lines[0].find("EAWR-GCAI-PROVIDER-0001 [warning]") == 0
+                && retirement_lines[0].find(" player=" + std::to_string(fault) + " ") != std::string::npos
+                && retirement_lines[0].find(" tick=") != std::string::npos && retirement_lines[0].find(" diagnostic=") != std::string::npos,
+                "a forced provider retirement logs exactly one warning line naming player, tick and diagnostic" + (retirement_lines.empty() ? std::string() : ": " + retirement_lines[0]));
             std::int64_t prior = 100;
             for (const auto& account : game.galaxy().snapshot()->player_economy()->players) {
                 const auto expected = account.player == fault ? 100 : 100 + 10 + prior - 100;
@@ -820,7 +829,7 @@ void native_provider_isolation_contracts() {
 // Supporting composition fixture, with explicitly empty gameplay inputs. All
 // retained owners are production implementations; this is not opponent proof.
 void real_factory_contracts(bool configured_cadence, bool invalid_freestore) {
-    std::string baseline;
+    std::string baseline, switch_baseline;
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
         auto executor = std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers);
         auto layout = galactic::synthetic_galaxy({.seed = 42, .planets = 2, .players = 2, .fleets_per_player = 0});
@@ -862,7 +871,8 @@ void real_factory_contracts(bool configured_cadence, bool invalid_freestore) {
         setup->lifecycle.categories = {{"OFFENSIVE", 1}};
         setup->lifecycle.xml = {
             {"data/xml/ai/players/fixture.xml", R"(<AIPlayerType><Name>Fixture</Name><Templates><Galactic>Default</Galactic></Templates><Difficulty_Adjustments><Normal>Normal</Normal></Difficulty_Adjustments></AIPlayerType>)"},
-            {"data/xml/ai/templates/fixture.xml", R"(<AITemplates><Default><Budget><Offensive>One</Offensive></Budget></Default></AITemplates>)"},
+            {"data/xml/ai/players/fixture2.xml", R"(<AIPlayerType><Name>Fixture2</Name><Templates><Galactic>Other</Galactic></Templates><Difficulty_Adjustments><Normal>Normal</Normal></Difficulty_Adjustments></AIPlayerType>)"},
+            {"data/xml/ai/templates/fixture.xml", R"(<AITemplates><Default><Budget><Offensive>One</Offensive></Budget></Default><Other><Budget><Offensive>One</Offensive></Budget></Other></AITemplates>)"},
             {"data/xml/ai/perceptualequations/fixture.xml", R"(<Equations><One>1</One><Timeline>Game.Timeline</Timeline><Budget>Variable_Self.BudgetFractionToBuild {Parameter_Type="BUDGET_TYPE"}</Budget><Category>Variable_Self.BudgetFractionToBuild {Parameter_Type="BUDGET_TYPE",Parameter_Category=1}</Category></Equations>)"},
             {"data/xml/difficultyadjustments.xml", R"(<Difficulty_Adjustments><Difficulty_Adjustment Name="Normal"/></Difficulty_Adjustments>)"}
         };
@@ -999,6 +1009,7 @@ void real_factory_contracts(bool configured_cadence, bool invalid_freestore) {
             return eawr::core::Result<cp::GalacticAiRuntimeProviders>::success(std::move(fresh));
         }));
         auto game = must(cp::GameSession::create(layout)); must(configuration->configure_native_ai(game));
+        const auto game_manager = managers.back(); // this session's lifecycle owner (later restores create their own)
         expect(births == 1, "fresh actor facts are prepared exactly once at live birth");
         expect(worlds.back()->evaluate_read_only(*engines.back(), "Timeline", 1, nullptr) == eawr::script::foc::ai::real(0),
             "fresh runtime publishes explicit global constructor timeline before manager initialization");
@@ -1166,6 +1177,40 @@ void real_factory_contracts(bool configured_cadence, bool invalid_freestore) {
         }
         if (baseline.empty()) baseline = continuation; else expect(baseline == continuation, "real serviced runtime equals on 1/2/4/8");
         if (!configured_cadence) {
+            // #6917: the control-switch story reward reaches the AI through the slot the runtime binds at install.
+            const auto slot = game.ai_control_switch_slot();
+            expect(slot && static_cast<bool>(*slot), "an installed native AI binds the control-switch slot");
+            const auto manager = game_manager.lock();
+            expect(manager && manager->player_type(1) == "FIXTURE", "the fixture player starts as its authored type");
+            const auto refused_type = must((*slot)(1, "Missing_Type"));
+            const auto refused_player = must((*slot)(2, "Fixture2"));
+            expect(refused_type.find("not defined") != std::string::npos && refused_player.find("no native AI instance") != std::string::npos
+                && manager->player_type(1) == "FIXTURE", "an undefined type or a faction without an AI instance is refused by name and changes nothing");
+            expect(must((*slot)(1, "fixture")).empty(), "the same type is accepted and its instance is reused");
+            for (unsigned frame = 0; frame < 3; ++frame) must(game.step(*executor));
+            expect(manager->player_type(1) == "FIXTURE", "naming the current type changes no AI state");
+            const auto accepted = must((*slot)(1, "Fixture2"));
+            expect(accepted.empty(), "a defined type is accepted (the slot answered: " + accepted + ")");
+            for (unsigned frame = 0; frame < 3; ++frame) must(game.step(*executor));
+            expect(manager->player_type(1) == "FIXTURE2" && manager->lifecycle().players.front().initialized,
+                "the player plays as the new type after the switch and its fresh instance has been initialized");
+            const auto switched_identities = ck::game_identities(layout);
+            const auto switched_saved = must(ck::save_game_checkpoint(game, switched_identities));
+            auto switched = must(ck::load_game_checkpoint(switched_saved, switched_identities, configuration->restore, *executor));
+            expect(managers.back().lock()->player_type(1) == "FIXTURE2", "a save after the switch restores the new type");
+            for (unsigned frame = 0; frame < 20; ++frame) {
+                const auto expected = must(game.step(*executor)).state_hash.get();
+                expect(must(switched.session.step(*executor)).state_hash.get() == expected, "the switched player continues equal to its restored copy");
+                continuation += expected;
+            }
+            {   // The slot is a runtime callback, not saved state: a restored session binds its own, and a later switch works in it.
+                const auto restored_slot = switched.session.ai_control_switch_slot();
+                expect(restored_slot && static_cast<bool>(*restored_slot), "a restored session binds the control-switch slot again at install");
+                expect(must((*restored_slot)(1, "Fixture")).empty(), "a restored session accepts a further switch");
+                for (unsigned frame = 0; frame < 3; ++frame) must(switched.session.step(*executor));
+                expect(managers.back().lock()->player_type(1) == "FIXTURE", "and applies it to its own restored AI state");
+            }
+            if (switch_baseline.empty()) switch_baseline = continuation; else expect(switch_baseline == continuation, "a switched player equals on 1/2/4/8 workers");
             refuse_outer_scheduler = true;
             auto faulted = must(cp::GameSession::create(layout)); must(configuration->configure_native_ai(faulted));
             const auto refused = faulted.step(*executor);
@@ -1241,6 +1286,77 @@ void prepared_restore_contracts() {
     }
 }
 
+// #7017: the staging dialog's level reaches the galactic AI players. A solo start maps the level to the entry the campaign's own
+// AI types author for it (the lobby's pick), and the AI selection then runs every AI player at that level; the human player is
+// never selected, so it gets no adjustment (CGS-26, WGA-177/178).
+void solo_difficulty_level_contracts() {
+    namespace ai = eawr::script::foc::ai;
+    eawr::data::galactic::GalacticData data;
+    for (const auto& name : {"Azure", "Copper", "Jade", "Rogue"}) {
+        eawr::data::galactic::Faction faction; faction.name = name;
+        faction.is_neutral = std::string_view(name) == "Rogue";
+        faction.enemies = {"Azure", "Copper", "Jade", "Rogue"};
+        data.factions.push_back(std::move(faction));
+    }
+    eawr::data::galactic::Planet planet; planet.name = "Home"; planet.behaviors = {"PLANET"};
+    planet.galactic_position = eawr::data::galactic::Position{};
+    data.planets.push_back(planet);
+    data.constants = {{"MaximumFleetMovementDistance", "10", eawr::sim::math::Fixed::from_integer(10).value()},
+        {"Fiscal_Cycle_Time_In_Secs", "45", eawr::sim::math::Fixed::from_integer(45).value()}};
+    eawr::data::galactic::Campaign campaign; campaign.name = "Solo_Levels"; campaign.locations = {"Home"}; campaign.planets = {"Home"};
+    campaign.ai_player_control = {{"Copper", "BuilderPlayer"}, {"Jade", "OtherPlayer"}};
+    data.campaigns.push_back(campaign);
+    cp::CampaignSetupOptions options; options.seed = 42;
+    for (galactic::PlayerId id = 1; id <= 4; ++id) {
+        options.players.push_back({{id, id, 0}, data.factions[id - 1].name, true});
+        options.seats.push_back({galactic::SeatId{id}, id, id == 1 ? galactic::SeatKind::human : galactic::SeatKind::ai,
+            id - 1, true, id == 1 ? 1U : 0U});
+    }
+    ai::AiData ai_data;
+    for (const auto& assignment : campaign.ai_player_control) {
+        ai::PlayerType type; type.name = assignment.name;
+        type.difficulty.emplace("EASY", "SOLO_EASY");
+        type.difficulty.emplace("NORMAL", "SOLO_NORMAL");
+        type.difficulty.emplace("HARD", "SOLO_HARD");
+        ai_data.players.emplace(ai::upper_case(type.name), std::move(type));
+    }
+    const cp::LobbyAiLevels levels = [&](std::string_view type) {
+        std::array<std::string, 3> out;
+        const auto found = ai_data.players.find(ai::upper_case(type));
+        if (found == ai_data.players.end()) return out;
+        std::size_t slot = 0;
+        for (const char* level : {"EASY", "NORMAL", "HARD"}) {
+            const auto mapped = found->second.difficulty.find(level);
+            if (mapped != found->second.difficulty.end()) out[slot] = mapped->second;
+            ++slot;
+        }
+        return out;
+    };
+    const auto plan = must(cp::plan_campaign_setup(data, {}, campaign.name, options));
+    for (const auto& [level, entry, expected] : {std::tuple<const char*, const char*, const char*>{"easy", "SOLO_EASY", "EASY"},
+            {"normal", "SOLO_NORMAL", "NORMAL"}, {"hard", "SOLO_HARD", "HARD"}, {"Hard", "SOLO_HARD", "HARD"},
+            {"", "SOLO_NORMAL", "NORMAL"}, {"nightmare", "SOLO_NORMAL", "NORMAL"}}) {
+        const auto name = cp::solo_difficulty_entry(data, campaign.name, level, levels);
+        expect(ai::upper_case(name) == entry, "#7017 the staging level maps to the entry the campaign's AI types author for it");
+        const auto selected = must(cp::select_live_galactic_ai_players(data, plan, ai_data, name));
+        expect(selected.size() == 2 && selected[0].difficulty == expected && selected[1].difficulty == expected,
+            "#7017 every galactic AI player of a solo start runs at the chosen level");
+        expect(std::none_of(selected.begin(), selected.end(), [](const auto& player) { return player.player == galactic::PlayerId{1}; }),
+            "#7017 the human player is never given an AI adjustment");
+    }
+    // A campaign whose types author nothing for the level (or no list at all) plays the level's stock name (CGS-26).
+    expect(cp::solo_difficulty_entry(data, campaign.name, "hard", {}) == "Hard_Default"
+            && cp::solo_difficulty_entry(data, campaign.name, "easy", {}) == "Easy_Default"
+            && cp::solo_difficulty_entry(data, campaign.name, "normal", {}) == "Normal_Default",
+        "#7017 without authored entries the three levels use the stock names");
+    expect(cp::solo_difficulty_entry(data, "No_Such_Campaign", "easy", levels) == "Easy_Default",
+        "#7017 an unknown campaign name falls back to the stock name, it never throws");
+    ai_data.players.at("BUILDERPLAYER").difficulty.erase("EASY");
+    ai_data.players.at("OTHERPLAYER").difficulty.erase("EASY");
+    expect(cp::solo_difficulty_entry(data, campaign.name, "easy", levels) == "Easy_Default"
+            && cp::solo_difficulty_entry(data, campaign.name, "hard", levels) == "SOLO_HARD",
+        "#7017 a level the types do not author falls back alone, the others keep their authored entries");
+}
 void authored_selection_contracts() {
     namespace ai = eawr::script::foc::ai;
     eawr::data::galactic::GalacticData data;
@@ -1319,6 +1435,20 @@ void authored_selection_contracts() {
     const auto plan = must(cp::plan_campaign_setup(data, {}, campaign.name, options));
     expect(!cp::select_live_galactic_ai_players(data, plan, ai_data, "Missing_Adjustment"),
         "missing difficulty mapping refuses instead of assuming Normal");
+    // #6858: retail has no adjustment-name matching: the level is Easy/Normal/Hard and a type that authors no adjustment for it
+    // plays on the dummy one. A campaign whose types author only a mod's own names still starts at the level a stock name
+    // ("Normal_Default") stands for; a name that is neither authored nor a stock name still refuses (above).
+    for (const auto& [name, expected] : {std::pair<const char*, const char*>{"Normal_Default", "NORMAL"}, {"Easy_Default", "EASY"},
+            {"hard_default", "HARD"}}) {
+        selected = must(cp::select_live_galactic_ai_players(data, plan, ai_data, name));
+        expect(selected.size() == 2 && selected[0].difficulty == expected && selected[1].difficulty == expected,
+            "#6858 a stock adjustment name no selected type authors resolves to its stock level for a campaign");
+    }
+    ai_data.players.at("BUILDERPLAYER").difficulty.emplace("NORMAL", "NORMAL_DEFAULT");
+    ai_data.players.at("OTHERPLAYER").difficulty.emplace("EASY", "NORMAL_DEFAULT");
+    selected = must(cp::select_live_galactic_ai_players(data, plan, ai_data, "Normal_Default"));
+    expect(selected.size() == 2 && selected[0].difficulty == "NORMAL" && selected[1].difficulty == "NORMAL",
+        "#6858 conflicting authored levels of a stock name resolve by the stock name instead of refusing");
 }
 namespace {
 struct MpSelectionFixture {
@@ -1441,5 +1571,6 @@ void mp_ai_refuses_unsupported_playable_inputs() {
         "GCMP-AI-04 refuses an unsupported global difficulty without assuming Normal");
     fixture.ai.players.at("COPPER_MOD_CONTROLLER").difficulty.emplace("NORMAL", "MOD_CHALLENGE");
     expect(!fixture.select(), "GCMP-AI-04 refuses ambiguous selected-type difficulty mappings");
+    expect(!fixture.select("Normal_Default"), "#6858 the multiplayer extension keeps refusing: a stock name is never assumed for a room");
 }
 } // namespace galactic_campaign_stock_test

@@ -1,5 +1,7 @@
 #include "tactical_hud_internal.hpp"
 
+#include "eawr/presentation/ui/movie_letterbox.hpp"
+
 namespace eawr::presentation::godot_backend {
 using tactical_hud_detail::text;
 using tactical_hud_detail::rect2;
@@ -311,28 +313,42 @@ void TacticalHud::set_beacon(const bool enabled, const bool targeting) {
 }
 void TacticalHud::set_movie_mode(const bool on, const bool immediate) {
     auto& state = *state_;
-    state.movie = on && state.movie_height.has_value();
-    if (!on && immediate) state.movie_band_progress = 0.0F;
-    if (state.mask) state.mask->set_visible(!state.overview && !state.movie);
+    state.bands.set_movie(on && state.movie_height.has_value(), immediate);
+    refresh_cinematic();
+    if (!state.bands.wanted() && immediate) advance_movie_bands(0.0);
+}
+// legacy #6634 (HCB-75): a tactical script's Letter_Box_In / Letter_Box_Out. The same bands and the same hidden game GUI as the
+// battle camera (HCB-11c): they stay up while either the camera or the script asks for them. Without a readable authored height
+// there are no bands (one diagnostic was kept when the HUD was built) and the GUI stays shown.
+void TacticalHud::set_script_letterbox(const bool on, const double seconds) {
+    auto& state = *state_;
+    if (!state.movie_height) return;
+    state.bands.request_script(on, seconds);
+    refresh_cinematic();
+    if (seconds == 0.0) advance_movie_bands(0.0); // at once: the anchors follow before the next frame
+}
+// The GUI follows the target at once; the bands follow the slide (advance_movie_bands).
+void TacticalHud::refresh_cinematic() {
+    auto& state = *state_;
+    const bool cinematic = state.bands.wanted();
+    if (state.mask) state.mask->set_visible(!state.overview && !cinematic);
     if (state.movie_bands) {
         // CanvasLayer supplies no parent Control rectangle for full-rect anchors.
         // Keep the band's parent at the current viewport size, including resizes.
         state.movie_bands->set_position(Vector2{});
         state.movie_bands->set_size(state.movie_bands->get_viewport()->get_visible_rect().size);
-        state.movie_bands->set_visible(state.movie || state.movie_band_progress > 0.0F);
+        state.movie_bands->set_visible(state.bands.visible());
     }
-    if (state.overlay) state.overlay->set_visible(!state.movie);
-    if (!on && immediate) advance_movie_bands(0.0);
+    if (state.overlay) state.overlay->set_visible(!cinematic);
 }
 void TacticalHud::advance_movie_bands(const double delta) {
     auto& state = *state_;
     if (!state.movie_bands || !state.movie_height) return;
-    const float step = static_cast<float>(std::max(delta, 0.0) / 0.5);
-    state.movie_band_progress = std::clamp(state.movie_band_progress + (state.movie ? step : -step), 0.0F, 1.0F);
-    const float height = *state.movie_height * state.movie_band_progress;
+    state.bands.advance(delta);
+    const float height = model::movie_letterbox_band_fraction(*state.movie_height, state.bands.progress());
     if (auto* top = Object::cast_to<Control>(state.movie_bands->get_child(0))) top->set_anchor(SIDE_BOTTOM, height, true);
     if (auto* bottom = Object::cast_to<Control>(state.movie_bands->get_child(1))) bottom->set_anchor(SIDE_TOP, 1.0F - height, true);
-    state.movie_bands->set_visible(state.movie || state.movie_band_progress > 0.0F);
+    state.movie_bands->set_visible(state.bands.visible());
 }
 void TacticalHud::set_order_handler(std::function<void(std::string_view)> handler) {
     state_->order_handler = std::move(handler);
@@ -378,6 +394,69 @@ void TacticalHud::set_retreat(const model::RetreatButtonView& view) {
     }
 }
 
+void TacticalHud::set_superlaser_handler(std::function<void()> handler) { state_->sl_handler = std::move(handler); }
+void TacticalHud::set_superlaser_switch(const model::SuperlaserSwitchView& view) {
+    auto& state = *state_;
+    if (state.sl_view == view) return;
+    state.sl_view = view;
+    if (state.sl_button) {
+        state.sl_button->set_visible(view.visible && !view.card_slot);
+        state.sl_button->set_special_soft_disabled(!view.enabled);
+        state.sl_button->set_icon_texture(view.enabled ? state.sl_ready : state.sl_base);
+    }
+    if (state.sl_card) {
+        state.sl_card->set_visible(view.visible && view.card_slot);
+        state.sl_card->set_special_soft_disabled(!view.enabled);
+    }
+    if (state.sl_bar) {
+        state.sl_bar->set_visible(view.visible && !view.card_slot);
+        state.sl_bar->completion = view.recharge;
+        state.sl_bar->queue_redraw();
+    }
+    if (state.sl_dial) {
+        state.sl_dial->completion = view.recharge;
+        state.sl_dial->queue_redraw();
+    }
+}
+
+void TacticalHud::set_superweapon_handler(std::function<void()> handler) { state_->ds_handler = std::move(handler); }
+void TacticalHud::note_superweapon_click(const model::SuperweaponSwitchFeedback feedback) {
+    const auto index = static_cast<std::size_t>(feedback);
+    if (index < state_->ds_feedback.size()) ++state_->ds_feedback[index];
+}
+void TacticalHud::probe_superweapon_switch() {
+    if (state_->hud != nullptr) state_->hud->set_probe([state = state_.get()] { state->run_switch_probe(); });
+}
+const model::SuperweaponSwitchView& TacticalHud::superweapon_switch() const noexcept { return state_->ds_view; }
+model::SuperweaponSwitchArt TacticalHud::superweapon_art() const noexcept {
+    const auto& look = state_->shell.deathstar_switch;
+    if (!look) return {};
+    return {static_cast<std::uint32_t>(look->button.alternates.size()), static_cast<std::uint32_t>(std::max(1.0F, look->anim_fps))};
+}
+void TacticalHud::set_superweapon_switch(const model::SuperweaponSwitchView& view) {
+    auto& state = *state_;
+    if (state.ds_view == view) return;
+    state.ds_view = view;
+    if (state.ds_button) {
+        state.ds_button->set_visible(view.visible);
+        state.ds_button->set_special_soft_disabled(!view.enabled);
+        const auto index = static_cast<std::size_t>(view.icon_frame + 1);
+        if (index < state.ds_icons.size()) state.ds_button->set_icon_texture(state.ds_icons[index]);
+        const auto& key = state.ds_tooltips[static_cast<std::size_t>(view.tooltip)];
+        const data::ui::TextDatabase empty;
+        data::ui::TextLookup lookup(state.text_database ? *state.text_database : empty);
+        state.ds_button->set_tooltip_text(key.empty() ? String() : text(data::ui::to_utf8(lookup.text(key))));
+    }
+    if (state.ds_readout) {
+        state.ds_readout->set_visible(view.countdown_visible);
+        if (state.ds_label) {
+            state.ds_label->set_text(text(view.countdown_text));
+            const auto& c = view.countdown_colour;
+            state.ds_label->set_colour(Color(c[0] / 255.0F, c[1] / 255.0F, c[2] / 255.0F, c[3] / 255.0F));
+        }
+    }
+}
+
 void TacticalHud::set_pause_notice(const std::string& text) {
     if (state_->overlay) state_->overlay->set_pause_notice(String::utf8(text.c_str()));
 }
@@ -415,7 +494,7 @@ void TacticalHud::set_overview(const bool on) {
     if (state.overview == on) return;
     state.overview = on;
     // V-5b: the hit mask carries the shell and everything placed on it; hidden, it takes no input.
-    if (state.mask != nullptr) state.mask->set_visible(!on && !state.movie);
+    if (state.mask != nullptr) state.mask->set_visible(!on && !state.bands.wanted());
     if (state.overlay != nullptr) state.overlay->show_paused(state.time_view.paused && !on);
 }
 
@@ -468,6 +547,8 @@ std::optional<std::array<float, 2>> TacticalHud::control_point(const std::string
     if (name == "movie_camera" || name == "b_camera_t") return button_centre(state.movie_button);
     if (name == "beacon" || name == "b_special_weapon2") return button_centre(state.beacon_button);
     if (name == "special_weapon" || name == "b_special_weapon") return button_centre(state.special_button);
+    if (name == "sl_switch") return button_centre(state.sl_view.card_slot ? state.sl_card : state.sl_button);
+    if (name == "deathstar_switch") return button_centre(state.ds_button);
     if (name == "retreat" || name == "b_retreat") return button_centre(state.retreat_button);
     if (const auto found = state.order_buttons.find(name); found != state.order_buttons.end()) return button_centre(found->second);
     if (state.production != nullptr) {

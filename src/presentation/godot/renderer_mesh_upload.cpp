@@ -122,13 +122,13 @@ void GodotRenderer::Impl::note_shared_census(const detail::TextureOwnerKind owne
 }
 
 [[nodiscard]] bool GodotRenderer::Impl::acquire_texture(RenderingServer& rendering, const assets::Texture& source,
-    RID& target, std::vector<detail::GpuItem>& items) {
+    RID& target, std::vector<detail::GpuItem>& items, const detail::GpuItem* known) {
     core::load_profile::Scope upload_scope(core::load_profile::Phase::texture_upload);
     // GM-01 (docs/performance/gpu-memory.md): one GPU texture per content;
     // every resource that samples the same pixels shares it. Textures are
     // never written after creation, except a GM-04 rebuild of the whole
     // texture at a smaller mip, which every sharer wants alike.
-    detail::GpuItem item = detail::texture_item(source);
+    detail::GpuItem item = known != nullptr ? *known : detail::texture_item(source);
     // Unshared, each request is its own pool entry under a serial.
     if (!detail::texture_sharing()) item.check = ++unshared_textures_;
     if (const auto found = texture_pool_.find({item.key, item.check}); found != texture_pool_.end()) {
@@ -292,6 +292,9 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
     target.bone_count = source.bones.size();
     target.skin_used_bones.assign(source.bones.size(), 0);
     target.skinned = false;
+    target.census_rigid_surfaces = target.census_palette_surfaces = target.census_plain_surfaces = target.census_rigid_bones = 0;
+    target.rigid_bone = -1;
+    std::vector<std::uint8_t> census_rigid_bone_seen(source.bones.size(), 0);
     target.hidden_geometry_collapses = detail::hidden_skin_geometry_collapses(source);
     target.billboard_modes.clear();
     target.bone_parents.clear();
@@ -334,6 +337,12 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
             if (rigid_skinned
                 && static_cast<std::size_t>(mesh.bone) >= source.bones.size()) return false;
             has_surface = true;
+            if (palette_skinned) ++target.census_palette_surfaces;
+            else if (rigid_skinned) {
+                ++target.census_rigid_surfaces;
+                auto& seen = census_rigid_bone_seen[static_cast<std::size_t>(mesh.bone)];
+                if (!seen) { seen = 1; ++target.census_rigid_bones; }
+            } else ++target.census_plain_surfaces;
             if (render_categories::ablation != "off") target.diagnostic_surface_names.emplace_back(mesh.diagnostic_name);
             if (render_categories::ablation != "off") target.category_triangles += submesh.indices.size() / 3;
             if (!detail::prepare_rigid_rest_pose(source.original, rigid_skinned, rest)) return false;
@@ -481,6 +490,12 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
             mesh_bytes += detail::surface_gpu_bytes(submesh.vertices.size(), submesh.indices.size(),
                 palette_skinned || rigid_skinned, authored_binormals);
         }
+    }
+    // One rigid bone for the whole model: every surface rigid, on the same bone.
+    if (target.census_rigid_surfaces > 0 && target.census_palette_surfaces == 0 && target.census_plain_surfaces == 0
+        && target.census_rigid_bones == 1) {
+        for (std::size_t bone = 0; bone < census_rigid_bone_seen.size(); ++bone)
+            if (census_rigid_bone_seen[bone]) target.rigid_bone = static_cast<std::int32_t>(bone);
     }
     if (!resident) return has_surface;
     if (!target.mesh.is_valid()) return false;

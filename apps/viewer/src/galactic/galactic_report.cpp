@@ -197,6 +197,14 @@ void GalacticMode::State::write_report_controls(std::ostringstream& output) cons
     output << ",\n  \"campaign_score\": " << (campaign_score ? campaign_score->report_json() : "null")
            << ",\n  \"campaign_score_consumed\": " << (score_consumed ? "true" : "false")
            << ",\n  \"campaign_score_failure\": " << json(score_failure);
+    output << ",\n  \"story_summary\": " << (story_summary ? story_summary->report_json() : "null");
+    output << ",\n  \"pause_banner\": " << (pause_banner ? pause_banner->report_json() : "null");
+    output << ",\n  \"cinematic_tour\": " << tour_report_json();
+    output << ",\n  \"story_letterbox\": {\"on\": " << (story_hud.letterbox_on() ? "true" : "false")
+           << ", \"progress\": " << story_hud.letterbox_progress()
+           << ", \"band_height\": " << story_band_height.value_or(-1.0F)
+           << ", \"bands_visible\": " << (story_bands && story_bands->is_visible() ? "true" : "false")
+           << ", \"hud_visible\": " << (hud && hud->is_visible() ? "true" : "false") << "}";
     output << ",\n  \"save_controls\": " << (save_controls ? save_controls->report_json() : "null");
     output << ",\n  \"hud_work\": {\"updates\": " << hud_updates
            << ", \"update_nanoseconds\": " << hud_update_nanoseconds
@@ -324,6 +332,17 @@ void GalacticMode::State::write_report_production(std::ostringstream& output) co
                << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
     }
     output << "]}";
+    // #7177: the hero status icons' tooltip (WGSI-8).
+    output << ",\n  \"hero_tooltip\": {\"planet\": " << hero_hover_planet << ", \"kind\": " << static_cast<int>(hero_hover_kind)
+           << ", \"visible\": " << (hero_tooltip && hero_tooltip->is_visible_in_tree() ? "true" : "false") << ", \"cells\": [";
+    std::size_t hero_written{};
+    if (hero_tooltip && hero_tooltip->is_visible_in_tree()) for (const auto& cell : hero_tooltip_cells) {
+        if (!cell.type || !cell.icon->is_visible_in_tree()) continue;
+        const auto rect = cell.icon->get_global_rect();
+        output << (hero_written++ ? ", " : "") << "{\"type\": " << cell.type << ", \"rect\": [" << rect.position.x << ", "
+               << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
+    }
+    output << "]}";
 }
 
 void GalacticMode::State::write_report_command_bar(std::ostringstream& output) const {
@@ -334,6 +353,7 @@ void GalacticMode::State::write_report_command_bar(std::ostringstream& output) c
            << ", \"population\": " << json(player_hud.population)
            << ", \"income_tooltip\": " << json(income_tooltip)
            << ", \"income_layer_visible\": " << (income_layer_visible ? "true" : "false")
+           << ", \"shown\": " << (command_bar && command_bar->is_visible_in_tree() ? "true" : "false")
            << ", \"ground_enabled\": " << (selected_hud.ground_enabled ? "true" : "false")
            << ", \"space_tab\": " << (selected_hud.space_tab ? "true" : "false")
            << ", \"technology_visible\": " << (command_faction == presentation::ui::HudFaction::underworld ? "false" : "true")
@@ -347,6 +367,7 @@ void GalacticMode::State::write_report_command_bar(std::ostringstream& output) c
         const auto hit_position = rect.position + hit.position;
         output << (controls_written++ ? ", " : "") << "{\"name\": " << json(name)
                << ", \"enabled\": " << (button->is_disabled() ? "false" : "true")
+               << ", \"pressed\": " << (button->is_pressed() ? "true" : "false")
                // Drawn: the active tab without selected art keeps its hit area but is not drawn (#5857).
                << ", \"visible\": " << (button->is_visible() && button->get_self_modulate().a > 0.0F ? "true" : "false")
                << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", "
@@ -471,6 +492,7 @@ void GalacticMode::State::write_report_panels(std::ostringstream& output) const 
         encyclopedia_body += "\n" + encyclopedia_panel->get_status().disabled_reason;
     output << ",\n  \"encyclopedia\": {\"type\": " << encyclopedia_type
         << ", \"planet_ability\": " << (encyclopedia_ability ? "true" : "false")
+        << ", \"planet_weather\": " << (encyclopedia_weather ? "true" : "false")
         << ", \"visible\": " << (encyclopedia_panel && encyclopedia_panel->is_visible() ? "true" : "false")
         << ", \"alpha\": " << encyclopedia_timing.alpha
         << ", \"title\": " << json(encyclopedia_panel ? encyclopedia_panel->get_content().name : std::string{})
@@ -573,6 +595,8 @@ void GalacticMode::State::write_report_scene(std::ostringstream& output) const {
                << ", \"scenario\": " << scenes[index].scenario_id
                << ", \"instances\": " << scenes[index].instances.size()
                << ", \"submitted_instances\": " << scenes[index].submitted_instances
+               << ", \"refresh_requests\": " << scene_refresh.requests(index)
+               << ", \"cache_valid\": " << (scene_refresh.valid(index) ? "true" : "false")
                << ", \"resident_instances\": " << (index == 0 ? (renderer ? renderer->lifecycle_counts().instances : 0)
                    : (scenes[index].renderer ? scenes[index].renderer->lifecycle_counts().instances : 0))
                << ", \"colour_probe\": ";
@@ -682,6 +706,11 @@ void GalacticMode::State::write_report_galaxy(std::ostringstream& output) const 
             output << "}";
         }
         output << "],\n  \"fleets\": [";
+        // #6940: the model path a fleet marker draws (WGP-16), empty when it has no uploaded model.
+        const auto fleet_model_path = [&](const galactic_view::ObjectId fleet) -> std::string {
+            const auto chosen = planet_models.find(fleet);
+            return chosen != planet_models.end() && chosen->second ? models[*chosen->second].logical_path : std::string{};
+        };
         for (std::size_t index = 0; index < view.fleets.size(); ++index) {
             const galactic_view::FleetMarker& marker = view.fleets[index];
             output << (index ? ",\n    " : "\n    ") << "{\"fleet\": " << marker.fleet << ", \"planet\": "
@@ -690,6 +719,7 @@ void GalacticMode::State::write_report_galaxy(std::ostringstream& output) const 
                    << (marker.transit ? "true" : "false")
                    << ", \"world_model_instances\": " << std::count_if(instance_planets.begin(), instance_planets.end(),
                        [&](const auto& instance) { return instance.second == marker.fleet; })
+                   << ", \"model\": " << json(fleet_model_path(marker.fleet))
                    << ", \"fleets\": " << marker.fleets << ", \"members\": "
                    << marker.members << ", \"colour\": " << rgb(marker.colour) << ", \"position\": "
                    << point(marker.position) << ", \"destination\": " << marker.destination
@@ -729,7 +759,8 @@ void GalacticMode::State::write_report_planet_hud(std::ostringstream& output) co
     }
     output << "], \"status_icons\": [";
     std::size_t status_written = 0;
-    for (const auto& [kind, icons] : {std::pair{"build", &production_icons}, std::pair{"corruption_info", &corruption_info_icons}}) {
+    for (const auto& [kind, icons] : {std::pair{"build", &production_icons}, std::pair{"corruption_info", &corruption_info_icons},
+        std::pair{"weather", &planet_weather_icons}, std::pair{"bonus", &planet_bonus_icons}}) {
         for (const auto& [id, image] : *icons) {
             const auto rect = image->get_global_rect();
             output << (status_written++ ? ", " : "") << "{\"planet\": " << id << ", \"kind\": " << json(kind)
@@ -739,6 +770,18 @@ void GalacticMode::State::write_report_planet_hud(std::ostringstream& output) co
                 output << ", \"anchor\": [" << anchor->second.x << ", " << anchor->second.y << "]";
             output << "}";
         }
+    }
+    for (const auto& [key, image] : status_effect_icons) {
+        const auto rect = image->get_global_rect();
+        output << (status_written++ ? ", " : "") << "{\"planet\": " << key.first << ", \"kind\": \"effect_" << static_cast<unsigned>(key.second)
+               << "\", \"visible\": " << (image->is_visible() ? "true" : "false")
+               << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
+    }
+    for (const auto& [id, label] : planet_corruption_labels) {
+        output << (status_written++ ? ", " : "") << "{\"planet\": " << id << ", \"kind\": \"corruption_text\""
+               << ", \"visible\": " << (label->is_visible() ? "true" : "false") << ", \"text\": " << json(std::string(label->get_text().utf8().get_data()))
+               << ", \"rect\": [" << label->get_global_rect().position.x << ", " << label->get_global_rect().position.y << ", "
+               << label->get_global_rect().size.x << ", " << label->get_global_rect().size.y << "]}";
     }
     output.precision(previous_precision);
     output << "], \"intelligence\": [";
@@ -752,6 +795,8 @@ void GalacticMode::State::write_report_planet_hud(std::ostringstream& output) co
                << ", \"income\": " << optional_number(facts.visible_income)
                << ", \"apparent_owner\": " << optional_number(facts.apparent_owner)
                << ", \"apparent_allegiance_owner\": " << optional_number(facts.apparent_allegiance_owner)
+               << ", \"apparent_allegiance_none\": " << (facts.apparent_allegiance_none ? "true" : "false")
+               << ", \"faction\": " << json(facts.observed_faction)
                << ", \"ground\": " << optional_number(facts.ground_level)
                << ", \"space\": " << optional_number(facts.space_level)
                << ", \"structures\": " << optional_number(facts.structures)
@@ -781,6 +826,12 @@ void GalacticMode::State::write_report_planet_hud(std::ostringstream& output) co
 void GalacticMode::State::write_report_battle_proof(std::ostringstream& output) const {
     output << ",\n  \"tactical_admission\": " << galactic_view::battle_tactical_report_json(
         battle_dialog ? battle_dialog->view() : galactic_view::BattleDialogView{}, json);
+    output << ",\n  \"arrival_cinematic\": {\"starts\":" << arrival_cinematic_starts
+           << ",\"dropped_events\":" << arrival_dropped_events << ",\"focus_losses\":" << arrival_focus_losses << ",\"gate\":[";
+    for (std::size_t index = 0; index < arrival_gate_log.size(); ++index)
+        output << (index ? "," : "") << "{\"ready_tick\":" << arrival_gate_log[index].first << ",\"admitted\":"
+               << (arrival_gate_log[index].second ? "true" : "false") << "}";
+    output << "]}";
     output << ",\n  \"space_cycle_proof\": {\"mode\": " << json(options.space_cycle_proof)
            << ",\"moved\":" << (proof_move_submitted ? "true" : "false")
            << ",\"merge_orders\":" << proof_merge_orders

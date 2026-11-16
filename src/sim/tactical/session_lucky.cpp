@@ -68,8 +68,7 @@ void TacticalSession::Impl::lock_lucky_shot(LiveUnit& unit, const EntityId targe
     slot->expires_tick = 0;
     slot->target = target;
     slot->target_hardpoint = hardpoint;
-    unit.state.order = Order{.kind = OrderKind::attack, .issued_tick = tick, .destination = {},
-        .target = target, .hardpoint = hardpoint, .through_hazards = false};
+    session_detail::Tick::replace_order(unit, AttackPayload{target, hardpoint}, tick);
     if (unit.combat) {
         unit.combat->attack_target = target;
         unit.combat->attack_hardpoint = hardpoint;

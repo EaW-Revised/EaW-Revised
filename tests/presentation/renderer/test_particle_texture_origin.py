@@ -163,5 +163,28 @@ class PartialMipUploadGraphical(unittest.TestCase):
                     self.assertGreater(red, 100, "uploaded synthetic red texture must be visible")
 
 
+class ParticleTextureChainStructure(unittest.TestCase):
+    def test_every_particle_texture_load_completes_the_mip_chain(self):
+        # MT-03 (docs/behaviour/texture-mip-upload.md): a single-level mod sprite must not reach the GPU as one level (sparkling distant sprites).
+        # One helper loads it; every particle texture resolver goes through it. A new resolver that calls
+        # assets::load_texture in these files fails here.
+        helper = (ROOT / "apps/viewer/src/particle_texture_load.hpp").read_text(encoding="utf-8")
+        self.assertIn("assets::extend_mip_chain(loaded.value(), assets::ChainKind::colour)", helper)
+        self.assertLess(helper.index("auto loaded = assets::load_texture("),
+                        helper.index("assets::extend_mip_chain(loaded.value()"))
+        resolvers = ("battle_effects_prepare.cpp", "debris_props.cpp", "unit_emitters_prepare.cpp",
+                     "map_mode_particles.cpp", "galactic/corruption_particles.cpp", "effect_mode_probe.cpp")
+        for name in resolvers:
+            text = (ROOT / "apps/viewer/src" / name).read_text(encoding="utf-8")
+            self.assertNotIn("assets::load_texture(", text, f"{name} loads a particle texture without the chain")
+            self.assertEqual(text.count("load_particle_texture("), 1, name)
+        # The battle effects resolve (decode and chain) every texture of every effect their looks reference at load,
+        # so the first detonation or hit never builds a chain on a battle frame.
+        effects = (ROOT / "apps/viewer/src/battle_effects_prepare.cpp").read_text(encoding="utf-8")
+        warm = effects[effects.index("void BattleEffects::prewarm_effect_programs()"):]
+        self.assertIn("resolve_texture(plan.texture)", warm)
+        self.assertIn("resolve_texture(plan.normal_texture)", warm)
+
+
 if __name__ == "__main__":
     unittest.main()

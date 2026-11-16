@@ -126,6 +126,23 @@ void MapMode::update_retreat_countdown(const sim::tactical::RetreatState& state,
         ui::retreat_countdown_line(cache.text, state, tick, sim::tactical::logical_frames_per_second), cache.presentation.colour);
 }
 
+bool MapMode::retreat_cinematic_ready() { return state_->retreat_cinematic_ready(); }
+void MapMode::update_retreat_cinematic(const sim::tactical::RetreatState& state, const std::uint64_t tick) {
+    state_->update_retreat_cinematic(state, tick);
+}
+void MapMode::end_retreat_cinematic() { state_->end_retreat_cinematic(); }
+bool MapMode::retreat_cinematic_active() const noexcept { return state_->retreat_cinematic.active; }
+bool MapMode::arrival_cinematic_ready() { return state_->arrival_cinematic_ready(); }
+void MapMode::update_arrival_cinematic(const ArrivalRequest& request, const std::uint64_t tick) {
+    state_->update_arrival_cinematic(request, tick);
+}
+void MapMode::end_arrival_cinematic() { state_->end_arrival_cinematic(); }
+bool MapMode::arrival_cinematic_active() const noexcept { return state_->arrival_cinematic.active; }
+std::uint32_t MapMode::arrival_focus_losses() const noexcept { return state_->arrival_cinematic.focus_losses; }
+std::optional<std::uint32_t> MapMode::arrival_cinematic_frame() const noexcept {
+    return state_->arrival_cinematic.active ? state_->arrival_cinematic.frame : std::nullopt;
+}
+
 void MapMode::retreat_refused(const sim::tactical::RetreatRefusal refusal) {
     if (state_->battle_audio) state_->battle_audio->retreat_refused(refusal);
 }

@@ -72,7 +72,8 @@ enum class Relation : std::uint8_t { own, other, neutral };
 struct PlanetView final {
     ObjectId id{};
     std::string name;
-    std::string model;
+    std::string model; // what is drawn: the destroyed model while the planet is destroyed and the type authors one
+    std::string destroyed_model; // the type's authored destroyed-state model (empty: none), preloaded with the scene
     Vec3 position;
     float scale{1.0F};
     std::optional<PlayerId> owner;
@@ -166,6 +167,10 @@ inline constexpr float orbit_max_distance = 6000.0F;
 inline constexpr float overview_zoom_out_max_factor = 1.8F;
 inline constexpr float overview_zoom_step = 1.12F;
 inline constexpr float overview_zoom_max_distance = 8000.0F;
+// WGP-194: the two GUI events the original starts itself on the map, named by no XML tag (debug build; stock
+// sfxeventsgui.xml defines both). A planet becoming selected plays the first; each planet zoom flight, in or out, the second.
+inline constexpr std::string_view planet_select_cue = "Planet_Dialog_Appears";
+inline constexpr std::string_view planet_zoom_cue = "GUI_Zoom";
 
 // Frames the whole galaxy at the given aspect and vertical field of view.
 [[nodiscard]] OrbitCamera overview_camera(const GalaxyView& view, float aspect, float vertical_fov_degrees);
@@ -245,6 +250,8 @@ public:
     // notch; zooming in at the authored pullback (the limit) returns false so the caller starts the planet zoom.
     bool zoom_overview(float direction);
     [[nodiscard]] float overview_zoom() const noexcept { return overview_zoom_; }
+    // Accepted planet zoom flights (inward or outward) started so far; the presenter plays the zoom cue once per new one.
+    [[nodiscard]] std::uint64_t zoom_flights() const noexcept { return zoom_flights_; }
     [[nodiscard]] OrbitCamera pose() const;
     [[nodiscard]] CameraLighting lighting() const;
     [[nodiscard]] CameraState state() const noexcept { return state_; }
@@ -268,6 +275,7 @@ private:
     float tilt_offset_{};
     float yaw_offset_{};
     float overview_zoom_{1.0F};
+    std::uint64_t zoom_flights_{};
 };
 
 // WGUI-90: centred radar-local coordinates, independent of camera bounds.

@@ -1,4 +1,5 @@
 #include "eawr/data/ui/dialog_catalog.hpp"
+#include "eawr/assets/asset_name_resolver.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/core/text.hpp"
 
@@ -503,17 +504,7 @@ CaptionKind classify_caption(const std::string_view text, const TextDatabase& da
 
 TextureProbe vfs_texture_probe(const vfs::Vfs& filesystem) {
     return [&filesystem](const std::string_view texture) {
-        std::string_view stem = texture;
-        for (const std::string_view suffix : {".tga", ".dds"}) {
-            if (stem.size() > suffix.size() && iequals(stem.substr(stem.size() - suffix.size()), suffix)) {
-                stem.remove_suffix(suffix.size());
-                break;
-            }
-        }
-        for (const std::string_view suffix : {".tga", ".dds"}) {
-            if (filesystem.stat("Data/Art/Textures/" + std::string(stem) + std::string(suffix))) return true;
-        }
-        return false;
+        return !assets::resolve_texture(filesystem, texture, "dialog catalog audit").empty();
     };
 }
 

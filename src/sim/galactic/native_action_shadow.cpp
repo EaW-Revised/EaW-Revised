@@ -656,6 +656,46 @@ core::Result<GalacticSession::NativeInvasionReceipt> GalacticSession::stage_nati
 std::shared_ptr<const GalacticSnapshot> GalacticSession::NativeActionShadow::snapshot() const { return data_->player ? data_->view() : nullptr; }
 const Fleet* GalacticSession::NativeActionShadow::fleet(FleetId id) const { return data_->fleet(id); }
 const CensusObject* GalacticSession::NativeActionShadow::actor(EntityId id) const { return data_->actor(id); }
+core::Result<void> GalacticSession::NativeActionShadow::stage_script_removal(EntityId id) {
+    if (script_removed(id)) return core::Result<void>::success();
+    const auto* actor = data_->actor(id);
+    if (!actor) actor = created_object(id);
+    if (const auto* fleet = data_->fleet(id); fleet && !fleet->members.empty()
+        && std::all_of(fleet->members.begin(), fleet->members.end(), [&](const auto& member) { return script_removed(member.id); })) {
+        detach(); data_->script_removed.insert(id); return core::Result<void>::success();
+    }
+    if (!id || planet(id) || data_->player || data_->work.requests >= data_->max_requests
+        || !actor || actor->dead || actor->delete_pending)
+        return invalid<void>("script removal requires a live object in the current batch");
+    detach();
+    data_->script_removed.insert(id);
+    Data::ScriptStep step; step.kind = Data::ScriptStep::Kind::despawn; step.actor = id;
+    data_->script_steps.push_back(std::move(step));
+    ++data_->work.requests;
+    return core::Result<void>::success();
+}
+bool GalacticSession::NativeActionShadow::script_removed(EntityId id) const noexcept {
+    std::size_t remaining = data_->base->actor_records().size() + data_->actor_changes.size() + 1;
+    while (id && remaining--) {
+        if (data_->script_removed.contains(id)) return true;
+        const auto* actor = data_->actor(id);
+        if (!actor || actor->container == id) return false;
+        id = actor->container;
+    }
+    return false;
+}
+bool GalacticSession::NativeActionShadow::has_script_removals() const noexcept { return !data_->script_removed.empty(); }
+std::size_t GalacticSession::NativeActionShadow::script_journal_entries() const noexcept {
+    using Kind = Data::ScriptStep::Kind;
+    return static_cast<std::size_t>(std::count_if(data_->script_steps.begin(), data_->script_steps.end(),
+        [](const auto& step) { return step.kind == Kind::journal || step.kind == Kind::despawn; }));
+}
+void GalacticSession::NativeActionShadow::stage_script_journal(NativeEffectKind kind, std::vector<std::uint8_t> payload) {
+    if (data_->player) return;
+    detach();
+    Data::ScriptStep step; step.kind = Data::ScriptStep::Kind::journal; step.effect = kind; step.payload = std::move(payload);
+    data_->script_steps.push_back(std::move(step));
+}
 core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::NativeActionShadow::admit_fleet(
     PlayerId player, const CommandPayload& payload, bool pending_local_conflict) {
     if (!std::holds_alternative<CreateFleet>(payload) && !std::holds_alternative<AddFleetMembers>(payload)
@@ -676,7 +716,7 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::NativeActionS
     const auto first = data_->events.size();
     const GameCommand command{{data_->base->completed_tick(), issuer->seat_id, 0}, payload};
     if (std::holds_alternative<MoveFleet>(payload))
-        session_detail::execute_native_movement(owner, command, data_->base->completed_tick(), data_->events, pending_local_conflict, {});
+        session_detail::execute_native_movement(owner, command, data_->base->completed_tick(), data_->events, pending_local_conflict, {}, true);
     else session_detail::execute_native_fleet(owner, command, data_->base->completed_tick(), data_->events, pending_local_conflict, false);
     NativeFleetReceipt receipt;
     for (auto i = first; i < data_->events.size(); ++i) {
@@ -998,6 +1038,8 @@ core::Result<math::Fixed> GalacticSession::NativeActionShadow::add_credits(Playe
     }
     detach(); ++data_->work.requests; ++data_->work.copied_accounts;
     data_->accounts[id] = balance.value();
+    if (!data_->player) { Data::ScriptStep step; step.kind = Data::ScriptStep::Kind::cash; step.player = id;
+        step.actual = actual.value(); data_->script_steps.push_back(std::move(step)); }
     data_->victory = std::move(staged_victory);
     if (victory_pending) data_->events.push_back({data_->base->completed_tick(), GalacticEventKind::victory_pending, {}, id, 0,
         static_cast<std::uint64_t>(VictoryKind::credits), GalacticRejectReason::none});
@@ -1068,6 +1110,42 @@ core::Result<std::vector<EntityId>> GalacticSession::NativeActionShadow::create_
         std::sort(contents->begin(), contents->end(), [](const auto& a, const auto& b) { return a.container < b.container; });
         data_->work.copied_orbital_objects += orbit->size() + visited.size();
         location->orbit = std::move(orbit); location->contents = std::move(contents);
+    }
+    if (!data_->player && !data_->script_removed.empty()) {
+        // The placement provider must see the same local rows that ordered
+        // publication will have after earlier removals in this batch.
+        auto orbit = std::make_shared<std::vector<Fleet>>(*location->orbit);
+        for (auto& fleet : *orbit) {
+            std::erase_if(fleet.members, [&](const auto& member) { return script_removed(member.id); });
+            if (fleet.motion.transit)
+                std::erase_if(fleet.motion.transit->packed, [&](const auto id) { return script_removed(id); });
+        }
+        std::erase_if(*orbit, [&](const auto& fleet) {
+            return script_removed(fleet.id) || fleet.members.empty();
+        });
+        auto contents = std::make_shared<std::vector<MovementContents>>(*location->contents);
+        for (auto& row : *contents)
+            std::erase_if(row.children, [&](const auto& child) { return script_removed(child.id); });
+        std::erase_if(*contents, [&](const auto& row) {
+            return script_removed(row.container);
+        });
+        location->orbit = std::move(orbit);
+        location->contents = std::move(contents);
+        std::erase_if(location->presence.ground_layout, [&](const auto& row) { return script_removed(row.object); });
+        const bool ground_removed = std::any_of(location->production.objects.begin(), location->production.objects.end(),
+            [&](const auto& object) { return script_removed(object.id) && object.domain == ProductionDomain::ground
+                && object.kind == ProductionKind::structure; });
+        std::erase_if(location->production.objects, [&](const auto& object) { return script_removed(object.id); });
+        if (ground_removed) {
+            const auto count = std::count_if(location->production.objects.begin(), location->production.objects.end(),
+                [](const auto& object) { return object.domain == ProductionDomain::ground && object.kind == ProductionKind::structure; });
+            const auto level = static_cast<std::uint32_t>(std::min<std::int64_t>(count, 5));
+            location->production.ground_level = level;
+            location->presence.ground_base = level ? ControlBase{location->production.target_owner, level} : ControlBase{};
+            if (level) std::erase_if(location->presence.built_structures, [&](const auto& row) {
+                return row.owner != location->presence.ground_base.owner || row.enable_level > level;
+            });
+        }
     }
     const auto skip_reader = [&](const Fleet& fleet) -> core::Result<bool> {
         std::vector<CensusObject> records;
@@ -1203,6 +1281,8 @@ core::Result<std::vector<EntityId>> GalacticSession::NativeActionShadow::create_
     const auto births = ordered_births(placement.originals).value();
     data_->actor_changes.insert(data_->actor_changes.end(), births.begin(), births.end());
     data_->forces.push_back(std::make_shared<const Data::Force>(Data::Force{request, std::move(made).value()}));
+    if (!data_->player) { Data::ScriptStep step; step.kind = Data::ScriptStep::Kind::force;
+        step.force = data_->forces.size() - 1; data_->script_steps.push_back(std::move(step)); }
     // An immediate batch inside the async lane (free_players) keeps its force and cash as intents too: the lane barrier is
     // discarded and the world takes only intents, so an unrecorded force would leave the AI with an actor the world never got.
     if (data_->player && (!data_->immediate_batch || data_->independent_player || data_->free_players)) data_->record_request(Data::ForceRequest{data_->forces.back(), actors.value()});

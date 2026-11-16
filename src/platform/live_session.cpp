@@ -5,12 +5,15 @@
 
 #include "eawr/platform/live_scripts.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/script/authoritative/letter_box.hpp"
 #include "eawr/script/authoritative/tactical_bridge.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/world.hpp"
 #include "eawr/core/tick_profile.hpp"
 
 #include <algorithm>
+#include <charconv>
+#include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <exception>
@@ -19,6 +22,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <system_error>
 #include <thread>
 #include <utility>
 
@@ -157,8 +161,17 @@ bool LiveEventLog::presented(const tactical::Event& event) noexcept {
         || event.kind == tactical::EventKind::pad_captured
         || event.kind == tactical::EventKind::pad_construction_started
         || event.kind == tactical::EventKind::pad_construction_completed
+        // Committed gifts notify the giving and receiving seats, including retained campaign battles.
+        || (event.kind == tactical::EventKind::controller_changed && event.order == tactical::OrderKind::gift)
         // WSW-33/34: the special weapon speech and pulse sounds are presented from these events.
-        || event.kind == tactical::EventKind::special_weapon_fired || event.kind == tactical::EventKind::special_weapon_ready;
+        || event.kind == tactical::EventKind::special_weapon_fired || event.kind == tactical::EventKind::special_weapon_ready
+        // TSW-15: the super weapon's speech, sounds, music, attack clip, explosion and debris props are presented from these.
+        || event.kind == tactical::EventKind::tsw_approach_started || event.kind == tactical::EventKind::tsw_speech_threshold
+        || event.kind == tactical::EventKind::tsw_in_range || event.kind == tactical::EventKind::tsw_power_up_started
+        || event.kind == tactical::EventKind::tsw_attack_started || event.kind == tactical::EventKind::tsw_target_destroyed
+        || event.kind == tactical::EventKind::tsw_debris_created || event.kind == tactical::EventKind::tsw_sequence_complete
+        // #7190: a refused reinforcement carries the simulation's reason for the reinforcement pane (rare, one row each).
+        || (event.kind == tactical::EventKind::order_rejected && event.order == tactical::OrderKind::reinforce);
 }
 
 bool LiveEventLog::presented(const tactical::CombatEvent& event) noexcept {
@@ -472,7 +485,10 @@ public:
             const bool turning = member.squad < movement->squads().size() && movement->squads()[member.squad].turning;
             sim::math::Vec2 target{};
             bool has_target = false;
-            if (member.squad < movement->squads().size()) {
+            sim::math::Fixed team_speed{};
+            const bool has_squad = member.squad < movement->squads().size();
+            if (has_squad) team_speed = movement->squads()[member.squad].speed;
+            if (has_squad) {
                 const auto& squad = movement->squads()[member.squad];
                 for (auto index = squad.next_node; index < squad.path.nodes.size(); ++index) {
                     if (squad.path.nodes[index] == member.position) continue;
@@ -482,7 +498,8 @@ public:
             // The simulation does not yet publish spread-out or a stop-point producer (U-LR13-02).
             result.members.push_back({member.object, member.state, member.speed, member.profile.maximum_speed,
                 member.profile.turn_rate, member.facing, member.transition_frame, member.position, target,
-                has_target, turning, false, false, input.heading_error, input.turn_fraction, input.valid, input.turn_fraction_valid});
+                has_target, turning, false, false, input.heading_error, input.turn_fraction, input.valid, input.turn_fraction_valid,
+                team_speed, has_squad});
         }
         return result;
     }
@@ -647,6 +664,11 @@ public:
         std::unique_lock lock(session_mutex_, std::defer_lock);
         { core::tick_profile::Scope wait("ui.lock.script-report"); lock.lock(); }
         return script_report_;
+    }
+
+    std::vector<LiveLetterboxRequest> take_letterbox_requests() {
+        const std::lock_guard lock(letterbox_mutex_);
+        return std::exchange(letterbox_requests_, {});
     }
 
 private:
@@ -859,6 +881,8 @@ private:
         std::optional<LiveLandMotion> motion_copy;
         double step_ms = 0.0;
         double fog_ms = 0.0;
+        double land_motion_ms = 0.0; // N5: the motion copy of a land session, apart from the fog and step phases
+        bool land_motion_timed = false;
         double session_lock_ms = 0.0;
         bool held_tick = false;
         const auto lock_started = options_.measure_phases ? Clock::now() : Clock::time_point{};
@@ -939,17 +963,26 @@ private:
                 auto stepped = core::Result<tactical::TacticalTick>::success(std::move(*driver_tick));
                 if (!scripted_) hashes_.push_back(stepped.value().state_hash);
                 fog = capture_fog();
+                const auto motion_started = Clock::now();
                 motion_copy = capture_land_motion();
-                step_ms = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+                land_motion_timed = motion_copy.has_value();
+                if (land_motion_timed) land_motion_ms = std::chrono::duration<double, std::milli>(Clock::now() - motion_started).count();
+                step_ms = std::chrono::duration<double, std::milli>(Clock::now() - started).count() - land_motion_ms;
                 return stepped;
             }
             auto stepped = local_step();
             const auto stepped_at = Clock::now();
             if (stepped && !scripted_) hashes_.push_back(std::move(stepped.value().state_hash));
-            if (stepped) { fog = capture_fog(); motion_copy = capture_land_motion(); }
+            if (stepped) {
+                fog = capture_fog();
+                const auto motion_started = Clock::now();
+                motion_copy = capture_land_motion();
+                land_motion_timed = motion_copy.has_value();
+                if (land_motion_timed) land_motion_ms = std::chrono::duration<double, std::milli>(Clock::now() - motion_started).count();
+            }
             const auto finished = Clock::now();
             step_ms = std::chrono::duration<double, std::milli>(stepped_at - started).count();
-            fog_ms = std::chrono::duration<double, std::milli>(finished - stepped_at).count();
+            fog_ms = std::chrono::duration<double, std::milli>(finished - stepped_at).count() - land_motion_ms;
             return stepped;
         }();
         if (held_tick) return true;
@@ -986,11 +1019,13 @@ private:
                 event_log_.record(*tick.value().snapshot, tick.value().asteroid_impacts, options_.base_attack_types, tick.value().damage_changes);
                 // #558: presentation-only wall-clock cost, never read by the simulation.
                 // #957: a scripted tick's AI step and Lua service are their own phases; "step" is the rest.
-                LiveTickCost cost{tick.value().completed_tick, step_ms + fog_ms, {{"step", step_ms}, {"fog", fog_ms}}};
+                LiveTickCost cost{tick.value().completed_tick, step_ms + fog_ms + land_motion_ms, {{"step", step_ms}, {"fog", fog_ms}}};
                 if (scripted_) {
                     cost.phases = {{"step", std::max(0.0, step_ms - ai_ms_ - lua_ms_)}, {"ai", ai_ms_}, {"lua", lua_ms_},
                         {"fog", fog_ms}};
                 }
+                // N5: only a land session carries this phase, so a space trace keeps exactly its existing columns.
+                if (land_motion_timed) cost.phases.push_back({"land-motion", land_motion_ms});
                 if (options_.cadence_profile) {
                     cost.phases.push_back({"cadence.completed-steady-ms",
                         std::chrono::duration<double, std::milli>(frame_.latest_published.time_since_epoch()).count()});
@@ -1115,6 +1150,12 @@ private:
             auto tick = staged->scripted_ ? staged->step_scripted(executor, refusals) : staged->session_->step(executor);
             if (!tick) return core::Result<void>::failure(tick.error());
             if (!staged->scripted_) staged->hashes_.push_back(tick.value().state_hash);
+            // N4: a replayed tick's motion is kept for the presenter, bounded as the live history is.
+            if (auto motion = staged->capture_land_motion()) {
+                staged->land_motion_history_.push_front(std::move(*motion));
+                if (staged->land_motion_history_.size() > std::max<std::size_t>(staged->options_.history, 256))
+                    staged->land_motion_history_.pop_back();
+            }
             return core::Result<void>::success();
         };
         context->set_target_rate = [staged](std::uint32_t rate) { staged->options_.target_rate = rate; };
@@ -1125,11 +1166,17 @@ private:
             input_ = std::move(staged->input_); driver_input_.clear();
             const auto snapshot = world().snapshot();
             auto fog = capture_fog();
+            // N4: the motion of the replayed ticks was captured by the catch-up steps; a catch-up without a step still has the
+            // activation tick's own.
+            auto motion = capture_land_motion();
             { const std::lock_guard lock(mutex_);
               // Pre-staging orders retain their tick and follow normal stale-order
               // diagnostics. No order accepted before the guard is silently erased.
               *admission = false; history_.clear(); history_.push_front(snapshot);
               fog_history_.clear(); if (fog) fog_history_.push_front(std::move(fog));
+              land_motion_history_ = std::move(staged->land_motion_history_);
+              if (motion && (land_motion_history_.empty() || land_motion_history_.front().tick < motion->tick))
+                  land_motion_history_.push_front(std::move(*motion));
               frame_ = {snapshot, snapshot, Clock::now()};
               event_log_ = LiveEventLog({options_.event_history, options_.event_bytes});
               interval_ = tick_interval(staged->options_.target_rate); rebase_ = true;
@@ -1161,6 +1208,22 @@ private:
             auto& sequence = sequences_[routed.key.player_id];
             sequence = std::max(sequence, routed.key.sequence + 1U);
         }
+        publish_letterbox(result.presentation, result.world.completed_tick);
+        if (!options_.debug_letterbox.empty()) {
+            std::vector<script::authoritative::ScriptCommand> injected;
+            for (const auto& request : options_.debug_letterbox) {
+                if (request.tick != result.world.completed_tick) continue;
+                script::authoritative::ScriptCommand command;
+                command.verb = std::string(script::authoritative::verb_tactical_letter_box);
+                char seconds[48]; // locale-free, as the script host writes them
+                const auto written = std::to_chars(seconds, seconds + sizeof(seconds), request.seconds);
+                if (written.ec != std::errc{}) continue;
+                command.arguments = {script::authoritative::Value::text(request.in ? "in" : "out"),
+                    script::authoritative::Value::text(std::string(seconds, written.ptr))};
+                injected.push_back(std::move(command));
+            }
+            publish_letterbox(injected, result.world.completed_tick);
+        }
         std::int64_t load = 0;
         for (const auto& entry : result.scripts.loads) load += entry.instructions;
         ++script_report_.ticks;
@@ -1175,6 +1238,29 @@ private:
         return core::Result<tactical::TacticalTick>::success(std::move(result.world));
     }
 
+    // legacy #6634: the calls arrive as text the script host checked (finite, not negative); one that is not that is dropped.
+    void publish_letterbox(const std::vector<script::authoritative::ScriptCommand>& commands, const std::uint64_t tick) {
+        if (commands.empty()) return;
+        std::vector<LiveLetterboxRequest> made;
+        for (const auto& command : commands) {
+            if (command.verb != script::authoritative::verb_tactical_letter_box || command.arguments.size() != 2) continue;
+            const auto* direction = std::get_if<std::string>(&command.arguments[0].data);
+            const auto* text = std::get_if<std::string>(&command.arguments[1].data);
+            if (!direction || !text) continue;
+            double seconds{};
+            const auto parsed = std::from_chars(text->data(), text->data() + text->size(), seconds);
+            if (parsed.ec != std::errc{} || parsed.ptr != text->data() + text->size() || !std::isfinite(seconds) || seconds < 0.0) continue;
+            made.push_back({tick, *direction == "in", seconds});
+        }
+        if (made.empty()) return;
+        const std::lock_guard lock(letterbox_mutex_);
+        letterbox_requests_.insert(letterbox_requests_.end(), made.begin(), made.end());
+        // A viewer that never takes them (headless runs) cannot grow the list without bound: the newest are the ones that count.
+        constexpr std::size_t keep = 256;
+        if (letterbox_requests_.size() > keep)
+            letterbox_requests_.erase(letterbox_requests_.begin(), letterbox_requests_.end() - static_cast<std::ptrdiff_t>(keep));
+    }
+
     std::unique_lock<std::mutex>* active_driver_lock_{};
     std::vector<tactical::PlayerCommand> driver_input_;
     std::vector<std::pair<sim::EntityId, sim::EntityId>> land_roster_;
@@ -1184,6 +1270,8 @@ private:
     // Scripted mode: the commands for the next step, submitted by it; the scripts' report.
     std::vector<tactical::PlayerCommand> input_;
     LiveScriptReport script_report_;
+    std::mutex letterbox_mutex_; // legacy #6634: guards letterbox_requests_ only, so the UI never waits for a step
+    std::vector<LiveLetterboxRequest> letterbox_requests_;
     double ai_ms_{}; // #957: the last scripted step's AI step and Lua service, for the cost phases
     double lua_ms_{};
     double world_ms_{};
@@ -1490,6 +1578,7 @@ std::uint64_t LiveSession::next_sequence(const tactical::PlayerId player) const 
 void LiveSession::request_save(SaveSink sink) { impl_->request_save(std::move(sink)); }
 diagnostics::MemoryCapacity LiveSession::memory_capacity() const { return impl_->memory_capacity(); }
 LiveScriptReport LiveSession::script_report() const { return impl_->script_report(); }
+std::vector<LiveLetterboxRequest> LiveSession::take_letterbox_requests() { return impl_->take_letterbox_requests(); }
 void LiveSession::stop() { impl_->stop(); }
 std::vector<std::string> LiveSession::tick_hashes() const { return impl_->tick_hashes(); }
 void LiveSession::require_tick_hashes() { impl_->require_tick_hashes(); }

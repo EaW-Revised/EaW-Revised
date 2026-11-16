@@ -23,6 +23,9 @@ inline constexpr std::uint8_t lobby_setup_kind = 76, lobby_cancel_kind = 77;
 inline constexpr std::uint8_t lobby_closed_kind = 78, lobby_rejected_kind = 79;
 inline constexpr std::uint8_t lobby_mod_review_ack_kind = 99;
 inline constexpr std::uint8_t lobby_prepare_kind = 100, lobby_prepared_kind = 101;
+inline constexpr std::uint8_t lobby_mods_refresh_kind = 102;
+// Every lobby frame carries this version after its kind byte. 4 added the host mod-description refresh (kind 102).
+inline constexpr std::uint32_t lobby_wire_version = 4;
 using LobbyDigest = std::array<std::uint8_t, 32>;
 
 enum class LobbyPhase : std::uint8_t { staging, starting, committed, closed };
@@ -104,6 +107,14 @@ struct LobbyPrepared {
     std::vector<core::ContentLayerIdentity> layers{};
     friend bool operator==(const LobbyPrepared&, const LobbyPrepared&) = default;
 };
+struct LobbyModsRefresh {
+    // Wire 4, kind 102: room:text, description:blob (a valid non-empty mod description, at most 64 KiB). Host to guests only,
+    // staging only: the host's mod description changed after the room opened (its content digests finished). Display only: it
+    // carries no revision, never clears readiness and never reaches the sim, hash or replay state.
+    std::string room;
+    std::vector<std::uint8_t> mounted_mods;
+    friend bool operator==(const LobbyModsRefresh&, const LobbyModsRefresh&) = default;
+};
 struct LobbyNotice {
     std::string room;
     std::uint64_t revision{};
@@ -114,7 +125,7 @@ struct LobbyCancel : LobbyNotice {};
 struct LobbyClosed : LobbyNotice {};
 struct LobbyRejected : LobbyNotice {};
 using LobbyFrame = std::variant<LobbySnapshot, LobbyRequest, LobbyChatRequest, LobbyChat,
-    LobbySetupFrame, LobbyCancel, LobbyClosed, LobbyRejected, LobbyPrepare, LobbyPrepared>;
+    LobbySetupFrame, LobbyCancel, LobbyClosed, LobbyRejected, LobbyPrepare, LobbyPrepared, LobbyModsRefresh>;
 
 [[nodiscard]] std::string sanitize_lobby_text(std::string_view value, std::size_t limit);
 // True when the room frame codec accepts these mounted-mod bytes (empty means "not known"). The host checks before it opens a room.
@@ -131,12 +142,16 @@ inline constexpr std::string_view start_pending_code = "EAWR-NET-1618";
 [[nodiscard]] core::Diagnostic start_pending_diagnostic(std::string message);
 [[nodiscard]] bool is_start_pending(const core::Diagnostic& diagnostic) noexcept;
 
+// #7198: the one bound on campaign preparation, in whole minutes. The room's deadline (LobbyLimits::preparation_timeout_ms) and
+// the wait text the lobby shows both come from this value. Measured on the rig (11-16, two-seat lobby preparation, Remake 5.0 Grand
+// campaign 156 planets, slowest chain 5.73 min on a laptop): twice the slowest, rounded up, never under 10 minutes.
+inline constexpr std::uint64_t preparation_timeout_minutes = 12;
 struct LobbyLimits {
     std::size_t frames_per_pump{256}, queued_setup_bytes{8U * 1024U * 1024U};
     std::size_t chat_history{128}, chat_messages_per_window{4};
     std::uint64_t chat_window_ms{2'000};
     std::size_t denied_identities{128};
-    std::uint64_t preparation_timeout_ms{1'800'000}; // A large authored campaign may take minutes; links remain serviced.
+    std::uint64_t preparation_timeout_ms{preparation_timeout_minutes * 60'000}; // A large authored campaign may take minutes; links remain serviced.
 };
 struct LobbySetupContext {
     SetupProviders providers;
@@ -233,6 +248,12 @@ public:
     [[nodiscard]] core::Result<void> request(LobbyAction action, std::uint64_t revision,
         LobbySelection selection = {});
     [[nodiscard]] core::Result<void> chat(std::string text);
+    // Host only, staging only, never blocks: replaces the host's mod description and sends it to every guest as a refresh
+    // frame (later admissions get it in their snapshot). Refused with a typed reason while the room is starting or closed;
+    // an equal or invalid description is a no-op/refusal. Used when the host's digests were not ready at room open.
+    [[nodiscard]] core::Result<void> refresh_mounted_mods(std::vector<std::uint8_t> mounted_mods);
+    // Guest: how many refresh frames this session applied. snapshot().mounted_mods is the current host description.
+    [[nodiscard]] std::uint64_t mounted_mods_refreshes() const;
     [[nodiscard]] core::Result<void> kick(PeerIndex peer, std::uint64_t revision);
     // Host only, before Start. Online room mesh: `newcomer` could not reach `unreachable` (a seat of this room, or a seat that
     // already left) through any direct or relayed path, so it is refused, not the room (owner decision 1, #3669). The newcomer

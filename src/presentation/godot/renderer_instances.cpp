@@ -137,7 +137,7 @@ GodotRenderer::ProxyResult GodotRenderer::reserve_proxy_instances(
                 instance.category_casts = !impl_->non_casting_.contains(proxy.asset);
             }
             const auto pending = impl_->skin_poses_.find(proxy.entity);
-            Impl::bind_instance_skin(*rendering, instance, resource,
+            impl_->bind_instance_skin(*rendering, instance, resource,
                 pending == impl_->skin_poses_.end() ? nullptr : &pending->second);
             if (resource.skinned && resource.bone_count && !instance.skeleton.is_valid()) {
                 rollback();
@@ -171,6 +171,12 @@ void GodotRenderer::Impl::prepare_shared_idle_surface(const std::uint64_t group,
     for (std::size_t i = 0; i < used.size(); ++i) plan.used[i] |= used[i];
 }
 
+bool GodotRenderer::Impl::skeleton_free_piece(const sim::AssetId asset, const Resource& resource) const {
+    return resource.skinned && resource.rigid_bone >= 0 && resource.bone_count > 0
+        && static_cast<std::size_t>(resource.rigid_bone) < resource.bone_count && resource.billboard_modes.empty()
+        && !batch_translated_asset(asset);
+}
+
 void GodotRenderer::Impl::release_instance_skeleton(RenderingServer* rendering, Instance& instance) {
     if (instance.shared_idle_skeleton) instance.shared_idle_skeleton.reset();
     else if (rendering && instance.skeleton.is_valid()) rendering->free_rid(instance.skeleton);
@@ -200,13 +206,18 @@ void GodotRenderer::Impl::copy_instance_pose(const sim::EntityId source, const s
     const auto pose = skin_poses_.find(source);
     if (pose == skin_poses_.end()) clear_skin_pose(target);
     else {
-        const PendingPose saved = pose->second;
+        PendingPose saved = pose->second;
+        saved.idle_group = 0;  // a copy is not an upload of the source's placement
+        if (const auto old = skin_poses_.find(target); old != skin_poses_.end())
+            note_idle_unposed(old->second, IdleDisturbance::copied);
         skin_poses_[target] = saved;
         const auto instance = instances_.find(target);
+        if (instance != instances_.end()) note_idle_unbound(instance->second, IdleDisturbance::copied);
         if (instance != instances_.end() && instance->second.asset_id == saved.asset_id) {
             if (auto* rendering = RenderingServer::get_singleton()) {
                 detach_shared_idle(*rendering, instance->second);
-                static_cast<void>(apply_skin_pose(*rendering, instance->second, saved));
+                static_cast<void>(apply_skin_pose(*rendering, instance->second, saved, {}, nullptr,
+                    render_categories::enabled ? &skin_census_ : nullptr, 1));
             }
         }
     }
@@ -237,6 +248,8 @@ void GodotRenderer::Impl::forget_instance_pose(const sim::EntityId entity_id) {
     // instance and skeleton now, including when another entity retains its mesh.
     const auto instance = instances_.find(entity_id);
     if (instance != instances_.end()) static_cast<void>(remove_instance(RenderingServer::get_singleton(), instance));
+    if (const auto pose = skin_poses_.find(entity_id); pose != skin_poses_.end())
+        note_idle_unposed(pose->second, IdleDisturbance::removed);
     skin_poses_.erase(entity_id);
     light_scales_.erase(entity_id);
     colorizations_.erase(entity_id);
@@ -446,6 +459,66 @@ std::span<const std::uint8_t> GodotRenderer::Impl::skin_geometry_bones_view(cons
 core::Result<void> GodotRenderer::Impl::bind_skin_pose(const sim::EntityId entity_id,
     const sim::AssetId asset_id, const Resource& resource, std::shared_ptr<const SkinPosePalette<Transform3D>> prepared,
     const std::uint64_t shared_idle_group) {
+    // No instance (culled or batched hull: nearly all of them in a big battle): the pose is only retained, for the
+    // instance a later submit builds from it. Nothing is diffed or applied, so skip the rest of the bind.
+    // A billboard surface never takes it: its refresh rewrites the skeleton, so it is bound (and reported) the long way.
+    if (prepared && !render_categories::fighter_experiment() && resource.billboard_modes.empty()
+        && !instances_.contains(entity_id)) {
+        if (skin_profile_) ++skin_work_.bindings;
+        if (render_categories::enabled) ++skin_census_.no_instance_binds;
+        auto& pending = skin_poses_[entity_id];
+        pending.asset_id = asset_id;
+        pending.prepared = std::move(prepared);
+        if (pending.idle_group != shared_idle_group) {
+            note_idle_unposed(pending, IdleDisturbance::other_bind);
+            pending.idle_group = shared_idle_group;
+        }
+        return core::Result<void>::success();
+    }
+    auto result = bind_skin_pose_body(entity_id, asset_id, resource, std::move(prepared), shared_idle_group);
+    track_idle_binding(entity_id, asset_id, resource, shared_idle_group, static_cast<bool>(result));
+    return result;
+}
+
+void GodotRenderer::Impl::track_idle_binding(const sim::EntityId entity_id, const sim::AssetId asset_id,
+    const Resource& resource, const std::uint64_t shared_idle_group, const bool bound) {
+    // An entity holds its placement's palette when its retained pose is that palette and, if it has an
+    // instance, the instance's skeleton shows it. An entity without an instance is the common case (culled or
+    // batched hulls): the retained pose is what a later instance will be built from.
+    const auto found = instances_.find(entity_id);
+    const auto pending = skin_poses_.find(entity_id);
+    Instance* instance = found == instances_.end() ? nullptr : &found->second;
+    PendingPose* pose = pending == skin_poses_.end() ? nullptr : &pending->second;
+    if (!shared_idle_group) {
+        if (instance) note_idle_unbound(*instance, IdleDisturbance::other_bind);
+        if (pose) note_idle_unposed(*pose, IdleDisturbance::other_bind);
+        return;
+    }
+    const bool pose_kept = bound && pose && pose->asset_id == asset_id;
+    const bool skeleton_shows = resource.billboard_modes.empty() && (!instance || instance->asset_id == asset_id);
+    if (pose_kept && skeleton_shows) {
+        // Billboard skeletons are rewritten by their refresh, so they never count as holding the idle palette.
+        if (pose->idle_group != shared_idle_group) note_idle_unposed(*pose, IdleDisturbance::other_bind);
+        pose->idle_group = shared_idle_group;
+        if (instance) {
+            if (instance->idle_group != shared_idle_group) note_idle_unbound(*instance, IdleDisturbance::other_bind);
+            instance->idle_group = shared_idle_group;
+        }
+        return;
+    }
+    const auto reason = !bound ? IdleDisturbance::bind_failed
+        : instance && instance->asset_id != asset_id ? IdleDisturbance::asset_mismatch
+        : IdleDisturbance::billboard;
+    if (pose && pose->idle_group != shared_idle_group) note_idle_unposed(*pose, reason);
+    else if (pose) pose->idle_group = 0;
+    if (instance && instance->idle_group != shared_idle_group) note_idle_unbound(*instance, reason);
+    else if (instance) instance->idle_group = 0;
+    note_idle_missed(shared_idle_group, reason);
+}
+
+core::Result<void> GodotRenderer::Impl::bind_skin_pose_body(const sim::EntityId entity_id,
+    const sim::AssetId asset_id, const Resource& resource, std::shared_ptr<const SkinPosePalette<Transform3D>> prepared,
+    const std::uint64_t shared_idle_group) {
     const auto owner = render_categories::fighter_experiment() ? diagnostic_owners_.find(entity_id) : diagnostic_owners_.end();
     const bool fighter = owner != diagnostic_owners_.end() && render_categories::authored_fighter(owner->second.categories);
     if (fighter) render_categories::begin_fighter_frame(static_cast<std::uint64_t>(Engine::get_singleton()->get_process_frames()));
@@ -456,7 +529,9 @@ core::Result<void> GodotRenderer::Impl::bind_skin_pose(const sim::EntityId entit
     const auto plan = shared_idle_plans_.find(shared_idle_group);
     const auto existing = instances_.find(entity_id);
     auto* shared_rendering = RenderingServer::get_singleton();
-    const bool shared_request = !hull_batching::enabled && skin_batch_active_
+    // Hull batching composes with sharing: pieces it takes (bind pose) are hidden and drawn from a
+    // multimesh, every other multi-surface idle piece keeps the shared skeleton.
+    const bool shared_request = skin_batch_active_
         && shared_idle_group && prepared && plan != shared_idle_plans_.end() && plan->second.surfaces > 1
         && resource.billboard_modes.empty() && plan->second.used.size() == prepared->palette.size()
         && resource.skin_used_bones.size() == plan->second.used.size()
@@ -464,6 +539,15 @@ core::Result<void> GodotRenderer::Impl::bind_skin_pose(const sim::EntityId entit
         && existing->second.skeleton.is_valid() && shared_rendering;
     if (shared_request) {
         auto& pending = skin_poses_[entity_id];
+        // Batching keys on the retained palette, so ask whether this surface's used bones moved
+        // before the shared palette replaces it (the same test the unshared path applies below).
+        bool pose_moved = false;
+        if (hull_batching::enabled) {
+            skin_palette_changes(pending.active_palette(), prepared->palette, skin_changes_, pending.asset_id != asset_id);
+            pose_moved = filter_skin_palette_changes(skin_changes_, resource.skin_used_bones)
+                && std::any_of(skin_changes_.begin(), skin_changes_.end(),
+                    [](const std::uint8_t changed) { return changed != 0; });
+        }
         pending.asset_id = asset_id;
         pending.prepared = prepared;
         auto shared = shared_idle_batch_.find(prepared.get());
@@ -483,7 +567,8 @@ core::Result<void> GodotRenderer::Impl::bind_skin_pose(const sim::EntityId entit
             for (std::size_t bone = 0; bone < skin_changes_.size(); ++bone) {
                 skin_changes_[bone] = plan->second.used[bone] && (skin_changes_[bone] || !group.valid_bones[bone]);
             }
-            if (!apply_skin_pose(*shared_rendering, existing->second, pending, skin_changes_, skin_profile_ ? &skin_work_ : nullptr)) {
+            if (!apply_skin_pose(*shared_rendering, existing->second, pending, skin_changes_, skin_profile_ ? &skin_work_ : nullptr,
+                    render_categories::enabled ? &skin_census_ : nullptr, 0)) {
                 // The batch map must not point at a group whose palette was not written.
                 shared_idle_batch_.erase(shared);
                 return failure(diagnostic_codes::invalid_skin_pose, "shared idle skeleton binding failed");
@@ -501,7 +586,7 @@ core::Result<void> GodotRenderer::Impl::bind_skin_pose(const sim::EntityId entit
             existing->second.shared_idle_skeleton = shared->second;
             existing->second.skeleton = shared->second->rid;
         }
-        // This branch excludes hull batching, so there is no batch to mark dirty.
+        if (pose_moved) batch_mark(entity_id);
         return core::Result<void>::success();
     }
     bool detached = false;
@@ -536,7 +621,8 @@ core::Result<void> GodotRenderer::Impl::bind_skin_pose(const sim::EntityId entit
         // bones, so only byte-different palette matrices cross the engine API.
         const auto changes = resource.billboard_modes.empty()
             ? std::span<const std::uint8_t>(skin_changes_) : std::span<const std::uint8_t>{};
-        if (!apply_skin_pose(*rendering, instance->second, pose, changes, skin_profile_ ? &skin_work_ : nullptr)) {
+        if (!apply_skin_pose(*rendering, instance->second, pose, changes, skin_profile_ ? &skin_work_ : nullptr,
+                render_categories::enabled ? &skin_census_ : nullptr, shared_idle_group ? 0 : 1)) {
             return failure(diagnostic_codes::invalid_skin_pose,
                 "Godot skeleton palette binding failed");
         }
@@ -641,12 +727,22 @@ core::Result<void> GodotRenderer::Impl::set_material_priority(const sim::AssetId
 void GodotRenderer::Impl::clear_skin_pose(const sim::EntityId entity_id) {
     const auto pose = skin_poses_.find(entity_id);
     if (pose == skin_poses_.end()) return;
+    note_idle_unposed(pose->second, IdleDisturbance::cleared);
     skin_poses_.erase(pose);
     batch_mark(entity_id);
     // A live instance returns to the rest palette it had before any pose,
     // exactly as bind_instance_skin leaves an unposed skeleton.
     const auto instance = instances_.find(entity_id);
+    if (instance != instances_.end()) note_idle_unbound(instance->second, IdleDisturbance::cleared);
     RenderingServer* rendering = RenderingServer::get_singleton();
+    if (instance != instances_.end() && rendering && instance->second.rigid_bone >= 0) {
+        // Skeleton-free piece: the bone returns to rest and the instance to its object transform.
+        instance->second.bone_transform = Transform3D();
+        if (!instance->second.batch_group)
+            rendering->instance_set_transform(instance->second.rid, world_transform(instance->second));
+        else batch_write_transform(entity_id, instance->second);
+        return;
+    }
     if (instance == instances_.end() || !rendering || !instance->second.skeleton.is_valid()) return;
     const auto resource = resources_.find(instance->second.asset_id);
     if (resource == resources_.end()) return;
@@ -727,7 +823,7 @@ core::Result<void> GodotRenderer::Impl::set_material_vector3(const sim::AssetId 
 [[nodiscard]] std::vector<GodotRenderer::SkinBindingEvidence> GodotRenderer::Impl::skin_bindings() const {
     std::vector<GodotRenderer::SkinBindingEvidence> result;
     for (const auto& [entity_id, instance] : instances_) {
-        if (!instance.skeleton.is_valid()) continue;
+        if (!instance.skeleton.is_valid() && instance.rigid_bone < 0) continue;
         const auto pose = skin_poses_.find(entity_id);
         if (pose == skin_poses_.end() || pose->second.asset_id != instance.asset_id) continue;
         result.push_back({entity_id, instance.asset_id, pose->second.active_palette().size()});
@@ -748,6 +844,7 @@ core::Result<void> GodotRenderer::Impl::set_material_vector3(const sim::AssetId 
     for (const auto& [entity, instance] : instances_) {
         static_cast<void>(entity);
         if (instance.skeleton.is_valid()) ++counts.skeletons;
+        else if (instance.rigid_bone >= 0) ++counts.skeleton_free;
     }
     return counts;
 }
@@ -761,7 +858,11 @@ core::Result<void> GodotRenderer::Impl::set_material_vector3(const sim::AssetId 
         GodotRenderer::InstanceEvidence evidence{.entity_id = entity_id, .asset_id = instance.asset_id};
         evidence.visible = instance.visible;
         evidence.mesh_surfaces = rendering->mesh_get_surface_count(resources_.at(instance.asset_id).mesh);
-        if (instance.skeleton.is_valid()) {
+        if (instance.rigid_bone >= 0) {
+            // A skeleton-free piece reads back as a skeleton of its model's bones with one posed bone.
+            evidence.skeleton_bones = static_cast<std::int64_t>(resources_.at(instance.asset_id).bone_count);
+            evidence.skeleton_posed = !instance.bone_transform.is_equal_approx(identity);
+        } else if (instance.skeleton.is_valid()) {
             evidence.skeleton_bones = rendering->skeleton_get_bone_count(instance.skeleton);
             for (std::int64_t bone = 0; bone < evidence.skeleton_bones; ++bone) {
                 const Transform3D transform = rendering->skeleton_bone_get_transform(
@@ -781,9 +882,17 @@ std::optional<std::array<float, 12>> GodotRenderer::Impl::bone_evidence(
     const sim::EntityId entity, const std::int32_t bone) const {
     RenderingServer* rendering = RenderingServer::get_singleton();
     const auto instance = instances_.find(entity);
-    if (!rendering || instance == instances_.end() || !instance->second.skeleton.is_valid()
-        || bone < 0 || bone >= rendering->skeleton_get_bone_count(instance->second.skeleton)) return std::nullopt;
-    const auto transform = rendering->skeleton_bone_get_transform(instance->second.skeleton, bone);
+    if (!rendering || instance == instances_.end()) return std::nullopt;
+    Transform3D transform;
+    if (instance->second.rigid_bone >= 0) {
+        if (bone < 0 || static_cast<std::size_t>(bone) >= resources_.at(instance->second.asset_id).bone_count)
+            return std::nullopt;
+        if (bone == instance->second.rigid_bone) transform = instance->second.bone_transform;
+    } else {
+        if (!instance->second.skeleton.is_valid() || bone < 0
+            || bone >= rendering->skeleton_get_bone_count(instance->second.skeleton)) return std::nullopt;
+        transform = rendering->skeleton_bone_get_transform(instance->second.skeleton, bone);
+    }
     const auto x = transform.basis.get_column(0);
     const auto y = transform.basis.get_column(1);
     const auto z = transform.basis.get_column(2);
@@ -828,7 +937,7 @@ void GodotRenderer::Impl::update_diagnostic_impostors(RenderingServer& rendering
                     }
                 }
                 bounds = posed; // An inconsistent explicit pose keeps the geometry.
-            } else if (!instance.skeleton.is_valid() || resource->second.bone_count == 0
+            } else if ((!instance.skeleton.is_valid() && instance.rigid_bone < 0) || resource->second.bone_count == 0
                        || !resource->second.billboard_modes.empty()) {
                 bounds.reset();
             }
@@ -1065,7 +1174,7 @@ void GodotRenderer::Impl::update_diagnostic_instances(RenderingServer& rendering
             return instances_.at(piece.second).category_role == render_categories::Role::hull;
         });
         if (anchor_piece == unit.pieces.end()) continue;
-        const auto& anchor = instances_.at(anchor_piece->second).object_transform;
+        const auto anchor = world_transform(instances_.at(anchor_piece->second));
         if (!anchor.is_finite() || std::abs(anchor.basis.determinant()) < 1e-8F) continue;
         const auto inverse = anchor.affine_inverse();
         std::string signature;
@@ -1073,7 +1182,8 @@ void GodotRenderer::Impl::update_diagnostic_instances(RenderingServer& rendering
             const auto size = key.size();
             signature.append(reinterpret_cast<const char*>(&size), sizeof(size));
             signature += key;
-            const auto& transform = instances_.at(entity).object_transform;
+            // The engine transform, so a skeleton-free piece's posed bone is part of the signature.
+            const auto transform = world_transform(instances_.at(entity));
             const auto local = transform == anchor ? Transform3D() : inverse * transform;
             // Local attachment/turret placements are state; only the common
             // world transform of a whole unit may vary within a group.
@@ -1125,7 +1235,7 @@ void GodotRenderer::Impl::update_diagnostic_instances(RenderingServer& rendering
         apply_visibility(rendering, instance, instance.visible);
         if (render_categories::ablation.starts_with("shadows-band-"))
             rendering.instance_geometry_set_cast_shadows_setting(instance.rid,
-                instance.category_casts && !instance.band_hidden ? RenderingServer::SHADOW_CASTING_SETTING_ON
+                render_categories::engine_casts(true) && instance.category_casts && !instance.band_hidden ? RenderingServer::SHADOW_CASTING_SETTING_ON
                                                                : RenderingServer::SHADOW_CASTING_SETTING_OFF);
     }
 }
@@ -1226,7 +1336,8 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
             }
             const auto pending = skin_poses_.find(source.entity_id);
             bind_instance_skin(*rendering, instance->second, *resource,
-                pending == skin_poses_.end() ? nullptr : &pending->second);
+                pending == skin_poses_.end() ? nullptr : &pending->second, render_categories::enabled ? &skin_census_ : nullptr,
+                skeleton_free_piece(source.asset_id, *resource));
             if (light_scales_.contains(source.entity_id)) {
                 apply_light_scale(*rendering, source.entity_id, instance->second);
             }
@@ -1236,15 +1347,19 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
             apply_unit_colorization(*rendering, source.entity_id, instance->second);
             batch_mark(source.entity_id);
         } else if (transition == detail::InstanceTransition::replace) {
+            note_idle_unbound(instance->second, IdleDisturbance::replaced);
             if (instance->second.skeleton.is_valid()) {
                 render_churn::record(render_churn::owner(instance->second.category_role, true), render_churn::Event::freed);
                 release_instance_skeleton(rendering, instance->second);
             }
             rendering->instance_set_base(instance->second.rid, resource->mesh);
             instance->second.asset_id = source.asset_id;
+            instance->second.rigid_bone = -1;
+            instance->second.bone_transform = Transform3D();
             const auto pending = skin_poses_.find(source.entity_id);
             bind_instance_skin(*rendering, instance->second, *resource,
-                pending == skin_poses_.end() ? nullptr : &pending->second);
+                pending == skin_poses_.end() ? nullptr : &pending->second, render_categories::enabled ? &skin_census_ : nullptr,
+                skeleton_free_piece(source.asset_id, *resource));
             batch_mark(source.entity_id);
         }
         presence.retain(instance->second.placement);
@@ -1262,7 +1377,7 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
             instance->second.object_transform = transform_from(adapt_instance(source).column_major);
             // A batched piece's hidden instance is resynced when it leaves its group.
             if (instance->second.batch_group) batch_write_transform(source.entity_id, instance->second);
-            else rendering->instance_set_transform(instance->second.rid, instance->second.object_transform);
+            else rendering->instance_set_transform(instance->second.rid, world_transform(instance->second));
             ++work_.transforms_sent;
         }
         if (!resource->billboard_modes.empty() && (moved || billboard_light_changed)) {
@@ -1317,6 +1432,9 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
 // replaced by set_skin_pose.
 GodotRenderer::Impl::InstanceMap::iterator GodotRenderer::Impl::remove_instance(RenderingServer* rendering, const InstanceMap::iterator instance) {
     batch_forget(rendering, instance->first, instance->second);
+    // No report: the retained pose still is the placement's palette and a later instance is built from it. A pose
+    // that goes with the instance (forget_instance_pose, asset removal) reports itself.
+    instance->second.idle_group = 0;
     // All retirement paths (including residency eviction and asset unload)
     // end their proxy reservation at this single removal point.
     if (const auto charge = proxy_.charges.find(instance->first); charge != proxy_.charges.end()) {
@@ -1335,9 +1453,30 @@ GodotRenderer::Impl::InstanceMap::iterator GodotRenderer::Impl::remove_instance(
 }
 
 [[nodiscard]] bool GodotRenderer::Impl::apply_skin_pose(
-    RenderingServer& rendering, const Instance& instance, const PendingPose& pose,
-    const std::span<const std::uint8_t> changes, SkinPoseWork* work) {
+    RenderingServer& rendering, Instance& instance, const PendingPose& pose,
+    const std::span<const std::uint8_t> changes, SkinPoseWork* work, SkinWriteCensus* census, const std::size_t path) {
     SkinPoseTimer upload(work ? &work->upload_ms : nullptr);
+    if (instance.rigid_bone >= 0) {
+        // Skeleton-free piece: its one bone moves the instance. A bone that did not change writes nothing.
+        const auto& palette = pose.active_palette();
+        const auto bone = static_cast<std::size_t>(instance.rigid_bone);
+        if (bone >= palette.size() || (!changes.empty() && changes.size() != palette.size())) return false;
+        const bool changed = changes.empty() || changes[bone] != 0;
+        const Transform3D transform = changed ? transform_from(palette[bone]) : instance.bone_transform;
+        const bool write = changed && !(transform == instance.bone_transform);
+        if (census) {
+            ++census->rigid_binds[path];
+            if (write) ++census->rigid_writes[path];
+        }
+        if (write) {
+            instance.bone_transform = transform;
+            // A batched member's engine instance is hidden and its slot holds object x bone; leaving the group resyncs the
+            // engine transform.
+            if (instance.batch_group) batch_write_transform(0, instance);
+            else rendering.instance_set_transform(instance.rid, world_transform(instance));
+        }
+        return true;
+    }
     if (!instance.skeleton.is_valid()) return false;
     const auto& palette = pose.active_palette();
     if (!changes.empty() && changes.size() != palette.size()) return false;
@@ -1347,9 +1486,15 @@ GodotRenderer::Impl::InstanceMap::iterator GodotRenderer::Impl::remove_instance(
         if (work && !uploaded) ++work->palette_uploads;
         uploaded = true;
         if (work) ++work->bone_uploads;
+        if (census) ++census->bone_writes[path];
         const auto transform = transform_from(palette[index]);
         rendering.skeleton_bone_set_transform(instance.skeleton,
             static_cast<std::int32_t>(index), transform);
+    }
+    if (census) {
+        ++census->binds[path];
+        if (uploaded) ++census->dirty_skeletons[path];
+        else ++census->zero_binds[path];
     }
     return true;
 }
@@ -1416,6 +1561,10 @@ void GodotRenderer::Impl::refresh_billboards(RenderingServer& rendering, const s
     }
     SkinPoseTimer upload(skin_profile_ ? &skin_work_.upload_ms : nullptr);
     if (skin_profile_ && resource.bone_count) ++skin_work_.billboard_uploads;
+    if (render_categories::enabled) {
+        ++skin_census_.billboard_refreshes;
+        skin_census_.billboard_bone_writes += resource.bone_count;
+    }
     for (std::size_t bone = 0; bone < resource.bone_count; ++bone) {
         if (skin_profile_) ++skin_work_.bone_uploads;
         rendering.skeleton_bone_set_transform(instance.skeleton,
@@ -1427,8 +1576,20 @@ void GodotRenderer::Impl::bind_instance_skin(
     RenderingServer& rendering,
     Instance& instance,
     const Resource& resource,
-    const PendingPose* pose) {
+    const PendingPose* pose,
+    SkinWriteCensus* census,
+    const bool without_skeleton) {
     if (!resource.skinned || resource.bone_count == 0) return;
+    if (without_skeleton && resource.rigid_bone >= 0 && !instance.reserved_proxy) {
+        // No engine skeleton: the one bone folds into the instance transform. Unposed, the bone is at rest.
+        instance.rigid_bone = resource.rigid_bone;
+        instance.bone_transform = Transform3D();
+        if (pose && pose->asset_id == instance.asset_id && pose->active_palette().size() == resource.bone_count) {
+            static_cast<void>(apply_skin_pose(rendering, instance, *pose, {}, nullptr, census, 2));
+            instance.idle_group = pose->idle_group;
+        }
+        return;
+    }
     instance.skeleton = rendering.skeleton_create();
     if (!instance.skeleton.is_valid()) return;
     rendering.skeleton_allocate_data(instance.skeleton,
@@ -1449,7 +1610,9 @@ void GodotRenderer::Impl::bind_instance_skin(
     }
     if (pose && pose->asset_id == instance.asset_id
         && pose->active_palette().size() == resource.bone_count) {
-        static_cast<void>(apply_skin_pose(rendering, instance, *pose));
+        static_cast<void>(apply_skin_pose(rendering, instance, *pose, {}, nullptr, census, 2));
+        // The skeleton now shows the retained pose, so it holds that pose's idle placement.
+        instance.idle_group = resource.billboard_modes.empty() ? pose->idle_group : 0;
     }
 }
 

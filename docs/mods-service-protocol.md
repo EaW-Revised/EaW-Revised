@@ -345,12 +345,14 @@ runs a saved profile, that profile is read-only: `profile.save` (any change, inc
 is allowed and is not the service's business. The lock is derived by the service itself from the launcher's state
 files: `launcher/game-running.json` (instance 1) and `instances/<n>/launcher/game-running.json` under the user-data
 folder, each counted only while the process it names is alive (PID plus creation time, so a reused PID does not
-hold a lock; a state written without `process_start_time` by an older launcher is judged by its PID alone). A
+hold a lock; a state without `process_start_time` cannot be told from a reused PID, so it is stale and holds nothing). A
 state without a profile id (a vanilla instance) and a missing state file hold nothing. A state file that exists
 but cannot be opened, is larger than 64 KiB or is not the expected JSON is **not** free: which profile it names is
 unknown, so every `profile.save` and `profile.delete` fails closed with `EAWR-MODS-SVC-0016` (message: the state
 of instance n could not be read; `error.data.unreadable` lists the instances) until that file is fixed or removed.
-Two managers see the same locks. It does not read pending `next-action.json` requests; a manager keeps its own
+The service's background content digest pauses while a profile is locked; an unreadable state holds the digest back
+for ten seconds only (the file may be mid-replace), then the digest runs on, so a corrupt file never pauses it for
+good. Profile changes stay refused for as long as the state is unreadable. Two managers see the same locks. It does not read pending `next-action.json` requests; a manager keeps its own
 pending lock between submitting a request and the game's state file appearing.
 
 The check and the write are not one atomic step: a game that starts between the lock check and the file write of

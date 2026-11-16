@@ -11,23 +11,27 @@ v3 added instance-local proximity registrations;
 v2 added the memory quota and account with Lua pattern metering), state hash `eawr-script-state-v1`, combined
 hash `eawr-authoritative-state-v1`. Any change to a rule below needs a new identity.
 
-The galactic clock profile uses `eawr-script-galactic-save-v3`. Immediately after
+The galactic clock profile uses `eawr-script-galactic-save-v4`. Its object attachment records include the service-registration sequence, which determines reverse registration order. Immediately after
 its completed tick and galactic frame it stores a uint32 retirement count and
 strictly increasing nonzero uint64 instance IDs. Retired IDs cannot also be live
 or receive queued events. Old GC scheduler saves are refused; no legacy reader
 is retained. Default and query profiles keep their existing encodings. The GC
 retirement corpus is exercised by `galactic_scripted_session_contracts`, including
-an independently specified v3 suffix and malformed count/identity/order cases.
+an independently specified v4 suffix and malformed count/identity/order cases.
 Tracked galactic replay fixtures contain world input, not scheduler save blobs,
 so this profile bump does not require rewriting their binary payloads or pins.
 
 During running GC service, Lua errors, rejected binding Results and deterministic
-sandbox quota faults retire only the failing instance. Its entire uncommitted
+sandbox quota faults retire only the failing AI-provider instance. Its entire uncommitted
 service output and private immediate-effect shadow are discarded; sibling
 instances continue in the existing partitioned phase or bounded native chain.
-The ordered commit records runtime LoadNote `EAWR-LOAD-1400`. Warnings remain
+The ordered commit records runtime LoadNote `EAWR-LOAD-1400`. Story and object
+scripts (`retire_on_lua_error` off, host policy, not saved) retire only on a quota
+or budget fault: an uncaught Lua error there ends the failing thread or call, rolls
+back its output and leaves a diagnostic, and the instance stays (see the named
+assumption in `lua-sandbox.md`). Warnings remain
 nonfatal, as do API diagnostics that return a sourced fallback. Retirement follows
-an uncaught protected Lua call failure or a sandbox quota fault, never a diagnostic
+an uncaught protected Lua call failure (providers) or a sandbox quota fault, never a diagnostic
 code by itself. Retirement enters both full and optimized scheduler hashes and
 checkpoint blobs; diagnostics stay outside authoritative state. Infrastructure
 and executor failures still refuse. Native AI/story callback retirement needs

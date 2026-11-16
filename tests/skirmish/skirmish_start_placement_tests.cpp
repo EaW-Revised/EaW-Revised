@@ -111,6 +111,33 @@ void synthetic_placement() {
     expect(units[3].state.position == at(0, 0), "PL-02: a super capital is placed on the marker");
     expect(units[4].state.position == at(0, 0), "the pad keeps its own position");
 
+    // WGT-57 (interim): the start of a destroyed planet's battle drops the planet backdrop and nothing else, and says
+    // why (the viewer hides a removed record).
+    {
+        auto planet_inputs = inputs;
+        auto planet = object(3, "Pad", "SpaceProp", 1, "Neutral", at(900, 900), 0); // a backdrop is a SpaceProp: no simulation object
+        planet.tactical_super_weapon_target = true;
+        planet.death_by_tsw_replacements = {"Remains_A", "Remains_B"};
+        planet_inputs.placements.push_back(planet);
+        const auto intact = skirmish::build_start(fixture, planet_inputs);
+        planet_inputs.destroyed_planet_backdrop = true;
+        const auto destroyed = skirmish::build_start(fixture, planet_inputs);
+        expect(intact && destroyed && intact.value().units.size() == 7 && destroyed.value().units.size() == 7,
+            "WGT-57: a destroyed planet's start keeps every simulation object");
+        const auto dropped = destroyed ? std::count_if(destroyed.value().removed.begin(), destroyed.value().removed.end(),
+            [](const auto& row) { return row.record == 3U && row.reason == skirmish::Removal::destroyed_planet; }) : 0;
+        expect(dropped == 1 && intact && intact.value().removed.empty(), "WGT-57: the backdrop is reported once as removed");
+        // WGT-57: the target's replacements stand at its position and facing, numbered from the replacement base.
+        expect(intact && intact.value().props.empty(), "WGT-57: an intact planet's start creates no replacement props");
+        const bool placed = destroyed && destroyed.value().props.size() == 2
+            && destroyed.value().props[0].type == "Remains_A" && destroyed.value().props[1].type == "Remains_B"
+            && destroyed.value().props[0].record == eawr::battle::replacement_prop_record_base
+            && destroyed.value().props[1].record == eawr::battle::replacement_prop_record_base + 1U
+            && destroyed.value().props[0].position == at(900, 900) && destroyed.value().props[1].position == at(900, 900)
+            && destroyed.value().props[0].replaces == planet.record && destroyed.value().props[1].replaces == planet.record;
+        expect(placed, "WGT-57: the replacement props stand at the target's pose, in authored order, each naming the backdrop it replaces");
+    }
+
     // PL-03: the start angle is the marker's yaw less 45 degrees (Coruscant's Rebel marker faces 336,
     // the Empire's 149), so a first ring point lies at -69 and at 104 degrees; a marker at yaw 0 gave
     // -45 above.
@@ -354,6 +381,23 @@ void synthetic_tactical_super_weapon() {
         "TSW-01: a target owned by the object's own faction is skipped (case-blind), a neutral or unmapped one is not");
     const auto anyone = skirmish::tactical_super_weapon_targets(mixed, {});
     expect(anyone && anyone.value().size() == 3, "TSW-01: without an owner faction nothing is skipped");
+    // WGT-57: the backdrop a destroyed planet's battle drops is the target nearest the origin, whatever its owner;
+    // the first one wins a tie; no target is a no-op.
+    const auto backdrop = skirmish::destroyed_backdrop_record(mixed);
+    expect(backdrop && backdrop.value() == std::optional<std::uint32_t>{43U},
+        "WGT-57: the nearest target to the origin is the backdrop, even one of the object's own faction");
+    auto twin = friendly; twin.record = 50; twin.position = at(-100, -100);
+    const auto tie = skirmish::destroyed_backdrop_record({twin, friendly});
+    expect(tie && tie.value() == std::optional<std::uint32_t>{50U}, "WGT-57: record order breaks an equal distance");
+    // The shared path: an empty list stands nothing, an unnamed entry is skipped, a mid-battle pose overrides the target's.
+    const std::vector<std::string> remains{"Remains_A", "", "Remains_B"};
+    const auto stood = skirmish::replace_target_prop(marked, remains, at(1, 2), Vec3{whole(0), whole(0), whole(45)}, 7);
+    expect(stood.size() == 2 && stood[0].record == 7U && stood[1].record == 8U && stood[1].type == "Remains_B"
+            && stood[0].position == at(1, 2) && stood[0].orientation_degrees.z == whole(45) && stood[0].replaces == marked.record,
+        "WGT-101: replace_target_prop stands the named replacements at the given pose");
+    expect(skirmish::replace_target_prop(marked, {}, at(1, 2), Vec3{}, 7).empty(), "WGT-57: no replacement list stands nothing");
+    const auto none = skirmish::destroyed_backdrop_record({object(60, "Plain", "SpaceProp", 3, "Neutral", at(1, 1), 0)});
+    expect(none && !none.value(), "WGT-57: a map without a target keeps every placement");
     const Vec3 near_friendly{whole(150), whole(150), whole(0)};
     const auto anchored = skirmish::tactical_super_weapon_start(data, near_friendly, enemy.value(), false);
     // 8000 from (700, -900) along the line to (150, 150): x about -3000, y about 6190. Anchored on the friendly (100, 100) it

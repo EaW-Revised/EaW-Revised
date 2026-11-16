@@ -16,6 +16,7 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <map>
 
 namespace {
 using namespace eawr;
@@ -566,8 +567,10 @@ std::map<sim::EntityId, LandSearch::Checkpoint> archived_land_searches(const Tac
     std::uint64_t next_landing{};
     std::map<sim::EntityId, session_detail::LandWalkingFormation> walking_formations; // version 15
     std::map<sim::EntityId, session_detail::LandGarrisonEntry> garrison_entries; // version 16: the garrison records follow the walking formations
+    std::map<sim::EntityId, std::uint64_t> force_disable_stamps; // version 18: the Force disabling stamps follow the garrison records
+    std::map<sim::EntityId, session_detail::LandAbilityMotion> ability_motion; // version 19: the ability motion records follow the stamps (version 20: each ends with the projectile index)
     in(id, version, terrain, clear_bit, occupancy, movement, requests, combat, dynamic_children, formations, landings, landed,
-        next_landing, walking_formations, garrison_entries);
+        next_landing, walking_formations, garrison_entries, force_disable_stamps, ability_motion);
     std::map<sim::EntityId, LandSearch::Checkpoint> searches;
     const auto count = in.count();
     for (std::uint64_t i = 0; i < count; ++i) {
@@ -669,6 +672,83 @@ void corner_formation_contracts() {
                 "corner formation equals with reverse partitions");
         }
     }
+}
+
+// LE-OCCUPY (WLPA-66): a placed non-obstacle pad (an empty terrain occupation) is a dynamic collision body when the content binds
+// its authored hard extents: a squad ordered through it goes round and never enters its body; without the binding it walks
+// through it as before.
+struct PadResult { Bytes state, checkpoint; bool crossed{}; Fixed least_gap{whole(100000)}; };
+PadResult pad_session(const sim::PartitionExecutor& executor, bool restore, bool bound) {
+    auto field = make_field(std::vector<std::string>(40, std::string(48, '.')));
+    auto tables = content(field.terrain);
+    tables.land.companies.front().company.members.resize(1);
+    tables.land.companies.front().members.resize(1);
+    auto initial = setup();
+    UnitState pad; pad.entity_id = 5; pad.type_id = 13; pad.owner = 1;
+    pad.position = {whole(300), whole(180), whole(17)};
+    pad.rotation = {Fixed{}, Fixed{}, Fixed{}, whole(1)};
+    initial.units.push_back(pad);
+    tables.land.static_objects.push_back(pad.type_id);
+    LandOccupation footprint; footprint.object = pad.entity_id; // a pad is no terrain raster: its occupation is empty
+    tables.land.occupations.push_back(footprint);
+    if (bound) tables.land.pad_bodies.push_back({pad.type_id, whole(10), whole(10), units::LandCollisionGroup::build_pad});
+    auto session = take(TacticalSession::create(initial, tables));
+    must(session.submit({{0, 1, 1}, {1}, MovePayload{{whole(620), whole(180), {}}}}));
+    const auto identities = checkpoint::tactical_identities(initial.content_identity);
+    PadResult result;
+    for (int tick = 0; tick < 700; ++tick) {
+        take(session.step(executor));
+        const auto position = session.land_movement()->squads().front().position;
+        result.crossed = result.crossed || position.x > whole(340);
+        result.least_gap = std::min(result.least_gap, distance(position, {whole(300), whole(180)}));
+        expect(session.unit_state(5) && session.unit_state(5)->position == pad.position, "the pad stays where it was placed");
+        if (restore && tick % 37 == 0) {
+            const auto saved = checkpoint_bytes(session);
+            auto resumed = take(checkpoint::load_tactical_checkpoint(saved, identities, factory(tables), executor));
+            expect(checkpoint_bytes(resumed.session) == saved, "land checkpoint bytes round trip while a pad body holds a row");
+            session = std::move(resumed.session);
+        }
+    }
+    result.state = session.canonical_state_bytes(); result.checkpoint = checkpoint_bytes(session);
+    return result;
+}
+
+void pad_occupancy_contracts() {
+    const sim::InlineExecutor serial;
+    const auto without = pad_session(serial, false, false);
+    expect(without.crossed && without.least_gap < whole(6), "control: without a bound pad body the squad walks through the pad");
+    const auto baseline = pad_session(serial, false, true);
+    expect(baseline.crossed, "a squad ordered through a pad passes it");
+    expect(baseline.least_gap >= whole(15), "and never enters the pad's collision body");
+    std::cout << "land pad session least_gap_raw=" << baseline.least_gap.raw() << " control_raw=" << without.least_gap.raw() << '\n';
+    const auto restored = pad_session(serial, true, true);
+    expect(restored.state == baseline.state && restored.checkpoint == baseline.checkpoint,
+        "save/restore around a pad equals uninterrupted motion (pad bodies are derived, never saved)");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter threads(workers);
+        const auto parallel = pad_session(threads, false, true);
+        expect(parallel.state == baseline.state && parallel.checkpoint == baseline.checkpoint, "pad avoidance equals on 1/2/4/8 workers");
+        test_support::ReverseOrderExecutor order(workers);
+        const auto reversed = pad_session(order, false, true);
+        expect(reversed.state == baseline.state && reversed.checkpoint == baseline.checkpoint, "pad avoidance equals with reverse partitions");
+    }
+    auto field = make_field(std::vector<std::string>(40, std::string(48, '.')));
+    auto tables = content(field.terrain);
+    auto initial = setup();
+    UnitState pad; pad.entity_id = 5; pad.type_id = 13; pad.owner = 1; pad.position = {whole(300), whole(180), whole(17)};
+    initial.units.push_back(pad);
+    tables.land.static_objects.push_back(pad.type_id);
+    LandOccupation footprint; footprint.object = pad.entity_id;
+    tables.land.occupations.push_back(footprint);
+    auto unordered = tables;
+    unordered.land.pad_bodies.push_back({13, whole(10), whole(10), units::LandCollisionGroup::build_pad});
+    unordered.land.pad_bodies.push_back({13, whole(10), whole(10), units::LandCollisionGroup::build_pad});
+    expect(!TacticalSession::create(initial, unordered), "pad body rows must be strictly increasing by type");
+    auto spare = tables;
+    spare.land.pad_bodies.push_back({99, whole(10), whole(10), units::LandCollisionGroup::build_pad});
+    expect(static_cast<bool>(TacticalSession::create(initial, spare)), "a pad body row for a type with no static root is never matched");
+    auto flat = tables; flat.land.pad_bodies.push_back({13, whole(10), Fixed{}, units::LandCollisionGroup::build_pad});
+    expect(!TacticalSession::create(initial, flat), "a pad body row without positive extents refuses the content");
 }
 
 void stress(bool repulsion = true) {
@@ -859,6 +939,62 @@ EconomyOutcome economy_run(const EconomyCase& input, const sim::PartitionExecuto
     return {session.canonical_state_bytes(), checkpoint_bytes(session)};
 }
 
+// #6976 (WLPA-66, DEV-16): a buildable pad is a collision body only while it carries a building or its construction. A squad
+// ordered onto an EMPTY pad walks up to it and onto it; ordered onto the same pad once a building stands there it stops beside
+// the body, near it and not far away. The pad is the economy's pad (id 5, buildable by player 1) with the stock-like empty
+// occupation; the stop distances are printed for the stage log.
+struct ApproachResult { Bytes state; Fixed gap{whole(100000)}; bool reached{}; };
+ApproachResult pad_approach(const sim::PartitionExecutor& executor, const bool built, const bool restore) {
+    auto field = make_field(std::vector<std::string>(40, std::string(48, '.')));
+    auto input = economy_case(field.terrain, 15, 9, 15);
+    for (auto& occupation : input.content.land.occupations) if (occupation.object == 5) occupation.primary_cells.clear();
+    input.content.land.pad_bodies.push_back({pad_type, whole(10), whole(10), units::LandCollisionGroup::build_pad});
+    const sim::math::Vec2 pad_centre{land_cell_centre(15, field.terrain->spacing()), land_cell_centre(9, field.terrain->spacing())};
+    auto session = take(TacticalSession::create(input.setup, input.content));
+    if (built) must(session.submit({{0, 1, 1}, {5}, PadBuildPayload{site_type}}));
+    must(session.submit({{0, 1, 2}, {1}, MovePayload{{pad_centre.x, pad_centre.y, {}}}}));
+    const auto identities = checkpoint::tactical_identities(input.setup.content_identity);
+    ApproachResult result;
+    for (int tick = 0; tick < 500; ++tick) {
+        take(session.step(executor));
+        const auto& squad = session.land_movement()->squads().front(); // the ordered squad (unit 1) has the lowest id
+        result.gap = std::min(result.gap, distance(squad.position, pad_centre));
+        result.reached = squad.order == LandMoveOrder::reached;
+        if (restore && tick % 41 == 0) {
+            const auto saved = checkpoint_bytes(session);
+            auto resumed = take(checkpoint::load_tactical_checkpoint(saved, identities, factory(input.content), executor));
+            expect(checkpoint_bytes(resumed.session) == saved, "a land checkpoint taken while a squad approaches a pad restores exactly");
+            session = std::move(resumed.session);
+        }
+    }
+    result.state = session.canonical_state_bytes();
+    return result;
+}
+
+void pad_approach_contracts() {
+    const sim::InlineExecutor serial;
+    const auto empty = pad_approach(serial, false, false);
+    const auto occupied = pad_approach(serial, true, false);
+    std::cout << "land pad approach: empty pad closest raw=" << empty.gap.raw() << " reached=" << empty.reached
+              << ", occupied pad closest raw=" << occupied.gap.raw() << " reached=" << occupied.reached << '\n';
+    expect(empty.reached && empty.gap < whole(8), "#6976: a squad ordered onto an empty pad walks up to its centre");
+    expect(occupied.gap >= whole(10), "#6976: a pad that carries a building is still a body the squad does not enter");
+    // Retail stops a walker beside a live building 72.5 from the pad centre, a distance that follows the building's size; this
+    // fixture's 10 x 10 body and one-member squad stop at 16.5, so the bound is the fixture's, not the retail number.
+    expect(occupied.gap < whole(60), "#6976: and a move ordered onto it ends beside it, not far away");
+    expect(pad_approach(serial, false, true).state == empty.state && pad_approach(serial, true, true).state == occupied.state,
+        "#6976: save and restore while a squad approaches a pad equals the uninterrupted run");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter threads(workers);
+        test_support::ReverseOrderExecutor order(workers);
+        for (const bool built : {false, true}) {
+            const auto& reference = built ? occupied : empty;
+            expect(pad_approach(threads, built, false).state == reference.state, "#6976: the pad approach equals on 1/2/4/8 workers");
+            expect(pad_approach(order, built, false).state == reference.state, "#6976: the pad approach equals with reverse partitions");
+        }
+    }
+}
+
 // The enemy squad (ids 3 and 4) stands 130 units north of the pad, inside gun range, and kills what is built on it.
 // The player's own squads (ids 1 and 2) are far away. A shot does 6 and a built object has 8 hull, so it takes two hits.
 EconomyCase battle_case(const std::shared_ptr<const LandTerrain>& terrain, const std::uint32_t seconds, const bool pad_targetable) {
@@ -1044,11 +1180,13 @@ void economy_contracts() {
 // Chief request 11-06: one stock map, two forced stuck squads, run at workers 1 and 8 with the state hash compared every
 // tick. Squad 0 has a member that can never move (WLPA-93: the leader is held by the lag cap, then released and walks on).
 // Squad 2 is a hard body walking into an idle hard body that cannot be pushed, with its route lock refused (WLPA-92: the pair
-// becomes unresolvable, re-decides after the retry count and searches again). The test fails if either guard never fires.
+// becomes unresolvable and re-decides after the retry count; since #4840 B2 a refused lock is known before the search, so the
+// re-decision charges no search). The test fails if either guard never fires.
 struct GuardOutcome {
     std::vector<std::string> hashes;
-    bool released{}, advanced{}, unresolvable{};
-    std::size_t searches{};
+    bool released{}, advanced{}, unresolvable{}, exhausted{};
+    std::size_t redecisions{};
+    std::uint64_t charged{}, redecision_charged{};
 };
 GuardOutcome stock_guard_run(const std::shared_ptr<const LandTerrain>& terrain, const TacticalContent& tables,
     const TacticalSetup& initial, const sim::PartitionExecutor& executor) {
@@ -1070,7 +1208,9 @@ GuardOutcome stock_guard_run(const std::shared_ptr<const LandTerrain>& terrain, 
             MovePayload{{land_cell_centre(terrain->width() * 2 / 3, terrain->spacing()), unit.position.y, {}}}}));
     }
     Fixed release_x;
-    std::uint64_t charged_before = 0;
+    std::map<std::pair<sim::EntityId, sim::EntityId>, std::uint8_t> previous_retry;
+    std::map<std::pair<sim::EntityId, sim::EntityId>, std::uint64_t> previous_spent;
+    std::map<std::pair<sim::EntityId, sim::EntityId>, bool> previous_failed;
     bool locked = false;
     for (int tick = 0; tick < 240; ++tick) {
         out.hashes.push_back(take(session.step(executor)).state_sha256);
@@ -1086,13 +1226,40 @@ GuardOutcome stock_guard_run(const std::shared_ptr<const LandTerrain>& terrain, 
         const auto& leader = movement->squads()[0];
         if (!out.released && leader.straggler_wait_remaining == 0) { out.released = true; release_x = leader.position.x; }
         if (out.released && leader.position.x.raw() > release_x.raw() + whole(40).raw()) out.advanced = true;
+        std::map<std::pair<sim::EntityId, sim::EntityId>, std::uint8_t> retry;
+        std::map<std::pair<sim::EntityId, sim::EntityId>, std::uint64_t> spent;
+        std::map<std::pair<sim::EntityId, sim::EntityId>, bool> failed;
         std::uint64_t charged = 0;
         for (const auto& contact : movement->contacts()) {
             charged += contact.charged_nodes;
             out.unresolvable |= contact.state == LandContactState::unresolvable;
+            const auto key = std::pair{contact.first, contact.second};
+            // A re-decision restarts the count from its last visit: the row was at one or zero and is full again.
+            const auto before = previous_retry.find(key);
+            if (before != previous_retry.end() && before->second <= 1 && contact.retry_remaining == land_contact_retry_visits
+                && contact.state == LandContactState::unresolvable) {
+                ++out.redecisions;
+                // B2: the refused re-decision charges no search.
+                const auto charged_before = previous_spent.find(key);
+                out.redecision_charged += contact.charged_nodes
+                    - (charged_before != previous_spent.end() ? charged_before->second : contact.charged_nodes);
+            }
+            retry.emplace(key, contact.retry_remaining);
+            spent.emplace(key, contact.charged_nodes);
+            failed.emplace(key, contact.state == LandContactState::unresolvable && contact.retry_failed);
         }
-        if (charged > charged_before) ++out.searches;
-        charged_before = charged;
+        // WLPA-97: a failed row that re-decides (its count was at one or zero) and fails again takes the terminal rung: the
+        // mover's move ends in front of the idle blocker and the row is gone after the same service.
+        for (const auto& [key, count] : previous_retry)
+            if (count <= 1 && previous_failed[key] && !retry.contains(key) && movement->squads()[2].order == LandMoveOrder::reached
+                && !out.exhausted) {
+                ++out.redecisions;
+                out.exhausted = true;
+            }
+        previous_retry = std::move(retry);
+        previous_spent = std::move(spent);
+        previous_failed = std::move(failed);
+        out.charged = charged;
     }
     expect(locked, "stock guard case: the pair's mover started its order");
     return out;
@@ -1114,12 +1281,16 @@ void stock_guard_case(const std::shared_ptr<const LandTerrain>& terrain, const T
     if (equal) std::cout << "stock guard case workers 1 vs 8: state hash matches on all " << first.hashes.size() << " ticks";
     else std::cout << "stock guard case workers 1 vs 8: first mismatching tick=" << mismatch;
     std::cout << " straggler_released=" << first.released << " leader_advanced=" << first.advanced
-        << " pair_unresolvable=" << first.unresolvable << " contact_searches=" << first.searches << '\n';
+        << " pair_unresolvable=" << first.unresolvable << " pair_redecisions=" << first.redecisions
+        << " charged_nodes=" << first.charged << '\n';
     expect(equal, "stock guard case: the state hash is equal at workers 1 and 8 on every tick");
     expect(first.released && first.advanced,
         "stock guard case: the straggler guard (WLPA-93) released the held leader and the leader walked on");
-    expect(first.unresolvable && first.searches >= 2,
-        "stock guard case: the unresolvable pair (WLPA-92) re-decided and searched again after the retry count");
+    expect(first.unresolvable && first.redecisions >= 1 && first.exhausted,
+        "stock guard case: the unresolvable pair (WLPA-92) re-decided after the retry count and, failing again, took the "
+        "terminal rung: the mover's move ended in front of the idle blocker (WLPA-97)");
+    expect(first.redecision_charged == 0,
+        "stock guard case: the lock-refused re-decision charged no search (B2)");
 }
 
 int installed() {
@@ -1284,6 +1455,6 @@ void fog_contracts() {
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") return installed();
-        contracts(); live_contracts(); fog_contracts(); corner_formation_contracts(); reorder_contracts(); maze_reorder_contracts(); victory_contracts(); economy_contracts(); stress(false); stress(); return checks.finish();
+        contracts(); live_contracts(); fog_contracts(); corner_formation_contracts(); pad_occupancy_contracts(); pad_approach_contracts(); reorder_contracts(); maze_reorder_contracts(); victory_contracts(); economy_contracts(); stress(false); stress(); return checks.finish();
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

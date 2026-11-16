@@ -94,6 +94,19 @@ namespace eawr_resource_churn_probe {
     return model;
 }
 
+[[nodiscard]] assets::Model two_bone_plate(const float half) {
+    assets::Model model;
+    model.bones.resize(2);
+    for (std::int32_t bone = 0; bone < 2; ++bone) {
+        assets::Mesh mesh;
+        mesh.name = "churn-two-bone-plate";
+        mesh.submeshes.push_back(triangle(half, static_cast<float>(bone) * half * 0.25F));
+        mesh.bone = bone;
+        model.meshes.push_back(std::move(mesh));
+    }
+    return model;
+}
+
 // The first surface reaches RenderingServer; the second names a palette bone
 // outside the model, so the upload fails after RIDs and a surface exist.
 [[nodiscard]] assets::Model partially_invalid_plate() {

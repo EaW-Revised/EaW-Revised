@@ -238,6 +238,25 @@ struct Admission final {
 // rolloff min / (min + rolloff * (d - min)), silent past the maximum distance.
 [[nodiscard]] double falloff_gain(double distance, double saturation_distance, const Space3D& space);
 
+// PA-01 (project deviation, see battle-audio.md): the distance law never takes the gain of a
+// marked cue below `floor` (linear gain, 0 = no floor). The floor wins over the law everywhere,
+// past the maximum distance too (stated rule: BA-11's silence beyond it does not apply to a marked
+// cue); the caller applies event volume and speech ducking afterwards.
+[[nodiscard]] double falloff_gain(double distance, double saturation_distance, const Space3D& space, double floor);
+
+// The project-side audio rules (apps/viewer/project/config/project-audio.xml), parsed from its
+// child elements: one `Distance_Gain_Floor_Db` (decibels, at most 0) and any number of
+// `Distance_Gain_Floor_Event` (the name of an SFX event that carries the floor). The data alone
+// marks the events; the code only asks `floor_for` with the name of the event it plays.
+struct ProjectAudioRules final {
+    double distance_gain_floor{};  // linear; 0 when absent
+    std::vector<std::string> floor_events;
+    // The linear floor of the event `event_name` (case-insensitive), 0 when the data does not mark it.
+    [[nodiscard]] double floor_for(std::string_view event_name) const;
+};
+// A malformed floor (not a finite number, or above 0 dB) is reported to `problems` and ignored.
+[[nodiscard]] ProjectAudioRules project_audio_rules(std::span<const Field> fields, std::vector<std::string>& problems);
+
 // Where the listener stands for a camera at `camera` looking along `forward` (BA-12): where the
 // view ray meets the plane z = listener_z, pulled back along the ray to |camera.z - listener_z|
 // from the camera when that point is farther. `ahead` is the listener's facing: the camera's
@@ -464,7 +483,7 @@ struct MusicFade final {
 // Each event plays its files in order, from where it last stopped, looping.
 class MusicDirector final {
 public:
-    enum class Mode : std::uint8_t { none, ambient, battle, victory, defeat };
+    enum class Mode : std::uint8_t { none, ambient, battle, victory, defeat, superweapon };
     struct Cue final {
         const MusicEvent* event{};
         std::string file;
@@ -476,9 +495,16 @@ public:
     std::optional<Cue> begin(Random& random);
     // A tick passed; `attack` when a weapon fired that involves the local player that tick.
     std::optional<Cue> tick(bool attack, Random& random);
-    // The playing track ended: the event's next file, when it loops.
-    std::optional<Cue> track_ended();
+    // The playing track ended: the event's next file, when it loops. In the super weapon mode (BA-46) a track that does
+    // not loop is followed by the battle playlist, so the music never ends in silence.
+    std::optional<Cue> track_ended(Random& random);
     std::optional<Cue> result(bool exact_local_winner, const MusicEvent* event);
+    // BA-46: the tactical super weapon's power-up starts `activation` in its own mode; the quiet count and the shots no
+    // longer pick the music. When the activation track ends (it does not loop) the mode goes on with `battle_event`
+    // (the faction's super weapon battle music) and keeps the mode for the rest of the battle, until a result; when that
+    // track ends and does not loop, the battle playlist continues it (a null `battle_event` goes straight to the
+    // playlist). A null or file-less activation event leaves the music alone.
+    std::optional<Cue> superweapon(const MusicEvent* activation, const MusicEvent* battle_event);
     [[nodiscard]] Mode mode() const noexcept { return mode_; }
 
 private:
@@ -490,6 +516,8 @@ private:
     Mode mode_{Mode::none};
     const MusicEvent* current_{};
     std::map<const MusicEvent*, std::size_t> next_file_;
+    const MusicEvent* superweapon_battle_{};
+    bool superweapon_activation_{};
 };
 
 } // namespace eawr::presentation::audio

@@ -15,12 +15,14 @@
 #include "eawr/presentation/live/unit_fade.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/scene/space_population.hpp"
+#include "eawr/scene/texture_prefetch.hpp"
 #include "eawr/sim/snapshot.hpp"
 #include "eawr/vfs/vfs_fwd.hpp"
 
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <map>
 #include <limits>
 #include <memory>
@@ -116,6 +118,7 @@ public:
     };
 
     explicit SpacePopulation(Options options);
+    ~SpacePopulation() override;
     SpacePopulation(const SpacePopulation&) = delete;
     SpacePopulation& operator=(const SpacePopulation&) = delete;
 
@@ -134,6 +137,19 @@ public:
     // Append newly demanded slots without replacing any existing ship, piece or playback state.
     [[nodiscard]] bool append_live_ships(GodotRenderer& renderer, const vfs::Vfs& filesystem,
                                         std::span<const Options::PlacedShip> ships) override;
+    // #5097: the arrival read-ahead (BattleScene::arrival_ahead_*). A worker runs the engine-free half of the
+    // classification of the ships (model decode, scene build, the textures each drawn surface asks for) and a session-long
+    // scene::TexturePrefetch decodes those textures; append_live_ships then takes them while a ticket is in use.
+    [[nodiscard]] std::uint64_t arrival_ahead_begin(const vfs::Vfs& filesystem, std::span<const Options::PlacedShip> ships) override;
+    [[nodiscard]] AheadState arrival_ahead_poll(std::uint64_t ticket) override;
+    void arrival_ahead_use(std::uint64_t ticket, bool on) override;
+    void arrival_ahead_release(std::uint64_t ticket) override;
+    [[nodiscard]] AheadStats arrival_ahead_stats() const override;
+    // #5097 PR 2 (BattleScene::begin_live_append): the same classify / per-surface / commit steps as the initial load,
+    // queued here and run a few at a time by step_live_append.
+    [[nodiscard]] bool begin_live_append(GodotRenderer& renderer, const vfs::Vfs& filesystem,
+        std::span<const Options::PlacedShip> ships, std::uint64_t ticket) override;
+    [[nodiscard]] AppendState step_live_append(double budget_ms) override;
     [[nodiscard]] std::optional<std::uint64_t> live_copy_bytes(const GodotRenderer&, std::size_t) const override;
     [[nodiscard]] ProxyResult append_model_proxies(GodotRenderer& renderer,
         std::size_t recipe_ship, std::span<const Options::PlacedShip> ships) override;
@@ -162,6 +178,14 @@ public:
     [[nodiscard]] const SkinPoseWork& idle_skin_work() const noexcept { return idle_skin_work_; }
     [[nodiscard]] std::size_t idle_placement_count() const noexcept { return idle_placements_.size(); }
     [[nodiscard]] std::size_t idle_surface_count() const noexcept { return animated_instances_.size(); }
+    // PF idle skin, last idle sample (all 0 on a frame that did not sample): placements uploaded / skipped as
+    // unchanged, instances the upload loops visited, placements the renderer reported disturbed.
+    [[nodiscard]] std::size_t idle_placements_uploaded() const noexcept { return idle_uploaded_; }
+    [[nodiscard]] std::size_t idle_placements_skipped() const noexcept { return idle_skipped_; }
+    [[nodiscard]] std::size_t idle_instances_visited() const noexcept { return idle_visited_; }
+    [[nodiscard]] std::size_t idle_placements_disturbed() const noexcept { return idle_disturbed_; }
+    // Reports per cause (IdleDisturbance order) in the last idle sample.
+    [[nodiscard]] const std::array<std::uint64_t, 9>& idle_disturbance_causes() const noexcept { return idle_causes_; }
     // #81: the clip a live ship with PlacedShip::clip bound at compose; null
     // when it has none or it did not bind (the report says why).
     [[nodiscard]] const animation::Player* live_clip(std::size_t ship, bool alternate = false) const noexcept override;
@@ -284,6 +308,9 @@ public:
         // (--eawr-map-particle-capacity) turned away.
         std::size_t admitted{};
         std::size_t capacity_exhausted{};
+        // Admitted records whose effect could not be prepared (asset, parse
+        // or emitter refusal): dropped, with the cause in map_particles.
+        std::size_t dropped{};
         std::string cause{"not planned"};
     };
     void set_attached_effects(AttachedEffects summary) { attached_effects_ = std::move(summary); }
@@ -326,8 +353,18 @@ private:
     struct ComposeBatch;
     // Starts the batch's texture read-ahead and hints it the hull base textures of the drawn decisions, in decision order.
     void start_texture_prefetch(ComposeContext& context, ComposeBatch& batch);
+    // A live append (begin_live_append) runs enqueue_compose_range for the ships past these counts.
+    struct AppendRange final {
+        std::size_t first_ship{}, ship_count{}, first_decision{}, first_piece{}, first_clip{};
+    };
     bool enqueue_compose_range(std::shared_ptr<ComposeOwner> owner, sim::AssetId first_asset_id,
-                               sim::EntityId first_entity_id, const EnqueueLoadStep& enqueue);
+                               sim::EntityId first_entity_id, const EnqueueLoadStep& enqueue,
+                               const AppendRange* append_range = nullptr, ComposeBatch* shared_batch = nullptr);
+    struct PendingAppend;
+    std::unique_ptr<PendingAppend> pending_append_;
+    AppendState last_append_{AppendState::idle};
+    // Finishes a pending live append at once (every other append and proxy copy calls it first).
+    void complete_live_append();
     struct SurfaceUpload;
     void prepare_compose_slots(bool appending);
     bool classify_arrivals(ComposeContext& context, std::size_t first_ship, std::size_t first_decision);
@@ -341,6 +378,13 @@ private:
     const SurfaceUpload* upload_composed_surface(ComposeContext& context, ComposeBatch& batch, const std::string& path,
         std::uint32_t mesh_index, std::uint32_t submesh_index,
         const scene::LegacySelector& selector, const std::string& texture_path);
+    // The stock planet material on a unit or prop surface (scene::Surface::planet_effect): the same one-upload-per-
+    // surface cache as upload_composed_surface. `resolved` is the surface's scene texture bindings (declared names
+    // already resolved to logical paths). A surface the environment planet adapter cannot plan is not an upload
+    // failure: nullptr with `skipped` naming why (the surface stays undrawn and is reported, as before this route).
+    const SurfaceUpload* upload_composed_planet_surface(ComposeContext& context, ComposeBatch& batch,
+        const std::string& path, std::uint32_t mesh_index, std::uint32_t submesh_index,
+        std::span<const scene::TextureBinding> resolved, std::string& skipped);
     // Decodes the base texture the upload of this surface will ask for into the batch's texture cache, as its own load
     // step ahead of the upload (the upload then finds it held). A no-op where the upload would not decode it.
     void prewarm_composed_texture(ComposeContext& context, ComposeBatch& batch, const std::string& path,
@@ -359,12 +403,15 @@ private:
     void compose_hardpoint_pieces(ComposeContext& context, ComposeBatch& batch,
         scene::SpacePlacementDecision& decision, std::size_t decision_index, const scene::Placement& placement,
         const assets::Model* model, const std::optional<std::size_t>& live_ship,
-        const std::optional<std::array<std::uint8_t, 3>>& colour, bool cloak_ship);
+        const std::optional<std::array<std::uint8_t, 3>>& colour, bool cloak_ship,
+        std::size_t first_hardpoint = 0, std::size_t end_hardpoint = static_cast<std::size_t>(-1));
     void compose_draw_pieces(ComposeContext& context, ComposeBatch& batch, std::size_t first_decision, bool appending);
     float commit_composed_pieces(ComposeContext& context, ComposeBatch& batch, sim::EntityId& next_entity);
+    // `first_piece` and `first_clip` (the sizes before the range was committed) matter only when appending: the closing
+    // pass then adds the new ships' rows instead of rebuilding the index of every ship composed so far.
     bool finish_composed_range(ComposeContext& context, bool appending, sim::AssetId next_asset,
         sim::EntityId next_entity, std::size_t receiving_before, std::size_t variant_failures_before,
-        float debug_farthest);
+        float debug_farthest, std::size_t first_piece = 0, std::size_t first_clip = 0);
     [[nodiscard]] bool compose_range(ComposeContext&, std::size_t first_ship, std::size_t first_decision,
                                     sim::AssetId first_asset, sim::EntityId first_entity);
     void schedule_arrival_sample() noexcept;
@@ -378,9 +425,19 @@ private:
         std::string_view model_path, std::uint32_t mesh_index, std::uint32_t submesh_index,
         const scene::LegacySelector& selector, const std::string& texture_path,
         const std::optional<std::array<std::uint8_t, 3>>& colour, const std::string& identity);
+    // Planet.fx (t0 fallback) through space::plan_environment_effect with the scene light the legacy materials get.
+    // nullopt with `skipped` set: the planner or a texture refused the surface; nullopt with it empty: the upload failed.
+    [[nodiscard]] std::optional<SurfaceUpload> upload_planet_surface(
+        GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
+        ComposeTextureCache& textures, sim::AssetId& next_asset,
+        std::string_view model_path, std::uint32_t mesh_index, std::uint32_t submesh_index,
+        std::span<const scene::TextureBinding> resolved, const std::string& identity, std::string& skipped);
+    // What every surface upload records once the renderer has it: the asset, its pass and its bind-pose bounds.
+    [[nodiscard]] SurfaceUpload register_surface_upload(sim::AssetId asset, const assets::Model& model,
+        std::uint32_t mesh_index, std::uint32_t submesh_index, RenderPass pass, bool effect_clock);
     [[nodiscard]] std::optional<SurfaceUpload> upload_shell(
         GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
-        sim::AssetId& next_asset, std::string_view model_path, std::uint32_t mesh_index,
+        ComposeTextureCache& textures, sim::AssetId& next_asset, std::string_view model_path, std::uint32_t mesh_index,
         std::uint32_t submesh_index, std::string& status, bool neutral_distortion = false);
     // A piece of hardpoint art: shown by the state of hardpoint `hardpoint`
     // of decisions_[decision].
@@ -470,6 +527,7 @@ private:
         GodotRenderer::PreparedSkinPose palette;
         SkinPoseWork work;
         bool failed{};
+        bool unchanged{}; // palette byte-equal to the last upload of a clean placement
     };
     struct PreparedTurretBinding {
         sim::EntityId entity;
@@ -478,6 +536,14 @@ private:
     };
     std::vector<PreparedIdle> prepared_idle_;
     std::vector<std::uint8_t> idle_consumed_;
+    // PF idle skin: per placement, 1 while every instance holds idle_last_palette_ (set after a clean upload,
+    // cleared by a renderer disturbance report, a failed or missing pose, or the serial path).
+    std::vector<std::uint8_t> idle_clean_;
+    std::vector<GodotRenderer::PreparedSkinPose> idle_last_palette_;
+    std::vector<std::uint64_t> idle_disturbed_groups_;
+    std::vector<std::uint8_t> idle_bind_failed_;
+    std::size_t idle_uploaded_{}, idle_skipped_{}, idle_visited_{}, idle_disturbed_{};
+    std::array<std::uint64_t, 9> idle_causes_{}, idle_causes_seen_{};
     std::vector<std::vector<PreparedTurretBinding>> turret_staged_;
     std::vector<std::span<const std::size_t>> turret_piece_rows_;
     std::vector<std::string> turret_errors_;
@@ -604,6 +670,26 @@ private:
     // Set once compose has planned the attached effects; a state change
     // re-plans them only from then on.
     bool composed_{};
+
+    // The arrival read-ahead (#5097). Declared last: the readers and the workers end before anything they read.
+    struct AheadPlan final {
+        std::vector<std::pair<std::string, scene::TextureProcessing>> textures;
+        std::vector<std::string> models;     // attached hardpoint models, decoded ahead
+        std::shared_ptr<scene::VfsAssetCache> pin; // keeps the decoded models of the plan alive until the append used them
+        double milliseconds{};
+        bool drawn{};
+    };
+    struct AheadTicket final {
+        std::future<AheadPlan> plan;
+        AheadPlan result;
+        AheadState state{AheadState::pending};
+        bool offered{};
+    };
+    std::map<std::uint64_t, AheadTicket> ahead_tickets_;
+    std::unique_ptr<scene::TexturePrefetch> ahead_prefetch_;
+    scene::TexturePrefetch* ahead_in_use_{};
+    std::uint64_t next_ahead_ticket_{1};
+    double ahead_preflight_ms_{};
 };
 
 } // namespace eawr::presentation::godot_backend

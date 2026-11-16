@@ -1,5 +1,6 @@
 #pragma once
 
+#include "advisor_hints.hpp"
 #include "planet_hud.hpp"
 
 #include <array>
@@ -57,6 +58,12 @@ struct TreeFacts {
     std::optional<std::int64_t> technology;
     std::vector<TreeSlot> land, space;
 };
+// WGP-147/GREF-04: the dialogs a faction's Tech Tree mounts. `authored` is the faction's own dialog name; a name that is
+// empty or names no dialog falls back to the Rebel dialog. The Space dialog appends `_SPACE`. A dialog without its own
+// Land/Space radio gadgets is a combined diagram: Land and Space share it.
+struct TreeDialogChoice { std::string land, space; bool combined{}; };
+[[nodiscard]] TreeDialogChoice choose_tree_dialogs(std::string_view authored,
+    const std::function<bool(std::string_view)>& exists, const std::function<bool(std::string_view)>& has_domain_switch);
 struct TreeViewSlot { std::string control; ReferenceIcon type; bool dimmed{}; };
 [[nodiscard]] std::vector<TreeViewSlot> tree_view(const TreeFacts&, bool space);
 // GREF-04: the atlas image an authored arrow gadget takes; empty when the id is not an arrow slot.
@@ -101,8 +108,8 @@ struct ReferenceFacts {
     TreeFacts tree;
     std::vector<SummaryPlanet> planets;
     std::vector<LegendEntry> legend, weather;
-    std::string droid_icon;
-    std::vector<LegendEntry> log;
+    std::string droid_icon; // WGP-124: the local faction's Helper_Icon_Name
+    std::vector<ArchiveEntry> log; // WGP-123: the archive as copied at the page's last activation
     std::optional<std::array<bool, 3>> hints;
 };
 struct ReferenceType {

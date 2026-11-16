@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/presentation/godot/adapter_memory.hpp"
 #include "eawr/diagnostics/owner_census.hpp"
 #include "renderer_upload_internal.hpp"
 #include "vram_probe.hpp"
@@ -8,6 +9,13 @@
 #include <sstream>
 
 namespace eawr::presentation::godot_backend {
+
+AdapterMemory query_adapter_memory(const bool refresh) {
+    if (const auto memory = detail::probe_device_memory(refresh))
+        return {memory->device_local_bytes, memory->bytes, memory->source, false};
+    return {};
+}
+
 namespace detail {
 struct RecipeMemoryProbe final {
     static void census(const GodotRenderer::Impl& impl, diagnostics::OwnerCensus& output) noexcept {
@@ -219,7 +227,17 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
         // Different content under a live asset ID would silently keep the
         // old RIDs; replacing an asset is an explicit release then upload.
         const detail::UploadIdentity identity = detail::upload_identity(model, texture, description, named);
-        if (existing->second.identity.get() != identity) {
+        // The earlier upload's identity may have been built on a pool worker; if that job failed (an allocation, say) its
+        // exception comes out here. Refuse this upload with a diagnostic rather than compare against nothing.
+        detail::UploadIdentity earlier{};
+        try {
+            earlier = existing->second.identity.get();
+        } catch (const std::exception& error) {
+            return failure(diagnostic_codes::upload_failed,
+                "the identity of the earlier upload of renderer asset " + std::to_string(asset_id)
+                    + " could not be computed (" + error.what() + "), so this upload cannot be compared with it");
+        }
+        if (earlier != identity) {
             return failure(diagnostic_codes::duplicate_asset,
                 "renderer asset " + std::to_string(asset_id)
                     + " is already uploaded with different model, texture or material content");
@@ -319,29 +337,76 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
         * detail::TextureBudget::usable_numerator;
     const bool resident = residency_.eager(held, incoming, usable);
     if (!upload_identity_pool_) upload_identity_pool_ = std::make_unique<detail::UploadIdentityPool>();
-    std::vector<std::uint8_t> identity_bytes;
-    {
-        core::load_profile::DetailScope copy(core::load_profile::Phase::upload_identity_copy);
-        identity_bytes = detail::upload_identity_bytes(model, texture, description, named);
-    }
-    {
+    // `model` is the view of the very snapshot the recipe keeps (the ModelUpload overload); any other view (a derived copy)
+    // keeps the serialised path below.
+    if (authoritative && &model.original == resource.recipe->model.snapshot().get()) {
+        // The identity is built and hashed on a pool worker from shared immutable snapshots (the model the recipe keeps,
+        // the texture snapshots, a copy of the small material): nothing is serialised here. The digest is the same
+        // byte-for-byte sequence as upload_identity_bytes (the streaming writer feeds the same stream to SHA-256).
+        std::shared_ptr<const detail::UploadIdentityInputs> inputs;
+        {
+            core::load_profile::DetailScope copy(core::load_profile::Phase::upload_identity_copy);
+            const auto share = [](const std::shared_ptr<detail::TextureRecipe>& kept, const assets::Texture& source) {
+                return kept && kept->snapshot() ? kept->snapshot() : std::make_shared<const assets::Texture>(source);
+            };
+            auto built = std::make_shared<detail::UploadIdentityInputs>();
+            built->model = resource.recipe->model.snapshot();
+            built->surface = resource.recipe->model.surface();
+            built->texture = share(resource.recipe->texture, texture);
+            built->material = description;
+            std::size_t cost = 0;
+            for (const auto& mip : built->texture->mips) cost += mip.bytes.size();
+            for (std::size_t index = 0; index < binding_textures.size(); ++index) {
+                built->bindings.emplace_back(binding_textures[index].binding,
+                    share(resource.recipe->bindings[index].second, binding_textures[index].texture));
+                for (const auto& mip : built->bindings.back().second->mips) cost += mip.bytes.size();
+            }
+            for (const auto& mesh : model.meshes) {
+                for (const auto& surface : mesh.submeshes) {
+                    cost += surface.vertices.size() * sizeof(assets::Vertex) + surface.indices.size() * sizeof(std::uint16_t);
+                }
+            }
+            built->cost = cost;
+            inputs = std::move(built);
+        }
         core::load_profile::DetailScope submit(core::load_profile::Phase::upload_identity_submit);
-        resource.identity = upload_identity_pool_->submit(std::move(identity_bytes));
+        resource.identity = upload_identity_pool_->submit(std::move(inputs), !play_uploads_);
+    } else {
+        std::vector<std::uint8_t> identity_bytes;
+        {
+            core::load_profile::DetailScope copy(core::load_profile::Phase::upload_identity_copy);
+            identity_bytes = detail::upload_identity_bytes(model, texture, description, named);
+        }
+        core::load_profile::DetailScope submit(core::load_profile::Phase::upload_identity_submit);
+        resource.identity = upload_identity_pool_->submit(std::move(identity_bytes), !play_uploads_);
     }
     core::load_profile::DetailScope gpu_create(core::load_profile::Phase::upload_gpu_create);
     MaterialRefusal refusal;
-    bool texture_uploaded = !resident || acquire_texture(*rendering, texture, resource.texture, resource.gpu_items);
-    for (const GodotRenderer::BindingTexture& item : binding_textures) {
-        if (!texture_uploaded) break;
-        RID bound;
-        texture_uploaded = !resident || acquire_texture(*rendering, item.texture, bound, resource.gpu_items);
-        if (bound.is_valid()) resource.binding_textures.emplace_back(item.binding, bound);
+    bool texture_uploaded = true;
+    {
+        core::load_profile::DetailScope acquire(core::load_profile::Phase::upload_acquire_texture);
+        texture_uploaded = !resident
+            || acquire_texture(*rendering, texture, resource.texture, resource.gpu_items, &*texture_gpu_item);
+        for (std::size_t index = 0; index < binding_textures.size(); ++index) {
+            if (!texture_uploaded) break;
+            const GodotRenderer::BindingTexture& item = binding_textures[index];
+            RID bound;
+            texture_uploaded = !resident
+                || acquire_texture(*rendering, item.texture, bound, resource.gpu_items, &binding_items[index]);
+            if (bound.is_valid()) resource.binding_textures.emplace_back(item.binding, bound);
+        }
     }
-    const MaterialUpload material_uploaded = texture_uploaded
-        ? upload_material(*rendering, description, resource, refusal)
-        : MaterialUpload::failed;
-    if (!texture_uploaded || material_uploaded != MaterialUpload::success
-        || !upload_mesh(*rendering, model, resource, legacy::authored_binormals(description), resident)) {
+    MaterialUpload material_uploaded = MaterialUpload::failed;
+    if (texture_uploaded) {
+        core::load_profile::DetailScope material_scope(core::load_profile::Phase::upload_material);
+        material_uploaded = upload_material(*rendering, description, resource, refusal);
+    }
+    bool mesh_uploaded = false;
+    if (texture_uploaded && material_uploaded == MaterialUpload::success) {
+        core::load_profile::DetailScope mesh_scope(core::load_profile::Phase::upload_mesh);
+        mesh_uploaded = upload_mesh(*rendering, model, resource, legacy::authored_binormals(description), resident);
+    }
+    if (!texture_uploaded || material_uploaded != MaterialUpload::success || !mesh_uploaded) {
         free_resource(*rendering, resource);
         if (material_uploaded == MaterialUpload::shader_compile_failed) {
             return failure(diagnostic_codes::shader_compile_failed,
@@ -361,7 +426,9 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
     if (resource.shadow_variant_failed) ++shadow_variant_failures_;
     resource.pass = description.pass;
     resource.description = description;
-    if (resident) {
+    if (resident && !play_uploads_) {
+        // Verification of the kept CPU snapshots against their sources, then their release (texture re-decode, model digest).
+        core::load_profile::DetailScope verify(core::load_profile::Phase::upload_verify);
         resource.recipe->texture->uploaded();
         for (const auto& binding : resource.recipe->bindings) binding.second->uploaded();
         resource.recipe->model.uploaded(model_stats_, [this](const auto& model) { return model_digest(model); });
@@ -412,8 +479,10 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
     // A pose set for this asset on an entity without its instance (not
     // yet submitted, or waiting while the asset was missing) would
     // otherwise outlive the asset and bind to a later re-upload.
-    std::erase_if(skin_poses_, [asset_id](const auto& pose) {
-        return pose.second.asset_id == asset_id;
+    std::erase_if(skin_poses_, [this, asset_id](auto& pose) {
+        if (pose.second.asset_id != asset_id) return false;
+        note_idle_unposed(pose.second, IdleDisturbance::removed);
+        return true;
     });
     if (found->second.shadow_receiving) --shadow_receiving_;
     if (found->second.shadow_variant_failed) --shadow_variant_failures_;
@@ -451,7 +520,7 @@ bool GodotRenderer::Impl::acquire_texture(RenderingServer& rendering, const deta
         }
     }
     const auto texture = recipe.read();
-    return texture && acquire_texture(rendering, *texture, target, items);
+    return texture && acquire_texture(rendering, *texture, target, items, recipe.item_for(texture.get()));
 }
 
 bool GodotRenderer::Impl::admit_resource(RenderingServer& rendering, const sim::AssetId asset, Resource& resource) {

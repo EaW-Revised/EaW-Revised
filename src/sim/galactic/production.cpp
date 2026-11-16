@@ -8,6 +8,7 @@
 
 #include <stdexcept>
 #include <algorithm>
+#include <tuple>
 #include <cassert>
 #include <limits>
 #include <map>
@@ -149,8 +150,7 @@ core::Result<std::int64_t> GalacticSession::set_technology(const TechnologyWrite
     note_native_output_published(); // story technology is a live write
     auto result = impl.assign_technology(write);
     if (!result) return result;
-    const auto events = impl.snapshot->events();
-    impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    impl.refresh_snapshot();
     return result;
 }
 core::Result<GalacticSession::ProductionLockReceipt> GalacticSession::apply_production_lock(const ProductionLockWrite& write) {
@@ -218,8 +218,7 @@ core::Result<GalacticSession::ProductionLockReceipt> GalacticSession::apply_prod
     }
     if (impl.production_lock_batch) impl.production_lock_publication_pending = true;
     else {
-        const auto events = impl.snapshot->events();
-        impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+        impl.refresh_snapshot();
     }
     return Result::success(receipt);
 }
@@ -227,8 +226,7 @@ void GalacticSession::begin_production_lock_batch() { impl_->production_lock_bat
 void GalacticSession::end_production_lock_batch() {
     auto& impl = *impl_;
     if (impl.production_lock_publication_pending) {
-        const auto events = impl.snapshot->events();
-        impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+        impl.refresh_snapshot();
         impl.production_lock_publication_pending = false;
     }
     impl.production_lock_batch = false;
@@ -1197,15 +1195,17 @@ GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_o
     part.emplace(gc_profile::Phase::off_rest);
     auto& bytes = result.admission;
     detail::put_u32(bytes, local);
-    detail::put_u64(bytes, next_id);
-    detail::put_u64(bytes, live_object_count);
+    // The admission rows read the identity counter and the live object count only through the resource-limit test of
+    // queried_admission (menu queries skip it, purchase queries apply it), so the key carries that test's outcome rather
+    // than the two raw counters: creating an object no longer invalidates every offer row (#6933).
+    detail::put_u8(bytes, next_id >= std::numeric_limits<EntityId>::max() - 2 || live_object_count >= galactic_max_objects ? 1 : 0);
     // The rows read the balance only for a pay-at-purchase builder (the credits check of a purchase). A pay-as-you-go
     // human's rows are the same at every balance, so its per-tick bills must not invalidate them (#5982).
     if (!player->pay_as_you_go) detail::put_i64(bytes, account->credits.raw());
     detail::put_i64(bytes, account->current_tech);
     detail::put_i64(bytes, account->maximum_tech);
     part.emplace(gc_profile::Phase::off_menu);
-    detail::encode_production_menu_inputs(bytes, *production, local, result.visible);
+    detail::encode_production_menu_globals(bytes, *production, local);
     part.emplace(gc_profile::Phase::off_rest);
     // Reservations include this player's queues on every producer, including hidden ones.
     const auto reservations = production_reservations(*production, local);
@@ -1222,14 +1222,6 @@ GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_o
         detail::put_u8(bytes, found ? 1 : 0);
         if (found) detail::encode_population(bytes, std::span<const PopulationTotal>(&*total, 1));
     }
-    for (auto planet : result.visible) {
-        const auto owner = std::lower_bound(owners.begin(), owners.end(), planet,
-            [](const auto& row, auto id) { return row.id < id; });
-        detail::put_u32(bytes, owner != owners.end() && owner->id == planet ? owner->owner : 0);
-        const auto unlocks = corruption_local_unlocks(planet, local);
-        detail::put_u64(bytes, unlocks.size());
-        for (auto type : unlocks) detail::put_u64(bytes, type);
-    }
     detail::put_u8(bytes, economy_corruption ? 1 : 0);
     if (economy_corruption) {
         detail::put_u8(bytes, economy_corruption->tutorial ? 1 : 0);
@@ -1239,17 +1231,39 @@ GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_o
             for (auto value : row.time) detail::put_i64(bytes, value.raw());
             detail::put_i64(bytes, row.tech_purchase_multiplier.raw());
         }
-        for (const auto& row : economy_corruption->planets)
-            if (std::binary_search(result.visible.begin(), result.visible.end(), row.planet)) {
-                detail::put_u64(bytes, row.planet);
-                detail::put_u8(bytes, row.corruption != corruption_fixture::Type::none ? 1 : 0);
+    }
+    // One segment per visible producer: everything that producer's rows read besides the shared inputs above, so a
+    // change at one producer re-evaluates only that producer's rows (#6933).
+    for (auto planet : result.visible) {
+        auto& segment = result.producers.emplace_back(planet, std::vector<std::uint8_t>{}).second;
+        const auto at = std::lower_bound(production->planets.begin(), production->planets.end(), planet,
+            [](const auto& row, auto id) { return row.planet < id; });
+        if (at != production->planets.end() && at->planet == planet) detail::encode_production_menu_planet(segment, *at);
+        const auto owner = std::lower_bound(owners.begin(), owners.end(), planet,
+            [](const auto& row, auto id) { return row.id < id; });
+        // Whether the planet exists at all is part of the key: a planet missing from the owner table is not admitted, and a
+        // neutral one (owner 0) is, so a bare owner of 0 would not tell them apart.
+        const bool present = owner != owners.end() && owner->id == planet;
+        detail::put_u8(segment, present ? 1 : 0);
+        detail::put_u32(segment, present ? owner->owner : 0);
+        const auto unlocks = corruption_local_unlocks(planet, local);
+        detail::put_u64(segment, unlocks.size());
+        for (auto type : unlocks) detail::put_u64(segment, type);
+        if (economy_corruption) {
+            const auto& table = economy_corruption->planets;
+            const auto row = std::lower_bound(table.begin(), table.end(), planet, [](const auto& value, auto id) { return value.planet < id; });
+            if (row != table.end() && row->planet == planet) {
+                detail::put_u64(segment, row->planet);
+                detail::put_u8(segment, row->corruption != corruption_fixture::Type::none ? 1 : 0);
             }
+        }
     }
     return result;
 }
 
 std::vector<ObservedProductionOffer> GalacticSession::Impl::observed_production_offers(
-    const ProductionOfferInputs& inputs, std::span<const Fleet> fleet_inputs, const PartitionExecutor& executor, const PlayerId local) const {
+    const ProductionOfferInputs& inputs, std::span<const Fleet> fleet_inputs, const PartitionExecutor& executor, const PlayerId local,
+    const OfferReuse* reuse) const {
     std::vector<ObservedProductionOffer> result;
     if (!production || !economy || !observer) return result;
     const auto player = std::lower_bound(production->players.begin(), production->players.end(), local,
@@ -1278,7 +1292,32 @@ std::vector<ObservedProductionOffer> GalacticSession::Impl::observed_production_
         admitted.push_back({&planet, &*owner});
     }
     std::vector<std::vector<ObservedProductionOffer>> staged(admitted.size());
+    // A producer whose own inputs and the shared inputs equal the previous publication's keeps that publication's rows:
+    // the rows are a pure function of exactly these inputs (#6933). Rows of one producer are contiguous and in producer order.
+    std::vector<bool> kept(admitted.size());
+    if (reuse && reuse->inputs && reuse->rows && reuse->inputs->admission == inputs.admission
+        && reuse->inputs->fleets == inputs.fleets && reuse->inputs->reductions == inputs.reductions) {
+        const auto segment = [](const ProductionOfferInputs& value, PlanetId planet) -> const std::vector<std::uint8_t>* {
+            const auto at = std::lower_bound(value.producers.begin(), value.producers.end(), planet,
+                [](const auto& row, auto id) { return row.first < id; });
+            return at != value.producers.end() && at->first == planet ? &at->second : nullptr;
+        };
+        const auto& previous_rows = *reuse->rows;
+        for (std::size_t index = 0; index < admitted.size(); ++index) {
+            const auto planet = admitted[index].planet->planet;
+            const auto* now = segment(inputs, planet);
+            const auto* before = segment(*reuse->inputs, planet);
+            if (!now || !before || *now != *before) continue;
+            const auto first = std::lower_bound(previous_rows.begin(), previous_rows.end(), planet,
+                [](const auto& row, auto id) { return row.planet < id; });
+            const auto last = std::upper_bound(first, previous_rows.end(), planet,
+                [](auto id, const auto& row) { return id < row.planet; });
+            staged[index].assign(first, last);
+            kept[index] = true;
+        }
+    }
     const auto evaluate = [&](const std::size_t index) {
+        if (kept[index]) return;
         const auto& planet = *admitted[index].planet;
         const auto* owner = admitted[index].owner;
         auto& rows = staged[index];
@@ -1313,7 +1352,7 @@ std::vector<ObservedProductionOffer> GalacticSession::Impl::observed_production_
     });
     if (!phase) {
         // A failed phase never publishes partial rows: recompute every producer in order on this thread.
-        for (std::size_t index = 0; index < admitted.size(); ++index) { staged[index].clear(); evaluate(index); }
+        for (std::size_t index = 0; index < admitted.size(); ++index) { staged[index].clear(); kept[index] = false; evaluate(index); }
     }
     for (auto& rows : staged) result.insert(result.end(), std::make_move_iterator(rows.begin()), std::make_move_iterator(rows.end()));
     return result;
@@ -1663,6 +1702,10 @@ core::Result<void> GalacticSession::finish_native_production_task(EntityId build
     return core::Result<void>::success();
 }
 
+void GalacticSession::set_construct_story_handler(ConstructStoryHandler handler) {
+    impl_->construct_story_handler = std::move(handler);
+}
+
 core::Result<void> GalacticSession::Impl::service_production(const PartitionExecutor& executor, std::uint64_t tick,
     std::vector<GalacticEvent>& events, bool pending_conflict) {
     production_producers = 0; production_entries = 0;
@@ -1673,6 +1716,7 @@ core::Result<void> GalacticSession::Impl::service_production(const PartitionExec
     const auto fleet_inputs = sorted_fleets();
     struct Notices { std::vector<ProductionEntry> cancelled; std::uint64_t visited{}; bool blocked{}; };
     std::vector<Notices> notices(producers.size());
+    std::vector<ConstructStoryNotice> story; // WST-33: delivered after the ordered commit, sorted
     // WGEP-35: per-planet prerequisite sweep uses copied inputs and disjoint outputs.
     const auto phase = executor.execute_phase("galactic-production", tick_partition_count, [&](std::size_t partition) {
         const auto range = partition_range(partition, staged.size());
@@ -1836,6 +1880,11 @@ core::Result<void> GalacticSession::Impl::service_production(const PartitionExec
                     }
                 }
                 invalidate_income_inputs(); // an economic object may have entered the live roster
+                if (construct_story_handler && type->kind != ProductionKind::technology) { // WGEP-41: base and ordinary results notify
+                    story.push_back({ConstructStoryNotice::Kind::built, finished.builder, planet.planet, type->type, finished.build_id, domain == 1, 0});
+                    if (type->kind == ProductionKind::starbase)
+                        story.push_back({ConstructStoryNotice::Kind::base_level, finished.builder, planet.planet, type->type, finished.build_id, true, type->base_level});
+                }
                 if (native_production_outcome_handler)
                     native_production_outcome_handler({finished.builder, finished.build_id, completed_object, true});
                 if (!queue.empty()) start(queue.front(), clock.galactic_frame);
@@ -1870,6 +1919,10 @@ core::Result<void> GalacticSession::Impl::service_production(const PartitionExec
     }
     population_stale = true;
     dirty[8] = true; dirty[1] = true; dirty[0] = true;
+    std::stable_sort(story.begin(), story.end(), [](const ConstructStoryNotice& a, const ConstructStoryNotice& b) {
+        return std::tuple{a.planet, a.build, a.kind} < std::tuple{b.planet, b.build, b.kind}; });
+    for (const auto& row : story)
+        if (auto told = construct_story_handler(row); !told) return told;
     return core::Result<void>::success();
 }
 } // namespace eawr::sim::galactic

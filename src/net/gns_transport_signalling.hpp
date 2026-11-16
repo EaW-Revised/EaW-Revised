@@ -2,6 +2,7 @@
 
 #include "eawr/net/gns_transport.hpp"
 #include "gns_room_signal.hpp"
+#include "turn_lists.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -30,8 +31,12 @@ struct GnsLogState {
     std::atomic<bool> enabled{}, has_pending{};
     std::atomic<int> seat{-1};
     std::uint64_t generation{};
+    std::map<std::string, Clock::time_point> turn_servers; // TURN servers that accepted a request, with the time (labels the route), under `mutex`
 };
 GnsLogState& gns_log();
+// Comma list of the "host:port" TURN servers that accepted a request in the last few minutes (GNS repeats it at every refresh, about
+// every two minutes); empty before the first one. More than one entry means different allocations use different servers.
+std::string gns_recent_turn_servers();
 // seat/peer < 0 are left out. The time is UTC of day, so lines from several machines can be lined up.
 std::string gns_log_line(int seat, int peer, std::string_view body, std::string_view event = "gns");
 #if EAWR_HAS_GNS

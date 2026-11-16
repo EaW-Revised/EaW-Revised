@@ -143,8 +143,20 @@ core::Result<void> LockstepSession::advance_timing() {
         }
         if (!ready && mesh_ && mesh_->running() && mesh_->state() != MeshLossState::settling)
             timing_->since_ms = last_now_.value_or(0);
-        if (!ready && last_now_.value_or(0) - timing_->since_ms >= options_.completeness_timeout_ms)
-            return refused<void>(timing_errors::timeout, "timing agreement expired");
+        if (!ready && last_now_.value_or(0) - timing_->since_ms >= options_.completeness_timeout_ms) {
+            // A slow vote on open streams is not a lost peer: keep the current delay, keep the agreement and
+            // wait on (hold_on_expiry), up to max_deferrals expiries. A voter stream that is not open, a pending
+            // departure or the last deferral fails closed as before: letting one peer drop the agreement alone
+            // could split the delay while another peer applies it.
+            bool lost = !deferred_departures_.empty();
+            for (PeerIndex peer = 0; peer < seats_.size() && !lost; ++peer)
+                lost = peer != self_ && timing_voter(peer) && transport_->link(peer) != LinkState::open;
+            if (!options_.adaptive_timing->hold_on_expiry || lost || timing_->deferrals >= options_.adaptive_timing->max_deferrals)
+                return refused<void>(timing_errors::timeout, "timing agreement expired");
+            timing_->since_ms = last_now_.value_or(0);
+            ++timing_->deferrals;
+            ++timing_deferrals_;
+        }
         if (ready && !timing_->retained) {
             Bytes control{timing_proposal_kind};
             append(control, timing_->event.tick, 8); append(control, timing_->event.delay, 8);
@@ -166,8 +178,9 @@ core::Result<void> LockstepSession::advance_timing() {
         }
         return notify_timing();
     }
+    // The host also leaves a running save barrier alone: a proposal then would only make the capture retry.
     if (self_ != options_.adaptive_timing->host || tick < next_policy_tick_ || tick < retain_until_ || agreement_ || held_
-        || !deferred_departures_.empty())
+        || checkpoint_ || !deferred_departures_.empty())
         return notify_timing();
     const auto cadence = 64 * std::max<std::uint64_t>(1, options_.input_delay / 2);
     // Catch-up and a retained transition can pass a policy boundary. Rejoin on

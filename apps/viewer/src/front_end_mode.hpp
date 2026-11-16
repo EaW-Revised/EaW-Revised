@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace eawr::presentation::godot_backend {
 
@@ -78,6 +79,12 @@ public:
     // again, whichever screen started the game (the setup screen is left, the campaign shell restored).
     void return_to_main_menu();
     void show_load_failure(const std::string& reason);
+    // The main menu's failure box for a battle that stopped with an error: headline and code, the first line of the
+    // error, and where the full text is.
+    void show_refusal(const std::string& reason, std::string_view headline);
+    // LOAD_CAMPAIGN (WST-95): a running campaign asks for another. This is the staging screen's own launcher without its
+    // screen bookkeeping (the shell already shows a campaign): the refusal text, or empty when the new campaign runs.
+    [[nodiscard]] std::string launch_campaign(const presentation::ui::CampaignStartRequest& request);
     // A campaign the host started itself (a multiplayer lobby's launch, which never passes through the shell's
     // own campaign launcher) owns the frame: the demo battle stops and the menus leave it, as for a launcher start.
     void campaign_started_by_host();

@@ -6,7 +6,8 @@
 namespace eawr::sim::galactic::story {
 enum class ObjectiveStatus { incomplete, complete, failed };
 struct Objective {
-    std::string text_id, suggestion;
+    std::string text_id;
+    bool suggestion{}; // WST-65: the Boolean suggestion flag
     std::int64_t number{};
     ObjectiveStatus status{ObjectiveStatus::incomplete};
     bool operator==(const Objective&) const = default;
@@ -22,17 +23,25 @@ struct GoalsState { // WST-47/58/60: authoritative fixture copy, excluding local
     std::vector<Objective> objectives;
     std::vector<Goal> goals;
     bool objectives_visible{true};
+    // WST-65/67: the story's objective numbering counter. An add takes it and increments it; removing entries never
+    // rewinds it. The start value is unverified (WST-U10); 1 is the least visible reading.
+    std::int64_t next_number{1};
 };
 // One owner's goals and objectives, as the campaign checkpoint carries them. The tail is deliberately outside the
 // state digest: the goal rows derive from the digested plot state (an event triggers once), so they add no
 // independent state to compare between peers; they only need to survive a save.
 struct OwnerGoals { Player owner{}; GoalsState state; };
 enum class ObjectiveAction { add, replace, complete, fail, remove, remove_all, display };
+// add: objective.text_id is the identity, suggestion as given, `index` the insertion position (WST-65: 0..size inserts
+// there, anything else appends; the number comes from the counter, not from the reward). complete, fail, remove: the
+// first entry whose text identity equals `identity` (WST-66). replace: `identity` is the old identity and
+// objective.text_id the new one. display: `visible`.
 struct ObjectiveReward {
     ObjectiveAction action{};
     std::string identity;
     Objective objective;
     bool visible{true};
+    std::int64_t index{-1};
 };
 enum class GoalAction { complete, remove, hide };
 struct GoalReward { GoalAction action{}; std::string tag; bool hidden{true}; };
@@ -47,7 +56,8 @@ struct LocalPresentation {
     std::string transmission_text, mission_added_sound;
     bool defer_summary_state{}; // a live renderer resolves its own open/closed state
 };
-struct ObjectiveChanged { ObjectiveAction action{}; std::string identity; std::optional<Objective> value; bool visible{}; };
+// `index` is where an add inserted the objective (WST-65), so a mirror of the list can place it the same way; -1 otherwise.
+struct ObjectiveChanged { ObjectiveAction action{}; std::string identity; std::optional<Objective> value; bool visible{}; std::int64_t index{-1}; };
 struct GoalChanged { std::string tag; std::optional<Goal> value; };
 enum class SummaryAction { refresh, open, flash_button, refresh_or_flash };
 struct SummaryRequest {

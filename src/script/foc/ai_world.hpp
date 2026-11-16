@@ -6,6 +6,7 @@
 #include "ai_data.hpp"
 #include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
+#include "eawr/sim/tactical/tsw.hpp"
 #include "eawr/sim/math/geometry.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 
@@ -21,6 +22,15 @@ namespace math = sim::math;
 using numeric::LuaNumber;
 
 // ---- The completed tick as the bindings read it -------------------------------------------
+
+// TSW-02/04: the tactical super weapon behaviour of one object, as the completed tick left it. Present on every object
+// whose type carries the behaviour; `active` is false when the battle has no TSW setup for it (the behaviour is inert,
+// so it is never ready and never fires). `gate_open` is the gate of both requests (TSW-04) at that tick.
+struct TswView {
+    bool active{};
+    tactical::TswPhase phase{tactical::TswPhase::idle};
+    bool gate_open{};
+};
 
 struct ViewUnit {
     sim::EntityId id{};
@@ -58,6 +68,7 @@ struct ViewUnit {
     std::uint64_t purchase_token{}; // SAE-11: distinguish concurrent arrivals of the same type
     std::optional<tactical::TacticalInstance::PlanetaryWeaponView> planetary_weapon;
     bool can_move{}; // completed SPACE formation eligibility, including active movement locks
+    std::optional<TswView> tsw; // TSW-02: only on an object whose type has the tactical super weapon behaviour
 };
 
 struct ViewPlayer {

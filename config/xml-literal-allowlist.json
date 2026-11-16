@@ -227,12 +227,6 @@
    "reason": "Existing engine-default initialization; authored tag override is read separately. Review its fallback diagnostic under the expanded tag universe."
   },
   {
-   "file": "src/skirmish/economy.cpp",
-   "text": "rules.max_queue = 5; // PU-14: FoC's built-in Max_Build_Queue; its data does not set it",
-   "ticket": 6215,
-   "reason": "Existing documented built-in queue limit (PU-14), not a copied stock XML value; review applicability of the newly catalogued tag."
-  },
-  {
    "file": "src/units/unit_tables_abilities_special.cpp",
    "text": "read(\"Target_Light_Effect_Pulse_Count\", Fixed::from_raw(Fixed::scale)).raw() / Fixed::scale, 1, 65535));",
    "ticket": 6215,

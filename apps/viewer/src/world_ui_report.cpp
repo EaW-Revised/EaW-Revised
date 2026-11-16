@@ -209,6 +209,11 @@ void WorldUiView::write_report(std::ostream& output) const {
     list(flag_rows_);
     output << ", \"flags_seen\": ";
     list(std::vector<std::string>(flags_seen_.begin(), flags_seen_.end()));
+    // #6931: the flag on a marked ally's unit bracket (unit:x=,y=), last frame, and every unit that ever showed one.
+    output << ", \"bracket_flag_rows\": ";
+    list(bracket_flag_rows_);
+    output << ", \"bracket_flags_seen\": ";
+    list(std::vector<std::string>(bracket_flags_seen_.begin(), bracket_flags_seen_.end()));
     output << ", \"ability_overlays\": [";
     for (std::size_t index = 0; index < ability_rows_.size(); ++index) {
         const auto& row = ability_rows_[index];

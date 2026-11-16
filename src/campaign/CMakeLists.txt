@@ -8,7 +8,7 @@ target_include_directories(
     PUBLIC
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
 )
-target_link_libraries(eawr_campaign PUBLIC eawr::sim_galactic eawr::sim eawr::core eawr::script_authoritative eawr::skirmish eawr::script_galactic eawr::data eawr::units)
+target_link_libraries(eawr_campaign PUBLIC eawr::sim_galactic eawr::sim eawr::core eawr::script_authoritative eawr::skirmish eawr::script_galactic eawr::data eawr::units eawr::platform_model_facts)
 target_compile_features(eawr_campaign PUBLIC cxx_std_20)
 target_link_libraries(eawr_campaign PUBLIC eawr::script_foc)
 eawr_target_project_warnings(eawr_campaign)

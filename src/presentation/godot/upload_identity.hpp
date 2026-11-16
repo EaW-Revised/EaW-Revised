@@ -2,12 +2,16 @@
 
 #include "eawr/assets/assets.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/presentation/model_upload.hpp"
 #include "eawr/presentation/renderer.hpp"
 
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -23,14 +27,23 @@ using UploadIdentity = std::array<std::uint8_t, 32>;
 // provenance and notices are left out, so equal content read from another
 // layer is still the same asset; any consumed difference is a different one.
 // A repeated upload is a shared reference only when the identities match.
+//
+// `streaming`: the bytes are fed to a SHA-256 hasher in 64 KiB pieces instead of being kept (large spans go in without a
+// copy), so the digest equals core::sha256 over the same byte sequence without ever holding it. take() needs the
+// default (buffering) mode.
 class UploadIdentityWriter final {
 public:
+    UploadIdentityWriter() = default;
+    struct Streaming final {};
+    explicit UploadIdentityWriter(Streaming) : sink_(std::in_place) {}
+
     template <typename T>
     void scalar(const T value) {
         static_assert(std::is_trivially_copyable_v<T>);
         std::array<std::uint8_t, sizeof(T)> raw{};
         std::memcpy(raw.data(), &value, sizeof(T));
         bytes_.insert(bytes_.end(), raw.begin(), raw.end());
+        flush_if_full();
     }
 
     void size(const std::size_t value) { scalar(static_cast<std::uint64_t>(value)); }
@@ -38,6 +51,7 @@ public:
     void text(const std::string_view value) {
         size(value.size());
         bytes_.insert(bytes_.end(), value.begin(), value.end());
+        flush_if_full();
     }
 
     void vec(const assets::Vec2f& value) { scalar(value.x); scalar(value.y); }
@@ -50,14 +64,33 @@ public:
         size(value.size());
         if (value.empty()) return;
         const auto* begin = reinterpret_cast<const std::uint8_t*>(value.data());
+        if (sink_ && value.size() >= flush_bytes) {
+            flush();
+            sink_->update(std::span<const std::uint8_t>(begin, value.size()));
+            return;
+        }
         bytes_.insert(bytes_.end(), begin, begin + value.size());
+        flush_if_full();
     }
 
-    [[nodiscard]] UploadIdentity digest() const { return core::sha256(bytes_); }
+    [[nodiscard]] UploadIdentity digest() {
+        if (!sink_) return core::sha256(bytes_);
+        flush();
+        return sink_->digest();
+    }
     [[nodiscard]] std::vector<std::uint8_t> take() && { return std::move(bytes_); }
 
 private:
+    static constexpr std::size_t flush_bytes = 64U * 1024U;
+    void flush() {
+        if (sink_ && !bytes_.empty()) sink_->update(bytes_);
+        if (sink_) bytes_.clear();
+    }
+    void flush_if_full() {
+        if (sink_ && bytes_.size() >= flush_bytes) flush();
+    }
     std::vector<std::uint8_t> bytes_;
+    std::optional<core::Sha256Hasher> sink_;
 };
 
 // One per-binding texture of an upload (GodotRenderer::BindingTexture).
@@ -77,12 +110,12 @@ inline void write_texture(UploadIdentityWriter& out, const assets::Texture& text
 // `binding_textures` are appended after the material, so an upload without
 // any keeps the identity it had before per-binding textures existed.
 template <typename Model>
-[[nodiscard]] inline std::vector<std::uint8_t> upload_identity_bytes(
+inline void write_upload_identity(
+    UploadIdentityWriter& out,
     const Model& model,
     const assets::Texture& texture,
     const MaterialDescription& material,
-    const std::span<const NamedTexture> binding_textures = {}) {
-    UploadIdentityWriter out;
+    const std::span<const NamedTexture> binding_textures) {
     // Mesh upload consumes the bone count (skin binding and skinning checks),
     // visible meshes, their rigid bone and every submesh's skinned geometry,
     // vertex colours included.
@@ -142,6 +175,16 @@ template <typename Model>
             if (item.texture != nullptr) write_texture(out, *item.texture);
         }
     }
+}
+
+template <typename Model>
+[[nodiscard]] inline std::vector<std::uint8_t> upload_identity_bytes(
+    const Model& model,
+    const assets::Texture& texture,
+    const MaterialDescription& material,
+    const std::span<const NamedTexture> binding_textures = {}) {
+    UploadIdentityWriter out;
+    write_upload_identity(out, model, texture, material, binding_textures);
     return std::move(out).take();
 }
 
@@ -151,7 +194,29 @@ template <typename Model>
     const assets::Texture& texture,
     const MaterialDescription& material,
     const std::span<const NamedTexture> binding_textures = {}) {
-    return core::sha256(upload_identity_bytes(model, texture, material, binding_textures));
+    UploadIdentityWriter out{UploadIdentityWriter::Streaming{}};
+    write_upload_identity(out, model, texture, material, binding_textures);
+    return out.digest();
 }
+
+// Everything one upload's identity reads, owned: shared immutable snapshots and a copy of the small material. A pool
+// worker evaluates it, so the model and texture bytes are never serialised on the uploading thread.
+struct UploadIdentityInputs final {
+    std::shared_ptr<const assets::Model> model;
+    std::optional<ModelSurface> surface;
+    std::shared_ptr<const assets::Texture> texture;
+    MaterialDescription material;
+    std::vector<std::pair<std::string, std::shared_ptr<const assets::Texture>>> bindings;
+    // Bytes the job keeps alive beyond the uploading call (the pool's admission budget counts them).
+    std::size_t cost{};
+
+    [[nodiscard]] UploadIdentity evaluate() const {
+        const ModelView view(*model, surface);
+        std::vector<NamedTexture> named;
+        named.reserve(bindings.size());
+        for (const auto& [name, texture_ptr] : bindings) named.push_back({name, texture_ptr.get()});
+        return upload_identity(view, *texture, material, named);
+    }
+};
 
 } // namespace eawr::presentation::godot_backend::detail

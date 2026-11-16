@@ -252,4 +252,16 @@ struct FontPixels {
 // unstretched face at `em_height`, which `width_em` names.
 [[nodiscard]] FontPixels font_pixels(const FontSpec& font, std::uint32_t screen_height) noexcept;
 
+// UI-B1: where a push button's art for one state is drawn, relative to the button's own rectangle. The rectangle
+// is as high as the button's resting art; a state whose art is taller (a mod's glow round a hovered, pressed or
+// disabled button) keeps its own height and grows equally above and below, so the caption stays on the
+// rectangle's centre line in every state. A state with no art height (0) draws at the resting height; a button with no resting art (0) takes the state's art as its
+// whole height, top-aligned, and the caption centres in it.
+struct ButtonArtBand {
+    double height{};
+    double top{}; // offset of the art's top edge from the rectangle's top edge; negative when it grows upward
+    double caption_height{}; // the height the caption is centred in, from the rectangle's top edge
+};
+[[nodiscard]] ButtonArtBand button_art_band(double resting_height, double state_height) noexcept;
+
 } // namespace eawr::presentation::ui

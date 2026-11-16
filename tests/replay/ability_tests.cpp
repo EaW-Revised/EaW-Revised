@@ -28,6 +28,7 @@ int main(int argc, char* argv[]) {
     if (argc == 2 && std::string_view(argv[1]) == "--beams") {
         test_hero_beams();
         test_super_laser();
+        test_super_laser_controls();
         test_leech_shields();
         test_beam_autofire();
         test_arriving_beam_autofire();
@@ -86,10 +87,12 @@ int main(int argc, char* argv[]) {
     test_hero_wingmen();
     test_spawned_hero_abilities();
     test_buzz_team_request();
+    test_buzz_solo_craft();
     test_buzz_droids();
     test_hostile_buzz_droids();
     test_hero_beams();
     test_super_laser();
+    test_super_laser_controls();
     test_beam_autofire();
     test_concentrate_autofire();
     test_arriving_beam_autofire();

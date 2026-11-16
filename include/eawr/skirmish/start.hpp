@@ -193,8 +193,14 @@ struct StartInputs final {
     sim::tactical::VictoryCondition land_victory_condition{sim::tactical::VictoryCondition::none};
     MatchOptions match_defaults{};
     std::vector<sim::tactical::TypeId> named_heroes{}, superweapons{};
+    // WGT-57 (interim): a campaign space battle at a destroyed planet drops the planet backdrop (the nearest
+    // DUMMY_TACTICAL_SUPER_WEAPON_TARGET placement to the origin) instead of replacing it by its Death_By_TSW_Replacements.
+    bool destroyed_planet_backdrop{};
     // Effective mounted data closure; synthetic inputs use canonical empty digests.
     std::string script_manifest_digest{}, ai_data_digest{};
+    // Test seam: the Lua sandbox policy identity this start claims in the match identity, to stand in for a peer on
+    // another build. Empty (always, in production): this build's script::authoritative::sandbox_policy_identity.
+    std::string sandbox_policy{};
     // WTA-46 (#735): the mounted AI player types' level -> difficulty entry table; absent for synthetic inputs and
     // data without difficulty entries. Read it through skirmish::player_difficulty().
     std::shared_ptr<const script::foc::AiDifficultyTable> difficulty{};
@@ -283,6 +289,10 @@ using battle::layer_position;
 using battle::TacticalSuperWeaponStart;
 using battle::tactical_super_weapon_start;
 using battle::tactical_super_weapon_targets;
+using battle::destroyed_backdrop_record;
+using battle::replace_target_prop;
+using battle::ReplacementProp;
+using battle::tactical_super_weapon_setup;
 
 // True when a TED placement can become a map-object unit (add_map_objects): it names a catalog
 // type, is not a designer marker, and is not a SpaceProp decoration. Map-object units are not in

@@ -1,8 +1,12 @@
 #include "map_mode_internal.hpp"
 #include "render_profile_viewport.hpp"
 #include "shader_activation_owner.hpp"
+#include "space_removed_records.hpp"
 
+#include "compose_texture_cache.hpp"
+#include "eawr/core/load_profile.hpp"
 #include "family_textures.hpp"
+#include "galactic/galactic_texture_chain.hpp"
 #include "legacy/registry.hpp"
 
 namespace eawr::presentation::godot_backend {
@@ -127,6 +131,21 @@ void bind_team_colour(MaterialDescription& material, const std::array<std::uint8
     material.bindings.push_back({"Colorization", scene::colorization_binding(material.program, colour)});
 }
 
+// MT-02 (docs/behaviour/texture-mip-upload.md), land compose: the one loader for the textures of the placed units,
+// buildings and props. The policy is the space compose's (texture_processing_for, chosen by effect phase, family slot
+// and format, never by file or mod name); the chain is completed here, on the loading thread, once per path and policy,
+// while the map composes, so no chain is built during the battle. A complete chain or an unsupported format comes back as
+// decoded. tests/presentation/renderer/test_land_texture_chain.py fails on a raw assets::load_texture in this file.
+[[nodiscard]] core::Result<assets::Texture> load_placement_texture(
+    const vfs::Vfs& filesystem, const std::string_view logical_path, const scene::TextureProcessing processing) {
+    auto loaded = assets::load_texture(filesystem, logical_path);
+    if (loaded) {
+        core::load_profile::Scope scope(core::load_profile::Phase::texture);
+        apply_galactic_chain(loaded.value(), processing);
+    }
+    return loaded;
+}
+
 } // namespace
 
 struct MapMode::State::PlacementComposition final {
@@ -180,8 +199,9 @@ void MapMode::State::collect_placement_colours(PlacementComposition& work) {
 void MapMode::State::upload_placement_surfaces(scene::VfsAssetCache& cache, PlacementComposition& work, sim::AssetId& next_asset, float wind_speed) {
     for (const scene::SceneAsset& asset : scene->assets) {
         const auto use = (*work.first_use).find(asset.asset_id);
+        if (use == (*work.first_use).end()) continue; // no composed placement uses it (#6144: e.g. only removed records)
         const assets::Model* model = cache.model(asset.logical_path);
-        if (use == (*work.first_use).end() || model == nullptr) continue;
+        if (model == nullptr) continue;
         const std::vector<scene::Surface>& surfaces = use->second->surfaces;
         std::optional<std::vector<lighting::wind::Matrix>> wind_bones;
         for (std::size_t index = 0; index < surfaces.size(); ++index) {
@@ -206,12 +226,16 @@ void MapMode::State::upload_placement_surfaces(scene::VfsAssetCache& cache, Plac
             const assets::Submesh& submesh = single.meshes.front().submeshes.front();
 
             assets::Texture texture = placeholder_texture();
+            const scene::TextureProcessing base_processing = surface.effect_missing
+                ? scene::TextureProcessing::none : texture_processing_for(*selector);
             for (const scene::TextureBinding& binding : surface.textures) {
                 if (!ieq(binding.parameter, "BaseTexture") || binding.resolved.empty()) continue;
-                auto found = (*work.textures).find(binding.resolved);
+                // Held per path and policy: one file wanted by two effects is two entries.
+                const std::string key = ComposeTextureCache::key(binding.resolved, base_processing);
+                auto found = (*work.textures).find(key);
                 if (found == (*work.textures).end()) {
-                    auto decoded = assets::load_texture(*filesystem, binding.resolved);
-                    found = (*work.textures).emplace(binding.resolved,
+                    auto decoded = load_placement_texture(*filesystem, binding.resolved, base_processing);
+                    found = (*work.textures).emplace(key,
                         decoded ? std::move(decoded.value()) : placeholder_texture()).first;
                 }
                 texture = found->second;
@@ -265,17 +289,29 @@ void MapMode::State::upload_placement_surfaces(scene::VfsAssetCache& cache, Plac
                     if (auto pose = player.value().sample({})) bind_pose = std::move(pose.value().bones);
                 }
             }
+            // The declared textures of the family's normal-map bindings: they get the normal chain, as in the space compose.
+            std::vector<std::string> normal_maps;
+            if (!surface.effect_missing && base_processing != scene::TextureProcessing::none) {
+                for (const std::string_view slot : normal_binding_names(*selector)) {
+                    const MaterialBinding* binding = legacy::bindings::find(authored, slot);
+                    if (const auto* declared = binding == nullptr ? nullptr : std::get_if<std::string>(&binding->value))
+                        normal_maps.push_back(*declared);
+                }
+            }
             // The family's own samplers (NormalTexture, #199) through the
             // scene's resolved references.
             const std::vector<GodotRenderer::BindingTexture> family_textures = family_binding_textures(authored,
                 [&](const std::string_view declared) -> std::optional<assets::Texture> {
                     for (const scene::TextureBinding& binding : surface.textures) {
                         if (binding.declared != declared || binding.resolved.empty()) continue;
-                        auto found = (*work.textures).find(binding.resolved);
+                        const scene::TextureProcessing processing = std::find(normal_maps.begin(), normal_maps.end(), declared)
+                            != normal_maps.end() ? scene::TextureProcessing::normal_mip_chain : scene::TextureProcessing::none;
+                        const std::string key = ComposeTextureCache::key(binding.resolved, processing);
+                        auto found = (*work.textures).find(key);
                         if (found == (*work.textures).end()) {
-                            auto decoded = assets::load_texture(*filesystem, binding.resolved);
+                            auto decoded = load_placement_texture(*filesystem, binding.resolved, processing);
                             if (!decoded) return std::nullopt;
-                            found = (*work.textures).emplace(binding.resolved, std::move(decoded.value())).first;
+                            found = (*work.textures).emplace(key, std::move(decoded.value())).first;
                         }
                         return found->second;
                     }
@@ -502,6 +538,10 @@ bool MapMode::State::compose_placements(const assets::Map& map,
     input.catalog = &*catalog;
     input.access = cache.access();
     scene = scene::build(input);
+    // #6144: the live land start (prepared before this composition) names the records it removed; they are not composed.
+    removed_land_placements = strip_removed_placements(*scene, live_session ? live_session->start_data() : nullptr);
+    // #6992: the markers the land start replaced with owned pads and pre-built structures are drawn by the session.
+    if (live_options.land) session_owned_land_placements = live_session ? strip_session_owned_placements(*scene, live_session->land_session_records()) : 0;
     build_attached_plan(cache);
     std::map<sim::AssetId, std::vector<std::uint8_t>> capture_variants;
     std::set<sim::AssetId> capture_checked;

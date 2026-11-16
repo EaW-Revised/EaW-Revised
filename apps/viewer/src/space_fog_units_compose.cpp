@@ -1,6 +1,7 @@
 #include "space_fog_units.hpp"
 #include "eawr/core/text.hpp"
 
+#include "compose_texture_cache.hpp"
 #include "family_textures.hpp"
 
 #include "eawr/core/diagnostic.hpp"
@@ -129,20 +130,22 @@ bool SpaceFogUnits::compose(GodotRenderer& renderer, const assets::Map& map, con
                 return fail("fog-enabled space capture has an admitted surface it cannot compose: " + unsupported_.back());
             }
             if (surface.effect_missing) texture_path = "";
-            auto found = textures.find(*texture_path);
+            // #6725: the BaseTexture and the sampled family textures get the chain the live compose gives them.
+            const std::string base_key = ComposeTextureCache::key(*texture_path, space_base_processing_for(*selector));
+            auto found = textures.find(base_key);
             if (found == textures.end()) {
                 if (surface.effect_missing) {
-                    found = textures.emplace(*texture_path,
+                    found = textures.emplace(base_key,
                         family_placeholder_texture(legacy::TexturePlaceholder::black)).first;
                 } else {
-                    auto decoded = assets::load_texture(filesystem, *texture_path);
+                    auto decoded = load_texture_chained(filesystem, *texture_path, space_base_processing_for(*selector));
                     if (!decoded) {
                         unsupported_.push_back(where + ": BaseTexture did not decode: "
                                                + core::format_diagnostic(decoded.error()));
                         return fail("fog-enabled space capture has an admitted surface it cannot compose: "
                                     + unsupported_.back());
                     }
-                    found = textures.emplace(*texture_path, std::move(decoded.value())).first;
+                    found = textures.emplace(base_key, std::move(decoded.value())).first;
                 }
             }
             const assets::Mesh& source_mesh = model->meshes[surface.mesh_index];
@@ -163,11 +166,16 @@ bool SpaceFogUnits::compose(GodotRenderer& renderer, const assets::Map& map, con
                 [&](const std::string_view declared) -> std::optional<assets::Texture> {
                     for (const scene::TextureBinding& binding : surface.textures) {
                         if (binding.declared != declared || binding.resolved.empty()) continue;
-                        auto cached = textures.find(binding.resolved);
+                        scene::TextureProcessing processing = scene::TextureProcessing::none;
+                        for (const SampledBinding& slot : sampled_bindings(*selector)) {
+                            if (ieq(slot.name, binding.parameter)) processing = binding_processing_for(slot.normal);
+                        }
+                        const std::string key = ComposeTextureCache::key(binding.resolved, processing);
+                        auto cached = textures.find(key);
                         if (cached == textures.end()) {
-                            auto decoded = assets::load_texture(filesystem, binding.resolved);
+                            auto decoded = load_texture_chained(filesystem, binding.resolved, processing);
                             if (!decoded) return std::nullopt;
-                            cached = textures.emplace(binding.resolved, std::move(decoded.value())).first;
+                            cached = textures.emplace(key, std::move(decoded.value())).first;
                         }
                         return cached->second;
                     }

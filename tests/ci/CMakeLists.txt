@@ -72,6 +72,17 @@ add_test(
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_publish_scan.py"
 )
 
+# The asset-name guard: new hand-rolled texture/model name resolution fails, the allowlist only shrinks.
+
+
+# The degradation gate (tools/ci/degradation_gate.py): a count that rises or a new class fails, one that falls is an
+# improvement, --update is deterministic, malformed input is refused.
+
+
+# The mod degradation sweep (tools/ci/degradation_sweep.py) with a stand-in sim_headless: targets are deleted before the runs,
+# the gate gets --expect-all and --since, the matrix and the baseline stay in step.
+
+
 # The release packager (tools/release, docs/releasing.md) on a stand-in build tree.
 
 
@@ -110,6 +121,8 @@ eawr_add_python_contract(python_performance_gc_quality tests.performance.test_gc
 eawr_add_python_contract(python_presentation_renderer_land_viewport tests.presentation.renderer.test_land_viewport)
 eawr_add_python_contract(python_presentation_renderer_viewer_galactic_ground_stack_runtime tests.presentation.renderer.test_viewer_galactic_ground_stack_runtime)
 eawr_add_python_contract(python_presentation_renderer_viewer_galactic_pause_runtime tests.presentation.renderer.test_viewer_galactic_pause_runtime)
+eawr_add_python_contract(python_presentation_renderer_viewer_galactic_pause_banner_runtime tests.presentation.renderer.test_viewer_galactic_pause_banner_runtime)
+eawr_add_python_contract(python_presentation_renderer_viewer_galactic_tour_runtime tests.presentation.renderer.test_viewer_galactic_tour_runtime)
 
 # Tier labels (cmake/EawrTestTiers.cmake).
 add_test(NAME ci_campaign_policy_compare COMMAND "${Python3_EXECUTABLE}"
@@ -136,6 +149,7 @@ eawr_add_python_contract(python_presentation_renderer_viewer_stealth_move_runtim
 eawr_add_python_contract(python_presentation_renderer_viewer_galactic_probe_live_runtime tests.presentation.renderer.test_viewer_galactic_probe_live_runtime)
 eawr_add_python_contract(python_presentation_renderer_viewer_galactic_wheel_zoom_runtime tests.presentation.renderer.test_viewer_galactic_wheel_zoom_runtime)
 eawr_add_python_contract(python_presentation_renderer_viewer_story_summary_runtime tests.presentation.renderer.test_viewer_story_summary_runtime)
+eawr_add_python_contract(python_presentation_renderer_viewer_story_letterbox_runtime tests.presentation.renderer.test_viewer_story_letterbox_runtime)
 
 eawr_label_tests(DEFAULT ci-tools)
 

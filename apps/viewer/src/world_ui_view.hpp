@@ -325,6 +325,8 @@ private:
     std::vector<std::string> icon_rows_;  // squadron:state:level, last frame
     std::vector<std::string> flag_rows_;  // squadron:x=,y= of a launched squadron's flag, last frame (#632)
     std::set<std::string> flags_seen_;    // every squadron that showed the flag
+    std::vector<std::string> bracket_flag_rows_;  // unit:x=,y= of the flag on a marked ally's bracket, last frame (#6931)
+    std::set<std::string> bracket_flags_seen_;    // every unit whose bracket showed the flag
     std::size_t max_circles_{};
     std::size_t max_reticles_{};
     std::array<float, 2> reticle_size_{};  // the last reticle drawn, pixels (WU-31)

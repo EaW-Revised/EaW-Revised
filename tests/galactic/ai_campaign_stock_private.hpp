@@ -11,6 +11,7 @@ void native_provider_isolation_contracts();
 void real_factory_contracts(bool configured_cadence = false, bool invalid_freestore = false);
 void prepared_restore_contracts();
 void authored_selection_contracts();
+void solo_difficulty_level_contracts();
 void mp_ai_uses_authored_faction_basic_ai();
 void shared_story_local_player_needs_sp_rules_and_one_human();
 void mp_ai_uses_agreed_difficulty_mapping();

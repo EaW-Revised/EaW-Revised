@@ -206,6 +206,7 @@ add_library(eawr_viewer_core STATIC
     ${EAWR_CHECKPOINT_SOURCES}
     ${EAWR_NET_SOURCES}
     ${EAWR_PLATFORM_LIVE_AI_SOURCES}
+    ${EAWR_PLATFORM_MODEL_FACTS_SOURCES}
     "${EAWR_ROOT}/third_party/pugixml/src/pugixml.cpp"
     "${EAWR_VIEWER_XML_SCHEMA_INC}"
 )

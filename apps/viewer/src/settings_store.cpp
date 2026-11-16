@@ -15,7 +15,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 namespace eawr::presentation::godot_backend {
 namespace ui = presentation::ui;
@@ -57,6 +60,42 @@ std::optional<ui::PlayerSettings>& active_storage() {
 }
 
 VideoApplyCounts display_applies;
+
+// Puts the whole windowed frame on the launcher's requested screen at startup, else on the current screen, only
+// moved as far as needed. The size shrinks to the usable area. Returns the report line, empty when nothing moved.
+// The pure rule is ui::place_window; this only reads the window system's rectangles and applies the result.
+std::string fit_window_to_screen(godot::DisplayServer& display, const bool centre) {
+    const int count = display.get_screen_count();
+    if (count <= 0) return {};
+    std::vector<ui::ScreenArea> screens;
+    for (int index = 0; index < count; ++index) {
+        const godot::Rect2i rect = display.screen_get_usable_rect(index);
+        screens.push_back({rect.position.x, rect.position.y, rect.size.x, rect.size.y});
+    }
+    const godot::Vector2i size = display.window_get_size();
+    const godot::Vector2i position = display.window_get_position();
+    const godot::Vector2i outer = display.window_get_position_with_decorations();
+    const godot::Vector2i outer_size = display.window_get_size_with_decorations();
+    const auto inset = [](const int value) { return std::max(value, 0); };
+    const ui::FrameInsets frame{inset(position.x - outer.x), inset(position.y - outer.y),
+                                inset(outer.x + outer_size.x - position.x - size.x),
+                                inset(outer.y + outer_size.y - position.y - size.y)};
+    const int current = display.window_get_current_screen();
+    const std::size_t screen = centre
+        ? ui::startup_window_screen(viewer_profile_options().arguments, current, count)
+        : static_cast<std::size_t>(std::max(current, 0));
+    const ui::WindowPlacement place = ui::place_window(
+        {size.x, size.y}, frame, screens, screen,
+        centre ? std::nullopt : std::optional<std::pair<int, int>>(std::make_pair(position.x, position.y)));
+    const bool resized = place.width != size.x || place.height != size.y;
+    const bool moved = place.x != position.x || place.y != position.y;
+    if (resized) display.window_set_size(godot::Vector2i(place.width, place.height));
+    if (moved) display.window_set_position(godot::Vector2i(place.x, place.y));
+    if (!resized && !moved) return {};
+    return "window: placed at " + std::to_string(place.x) + "," + std::to_string(place.y) + " ("
+        + std::to_string(place.width) + "x" + std::to_string(place.height) + ") on screen "
+        + std::to_string(display.window_get_current_screen());
+}
 
 } // namespace
 
@@ -120,11 +159,30 @@ void apply_audio(const ui::AudioSettings& audio, ApplyReport& report) {
 VideoApplyCounts video_apply_counts() noexcept { return display_applies; }
 
 void apply_startup_video(const ui::SettingsLoad& loaded, ApplyTargets targets, ApplyReport& report) {
+    // A run that applies the window (not a capture or test run) also places it: centred on the requested screen,
+    // whole frame visible, with or without saved settings. Without them the window keeps its launch size.
+    const bool place = targets.window;
+    godot::DisplayServer* display = godot::DisplayServer::get_singleton();
+    // Move before applying the saved size: a smaller initial monitor must not shrink a size that fits the
+    // launcher's monitor. Reading frame insets afterwards also follows the destination monitor's DPI.
+    const bool windowed_start = loaded.defaulted
+        ? display && display->window_get_mode() == godot::DisplayServer::WINDOW_MODE_WINDOWED
+        : loaded.settings.video.windowed;
+    if (place && windowed_start && display && display->get_name() != godot::String("headless")
+        && display->get_screen_count() > 0) {
+        const int current = display->window_get_current_screen();
+        const auto screen = ui::startup_window_screen(viewer_profile_options().arguments, current, display->get_screen_count());
+        if (static_cast<int>(screen) != current) display->window_set_current_screen(static_cast<int>(screen));
+    }
     if (loaded.defaulted) {
         targets.window = false;
         targets.texture_detail = false;
     }
     apply_video(loaded.settings.video, targets, report);
+    if (!place || display == nullptr || display->get_name() == godot::String("headless")) return;
+    const auto mode = display->window_get_mode();
+    if (mode != godot::DisplayServer::WINDOW_MODE_WINDOWED) return;
+    if (const std::string line = fit_window_to_screen(*display, true); !line.empty()) report.applied.push_back(line);
 }
 
 void apply_video(const ui::VideoSettings& video, const ApplyTargets& targets, ApplyReport& report) {
@@ -170,8 +228,15 @@ void apply_video(const ui::VideoSettings& video, const ApplyTargets& targets, Ap
             ++display_applies.window_size;
             window_changed = true;
         }
-        if (window_changed) report.applied.emplace_back("window: " + std::to_string(video.window_width) + "x"
-                                                       + std::to_string(video.window_height));
+        if (window_changed) {
+            report.applied.emplace_back("window: " + std::to_string(video.window_width) + "x"
+                                       + std::to_string(video.window_height));
+            // A bigger window grows from its top-left corner: pull it back onto the screen.
+            if (display->get_name() != godot::String("headless")) {
+                if (const std::string line = fit_window_to_screen(*display, false); !line.empty())
+                    report.applied.push_back(line);
+            }
+        }
     } else {
         // The window system keeps the display's own resolution in full screen; the chosen
         // full-screen size is stored for the player but not applied (ST-V1).
@@ -201,14 +266,23 @@ void update_frame_pacing(const ui::VideoSettings& video, const bool menu) {
 RenderProfile resolve_render_profile(const ui::RenderProfileSetting setting, const RenderProfile fallback) noexcept {
     switch (setting) {
     case ui::RenderProfileSetting::retail: return RenderProfile::retail;
-    case ui::RenderProfileSetting::enhanced: return RenderProfile::enhanced;
+    case ui::RenderProfileSetting::low: return RenderProfile::low;
+    case ui::RenderProfileSetting::medium: return RenderProfile::medium;
+    case ui::RenderProfileSetting::high: return RenderProfile::high;
     case ui::RenderProfileSetting::automatic: break;
     }
     return fallback;
 }
 
 ui::RenderProfileSetting setting_of(const RenderProfile profile) noexcept {
-    return profile == RenderProfile::enhanced ? ui::RenderProfileSetting::enhanced : ui::RenderProfileSetting::retail;
+    switch (profile) {
+    case RenderProfile::retail: return ui::RenderProfileSetting::retail;
+    case RenderProfile::enhanced: return ui::RenderProfileSetting::medium;
+    case RenderProfile::low: return ui::RenderProfileSetting::low;
+    case RenderProfile::medium: return ui::RenderProfileSetting::medium;
+    case RenderProfile::high: return ui::RenderProfileSetting::high;
+    }
+    return ui::RenderProfileSetting::automatic;
 }
 
 DisplayFacts display_facts() {

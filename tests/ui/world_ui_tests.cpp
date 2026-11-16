@@ -690,6 +690,21 @@ void reticle_xml() {
 
 } // namespace
 
+void bracket_garrison_flag() {
+    // WU-39a (#6931): flush to the bar's right end, on the bracket point's row, at the flag's own size.
+    const auto flat = ui::bracket_garrison_flag_rect(100.0F, 50.0F, 40.0F, 1.0F, 1.0F);
+    expect(close_to(flat.width, 12.0F) && close_to(flat.height, 14.0F), "WU-39a: flag keeps its 12 x 14 art size");
+    expect(close_to(flat.centre_x, 100.0F + 20.0F + 6.0F) && close_to(flat.centre_y, 50.0F),
+           "WU-39a: centre is half the bar plus half the flag right of the bracket point, on its row");
+    const auto scaled = ui::bracket_garrison_flag_rect(100.0F, 50.0F, 40.0F, 2.0F, 1.5F);
+    expect(close_to(scaled.width, 36.0F) && close_to(scaled.height, 42.0F),
+           "WU-39a: size follows the GUI bounds scale and the UI scale");
+    expect(close_to(scaled.centre_x, 100.0F + 20.0F + 18.0F), "WU-39a: the flag's own scaled half width offsets it");
+    expect(ui::bracket_garrison_flag_shown(true, true), "WU-39a: a marked ally shows the flag");
+    expect(!ui::bracket_garrison_flag_shown(true, false), "WU-39a: an enemy never shows it");
+    expect(!ui::bracket_garrison_flag_shown(false, true), "WU-39a: an unmarked ally shows none");
+}
+
 int main() {
     const auto small_area = ui::area_preview_side(120.0F, 1.2F);
     const auto large_area = ui::area_preview_side(345.0F, 1.2F);
@@ -719,6 +734,7 @@ int main() {
     controller_owner_names();
     waypoints();
     ability_overlays();
+    bracket_garrison_flag();
     group_numbers();
     circles();
     bars();

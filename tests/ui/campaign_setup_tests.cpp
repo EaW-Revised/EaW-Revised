@@ -87,9 +87,12 @@ void factions_and_start() {
     expect(std::none_of(model.factions().begin(), model.factions().end(), [](const auto& faction) {
         return faction.name == "Hostile";
     }), "an authored non-playable faction is not a selectable side");
-    expect(model.factions()[0].title == "raider fleet" && model.factions()[2].title == "Warden League",
-           "WGP-40: the drop-down is sorted by display name");
-    expect(model.selected_faction() == std::size_t{2} && model.factions()[*model.selected_faction()].name == "Wardens",
+    // WGP-40a: the data's own order (Wardens, Raiders, Syndicate), not the display-name order
+    // (raider fleet, Warden League, The Syndicate).
+    expect(model.factions()[0].name == "Wardens" && model.factions()[1].name == "Raiders"
+               && model.factions()[2].name == "Syndicate",
+           "WGP-40a: the drop-down lists the playable factions in the faction table's order");
+    expect(model.selected_faction() == std::size_t{2} && model.factions()[*model.selected_faction()].name == "Syndicate",
            "WGP-40: with nothing chosen the last playable faction is selected");
     expect(!model.selected_row() && model.description().empty() && !model.can_start(),
            "WGP-40/66: opening selects no campaign and Start is off");
@@ -109,6 +112,7 @@ void factions_and_start() {
 
     model.select_row(1);
     expect(model.selected() != nullptr && model.selected()->title == "Beta Origin", "a row selects");
+    model.select_faction(0); // Wardens: the list is in table order, the default is its last row
     expect(model.can_start(), "WGP-67: a campaign and a faction with a variant enable Start");
     const auto request = model.start_request();
     expect(request && request->campaign == "Set_Beta_Wardens" && request->faction == "Wardens"
@@ -116,7 +120,7 @@ void factions_and_start() {
                && request->kind == ui::CampaignStartRequest::Kind::custom,
            "WGP-29: Start asks for the set's entry of the chosen faction at the chosen difficulty");
 
-    model.select_faction(0);
+    model.select_faction(1);
     expect(model.start_request() && model.start_request()->campaign == "Set_Beta_Raiders",
            "WGP-29: another faction starts that faction's entry of the same set");
 
@@ -127,7 +131,7 @@ void factions_and_start() {
                  }), sparse.end());
     ui::CampaignSetupModel missing(sparse, factions());
     missing.select_row(1);
-    missing.select_faction(0); // raider fleet
+    missing.select_faction(1); // Raiders
     expect(!missing.can_start() && !missing.start_request() && !missing.start_disabled_reason().empty(),
            "WGP-67: a missing same-set faction variant disables Start with a reason");
     missing.select_faction(2);
@@ -137,6 +141,7 @@ void factions_and_start() {
     std::vector<ui::CampaignFacts> cased = {entry("Only", "S", "WARDENS", "One", 1)};
     ui::CampaignSetupModel folded(cased, factions());
     folded.select_row(0);
+    folded.select_faction(0); // Wardens
     expect(folded.can_start(), "faction names compare case-insensitively, as the data's names do");
 
     // An unlisted set is not selectable by index.
@@ -145,6 +150,63 @@ void factions_and_start() {
     model.reset();
     expect(!model.selected_row() && model.selected_faction() == std::size_t{2} && model.difficulty() == ui::CampaignDifficulty::normal,
            "reopening resets the choices");
+}
+
+// WGP-40a: one list for the whole dialog. Every playable faction is a row: the named ones in table order, then the
+// factions without display text (blank rows) in table order, also a faction that no campaign offers.
+void side_list_is_the_table() {
+    std::vector<ui::FactionFacts> table{{"Rebel", "Rebellion", true}, {"Pirates", "Pirates", false},
+        {"Empire", "Empire", true}, {"Dummy_1", "", true}, {"Hutts", "Hutts", false},
+        {"Zed", "Zed", true}, {"Dummy_2", "", true}};
+    std::vector<ui::CampaignFacts> campaigns{entry("Set_A_Rebel", "Set_A", "Rebel", "A", 1),
+        entry("Set_A_Empire", "Set_A", "Empire", "A", 1)};
+    ui::CampaignSetupModel model(campaigns, table, ui::CampaignHostSupport{true, true});
+    expect(model.factions().size() == 5, "WGP-40a: every playable faction is a row, none is capped");
+    const std::vector<std::string> order{"Rebel", "Empire", "Zed", "Dummy_1", "Dummy_2"};
+    for (std::size_t i = 0; i < order.size(); ++i)
+        expect(model.factions()[i].name == order[i], "WGP-40a: named rows follow the table order (not the display names), blank rows come last");
+    expect(model.factions()[3].title.empty() && model.factions()[4].title.empty(),
+           "WGP-40a: a faction without display text is a row with no caption");
+    expect(*model.selected_faction() == 4, "WGP-40: the last playable row is selected on open");
+
+    // WGP-40b: a side without an entry in the campaign can be chosen; it only greys Start and options.
+    model.select_row(0);
+    expect(!model.can_start() && !model.options_available() && !model.start_disabled_reason().empty(),
+           "WGP-40b: the selected side Dummy_2 has no entry: Start and options are off");
+    model.select_faction(3);
+    expect(!model.can_start() && !model.options_available()
+               && model.start_disabled_reason().find("Dummy_1") != std::string::npos,
+           "WGP-40b: a captionless side names its identity in the reason");
+    model.select_faction(0);
+    expect(model.can_start() && model.options_available(), "WGP-40b: a side with an entry enables both");
+    model.select_faction(2);
+    expect(!model.can_start() && !model.options_available(), "WGP-40b: back to a side with no entry greys both again");
+    expect(model.factions().size() == 5, "choosing a side never changes the list");
+}
+
+// WGP-40b: the options button is hidden with no campaign, follows the entry's custom-settings flag, and a side with no
+// entry leaves its visibility alone.
+void options_visibility() {
+    std::vector<ui::FactionFacts> table{{"Rebel", "Rebellion", true}, {"Empire", "Empire", true},
+        {"Zed", "Zed", true}};
+    std::vector<ui::CampaignFacts> campaigns{entry("Set_A_Rebel", "Set_A", "Rebel", "A", 1),
+        entry("Set_A_Empire", "Set_A", "Empire", "A", 1)};
+    campaigns[1].supports_custom_settings = false;
+    ui::CampaignSetupModel model(campaigns, table, ui::CampaignHostSupport{true, true});
+    expect(!model.options_visible(), "WGP-40b: no campaign selected: the options button is hidden");
+    model.select_row(0);
+    model.select_faction(0);
+    expect(model.options_visible() && model.options_available(), "WGP-40b: a supporting entry shows and enables it");
+    model.select_faction(2);
+    expect(model.options_visible() && !model.options_available(),
+           "WGP-40b: a side with no entry leaves it shown but disabled");
+    model.select_faction(1);
+    expect(!model.options_visible() && !model.options_available(),
+           "WGP-40b: an entry that does not support custom settings hides it");
+    model.select_faction(2);
+    expect(!model.options_visible(), "WGP-40b: a side with no entry leaves it as it was (hidden)");
+    model.select_row(std::nullopt);
+    expect(!model.options_visible(), "WGP-40b: deselecting the campaign hides it");
 }
 
 void difficulty_and_options() {
@@ -167,6 +229,14 @@ void difficulty_and_options() {
     expect(capable.select_difficulty(ui::CampaignDifficulty::hard) && capable.start_request()
                && capable.start_request()->difficulty == "hard",
            "a capable host takes the other levels, and Start carries the level");
+    expect(capable.select_difficulty(ui::CampaignDifficulty::easy) && capable.start_request()
+               && capable.start_request()->difficulty == "easy",
+           "#7017 easy is taken and carried like hard");
+    capable.reset();
+    capable.select_row(0);
+    expect(capable.difficulty() == ui::CampaignDifficulty::normal && capable.start_request()
+               && capable.start_request()->difficulty == "normal",
+           "WGP-40: reopening the screen starts at normal again");
     expect(capable.options_available(), "WGP-67: a supporting campaign with a variant enables options");
 
     std::vector<ui::CampaignFacts> unsupported = stock_like();
@@ -183,7 +253,7 @@ void technology_options() {
     auto campaigns = stock_like();
     for (auto& row : campaigns) { row.starting_credits = 12000; row.starting_tech = 1; row.maximum_tech = 4; }
     auto fs = factions(); fs[0].displayed_tech_adjustment = 1;
-    ui::CampaignSetupModel model(campaigns, fs, {false, true}); model.select_row(0);
+    ui::CampaignSetupModel model(campaigns, fs, {false, true}); model.select_row(0); model.select_faction(0);
     expect(model.open_options() && model.tech_options().starting == 2 && model.tech_options().maximum == 5,
         "WGP-190 authored defaults are displayed with the selected faction adjustment");
     model.close_options(true);
@@ -209,11 +279,11 @@ void technology_options() {
     expect(model.start_request()->economy->starting_tech == 5, "cancel after Defaults keeps accepted options");
     model.open_options(); model.default_options(); model.close_options(true);
     expect(!model.start_request()->economy, "accept Defaults restores authored creation");
-    model.open_options(); model.select_starting_tech(4); model.close_options(true); model.select_faction(0);
+    model.open_options(); model.select_starting_tech(4); model.close_options(true); model.select_faction(1);
     expect(!model.start_request()->economy, "faction change clears custom options");
     campaigns[3].minimum_custom_tech = 2; campaigns[3].maximum_custom_tech = 9;
     campaigns[3].maximum_tech = 8; fs[0].displayed_tech_adjustment = 7;
-    ui::CampaignSetupModel mod(campaigns, fs, {false, true}); mod.select_row(0);
+    ui::CampaignSetupModel mod(campaigns, fs, {false, true}); mod.select_row(0); mod.select_faction(0);
     expect(mod.open_options() && mod.minimum_tech() == 2 && mod.maximum_tech() == 9,
         "mod campaign bounds are not pinned to the stock five levels");
     mod.select_maximum_tech(9); mod.select_starting_tech(8); mod.close_options(true);
@@ -224,6 +294,8 @@ void technology_options() {
 int main() {
     listing();
     factions_and_start();
+    side_list_is_the_table();
+    options_visibility();
     difficulty_and_options();
     technology_options();
     if (eawr::test::ui::failures() != 0) {

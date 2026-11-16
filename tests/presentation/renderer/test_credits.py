@@ -120,6 +120,18 @@ class CreditsStructure(unittest.TestCase):
         for token in ("VideoStreamTheora", "avcodec", "binkw32"):
             self.assertNotIn(token, view)
 
+    def test_logos_and_the_menu_overlay_resolve_their_names_through_the_shared_resolver(self):
+        # #6771 row 5: an authored name whose extension differs from the shipped file still loads, and a miss is one
+        # EAWR-ASSET-NAME-0001 line. The behaviour is the root CTest ui_model_contracts (named_picture_contracts),
+        # which runs the engine-free helper both screens call; this keeps the screens on that helper.
+        for path, site in (("src/presentation/godot/ui/credits_view.cpp", "credits logo"),
+                           ("apps/viewer/src/front_end_mode.cpp", "main menu overlay")):
+            text = (ROOT / path).read_text(encoding="utf-8")
+            self.assertIn("load_named_picture(", text, path)
+            self.assertIn(f'"{site}"', text, path)
+            self.assertNotIn("Data/Art/Textures", text, path)
+            self.assertNotIn("data/art/textures", text, path)
+
     def test_the_standalone_flag_is_the_gallery_hook(self):
         mode = source_text("apps/viewer/src/ui_gallery_mode.cpp")
         self.assertIn("--eawr-credits", mode)

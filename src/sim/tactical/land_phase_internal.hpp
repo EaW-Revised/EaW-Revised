@@ -1,8 +1,10 @@
 #pragma once
 
+#include "eawr/sim/math/geometry.hpp"
 #include "eawr/sim/world.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 #include <type_traits>
 
@@ -27,5 +29,14 @@ template <class Body>
     static_assert(land_phase_body_fits<Body>, "a land phase closure holds at most two pointers: put the rest in a context struct");
     return executor.execute(partitions, body);
 }
+
+class LandOccupancy;
+
+// WLPA-36: the one segment test for land terrain. A step from `from` to `to` is admitted when every cell rectangle between
+// consecutive half-pitch samples, widened by the footprint of `radius`, admits `mask` (diagonal corner cells included). The
+// movement step, the terrain contact's recheck and the contact routes' own legs use it, so a contact never calls a segment
+// clear that the next step refuses (#4840 liveness, C4).
+[[nodiscard]] bool land_segment_admitted(const LandOccupancy& grid, math::Vec2 from, math::Vec2 to, math::Fixed radius,
+    std::uint32_t mask);
 
 } // namespace eawr::sim::tactical

@@ -185,6 +185,11 @@ struct MeshGlossVertex final {
                                                const assets::Vec3f& eye) noexcept;
 // `texel` is the linear sampled texture (rgb, alpha).
 [[nodiscard]] assets::Vec4f meshgloss_fragment(const MeshGlossVertex& vertex, const assets::Vec4f& texel) noexcept;
+// The unlit sky policy folded to one factor: the rgb that multiplies the linear
+// texel, 2 * Emissive.rgb (the unlit policy's zero irradiance and zero
+// specular leave only the emissive term). Both the space sky and the land
+// sky dome use it, so a MeshGloss-family sky surface is tinted by one rule.
+[[nodiscard]] assets::Vec3f unlit_meshgloss_gain(const MeshGlossMaterial& material) noexcept;
 
 // -- MeshAdditive sky material route (opt-in, synthetic) -------------------------
 //

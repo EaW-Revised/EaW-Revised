@@ -7,6 +7,7 @@
 #include "eawr/sim/tactical/types.hpp"
 #include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/object_turn.hpp"
+#include "eawr/sim/tactical/tsw.hpp"
 
 #include <array>
 #include <cstddef>
@@ -50,6 +51,7 @@ inline constexpr std::uint16_t replay_extension_object_turn = 16; // #3644: obje
 inline constexpr std::uint16_t replay_extension_battle_domain = 17; // BF-1: absent is space
 inline constexpr std::uint16_t replay_extension_controllers = 18; // ADR-020: versioned optional controller policy
 inline constexpr std::uint16_t replay_extension_market_purchases = 19; // WGEP-145
+inline constexpr std::uint16_t replay_extension_tactical_superweapon = 20; // TSW-03/04: target list and conflict gate, only with a TSW object
 inline constexpr std::size_t replay_max_bytes = 256U * 1024U * 1024U;
 
 // Recorded lobby settings are load-time metadata, never part of canonical simulation state.
@@ -175,6 +177,7 @@ struct TacticalSetup {
     std::vector<BeaconRule> beacon_rules; // HCB-12: resolved faction type/lifetime, ascending issuer.
     std::optional<ReplayNativeScene> native_scene{};
     std::optional<AttractPoolReturn> attract_pool; // MAT-15/16: the demo attract's pool return, opt-in
+    std::optional<TswSetup> tsw; // TSW-03/04: the super weapon targets and the conflict gate; absent without a TSW object
     BattleDomain domain{BattleDomain::space};
     std::optional<BattleControllerPolicy> controllers{};
     friend bool operator==(const TacticalSetup&, const TacticalSetup&) = default;
@@ -213,7 +216,8 @@ struct TacticalReplay {
     std::span<const std::uint8_t> bytes) noexcept;
 
 [[nodiscard]] core::Result<void> validate_setup(const TacticalSetup& setup);
-// Fill omitted battle-creation settings from trusted roles: AI false, human true.
+// Fill omitted battle-creation settings: every seat resolves to enabled (the debug build plays the retreat cinematic for
+// either side, #4444); the role list is no longer read.
 // Call after validate_setup; explicit profile settings retain their value.
 void resolve_cinematic_seats(TacticalSetup&, std::span<const EconomyPlayer>);
 [[nodiscard]] core::Result<void> validate_replay(const TacticalReplay& replay);

@@ -6,8 +6,8 @@
     "statuses": {
       "bound": 12,
       "forbidden": 1,
-      "missing": 220,
-      "partial": 20,
+      "missing": 216,
+      "partial": 24,
       "script": 142,
       "unresolved": 18
     },
@@ -23397,9 +23397,9 @@
         "Target.Is_Corrupted"
       ],
       "registered_engine_name": true,
-      "status": "missing",
+      "status": "partial",
       "symbol": "Is_Corrupted",
-      "target": "galactic host adapters (legacy #1991)"
+      "target": "src/script/foc/galactic_ai_freestore.cpp"
     },
     {
       "call_count": 2,
@@ -23461,9 +23461,9 @@
         "RaidForce.Is_Raid_Capable"
       ],
       "registered_engine_name": true,
-      "status": "missing",
+      "status": "partial",
       "symbol": "Is_Raid_Capable",
-      "target": "galactic host adapters (legacy #1991)"
+      "target": "src/script/foc/plan_bindings.cpp"
     },
     {
       "call_count": 1,
@@ -30800,9 +30800,9 @@
         "RaidForce.Raid"
       ],
       "registered_engine_name": true,
-      "status": "missing",
+      "status": "partial",
       "symbol": "Raid",
-      "target": "galactic host adapters (legacy #1991)"
+      "target": "src/script/foc/plan_bindings.cpp"
     },
     {
       "call_count": 15,
@@ -50922,9 +50922,9 @@
       ],
       "receiver_expressions": [],
       "registered_engine_name": true,
-      "status": "missing",
+      "status": "partial",
       "symbol": "WaitForStarbase",
-      "target": "galactic host adapters (legacy #1991)"
+      "target": "src/script/foc/plan_bindings.cpp"
     },
     {
       "call_count": 3,
@@ -55962,7 +55962,9 @@
   "rules": [
     "WGA-32",
     "WGA-37..47",
-    "WST-53..57"
+    "WGA-450..451",
+    "WST-53..57",
+    "GAR-01..03"
   ],
   "schema_version": 1,
   "scope": "conservative GC roots: galactic-mode and top-level AI, galactic freestore, all story and intervention scripts; literal require closure",

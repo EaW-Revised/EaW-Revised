@@ -53,6 +53,7 @@ struct ScriptedGalacticTick {
     std::vector<RoutedGalacticCommand> script_input;
     std::optional<ServiceReport> ai; // absent while paused
     ServiceReport story;            // one service per recorded session barrier
+    std::optional<ServiceReport> objects;
     sim::StateHash state_hash;
 };
 
@@ -73,6 +74,16 @@ struct GalacticScriptSave {
     std::set<sim::galactic::SeatId> exhausted_seats;
     std::string world_sha256;
     std::string scripts_sha256;
+    std::optional<std::string> objects{};
+};
+
+// Session-owned adapter for the galactic GameObject scheduler. Its service
+// reads the owning world at a barrier and publishes through native effects.
+class GalacticObjectScriptEngine {
+public:
+    virtual ~GalacticObjectScriptEngine() = default;
+    [[nodiscard]] virtual core::Result<ServiceReport> service(const sim::PartitionExecutor&,
+        sim::galactic::GalacticSession&, ScriptScheduler&) = 0;
 };
 
 // Mode-aware engine seam: bounded ordered preparation, snapshot queries and
@@ -118,18 +129,20 @@ public:
     // Fresh world and fresh GC-profile schedulers, with a 1/30 second frame.
     // Restoring the full container belongs to checkpoint section wiring.
     [[nodiscard]] static core::Result<ScriptedGalacticSession> create(
-        sim::galactic::GalacticSession world, ScriptScheduler ai, ScriptScheduler story);
+        sim::galactic::GalacticSession world, ScriptScheduler ai, ScriptScheduler story,
+        std::optional<ScriptScheduler> objects = {});
     // The parent supplies the galaxy restored to the same barrier and fresh
     // schedulers with matching config, modules and bindings. Register the same
     // pure translators/engines before continuing, as for create().
     [[nodiscard]] static core::Result<ScriptedGalacticSession> restore(
-        sim::galactic::GalacticSession world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved);
+        sim::galactic::GalacticSession world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved,
+        std::optional<ScriptScheduler> objects = {});
     // Parent ownership transfer is transactional: failed validation retains its world. `timer_held` says the
     // campaign owner holds this galaxy's frame timer (a pending-conflict pause, a selected or staged tactical child, or
     // the battle-summary hold); only then may the AI host lead the frame timer.
     [[nodiscard]] static core::Result<ScriptedGalacticSession> restore_preserving(
         sim::galactic::GalacticSession& world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved,
-        bool timer_held = false);
+        bool timer_held = false, std::optional<ScriptScheduler> objects = {});
     ScriptedGalacticSession(ScriptedGalacticSession&&) noexcept;
     ScriptedGalacticSession& operator=(ScriptedGalacticSession&&) noexcept;
     ~ScriptedGalacticSession();
@@ -139,6 +152,10 @@ public:
     [[nodiscard]] core::Result<void> bind_orbit_recheck(sim::galactic::SeatId seat);
     [[nodiscard]] core::Result<void> set_ai_engine(std::shared_ptr<GalacticScriptEngine> engine);
     [[nodiscard]] core::Result<void> set_story_engine(std::shared_ptr<GalacticScriptEngine> engine);
+    // The world setup may install this independently after the AI/story hosts,
+    // before the first step. Checkpoint restore supplies it during restore.
+    [[nodiscard]] core::Result<void> set_object_scheduler(ScriptScheduler);
+    [[nodiscard]] core::Result<void> set_object_engine(std::shared_ptr<GalacticObjectScriptEngine> engine);
     void set_state_hasher(std::shared_ptr<sim::StateHasher> hasher) noexcept;
     // Ordered story tail; the same owner commits AI/object writes in after_service.
     void set_global_value_committer(std::function<void(ServiceReport&)>);
@@ -154,8 +171,14 @@ public:
     [[nodiscard]] const sim::galactic::GalacticSession& world() const noexcept;
     // Borrowed parent scheduler; the enclosing session owns its lifetime.
     [[nodiscard]] ScriptScheduler& ai_scheduler() noexcept;
+    // Async AI step 2c-3 (R3): how often the per-tick disjointness checks re-read the AI scheduler's id list (it is copied sim-side and
+    // read again only when the scheduler's instance revision moved), and a test/debug owner check that the copy still equals the live list
+    // whenever the revision has not moved (false: an instance change that skipped the revision).
+    [[nodiscard]] std::uint64_t ai_instance_list_reads() const noexcept;
+    [[nodiscard]] bool ai_instance_copy_matches() const;
     // Borrowed story scheduler, for the campaign's story-script host (instances, plot-engine calls).
     [[nodiscard]] ScriptScheduler& story_scheduler() noexcept;
+    [[nodiscard]] ScriptScheduler* object_scheduler() noexcept;
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     [[nodiscard]] std::size_t pending_script_commands() const noexcept;
     [[nodiscard]] sim::galactic::GalacticReplay record() const;

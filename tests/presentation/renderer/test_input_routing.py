@@ -98,6 +98,16 @@ class InputRoutingStructure(unittest.TestCase):
         self.assertIn("add_to_group(group);", routing)
         self.assertIn("register_ui_input_classes()", (SRC / "register_types.cpp").read_text(encoding="utf-8"))
 
+    def test_a_scroll_area_and_the_objectives_menu_consume_the_wheel(self):
+        # #6758: Godot hands the wheel a STOP control does not use (a list at either end of its range) on to the world, so a
+        # list under the pointer must not pass it, and the Objectives menu is a modal layer like the other galactic windows.
+        kit = (ROOT / "src/presentation/godot/ui/kit_controls.cpp").read_text(encoding="utf-8")
+        body = function_body(kit, "EawrUiList::EawrUiList()")
+        self.assertIn("set_force_pass_scroll_events(false);", body)
+        story = (SRC / "galactic/story_summary_widget.cpp").read_text(encoding="utf-8")
+        self.assertIn("root_ = memnew(EawrUiModalLayer);", story)
+        self.assertNotIn("MOUSE_FILTER", story)
+
     def test_the_sink_is_the_only_order_path_and_writes_no_sim_state(self):
         header = (ROOT / "include/eawr/presentation/ui/command_sink.hpp").read_text(encoding="utf-8")
         self.assertIn("class CommandSink", header)

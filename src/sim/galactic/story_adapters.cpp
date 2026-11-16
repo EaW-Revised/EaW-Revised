@@ -222,7 +222,10 @@ std::string_view event_name(const Payload& payload) {
             case Economy::credits: return "STORY_ACCUMULATE"; case Economy::tech_level: return "STORY_TECH_LEVEL"; case Economy::era: return "STORY_BEGIN_ERA";
             }
         } else if constexpr (std::is_same_v<T, LossNotice>) {
-            switch (n.kind) { case Loss::destroy: return "STORY_DESTROY"; case Loss::destroy_base: return "STORY_DESTROY_BASE"; }
+            switch (n.kind) {
+            case Loss::destroy: return "STORY_DESTROY"; case Loss::destroy_base: return "STORY_DESTROY_BASE";
+            case Loss::hero_defeat: return "STORY_DEFEAT_HERO";
+            }
         } else if constexpr (std::is_same_v<T, BattleNotice>) {
             switch (n.kind) {
             case Battle::won: return "STORY_WIN_BATTLES"; case Battle::lost: return "STORY_LOSE_BATTLES";
@@ -270,6 +273,16 @@ std::string_view event_name(const Payload& payload) {
 std::string_view notification_seam(const Payload& payload) {
     return std::holds_alternative<TacticalNotice>(payload) ? "WST-35/38/39: tactical emitter/evaluator seam" : std::string_view{};
 }
+std::vector<TravelNotice> hero_moves(const TravelNotice& arrival, const std::span<const std::string> heroes) {
+    std::vector<TravelNotice> out;
+    out.reserve(heroes.size());
+    for (const auto& hero : heroes) {
+        out.push_back(arrival);
+        out.back().kind = Travel::move_hero; out.back().hero = hero;
+    }
+    return out;
+}
+
 std::vector<LossNotice> destruction(std::string type, std::string original, std::string planet, Player owner) {
     std::vector<LossNotice> out{{Loss::destroy, type, planet, BaseKind::either, owner}};
     if (!equal(type, original)) out.push_back({Loss::destroy, std::move(original), std::move(planet), BaseKind::either, owner});

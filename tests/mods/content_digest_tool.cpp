@@ -1,5 +1,5 @@
 // Measurement tool: content digest of one folder, cold then warm.
-// Usage: mods_content_digest_tool <folder> [cache folder] [--workers N] [--foreground] [--normal-io] [--yield-ms N]
+// Usage: mods_content_digest_tool <folder> [cache folder] [--workers N] [--rotational-workers N] [--foreground] [--normal-io] [--yield-ms N]
 // Reads the folder (never writes to it); the cache folder is the only thing written. --workers and --foreground
 // (normal instead of background priority) exist to compare digest settings; the digest value never depends on them.
 // Prints the process CPU time (user / kernel) after the cold run.
@@ -28,13 +28,14 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--workers" && i + 1 < argc) options.worker_count = static_cast<std::size_t>(std::atoi(argv[++i]));
+        else if (arg == "--rotational-workers" && i + 1 < argc) options.rotational_worker_count = static_cast<std::size_t>(std::atoi(argv[++i]));   // 0 = no HDD special case
         else if (arg == "--foreground") options.lower_priority = false;
         else if (arg == "--normal-io") options.background_io = false;
         else if (arg == "--yield-ms" && i + 1 < argc) options.yield_for = std::chrono::milliseconds(std::atoi(argv[++i]));
         else positional.push_back(arg);
     }
     if (positional.empty()) {
-        std::cerr << "usage: mods_content_digest_tool <folder> [cache folder] [--workers N] [--foreground] [--normal-io] [--yield-ms N]\n";
+        std::cerr << "usage: mods_content_digest_tool <folder> [cache folder] [--workers N] [--rotational-workers N] [--foreground] [--normal-io] [--yield-ms N]\n";
         return 2;
     }
     const auto root = steam::path_from_utf8(positional[0]);
@@ -68,7 +69,7 @@ int main(int argc, char** argv) {
     }
 #endif
     const ContentJobStats stats = digests.stats(record.key);
-    std::cout << "files hashed " << stats.files_hashed << ", reused " << stats.files_reused << ", bytes read " << stats.bytes_read << "\n";
+    std::cout << "media " << stats.media << ", workers " << stats.workers << ", files hashed " << stats.files_hashed << ", reused " << stats.files_reused << " (adopted " << stats.files_adopted << "), bytes read " << stats.bytes_read << "\n";
     const auto t4 = std::chrono::steady_clock::now();
     const ContentDigest warm = digests.lookup(record, false);
     const auto t5 = std::chrono::steady_clock::now();

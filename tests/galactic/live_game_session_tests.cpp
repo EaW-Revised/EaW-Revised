@@ -2,6 +2,7 @@
 
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/campaign/setup.hpp"
+#include "eawr/core/gc_tick_trace.hpp"
 #include "eawr/platform/live_game_session.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
 #include "eawr/platform/campaign_battle_view.hpp"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <limits>
 #include <filesystem>
 #include <stdexcept>
@@ -338,6 +340,91 @@ std::uint64_t scheduled_ticks(const Fixed speed, const std::chrono::nanoseconds 
         ++ticks;
     }
     return ticks;
+}
+
+// The opt-in per-tick trace (EAWR_GC_TICK_TRACE) reads clocks and counters only: the same input gives the same tick
+// hashes with it off and on, and the trace holds one parsable row per completed tick.
+void tick_trace_keeps_hashes() {
+    const auto initial = setup();
+    const auto input = script(initial, 50);
+    const auto run = [&] {
+        auto started = LiveGameSession::start(initial, {.workers = 2, .pacing = LiveGameSession::Pacing::driven, .entries = {}});
+        expect(static_cast<bool>(started), "trace session starts");
+        if (!started) return std::vector<std::string>{};
+        auto& live = *started.value();
+        for (auto at = input.rbegin(); at != input.rend(); ++at) live.submit(*at);
+        live.advance_to(50);
+        expect(live.wait_for(50, 10s), "trace session reaches its target");
+        live.stop();
+        return live.tick_hashes();
+    };
+    const auto off = run();
+    const auto path = std::filesystem::temp_directory_path() / "eawr_gc_tick_trace_test.jsonl";
+    const bool was_enabled = eawr::gc_profile::enabled.load();
+    auto& trace = eawr::gc_profile::TickTrace::instance();
+    expect(trace.open(path.string()) && trace.active(), "the trace opens its file");
+    const auto on = run();
+    trace.stop();
+    eawr::gc_profile::enabled.store(was_enabled);
+    expect(!off.empty() && off == on, "tick hashes are identical with the trace off and on");
+    std::ifstream rows(path);
+    std::size_t count = 0;
+    std::string line;
+    while (std::getline(rows, line)) {
+        ++count;
+        expect(line.rfind("{\"tick\":", 0) == 0 && line.find("\"phases\":{") != std::string::npos && line.back() == '}',
+            "a trace row is one JSON object with the tick and its phases");
+    }
+    expect(count >= 50, "the trace holds a row per completed tick");
+    rows.close();
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+}
+
+// The stop path of the trace (#7109): an explicit stop ends the writer thread, is safe to repeat, drops later rows, and the
+// destructor of a stopped trace joins nothing (the process-wide instance is never destroyed at all).
+void tick_trace_stop_path() {
+    const auto path = std::filesystem::temp_directory_path() / "eawr_gc_tick_trace_stop_test.jsonl";
+    const bool was_enabled = eawr::gc_profile::enabled.load();
+    {
+        eawr::gc_profile::TickTrace trace{eawr::gc_profile::TickTrace::NoEnvironment{}};
+        expect(!trace.running() && !trace.active(), "a trace that was never opened has no writer");
+        expect(trace.open(path.string()), "the scoped trace opens its file");
+        expect(trace.running() && trace.active(), "an open trace has a writer thread");
+        for (std::uint64_t tick = 1; tick <= 5; ++tick) trace.record(tick, 1.0, 0.5, 0.5);
+        expect(trace.flush(), "a flush answers within its bound"); // a session end: the rows are on disk while the trace stays open for the next session
+        expect(trace.running() && trace.active(), "a flush leaves the trace open");
+        // The promise of a flush: the rows are in the file while the trace stays open. The size is a stat (no open); the
+        // stop below writes nothing more, so the size after it must equal the size here.
+        std::error_code size_error;
+        const auto flushed_size = std::filesystem::file_size(path, size_error);
+        expect(!size_error && flushed_size >= 5 * 80, "a flush has written the five queued rows to the open file (file size)");
+        {
+            // A reader can tail the open trace (the writer's handle allows reads).
+            std::ifstream tail(path);
+            std::size_t tail_rows = 0;
+            std::string tail_line;
+            while (std::getline(tail, tail_line)) ++tail_rows;
+            expect(tail_rows == 5, "the open trace can be read while it is written and holds the five flushed rows");
+        }
+        trace.stop();
+        std::error_code stopped_error;
+        const auto stopped_size = std::filesystem::file_size(path, stopped_error);
+        expect(!stopped_error && stopped_size == flushed_size, "the stop wrote nothing the flush had not already written");
+        expect(!trace.running() && !trace.active(), "stop joins the writer and ends the trace");
+        trace.stop(); // repeated stop: no hang, no second join
+        trace.record(6, 1.0, 0.5, 0.5); // a row after the stop is dropped
+        expect(!trace.running(), "a stopped trace stays stopped");
+    } // the destructor of the stopped trace has nothing to join
+    eawr::gc_profile::enabled.store(was_enabled);
+    std::ifstream rows(path);
+    std::size_t count = 0;
+    std::string line;
+    while (std::getline(rows, line)) ++count;
+    expect(count == 5, "the stop wrote the five queued rows and nothing after it");
+    rows.close();
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
 }
 
 void applied_speed_schedule() {
@@ -912,7 +999,8 @@ struct PendingChoiceFixture {
         std::make_shared<eawr::platform::CampaignServiceConfiguration>();
     eawr::campaign::ConflictRecord entry;
     unsigned content_attempts{};
-    explicit PendingChoiceFixture(const bool capability_refusal) {
+    // The first `refused_contents` tactical content requests are refused (the refusal tests); 0 lets a Fight open its child.
+    explicit PendingChoiceFixture(const bool capability_refusal, const bool forced_tactical = false, const unsigned refused_contents = 2) {
         namespace cp = eawr::campaign;
         if (capability_refusal) services->tactical_capability = [](const auto&) {
             eawr::core::Diagnostic refusal;
@@ -920,7 +1008,7 @@ struct PendingChoiceFixture {
             refusal.message = "reachable ship has an unsupported rocket curve";
             return eawr::core::Result<void>::failure(std::move(refusal));
         };
-        services->configure = [this](auto& game) {
+        services->configure = [this, forced_tactical, refused_contents](auto& game) {
             entry.id = game.galaxy().next_entity_id(); entry.planet = initial.planets.front().id;
             entry.invader = 1; entry.defender = 2;
             entry.tactical.content_identity = initial.content_identity;
@@ -929,15 +1017,15 @@ struct PendingChoiceFixture {
             entry.seats = {{{1}, 1}, {{2}, 2}};
             game.set_conflict_service([](const auto&, const auto&, eawr::sim::EntityId) {
                 return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({});
-            }, [this](const auto&) {
-                if (++content_attempts <= 2) {
+            }, [this, refused_contents](const auto&) {
+                if (++content_attempts <= refused_contents) {
                     eawr::core::Diagnostic refusal;
                     refusal.message = "tactical content unavailable";
                     return eawr::core::Result<eawr::sim::tactical::TacticalContent>::failure(refusal);
                 }
                 return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success({});
             }, {}, eawr::campaign::ScriptRequirement::none);
-            return game.queue_conflict(entry, {cp::ConflictRoute::pending_tactical, false, false});
+            return game.queue_conflict(entry, {cp::ConflictRoute::pending_tactical, forced_tactical, false});
         };
     }
     PendingChoiceFixture(const PendingChoiceFixture&) = delete;
@@ -1068,6 +1156,100 @@ void awaited_input_names_the_wait() {
     live.submit(*choice);
     expect(live.wait_for(3, 5s), "the answer releases the waiting tick");
     live.stop(); expect(!live.failure(), "awaited input fixture stops cleanly");
+}
+
+// Drives the fixture's paused galaxy to a ready conflict choice (tick 2), as the headless tool meets it.
+bool reach_ready_choice(LiveGameSession& live) {
+    live.submit(LiveGameOrder{{1}, galactic::PauseGalaxy{}, {}});
+    live.advance_to(1); if (!live.wait_for(1, 5s)) return false;
+    live.submit(LiveGameOrder{{1}, galactic::SetSpeed{false, Fixed::from_raw(Fixed::scale)}, {}});
+    live.advance_to(2); if (!live.wait_for(2, 5s)) return false;
+    const auto ready = live.frame();
+    return ready.pending_conflict && ready.pending_conflict->choice_ready;
+}
+
+// #7003: the headless tool answers with Resolve (fight = false, the default). A conflict that admits Resolve is answered
+// with Resolve; one that refuses it (forced tactical) is answered with Fight instead of stalling and ending the run.
+void unattended_advance_resolves_then_falls_back_to_fight() {
+    {
+        PendingChoiceFixture fixture{false};
+        auto options = fixture.options();
+        auto created = LiveGameSession::start(fixture.initial, options);
+        expect(bool(created), "Resolve fixture starts"); if (!created) return;
+        auto& live = *created.value();
+        expect(reach_ready_choice(live), "the Resolve-admitting choice is ready");
+        const auto ready = live.frame();
+        expect(bool(eawr::platform::battle_choice_order(ready, {1}, fixture.entry.id, false)), "Resolve is admitted here");
+        eawr::sim::EntityId answered{};
+        const auto advanced = eawr::platform::advance_unattended(live, 3, 10s, answered);
+        expect(advanced.reached && !advanced.timed_out && !advanced.stalled && advanced.answered == 1 && answered == fixture.entry.id,
+            "the tool's own call (Resolve) answers a conflict that admits it, once");
+        // Which answer was sent shows in the frame: Resolve never opens a tactical child (an always-Fight driver would).
+        const auto after = eawr::platform::advance_unattended(live, 6, 10s, answered, false, 3s);
+        const auto resolved = live.frame();
+        expect(after.answered == 0 && !resolved.conflict && !resolved.battle, "Resolve was sent: no tactical child opened");
+        live.stop(); expect(!live.failure(), "Resolve fixture stops cleanly");
+    }
+    {
+        PendingChoiceFixture fixture{false, true, 0};
+        auto options = fixture.options();
+        auto created = LiveGameSession::start(fixture.initial, options);
+        expect(bool(created), "forced-tactical fixture starts"); if (!created) return;
+        auto& live = *created.value();
+        expect(reach_ready_choice(live), "the forced-tactical choice is ready");
+        const auto ready = live.frame();
+        expect(!eawr::platform::battle_choice_order(ready, {1}, fixture.entry.id, false)
+                && eawr::platform::battle_choice_order(ready, {1}, fixture.entry.id, true),
+            "Resolve is refused and Fight admitted on a forced-tactical conflict");
+        eawr::sim::EntityId answered{};
+        const auto advanced = eawr::platform::advance_unattended(live, 3, 10s, answered, false, 5s);
+        expect(advanced.reached && !advanced.timed_out && !advanced.stalled && advanced.answered == 1 && answered == fixture.entry.id,
+            "a refused Resolve falls back to Fight: the tick is reached, one answer, no stall");
+        // Fight was sent: the conflict's tactical child is open. The driver goes on past it (it answers nothing but the choice):
+        // what it reports there is printed, a stall in the child is a separate ticket.
+        const auto onward = eawr::platform::advance_unattended(live, 6, 10s, answered, false, 3s);
+        const auto fought = live.frame();
+        expect(onward.answered == 0 && fought.conflict && fought.conflict->id == fixture.entry.id && fought.battle,
+            "Fight was sent: the tactical child of the conflict opened");
+        std::cout << "unattended after the Fight fallback: reached=" << onward.reached << " timed_out=" << onward.timed_out
+                  << " stalled=" << (onward.stalled ? onward.stalled->describe() : std::string("none")) << '\n';
+        live.stop(); expect(!live.failure(), "forced-tactical fixture stops cleanly");
+    }
+}
+
+// #6902: a headless run has no presentation to answer the human seat. The unattended advance answers a ready conflict
+// choice once and gets the tick out; a wait that no seat can answer is named, not waited out.
+void unattended_advance_answers_and_names() {
+    {
+        PendingChoiceFixture fixture{false};
+        auto options = fixture.options();
+        auto created = LiveGameSession::start(fixture.initial, options);
+        expect(bool(created), "unattended fixture starts"); if (!created) return;
+        auto& live = *created.value();
+        live.submit(LiveGameOrder{{1}, galactic::PauseGalaxy{}, {}});
+        live.advance_to(1); expect(live.wait_for(1, 5s), "announcement publication arrives");
+        live.submit(LiveGameOrder{{1}, galactic::SetSpeed{false, Fixed::from_raw(Fixed::scale)}, {}});
+        live.advance_to(2); expect(live.wait_for(2, 5s), "next eligible tail publishes pending choice");
+        expect(live.frame().pending_conflict && live.frame().pending_conflict->choice_ready, "the choice is ready");
+        eawr::sim::EntityId answered{};
+        const auto advanced = eawr::platform::advance_unattended(live, 3, 10s, answered, true, 5s);
+        expect(advanced.reached && !advanced.timed_out && !advanced.stalled, "the unattended advance gets the tick out of the choice");
+        expect(advanced.answered == 1 && answered == fixture.entry.id, "it answered the pending conflict, once");
+        live.stop(); expect(!live.failure(), "unattended fixture stops cleanly");
+    }
+    {
+        auto created = LiveGameSession::start(setup(), {.workers = 2, .pacing = LiveGameSession::Pacing::driven});
+        expect(bool(created), "paused fixture starts"); if (!created) return;
+        auto& live = *created.value();
+        live.submit(LiveGameOrder{{1}, galactic::PauseGalaxy{}, {}});
+        live.advance_to(1); expect(live.wait_for(1, 5s), "the pause publishes");
+        eawr::sim::EntityId answered{};
+        const auto advanced = eawr::platform::advance_unattended(live, 5, 30s, answered, false, 400ms);
+        expect(!advanced.reached && !advanced.timed_out && advanced.stalled
+            && advanced.stalled->kind == eawr::platform::LiveAwaitedInput::Kind::galaxy_paused && advanced.answered == 0,
+            "a pause no seat answers is named after the stall limit, not waited out");
+        live.stop();
+    }
 }
 
 void child_untimed_input_after_drain() {
@@ -1600,10 +1782,14 @@ int case_galactic_live_game_session_tests() {
     summary_startup_reconciliation();
     pending_choice_publication();
     replay_parity();
+    tick_trace_keeps_hashes();
+    tick_trace_stop_path();
     pause_and_sequences(LiveGameSession::Pacing::driven);
     pause_and_sequences(LiveGameSession::Pacing::real_time);
     resume_and_failure();
     awaited_input_names_the_wait();
+    unattended_advance_answers_and_names();
+    unattended_advance_resolves_then_falls_back_to_fight();
     child_untimed_input_after_drain();
     child_health_warning_publication();
     child_readiness_and_return();

@@ -230,6 +230,20 @@ core::Result<void> register_planet_usability_method(auth::ScriptScheduler& scrip
         return detail::one(answered.value().front());
     });
 }
+core::Result<void> register_planet_corruption_method(auth::ScriptScheduler& scripts) {
+    return scripts.register_method(handle_game_object, "Is_Corrupted", [](auth::BindingContext& context, const auth::ValueList& args)
+        -> core::Result<auth::ValueList> {
+        // WGA-450/GA-06: the planet's committed corruption; the native owner validates the receiver.
+        if (args.empty() || !detail::as_handle(args[0], handle_game_object))
+            return detail::fail("Is_Corrupted requires a game object");
+        const auto answered = context.query_immediate("galactic.planet_corrupted", {args[0]});
+        if (!answered) return core::Result<auth::ValueList>::failure(error(answered.error().code,
+            "Is_Corrupted unavailable: " + answered.error().message));
+        if (answered.value().size() != 1 || !std::get_if<bool>(&answered.value().front().data))
+            return detail::fail("Is_Corrupted native predicate returned an invalid answer");
+        return detail::one(answered.value().front());
+    });
+}
 core::Result<void> register_freestore_bindings(auth::ScriptScheduler& scripts, std::shared_ptr<const FreestoreInput> input, bool unqualified_fixture) {
     if (!input) return core::Result<void>::failure(error(auth::codes::invalid_request, "freestore input absent"));
     const auto bind = [&](std::string_view name, auth::Binding function) { return scripts.register_method(handle_galactic_freestore, name, std::move(function)); };
@@ -284,6 +298,7 @@ core::Result<void> register_freestore_bindings(auth::ScriptScheduler& scripts, s
     if (!result) return result;
     if (auto registered = register_freestore_object_methods(scripts, input, unqualified_fixture); !registered) return registered;
     if (auto registered = register_planet_usability_method(scripts); !registered) return registered;
+    if (auto registered = register_planet_corruption_method(scripts); !registered) return registered;
     return bind("Move_Object", [](auth::BindingContext& context, const auth::ValueList& args) {
         // WGA-309/313: preflight reads the completed native owner/private pool.
         // Stock callbacks have no post-call moved-state reader; native writes

@@ -93,6 +93,7 @@ struct TacticalStep final {
     // FoC grab translate in mouse units, view axes (+x right, +y up): one
     // unit moves the target 1/100 of the live camera distance. Applied once as
     // a displacement, like `drag`.
+    // Screen axes at the yaw the step starts at (the view yaw when one is set).
     PanDisplacement translate_units{};
     // Project scale on the XML pan speed for the eased pan (held keys, edge
     // scroll, push scroll). The drag keeps its screen-matched scale.

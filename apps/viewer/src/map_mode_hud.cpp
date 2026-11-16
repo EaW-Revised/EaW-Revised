@@ -33,11 +33,14 @@
 #include <godot_cpp/core/object.hpp>
 
 #include "eawr/battle/start.hpp"
+#include "eawr/presentation/space/space.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <charconv>
 #include <cctype>
+#include <cstdlib>
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -448,6 +451,9 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
             BattleInput* input = battle.get();
             hud->set_special_weapon_handler([input, live] { input->special_weapon_click(*live); });
             hud->set_beacon_handler([input, live] { input->beacon_click(*live); });
+            hud->set_superlaser_handler([input, live] { input->superlaser_click(*live); });
+            TacticalHud* switch_hud = hud.get();
+            hud->set_superweapon_handler([input, live, switch_hud] { input->superweapon_click(*live, switch_hud->superweapon_art()); });
             hud->set_gift_handler([input, live](const sim::SeatId recipient) { input->gift_click(recipient, *live); });
             hud->set_order_handler([input, live](const std::string_view name) {
                 const ui::OrderMode mode = name == "attack" ? ui::OrderMode::attack
@@ -703,11 +709,17 @@ void MapMode::State::sync_production() {
     }
     view.notifications = live.reinforcement_notifications();
     view.notification_seconds = live.reinforcement_notification_tick() / sim::tactical::logical_frames_per_second;
-    // Land reinforcement drops are not wired yet: the pane stays inert there.
     const bool movie = space && space->live_camera_movie();
     view.reinforcement_allowed = presentation::ui::reinforcement_available(
-        live.reinforcement_allowed(), overview_ui.tactical_shell, movie, static_cast<bool>(land_population));
+        live.reinforcement_allowed(), overview_ui.tactical_shell, movie);
     view.tactical_population.clear();
+    // #7190: the simulation's reason for the last refused drop, for four seconds.
+    view.refusal.clear();
+    if (const auto& refusal = live.reinforcement_refusal()) {
+        const auto presented = static_cast<std::uint64_t>(std::max(0.0, live.presented_tick()));
+        if (presented >= refusal->tick && presented - refusal->tick <= presentation::ui::reinforcement_refusal_frames)
+            view.refusal = std::string(presentation::ui::reinforcement_refusal_label(refusal->reason));
+    }
     if ((!view.reinforcement_allowed || movie) && battle->placing()) battle->cancel();
     if (const sim::tactical::EconomyView* economy = live.local_economy()) {
         // WPR-04/41: only registered arrivals count; station capacity and queued
@@ -999,6 +1011,19 @@ std::optional<AttractCameraPose> MapMode::State::movie_pose(const LiveSessionVie
     }
     std::array<float, 3> offset{};
     std::array<float, 3> target_offset{};
+    // #6563: the ordinary shots and the C-key preview turn their offsets by the subject's rotation low-passed in time, so the
+    // tick-rate steps of a fighter's turn rate do not kick the eye (battlecam_rotation_filter.hpp). A TEC sequence keeps its
+    // fixed rotation; hardpoint and frigate shots (capital ships) returned above and are unchanged.
+    RotationMatrix subject_rotation{};
+    if (!movie_tec || movie_preview) {
+        if (movie_rotation_subject != subject.entity) {
+            movie_rotation_filter.reset();
+            movie_rotation_subject = subject.entity;
+        }
+        for (std::size_t row = 0; row < 3; ++row)
+            for (std::size_t col = 0; col < 3; ++col) subject_rotation[row][col] = to_double(box->model_to_world.rows[row][col]);
+        subject_rotation = movie_rotation_filter.evaluate(subject_rotation, movie_rotation_dt);
+    }
     if (movie_preview) {
         offset = preview_offset(preview_distance, preview_azimuth, preview_elevation);
     } else if (movie_tec) {
@@ -1012,7 +1037,7 @@ std::optional<AttractCameraPose> MapMode::State::movie_pose(const LiveSessionVie
         target[row] = floating ? movie_anchor[row] : static_cast<float>(subject.position[row]);
         for (std::size_t col = 0; col < 3; ++col) {
             const float rotation = movie_tec && !movie_preview ? movie_tec_rotation[row][col]
-                : static_cast<float>(to_double(box->model_to_world.rows[row][col]));
+                : static_cast<float>(subject_rotation[row][col]);
             source[row] += floating ? (row == col ? offset[col] : 0.0F) : rotation * offset[col];
             if (!movie_preview) target[row] += rotation * target_offset[col];
         }
@@ -1032,7 +1057,7 @@ std::optional<float> MapMode::State::movie_fov() const {
 
 void MapMode::State::enter_unit_preview() {
     if (!space || !live_session || !space_population || !battle
-        || live_session->phase() != LiveSessionView::Phase::running || !cinematics_allowed()) return;
+        || live_session->phase() != LiveSessionView::Phase::running || !cinematics_allowed() || cinematic_owns_camera()) return;
     if (movie_preview && space->live_camera_movie()) {
         preview_azimuth = std::fmod(preview_azimuth - 45.0F + 360.0F, 360.0F);
         preview_elevation = 30.0F;
@@ -1062,6 +1087,7 @@ void MapMode::State::enter_unit_preview() {
     movie_preview = true;
     movie_tec.reset();
     movie_subject = subject->entity;
+    movie_rotation_filter.reset(); // #6563: the preview is a cut
     // Trace only: the C-key preview starts here (a cut for the drawn camera).
     ++perf_camera.shot_id;
     perf_camera.shot_cut = true;
@@ -1097,7 +1123,8 @@ void MapMode::State::set_movie_mode(const bool on, const bool immediate) {
         preview_key_down = false;
         return;
     }
-    if (!space || !live_session || !space_population || live_session->phase() != LiveSessionView::Phase::running || !cinematics_allowed()) return;
+    if (!space || !live_session || !space_population || live_session->phase() != LiveSessionView::Phase::running || !cinematics_allowed()
+        || cinematic_owns_camera()) return;
     const auto& visible = live_session->visible_units();
     if (visible.empty()) { set_movie_mode(false); return; }
     movie_preview = false;
@@ -1109,6 +1136,7 @@ void MapMode::State::set_movie_mode(const bool on, const bool immediate) {
     if (subject_it == visible.end()) { set_movie_mode(false); return; }
     const auto* subject = &*subject_it;
     movie_subject = subject->entity;
+    movie_rotation_filter.reset(); // #6563: a new shot is a cut
     if (!begin_movie_shot(*subject)) { set_movie_mode(false); return; }
     // Trace only: a new battlecam shot starts here (a cut for the drawn camera).
     ++perf_camera.shot_id;
@@ -1130,9 +1158,12 @@ void MapMode::State::set_movie_mode(const bool on, const bool immediate) {
 
 
 void MapMode::State::advance_movie(const double delta) {
-    if (!space || !space->live_camera_movie()) return;
+    if (!space || !space->live_camera_movie() || cinematic_owns_camera()) return; // a campaign cinematic owns its camera
     const bool playing = live_session && space_population && live_session->phase() == LiveSessionView::Phase::running && cinematics_allowed();
     const bool paused = playing && live_session->time().paused();
+    // #6563: the camera's rotation filter takes the frame's step (held while paused) and starts from last frame's result.
+    movie_rotation_dt = paused ? 0.0 : std::max(delta, 0.0);
+    movie_rotation_filter.commit();
     const auto before = battlecam_advance(playing, paused, false, false);
     if (before == BattlecamAdvance::exit) { set_movie_mode(false, true); return; }
     const auto& visible = live_session->visible_units();
@@ -1560,6 +1591,8 @@ void MapMode::State::sync_battle_hud() {
     if (battle) {
         hud->set_special_weapon(battle->special_weapon_button(*live_session));
         hud->set_beacon(battle->beacon_enabled(*live_session), battle->beacon_targeting());
+        hud->set_superlaser_switch(battle->superlaser_switch(*live_session));
+        hud->set_superweapon_switch(battle->superweapon_switch(*live_session, hud->superweapon_art()));
         const bool gift_enabled = battle->gift_enabled(*live_session);
         static const std::vector<ui::ObserverOwner> no_recipients;
         hud->set_gift(live_session->controller_policy_enabled(), gift_enabled,
@@ -1734,6 +1767,449 @@ void MapMode::State::update_speed_notice(const bool running, const LanView& lan,
     auto* label = static_cast<EawrUiLabel*>(speed_notice);
     label->set_text(String::utf8(speed_notice_text.text().c_str()));
     label->set_visible(!speed_notice_text.text().empty());
+}
+
+// FS-R07: the ATTACKER ENTRY POSITION marker the retreat cinematic is framed from. The simulation's entry preparation picks
+// the attacker marker nearest the first defender marker (the closest-defender branch) and the first one when there is no
+// defender marker; the same choice is made here from the map's own placements.
+void MapMode::State::read_retreat_entry(const assets::Map& map) {
+    retreat_cinematic = {};
+    const auto named = [](const assets::Placement& placement, const std::string_view name) {
+        return !placement.type_candidates.empty() && ieq(placement.type_candidates.front().logical_name, name);
+    };
+    const auto complete = [](const assets::Placement& placement) {
+        return placement.position && placement.orientation_degrees
+            && (placement.orientation_status == assets::OrientationStatus::yaw_only
+                || placement.orientation_status == assets::OrientationStatus::three_axis);
+    };
+    const assets::Placement* defender = nullptr;
+    for (const auto& placement : map.placements)
+        if (!defender && complete(placement) && named(placement, "Defending Forces Position")) defender = &placement;
+    const assets::Placement* entry = nullptr;
+    float best = std::numeric_limits<float>::max();
+    for (const auto& placement : map.placements) {
+        if (!complete(placement) || !named(placement, "Attacker Entry Position")) continue;
+        float distance = 0.0F;
+        if (defender) {
+            const float dx = placement.position->x - defender->position->x;
+            const float dy = placement.position->y - defender->position->y;
+            const float dz = placement.position->z - defender->position->z;
+            distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        if (!entry || distance < best) { entry = &placement; best = distance; }
+    }
+    if (!entry) return;
+    presentation::camera::RetreatCameraInput geometry;
+    geometry.entry = {entry->position->x, entry->position->y, entry->position->z};
+    geometry.departure_direction = presentation::camera::retreat_departure_direction(
+        entry->orientation_degrees->y, entry->orientation_degrees->z);
+    // UFS-R02: the retained entry/destination span is unresolved; the constructor value is zero. The destination is the
+    // marker itself until a capture says otherwise.
+    geometry.destination = geometry.entry;
+    retreat_cinematic.geometry = geometry;
+}
+
+bool MapMode::State::retreat_cinematic_ready() {
+    if (!retreat_cinematic.geometry || !filesystem || !space || !live_session || !cinematics_allowed()) return false;
+    if (!retreat_cinematic.unlocked_tried) {
+        retreat_cinematic.unlocked_tried = true;
+        constexpr std::string_view tactical_path = "data/xml/tacticalcameras.xml";
+        constexpr std::string_view constants_path = "data/xml/gameconstants.xml";
+        auto tactical_bytes = filesystem->open(tactical_path);
+        auto constants_bytes = filesystem->open(constants_path);
+        if (tactical_bytes && constants_bytes) {
+            const std::string tactical_sha = hash_bytes(tactical_bytes.value());
+            const std::string constants_sha = hash_bytes(constants_bytes.value());
+            auto loaded = presentation::camera::load_constants({tactical_bytes.value(), tactical_path, tactical_sha},
+                {constants_bytes.value(), constants_path, constants_sha}, presentation::camera::Mode::unlocked);
+            if (loaded) retreat_cinematic.unlocked = loaded.value().constants;
+        }
+    }
+    return retreat_cinematic.unlocked.has_value();
+}
+
+void MapMode::State::update_retreat_cinematic(const sim::tactical::RetreatState& retreat, const std::uint64_t tick) {
+    if (!retreat_cinematic_ready()) return;
+    if (retreat.phase != sim::tactical::RetreatPhase::escaping) { end_retreat_cinematic(); return; }
+    auto& cinematic = retreat_cinematic;
+    cinematic.frame = retreat.cinematic_frame;
+    cinematic.tick = tick;
+    cinematic.roster = !retreat.actors.empty();
+    // FS-R09: the attached shots follow the retreating player's station; a removed station keeps its last transform.
+    if (const auto battle_data = live_session->prepared_battle()) {
+        const auto& starbases = battle_data->victory.starbase_types;
+        for (const auto& unit : live_session->visible_units()) {
+            if (unit.owner != retreat.player || !std::binary_search(starbases.begin(), starbases.end(), unit.type)) continue;
+            // The model path includes the type's ranged-target Z adjust.
+            const auto* profile = battle_data->content.combat.find(unit.type);
+            const double adjust = profile ? to_double(profile->ranged_target_z_adjust) : 0.0;
+            cinematic.station = std::array<float, 3>{static_cast<float>(unit.position[0]),
+                static_cast<float>(unit.position[1]), static_cast<float>(unit.position[2] + adjust)};
+            break;
+        }
+    }
+    if (!cinematic.roster && !cinematic.station) { end_retreat_cinematic(); return; }
+    if (!cinematic.active) {
+        cinematic.active = true;
+        // The battle UI and fog hide for the cinematic like the battlecam's; its world input is dropped.
+        space->live_camera_movie(true, {});
+        if (live_fog) live_fog->set_movie_hidden(true);
+        if (hud) hud->set_movie_mode(true);
+        if (battle) {
+            battle->command_click(ui::OrderMode::none, false, *live_session, ui::CommandOrigin::hud_button);
+            battle->cancel();
+        }
+    }
+    live_session->set_cinematic_pacing(true);
+    apply_retreat_flight(retreat);
+    apply_retreat_pose();
+}
+
+// FC-R04: the faction numbers of the escape flight. A faction that does not author a tag (stock Empire does not
+// author the consumed increment: its Space_Retreat_Flight_Increment is a different, ignored spelling) uses the debug
+// build's defaults, 250 and 2.
+presentation::camera::RetreatFlightRates MapMode::State::read_retreat_flight_rates(const std::string& faction) const {
+    presentation::camera::RetreatFlightRates rates;
+    if (!catalog) return rates;
+    const auto resolved = catalog->resolve(faction, data::Category::faction);
+    if (!resolved) return rates;
+    const auto number = [&](const std::string_view key) -> std::optional<double> {
+        const auto* field = resolved.value().value(key);
+        if (!field) return std::nullopt;
+        data::tag_trace::used(field->value);
+        const std::string text = field->value.raw_text;
+        char* end = nullptr;
+        const double parsed = std::strtod(text.c_str(), &end);
+        if (end == text.c_str() || !std::isfinite(parsed)) return std::nullopt;
+        return parsed;
+    };
+    if (const auto increment = number("Space_Retreat_Flight_Move_Increment"))
+        rates.increment = static_cast<float>(*increment);
+    if (const auto wait = number("Space_Retreat_Unit_Increment_Wait_Frames"))
+        rates.wait_frames = static_cast<std::int32_t>(std::clamp(*wait, -1.0e6, 1.0e6));
+    return rates;
+}
+
+// FS-R07, FC-R04, FC-R05, RC-07: the escape flight is drawn by the live view from the simulation's cinematic frame.
+void MapMode::State::apply_retreat_flight(const sim::tactical::RetreatState& state) {
+    auto& cinematic = retreat_cinematic;
+    if (!cinematic.roster || !cinematic.geometry || !cinematic.unlocked || !live_session) {
+        if (live_session) live_session->set_retreat_flight(std::nullopt);
+        return;
+    }
+    if (cinematic.rates_player != state.player) {
+        cinematic.rates = read_retreat_flight_rates(live_session->player_faction(state.player));
+        cinematic.rates_player = state.player;
+    }
+    LiveSessionView::RetreatFlightSetup setup;
+    setup.geometry = {cinematic.geometry->entry, cinematic.geometry->departure_direction};
+    setup.rates = cinematic.rates;
+    // The object fade is measured from the ship shot's camera, where the cinematic starts.
+    auto ship_shot = *cinematic.geometry;
+    ship_shot.station.reset();
+    ship_shot.ship_shot = true;
+    const auto first = presentation::camera::retreat_camera(ship_shot, 0, *cinematic.unlocked);
+    setup.eye = first ? first.value().eye : cinematic.geometry->entry;
+    setup.fade_begin = cinematic.unlocked->object_fade_begin;
+    setup.fade_end = cinematic.unlocked->object_fade_end;
+    live_session->set_retreat_flight(std::move(setup));
+}
+
+bool MapMode::State::apply_retreat_pose() {
+    auto& cinematic = retreat_cinematic;
+    if (!cinematic.active || !cinematic.geometry || !cinematic.unlocked || !space || !live_session) return false;
+    auto input = *cinematic.geometry;
+    input.station = cinematic.station;
+    input.ship_shot = cinematic.roster;
+    // The battle presents between its last two ticks; only the orbit uses the part of a frame.
+    const double lag = std::clamp(live_session->presented_tick() - static_cast<double>(cinematic.tick), -1.0, 0.0);
+    const double position = static_cast<double>(cinematic.frame) + lag;
+    const auto whole = static_cast<std::uint32_t>(std::max(0.0, std::floor(position)));
+    const float fraction = static_cast<float>(std::max(0.0, position - std::floor(position)));
+    const auto pose = presentation::camera::retreat_camera(input, whole, *cinematic.unlocked, fraction);
+    if (!pose) return false;
+    const auto eye = presentation::space::render_from_source({pose.value().eye[0], pose.value().eye[1], pose.value().eye[2]});
+    const auto aim = presentation::space::render_from_source({pose.value().target[0], pose.value().target[1], pose.value().target[2]});
+    space->live_camera_movie(true, {aim.x, aim.y, aim.z});
+    space->live_camera_movie_eye({eye.x, eye.y, eye.z});
+    space->live_camera_movie_fov(std::nullopt);
+    space->live_camera_movie_clip(std::pair{pose.value().near_clip, pose.value().far_clip});
+    return true;
+}
+
+void MapMode::State::end_retreat_cinematic() {
+    auto& cinematic = retreat_cinematic;
+    if (!cinematic.active) return;
+    cinematic.active = false;
+    cinematic.rates_player.reset();
+    if (live_session) {
+        live_session->set_retreat_flight(std::nullopt);
+        live_session->set_cinematic_pacing(false);
+    }
+    set_movie_mode(false, true);
+}
+
+// SK-ARR-01: the arrival cinematic needs the attacker entry marker (the retreat cinematic's geometry), a space battle and
+// In_Game_Cinematics. Nothing else gates it here: the campaign parent has already refused multiplayer, a held hyperspace
+// arrival and a story-linked battle (SK-ARR-13).
+bool MapMode::State::arrival_cinematic_ready() {
+    return retreat_cinematic.geometry && filesystem && space && live_session && cinematics_allowed();
+}
+
+void MapMode::State::update_arrival_cinematic(const MapMode::ArrivalRequest& request, const std::uint64_t tick) {
+    auto& cinematic = arrival_cinematic;
+    if (cinematic.finished) return;
+    if (!presentation::camera::arrival_cinematic_running(static_cast<std::uint32_t>(std::min<std::uint64_t>(tick, 1U << 30)))) {
+        end_arrival_cinematic();
+        cinematic.finished = true;
+        return;
+    }
+    if (!arrival_cinematic_ready()) return; // not drawable yet, or the map has no entry marker
+    if (!cinematic.active) {
+        // SK-ARR-03/04: every shot ends on the tactical camera's pose at the start, read once here.
+        const auto frame = space->live_camera_frame();
+        if (!frame || !retreat_cinematic.geometry) return;
+        presentation::camera::ArrivalCameraInput input;
+        input.role = request.attacker ? presentation::camera::ArrivalRole::attacker : presentation::camera::ArrivalRole::defender;
+        input.shot_choice = presentation::camera::arrival_shot_from_seed(request.seed);
+        // SK-ARR-02: the fleet arrives at the attacker entry marker, along its facing reversed (the retreat cinematic's
+        // departure direction is the same reversed facing).
+        input.destination = retreat_cinematic.geometry->entry;
+        input.departure_direction = retreat_cinematic.geometry->departure_direction;
+        const auto eye = presentation::space::source_from_render(frame->eye);
+        const auto aim = presentation::space::source_from_render(frame->target);
+        input.rest_eye = {eye.x, eye.y, eye.z};
+        input.look_at = {aim.x, aim.y, aim.z};
+        if (!request.attacker) {
+            // SK-ARR-04: the defender's first star base, at ground height; the camera's own look-at without one.
+            if (const auto battle_data = live_session->prepared_battle()) {
+                const auto& starbases = battle_data->victory.starbase_types;
+                for (const auto& unit : live_session->visible_units()) {
+                    if (unit.owner != request.defender || !std::binary_search(starbases.begin(), starbases.end(), unit.type)) continue;
+                    input.look_at = {static_cast<float>(unit.position[0]), static_cast<float>(unit.position[1]), 0.0F};
+                    break;
+                }
+            }
+        }
+        cinematic.input = input;
+        cinematic.active = true;
+        // SK-ARR-05: the battle UI and fog hide for the cinematic like the battlecam's; its world input is dropped and any
+        // selection and armed order cleared.
+        space->live_camera_movie(true, {});
+        if (live_fog) live_fog->set_movie_hidden(true);
+        if (hud) hud->set_movie_mode(true);
+        if (battle) {
+            battle->command_click(ui::OrderMode::none, false, *live_session, ui::CommandOrigin::hud_button);
+            battle->cancel();
+            battle->clear_selection();
+        }
+    }
+    live_session->set_cinematic_pacing(true);
+    apply_arrival_pose();
+}
+
+bool MapMode::State::apply_arrival_pose() {
+    auto& cinematic = arrival_cinematic;
+    if (!cinematic.active || !cinematic.input || !space || !live_session) return false;
+    // The battle presents between its last two ticks: the keyed camera is continuous in the presented time.
+    const double position = std::clamp(live_session->presented_tick(), 0.0, static_cast<double>(presentation::camera::arrival_rules::duration_frames));
+    const auto whole = static_cast<std::uint32_t>(std::floor(position));
+    const auto fraction = static_cast<float>(position - std::floor(position));
+    cinematic.frame = whole;
+    const auto pose = presentation::camera::arrival_camera(*cinematic.input, whole, fraction);
+    if (!pose) return false;
+    const auto eye = presentation::space::render_from_source({pose.value().eye[0], pose.value().eye[1], pose.value().eye[2]});
+    const auto aim = presentation::space::render_from_source({pose.value().target[0], pose.value().target[1], pose.value().target[2]});
+    space->live_camera_movie(true, {aim.x, aim.y, aim.z});
+    space->live_camera_movie_eye({eye.x, eye.y, eye.z});
+    space->live_camera_movie_fov(std::nullopt);
+    space->live_camera_movie_clip(std::pair{pose.value().near_clip, pose.value().far_clip});
+    return true;
+}
+
+void MapMode::State::end_arrival_cinematic() {
+    auto& cinematic = arrival_cinematic;
+    if (!cinematic.active) return;
+    cinematic.active = false;
+    if (live_session) live_session->set_cinematic_pacing(false);
+    set_movie_mode(false, true);
+}
+
+// TSW-16: the model's first fire bone (the debug build's convention for a weapon's muzzle), in the model's own space: its
+// position and the direction of its first axis, which is the direction the weapon fires along.
+std::optional<MapMode::State::TswDishBone> MapMode::State::read_tsw_dish_bone(const LiveSessionView& live,
+        const sim::tactical::TypeId type, const vfs::Vfs& filesystem) {
+    const auto* tables = live.tables();
+    if (tables == nullptr) return std::nullopt;
+    std::string path;
+    for (const auto& candidate : tables->units) if (battle::type_id(candidate.id) == type) { path = candidate.model_path; break; }
+    if (path.empty()) return std::nullopt;
+    const auto model = assets::load_model(filesystem, path);
+    if (!model) return std::nullopt;
+    const auto frames = units::bind_frames(model.value());
+    if (!frames) return std::nullopt;
+    for (std::size_t index = 0; index < model.value().bones.size() && index < frames.value().size(); ++index) {
+        if (!ieq(model.value().bones[index].name, "MuzzleA_00")) continue;
+        const auto& frame = frames.value()[index];
+        TswDishBone bone;
+        for (std::size_t row = 0; row < 3; ++row) {
+            bone.position[row] = static_cast<float>(to_double(frame.rows[row][3]));
+            bone.forward[row] = static_cast<float>(to_double(frame.rows[row][0]));
+        }
+        return bone;
+    }
+    return std::nullopt;
+}
+
+// TSW-16: the dish bone of each super weapon object, read once when the battle first shows the object, so the power-up
+// itself never reads a model file on the frame thread.
+void MapMode::State::resolve_tsw_dish_bones() {
+    const auto& latest = live_session->battle_frame().latest;
+    if (!latest || latest->tsw_views().empty() || !filesystem) return;
+    for (const auto& view : latest->tsw_views()) {
+        if (!tsw_cinematic.seen.insert(view.unit).second) continue;
+        for (const auto& instance : latest->instances()) {
+            if (instance.entity_id != view.unit) continue;
+            if (!tsw_cinematic.bones.contains(instance.type_id))
+                tsw_cinematic.bones.emplace(instance.type_id, read_tsw_dish_bone(*live_session, instance.type_id, *filesystem));
+            break;
+        }
+    }
+}
+
+// TSW-16: the super weapon's power-up cinematic. The event names the object and the battle tick that accepted the power-up;
+// the shot is a function of the presented tick from there. The object must be drawn (its model box gives the dish's pose
+// and the shot's scale); an object the local view does not draw (fog, no model) plays no cinematic: the least visible
+// choice while it is unverified whether the debug build shows it for an object the player cannot see.
+void MapMode::State::update_tsw_cinematic() {
+    auto& cinematic = tsw_cinematic;
+    if (!live_session || !space || !space_population) return;
+    const bool running = live_session->phase() == LiveSessionView::Phase::running;
+    const double presented = live_session->presented_tick();
+    if (running) resolve_tsw_dish_bones();
+    if (cinematic.active) {
+        const auto frame = static_cast<std::uint64_t>(std::max(0.0, std::floor(presented - static_cast<double>(cinematic.start_tick))));
+        if (!running || !presentation::camera::tsw_cinematic_running(static_cast<std::uint32_t>(std::min<std::uint64_t>(frame, 1U << 30))))
+            end_tsw_cinematic();
+        return;
+    }
+    // The cinematic takes the camera from a battlecam shot too; a campaign cinematic never overlaps a super weapon.
+    if (!running || !filesystem || !cinematics_allowed() || retreat_cinematic.active || arrival_cinematic.active) return;
+    for (const auto& record : live_session->battle_frame().reached) {
+        for (const auto& event : record.events) {
+            if (event.kind != sim::tactical::EventKind::tsw_power_up_started || event.tick <= cinematic.handled_tick) continue;
+            cinematic.handled_tick = event.tick;
+            const double frame = std::floor(presented - static_cast<double>(event.tick));
+            if (!presentation::camera::tsw_cinematic_running(
+                    static_cast<std::uint32_t>(std::clamp(frame, 0.0, static_cast<double>(1U << 30))))) continue;
+            const auto& visible = live_session->visible_units();
+            const auto unit = std::find_if(visible.begin(), visible.end(), [&event](const auto& item) { return item.entity == event.unit; });
+            if (unit == visible.end()) continue;
+            const auto box = space_population->live_ship_box(unit->ship);
+            if (!box) continue;
+            // The model's radius and centre in source coordinates: the box is model-local, so its centre goes through the
+            // model's rotation and its radius is the largest half extent scaled by that axis' column length.
+            std::array<float, 3> center_local{};
+            for (std::size_t i = 0; i < 3; ++i) center_local[i] = (box->low[i] + box->high[i]) * 0.5F;
+            std::array<float, 3> center{};
+            float radius = 0.0F;
+            for (std::size_t col = 0; col < 3; ++col) {
+                float norm = 0.0F;
+                for (std::size_t row = 0; row < 3; ++row) {
+                    const auto element = static_cast<float>(to_double(box->model_to_world.rows[row][col]));
+                    norm += element * element;
+                    center[row] += element * center_local[col];
+                }
+                radius = std::max(radius, (box->high[col] - box->low[col]) * 0.5F * std::sqrt(norm));
+            }
+            for (std::size_t row = 0; row < 3; ++row) center[row] += static_cast<float>(unit->position[row]);
+            presentation::camera::TswCameraInput input;
+            input.radius = radius;
+            // The dish is where the model puts its first fire bone, firing along that bone's forward axis (TSW-16). A model
+            // without one falls back to its surface along the object's facing, which the sequence points at the target.
+            const auto cached = cinematic.bones.find(unit->type);
+            const auto dish_bone = cached == cinematic.bones.end() ? std::optional<TswDishBone>{} : cached->second;
+            if (dish_bone) {
+                for (std::size_t row = 0; row < 3; ++row) {
+                    input.dish[row] = static_cast<float>(unit->position[row]);
+                    input.dish_axis[row] = 0.0F;
+                    for (std::size_t col = 0; col < 3; ++col) {
+                        const auto element = static_cast<float>(to_double(box->model_to_world.rows[row][col]));
+                        input.dish[row] += element * dish_bone->position[col];
+                        input.dish_axis[row] += element * dish_bone->forward[col];
+                    }
+                }
+                // The fire bone is an emitter point that floats above the hull (stock Death Star: about a tenth of the radius), so
+                // looking at it from the side points the camera beside the dish. The dish is where the line from the model's
+                // centre (the object's position) through the bone meets the hull as drawn (the pick box's radius).
+                const std::array<float, 3> origin{static_cast<float>(unit->position[0]), static_cast<float>(unit->position[1]),
+                                                  static_cast<float>(unit->position[2])};
+                input.dish = presentation::camera::tsw_dish_on_hull(origin, input.dish, radius);
+            } else {
+                const auto snapshot = live_session->snapshot_at(event.tick);
+                const sim::tactical::TacticalInstance* instance = nullptr;
+                if (snapshot) for (const auto& item : snapshot->instances()) if (item.entity_id == event.unit) { instance = &item; break; }
+                if (instance == nullptr) continue;
+                for (std::size_t row = 0; row < 3; ++row)
+                    input.dish_axis[row] = static_cast<float>(to_double(instance->fixed_transform.rows[row][0]));
+                const float axis_length = std::sqrt(input.dish_axis[0] * input.dish_axis[0]
+                    + input.dish_axis[1] * input.dish_axis[1] + input.dish_axis[2] * input.dish_axis[2]);
+                if (!(axis_length > 0.0F)) continue;
+                for (std::size_t row = 0; row < 3; ++row) input.dish[row] = center[row] + input.dish_axis[row] / axis_length * radius;
+            }
+            if (!presentation::camera::tsw_camera(input, 0)) continue; // a degenerate box: no cinematic
+            if (const auto first = presentation::camera::tsw_camera(input, 0)) {
+                // One line per shot for the eye check: the dish point and the shot's eye, in source coordinates.
+                UtilityFunctions::print("EAWR tsw camera: dish ", input.dish[0], " ", input.dish[1], " ", input.dish[2], "; axis ",
+                    input.dish_axis[0], " ", input.dish_axis[1], " ", input.dish_axis[2], "; radius ", input.radius,
+                    "; centre ", center[0], " ", center[1], " ", center[2], "; unit ", unit->position[0], " ", unit->position[1], " ",
+                    unit->position[2], "; fov ", space->live_camera_frame() ? space->live_camera_frame()->vertical_fov_degrees : 0.0F, "; eye ", first.value().eye[0], " ",
+                    first.value().eye[1], " ", first.value().eye[2], "; from event tick ", static_cast<int64_t>(event.tick));
+            }
+            cinematic.input = input;
+            cinematic.start_tick = event.tick;
+            cinematic.active = true;
+            // The battle UI and fog hide like the other cinematics' (SK-ARR-05); the world input is dropped and any
+            // selection and armed order cleared.
+            space->live_camera_movie(true, {});
+            if (live_fog) live_fog->set_movie_hidden(true);
+            if (hud) hud->set_movie_mode(true);
+            if (battle) {
+                battle->command_click(ui::OrderMode::none, false, *live_session, ui::CommandOrigin::hud_button);
+                battle->cancel();
+                battle->clear_selection();
+            }
+            live_session->set_cinematic_pacing(true);
+            apply_tsw_pose();
+            return;
+        }
+    }
+}
+
+bool MapMode::State::apply_tsw_pose() {
+    auto& cinematic = tsw_cinematic;
+    if (!cinematic.active || !cinematic.input || !space || !live_session) return false;
+    const double position = std::max(0.0, live_session->presented_tick() - static_cast<double>(cinematic.start_tick));
+    const auto frame = static_cast<std::uint32_t>(std::min(std::floor(position),
+        static_cast<double>(presentation::camera::tsw_rules::duration_frames - 1U)));
+    const auto pose = presentation::camera::tsw_camera(*cinematic.input, frame);
+    if (!pose) return false;
+    const auto eye = presentation::space::render_from_source({pose.value().eye[0], pose.value().eye[1], pose.value().eye[2]});
+    const auto aim = presentation::space::render_from_source({pose.value().target[0], pose.value().target[1], pose.value().target[2]});
+    space->live_camera_movie(true, {aim.x, aim.y, aim.z});
+    space->live_camera_movie_eye({eye.x, eye.y, eye.z});
+    space->live_camera_movie_fov(std::nullopt);
+    space->live_camera_movie_clip(std::pair{pose.value().near_clip, pose.value().far_clip});
+    return true;
+}
+
+void MapMode::State::end_tsw_cinematic() {
+    auto& cinematic = tsw_cinematic;
+    if (!cinematic.active) return;
+    cinematic.active = false;
+    cinematic.input.reset();
+    if (live_session) live_session->set_cinematic_pacing(false);
+    set_movie_mode(false, true);
 }
 
 } // namespace eawr::presentation::godot_backend

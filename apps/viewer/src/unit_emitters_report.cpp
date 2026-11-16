@@ -156,7 +156,7 @@ void UnitEmitters::write_report(std::ostream& output) const {
            << ", \"error_bins_px\": [";
     for (std::size_t bin = 0; bin < ss_.error_bins.size(); ++bin) output << (bin ? ", " : "") << ss_.error_bins[bin];
     output << "]}";
-    output << ", \"caught_up\": " << caught_up_ << ", \"unknown_samples\": " << unknown_samples_
+    output << ", \"folded_frames\": " << folded_frames_ << ", \"caught_up\": " << caught_up_ << ", \"unknown_samples\": " << unknown_samples_
            << ", \"presented_frames\": " << presented_frames_ << ", \"presented_effects\": " << presented_effects_;
     output << ", \"start_log\": [";
     for (std::size_t index = 0; index < start_log_.size(); ++index) {

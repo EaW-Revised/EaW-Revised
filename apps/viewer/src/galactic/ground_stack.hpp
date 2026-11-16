@@ -24,7 +24,11 @@ inline std::optional<GroundStack> ground_stack(const sim::galactic::GalacticSnap
         return {};
     };
     const auto owner_faction = faction(observed->allegiance);
-    if (!owner_faction) return {};
+    // A surface the local player can see is empty is a landing target while ground units are held, whoever holds the planet:
+    // the session admits a landing on an uncontested empty surface (WGM-39/53), and a planet with no base or troops has no
+    // allegiance, so it is neither allied nor has a faction to count for (#6934).
+    const bool known_empty = roster.count_known && roster.count && *roster.count == 0;
+    if (!owner_faction && !(empty_drop_target && known_empty)) return {};
     GroundStack result;
     result.owner = observed->allegiance; result.allied = roster.allied;
     result.contents_known = roster.contents_known;
@@ -39,12 +43,12 @@ inline std::optional<GroundStack> ground_stack(const sim::galactic::GalacticSnap
         if (group == result.contents.end()) result.contents.push_back({company.type, 1});
         else ++group->count;
     }
-    if (!result.count && !(empty_drop_target && result.allied)) return {};
+    if (!result.count && !(empty_drop_target && (result.allied || known_empty))) return {};
     result.texture = stack_texture_index(result.count, textures);
     if (!result.contents_known && result.count) result.contents.push_back({{}, result.count});
     return result;
 }
-// GGS-05: an empty allied surface becomes a receiver while ground units are held
+// GGS-05: an empty allied surface, or one known to be empty, becomes a receiver while ground units are held
 // (owner-specified; retail visual capture pending). Orbit drops retain their
 // same-planet landing admission, including mixed stacks with a loaded transport.
 inline std::optional<GroundStack> ground_drop_stack(const sim::galactic::GalacticSnapshot& snapshot,
@@ -67,8 +71,7 @@ inline std::optional<GroundStack> ground_drop_stack(const sim::galactic::Galacti
         const auto& types = snapshot.fleet_control()->types;
         const auto type = std::find_if(types.begin(), types.end(), [&](const auto& row) { return row.type == unit->type; });
         if (type == types.end() || !type->transport) continue;
-        const auto capable = sim::galactic::has_ground_capability(*snapshot.control(), *unit, snapshot.movement());
-        if (capable && capable.value()) selected_ground = true;
+        if (transport_can_land(snapshot, local, planet, *unit)) selected_ground = true;
     }
     const bool landing = selected_ground && source != fleets.end() && source->orbit == planet
         && fleet_can_land(snapshot, local, fleet, stack);

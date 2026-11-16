@@ -114,6 +114,28 @@ void Loader::load_land_body(Object& object, UnitType& unit) {
     if (hull && hull->raw() > 0) unit.hull = hull;
     else if (hull) report_.note(unit.id, "Tactical_Health", trim(object.text("Tactical_Health")), "non-positive health; the type has no durability row");
     unit.shielded = land_behavior(object, "SHIELDED");
+    // WLAB-08: a Force-disabling carrier names its radius. The behaviour without a positive range scans nothing and has no row.
+    if (land_behavior(object, "DISABLE_FORCE_ABILITIES")) {
+        const auto range = object.fixed("Disable_Force_Abilities_Range", report_, false);
+        if (range && range->raw() > 0) unit.force_disable_range = range;
+        else report_.note(unit.id, "Disable_Force_Abilities_Range", trim(object.text("Disable_Force_Abilities_Range")),
+            "DISABLE_FORCE_ABILITIES without a positive range disables nothing; the type has no Force-disabling row");
+    }
+    // WLAB-16: the locomotor names of a type that uses several (JET_PACK switches to the secondary one).
+    unit.uses_multiple_locomotors = flag(object, "Uses_Multiple_Locomotors", false).value_or(false);
+    if (unit.uses_multiple_locomotors) {
+        unit.primary_locomotor_name = trim(object.text("Primary_Locomotor_Name"));
+        unit.secondary_locomotor_name = trim(object.text("Secondary_Locomotor_Name"));
+        // WLAB-16 (#7084): the jet-pack flight tags. The row needs a positive Alternate_Max_Speed; an unauthored lift or hover is zero.
+        if (const auto alternate = object.retail_float("Alternate_Max_Speed", report_); alternate && alternate->raw() > 0) {
+            UnitType::LandJump jump;
+            jump.alternate_max_speed = *alternate;
+            jump.max_lift = object.retail_float("Max_Lift", report_).value_or(Fixed{});
+            jump.hover_offset = object.retail_float("Hover_Offset", report_).value_or(Fixed{});
+            jump.alternate_rate_of_turn = object.retail_float("Alternate_Max_Rate_Of_Turn", report_);
+            unit.land_jump = jump;
+        }
+    }
     unit.shield_points = object.fixed("Shield_Points", report_, false);
     const bool shielded = unit.shielded && unit.shield_points && unit.shield_points->raw() > 0;
     unit.shield_refresh_rate = object.fixed("Shield_Refresh_Rate", report_, shielded);
@@ -290,6 +312,12 @@ void Loader::load_land_static(Object& object) {
     // LC-86 (#6183): every placed static candidate reads its fog inputs, obstacle or not (a build pad reveals without being
     // an obstacle), with the same tags and defaults as a land body.
     row.fog = read_land_reveal(object);
+    // LE-OCCUPY: the authored collision class of any placed static candidate (WLPA-73 names; an unknown name leaves it absent).
+    if (const auto* node = object.single("UnitCollisionClass")) {
+        const auto name = trim(node->raw_text);
+        if (const auto parsed = parse_land_collision_class(name)) row.collision_class = *parsed;
+        else report_.note(row.id, "UnitCollisionClass", name, "not a collision class name; none stays (LSL-06)");
+    }
     if (row.land_obstacle) {
         row.proxy_type = trim(object.text("Obstacle_Proxy_Type"));
         row.secondary_passability = trim(object.text("SecondaryOccupationPassability"));
@@ -439,6 +467,19 @@ void Loader::load_land_movement_classes() {
     }
 }
 
+// LR4-05/06 (#6993): the rows a producer's menu reads for a company: the same tags and readings as an ordinary type's
+// production row (load_production), without its menu, successor chain or income, which a company does not use on land.
+void Loader::load_land_company_production(Object& object, Production& production) {
+    production.build_cost_multiplayer = object.fixed("Tactical_Build_Cost_Multiplayer", report_, false);
+    production.build_time_seconds = object.fixed("Tactical_Build_Time_Seconds", report_, false);
+    production.production_queue = object.text("Tactical_Production_Queue");
+    production.lifetime_player = count(object, "Build_Limit_Lifetime_Per_Player", false, true);
+    production.current_player = count(object, "Build_Limit_Current_Per_Player", false, true);
+    production.lifetime_allies = count(object, "Build_Limit_Lifetime_For_All_Allies", false, true);
+    production.current_allies = count(object, "Build_Limit_Current_For_All_Allies", false, true);
+    production.prerequisites = tokens(object.text("Tactical_Build_Prerequisites"));
+}
+
 // LC-01..LC-06: the ordered member list, the squad size, the team type and its speed source. Any
 // member or reference that does not resolve leaves an unresolved row and the company out of the table.
 void Loader::load_land_company(Object& object) {
@@ -450,6 +491,7 @@ void Loader::load_land_company(Object& object) {
         if (const auto value = data::retail::integer_value(node->raw_text); value && value->value >= 0)
             company.population_value = static_cast<std::uint32_t>(value->value);
     }
+    load_land_company_production(object, company.production);
     bool complete = true;
     std::string first_member_team;
     std::vector<std::string> ids;
@@ -516,10 +558,24 @@ void Loader::load_land_company(Object& object) {
                 if (const auto parsed = parse_land_collision_class(name)) company.team_collision_class = *parsed;
                 else report_.note(selected_team, "UnitCollisionClass", name, "not a collision class name; None stays (LSL-06)");
             }
+            {
+                UnitType team_scratch;
+                team_scratch.id = company.team_type;
+                load_unit_abilities(*team, team_scratch); // WLAB-03: the container's own rows
+                company.team_abilities = std::move(team_scratch.abilities);
+            }
             team->note_duplicates(report_);
         } else {
             complete = false;
         }
+    }
+    // WLAB-01, WLAB-03 (#3238): the company object's and its container's own Unit_Abilities_Data. The loader fills a type
+    // row, so each object reads into a scratch row that carries only the identity its diagnostics name.
+    {
+        UnitType scratch;
+        scratch.id = company.id;
+        load_unit_abilities(object, scratch);
+        company.abilities = std::move(scratch.abilities);
     }
     if (!company.formation_spacing && !company.locomotion.empty())
         company.formation_spacing = company.locomotion.front().formation_spacing;

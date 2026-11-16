@@ -50,8 +50,23 @@ class GalacticGroundRuntime(unittest.TestCase):
         self.assertLess(y + height, 720, hud)
         self.assertTrue(capture.is_file())
 
+    def test_opener_is_drawn_only_where_the_map_can_be_opened(self):
+        # GPD-42 (legacy #5628): an enemy planet without ground intelligence shows the plain base layout text and no
+        # magnifier or bar; the same probe on the owner's planet (the bone-only test) finds the opener drawn.
+        rows, _ = self.probe_focused_buttons("ground-unseen")
+        self.assertIn("base_layout_caption", rows)
+        self.assertTrue(rows["base_layout_caption"]["visible"], rows)
+        self.assertIn("advanced_planetary", rows)
+        self.assertFalse(rows["advanced_planetary"]["visible"], rows)
+        rows, _ = self.probe_focused_buttons("ground-contents")
+        self.assertTrue(rows["advanced_planetary"]["visible"], rows)
+
     def test_bone_only_focused_buttons_are_visible(self):
         # GHUD-S98: both buttons are attached to shell bones, including when no mesh exists.
+        rows, capture = self.probe_focused_buttons("ground-contents")
+        self.check_bone_only_buttons(rows, capture)
+
+    def probe_focused_buttons(self, fixture):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-focused-buttons-"))
         report, probe, capture, driver = (directory / name for name in
             ("report.json", "buttons.json", "focused.png", "input.gd"))
@@ -85,14 +100,16 @@ func _process(delta):
 ''' % (json.dumps(probe.as_posix()), json.dumps(capture.as_posix())), encoding="utf-8")
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
-            "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", "ground-contents",
+            "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", fixture,
             "--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750",
             "--eawr-game-root", support.GAME_ROOT, "--eawr-galactic-paused", "yes",
             "--eawr-report", str(report)], cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(probe.is_file(), result.stdout + result.stderr)
-        rows = json.loads(probe.read_text(encoding="utf-8"))
+        return json.loads(probe.read_text(encoding="utf-8")), capture
+
+    def check_bone_only_buttons(self, rows, capture):
         for name in ("advanced_planetary", "planet_info"):
             self.assertIn(name, rows)
             self.assertTrue(rows[name]["visible"], rows)
@@ -126,6 +143,255 @@ func _process(delta):
         bar_centre = (left + right - 1) / 2
         self.assertAlmostEqual(bar_centre, caption[0] + caption[2] / 2, delta=2.0,
             msg="stock Base Layout bar and caption align")
+        self.assertTrue(capture.is_file())
+
+    def test_focused_planet_draws_the_planet_info_card_above_its_button(self):
+        # GPI-01/03/04: the card is built under the organization shell and anchored on the planet_info button; its
+        # content-driven height grows upward from the anchor, so its bottom edge clears the button.
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-planet-card-"))
+        report, probe, capture, driver = (directory / name for name in
+            ("report.json", "card.json", "focused.png", "input.gd"))
+        driver.write_text('''extends SceneTree
+var elapsed = 0.0
+var frame = 0
+func _initialize(): call_deferred("_start")
+func _start():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func _process(delta):
+    elapsed += delta
+    if elapsed < 2.0: return false
+    frame += 1
+    if frame == 120:
+        var rows = {}
+        var button = root.find_children("planet_info", "Control", true, false)
+        if not button.is_empty():
+            var rect = button[0].get_global_rect()
+            rows["planet_info"] = {"visible": button[0].is_visible_in_tree(), "rect": [rect.position.x, rect.position.y, rect.size.x, rect.size.y]}
+        var card = root.find_children("planet_info_card", "Control", true, false)
+        if not card.is_empty():
+            var union = Rect2()
+            var texts = []
+            var textures = 0
+            var texture_rects = []
+            for child in card[0].get_children():
+                var control = child as Control
+                if control == null: continue
+                var rect = control.get_global_rect()
+                union = rect if union.size == Vector2.ZERO else union.merge(rect)
+                if control is Label: texts.append(control.text)
+                if control is TextureRect:
+                    textures += 1
+                    texture_rects.append([rect.position.x, rect.position.y, rect.size.x, rect.size.y])
+            rows["planet_info_card"] = {"visible": card[0].is_visible_in_tree(), "children": card[0].get_child_count(),
+                "textures": textures, "texture_rects": texture_rects, "texts": texts, "rect": [union.position.x, union.position.y, union.size.x, union.size.y]}
+        var file = FileAccess.open(%s, FileAccess.WRITE)
+        file.store_string(JSON.stringify(rows))
+        file.close()
+        root.get_texture().get_image().save_png(%s)
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''' % (json.dumps(probe.as_posix()), json.dumps(capture.as_posix())), encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", "ground-contents",
+            "--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750",
+            "--eawr-game-root", support.GAME_ROOT, "--eawr-galactic-paused", "yes",
+            "--eawr-report", str(report)], cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(probe.is_file(), result.stdout + result.stderr)
+        rows = json.loads(probe.read_text(encoding="utf-8"))
+        self.assertIn("planet_info_card", rows, rows)
+        card, button = rows["planet_info_card"], rows["planet_info"]
+        self.assertTrue(card["visible"], rows)
+        self.assertGreater(card["textures"], 2, "backdrop, frame and glow at least")
+        self.assertTrue(card["texts"], rows)
+        x, y, width, height = card["rect"]
+        bx, by, bwidth, bheight = button["rect"]
+        self.assertGreater(width, 100, rows)
+        self.assertLess(y + height, by + 1, "the card grows upward from the button")
+        self.assertGreater(x + width, bx, "the card spans the button's column")
+        self.assertLess(x, bx + bwidth, "the card spans the button's column")
+        self.assertTrue(capture.is_file())
+        # Retail draws the header band across the whole backdrop, flush with both frame edges (glow, frame, backdrop, band).
+        glow, frame, backdrop, band = card["texture_rects"][:4]  # draw order
+        self.assertAlmostEqual(band[0], backdrop[0], delta=1.0, msg="the header band starts at the backdrop's left edge")
+        self.assertAlmostEqual(band[2], backdrop[2], delta=1.0, msg="the header band spans the backdrop's width")
+        self.assertGreater(glow[2], frame[2], "the glow reaches past the frame")
+        # Retail's card interior is one near-black navy, (9,13,20) in two frames over different scenes: the backdrop
+        # (0.9 black) lies over the opaque frame image and the additive glow is below both (GPI-06). A translucent
+        # backdrop or a glow drawn over it lights the interior up (the earlier look was about (58,90,139)).
+        from tests.presentation.renderer.space_map_test_support import decode_png
+        image_width, image_height, pixels = decode_png(capture.read_bytes())
+        # Below the header band, at the backdrop's right end: no text or pip icon is there in this fixture.
+        bx0, by0, bw0, bh0 = backdrop
+        for sample_x, sample_y in ((bx0 + bw0 - 12, by0 + bh0 - 6), (bx0 + bw0 - 30, by0 + bh0 - 6)):
+            red, green, blue = pixels[int(sample_y)][int(sample_x)][:3]
+            self.assertLess(max(red, green, blue), 48, f"planet card interior is not near-black at {sample_x},{sample_y}")
+            self.assertGreater(blue, red, "the interior keeps the frame's blue under the backdrop")
+
+    def card_textures(self, fixture):
+        # The focused planet card's TextureRect children (rect size and texture size), for one synthetic fixture.
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-planet-card-weather-"))
+        report, probe, driver = (directory / name for name in ("report.json", "card.json", "input.gd"))
+        driver.write_text('''extends SceneTree
+var elapsed = 0.0
+var frame = 0
+func _initialize(): call_deferred("_start")
+func _start():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func _process(delta):
+    elapsed += delta
+    if elapsed < 2.0: return false
+    frame += 1
+    if frame == 120:
+        var rows = []
+        var card = root.find_children("planet_info_card", "Control", true, false)
+        if not card.is_empty():
+            for child in card[0].get_children():
+                var art = child as TextureRect
+                if art == null or art.texture == null: continue
+                rows.append({"rect": [art.size.x, art.size.y], "texture": [art.texture.get_width(), art.texture.get_height()]})
+        var file = FileAccess.open(%s, FileAccess.WRITE)
+        file.store_string(JSON.stringify(rows))
+        file.close()
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''' % json.dumps(probe.as_posix()), encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", fixture,
+            "--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750",
+            "--eawr-game-root", support.GAME_ROOT, "--eawr-galactic-paused", "yes",
+            "--eawr-report", str(report)], cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(probe.is_file(), result.stdout + result.stderr)
+        return json.loads(probe.read_text(encoding="utf-8"))
+
+    def test_card_weather_icon_draws_only_from_the_command_bar_atlas(self):
+        # #6756: the header's weather icon is a command-bar icon component, so only an atlas entry draws; a
+        # standalone texture (a mod's loading picture) draws nothing instead of filling the view at texture size.
+        plain = self.card_textures("ground-contents")
+        atlas = self.card_textures("ground-weather-atlas")
+        loadscreen = self.card_textures("ground-weather-loadscreen")
+        self.assertTrue(plain, "the focused planet card draws no art")
+        self.assertEqual(len(atlas), len(plain) + 1, "an atlas weather icon is missing from the card header")
+        self.assertEqual(len(loadscreen), len(plain), "a standalone weather texture was drawn in the card header")
+
+    def test_planet_info_dialog_weather_picture_fills_its_fixed_slot(self):
+        # #6756: the dialog's weather picture is a picture gadget of 128 x 128 in the 975 x 718 dialog, so its picture
+        # is stretched into that slot (the panel is half the window wide, 960 at most).
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-planet-info-weather-"))
+        report, probe, driver = (directory / name for name in ("report.json", "dialog.json", "input.gd"))
+        driver.write_text('''extends SceneTree
+var elapsed = 0.0
+var frame = 0
+func _initialize(): call_deferred("_start")
+func _start():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func click(point):
+    for down in [true, false]:
+        var event = InputEventMouseButton.new()
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.position = point
+        event.global_position = point
+        event.pressed = down
+        Input.parse_input_event(event)
+func _process(delta):
+    elapsed += delta
+    if elapsed < 2.0: return false
+    frame += 1
+    if frame == 120:
+        var button = root.find_children("planet_info", "Control", true, false)
+        if not button.is_empty(): click(button[0].get_global_rect().get_center())
+    if frame == 180:
+        var rows = []
+        var dialog = root.find_children("planet_info_dialog", "Control", true, false)
+        if not dialog.is_empty() and dialog[0].is_visible_in_tree():
+            for art in dialog[0].find_children("*", "TextureRect", true, false):
+                if art.texture == null: continue
+                rows.append({"rect": [art.size.x, art.size.y], "texture": [art.texture.get_width(), art.texture.get_height()]})
+        var file = FileAccess.open(%s, FileAccess.WRITE)
+        file.store_string(JSON.stringify(rows))
+        file.close()
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''' % json.dumps(probe.as_posix()), encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", "ground-weather-atlas",
+            "--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750",
+            "--eawr-game-root", support.GAME_ROOT, "--eawr-galactic-paused", "yes",
+            "--eawr-report", str(report)], cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = json.loads(probe.read_text(encoding="utf-8"))
+        self.assertTrue(rows, "the Planet Info dialog drew no weather picture")
+        slot = 128.0 * 640.0 / 975.0
+        self.assertTrue(any(abs(row["rect"][0] - slot) < 1.0 and abs(row["rect"][1] - slot) < 1.0 for row in rows), rows)
+
+    def test_stock_campaign_card_lists_description_and_pip_rows(self):
+        # GPI-07/08/09 on the installed data: the focused owned planet shows its authored description and both pip rows.
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-planet-card-stock-"))
+        report, probe, capture, driver = (directory / name for name in
+            ("report.json", "card.json", "focused.png", "input.gd"))
+        driver.write_text('''extends SceneTree
+var elapsed = 0.0
+var frame = 0
+func _initialize(): call_deferred("_start")
+func _start():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func _process(delta):
+    elapsed += delta
+    if elapsed < 2.0: return false
+    frame += 1
+    # The opening story summary covers the view until it is dismissed.
+    if frame == 60: Input.action_press("ui_cancel")
+    if frame == 62: Input.action_release("ui_cancel")
+    if frame == 200:
+        var rows = {}
+        var card = root.find_children("planet_info_card", "Control", true, false)
+        if not card.is_empty():
+            var texts = []
+            var textures = 0
+            for child in card[0].get_children():
+                if child is Label: texts.append(child.text)
+                if child is TextureRect: textures += 1
+            rows["planet_info_card"] = {"visible": card[0].is_visible_in_tree(), "textures": textures, "texts": texts}
+        var file = FileAccess.open(%s, FileAccess.WRITE)
+        file.store_string(JSON.stringify(rows))
+        file.close()
+        root.get_texture().get_image().save_png(%s)
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''' % (json.dumps(probe.as_posix()), json.dumps(capture.as_posix())), encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "Sandbox_Equal_Footing_Empire", "--eawr-galactic-focus", "15",
+            "--eawr-galactic-flight-ms", "750", "--eawr-game-root", support.GAME_ROOT,
+            "--eawr-galactic-paused", "yes", "--eawr-report", str(report)],
+            cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rows = json.loads(probe.read_text(encoding="utf-8"))
+        self.assertIn("planet_info_card", rows, rows)
+        card = rows["planet_info_card"]
+        self.assertTrue(card["visible"], rows)
+        self.assertGreater(len(card["texts"]), 1, "name and at least one description entry")
+        self.assertGreater(card["textures"], 12, "frame, backdrop, glow, header art and both pip rows")
         self.assertTrue(capture.is_file())
 
     def test_unseen_ground_force_size_reads_unknown(self):
@@ -177,6 +443,13 @@ func _process(delta):
             end = [start[0] - 120, start[1] + 110]
         if action in {"land", "land-drag"}:
             start = self.center(next(row for row in initial["fleet_hud"]["controls"] if row["name"] == "q1_fleet"))
+            end = self.center(controls["Slot_00"])
+        if action == "land-cell":
+            # #7178: one unit cell of the two-transport stack, not the card header.
+            card = next(row for row in initial["fleet_hud"]["cards"] if row["fleet"] == 601)
+            group = next(index for index, row in enumerate(card["groups"]) if row["representative"] == 7001)
+            start = self.center(next(row for row in initial["fleet_hud"]["controls"]
+                if row["name"].startswith("q1_") and row["visible"] and row.get("group") == group))
             end = self.center(controls["Slot_00"])
         if action in {"launch", "launch-slot"}:
             # WGUI-54/55: press the first company, release over fleet 601's member cell (q1) or the
@@ -280,7 +553,7 @@ func _process(delta):
         quit()
     return false
 ''' % (json.dumps(start), json.dumps(end), json.dumps(action), json.dumps(str(capture).replace("\\", "/")), "true" if action == "land" else "false",
-       "true" if action == "land-drag" else "false", "true" if action == "ctrl" else "false",
+       "true" if action in {"land-drag", "land-cell"} else "false", "true" if action == "ctrl" else "false",
        "true" if action == "double" else "false", "true" if action.startswith("sale") else "false",
        "true" if action in {"sale-confirm", "sale-unit-ground", "sale-unit-ship"} else "false", "true" if action.startswith("sale-switch") else "false",
        ), encoding="utf-8")
@@ -288,7 +561,7 @@ func _process(delta):
                 "--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750",
                 "--eawr-font-cache", str(self.font_cache),
                 "--eawr-game-root", support.GAME_ROOT, "--eawr-report", str(report)]
-        if action not in {"land", "land-drag", "launch", "launch-slot", "launch-move", "launch-world", "launch-world-slot"}:
+        if action not in {"land", "land-drag", "land-cell", "launch", "launch-slot", "launch-move", "launch-world", "launch-world-slot"}:
             args += ["--eawr-galactic-paused", "yes"]
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver),
@@ -454,6 +727,28 @@ func _process(delta):
                 self.assertEqual(data["live_session"]["submitted_orders"], 1)
                 self.assertEqual(sum(row["count"] for row in data["fleet_hud"]["cards"] if row["local"]), 2, "accepted landing did not detach the two transport members")
 
+    def test_dragging_one_unit_cell_lands_only_that_unit(self):
+        # #7178: the two-transport stack's cell carries one unit; the other transport and the rest of the
+        # fleet stay in orbit, and the release is one typed landing command naming that unit.
+        data, initial = self.native("land-cell")
+        self.assertEqual(data["ground_hud"]["land_orders"], 1)
+        self.assertEqual(data["live_session"]["submitted_orders"], 1)
+        before = sum(row["count"] for row in initial["fleet_hud"]["cards"] if row["local"])
+        after = sum(row["count"] for row in data["fleet_hud"]["cards"] if row["local"])
+        self.assertEqual(after, before - 1, "only the dragged unit may leave orbit")
+
+    def test_noncombat_passenger_can_land_from_a_fleet_or_unit_cell(self):
+        # GGS-11: stay-in-transport cargo supplies no land-combat capability,
+        # but the transport can link to allied ground through either drag path.
+        for action in ("land-drag", "land-cell"):
+            with self.subTest(action=action):
+                data, initial = self.native(action, "ground-noncombat")
+                self.assertEqual(data["ground_hud"]["land_orders"], 1)
+                self.assertEqual(data["live_session"]["submitted_orders"], 1)
+                before = sum(row["count"] for row in initial["fleet_hud"]["cards"] if row["local"])
+                after = sum(row["count"] for row in data["fleet_hud"]["cards"] if row["local"])
+                self.assertEqual(after, before - (1 if action == "land-cell" else 2))
+
     def test_native_ground_drag_launches_surface_units_into_orbit(self):
         # #2880 / WGM-13: the drag's release is one typed seat command (launch_from_surface, opcode 18)
         # and the live campaign publishes the new orbit state: the unit leaves the roster and joins a fleet.
@@ -513,6 +808,21 @@ func _process(delta):
         self.assertEqual(data["ground_hud"]["boxes"], 0, "rejected company drag fell through to box selection")
         self.assertFalse(any(row["selected"] for row in data["ground_hud"]["widgets"]))
         self.assertEqual(data["live_session"]["submitted_orders"], initial["live_session"]["submitted_orders"])
+
+
+@unittest.skipUnless(support.RUNTIME and support.GAME_ROOT and os.environ.get("EAWR_REMAKE_MOD_ROOT"),
+                     "requires GPU viewer, installed FoC and a mod root whose readout authors a Scale (Remake base layer)")
+class GalacticReadoutScaleRuntime(unittest.TestCase):
+    def test_population_readout_scale_sizes_its_text_and_icon(self):
+        # #6756: the authored Scale 0.7 of the population readout makes its glyphs and icon smaller than the tech
+        # readout's (Scale 1.0, a smaller authored point size but no scale): unscaled, the 8 point population text
+        # would be the taller one and the icon would keep its texture size.
+        data, _ = support.PlanetHudRuntime.capture(self, "GC_Standard_Web_Way_Imperial",
+            "--eawr-mod-root", os.environ["EAWR_REMAKE_MOD_ROOT"], "--eawr-galactic-dismiss-story", "yes")
+        rows = {row["name"]: row for row in data["command_bar"]["planet_block"]}
+        population, tech = rows["Text_Pop_Cap"], rows["Text_Tech_Level"]
+        self.assertLess(population["glyph_pixels"], tech["glyph_pixels"], (population, tech))
+        self.assertLessEqual(population["icon"]["rect"][2], 18, population)
 
 
 if __name__ == "__main__":

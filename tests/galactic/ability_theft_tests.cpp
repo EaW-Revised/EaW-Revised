@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <set>
 #include <string>
 #include <stdexcept>
 #include <vector>
@@ -571,13 +572,64 @@ void auto_spy_cases(const eawr::sim::PartitionExecutor& pool, std::vector<std::s
     const std::array gone{actor}; take(standalone.apply_battle_losses(gone));
     expect(holders(*standalone.snapshot()->observer()).empty(), "automatic spy source loss removes its intelligence");
 }
+// WGUI-180/181: the range edge. A planet exactly at the range is refused for an ordinary source, for a lone transport and
+// for cargo that carries the group maximum (the stock hero in a carrier whose own range is 0); the recipient stays the
+// source's current owner on every path. The inclusive landed-transport edge below the group maximum is not modelled.
+void auto_spy_boundary(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    for (const unsigned variant : {0U, 1U, 2U}) { // 0 ordinary source, 1 transport source, 2 cargo of a transport
+        auto config = spy_setup(false); const auto parent = buyer(config);
+        const auto home = std::find_if(config.census->objects.begin(), config.census->objects.end(), [&](const auto& o) { return o.id == parent; })->planet;
+        constexpr eawr::sim::EntityId hero = 50000;
+        auto source = parent;
+        if (variant == 2) {
+            config.census->objects.push_back(ability_fixture::census_actor(hero, 1000, 2, home, parent));
+            config.census->objects[1].original_type = config.census->objects[1].current_type = 2000;
+            config.fleets[1].members[0].type = 2000;
+            config.census->types.push_back({2000, {}, 0});
+            config.fleet_control->types.push_back({2000, true, true, false});
+            config.control->types.push_back({2000, 0, false, false});
+            config.observer->types.push_back({2000, false, false, false}); // the observer needs fleet traits for every type
+            source = hero;
+        }
+        if (variant != 0) {
+            auto& movement = ability_fixture::add_movement(config);
+            for (auto& type : movement.types) type.transport = variant == 1 ? type.type == 1000 : type.type == 2000;
+            // Every object of a transport type needs a contents row, not only the one under test (rows ascend by container).
+            std::vector<gc::MovementContents> rows;
+            for (const auto& object : config.census->objects) if (object.current_type == (variant == 1 ? 1000U : 2000U))
+                rows.push_back({object.id, object.id == parent && variant == 2 ? std::vector<gc::FleetMember>{{hero, 1000}} : std::vector<gc::FleetMember>{}});
+            std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.container < b.container; });
+            movement.contents = std::move(rows);
+        }
+        auto& profile = config.ability_host->profiles[0];
+        profile.spy.reset(); profile.ground_activated.clear(); config.ability_host->activated_spy_abilities.clear();
+        profile.auto_spies = {{"automatic probe", 9, Fixed::from_raw(-Fixed::scale), f(3), gc::bit(gc::Intelligence::fleet_contents)}};
+        std::vector<gc::PlanetId> others;
+        for (auto& planet : config.planets) {
+            if (planet.id == home) { planet.position = {f(0), f(0), f(0)}; continue; }
+            planet.position = {others.empty() ? f(3) : f(100 + static_cast<std::int64_t>(others.size())), f(0), f(0)};
+            others.push_back(planet.id);
+        }
+        auto game = take(eawr::campaign::GameSession::create(config));
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        std::set<gc::PlanetId> held;
+        for (const auto& r : game.galaxy().snapshot()->observer()->records)
+            if (std::any_of(r.sources.begin(), r.sources.end(), [&](const auto& s) { return s.source == source && s.ability == 9; })) {
+                expect(r.player == 2, "the intelligence goes to the source's current owner on every path");
+                held.insert(r.planet);
+            }
+        expect(held == std::set<gc::PlanetId>{home}, variant == 0 ? "an ordinary source excludes a planet exactly at its range"
+            : variant == 1 ? "a lone transport carries the group maximum, so a planet exactly at its range is excluded"
+            : "cargo carrying the group maximum in a range-0 carrier excludes a planet exactly at its range");
+    }
+}
 } // namespace
 int case_galactic_ability_theft_tests() {
     ability_fixture::arm_watchdog();
     try {
-        std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1); cases(one, baseline); lifecycle(one, baseline); parent_loss(one, baseline); landing_theft_seam(one, baseline); ai_landing_theft(one, baseline); ai_landing_loss_notification(one, baseline); spy_cases(one, baseline); first_appropriate_bearer(one, baseline); consumed_contained_spy(one, baseline); auto_spy_cases(one, baseline);
+        std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1); cases(one, baseline); lifecycle(one, baseline); parent_loss(one, baseline); landing_theft_seam(one, baseline); ai_landing_theft(one, baseline); ai_landing_loss_notification(one, baseline); spy_cases(one, baseline); first_appropriate_bearer(one, baseline); consumed_contained_spy(one, baseline); auto_spy_cases(one, baseline); auto_spy_boundary(one, baseline);
         for (std::size_t workers : {2U, 4U, 8U}) {
-            eawr::platform::ThreadWorkerAdapter pool(workers); std::vector<std::string> hashes; cases(pool, hashes); lifecycle(pool, hashes); parent_loss(pool, hashes); landing_theft_seam(pool, hashes); ai_landing_theft(pool, hashes); ai_landing_loss_notification(pool, hashes); spy_cases(pool, hashes); first_appropriate_bearer(pool, hashes); consumed_contained_spy(pool, hashes); auto_spy_cases(pool, hashes);
+            eawr::platform::ThreadWorkerAdapter pool(workers); std::vector<std::string> hashes; cases(pool, hashes); lifecycle(pool, hashes); parent_loss(pool, hashes); landing_theft_seam(pool, hashes); ai_landing_theft(pool, hashes); ai_landing_loss_notification(pool, hashes); spy_cases(pool, hashes); first_appropriate_bearer(pool, hashes); consumed_contained_spy(pool, hashes); auto_spy_cases(pool, hashes); auto_spy_boundary(pool, hashes);
             expect(hashes == baseline, "theft effects and restore hashes equal on1/2/4/8");
         }
         observer_and_idle();

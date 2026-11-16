@@ -346,6 +346,9 @@ int main() {
     particle_upload_contracts();
     derived_fog_variant_contracts();
     upload_identity_contracts();
+    upload_identity_streaming_contracts();
+    upload_identity_job_failure_contracts();
+    lighting_propagation_contracts();
     missing_asset_wait_contracts();
     pass_order_contracts();
     surface_material_contracts();

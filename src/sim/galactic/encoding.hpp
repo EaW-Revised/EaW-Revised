@@ -60,9 +60,10 @@ void encode_production_hash(std::vector<std::uint8_t>&, const ProductionSetup&, 
 using ProductionOfferRows = std::vector<std::vector<std::uint8_t>>;
 [[nodiscard]] ProductionOfferRows production_offer_rows(const ProductionSetup&);
 void encode_production(std::vector<std::uint8_t>& bytes, const ProductionSetup& production, const ProductionOfferRows& offer_rows);
-// Mutable admission inputs, excluding offer content and queue payment/countdown fields.
-void encode_production_menu_inputs(std::vector<std::uint8_t>&, const ProductionSetup&, PlayerId,
-    std::span<const PlanetId> visible);
+// Mutable admission inputs, excluding offer content and queue payment/countdown fields: the part every producer shares
+// (queue bound, the local player's row, fleet blockers) and one producer's own part.
+void encode_production_menu_globals(std::vector<std::uint8_t>&, const ProductionSetup&, PlayerId);
+void encode_production_menu_planet(std::vector<std::uint8_t>&, const PlanetProduction&);
 // Checkpoint form (wire marker 9): each planet's offer table is one u32 index into `pool`, which the caller writes as the
 // checkpoint's offer-pool section. decode_production with a pool reads only marker 9; without one, only marker 7.
 void encode_production_pooled(std::vector<std::uint8_t>& bytes, const ProductionSetup& production, OfferPool& pool);

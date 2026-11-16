@@ -61,6 +61,7 @@ add_executable(tactical_ability_tests ability_tests.cpp
     ability_rules_tests.cpp
     ability_special_tests.cpp
     ability_hero_tests.cpp
+    ability_super_laser_tests.cpp
     ability_defence_tests.cpp
     ability_support_tests.cpp)
 target_link_libraries(tactical_ability_tests PRIVATE eawr::sim eawr::platform)
@@ -393,6 +394,15 @@ eawr_target_project_warnings(tactical_combat_tests)
 add_test(
     NAME tactical_combat_contracts
     COMMAND tactical_combat_tests "${EAWR_REPLAY_FIXTURES}" "${PROJECT_SOURCE_DIR}/tests/behaviour/space-targeting-cases.json"
+)
+
+add_executable(tactical_tsw_tests tsw_tests.cpp)
+target_link_libraries(tactical_tsw_tests PRIVATE eawr::sim eawr::platform)
+target_compile_features(tactical_tsw_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_tsw_tests)
+add_test(
+    NAME tactical_tsw_contracts
+    COMMAND tactical_tsw_tests
 )
 
 add_executable(tactical_hotpath_tests hotpath_tests.cpp)

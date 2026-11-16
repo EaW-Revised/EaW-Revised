@@ -128,10 +128,51 @@ void sleeps_through_the_library(const std::filesystem::path& root) {
     expect(integer_of(scripts, instance, "Rounds") > later, "and goes on when the clock moves");
     expect(faults == 0, "the library chain raises no script error and calls no unbound engine function");
 }
+
+// #7073: the installed game's own scoring module (the one its constants name) runs its Base_Definitions once at story load in the story
+// host's environment, as the plots do, without a fault or a note, and sets the one global the stock stats reset sets.
+void stock_scoring_definitions(const std::filesystem::path& root) {
+    const auto game = eawr::testing::game_root();
+    if (!game) throw std::runtime_error("the stock scoring-definitions test needs EAWR_EAW_GAME_ROOT; unavailable data is not success");
+    const auto loose = root / "loose";
+    std::filesystem::remove_all(root);
+    write(loose / "scripts" / "story" / "Sleep_Probe.lua", std::string(probe));
+    std::vector<eawr::vfs::MountSpec> mounts;
+    eawr::vfs::MountSpec probe_layer; probe_layer.layer_id = "scoring-probe"; probe_layer.data_root = loose;
+    mounts.push_back(probe_layer);
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+        mounts.push_back(must(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*game) / folder / "Data")).mount);
+    const auto files = must(eawr::vfs::Vfs::mount(mounts));
+    const auto modules = must(files.enumerate("data/scripts/miscellaneous", ".lua"));
+    const bool authored = std::any_of(modules.begin(), modules.end(), [](const auto& asset) { return asset.canonical_path == "data/scripts/miscellaneous/gamescoring.lua"; });
+    expect(authored, "the installed game authors its scoring module (so the run below is not vacuous)");
+    st::SubPlotDef plot;
+    plot.name = "Sleep.xml"; plot.script = "Sleep_Probe"; plot.owner = 1;
+    const auto content = must(cpn::GalacticStoryScripts::load(files, std::vector<st::SubPlotDef>{plot}));
+    for (const auto& note : content->notes()) std::cerr << "note: " << note << '\n';
+    expect(content->notes().empty(), "the stock scoring module is pinned at story load without a note");
+    auth::SessionConfig config;
+    config.seed = 5; config.galactic_clock = true; config.tick_duration = {1, 30};
+    must(cpn::create_galactic_story_scheduler(*content, config));
+    for (const auto& note : content->scoring_notes()) std::cerr << "scoring note: " << note << '\n';
+    expect(content->scoring_notes().empty(), "the stock scoring module's Base_Definitions runs when the scheduler is made, without a fault or a note");
+    // The stock module's stats reset sets one flag, Allow_AI_Controlled_Fog_Reveal = 1 (its own debug text: "Resetting ... to 1 (allowed)").
+    const auto flag = content->initial_globals().find("Allow_AI_Controlled_Fog_Reveal");
+    const auto* value = flag == content->initial_globals().end() ? nullptr : std::get_if<eawr::script::numeric::LuaNumber>(&flag->second.data);
+    expect(content->initial_globals().size() == 1 && value && value->repr == eawr::script::numeric::LuaNumber(1).repr,
+        "the stock scoring module's definitions set exactly Allow_AI_Controlled_Fog_Reveal to 1 as the story scripts' starting value");
+    const auto again = must(cpn::GalacticStoryScripts::load(files, std::vector<st::SubPlotDef>{plot}));
+    must(cpn::create_galactic_story_scheduler(*again, config));
+    expect(again->fingerprint() == content->fingerprint() && again->initial_globals().size() == 1, "loading the same data twice gives the same content identity and values");
+}
 } // namespace
 
 int case_galactic_story_sleep_stock_tests(int argc, char** argv) {
-    try { sleeps_through_the_library(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-sleep-stock")); }
+    try {
+        const auto root = argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-sleep-stock");
+        sleeps_through_the_library(root);
+        stock_scoring_definitions(root / "scoring");
+    }
     catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

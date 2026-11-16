@@ -5,6 +5,7 @@
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/script/foc/galactic_ai.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional> // include-guard: keep
@@ -80,6 +81,15 @@ public:
     void end_batch();
     void abandon_batch();
     [[nodiscard]] bool open() const noexcept { return open_; }
+    // The open batch's snapshot tick and virtual tick being decided (0 outside a virtual tick): what a stage loss is filed under.
+    [[nodiscard]] std::uint64_t snapshot_tick() const noexcept { return snapshot_tick_; }
+    [[nodiscard]] std::uint32_t virtual_tick() const noexcept { return virtual_tick_; }
+    // Whether slice j of the batch snapshotted at s still waits to be applied.
+    [[nodiscard]] bool holds_slice(std::uint64_t snapshot, std::uint32_t virtual_tick_index) const noexcept {
+        return std::any_of(slices_.begin(), slices_.end(), [&](const OutboxSlice& slice) {
+            return slice.snapshot_tick == snapshot && slice.virtual_tick == virtual_tick_index;
+        });
+    }
 
     // World side: every slice due at `tick` or earlier, in ascending apply tick.
     [[nodiscard]] std::vector<OutboxSlice> take_due(std::uint64_t tick);

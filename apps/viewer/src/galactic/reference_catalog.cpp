@@ -25,7 +25,8 @@ std::optional<ReferenceType> ReferenceCatalog::metadata(std::string_view name) c
         return value ? trim(value->value.raw_text) : std::string{};
     };
     const auto flag = [&](std::string_view tag) { return data::retail::boolean(field(tag)).value_or(false); };
-    type.icon = {field("Icon_Name"), text_(field("Text_ID")),
+    // ML-23/24: reference pages retain the last real icon over blank or TBD repeats too.
+    type.icon = {resolved.value().single_text("Icon_Name"), text_(field("Text_ID")),
         text_(field("Encyclopedia_Unit_Class")) + "\n" + text_(field("Encyclopedia_Text")), 0, 1};
     type.hero = resolved.value().type_name == "HeroUnit" || resolved.value().type_name == "HeroCompany"
         || resolved.value().type_name == "GenericHeroUnit" || flag("Is_Named_Hero");

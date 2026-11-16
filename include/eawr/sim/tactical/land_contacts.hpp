@@ -2,6 +2,9 @@
 
 #include "eawr/sim/tactical/land_path.hpp"
 
+#include <cstdint>
+#include <limits>
+
 namespace eawr::sim::tactical {
 
 inline constexpr std::uint8_t land_contact_retry_visits = 30; // WLPA-92
@@ -26,6 +29,9 @@ struct LandContactSettings {
     friend bool operator==(const LandContactSettings&, const LandContactSettings&) = default;
 };
 
+// WLPA-97: a pair row's real-progress baseline for a body without a moving order (no baseline yet, not a zero distance).
+inline constexpr math::Fixed land_contact_no_gap = math::Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+
 struct LandContact {
     // Canonical member IDs are the stable contact identity; second==0 means terrain.
     EntityId first{}, second{}, primary{}, route_actor{}, recorded_member{};
@@ -40,7 +46,10 @@ struct LandContact {
     std::uint8_t retry_remaining{land_contact_retry_visits};
     std::uint64_t first_progress{}, second_progress{}, charged_nodes{};
     bool first_stopped{}, second_stopped{}, search_succeeded{}, installed{}, motion_observed{};
-    bool escape_retry_pending{}; // first escape is ordinary service; failed retries rejoin quota admission
+    // WLPA-97: one resolution attempt of this row failed (kept until real progress; entering a deadlock keeps it, #6845). A
+    // second failure takes the terminal rung. Also LR3-07: the deadlock-entry visit escapes as ordinary service; an escape
+    // retry after a failure waits the retry count and joins quota admission.
+    bool retry_failed{};
     friend bool operator==(const LandContact&, const LandContact&) = default;
 };
 

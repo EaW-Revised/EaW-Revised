@@ -56,6 +56,13 @@ st::EventDef click(std::string name, std::string control, std::string trigger = 
     if (!trigger.empty()) { e.reward_type = "TRIGGER_AI"; e.reward_params[0] = {std::move(trigger)}; e.reward_params[1] = {"Alpha"}; }
     return e;
 }
+// #5922: a click on a production card, whose name the plot authors in its own case; the reward leaves a record to count.
+st::EventDef card_click(std::string name, std::string control) {
+    auto e = event(std::move(name), "STORY_CLICK_GUI");
+    e.params[0] = {std::move(control)};
+    e.reward_type = "SET_FLAG"; e.reward_params[0] = {"CARD_SEEN"}; e.reward_params[1] = {"1"};
+    return e;
+}
 // A script notification (STORY_AI_NOTIFICATION: 1 planet list, 2 the string).
 st::EventDef note(std::string name, std::string text, std::string reward = {}, std::vector<std::string> first = {}) {
     auto e = event(std::move(name), "STORY_AI_NOTIFICATION");
@@ -78,6 +85,7 @@ std::vector<st::SubPlotDef> plots() {
         click("CLICK_FB1", "fb1", "Fb1"), click("CLICK_FB2", "fb2", "Fb2"),
         click("CLICK_TAB_A", "tab_a", "TabA"), click("CLICK_TAB_B", "tab_b", "TabB"),
         click("CLICK_PAUSE", "pausebtn", {}, true),
+        card_click("CLICK_CARD", "b_Create_26"),
         force_after("FORCE_TAB_A", {{"CLICK_FA1"}, {"CLICK_FA2"}}, "tab_a"),
         force_after("FORCE_TAB_B", {{"CLICK_FB1"}, {"CLICK_FB2"}}, "tab_b"),
         note("FORCE_FA1", "Force_Fa1", "FORCE_CLICK_GUI", {"fa1"}), note("FORCE_FA2", "Force_Fa2", "FORCE_CLICK_GUI", {"fa2"}),
@@ -240,6 +248,11 @@ struct Hud final : vg::CommandPresses::Surface, vg::CommandPresses::Effects {
         log.push_back("forced:" + std::string(component));
         presses.press(states, std::string(component), *this);
     }
+    // The button action of a control that raises its own story click (a production card, a queue slot, the help button).
+    void card(const std::string& name) {
+        log.push_back("card:" + name);
+        presses.raise_from_action(states, name, *this);
+    }
     void human(const std::string& name) {
         log.push_back("human:" + name);
         presses.press(states, name, *this);
@@ -311,9 +324,19 @@ Outcome flow(std::size_t workers, const std::filesystem::path& root) {
     take(game.connect_story_link(link));
     const auto instance = content->find("Filters.xml")->instance;
     Hud hud(game);
-    expect(hud.listeners.size() == 7 && std::binary_search(hud.listeners.begin(), hud.listeners.end(), std::string("FA1")),
+    expect(hud.listeners.size() == 8 && std::binary_search(hud.listeners.begin(), hud.listeners.end(), std::string("FA1")),
         "the plots' click listeners are the controls their events name");
     hud.settle(executor, 6); // the script's threads are up
+
+    // #5922: a human click on a production card reaches the plots as STORY_CLICK_GUI with the name the plot authored,
+    // whatever the case of the control's own name; a click on a card nobody listens to raises nothing.
+    expect(std::binary_search(hud.listeners.begin(), hud.listeners.end(), std::string("B_CREATE_26")), "the plot authored the card name as b_Create_26; the engine lists it upper-cased");
+    hud.card("B_CREATE_26");
+    hud.card("b_create_01");
+    hud.settle(executor, 2);
+    expect(hud.count("CLICK_CARD") == 1, "a human click on a listened production card fires its event once, with no name exclusion");
+    expect(hud.log == std::vector<std::string>({"card:B_CREATE_26", "card:b_create_01"}), "no other press followed it");
+    hud.log.clear();
 
     // A. a space category: one human press, one click; the forced domain tab press raises no click, so nothing loops.
     hud.human("fa1");

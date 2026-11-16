@@ -145,6 +145,9 @@ private:
     // The in-game menu's Quit Game (or the campaign score's Main Menu): the running campaign is freed
     // and the front end shows its main menu.
     void leave_campaign_to_menu();
+    // LOAD_CAMPAIGN (WST-95): the running campaign is freed and the campaign a plot named is started through the same
+    // launcher the campaign setup screen uses (FrontEndMode::launch_campaign); a refused start shows its reason on the main menu.
+    void switch_campaign(const campaign::CampaignSwitchTarget& target);
     // #1923: the skirmish Start shows the battle loading screen, then prepares the battle behind it
     // once the screen has drawn (EawrLoadingScreen::frames).
     void open_skirmish_loading();

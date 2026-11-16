@@ -45,12 +45,36 @@ namespace clip_types {
 inline constexpr std::size_t idle = 0;
 inline constexpr std::size_t space_idle = 1;
 inline constexpr std::size_t move = 2;
+// The land locomotion clips (WLAN-03..05, 10, 11); each index is checked against the name table below.
+inline constexpr std::size_t turn_left = 3;
+inline constexpr std::size_t turn_right = 4;
+inline constexpr std::size_t turn_left_begin = 12;
+inline constexpr std::size_t turn_left_end = 13;
+inline constexpr std::size_t turn_right_begin = 14;
+inline constexpr std::size_t turn_right_end = 15;
+inline constexpr std::size_t move_start = 16;
+inline constexpr std::size_t move_end_first = 17; // MOVE_ENDONE; the next three are the further stop variants
+inline constexpr std::size_t move_end_last = 20;
+inline constexpr std::size_t turn_left_half = 21;
+inline constexpr std::size_t turn_left_quarter = 22;
+inline constexpr std::size_t turn_right_half = 23;
+inline constexpr std::size_t turn_right_quarter = 24;
+inline constexpr std::size_t walk_move = 66;
+inline constexpr std::size_t crouch_move = 67;
 inline constexpr std::size_t attack = 5;
 inline constexpr std::size_t attack_idle = 6;
 inline constexpr std::size_t die = 7;
 inline constexpr std::size_t deploy = 25;
 inline constexpr std::size_t undeploy = 26;
 } // namespace clip_types
+static_assert(clip_type_names[clip_types::turn_left] == "TURNL" && clip_type_names[clip_types::turn_right] == "TURNR"
+    && clip_type_names[clip_types::turn_left_begin] == "TURNL_BEGIN" && clip_type_names[clip_types::turn_left_end] == "TURNL_END"
+    && clip_type_names[clip_types::turn_right_begin] == "TURNR_BEGIN" && clip_type_names[clip_types::turn_right_end] == "TURNR_END"
+    && clip_type_names[clip_types::move_start] == "MOVESTART" && clip_type_names[clip_types::move_end_first] == "MOVE_ENDONE"
+    && clip_type_names[clip_types::move_end_last] == "MOVE_ENDFOUR" && clip_type_names[clip_types::turn_left_half] == "TURNL_HALF"
+    && clip_type_names[clip_types::turn_left_quarter] == "TURNL_QUARTER" && clip_type_names[clip_types::turn_right_half] == "TURNR_HALF"
+    && clip_type_names[clip_types::turn_right_quarter] == "TURNR_QUARTER" && clip_type_names[clip_types::walk_move] == "WALKMOVE"
+    && clip_type_names[clip_types::crouch_move] == "CROUCHMOVE", "the land clip type constants name the table's types");
 
 // The logical ALA paths of `model_path`'s clips of `type`: the model's
 // directory and stem (or `anim_override`'s stem, the *_Model_Anim_Override_Name

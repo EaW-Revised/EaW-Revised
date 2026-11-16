@@ -39,7 +39,10 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
+
+namespace eawr::presentation::ui { struct MessageBoxRequest; }
 
 namespace eawr::presentation::godot_backend {
 
@@ -173,6 +176,9 @@ public:
     // player leaves it; the screen is then out of the tree.
     void show(godot::Node& parent, std::optional<presentation::ui::LobbySourceKind> initial_source = std::nullopt);
     [[nodiscard]] bool shown() const noexcept { return shown_; }
+    // A start the battle or campaign load refused (#6816): the lobby's failure box with the error code, the first
+    // line of the error and where the full text is. Call after show().
+    void show_refusal(const std::string& reason, std::string_view headline);
     // Removes the screen without the `closed` signal: the menu that took a started match calls it.
     void dismiss();
     [[nodiscard]] Page page() const noexcept { return page_; }
@@ -347,6 +353,7 @@ private:
     void leave_staging();
     void announce();
     void show_failure(const std::string& message);
+    void open_failure_box(presentation::ui::MessageBoxRequest request, const std::string& scrollable = {});
     void review_host_mods();
     void note_chat(presentation::ui::ChatKind kind, const std::string& line, const std::string& sender = {});
     void play_sound(const std::string& wanted);

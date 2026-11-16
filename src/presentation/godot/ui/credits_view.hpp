@@ -40,6 +40,10 @@ struct CreditsContext final {
     std::string language{"ENGLISH"};     // the text database's language word
     godot::String movie_cache;           // the player's converted-movie cache; empty plays no movie
     godot::Vector2 viewport_size;
+    // The campaign-end use (WGP-107/110) draws the credits under the score screen and leaves the keys to the score's
+    // movie skip (WGP-109); the menu credits keep the default layer and skip on Esc or a click.
+    std::optional<int> layer;
+    bool input_skips{true};
 };
 
 class EawrCreditsScreen final : public godot::CanvasLayer {
@@ -103,6 +107,7 @@ private:
     std::map<std::size_t, std::unique_ptr<KitText>> text_;
     double elapsed_{};
     bool finished_{};
+    bool input_skips_{true};
 };
 
 void register_credits_classes();

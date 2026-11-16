@@ -397,24 +397,53 @@ void GodotRenderer::Impl::set_surface_material(RenderingServer& rendering, const
             source = std::move(*receiving);
         }
         source = stored_output::backend_source(source);
-        consumer.shader = rendering->shader_create();
-        rendering->shader_set_code(consumer.shader,
-            String::utf8(source.data(), static_cast<int64_t>(source.size())));
-        if (const auto problem = fog_uniform_problem(*rendering, consumer.shader)) {
-            render_churn::free_rid(*rendering, consumer.shader, render_churn::Owner::model_resource);
-            consumer.shader = {};
+        // The fog variant of one program is the same text for every asset using it, so it shares through
+        // the setup/session cache like the default material. The cache is keyed by source text only: a
+        // program admitted by the default-material route with identical text is a hit here too, so the
+        // fog stage's uniform contract is checked on a hit as well. Programs this route admits passed
+        // the portable-limit check below; a hit on another route's program has passed its own.
+        const auto fog_rejection = [&](const auto& problem) {
             return pushed(diagnostic_codes::shader_compile_failed,
                 "Godot rejected the " + family
                     + " fog-stub-v1 variant for asset "
-                    + std::to_string(asset_id) + ": it " + *problem);
+                    + std::to_string(asset_id) + ": it " + problem);
+        };
+        if (shader_cache_) {
+            consumer.shared_shader = shader_cache_->impl_->find(source);
+            if (consumer.shared_shader) consumer.shader = consumer.shared_shader->shader;
         }
-        const auto tokens = shader_tokens(source).value_or(std::vector<std::string>{});
-        if (auto problem = portable_limit_problem(reflected_uniforms(*rendering, consumer.shader), tokens)) {
-            render_churn::free_rid(*rendering, consumer.shader, render_churn::Owner::model_resource);
-            consumer.shader = {};
-            return pushed(diagnostic_codes::shader_compile_failed,
-                family
-                    + " fog-stub-v1 variant for asset " + std::to_string(asset_id) + " " + *problem);
+        if (consumer.shared_shader) {
+            if (const auto problem = fog_uniform_problem(*rendering, consumer.shader)) {
+                consumer.shared_shader.reset(); // The cache keeps the program; this consumer never used it.
+                consumer.shader = {};
+                return fog_rejection(*problem);
+            }
+        } else {
+            consumer.shader = rendering->shader_create();
+            rendering->shader_set_code(consumer.shader,
+                String::utf8(source.data(), static_cast<int64_t>(source.size())));
+            if (const auto problem = fog_uniform_problem(*rendering, consumer.shader)) {
+                render_churn::free_rid(*rendering, consumer.shader, render_churn::Owner::model_resource);
+                consumer.shader = {};
+                return fog_rejection(*problem);
+            }
+            auto tokens = shader_tokens(source).value_or(std::vector<std::string>{});
+            auto uniforms = reflected_uniforms(*rendering, consumer.shader);
+            if (auto problem = portable_limit_problem(uniforms, tokens)) {
+                render_churn::free_rid(*rendering, consumer.shader, render_churn::Owner::model_resource);
+                consumer.shader = {};
+                return pushed(diagnostic_codes::shader_compile_failed,
+                    family
+                        + " fog-stub-v1 variant for asset " + std::to_string(asset_id) + " " + *problem);
+            }
+            if (shader_cache_) {
+                auto accepted = std::make_shared<CachedShader>();
+                accepted->shader = consumer.shader;
+                accepted->uniforms = std::move(uniforms);
+                accepted->tokens = std::move(tokens);
+                if (auto admitted = shader_cache_->impl_->admit(source, accepted)) consumer.shared_shader = std::move(admitted);
+                else accepted->shader = RID(); // Refused: the consumer keeps owning its RID.
+            }
         }
         consumer.material = rendering->material_create();
         rendering->material_set_shader(consumer.material, consumer.shader);
@@ -443,8 +472,11 @@ void GodotRenderer::Impl::detach_fog_consumer(const sim::AssetId asset_id, FogCo
         const Resource& resource = resources_.at(asset_id);
         set_surface_material(*rendering, resource.mesh, resource.material);
         render_churn::free_rid(*rendering, consumer.material, render_churn::Owner::model_resource);
-        render_churn::free_rid(*rendering, consumer.shader, render_churn::Owner::model_resource);
+        // A cached program belongs to its cache; only an uncached one is the consumer's to free.
+        if (!consumer.shared_shader)
+            render_churn::free_rid(*rendering, consumer.shader, render_churn::Owner::model_resource);
     }
+    consumer.shared_shader.reset();
     consumer.shader = {};
     consumer.material = {};
 }

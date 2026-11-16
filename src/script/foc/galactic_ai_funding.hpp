@@ -6,6 +6,7 @@
 #include "eawr/script/foc/galactic_ai.hpp"
 
 #include <map>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <utility>
@@ -100,6 +101,16 @@ public:
         BoundState* selected_{};
     };
     [[nodiscard]] SuspendIntents suspend_player_intents() { return SuspendIntents(*this); }
+    // Fiscal-cycle refusals of one AI player's ledger that were isolated to that player instead of ending the session, in
+    // order. A diagnostic list only: never saved, hashed or replayed.
+    struct IsolatedFault { sim::galactic::PlayerId player{}; core::Diagnostic error; };
+    // Told of every isolated refusal as it happens (the observer decides how often to say it); never saved.
+    struct FaultObserver {
+        virtual ~FaultObserver() = default;
+        virtual void isolated_fault(sim::galactic::PlayerId player, const core::Diagnostic& fault) = 0;
+    };
+    void bind_fault_observer(std::weak_ptr<FaultObserver> observer) { fault_observer_ = std::move(observer); }
+    [[nodiscard]] const std::vector<IsolatedFault>& isolated_faults() const noexcept { return isolated_faults_; }
     [[nodiscard]] std::uint64_t state_revision() const noexcept;
     [[nodiscard]] std::uint64_t state_revision(sim::galactic::PlayerId) const;
     // Owned immutable copy: retain the shared pointer while traversing its fields.
@@ -233,6 +244,9 @@ private:
     };
     std::map<sim::galactic::PlayerId, Frontier> frontiers_;
     std::vector<sim::galactic::PlayerId> prepared_players_;
+    std::vector<IsolatedFault> isolated_faults_;
+    std::weak_ptr<FaultObserver> fault_observer_;
+    void isolate(sim::galactic::PlayerId player, core::Diagnostic error);
     std::string prepared_hash_;
     std::uint64_t prepared_revision_{};
     static thread_local const GalacticFunding* frontier_owner_;

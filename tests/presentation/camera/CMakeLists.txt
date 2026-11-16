@@ -39,6 +39,28 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     )
     target_include_directories(camera_bindings_tests PRIVATE
         "${EAWR_ROOT}/include" "${EAWR_ROOT}/apps/viewer/src")
+    add_executable(camera_retreat_tests
+        retreat_camera_main.cpp
+        "${EAWR_ROOT}/src/core/diagnostic.cpp"
+        "${EAWR_ROOT}/src/presentation/camera/camera.cpp"
+        "${EAWR_ROOT}/src/presentation/camera/constants_source.cpp"
+        "${EAWR_ROOT}/src/presentation/camera/retreat_camera.cpp"
+        "${EAWR_ROOT}/third_party/pugixml/src/pugixml.cpp"
+    )
+    target_include_directories(camera_retreat_tests PRIVATE
+        "${EAWR_ROOT}/include" "${EAWR_ROOT}/third_party/pugixml/src")
+    add_executable(camera_arrival_tests
+        arrival_camera_main.cpp
+        "${EAWR_ROOT}/src/core/diagnostic.cpp"
+        "${EAWR_ROOT}/src/presentation/camera/arrival_camera.cpp"
+    )
+    target_include_directories(camera_arrival_tests PRIVATE "${EAWR_ROOT}/include")
+    add_executable(camera_tsw_tests
+        tsw_camera_main.cpp
+        "${EAWR_ROOT}/src/core/diagnostic.cpp"
+        "${EAWR_ROOT}/src/presentation/camera/tsw_camera.cpp"
+    )
+    target_include_directories(camera_tsw_tests PRIVATE "${EAWR_ROOT}/include")
     add_executable(camera_constants_source_tests
         constants_source_main.cpp
         "${EAWR_ROOT}/src/core/diagnostic.cpp"
@@ -53,11 +75,17 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(free_camera_tests PRIVATE /W4 /WX /permissive-)
         target_compile_options(camera_bindings_tests PRIVATE /W4 /WX /permissive-)
         target_compile_options(camera_constants_source_tests PRIVATE /W4 /WX /permissive-)
+        target_compile_options(camera_retreat_tests PRIVATE /W4 /WX /permissive-)
+        target_compile_options(camera_arrival_tests PRIVATE /W4 /WX /permissive-)
+        target_compile_options(camera_tsw_tests PRIVATE /W4 /WX /permissive-)
     else()
         target_compile_options(camera_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
         target_compile_options(free_camera_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
         target_compile_options(camera_bindings_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
         target_compile_options(camera_constants_source_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        target_compile_options(camera_retreat_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        target_compile_options(camera_arrival_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        target_compile_options(camera_tsw_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
 else()
     set(EAWR_ROOT "${PROJECT_SOURCE_DIR}")
@@ -87,6 +115,18 @@ else()
     target_link_libraries(camera_constants_source_tests PRIVATE eawr::presentation)
     target_compile_features(camera_constants_source_tests PRIVATE cxx_std_20)
     eawr_target_project_warnings(camera_constants_source_tests)
+    add_executable(camera_retreat_tests retreat_camera_main.cpp)
+    target_link_libraries(camera_retreat_tests PRIVATE eawr::presentation)
+    target_compile_features(camera_retreat_tests PRIVATE cxx_std_20)
+    eawr_target_project_warnings(camera_retreat_tests)
+    add_executable(camera_arrival_tests arrival_camera_main.cpp)
+    target_link_libraries(camera_arrival_tests PRIVATE eawr::presentation)
+    target_compile_features(camera_arrival_tests PRIVATE cxx_std_20)
+    eawr_target_project_warnings(camera_arrival_tests)
+    add_executable(camera_tsw_tests tsw_camera_main.cpp)
+    target_link_libraries(camera_tsw_tests PRIVATE eawr::presentation)
+    target_compile_features(camera_tsw_tests PRIVATE cxx_std_20)
+    eawr_target_project_warnings(camera_tsw_tests)
 endif()
 add_executable(camera_controller_tests controller_main.cpp)
 target_compile_features(camera_controller_tests PRIVATE cxx_std_20)
@@ -117,6 +157,34 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     endif()
 else()
     eawr_target_project_warnings(camera_instant_tests)
+endif()
+
+# #4444: the drawn retreat escape flight (header-only, engine-free).
+add_executable(camera_retreat_flight_tests retreat_flight_main.cpp)
+target_compile_features(camera_retreat_flight_tests PRIVATE cxx_std_20)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    target_include_directories(camera_retreat_flight_tests PRIVATE "${EAWR_ROOT}/include")
+    if(MSVC)
+        target_compile_options(camera_retreat_flight_tests PRIVATE /W4 /WX /permissive-)
+    else()
+        target_compile_options(camera_retreat_flight_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+else()
+    target_link_libraries(camera_retreat_flight_tests PRIVATE eawr::presentation)
+    eawr_target_project_warnings(camera_retreat_flight_tests)
+endif()
+
+# #6563: the battlecam's subject-rotation low-pass (header-only, engine-free).
+add_executable(camera_battlecam_rotation_tests battlecam_rotation_main.cpp)
+target_compile_features(camera_battlecam_rotation_tests PRIVATE cxx_std_20)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    if(MSVC)
+        target_compile_options(camera_battlecam_rotation_tests PRIVATE /W4 /WX /permissive-)
+    else()
+        target_compile_options(camera_battlecam_rotation_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+else()
+    eawr_target_project_warnings(camera_battlecam_rotation_tests)
 endif()
 
 target_compile_definitions(camera_bindings_tests PRIVATE
@@ -170,8 +238,13 @@ add_test(NAME camera_contracts COMMAND camera_tests)
 add_test(NAME free_camera_contracts COMMAND free_camera_tests)
 add_test(NAME camera_bindings_contracts COMMAND camera_bindings_tests)
 add_test(NAME camera_constants_source_contracts COMMAND camera_constants_source_tests)
+add_test(NAME camera_retreat_contracts COMMAND camera_retreat_tests)
+add_test(NAME camera_retreat_flight_contracts COMMAND camera_retreat_flight_tests)
+add_test(NAME camera_arrival_contracts COMMAND camera_arrival_tests)
+add_test(NAME camera_tsw_contracts COMMAND camera_tsw_tests)
 add_test(NAME camera_controller_contracts COMMAND camera_controller_tests)
 add_test(NAME camera_instant_contracts COMMAND camera_instant_tests)
+add_test(NAME camera_battlecam_rotation_contracts COMMAND camera_battlecam_rotation_tests)
 add_test(NAME map_camera_bridge_contracts COMMAND map_camera_bridge_tests)
 
 # Tier labels (cmake/EawrTestTiers.cmake).

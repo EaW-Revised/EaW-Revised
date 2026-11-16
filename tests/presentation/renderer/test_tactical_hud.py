@@ -56,7 +56,8 @@ class TacticalHudStructure(unittest.TestCase):
         self.assertIn('production.reinforce = state.shell.reinforcement;', build)
         for panel in ('cards', 'production', 'abilities', 'heroes', 'minimap'):
             self.assertIn(f'state.hud->add_child(state.{panel});', build)
-        self.assertNotIn('set_z_index(', build)
+        # Explicit depths in the build file (e.g. the super-laser switch's alternate
+        # texture) are fine while they stay below the tooltip layer (checked below).
         self.assertGreater(tooltip_z, 0)
         for path in UI.glob("*.cpp"):
             for value in re.findall(r'set_z_index\((\d+)\)', path.read_text(encoding="utf-8")):
@@ -79,7 +80,11 @@ class TacticalHudStructure(unittest.TestCase):
         self.assertNotIn('tooltip_z_index', fleet)  # Keep the default relative zero.
         fleet_z = int(re.search(r'fleet_popup->set_z_index\((\d+)\)', fleet)[1])
         # The tooltip is a child drawn after the fleet popup at its depth.
-        for name in ('battle_dialog.cpp', 'campaign_score_dialog.cpp', 'black_market_hud.cpp',
+        # The campaign score dialog owns a CanvasLayer above the credits roll, so it is
+        # above every in-host z by construction and carries no explicit z.
+        score = (SRC / "galactic" / "campaign_score_dialog.cpp").read_text(encoding="utf-8")
+        self.assertIn('layer_->set_layer(EawrCreditsScreen::layer_index + 1);', score)
+        for name in ('battle_dialog.cpp', 'black_market_hud.cpp',
                      'corruption_hud.cpp', 'hero_action_hud.cpp', 'weapon_action_hud.cpp'):
             modal = (SRC / "galactic" / name).read_text(encoding="utf-8")
             modal_z = [int(z) for z in re.findall(r'(?:root_|[\w.]+blocker)->set_z_index\((\d+)\)', modal)]

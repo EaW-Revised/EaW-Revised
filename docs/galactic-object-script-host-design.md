@@ -48,7 +48,8 @@ present this ordering as a retail finding.
 
 ## Bindings and placement
 
-Expose the general `SpawnList` and `Count_Objects_On_Planet` functions and the
+Load data-authored libraries that define `SpawnList` and `Count_Objects_On_Planet`.
+Expose their underlying general engine APIs, including object enumeration, and the
 object, type, owner and planet methods required by the invoked modules through
 normal Lua bindings. Resolve names from mounted type data and operate on actual
 live identity and containment, not display icons. Count matching live objects

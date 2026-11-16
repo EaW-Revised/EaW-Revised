@@ -51,12 +51,13 @@
   row: at most its count alive at once, and its count plus the matching
   `Reserve_Spawned_Units_Tech_0` count (0 when absent) to launch in all; a negative reserve never
   runs out. The first service may launch at once.
-- **FL-03** (research E75-03, EWSL-05/07) A service launches only when the next-spawn frame has come and a
+- **FL-03** (research E75-03, EWSL-05/07; debug build E6234-01) A service launches only when the next-spawn frame has come and a
   fighter bay stands: a destroyed destroyable bay no longer launches, and a spawner without a
   standing bay launches nothing. The space eligibility check does not reject a disabled bay:
   a bay restored disabled at 0.1 health by a station upgrade can launch both authored and free
   pending companies. Its weapon remains disabled under the weapon hardpoint rules.
   A spawner with `DEFEND` active launches nothing (no M2 unit has it).
+  Deadline equality is eligible; there is no extra service interval after equality.
 - **FL-19** (owner confirmation, 2026-11-08; debug build E6364-01..04) Hangar ownership is independent
   of the locomotor: a mobile object with `FIGHTER_LOCOMOTOR` and `SPAWN_SQUADRON` can use its authored
   complement and a standing bay. The locomotor still controls its flight; its hangar follows the same
@@ -73,9 +74,12 @@
   The craft are created in `Squadron_Units` order, then their team container.
 - **FL-07** (research E75-08) A squadron from a mobile spawner (a ship) escorts it; one from a
   station holds the end of the spawn vector.
-- **FL-08** (research E75-09) When a launched squadron leaves the session (its last craft died),
+- **FL-08** (research E75-09; debug build E6234-02) When a launched squadron leaves the session (its last craft died),
   its entry's alive count drops. If every entry up to and including that one was full before the
   drop, the next launch waits a full delay from that frame; otherwise the running delay stands.
+  This writes the launch deadline while the space hangar is idle; it does not restart the
+  periodic service phase (FC-28/47). The fullness check uses the entries through the lost entry only:
+  a deficit in a later entry does not prevent this reset.
 - **FL-09** (research E75-04) A human player's spawner with `DEPLOY_SQUAD` waits for the player.
   No pinned M2 spawner has the ability. Manual deployment follows FL-17 and FL-18.
 - **FL-17** (debug build, DS-R01 to DS-R04) In space, an eligible human-owned hangar
@@ -103,8 +107,11 @@
   FL-08 for a table with reserves (starbase hangars, a later phase).
 - **FL-10** (recording S-16, S-28) The Acclamator launches its first squadron 27 frames after tick
   zero and the second 150 frames later (FL-05 with its 5-second delay). In S-28 the TIE fighter
-  squadron is lost at tick 417 and the reserve squadron leaves at tick 597, the first service after
-  417 + 150 (FL-08). Every craft of a launch starts at one point, 15.4 units ahead of and 8.8 below
+  squadron is lost around tick 417 (the loss comparison below lists 418) and the reserve squadron
+  leaves at tick 597. These sampled observations do not establish the exact detach callback
+  frame: a callback at 417 with that phase would permit 567, whereas a callback at 418 would
+  permit 597. Do not infer a strict deadline comparison from this recording; FL-03 is inclusive
+  in the debug build. Every craft of a launch starts at one point, 15.4 units ahead of and 8.8 below
   the carrier's origin, nose 45 degrees down.
 - **FL-12** (debug build, carrier-arrival evidence EFCA-01 to EFCA-07) A newly reinforced
   `SPAWN_SQUADRON` unit has the same hangar as a starting unit. Creation schedules its first
@@ -297,7 +304,7 @@ scale does not depend on live depletion or the size of the final chunk.
   times; FoC has none, so the remake has none either.
 - **FM-20** (research E75-15) Idle: the squadron holds a point. Within 90 units of it the leader
   circles it 60 units out; the followers trail the leader (its position plus 40 frames of its
-  velocity plus three quarters of their slot offset, turned as FM-14 says). Outside that the craft fly at `Min_Speed`.
+  velocity plus three quarters of their slot offset, turned as FM-14 says). Outside that the craft fly at `Min_Speed`, except on a guard order of a unit (debug build: a guard of a unit is a move to the unit; the launched-escort case, FM-21, is unverified and keeps the idle hold, plan question Q1): there they fly at their own `Max_Speed` outside the near zone, half the craft's attack distance (at most `Space_Guard_Range`) from the unit, and at most twice the unit's `Max_Speed` inside it, also inside the 90-unit circle below, where the idle ratio does not apply to a guard. Deviations and gaps: the 90-unit circle geometry still runs for a guard (unverified whether retail keeps it); retail's far speed is the formation maximum (the slowest member) while the remake uses each craft's own `Max_Speed`, which only matters for a mixed squadron; the near zone is measured to the hold point, which is an idle cell's point (up to the idle cell size from the unit) once FM-24 claims one; retail takes the unit's formation speed while it is on a formation move (unverified), and the remake path copy is not modelled.
   Inside it every craft wants half its own distance to the point over the leader's (at least one
   unit), with no cap, and the leader aims 60 units out, turned by ten over its own distance in
   radians (debug build: the idle service). The remake divided by at least one unit there (dogfight craft dispersion): a
@@ -749,7 +756,11 @@ fixture's exact starting slots.
 - **C-01** A spawner of entries A (1, reserve 2) and B (1, no reserve) and a 150-frame delay launches
   at its first service, again 150 frames later, and nothing more while both are alive.
 - **C-02** Losing A's squadron while both are alive makes the next launch wait 150 frames from the
-  loss; losing B's (no reserve left) launches nothing.
+  loss; losing B's (no reserve left) launches nothing. Controlled service-phase/loss/replacement
+  triples are 15/571/735, 27/418/597, 27/417/567 and 27/416/567. Loss preserves the periodic
+  phase, and equality launches immediately on a due service. A deficit before the lost entry
+  preserves the old deadline; a deficit after it does not. These are clock contracts, not a
+  claim that a recording exposes its detach callback frame.
 - **C-03** With its only bay destroyed a spawner launches nothing.
 - **C-04** A launched squadron's craft start at the bay facing along the spawn vector at full speed,
   and their container has the next ID after them.
@@ -889,6 +900,26 @@ fixture's exact starting slots.
   Acclamator's lasers alone finish the corvette; the keyed service draw launches at 15 instead of
   27 (FL-01); and (FL-11) the M2 table launches no reserve squadron, while retail's reserve at 597
   finishes the corvette.
+- **G-F11** (S-28 reserve timing; debug build E6234-01/02; recorded remake trace)
+  The earlier replacement trace launches the initial fighters at 15, bombers at 165 and reserves
+  at 735. Its last initial fighter is first absent at 571, also the destruction-event tick
+  (the issue summary said 570). FL-08 gives deadline 721; the unchanged `15 + 30n` service phase
+  next runs at 735. All initial fighter and bomber losses in the paired before/after traces
+  agree: enabling the authored reserve adds the replacement without changing those earlier
+  losses. Published retail observations give all initial fighters lost by 417
+  ([recording summary](../../tests/fidelity/README.md)) and last death 418 (G-F7).
+  The raw recording is no longer available, so its exact detach-frame mapping cannot be
+  rechecked. Using 418 gives deadline 568 and next `27 + 30n` service 597, matching the recorded
+  replacement. Our last fighter survives about 153 frames longer (571 - 418); the respective
+  waits to replacement are 164 and 179 frames, so the launch gap is 153 - 15 = 138 frames.
+  This identifies a combat survival gap, not a different five-second delay, strict deadline
+  or per-craft reserve trigger. The next investigation is the corvette's target selection
+  and hit opportunities against the last surviving fighter: candidate order (space-targeting
+  CO-03/G-01) and per-mesh hit acceptance (space-damage DG-36/37), alongside the existing
+  G-F5/G-F7 combat differences. Which of those rules causes the extra survival is still
+  unverified; this research changes no runtime clock or replay baseline. FD-28's separate
+  same-frame carrier-before-loss boundary remains open; it does not explain the earlier
+  difference in fighter survival.
 - **G-F6** The leader of a moving squadron follows a planned path in retail (E75-20). The remake
   supports move orders and retains their straight open-space segment, using WSQ-17's look-ahead
   and height easing for every craft. Planning segments around obstacles remains unverified;

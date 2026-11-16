@@ -169,6 +169,8 @@ inline constexpr std::string_view freestore_move_reader_seam =
     std::shared_ptr<const FreestoreInput>, bool unqualified_fixture = false);
 // WGA-438: Get_Is_Planet_AI_Usable answers through the native owner's immediate query.
 [[nodiscard]] core::Result<void> register_planet_usability_method(authoritative::ScriptScheduler&);
+// WGA-450 (#7188): Is_Corrupted on a planet object, through the native owner's immediate query.
+[[nodiscard]] core::Result<void> register_planet_corruption_method(authoritative::ScriptScheduler&);
 // Unqualified presence is an explicitly opted-in contract fixture only.
 [[nodiscard]] core::Result<void> register_freestore_bindings(authoritative::ScriptScheduler&,
     std::shared_ptr<const FreestoreInput>, bool unqualified_fixture = false);

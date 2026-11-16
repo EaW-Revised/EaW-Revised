@@ -70,6 +70,7 @@ void test_idle_cell_claim();
 void test_map_box_grids();
 void test_idle_grid();
 void test_squadron_guard();
+void test_guard_speed();
 void test_attack_order_approach();
 void test_attack_path_checkpoint();
 void test_team_attack();

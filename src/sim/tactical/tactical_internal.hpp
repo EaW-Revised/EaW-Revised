@@ -59,7 +59,9 @@ inline constexpr std::uint8_t opcode_battle_control = 33; // ADR-020: coordinato
 inline constexpr std::uint8_t opcode_script_invulnerable = 34; // TL-03: Lua Make_Invulnerable, engine only.
 inline constexpr std::uint8_t opcode_land_garrison = 35;
 inline constexpr std::uint8_t opcode_land_unload = 36;
-inline constexpr std::uint8_t max_command_opcode = opcode_land_unload;
+inline constexpr std::uint8_t opcode_tactical_superweapon = 37; // TSW-10: the Death Star switch, one listed unit
+inline constexpr std::uint8_t opcode_move_facing = 38; // MV-40: a move that carries a final facing, flags in the payload
+inline constexpr std::uint8_t max_command_opcode = opcode_move_facing;
 
 [[nodiscard]] core::Diagnostic diagnostic(
     std::string_view code,
@@ -83,11 +85,13 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
 void append_event(std::vector<std::uint8_t>& bytes, const Event& event);
 
 // Checks that do not depend on session state: issuer declared and commandable, unit list
-// size and order, attack target nonzero.
+// size and order, attack target nonzero. `land_domain` is whether the battle is a land battle: the land-only ability kinds
+// (the vocabulary appended after the 32 space kinds) are refused everywhere else.
 [[nodiscard]] core::Result<void> validate_command_shape(
     const PlayerCommand& command,
     const std::vector<Player>& players,
     std::string_view context,
-    std::string_view logical_path);
+    std::string_view logical_path,
+    bool land_domain = false);
 
 } // namespace eawr::sim::tactical::detail

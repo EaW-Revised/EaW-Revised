@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/skirmish/land_start.hpp"
+#include "eawr/sim/tactical/land_abilities.hpp"
 #include "eawr/units/domain_tags.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/core/text.hpp"
@@ -193,8 +194,12 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
 
 // LC-13 spacing remains in authored units: L5 applies the cited factor of 20 exactly once.
 // All other physical profile values are world units/second (turns/second for turn rate).
+// `optional_company_types` (#6993): companies a producer's menu offers. Each is bound like a selected one, but one that cannot be
+// bound is left out with a note in static_notes instead of refusing the content (a stock company can be refused, see the land
+// start tests), and its menu entry is then disabled by the start build.
 [[nodiscard]] inline core::Result<LandStartBindings> build_land_bindings(const units::UnitTables& tables,
-    std::span<const std::string> company_types, const LandContentInputs& inputs) {
+    std::span<const std::string> company_types, const LandContentInputs& inputs,
+    std::span<const std::string> optional_company_types = {}) {
     using namespace sim::tactical;
     using sim::math::Fixed;
     using Result = core::Result<LandStartBindings>;
@@ -242,6 +247,9 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
         }
         // LC-102: the loader validated the decimal; an unauthored constant leaves the optional empty.
         result.land.garrisoned_range_multiplier = constant("Garrisoned_Max_Attack_Distance_Multiplier");
+        // WLAB-13: a positive coefficient only; anything else leaves the spacing as authored.
+        if (const auto spread = constant("Spread_Out_Spacing_Coefficient"); spread && *spread > Fixed{})
+            result.land.spread_out_spacing = spread;
     }
     result.land.occupations = inputs.occupations;
     // G-01: retain host and entrant rows independently of obstacle and company admission.
@@ -315,8 +323,17 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
         binding.type = type_id(object.id);
         binding.fine_tune = false;
         result.land.static_objects.push_back(binding.type);
+        // LE-OCCUPY (WLPA-66): the authored hard footprint is dynamic collision. A pad that authors no positive hard extent in
+        // both axes, or no collision class, has no body (named in the static notes), as a member with neither has none.
+        const auto& hard_x = object.fog.custom_hard_x; const auto& hard_y = object.fog.custom_hard_y;
+        if (hard_x && hard_y && *hard_x > Fixed{} && *hard_y > Fixed{}
+            && object.collision_class && *object.collision_class != units::LandCollisionGroup::none)
+            result.land.pad_bodies.push_back({binding.type, *hard_x, *hard_y, *object.collision_class});
+        else result.static_notes.push_back(object.id + ": pad has no authored hard extents or collision class: no collision body (LE-OCCUPY)");
         result.static_objects.push_back(std::move(binding));
     }
+    std::sort(result.land.pad_bodies.begin(), result.land.pad_bodies.end(),
+        [](const auto& a, const auto& b) { return a.type < b.type; });
     std::vector<std::string> collision_names;
     for (const auto& row : inputs.collision_class_order) {
         if (row.name.empty() || std::any_of(collision_names.begin(), collision_names.end(), [&](const auto& name) { return equal(name, row.name); }))
@@ -338,7 +355,8 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
         result.movement_masks.push_back({authored.name, mask});
     }
     std::set<TypeId> company_ids;
-    for (const auto& name : company_types) {
+    std::vector<std::string> bound_types(company_types.begin(), company_types.end());
+    const auto bind_company = [&](const std::string& name) -> std::optional<Result> {
         const auto company = std::find_if(tables.land_companies.begin(), tables.land_companies.end(),
             [&](const auto& value) { return equal(value.id, name); });
         if (company == tables.land_companies.end()) return fail(name, "Company_Units", "company is absent or unresolved");
@@ -477,20 +495,119 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
             binding.members.push_back(std::move(output));
         }
         result.land.companies.push_back(std::move(binding));
+        return std::nullopt;
+    };
+    for (const auto& name : company_types)
+        if (auto failed = bind_company(name)) return std::move(*failed);
+    for (const auto& name : optional_company_types) {
+        if (std::any_of(bound_types.begin(), bound_types.end(), [&](const auto& bound) { return equal(bound, name); })) continue;
+        if (auto failed = bind_company(name)) {
+            result.static_notes.push_back(name + " not offered: " + failed->error().message);
+            continue;
+        }
+        bound_types.push_back(name);
     }
     // LS shoot PR 1: the combat and durability rows of the loaded land bodies. A table without a damageable or armed
     // body binds none, so the movement-only content keeps empty tables. The rows cover the selected companies' members
     // and every loaded type that no company lists (statics); another company's members stay out.
-    if (std::any_of(tables.units.begin(), tables.units.end(), [](const auto& unit) { return unit.hull || unit.weapon; })) {
-        std::set<std::string> chosen, listed;
-        for (const auto& company : tables.land_companies) {
-            const bool selected = std::any_of(company_types.begin(), company_types.end(),
-                [&](const auto& name) { return equal(company.id, name); });
-            for (const auto& member : company.members) {
-                listed.insert(core::to_lower(member.type));
-                if (selected) chosen.insert(core::to_lower(member.type));
-            }
+    std::set<std::string> chosen, listed;
+    for (const auto& company : tables.land_companies) {
+        const bool selected = std::any_of(bound_types.begin(), bound_types.end(),
+            [&](const auto& name) { return equal(company.id, name); });
+        for (const auto& member : company.members) {
+            listed.insert(core::to_lower(member.type));
+            if (selected) chosen.insert(core::to_lower(member.type));
         }
+    }
+    // WLAB-01 (#3238): the ability rows of the same selection: the chosen companies (their own and their container's rows) and
+    // their members, and every loaded type that no company lists. Another company's members and the companies that were not
+    // chosen stay out, so a session binds only the profiles it can spawn. An empty table binds nothing.
+    {
+        auto narrowed = tables;
+        std::erase_if(narrowed.units, [&](const auto& unit) {
+            const auto key = core::to_lower(unit.id);
+            return listed.contains(key) && !chosen.contains(key);
+        });
+        std::erase_if(narrowed.land_companies, [&](const auto& company) {
+            return std::none_of(bound_types.begin(), bound_types.end(), [&](const auto& name) { return equal(company.id, name); });
+        });
+        std::vector<core::Diagnostic> ability_notes;
+        auto abilities = units::land_ability_table(narrowed, inputs.content_errors, &ability_notes);
+        if (!abilities) return Result::failure(abilities.error());
+        result.abilities = std::move(abilities).value();
+        result.land.ability_effects = sim::tactical::make_land_ability_effects(); // #3239: the effects of the kinds G2 carries
+        for (const auto& row : ability_notes) result.static_notes.push_back(row.code + ": " + row.message);
+    }
+    // WLAB-16 (#3239): the types of the same selection that use a secondary locomotor, ascending.
+    {
+        std::set<TypeId> seen;
+        for (const auto& unit : tables.units) {
+            const auto key = core::to_lower(unit.id);
+            if (!unit.uses_multiple_locomotors || unit.secondary_locomotor_name.empty()
+                || equal(unit.secondary_locomotor_name, unit.primary_locomotor_name) || (listed.contains(key) && !chosen.contains(key))) continue;
+            seen.insert(type_id(unit.id));
+        }
+        result.land.multi_locomotor_types.assign(seen.begin(), seen.end());
+    }
+    // WLAB-16 (#7084): the jet-pack flight rows of the same selection, ascending. Speed and lift are ratios over the type's own
+    // Max_Speed (an unauthored one is the type default), so they follow the member's converted ground speed. The take-off wait is a
+    // measured stand-in for the take-off clip (DEV-24), the midpoint of the measured range by exact type id: boba_fett 2.1 s (1.9 to
+    // 2.3), dark_trooper_phaseii 3.25 s (3.0 to 3.5); any other type, Dark Trooper III included, 2.5 s (not measured).
+    {
+        std::map<TypeId, LandSessionContent::Jump> rows;
+        for (const auto& unit : tables.units) {
+            const auto key = core::to_lower(unit.id);
+            if (!unit.land_jump || (listed.contains(key) && !chosen.contains(key))) continue;
+            const auto speed = std::max(unit.movement.max_speed.value_or(type_default_max_speed), Fixed{});
+            LandSessionContent::Jump row;
+            row.type = type_id(unit.id);
+            if (speed <= Fixed{} || !sim::math::try_divide(unit.land_jump->alternate_max_speed, speed, row.cruise_ratio)
+                || !sim::math::try_divide(std::max(unit.land_jump->max_lift, Fixed{}), speed, row.lift_ratio)) continue;
+            row.hover = std::max(unit.land_jump->hover_offset, Fixed{});
+            const std::uint32_t hundredths = key == "boba_fett" ? 210U : key == "dark_trooper_phaseii" ? 325U : 250U;
+            row.takeoff_frames = (hundredths * logical_frames_per_second + 50U) / 100U;
+            rows.emplace(row.type, row);
+        }
+        for (const auto& entry : rows) result.land.jumps.push_back(entry.second);
+    }
+    // WLAB-19, WLAB-71 (#3239): the types of the same selection with more than one projectile type, ascending, and for each the
+    // permanent swap index when that handler is available (enabled, automatic, an index below the type count; the loader
+    // already refused anything above 1).
+    {
+        std::map<TypeId, std::optional<std::uint8_t>> rows;
+        for (const auto& unit : tables.units) {
+            const auto key = core::to_lower(unit.id);
+            if (unit.projectile_type_count <= 1 || (listed.contains(key) && !chosen.contains(key))) continue;
+            std::optional<std::uint8_t> permanent;
+            if (const auto& swap = unit.permanent_weapon_swap;
+                swap && swap->initially_enabled && swap->automatic && swap->weapon_index < unit.projectile_type_count)
+                permanent = static_cast<std::uint8_t>(swap->weapon_index);
+            rows.emplace(type_id(unit.id), permanent);
+        }
+        for (const auto& [type, permanent] : rows) result.land.weapon_swaps.push_back({type, permanent});
+    }
+    // WLAB-08 (#3238): the Force-disabling carriers of the same selection, ascending type, and the window. The constant is in
+    // seconds and a value under 0.1 s counts as 0; the stock window of three logical frames is what that leaves. A longer
+    // authored time adds its whole logical frames to those three (a reading: the walk gives the stock window only).
+    {
+        std::set<TypeId> seen;
+        for (const auto& unit : tables.units) {
+            const auto key = core::to_lower(unit.id);
+            if (!unit.force_disable_range || (listed.contains(key) && !chosen.contains(key))) continue;
+            const auto type = type_id(unit.id);
+            if (seen.insert(type).second) result.land.force_disablers.push_back({type, *unit.force_disable_range});
+        }
+        std::sort(result.land.force_disablers.begin(), result.land.force_disablers.end(),
+            [](const auto& a, const auto& b) { return a.type < b.type; });
+        std::optional<Fixed> disable_time;
+        for (const auto& value : tables.constants.scalars) if (equal(value.tag, "Force_Ability_Disable_Time")) disable_time = value.value;
+        if (disable_time && *disable_time >= Fixed::from_ratio(1, 10).value()) {
+            const auto seconds = std::min<std::int64_t>(disable_time->raw(), std::int64_t{3600} * Fixed::scale);
+            const auto whole = seconds * static_cast<std::int64_t>(sim::tactical::logical_frames_per_second) / Fixed::scale;
+            result.land.force_disable_frames = static_cast<std::uint32_t>(3 + whole);
+        }
+    }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const auto& unit) { return unit.hull || unit.weapon; })) {
         auto narrowed = tables;
         std::erase_if(narrowed.units, [&](const auto& unit) {
             const auto key = core::to_lower(unit.id);
@@ -510,7 +627,10 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
     const auto number = [&](std::uint64_t value) { for (unsigned shift = 0; shift < 64; shift += 8) bytes.push_back(static_cast<std::uint8_t>(value >> shift)); };
     const auto fixed = [&](Fixed value) { number(static_cast<std::uint64_t>(value.raw())); };
     const auto text = [&](const std::string& value) { number(value.size()); bytes.insert(bytes.end(), value.begin(), value.end()); };
-    text("land-content-adapter-v8");
+    text("land-content-adapter-v10");
+    number(result.land.force_disablers.size());
+    for (const auto& row : result.land.force_disablers) { number(row.type); fixed(row.range); }
+    number(result.land.force_disable_frames);
     number(result.static_objects.size());
     for (const auto& row : result.static_objects) {
         number(row.type); fixed(row.width); fixed(row.height); fixed(row.x_offset); fixed(row.y_offset);
@@ -518,6 +638,8 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
         number(row.primary_passability); number(row.secondary_passability); number(row.water_bit);
         number(row.fine_tune); number(row.model_present); fixed(row.scale_factor);
     }
+    number(result.land.pad_bodies.size());
+    for (const auto& row : result.land.pad_bodies) { number(row.type); fixed(row.half_x); fixed(row.half_y); number(static_cast<std::uint8_t>(row.group)); }
     number(result.land.clear_bit);
     number(result.movement_masks.size());
     for (const auto& row : result.movement_masks) { text(row.name); number(row.bits); }

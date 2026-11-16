@@ -1,7 +1,7 @@
 #pragma once
 #include "galactic_ai_world.hpp"
 
-// Perception component bytes (domain "eawr-galactic-perception", version 3).
+// Perception component bytes (domain "eawr-galactic-perception", version 4).
 // The generic whole-state encoder is the canonical form: capture, restore
 // validation and the cold digest oracle use it. The single-record encoders below
 // write exactly the bytes the generic encoder gives a state holding only that
@@ -28,5 +28,6 @@ void encode_cache_record(std::vector<std::uint8_t>& out, const PerceptionKeyView
 void encode_visibility_record(std::vector<std::uint8_t>& out, const GalacticVisibility& row);
 void encode_flag_record(std::vector<std::uint8_t>& out, const GalacticStoryFlag& row);
 void encode_hint_record(std::vector<std::uint8_t>& out, const GalacticHint& row);
+void encode_space_conflict_record(std::vector<std::uint8_t>& out, const GalacticSpaceConflict& row);
 
 } // namespace eawr::script::foc::ai

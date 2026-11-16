@@ -80,6 +80,7 @@ void foc_fleet(const bool formation_only, const bool fire_bones_only) {
     foc_self_destruct(input);
     foc_corrupt_systems(input);
     foc_peacebringer_blast(input);
+    foc_piett_filter(input, specs);
     foc_asymmetric_release_geometry(input);
     foc_special_without_blast(input);
     foc_leech_shields(input);
@@ -467,14 +468,15 @@ void foc_fleet(const bool formation_only, const bool fire_bones_only) {
         expect((item.production.upgrade_object || item.kind == UnitKind::squadron || item.category_bits != 0) && (item.property_bits & 0x100) == 0,
                "fleet type has categories and is an opportunity target: " + item.id);
     }
-    expect(tables.constants.scalars.size() == 55, "combat, hazard and multiplayer tech scalars");
+    expect(tables.constants.scalars.size() == 56, "combat, hazard and multiplayer tech scalars");
     for (const auto& [tag, expected] : {
+            std::pair{std::string_view{"Under_Construction_Damage_Multiplier"}, Fixed::from_raw(raw(2))},
             std::pair{std::string_view{"Asteroid_Field_Damage"}, Fixed::from_raw(raw(20))},
             std::pair{std::string_view{"Asteroid_Field_Damage_Rate"}, Fixed::from_decimal("0.20").value()}}) {
         const auto constant = std::find_if(tables.constants.scalars.begin(), tables.constants.scalars.end(),
             [&](const auto& value) { return value.tag == tag; });
         expect(constant != tables.constants.scalars.end() && constant->value == expected,
-            "WHZ-11/12: stock asteroid damage and per-frame probability are retained");
+            "WCC-41, WHZ-11/12: stock construction and asteroid damage scalars are retained");
     }
     // #70: the five roster ships move; Max_Speed, OverrideAcceleration/Deceleration and
     // Max_Rate_Of_Turn x 1.2 (docs/behaviour/space-movement.md MV-01).

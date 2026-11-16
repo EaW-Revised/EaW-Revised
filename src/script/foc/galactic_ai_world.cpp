@@ -87,6 +87,7 @@ void GalacticWorld::memory_inventory(diagnostics::GcMemory& m) const {
         m.row(prefix + ".bindings", s.bindings, s.binding_ids, s.memo_bindings, s.memo_binding_ids);
         m.row(prefix + ".economy", s.economy.queries);
         m.row(prefix + ".visibility", s.visibility, s.flags, s.hints, s.visibility_index);
+        m.row(prefix + ".space_conflicts", s.space_conflicts);
         m.row(prefix + ".tokens", s.late_token_ids, s.late_tokens);
     }
     m.row("gc.perception.shared_tokens", token_ids_, tokens_);

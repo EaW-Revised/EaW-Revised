@@ -219,7 +219,8 @@ void resolve_transform(Placement& placement, const assets::Placement& source) {
 
 void resolve_object(Placement& placement, const assets::Placement& source,
                     const std::optional<assets::MapKind> kind, const data::Catalog& catalog,
-                    const AssetAccess& access, std::map<std::string, ModelFacts>& models) {
+                    const AssetAccess& access, std::map<std::string, ModelFacts>& models,
+                    const bool live_objects) {
     if (!source.type_crc) {
         add_issue(placement, Cause::crc_absent);
         return;
@@ -292,9 +293,11 @@ void resolve_object(Placement& placement, const assets::Placement& source,
     if (found == models.end()) found = models.emplace(path, model_facts(access, path)).first;
     const ModelFacts& facts = found->second;
     if (!facts.loaded) {
-        // BP-70: a projectile may author a particle system as its root model.
-        // Keep it on the effect-only projectile route, with the ordinary authored transform.
-        if (facts.particle_system && ieq(object.type_name, "Projectile")) {
+        // BP-70: a projectile, or a live-session unit, may author a particle system as its root model.
+        // Keep it on the effect-only route, with the ordinary authored transform.
+        if (facts.particle_system
+            && (ieq(object.type_name, "Projectile") || (live_objects && ieq(object.type_name, "SpaceUnit")))) {
+            placement.particle_root = ieq(object.type_name, "SpaceUnit");
             placement.effects.push_back({placement.model_declared, path, 0, false});
             add_issue(placement, Cause::model_has_no_surface, path);
             return;
@@ -374,6 +377,7 @@ PreparedScene prepare(const BuildInput& input) {
                          }
                          return left->key.record_ordinal < right->key.record_ordinal;
                      });
+    if (input.extra_placements) for (const assets::Placement& extra : *input.extra_placements) ordered.push_back(&extra);
 
     const std::vector<FactionColour> factions = faction_colours(*input.catalog);
     scene.placements.resize(ordered.size());
@@ -387,7 +391,7 @@ PreparedScene prepare(const BuildInput& input) {
         placement.serialized_object_id = source.serialized_object_id;
         placement.type_crc = source.type_crc;
         resolve_team_colour(placement, source, factions);
-        resolve_object(placement, source, map.kind, *input.catalog, input.access, prepared.models);
+        resolve_object(placement, source, map.kind, *input.catalog, input.access, prepared.models, input.live_objects);
     }
     return prepared;
 }

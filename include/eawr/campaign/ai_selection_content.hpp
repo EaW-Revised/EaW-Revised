@@ -9,6 +9,7 @@ namespace eawr::script::foc::galactic_ai { struct FreestoreFacts; struct Freesto
 namespace eawr::sim { class PartitionExecutor; }
 namespace eawr::sim::galactic { class GalacticSnapshot; }
 namespace eawr::campaign {
+class SharedUnitTables;
 using FreestoreMemberQualifier = std::function<core::Result<bool>(sim::galactic::TypeId)>;
 using FreestoreCurrentTypeQualifier = std::function<core::Result<sim::galactic::TypeId>(
     const script::foc::galactic_ai::FreestoreObject&)>;
@@ -19,7 +20,8 @@ using FreestoreCurrentTypeQualifier = std::function<core::Result<sim::galactic::
 // authoring and fixed numeric decoding precede immutable AI selection facts.
 [[nodiscard]] core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>>
 prepare_ai_selection_content(const vfs::Vfs&, const data::Catalog&,
-    const data::galactic::GalacticData&, const units::GalacticTypeTable&, const CampaignSetupPlan&);
+    const data::galactic::GalacticData&, const units::GalacticTypeTable&, const CampaignSetupPlan&,
+    std::shared_ptr<const SharedUnitTables> shared = {});
 // WGA-301/303/312/316: genuine fresh ordinary galaxy construction only.
 // Loaded actors and inherited generated teams use their retained actor facts.
 // WGA-363/364: member callback needs completed parse-pass flags (#2725).

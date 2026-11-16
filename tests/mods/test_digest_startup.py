@@ -31,3 +31,22 @@ assert 'mod_progress_notice' not in refresh
 assert 'deferred_mod_review' in lobby
 
 assert 'if (impl_->box) { impl_->review_digest_wait.reset(); return; }' in lobby
+
+# #6468: the "Mod list not shared" message raised when a host room opens must survive until the box is shown. open_staging runs right
+# after host_galactic_game and must not clear it; a room starts with a clean notice in host_galactic_game, a room ends it in
+# leave_staging, and review_host_mods turns it into the box (also from the per-frame staging refresh).
+galactic = (viewer / 'lan_lobby_screen_galactic.cpp').read_text()
+staging = (viewer / 'lan_lobby_screen_staging.cpp').read_text()
+open_staging = staging.split('void EawrLanLobby::open_staging(', 1)[1].split('\nvoid EawrLanLobby::', 1)[0]
+assert 'host_mod_notice' not in open_staging, 'open_staging must not clear a notice raised at room open'
+leave_staging = staging.split('void EawrLanLobby::leave_staging()', 1)[1].split('\nvoid EawrLanLobby::', 1)[0]
+assert 'host_mod_notice.clear()' in leave_staging
+host_game = galactic.split('std::optional<std::string> EawrLanLobby::host_galactic_game()', 1)[1].split('\nvoid EawrLanLobby::refresh_galactic_staging()', 1)[0]
+assert host_game.index('host_mod_notice.clear()') < host_game.index('report_host_mod_list_not_shared('), 'a room starts clean, then may raise a notice'
+assert 'viewer::host_mod_list_unsendable_reason(encoded)' in host_game
+begin_hosting = staging.index('if (const auto refusal = host_galactic_game())')
+assert begin_hosting < staging.index('open_staging(true, *cleaned, {});', begin_hosting)
+shown = galactic.split('void EawrLanLobby::review_host_mods()', 1)[1]
+assert 'host_mod_notice.empty()' in shown and 'caption = "Mod list not shared"' in shown
+refresh_staging = galactic.split('void EawrLanLobby::refresh_galactic_staging()', 1)[1].split('\nvoid EawrLanLobby::', 1)[0]
+assert 'review_host_mods();' in refresh_staging

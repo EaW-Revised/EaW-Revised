@@ -35,3 +35,26 @@ zero capacity, budget exhaustion, and fixed-frame overflow are `unsupported`.
 The record keeps the selected path even when later admission checks fail.
 Unrecognized or malformed `_ALT`/`_LOD` syntax fails closed; only uppercase
 decimal tags in the supported suffix forms are accepted.
+
+## Space maps: an unpreparable effect is dropped
+
+Admission only decides what the plan wants to run. When the viewer then starts
+an admitted record, the effect can still be refused: its particle file is not in
+the data, it does not parse, a colour texture does not resolve or cannot be
+prepared, or an emitter's data is refused. On a populated space map
+(`--eawr-populate`) the viewer leaves such an effect out and carries on (project
+rule, unverified against the original game: no capture yet): the
+record's placement is reported with status `dropped` and its causes under
+`map_particles`, `populate.attached_effects.dropped` counts them, and the run
+and its capture proceed. A record whose emitters are only partly refused keeps
+the drawable ones and lists the others as causes. Land maps keep the strict
+evidence contract (any refused effect fails the run) because land runs are the
+capture-verification path; that difference is a viewer-mode choice, not a rule
+about the original game, and is on the fidelity list.
+
+Two things are not dropped. A refusal by the engine or device (a shader
+program, material, mesh, instance or texture handle it would not give) is a
+failure of the run in every mode, so a device problem cannot hide behind the
+rule; the backend reports which kind a refusal is. And a record whose emitter
+plan is not drawable at all (an unsupported renderer family, say) keeps its own
+status `unsupported` and is not counted as dropped; it never failed the map.

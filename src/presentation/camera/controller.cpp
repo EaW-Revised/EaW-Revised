@@ -83,6 +83,36 @@ namespace {
     return core::Result<float>::success(best_zoom);
 }
 
+// CAMIN-REL-1. The original steps the scroll speed once per rendered frame
+// (debug build): while a key or the screen edge is held it adds the wanted
+// speed times the acceleration factor, never past the wanted speed; after the
+// release it divides by the deceleration factor and stops under 0.1. The
+// remake runs in seconds, so each factor becomes the time constant whose
+// travel lag (ramp) or total coast (release) equals that per-frame sum at the
+// reference frame time. The original has no fixed display rate; 60 Hz is a
+// project choice (unverified, fidelity list), so the remake stays
+// frame-rate independent.
+constexpr double scroll_reference_frame_seconds = 1.0 / 60.0;
+
+// Ramp: frame k reaches min(k * factor, 1) of the wanted speed, so the lag
+// behind the wanted speed is the sum of 1 - k * factor over the frames with
+// k * factor < 1. A factor of 1 or more reaches it in one frame, 0 or less is
+// instant here (the original would never start).
+[[nodiscard]] float ramp_time_seconds(const float acceleration_factor) {
+    if (!(acceleration_factor > 0.0F) || acceleration_factor >= 1.0F) return 0.0F;
+    const double frames = std::floor(1.0 / static_cast<double>(acceleration_factor));
+    const double lag = frames - static_cast<double>(acceleration_factor) * frames * (frames + 1.0) / 2.0;
+    return static_cast<float>(scroll_reference_frame_seconds * std::max(lag, 0.0));
+}
+
+// Release: the coast is 1 / (factor - 1) frames of the speed at the release.
+// A factor of 1 or less has no braking, so there is no coast here.
+[[nodiscard]] float release_time_seconds(const float deceleration_factor) {
+    return deceleration_factor > 1.0F
+        ? static_cast<float>(scroll_reference_frame_seconds
+            / (static_cast<double>(deceleration_factor) - 1.0)) : 0.0F;
+}
+
 // Integrate a pan velocity approaching a target whose speed follows the
 // exponential zoom distance. Both the final velocity and travel are exact for
 // constant input over this step, including the equal-time-constant limit.
@@ -284,11 +314,11 @@ core::Result<void> BoundedTacticalController::advance(const TacticalStep& step) 
     const PanDisplacement desired_goal = length > 0.0F
         ? PanDisplacement{step.pan.x * goal_scale / length, step.pan.y * goal_scale / length}
         : PanDisplacement{};
-    // FoC's 1.5 deceleration factor is a braking gain, not 1.5 seconds of
-    // coast. Scale the acceleration time by its reciprocal on release.
-    const float smooth_time = length > 0.0F ? constants_.scroll_acceleration_factor
-        : (constants_.scroll_deceleration_factor > 0.0F
-            ? constants_.scroll_acceleration_factor / constants_.scroll_deceleration_factor : 0.0F);
+    // CAMIN-REL-1: the deceleration factor is a per-frame divisor, not seconds
+    // of coast; the release time comes from it at the reference frame time.
+    const float smooth_time = length > 0.0F
+        ? ramp_time_seconds(constants_.scroll_acceleration_factor)
+        : release_time_seconds(constants_.scroll_deceleration_factor);
     PanDisplacement velocity{};
     PanDisplacement displacement{};
     if (!integrate_pan(pan_velocity_.x, desired_start.x, desired_goal.x, smooth_time,
@@ -305,16 +335,25 @@ core::Result<void> BoundedTacticalController::advance(const TacticalStep& step) 
     displacement.y += dragged.value().y;
     // FoC translate: a mouse unit moves 1/100 of the live (smoothed) distance.
     const float translate_scale = state.value().distance * 0.01F;
-    displacement.x += step.translate_units.x * translate_scale;
-    displacement.y += step.translate_units.y * translate_scale;
+    const PanDisplacement translate{step.translate_units.x * translate_scale,
+                                    step.translate_units.y * translate_scale};
     if (!std::isfinite(displacement.x) || !std::isfinite(displacement.y)) return invalid();
 
-    const float radians = step.view_yaw_degrees.value_or(yaw.value()) * (std::numbers::pi_v<float> / 180.0F);
+    constexpr float to_radians = std::numbers::pi_v<float> / 180.0F;
+    const float radians = step.view_yaw_degrees.value_or(yaw.value()) * to_radians;
     const float cosine = std::cos(radians);
     const float sine = std::sin(radians);
+    // Translate units are in the yaw the step starts at (#5789): a grab turned
+    // and dragged inside one long frame moves like the same events over many
+    // short frames. Pan and drag keep reading the yaw the step ends at.
+    const float start_radians = step.view_yaw_degrees.value_or(yaw_degrees_) * to_radians;
+    const float start_cosine = std::cos(start_radians);
+    const float start_sine = std::sin(start_radians);
     auto target = tactical_frame_.target;
-    const float x = target[0] + cosine * displacement.x - sine * displacement.y;
-    const float z = target[2] - sine * displacement.x - cosine * displacement.y;
+    const float x = target[0] + cosine * displacement.x - sine * displacement.y
+        + start_cosine * translate.x - start_sine * translate.y;
+    const float z = target[2] - sine * displacement.x - cosine * displacement.y
+        - start_sine * translate.x - start_cosine * translate.y;
     if (!std::isfinite(x) || !std::isfinite(z)) return invalid();
     target[0] = std::clamp(x, bounds_.min_x, bounds_.max_x);
     target[2] = std::clamp(z, bounds_.min_z, bounds_.max_z);

@@ -141,10 +141,11 @@ BuiltDialog build_dialog(const data::Dialog& dialog, const model::ThemeModel& th
             // clips, as the retail control's does; the box never grows to its longest item) and its list
             // takes the retail list skin (#3167).
             auto* combo = memnew(EawrUiCombo);
-            // UI-COMBO-01: scrolling resources reserve a list rectangle. Project
-            // controls without WS_VSCROLL supply only their closed-box geometry.
-            if (has_style(control, "WS_VSCROLL"))
-                combo->set_list_height(static_cast<float>(std::max(0.0, authored_height - gadget.rect.height)));
+            // UI-COMBO-01: the resource rectangle of a combo includes its list, whether or not the
+            // resource also writes WS_VSCROLL (the Remake's campaign staging dialog does not, and its
+            // list is still bounded by that height in the original). A rectangle that cannot hold one
+            // complete row is a closed box and the list keeps the viewport-bounded fallback.
+            combo->set_list_height(static_cast<float>(std::max(0.0, authored_height - gadget.rect.height)));
             if (retail_combos) {
                 combo->set_fit_to_longest_item(false);
                 combo->set_clip_text(true);
@@ -167,7 +168,9 @@ BuiltDialog build_dialog(const data::Dialog& dialog, const model::ThemeModel& th
             made->set_theme_type_variation(godot_text(gadget.variation));
             made->set_position(Vector2(static_cast<float>(gadget.rect.x - frame_rect.x),
                                        static_cast<float>(gadget.rect.y - frame_rect.y)));
-            made->set_size(Vector2(static_cast<float>(gadget.rect.width), static_cast<float>(gadget.rect.height)));
+            const Vector2 authored_size(static_cast<float>(gadget.rect.width), static_cast<float>(gadget.rect.height));
+            if (auto* check = Object::cast_to<EawrUiCheck>(made)) check->set_authored_size(authored_size);
+            else made->set_size(authored_size);
             if (has_style(control, "NOT WS_VISIBLE")) made->set_visible(false);
             if (has_style(control, "WS_DISABLED")) {
                 if (auto* button = Object::cast_to<BaseButton>(made)) button->set_disabled(true);

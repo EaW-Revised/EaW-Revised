@@ -11,6 +11,7 @@
 
 #include "eawr/presentation/ui/selection.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
+#include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/types.hpp"
 
 #include <cstddef>
@@ -70,6 +71,12 @@ public:
     const data::Catalog* objects, const std::function<bool(std::string_view)>& available);
 // AB-09: abilities that take a target before they fire.
 [[nodiscard]] bool ability_targeted(std::uint32_t ability) noexcept;
+// CU-09, WHE-14, WHE-57: whether the authored target filter of the aimed ability admits a victim of this
+// exact type and category mask, so the pointer can refuse a target the order would refuse. `nested` is the
+// aiming unit's nested handlers; an ability without a handler of its kind has no filter to apply and admits
+// (the simulation stays the authority). Several handlers of one kind admit when any does.
+[[nodiscard]] bool ability_target_admitted(std::span<const sim::tactical::SpecialAbilityProfile> nested,
+    std::uint32_t ability, sim::tactical::TypeId victim_type, std::uint64_t victim_categories) noexcept;
 
 // AB-01..AB-07: one ability button.
 struct AbilityButton {

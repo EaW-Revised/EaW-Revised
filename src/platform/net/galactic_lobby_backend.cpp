@@ -75,6 +75,14 @@ template<class T> core::Result<T> unavailable(const std::optional<core::Diagnost
 }
 } // namespace
 
+std::string solo_campaign_difficulty(const vfs::Vfs& filesystem, const eawr::data::galactic::GalacticData& data,
+    const std::string_view campaign, const std::string_view level) {
+    campaign::LobbyAiLevels levels;
+    if (const auto table = skirmish::load_difficulty_table(filesystem))
+        levels = [table](std::string_view type) { return table->level_entries(type); };
+    return campaign::solo_difficulty_entry(data, campaign, level, levels);
+}
+
 core::Result<GalacticLobbyContent> load_galactic_lobby_content(const vfs::Vfs& filesystem, const data::Catalog& catalog,
     std::shared_ptr<const void> keepalive, std::array<std::uint8_t, 32> checkpoint_mod_list) {
     using Result = core::Result<GalacticLobbyContent>;

@@ -83,14 +83,14 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
         colorization_enabled_ = false;
         return prepare_native(battle, failure);
     }
-    if (!tables) tables = load_start_tables(filesystem, catalog, failure, {});
+    if (!tables) tables = load_start_tables(filesystem, catalog, failure, {}, true);
     if (!tables) return false;
     tactical::TacticalSetup& setup = replay->setup;
     const std::string replay_map = setup.skirmish ? setup.skirmish->map : std::string(map_path);
     if (units::content_identity(*tables) != replay.value().setup.content_identity) {
         // WHZ-01: live recordings include the selected map's authored hazard
         // profiles. Pinned fixtures retain the narrower M2 closure above.
-        auto selected = load_start_tables(filesystem, catalog, failure, replay_map);
+        auto selected = load_start_tables(filesystem, catalog, failure, replay_map, true);
         if (!selected) return false;
         tables = std::move(selected);
     }
@@ -109,7 +109,7 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
         if (!inputs) { failure = core::format_diagnostic(inputs.error()); return false; }
         const auto missing = missing_start_types(recorded.value(), inputs.value(), *tables);
         if (!missing.empty()) {
-            auto extended = load_start_tables(filesystem, catalog, failure, replay_map, missing);
+            auto extended = load_start_tables(filesystem, catalog, failure, replay_map, true, missing);
             if (!extended) return false;
             tables = std::move(extended);
         }
@@ -377,7 +377,7 @@ std::optional<tactical::TacticalReplay> BattleSourceState::read_replay(std::stri
 
 std::optional<tactical::TacticalReplay> BattleSourceState::build_melee(const vfs::Vfs& filesystem,
     const data::Catalog& catalog, std::optional<units::UnitTables>& tables, std::string& failure) {
-    tables = load_start_tables(filesystem, catalog, failure, {});
+    tables = load_start_tables(filesystem, catalog, failure, {}, true);
     if (!tables) return std::nullopt;
     // #601: the melee benchmark's fight, built here exactly as path_bench --melee builds it.
     auto inputs = skirmish::read_start_inputs(skirmish::m2_fixture(), filesystem, catalog, *tables);

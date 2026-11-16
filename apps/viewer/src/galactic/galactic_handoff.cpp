@@ -32,6 +32,7 @@ std::uint64_t video_memory() {
 }
 
 GalacticMode::State::~State() {
+    disconnect_scene_refresh(); // No pre-draw callback may outlive this state or its viewports.
     for (auto& particles : corruption_particles) particles.reset(); // Resources precede scene hosts.
     corruption_lines.reset(); corruption_paths.reset();
     corruption_uploaded_quads.clear(); corruption_quads.clear(); corruption_particle_layers.clear();
@@ -57,7 +58,7 @@ void GalacticMode::State::release_battle_presentation() {
     if (retreat_layer) memdelete(retreat_layer);
     if (retreat_hud) retreat_hud->set_retreat_handler({});
     retreat_layer = nullptr; retreat_root = nullptr; retreat_hud = nullptr;
-    retreat_dialog.reset(); retreat_view.reset(); retreat_snapshot.reset(); retreat_dialog_open = false; retreat_completion_sent = false;
+    retreat_dialog.reset(); retreat_view.reset(); retreat_snapshot.reset(); retreat_dialog_open = false; retreat_completion_sent = false; retreat_playback_started = false; arrival_cinematic_done = false; arrival_gate_checked = false; arrival_counted = false; proof_arrival_frame.reset();
     if (tactical) tactical->close_requested();
     tactical.reset();
     try { flush_bink_load_notes(); } catch (...) { /* Continue the battle transition. */ }
@@ -551,6 +552,7 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         if (planet != metadata.planets.end()) map.campaign_planet = planet->name;
         map.populate = true; map.interactive = true;
         map.content = battle_content;
+        map.shaders = shaders; // The session's cache: the battle reuses the galaxy's programs instead of compiling its own.
         map.loading = loading;
         // WGP-112/114: only solo campaign completion waits for player Begin.
         map.loading_begin_barrier = std::count_if(metadata.seats.begin(), metadata.seats.end(),
@@ -627,6 +629,7 @@ bool GalacticMode::State::process_battle_transition(double delta) {
     combined_memory = std::max(combined_memory, OS::get_singleton()->get_static_memory_usage());
     combined_video_memory = std::max(combined_video_memory, video_memory());
     service_retreat_controls();
+    service_arrival_cinematic();
     if (campaign_briefing && frame.battle) {
         campaign::SpaceBriefingGate gate;
         gate.enabled = campaign_briefing->enabled;
@@ -845,6 +848,7 @@ bool GalacticMode::State::process_handoff(double delta) {
         map.populate = true;
         map.interactive = true;
         map.content = battle_content;
+        map.shaders = shaders;
         // The handoff owns its loading screen. MapMode's externally supplied
         // screen requires a manual Begin, while this transition begins on ready.
         map.borrowed_battle = prepared;

@@ -92,6 +92,10 @@ struct Constants final {
 
     float near_clip{};
     float far_clip{};
+    // Object_Fade_Begin / Object_Fade_End: the distances over which the camera fades objects out
+    // (FS-R09: the Unlocked cinematic camera applies them). Optional tags; 0 means not authored.
+    float object_fade_begin{};
+    float object_fade_end{};
 
     // Terrain following (Land_Mode). Nonzero location_follows_terrain makes a
     // map camera with a ground source keep its target on the terrain, easing

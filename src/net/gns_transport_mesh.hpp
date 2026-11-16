@@ -15,6 +15,7 @@ struct GnsTransport::Mesh {
     std::uint32_t peers{};
     HSteamListenSocket listener{k_HSteamListenSocket_Invalid};
     std::optional<GnsTurnCredentials> turn;
+    std::optional<std::string> own_turn;
     std::string turn_users, turn_passwords;
     std::optional<core::Diagnostic> failure;
     std::array<std::unique_ptr<Impl>, max_match_seats> links;
@@ -73,7 +74,7 @@ struct GnsTransport::Mesh {
     bool host() const;
     static constexpr MeshSeats bit(PeerIndex seat) { return mesh_seat(seat); }
     static GnsPairDiagnostic diagnostic(GnsPairPhase phase, unsigned code, bool relay_offered, bool relay_failed,
-        GnsRoute route = GnsRoute::unknown);
+        GnsRoute route = GnsRoute::unknown, GnsRelayProvider relay_provider = GnsRelayProvider::none, bool route_lossy = false);
     static void add(MeshSeats& seats, PeerIndex seat);
 
     void emit(GnsMeshEventKind kind, PeerIndex seat, PeerIndex other = 0, unsigned code = 0, bool relay = false);

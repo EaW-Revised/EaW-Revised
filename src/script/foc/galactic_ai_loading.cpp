@@ -156,6 +156,30 @@ std::vector<std::string> include_mounted_ai_files(LifecycleSetup& setup) {
     return skipped;
 }
 
+core::Result<ai::EquationSet> load_perception_equations(const std::map<std::string, std::string, std::less<>>& xml,
+                                                         std::vector<std::string>& skipped) {
+    using Result = core::Result<ai::EquationSet>;
+    LifecycleSetup setup;
+    setup.xml = xml;
+    auto words = vocabulary(setup);
+    if (!words) return Result::failure(words.error());
+    const auto converter = make_converter(setup, std::move(words).value());
+    // The galaxy's own closure first, then the rest of the mounted directory in path order: the first definition of a
+    // name wins, as for the galactic AI (AI-16). A file that does not parse is skipped by name, never fatal.
+    std::vector<std::string> order;
+    for (const auto& path : required_xml())
+        if (path.find("/perceptualequations/") != std::string::npos && xml.contains(path)) order.push_back(path);
+    const std::unordered_set<std::string_view> first(order.begin(), order.end());
+    for (const auto& [path, bytes] : xml) {
+        static_cast<void>(bytes);
+        if (path.starts_with("data/xml/ai/perceptualequations/") && path.ends_with(".xml") && !first.contains(path)) order.push_back(path);
+    }
+    ai::EquationSet equations;
+    for (const auto& path : order)
+        if (auto added = equations.append({{path, xml.at(path)}}, converter); !added) skipped.push_back(path + ": " + added.error().message);
+    return Result::success(std::move(equations));
+}
+
 std::vector<std::string> unresolved_goal_equations(const ai::AiData& data, std::span<const PlayerSelection> selected) {
     std::vector<std::string> lines;
     for (const auto& selection : selected) {

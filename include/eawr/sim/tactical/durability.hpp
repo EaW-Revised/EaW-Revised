@@ -67,6 +67,9 @@ struct DamageRules {
     // no_type_index (no table entry) leaves the multiplier at 1.
     std::uint32_t default_damage_type{no_type_index};
     math::Fixed ion_storm_disable_seconds{}; // WHZ-31, Ion_Storm_Shield_Disable_Time
+    // WCC-41: immutable type membership, shared by every damage delivery route.
+    math::Fixed under_construction_multiplier{math::Fixed::from_raw(math::Fixed::scale)};
+    std::vector<TypeId> under_construction_types; // sorted, unique TACTICAL_UNDER_CONSTRUCTION types
     friend bool operator==(const DamageRules&, const DamageRules&) = default;
 };
 

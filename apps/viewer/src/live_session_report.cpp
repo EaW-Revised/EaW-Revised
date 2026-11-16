@@ -17,6 +17,7 @@
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/units/unit_tables.hpp"
 
+#include "viewer_degradation.hpp"
 #include "viewer_path.hpp"
 
 #include <godot_cpp/classes/project_settings.hpp>
@@ -80,6 +81,9 @@ void LiveSessionView::save_failure_replay() {
     if (failure_replay_tried_ || !session_ || !session_->failure()) return;
     failure_replay_tried_ = true;
     const auto failure = session_->failure();
+    // A failed session leaves its degradation summary beside the failure replay (the host teardown rewrites it later and
+    // prints the log line; a crash after this point still leaves this file).
+    publish_viewer_degradation_summary(core::degradation::Ended::failed, false);
     const bool connection_loss = failure && lan_connection_loss(failure->code);
     // A connection loss records only executed input, never the held/future tick.
     const tactical::TacticalReplay replay = connection_loss ? session_->record() : session_->failure_record();
@@ -469,7 +473,14 @@ void LiveSessionView::write_report_runtime(std::ostream& output) const {
            << ", \"multiplayer\": " << (multiplayer() ? "true" : "false")
            << ", \"lan_message\": " << json(multiplayer() ? lan_message(lan_view()) : std::string{})
            << ", \"lan_input_delay\": " << (multiplayer() ? lan_view().input_delay : 0)
-           << ", \"lan_desync\": " << (multiplayer() && lan_view().desync_tick ? "true" : "false");
+           << ", \"lan_desync\": " << (multiplayer() && lan_view().desync_tick ? "true" : "false")
+           // #4444 (RC-07/RC-08): what the drawn retreat flight did, for the GPU proof.
+           << ", \"retreat_flight\": {\"ships\": " << retreat_flight_report_.ships_max
+           << ", \"max_distance\": " << retreat_flight_report_.distance_max
+           << ", \"min_opacity\": " << retreat_flight_report_.opacity_min
+           << ", \"jumps\": " << retreat_flight_report_.jumps
+           << ", \"brightened\": " << retreat_flight_report_.brightened_max
+           << ", \"last_frame\": " << retreat_flight_report_.frame_max << "}";
 }
 
 void LiveSessionView::write_report_slots(std::ostream& output) const {
@@ -495,6 +506,20 @@ void LiveSessionView::write_report_slots(std::ostream& output) const {
            << ", \"resident_proxy_bytes\": " << arrival_slots_.warm_resident_bytes
            << ", \"load_ms\": " << arrival_slots_.warm_ms
            << ", \"driver_overhead_known\": false}"
+           << ", \"hangar_warm\": {\"planned\": " << arrival_slots_.hangar_planned
+           << ", \"recipes\": " << arrival_slots_.hangar_recipes
+           << ", \"copies\": " << arrival_slots_.hangar_copies
+           << ", \"skipped\": " << arrival_slots_.hangar_skipped
+           << ", \"late\": " << arrival_slots_.hangar_late
+           << ", \"proxy_bytes\": " << arrival_slots_.hangar_proxy_bytes
+           << ", \"recipe_read_bytes_on_main\": " << arrival_slots_.hangar_recipe_bytes
+           << ", \"main_ms_total\": " << arrival_slots_.hangar_total_ms
+           << ", \"main_ms_worst_frame\": " << arrival_slots_.hangar_worst_ms
+           << ", \"ahead\": {\"textures_planned\": " << arrival_slots_.hangar_ahead.planned
+           << ", \"textures_decoded\": " << arrival_slots_.hangar_ahead.decoded
+           << ", \"textures_unplanned\": " << arrival_slots_.hangar_ahead.unplanned
+           << ", \"held_bytes_peak\": " << arrival_slots_.hangar_ahead.held_bytes_peak
+           << ", \"preflight_ms\": " << arrival_slots_.hangar_ahead.preflight_ms << "}}"
            << ", \"undrawn_entities\": " << arrival_slots_.undrawn.size()
            << ", \"slot_growth_failure\": " << (arrival_slots_.failure.empty() ? "null" : json(arrival_slots_.failure))
            << ", \"slotless\": [" << slotless_report_rows() << "]";
@@ -532,6 +557,21 @@ void LiveSessionView::write_report_squadrons(std::ostream& output) const {
                           + ", \"owner\": " + std::to_string(owner) + ", \"launched\": " + (launched ? "true" : "false")
                           + ", \"seen_tick\": " + std::to_string(squadron_seen_.at(container))
                           + ", \"members\": [" + members + "]}";
+                  }
+                  return rows;
+              }() << "]"
+           // #6931: every unit the newest snapshot carries as a garrison unit (the bracket flag's source).
+           << ", \"garrison_units\": [" << [&] {
+                  std::string rows;
+                  if (battle_frame_.latest) {
+                      for (const tactical::TacticalInstance& instance : battle_frame_.latest->instances()) {
+                          if (!instance.garrison_unit) continue;
+                          rows += (rows.empty() ? "" : ", ") + std::string("{\"entity\": ") + std::to_string(instance.entity_id)
+                              + ", \"owner\": " + std::to_string(instance.owner)
+                              + ", \"squadron_member\": " + (squadron_of_.contains(instance.entity_id) ? "true" : "false")
+                              + ", \"squadron_container\": " + (squadrons_.contains(instance.entity_id) ? "true" : "false")
+                              + ", \"arriving\": " + (instance.arrival.has_value() ? "true" : "false") + "}";
+                      }
                   }
                   return rows;
               }() << "]";
@@ -596,6 +636,24 @@ void LiveSessionView::write_report_battle_start(std::ostream& output) const {
     output << ", \"scripted_inputs\": " << options_.inputs.size()
            << ", \"start_map\": " << json(start_ ? start_->map : "")
            << ", \"start_map_sha256\": " << json(start_ ? start_->map_sha256 : "")
+           << ", \"start_removed\": [" << [&] {
+                  std::string rows;
+                  if (start_) for (const auto& removed : start_->removed) {
+                      rows += (rows.empty() ? "" : ", ") + std::string("{\"record\": ") + std::to_string(removed.record)
+                          + ", \"type\": " + json(removed.type) + "}";
+                  }
+                  return rows;
+              }() << "]"
+           << ", \"start_props\": [" << [&] {
+                  std::string rows;
+                  if (start_) for (const auto& prop : start_->props) {
+                      rows += (rows.empty() ? "" : ", ") + std::string("{\"record\": ") + std::to_string(prop.record)
+                          + ", \"type\": " + json(prop.type) + ", \"replaces\": " + std::to_string(prop.replaces)
+                          + ", \"x\": " + std::to_string(static_cast<double>(prop.position.x.raw()) / static_cast<double>(sim::math::Fixed::scale)) + ", \"y\": " + std::to_string(static_cast<double>(prop.position.y.raw()) / static_cast<double>(sim::math::Fixed::scale))
+                          + ", \"z\": " + std::to_string(static_cast<double>(prop.position.z.raw()) / static_cast<double>(sim::math::Fixed::scale)) + "}";
+                  }
+                  return rows;
+              }() << "]"
            << ", \"match_policy\": {\"heroes\": " << (start_ && start_->match.allow_heroes ? "true" : "false")
            << ", \"superweapons\": " << (start_ && start_->match.allow_superweapons ? "true" : "false")
            << ", \"free_starting_units\": " << (start_ && start_->match.free_starting_units ? "true" : "false") << "}"
@@ -826,6 +884,9 @@ void LiveSessionView::write_report_orders(std::ostream& output) const {
         const ScheduledOrder& order = options_.orders[index];
         output << (index ? ", " : "") << "{\"tick\": " << order.tick << ", \"kind\": " << json(tactical::to_string(order.kind))
                << ", \"unit\": " << order.unit;
+        if (order.purchase != ScheduledOrder::Purchase::none)
+            output << ", \"purchase\": " << json(order.purchase == ScheduledOrder::Purchase::buy ? "buy" : "reinforce")
+                   << ", \"type\": " << json(order.type_name);
         if (order.target != 0) output << ", \"target\": " << order.target;
         output << "}";
     }
@@ -884,7 +945,9 @@ void LiveSessionView::write_report_ability_effects(std::ostream& output) const {
         output << (row == ion_stun_rows_.begin() ? "" : ", ") << "{\"unit\": " << row->first << ", \"first\": "
                << row->second.first << ", \"max_frames\": " << row->second.max_frames << "}";
     }
-    output << "]}, \"sfoil_switches\": " << sfoil_switches_ << ", \"ability_requests\": {\"issued\": "
+    output << "]}, \"sfoil_switches\": " << sfoil_switches_ << ", \"laser_clip_poses\": " << laser_clip_poses_
+           << ", \"laser_clip_poses_before_fire\": " << laser_clip_poses_before_fire_
+           << ", \"ability_requests\": {\"issued\": "
            << abilities_.issued() << ", \"refused\": " << abilities_.refused() << "}";
 }
 

@@ -873,8 +873,10 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
         if (!faction || binding.player.faction_id == 0 || !faction_ids.insert(binding.player.faction_id).second
             || !players.emplace(key(faction->name), &binding).second)
             return invalid<CampaignSetupPlan>("unknown or multiply bound faction " + binding.faction, campaign->file);
-        if (faction->is_neutral.value_or(false)) {
-            if (neutral != 0 || !binding.active) return invalid<CampaignSetupPlan>("root needs one active neutral player", campaign->file);
+        // The first neutral binding is THE neutral (owner of unowned planets, root of the control state); a mod's further
+        // neutral factions (free-mode team slots) are players too and own nothing (CGS-24).
+        if (faction->is_neutral.value_or(false) && neutral == 0) {
+            if (!binding.active) return invalid<CampaignSetupPlan>("root needs one active neutral player", campaign->file);
             neutral = binding.player.player_id;
         }
         plan.galaxy_.players.push_back(binding.player);
@@ -1538,7 +1540,13 @@ void bind_story_identities(GameSession& game, const CampaignSetupPlan& plan) {
         planets.emplace(location.planet->id, location.original_type);
     for (const auto& binding : plan.player_bindings())
         factions.emplace(binding.player.player_id, binding.faction);
-    game.set_story_identities(std::move(planets), std::move(factions));
+    std::map<gc::TypeId, std::string> types;
+    for (const auto& binding : plan.type_bindings()) types.emplace(binding.id, binding.original_type);
+    std::set<gc::TypeId> heroes; // STORY_MOVE: a named hero (the galactic type table carries no generic-hero flag: WST-U12)
+    for (const auto& binding : plan.type_bindings())
+        if (const auto* type = plan.original_type(binding.id); type && type->named_hero.value_or(false))
+            heroes.insert(binding.id);
+    game.set_story_identities(std::move(planets), std::move(factions), std::move(types), std::move(heroes));
 }
 std::span<const core::LoadNote> CampaignRoot::load_notes() const {
     combined_load_notes_ = load_notes_;

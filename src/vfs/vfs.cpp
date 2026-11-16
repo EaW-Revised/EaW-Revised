@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <condition_variable>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -452,7 +453,9 @@ core::Result<ManifestResolution> resolve_manifest_mount(
 }
 
 std::filesystem::path mod_data_root(const std::filesystem::path& root) {
-    return !root.empty() && std::filesystem::is_directory(root / "Data") ? root / "Data" : root;
+    // The non-throwing overload: a folder on a drive the host does not have is not a directory, never an exception.
+    std::error_code error;
+    return !root.empty() && std::filesystem::is_directory(root / "Data", error) ? root / "Data" : root;
 }
 
 bool insert_revised_layer(std::vector<LayerRoot>& roots, const bool enabled,
@@ -470,22 +473,29 @@ bool insert_revised_layer(std::vector<LayerRoot>& roots, const bool enabled,
     return true;
 }
 
-std::vector<LayerRoot> mod_chain_roots(const std::filesystem::path& chain) {
-    std::vector<LayerRoot> roots;
-    // A directory whose own name contains ';' (legal on Windows) is one root, not a chain.
-    if (!chain.empty() && std::filesystem::is_directory(chain)) {
-        roots.emplace_back("mod", mod_data_root(chain));
-        return roots;
+std::vector<std::filesystem::path> mod_chain_folders(const std::filesystem::path& chain) {
+    std::vector<std::filesystem::path> folders;
+    // A directory whose own name contains ';' (legal on Windows) is one folder, not a chain.
+    std::error_code error;
+    if (!chain.empty() && std::filesystem::is_directory(chain, error)) {
+        folders.push_back(chain);
+        return folders;
     }
     const auto text = chain.native();
     std::size_t begin = 0;
     while (!text.empty() && begin <= text.size()) {
         const auto end = text.find(static_cast<std::filesystem::path::value_type>(';'), begin);
-        auto root = std::filesystem::path(text.substr(begin, end == text.npos ? text.npos : end - begin));
-        roots.emplace_back(roots.empty() ? "mod" : "mod-parent-" + std::to_string(roots.size()), mod_data_root(root));
+        folders.emplace_back(text.substr(begin, end == text.npos ? text.npos : end - begin));
         if (end == text.npos) break;
         begin = end + 1;
     }
+    return folders;
+}
+
+std::vector<LayerRoot> mod_chain_roots(const std::filesystem::path& chain) {
+    std::vector<LayerRoot> roots;
+    for (const auto& folder : mod_chain_folders(chain))
+        roots.emplace_back(roots.empty() ? "mod" : "mod-parent-" + std::to_string(roots.size()), mod_data_root(folder));
     return roots;
 }
 
@@ -552,6 +562,12 @@ struct Vfs::Impl {
     std::unordered_map<std::string, std::vector<std::size_t>> by_path;
     mutable std::mutex attachments_mutex;
     mutable std::map<std::type_index, std::shared_ptr<void>> attachments;
+    // The size and time of each container file, read once per mount (source_stamp); nullopt = unreadable.
+    mutable std::mutex stamps_mutex;
+    mutable std::map<std::filesystem::path, std::optional<std::pair<std::uint64_t, std::int64_t>>> container_stamps;
+    // view_identity(): computed once.
+    mutable std::mutex identity_mutex;
+    mutable std::optional<std::string> identity;
     // Used only by exact-candidate audio reads, never by open(logical_path).
     mutable std::mutex archive_names_mutex;
     mutable std::map<std::filesystem::path, std::map<std::pair<std::uint64_t, std::uint64_t>, std::set<std::string>>> archive_names;
@@ -868,6 +884,86 @@ std::optional<ReadLocation> Vfs::read_location(const AssetRecord& candidate) con
         if (asset.record == candidate) return ReadLocation{asset.native_path.generic_string(), asset.offset};
     }
     return std::nullopt;
+}
+
+std::optional<SourceStamp> Vfs::source_stamp(const AssetRecord& candidate) const {
+    if (source_ || !impl_) return std::nullopt;
+    const auto found = impl_->by_path.find(candidate.canonical_path);
+    if (found == impl_->by_path.end()) return std::nullopt;
+    for (const auto index : found->second) {
+        const auto& asset = impl_->assets[index];
+        if (!(asset.record == candidate)) continue;
+        std::optional<std::pair<std::uint64_t, std::int64_t>> container;
+        {
+            const std::lock_guard lock(impl_->stamps_mutex);
+            const auto known = impl_->container_stamps.find(asset.native_path);
+            if (known != impl_->container_stamps.end()) container = known->second;
+            else {
+                std::error_code error;
+                const auto size = std::filesystem::file_size(asset.native_path, error);
+                if (!error) {
+                    const auto time = std::filesystem::last_write_time(asset.native_path, error);
+                    if (!error) container = std::pair{static_cast<std::uint64_t>(size), static_cast<std::int64_t>(time.time_since_epoch().count())};
+                }
+                impl_->container_stamps.emplace(asset.native_path, container);
+            }
+        }
+        if (!container) return std::nullopt;
+        return SourceStamp{asset.native_path.generic_string(), container->first, container->second, asset.offset};
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> Vfs::view_identity() const {
+    if (source_ || !impl_) return std::nullopt;
+    const std::lock_guard identity_lock(impl_->identity_mutex);
+    if (impl_->identity) return impl_->identity;
+    core::Sha256Hasher hasher;
+    const auto text = [&](const std::string_view value) {
+        const std::uint64_t length = value.size();
+        hasher.update(std::span(reinterpret_cast<const std::uint8_t*>(&length), sizeof(length)));
+        hasher.update(std::span(reinterpret_cast<const std::uint8_t*>(value.data()), value.size()));
+    };
+    const auto number = [&](const std::uint64_t value) {
+        hasher.update(std::span(reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)));
+    };
+    text("eawr-vfs-view/v1");
+    number(impl_->layer_ids.size());
+    for (const auto& layer : impl_->layer_ids) text(layer);
+    number(impl_->assets.size());
+    std::set<std::filesystem::path> archives;
+    for (const auto& asset : impl_->assets) {
+        text(asset.record.canonical_path);
+        text(asset.record.layer_id);
+        text(asset.record.source_id);
+        number(static_cast<std::uint64_t>(asset.record.origin));
+        number(asset.record.size);
+        number(asset.offset);
+        if (asset.record.origin == AssetOrigin::archive) archives.insert(asset.native_path);
+    }
+    for (const auto& archive : archives) {
+        text(archive.generic_string());
+        std::optional<std::pair<std::uint64_t, std::int64_t>> container;
+        {
+            const std::lock_guard lock(impl_->stamps_mutex);
+            const auto known = impl_->container_stamps.find(archive);
+            if (known != impl_->container_stamps.end()) container = known->second;
+            else {
+                std::error_code error;
+                const auto size = std::filesystem::file_size(archive, error);
+                if (!error) {
+                    const auto time = std::filesystem::last_write_time(archive, error);
+                    if (!error) container = std::pair{static_cast<std::uint64_t>(size), static_cast<std::int64_t>(time.time_since_epoch().count())};
+                }
+                impl_->container_stamps.emplace(archive, container);
+            }
+        }
+        number(container ? 1U : 0U);
+        number(container ? container->first : 0U);
+        number(container ? static_cast<std::uint64_t>(container->second) : 0U);
+    }
+    impl_->identity = hasher.hex_digest();
+    return impl_->identity;
 }
 
 core::Result<AssetRecord> Vfs::stat(const std::string_view logical_path) const {

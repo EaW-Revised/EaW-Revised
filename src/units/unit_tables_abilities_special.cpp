@@ -1,6 +1,10 @@
 #include "unit_tables_decode.hpp"
 
+#include "eawr/units/attack_clip.hpp"
+
+#include "eawr/assets/assets.hpp"
 #include "eawr/sim/tactical/combat.hpp"
+#include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
 
@@ -123,6 +127,38 @@ void Loader::load_special_super_laser(UnitType& unit, sim::tactical::SpecialAbil
     special.leech_beam_width = read("Line_Width");
     special.leech_beam_frames = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
         read("Num_Anim_Frames").raw() / Fixed::scale, 0, sim::tactical::max_ability_frames));
+    // WSPL-08: the aiming and firing controls keep the retail constructor defaults when a tag is absent.
+    const auto read_or = [&](const std::string_view name, const Fixed fallback) {
+        return child_text(name).empty() ? fallback : read(name);
+    };
+    if (const auto face = boolean(child_text("Face_Target"))) special.laser_face_target = *face;
+    special.laser_can_turn = unit.tactical_super_weapon.has_value();
+    special.laser_turn_rate = read_or("Turn_Rate", special.laser_turn_rate);
+    special.laser_firing_cone = read_or("Firing_Cone", special.laser_firing_cone);
+    special.laser_fire_frame = read("Fire_Frame");
+    const auto sub_index = read("Attack_Anim_Sub_Index").raw() / Fixed::scale;
+    special.laser_anim_sub_index = static_cast<std::uint32_t>(std::clamp<std::int64_t>(sub_index, 0, 0xffff));
+    const auto continuation = std::clamp<std::int64_t>(read("Fire_Continuation").raw(), 0,
+        static_cast<std::int64_t>(sim::tactical::max_ability_frames) * Fixed::scale / sim::tactical::logical_frames_per_second);
+    special.laser_continuation_frames = static_cast<std::uint32_t>(continuation * sim::tactical::logical_frames_per_second / Fixed::scale);
+    // WSPL-08: the model's attack clip `<model stem>_attack_NN.ala` (NN = Attack_Anim_Sub_Index) times Fire_Frame.
+    // A model without that clip fires as soon as the aiming gate passes.
+    // The viewer plays the file this shared resolution names (eawr::units::attack_clip_path).
+    if (const auto path = attack_clip_path(unit.model_path, sub_index); input_.filesystem && !path.empty()) {
+        if (const auto clip = assets::load_animation(*input_.filesystem, path)) {
+            special.attack_clip_frames = clip.value().stored_frame_count;
+            special.attack_clip_fps = clip_frames_per_second(clip.value());
+            if (special.attack_clip_fps.raw() <= 0) {
+                // A clip that never advances would hold the fire stage for ever: treat it as a model without the clip.
+                report_.note(unit.id, "Attack_Anim_Sub_Index", child_text("Attack_Anim_Sub_Index"),
+                    "the attack clip has no positive frame rate: it is ignored and the beam fires as soon as the aiming gate passes (WSPL-08)");
+                special.attack_clip_frames = 0;
+                special.attack_clip_fps = Fixed{};
+            }
+            if (special.attack_clip_frames >= 2 && special.laser_fire_frame.raw() > static_cast<std::int64_t>(special.attack_clip_frames - 2) * Fixed::scale)
+                report_.note(unit.id, "Fire_Frame", child_text("Fire_Frame"), "beyond the last playable frame of the attack clip: the beam never fires (WSPL-08)");
+        }
+    }
     constexpr std::string_view tag = "Line_Color";
     const auto colour = tokens(child_text(tag));
     for (std::size_t channel = 0; channel < colour.size() && channel < special.leech_colour.size(); ++channel) {

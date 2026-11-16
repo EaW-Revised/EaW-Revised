@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import shutil
@@ -47,7 +48,8 @@ HEX64 = re.compile(r"[0-9a-f]{64}")
 
 # Files that decide a kit's bytes or the checks on them. A required file missing from the kit commit refuses the cut.
 PAYLOAD_REQUIRED = (
-    "tools/release/package_release.py", "tools/release/kit_engine.py", "tools/release/launcher_artifact.py",
+    "tools/release/package_release.py", "tools/release/godot_linux_import.py", "tools/release/kit_engine.py",
+    "tools/release/launcher_artifact.py",
     "tools/release/update_manifest.py", "tools/release/add_revised_layer.py", "tools/release/kit-readme.template.md",
     "tools/release/revised-layer-manifest.json", "tools/engine_pins.json", "tools/common/engine_guard.py",
     "apps/viewer/tools/export_package.py", "config/launcher-pin.json",
@@ -55,7 +57,7 @@ PAYLOAD_REQUIRED = (
     "tools/release/finish_kit.py", "tools/release/kit_manifest.py",
 )
 PAYLOAD_OPTIONAL = (
-    "tools/release/package_cross.py", "tools/release/godot_wine.py",
+    "tools/release/package_cross.py",
     "tools/release/cut_kit.py", "tools/release/host_package.py",
     "tools/release/pool_host/Package-OnHost.ps1",
     "config/release-version.json",
@@ -63,7 +65,10 @@ PAYLOAD_OPTIONAL = (
 # What finish_kit extracts from the kit commit to run its checks from.
 PAYLOAD_TREES = ("tools", "apps/viewer/tools", "config", "LICENSE", "THIRD_PARTY_NOTICES.md",
                  "docs/player-guide.md", "docs/debug-build.md")
-# The scripts and tools that move bytes for a cut. They run from the operator's checkout, so the plan records them.
+# Every directory a cut, finish or verify imports code from. "Clean" means no tracked change and no untracked file anywhere in them
+# (ignored files such as __pycache__ do not count), so a release cut from a tree with edited helpers cannot claim clean tooling.
+ORCHESTRATOR_TREES = ("tools/release", "tools/offload", "tools/common")
+# The scripts and tools that move bytes for a cut. They run from the operator's checkout, so the plan records their hashes.
 ORCHESTRATOR_FILES = (
     "tools/release/cut_kit.py", "tools/offload/windows_build.py", "tools/offload/linux_cross_build.py",
     "tools/offload/offload_job.py", "tools/offload/offload_common.py", "tools/offload/cross_package.py", "tools/offload/package_plan.py",
@@ -154,7 +159,7 @@ def blob_id_of_file(repo: Path, repo_path: str, file: Path) -> str:
 def orchestrator(repo: Path) -> dict:
     """The operator's checkout that runs the cut: its commit, whether the orchestrating files are clean, their hashes."""
     head = git(repo, "rev-parse", "HEAD").decode().strip()
-    dirty = git(repo, "status", "--porcelain", "--untracked-files=no", "--", *ORCHESTRATOR_FILES).decode().strip()
+    dirty = git(repo, "status", "--porcelain", "--untracked-files=all", "--", *ORCHESTRATOR_TREES, *ORCHESTRATOR_FILES).decode().strip()
     files = []
     for name in ORCHESTRATOR_FILES:
         path = Path(repo) / name
@@ -207,19 +212,52 @@ def default_verify_tag(repo: Path, tag: str) -> bool:
     return subprocess.run(["git", "-C", str(repo), "verify-tag", tag], capture_output=True).returncode == 0
 
 
-def tag_facts(repo: Path, tag: str, verify=default_verify_tag) -> dict:
-    """What a release records about its tag: an annotated tag object whose signature this checkout verifies."""
+SIGNATURE_MARKERS = (b"-----BEGIN PGP SIGNATURE-----", b"-----BEGIN SSH SIGNATURE-----", b"-----BEGIN SIGNED MESSAGE-----")
+
+
+def tag_is_signed(repo: Path, tag: str) -> bool:
+    """True when the annotated tag object carries a signature block (any of git's gpg, ssh or x509 formats)."""
+    body = git(repo, "cat-file", "tag", f"refs/tags/{tag}")
+    return any(marker in body for marker in SIGNATURE_MARKERS)
+
+
+def tag_facts(repo: Path, tag: str, verify=default_verify_tag, signed=tag_is_signed) -> dict:
+    """What a release records about its tag: an annotated tag object. Signing is optional (owner decision 2026-11-11, as for
+    v0.3.0): an unsigned annotated tag is recorded as 'unsigned'; a tag that carries a signature must verify, or it is refused."""
     ref = f"refs/tags/{tag}"
     try:
         kind = git(repo, "cat-file", "-t", ref).decode().strip()
     except ManifestError as error:
         raise ManifestError(f"tag {tag} does not exist in this checkout") from error
     if kind != "tag":
-        raise ManifestError(f"{tag} is a lightweight tag; a release needs an annotated, signed tag object")
-    if not verify(repo, tag):
-        raise ManifestError(f"git cannot verify the signature of {tag}; tag it with `git tag -s` and use a checkout that trusts the key")
+        raise ManifestError(f"{tag} is a lightweight tag; a release needs an annotated tag object (`git tag -a`; signing is optional)")
+    signature = "unsigned"
+    if signed(repo, tag):
+        if not verify(repo, tag):
+            raise ManifestError(f"git cannot verify the signature of {tag}; a signed tag must verify in this checkout "
+                               "(trust the key), or tag without `-s`")
+        signature = "good"
     return {"tag": tag, "tag_object": git(repo, "rev-parse", ref).decode().strip(),
-            "tag_commit": git(repo, "rev-parse", ref + "^{commit}").decode().strip(), "signature": "good"}
+            "tag_commit": git(repo, "rev-parse", ref + "^{commit}").decode().strip(), "signature": signature}
+
+
+def tooling_problems(repo: Path, plan: dict, tooling_commit: str) -> list[str]:
+    """A release may run its finish and verifier from a LATER commit of the same history (a reviewed tool fix made after the tag).
+    That commit must be the one the cut recorded as its orchestrating checkout and must descend from the tagged commit."""
+    problems = []
+    try:
+        full = git(repo, "rev-parse", tooling_commit + "^{commit}").decode().strip()
+    except ManifestError:
+        return [f"tooling commit {tooling_commit} does not exist in this checkout"]
+    recorded = plan.get("orchestrator", {}).get("tooling_commit")
+    if not plan.get("orchestrator", {}).get("clean"):
+        problems.append("the cut's orchestrating checkout was not clean, so its tooling commit does not describe the tools that ran")
+    if full != recorded:
+        problems.append(f"tooling commit {full[:12]} is not the one the cut recorded ({str(recorded)[:12]})")
+    base = plan["source"]["base_sha"]
+    if subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", base, full], capture_output=True).returncode != 0:
+        problems.append(f"tooling commit {full[:12]} does not descend from the tagged commit {base[:12]}")
+    return problems
 
 
 def add_host(manifest: dict, host: dict) -> dict:
@@ -299,6 +337,14 @@ def verify_sums_folder(folder: Path, sums_name: str = "SHA256SUMS") -> tuple[lis
     return problems, sha256_file(sums)
 
 
+def land_skirmish_built(receipt) -> bool:
+    """The host counted the land skirmish compile define in the build rules of BOTH the root and the viewer tree. This, not the flag
+    that was requested or the overlay that was staged, is what a kit may say about land skirmish."""
+    counted = receipt.get("land_skirmish") if isinstance(receipt, dict) else None
+    return (isinstance(counted, dict)
+            and all(type(counted.get(tree)) is int and counted[tree] > 0 for tree in ("root", "viewer")))
+
+
 def receipt_problems(manifest: dict, host: dict) -> list[str]:
     """The host receipt (host_package.py) agrees with the plan and with the outputs the host section lists."""
     receipt = host.get("receipt")
@@ -326,7 +372,7 @@ def receipt_problems(manifest: dict, host: dict) -> list[str]:
 
 
 def _release_problems(manifest: dict, require_evidence: bool) -> list[str]:
-    """A release is a kit with more to prove: a signed annotated tag on the base commit, nothing added to the tagged tree but the
+    """A release is a kit with more to prove: an annotated tag (signing optional) on the base commit, nothing added to the tagged tree but the
     label and pin, a clean orchestrator, a reviewed layer, no waivers, an unchanged package, and the evidence."""
     plan = manifest["plan"]
     problems = []
@@ -337,8 +383,8 @@ def _release_problems(manifest: dict, require_evidence: bool) -> list[str]:
         if not HEX40.fullmatch(str(release.get(key, ""))):
             problems.append(f"release {key} is not a full hash")
     version = plan["version"]
-    if release.get("signature") != "good":
-        problems.append("the release tag's signature was not verified")
+    if release.get("signature") not in ("good", "unsigned"):
+        problems.append("the release tag's signature was not verified (a signed tag must verify; an unsigned annotated tag is recorded as 'unsigned')")
     if not version.get("release_version") or release.get("tag") != "v" + str(version.get("release_version")):
         problems.append("the release tag is not v<release version> of config/release-version.json")
     if version.get("label") != version.get("release_version"):
@@ -414,6 +460,14 @@ def _receipt_input_problems(receipt: dict, plan: dict) -> list[str]:
     return problems
 
 
+def _linux_godot_pin() -> str:
+    """The record the host writes for the pinned official Linux Godot editor: "<--version> sha256 <hash>"."""
+    spec = importlib.util.spec_from_file_location("godot_linux_import", Path(__file__).with_name("godot_linux_import.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return f"{module.LINUX_GODOT_VERSION} sha256 {module.LINUX_GODOT_SHA256}"
+
+
 def _receipt_toolchain_problems(toolchain, route_kind) -> list[str]:
     """A kit cut records the compiler and linker that built it, and the tools of the route it ran on."""
     if not isinstance(toolchain, dict):
@@ -423,8 +477,10 @@ def _receipt_toolchain_problems(toolchain, route_kind) -> list[str]:
     if route_kind == "linux-xbuild":
         if not host_os.startswith("Linux"):
             problems.append(f"the plan's route is the Linux cross host, the receipt's host is {host_os or 'unknown'}")
-        if not toolchain.get("wine"):
-            problems.append("the host receipt records no Wine (the Linux route runs the engine through it)")
+        pinned = _linux_godot_pin()
+        if str(toolchain.get("linux_godot") or "") != pinned:
+            problems.append(f"the host receipt's Linux Godot editor is {toolchain.get('linux_godot')!r}, the pin is {pinned!r} (the "
+                            "Linux route writes the project metadata with it)")
     elif route_kind == "windows-pool":
         if not host_os.startswith("Windows"):
             problems.append(f"the plan's route is the Windows pool, the receipt's host is {host_os or 'unknown'}")

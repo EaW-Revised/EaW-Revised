@@ -152,9 +152,10 @@ bool sink(const std::filesystem::path& user) {
     const auto n = note("EAWR-LOAD-0001", "quoted\"\nobject");
     const std::vector<LoadNote> notes{n};
     LoadNoteHeader header; header.profile_id = "session-a"; header.written_at = "2026-10-27T00:00:00Z"; header.game_version = "synthetic";
+    header.session_id = "20261027T000000Z-00000001";
     auto saved = eawr::platform::write_load_notes(user, header, notes);
     if (!check(!saved.failure, "write session JSON")) return false;
-    auto other = header; other.profile_id = "session-b";
+    auto other = header; other.profile_id = "session-b"; other.session_id = "20261027T000001Z-00000002";
     saved = eawr::platform::write_load_notes(user, other, {});
     if (!check(!saved.failure, "independent session JSON")) return false;
     std::ifstream input(eawr::platform::load_notes_path(user, header), std::ios::binary);

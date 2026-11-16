@@ -29,6 +29,7 @@ struct ProfileLaunch {
     std::string mode = "front-end";
     std::string render_thread = "separate";
     std::optional<int> frame_rate_limit; // absent/null inherits settings; -1 display, 0 off, positive cap
+    bool no_fog = false;                 // owner convenience (not retail): the launcher passes --eawr-no-fog; absent = off
     friend bool operator==(const ProfileLaunch&, const ProfileLaunch&) = default;
 };
 struct ProfileAccepted {

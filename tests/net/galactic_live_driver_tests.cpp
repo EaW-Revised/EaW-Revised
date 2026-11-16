@@ -14,6 +14,8 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/platform/tactical_feed.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
+#include "eawr/presentation/audio/gift_notifications.hpp"
+#include "eawr/presentation/ui/net_perf.hpp"
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 #include "../../apps/viewer/src/galactic/live_battle_dialog_view.hpp"
@@ -22,6 +24,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <system_error>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -330,10 +333,19 @@ void agreed_commands_and_digests(const std::array<std::size_t, 2> workers) {
         expect(pair.matches[peer]->pause_notice_revision() > pause_revisions[peer],
             label + "the agreed resume invalidates the paused notice");
     }
-    for (std::size_t peer = 0; peer < 2; ++peer)
+    // Both events are counted, but which of the two orders (resume from seat 0, speed from seat 1) executes last depends
+    // on the ticks they were stamped for, so the last action is either one; the peers must agree on it (#6640).
+    for (std::size_t peer = 0; peer < 2; ++peer) {
+        const auto& action = pair.matches[peer]->view().clock_action;
         expect(pair.matches[peer]->clock_events() >= clock_events[peer] + 2
-            && pair.matches[peer]->view().clock_action == "set the galactic speed to 2x",
-            label + "the resume and the speed change each move the clock event count (#5355)");
+            && (action == "resumed" || action == "set the galactic speed to 2x"),
+            label + "the resume and the speed change each move the clock event count (#5355): peer " + std::to_string(peer)
+            + " events " + std::to_string(clock_events[peer]) + " -> " + std::to_string(pair.matches[peer]->clock_events())
+            + ", last action '" + action + "' at tick " + std::to_string(pair.matches[peer]->view().clock_change_tick));
+    }
+    expect(pair.matches[0]->view().clock_action == pair.matches[1]->view().clock_action
+        && pair.matches[0]->view().clock_change_tick == pair.matches[1]->view().clock_change_tick,
+        label + "both peers show the same last clock action");
     expect(pair.speed(0) == double_speed && pair.speed(1) == double_speed, label + "the agreed speed change reached both peers");
     expect(pair.galaxy_frame(0) > frozen && pair.galaxy_frame(0) == pair.galaxy_frame(1), label + "the galaxy runs again, equally");
     for (auto& live : pair.lives) live->stop();
@@ -441,6 +453,89 @@ void views_connect_wait_and_run() {
     pair.lives[1]->advance_to(60);
     expect(pair.run_to(60), "the wait ends when the peer continues");
     expect(until([&] { return pair.matches[0]->view().phase == viewer::GalacticLanPhase::running; }, 5s), "back to running");
+}
+
+// Co-op campaign network diagnostics: an injected peer wait (the second peer stops at tick 10, the first wants more)
+// logs stall-start and stall-end with the waiting peer and the duration, and fills the view's overlay data, which the
+// viewer turns into the same report and 5 s summary line as a skirmish. Diagnostics only: no tick or digest changes.
+void netdiag_reports_waits() {
+    std::mutex log_mutex;
+    std::vector<std::string> lines;
+    const auto logged = [&](const std::string_view event) {
+        const std::lock_guard lock(log_mutex);
+        return std::any_of(lines.begin(), lines.end(), [&](const std::string& line) {
+            return line.find(std::string("event=") + std::string(event)) != std::string::npos;
+        });
+    };
+    std::atomic<bool> route_gone{false};   // the transport's route disappears (the link closed) while flagged
+    Pair pair(versus_setup(), {2, 2}, LiveGameSession::Pacing::driven, 3000, 2, net::max_session_ticks,
+        net::GalacticClockPolicy::limited, [&](viewer::GalacticLanOptions& options, const net::PeerIndex peer) {
+            if (peer != 0) return;
+            options.link_route = [&route_gone](net::PeerIndex) {
+                return route_gone.load() ? eawr::presentation::ui::NetRouteInfo{}
+                    : eawr::presentation::ui::NetRouteInfo{eawr::presentation::ui::NetRoute::relay_cloudflare, true};
+            };
+            options.diagnostic_sink = [&](const std::string_view line) {
+                const std::lock_guard lock(log_mutex);
+                lines.emplace_back(line);
+            };
+        });
+    expect(pair.run_to(10), "both peers run to tick 10");
+    // The second peer stays at tick 10 while the first wants more.
+    pair.lives[0]->advance_to(60);
+    expect(until([&] { return logged("stall-start"); }, 15s), "a wait of a second or more logs stall-start");
+    {
+        const std::lock_guard lock(log_mutex);
+        const auto start = std::find_if(lines.begin(), lines.end(), [](const std::string& line) {
+            return line.find("event=stall-start") != std::string::npos; });
+        expect(start != lines.end() && start->find("seat=0") != std::string::npos
+            && start->find("peer=1") != std::string::npos && start->find("reason=lockstep-wait") != std::string::npos
+            && start->find("missing=1,") != std::string::npos, "stall-start names the waiting peer and the missing peers");
+    }
+    const bool wait_in_view = until([&] {
+        const auto view = pair.matches[0]->view();
+        return view.net_stall.waiting && view.net_stall.wait_peer == 1 && view.net_stall.wait_ms >= 1000;
+    }, 5s);
+    expect(wait_in_view, "the view reports the running wait, its peer and its length");
+    const auto waiting = pair.matches[0]->view();
+    expect(waiting.net_seat == 0 && waiting.net_peers.size() == 1 && waiting.net_peers[0].peer == 1,
+        "the view carries one link row per remote peer");
+    expect(!waiting.net_peers.empty() && waiting.net_peers[0].route == eawr::presentation::ui::NetRoute::relay_cloudflare
+        && waiting.net_peers[0].route_lossy, "the view carries the transport's route, its relay provider and the degraded flag");
+    expect(logged("route"), "the route is logged once it is known");
+    expect(logged("route-degraded"), "the degraded route is logged when the transport flags it");
+    expect(waiting.net_stall.longest_ms_10s >= 1000, "the ledger keeps the longest wait for the overlay");
+    namespace ui = eawr::presentation::ui;
+    ui::NetPerfReport report;
+    report.seat = waiting.net_seat; report.peers = waiting.net_peers; report.stall = waiting.net_stall;
+    const std::string summary = ui::net_summary_line(report);
+    expect(summary.find("verdict=network") != std::string::npos && summary.find("wait_peer=1") != std::string::npos,
+        "the summary line blames the network and names the peer: " + summary);
+    expect(summary.find("1:route=relay-cloudflare,degraded,") != std::string::npos, "the summary line names each peer's route: " + summary);
+    expect(ui::net_route_hint(report).starts_with("Network route degraded (relay cloudflare, "), "the overlay hint names the relay: " + ui::net_route_hint(report));
+    // Let the wait outlast the one-per-second line spacing, then resume the peer.
+    std::this_thread::sleep_for(1200ms);
+    pair.lives[1]->advance_to(60);
+    expect(pair.run_to(60), "the wait ends when the peer continues");
+    expect(until([&] { return logged("stall-end"); }, 15s), "the end of the wait logs stall-end");
+    {
+        const std::lock_guard lock(log_mutex);
+        const auto end = std::find_if(lines.begin(), lines.end(), [](const std::string& line) {
+            return line.find("event=stall-end") != std::string::npos; });
+        expect(end != lines.end() && end->find("peer=1") != std::string::npos
+            && end->find("duration_ms=") != std::string::npos && end->find("start_tick=") != std::string::npos,
+            "stall-end names the peer and the duration");
+        const auto degraded = std::find_if(lines.begin(), lines.end(), [](const std::string& line) {
+            return line.find("event=route-degraded") != std::string::npos; });
+        expect(degraded != lines.end() && degraded->find("reason=relay (cloudflare)") != std::string::npos,
+            "the log names the relay as 'relay (cloudflare)'");
+    }
+    // The flagged peer's route disappears: the log says it recovered instead of staying silent.
+    route_gone = true;
+    pair.lives[0]->advance_to(80);
+    pair.lives[1]->advance_to(80);
+    expect(pair.run_to(80), "both peers run on after the route is gone");
+    expect(until([&] { return logged("route-recovered"); }, 15s), "a flagged peer whose route is gone logs route-recovered");
 }
 
 // GCMP-04: an invasion acceptance crosses the same agreed input stream as other seat commands.
@@ -1687,9 +1782,15 @@ void presentation_barrier_is_refused() {
 void saves_are_agreed() {
     for (const auto workers : {1U, 2U, 4U, 8U}) for (const bool disk_failure : {false, true}) {
         auto setup = policy_setup(); galactic_test::mark_multiplayer(setup);
-        Pair pair(setup, {workers, workers}, LiveGameSession::Pacing::driven, 3000, 0);
+        // A directory of its own per run (#6640): a fixed /tmp name collides with a stale file of another user or run.
+        // It is declared before the pair so it is removed after both peers have stopped writing.
         const auto directory = std::filesystem::temp_directory_path() / ("eawr-gc-agreed-save-" + std::to_string(workers)
-            + (disk_failure ? "-failure" : "-success"));
+            + (disk_failure ? "-failure-" : "-success-") + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        struct RemoveAtExit {
+            std::filesystem::path path;
+            ~RemoveAtExit() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+        } remove_directory{directory};
+        Pair pair(setup, {workers, workers}, LiveGameSession::Pacing::driven, 3000, 0);
         std::filesystem::create_directories(directory);
         const auto output = disk_failure ? directory / "regular-file" : directory;
         if (disk_failure) { std::ofstream block(output); block << "this is not a directory"; }
@@ -2455,10 +2556,26 @@ void borrowed_controller_orders_survive() {
         if (coop) {
             ui::TacticalIntent gift = stop; gift.verb = ui::TacticalVerb::gift; gift.gift_recipient = pair.humans[1];
             require(schedulers[0]->issue(gift)); advance(14);
-            const auto snapshot = pair.lives[0]->frame().battle;
-            expect(snapshot && std::any_of(snapshot->instances().begin(), snapshot->instances().end(), [&](const auto& unit) {
-                return unit.entity_id == root && unit.controller_seat == pair.humans[1];
-            }), "gift transfers the root to the other human without ending the battle");
+            const auto root_gifted = [&] {
+                const auto snapshot = pair.lives[0]->frame().battle;
+                return snapshot && std::any_of(snapshot->instances().begin(), snapshot->instances().end(), [&](const auto& unit) {
+                    return unit.entity_id == root && unit.controller_seat == pair.humans[1];
+                });
+            };
+            // Fixed delay here (adaptive timing is off in this fixture). The scheduler's order is taken by the live thread's
+            // next poll and stamped max(next_seal, completed + delay): normally tick 12 for an issue at tick 10, but when
+            // that poll comes a tick later (a loaded host) the stamp is 13 and the gift executes one tick later. Every peer
+            // applies the same agreed stamp (the end-of-test digest equality checks that); on a loaded host about 1 run in 6
+            // saw it late on the base commit too, so this is a test-timing race, not a product change.
+            for (std::uint64_t tick = 15; tick <= 17 && !root_gifted(); ++tick) advance(tick);
+            expect(root_gifted(), "gift transfers the root to the other human without ending the battle");
+            for (std::size_t peer = 0; peer < feeds.size(); ++peer) {
+                const auto journal = feeds[peer]->events_after(0, feeds[peer]->completed_tick());
+                std::size_t notifications = 0;
+                for (const auto& entry : journal.ticks)
+                    notifications += eawr::presentation::audio::gift_notifications(entry.events, pair.humans[peer]);
+                expect(notifications == 1, "GC co-op child journal notifies giver and receiver once each");
+            }
             const auto gifted = feeds[0]->record();
             expect(std::any_of(gifted.commands.begin(), gifted.commands.end(), [](const auto& command) {
                 return std::holds_alternative<tactical::GiftPayload>(command.payload);
@@ -2589,7 +2706,7 @@ void multiplayer_ai_vote_human_leaves() {
 struct RecoveryPeers {
     RecoveryPeers(std::uint32_t count, std::size_t workers, std::size_t log_limit = 8U * 1024U * 1024U,
         std::uint64_t timeout = 30'000, bool loading_barrier = true,
-        std::optional<std::uint64_t> returning_timeout = {})
+        std::optional<std::uint64_t> returning_timeout = {}, bool adaptive = false)
         : setup(policy_setup()), pipes(count) {
         setup.seats.clear();
         for (std::uint32_t seat = 1; seat <= count; ++seat)
@@ -2637,6 +2754,11 @@ struct RecoveryPeers {
                     "an absent loading barrier gives a named optional-feature refusal");
             }
             options.recovery_offer = offer; options.recovery_log_bytes = log_limit; options.completeness_timeout_ms = timeout;
+            if (adaptive) {
+                options.adaptive_timing = true;
+                options.adaptive_rtt_ms = [](net::PeerIndex) { return std::optional<std::uint64_t>{330}; };
+            }
+            options.diagnostic_sink = [this](std::string_view line) { logs.emplace_back(line); };
             if (returning_timeout && peer == count - 1) options.completeness_timeout_ms = *returning_timeout;
             options.quarantine_recovery_peer = [this, peer](net::PeerIndex remote) {
                 pipes.links_[peer][remote] = pipes.links_[remote][peer] = false;
@@ -2708,6 +2830,7 @@ struct RecoveryPeers {
     std::vector<std::shared_ptr<eawr::platform::LiveGameStepDriver>> drivers;
     std::vector<std::uint32_t> publications;
     std::vector<std::vector<eawr::core::Diagnostic>> rejected;
+    std::vector<std::string> logs; // diagnostic lines of every peer, in step order (one thread)
     std::uint64_t now{};
 };
 void recovery_release_interleaving_contracts() {
@@ -2810,6 +2933,98 @@ void recovery_voted_refusal_interleaving_contracts() {
             "committed survivors continue through ordinary departure of the quarantined target");
         if (count == 3) expect(rig.games[0]->state_sha256() == rig.games[1]->state_sha256(),
             "source and held-then-committed survivor retain equal hashes after the target departs");
+    }
+}
+
+// Adaptive input delay for online co-op (PR 2): a recovery after an agreed delay change rebuilds the core at the delay in force
+// (the frontier carries it), so the returning peer, the survivors and the new core stay in lockstep.
+void adaptive_coop_recovery_across_a_delay_change() {
+    for (const auto peers : {2U, 3U}) for (const auto workers : {1U, 8U}) {
+        RecoveryPeers rig(peers, workers, 8U * 1024U * 1024U, 30'000, true, {}, true);
+        rig.run(130); // the host proposes at the first policy tick; the change is agreed and applied well before here
+        const auto changes = std::count_if(rig.logs.begin(), rig.logs.end(), [](const std::string& line) {
+            return line.find("event=input-delay-change") != std::string::npos; });
+        expect(changes >= static_cast<std::ptrdiff_t>(peers), "every peer logs the agreed delay change before the recovery (" + std::to_string(changes) + ")");
+        for (unsigned stall = 0; stall < 12; ++stall)
+            for (std::uint32_t peer = 0; peer + 1 < peers; ++peer) rig.step(peer, true);
+        const auto before = rig.logs.size();
+        expect(rig.recover(0, 220) == net::GalacticRecoveryRefusal::none,
+            "recovery after an agreed delay change publishes on " + std::to_string(peers) + " peers and " + std::to_string(workers) + " workers");
+        rig.run(260);
+        for (const auto& game : rig.games) expect(game->state_sha256() == rig.games.front()->state_sha256(),
+            "adaptive co-op peers converge after a recovery across a delay change");
+        // The rebuilt core runs at the delay in force: no later line reports it falling back to the offered delay.
+        for (std::size_t line = before; line < rig.logs.size(); ++line)
+            expect(rig.logs[line].find("event=input-delay-change") == std::string::npos,
+                "the recovered core keeps the agreed delay: " + rig.logs[line]);
+    }
+}
+
+// Proposals are rare: a stable link proposes once (to leave the offered delay), then stays on the agreed delay.
+void adaptive_coop_proposals_are_rare() {
+    std::mutex log_mutex;
+    std::vector<std::string> lines;
+    Pair pair(versus_setup(), {2, 2}, LiveGameSession::Pacing::driven, 3000, 2, net::max_session_ticks,
+        net::GalacticClockPolicy::limited, [&](viewer::GalacticLanOptions& options, const net::PeerIndex peer) {
+            options.adaptive_timing = true;
+            options.adaptive_rtt_ms = [](net::PeerIndex) { return std::optional<std::uint64_t>{330}; };
+            if (peer == 0) options.diagnostic_sink = [&](const std::string_view line) {
+                const std::lock_guard lock(log_mutex); lines.emplace_back(line);
+            };
+        });
+    expect(pair.run_to(700), "an adaptive co-op pair runs 700 ticks");
+    const std::lock_guard lock(log_mutex);
+    const auto count = [&](const char* event) {
+        return std::count_if(lines.begin(), lines.end(), [&](const std::string& line) { return line.find(event) != std::string::npos; });
+    };
+    expect(count("event=timing-mode") == 1 && count("reason=adaptive") >= 1, "the timing mode is logged once, as adaptive");
+    expect(count("event=input-delay-change") == 1, "a stable link changes the delay once, not at every policy tick ("
+        + std::to_string(count("event=input-delay-change")) + ")");
+}
+
+// A save that hits a pending delay proposal is retried automatically and completes: the player sees no error. The short
+// case (330 ms: delay 8, the agreement spans about 37 ticks) and the long one (2640 ms: delay 64, about 260 ticks) both
+// finish; the retry waits for the agreement to settle instead of spending a fixed number of tries on its ticks.
+void adaptive_coop_save_retries_over_a_proposal() {
+    struct Case { std::uint64_t rtt, earliest, until; };
+    for (const auto& row : {Case{330, 100, 160}, Case{2640, 320, 760}}) {
+        auto setup = versus_setup();
+        const auto rtt = row.rtt;
+        Pair pair(setup, {1, 1}, LiveGameSession::Pacing::driven, 3000, 0, net::max_session_ticks,
+            net::GalacticClockPolicy::limited, [&](viewer::GalacticLanOptions& options, const net::PeerIndex) {
+                options.adaptive_timing = true;
+                options.adaptive_rtt_ms = [rtt](net::PeerIndex) { return std::optional<std::uint64_t>{rtt}; };
+            });
+        const auto directory = std::filesystem::temp_directory_path() / ("eawr-gc-adaptive-save-" + std::to_string(rtt) + "-"
+            + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(directory);
+        pair.start(0, [&](auto& options) { options.saves.directory = directory.string(); });
+        pair.start(1, [&](auto& options) { options.saves.directory = (directory / "joiner").string(); });
+        // The host proposes at tick 64 (first policy tick for the offered delay); the change applies later.
+        expect(pair.run_to(66), "the fixture reaches the proposal window");
+        eawr::platform::LiveSaveRequest request; request.seat = pair.humans[0]; request.name = "inside-proposal";
+        const auto token = pair.lives[0]->request_save(request);
+        expect(token != 0, "the host admits the save");
+        // A second request while the first is held for its retry is refused visibly (one save in flight at a time), never
+        // admitted next to it: the held save cannot be replaced or lost.
+        eawr::platform::LiveSaveRequest second = request; second.name = "second-inside-proposal";
+        const auto second_token = pair.lives[0]->request_save(second);
+        expect(pair.run_to(row.until), "both peers continue while the save retries");
+        expect(pair.lives[0]->wait_save(token, 10s), "the retried save settles");
+        const auto outcomes = pair.lives[0]->save_outcomes();
+        const auto first_outcome = std::find_if(outcomes.begin(), outcomes.end(), [&](const auto& row_) { return row_.token == token; });
+        const auto second_outcome = std::find_if(outcomes.begin(), outcomes.end(), [&](const auto& row_) { return row_.token == second_token; });
+        expect(first_outcome != outcomes.end() && first_outcome->phase == eawr::platform::LiveSavePhase::completed && !first_outcome->diagnostic,
+            "a save that overlapped a pending proposal completes without any error (rtt " + std::to_string(rtt) + ")");
+        expect(second_outcome != outcomes.end() && second_outcome->phase == eawr::platform::LiveSavePhase::rejected && second_outcome->diagnostic,
+            "a second save during the held retry is refused with a visible reason, not silently queued behind it");
+        expect(std::none_of(outcomes.begin(), outcomes.end(), [](const auto& row_) {
+            return row_.phase == eawr::platform::LiveSavePhase::requested; }), "no save request is left pending");
+        expect(first_outcome != outcomes.end() && first_outcome->completed_tick > row.earliest, "it was taken after the agreement completed, not inside it");
+        expect(std::filesystem::exists(directory / "inside-proposal.eawrsave"), "the player file exists");
+        expect(pair.lives[0]->tick_hashes() == pair.lives[1]->tick_hashes(), "the retried save keeps both peers equal");
+        for (auto& live : pair.lives) live->stop();
+        std::filesystem::remove_all(directory);
     }
 }
 
@@ -2960,6 +3175,16 @@ int main(int argc, char** argv) {
             dormant_freestore_admission();
             multiplayer_coop_battle();
             multiplayer_ai_vote_human_leaves();
+            return galactic_test::checker.finish();
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--adaptive") {
+            adaptive_coop_proposals_are_rare();
+            adaptive_coop_save_retries_over_a_proposal();
+            adaptive_coop_recovery_across_a_delay_change();
+            return galactic_test::checker.finish();
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--netdiag") {
+            netdiag_reports_waits();
             return galactic_test::checker.finish();
         }
         if (argc == 2 && std::string_view(argv[1]) == "--raid") {

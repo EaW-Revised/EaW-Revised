@@ -1,5 +1,6 @@
 # Authoritative Lua sandbox and scheduler (#247, docs/lua-sandbox.md).
 add_executable(lua_sandbox_tests lua_sandbox_tests.cpp
+    lua_sandbox_policy_tests.cpp
     lua_scheduler_tests.cpp)
 target_link_libraries(
     lua_sandbox_tests
@@ -8,7 +9,7 @@ target_link_libraries(
 target_compile_features(lua_sandbox_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(lua_sandbox_tests)
 
-foreach(_eawr_mode IN ITEMS clock_rng sandbox iteration scheduler workers)
+foreach(_eawr_mode IN ITEMS clock_rng sandbox iteration scheduler workers policy)
     add_test(NAME lua_sandbox_${_eawr_mode} COMMAND lua_sandbox_tests ${_eawr_mode})
 endforeach()
 

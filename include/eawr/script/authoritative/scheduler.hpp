@@ -31,7 +31,7 @@ class PartitionExecutor;
 
 namespace eawr::script::authoritative {
 
-inline constexpr std::string_view sandbox_policy_identity = "eawr-lua-sandbox-v3";
+inline constexpr std::string_view sandbox_policy_identity = "eawr-lua-sandbox-v4";
 
 // The instance service's executor phase (docs/simulation.md, phase map).
 inline constexpr std::string_view script_phase_name = "script-instances";
@@ -59,13 +59,15 @@ inline constexpr std::string_view missing_api = "EAWR-SCRIPT-0215";
 inline constexpr std::string_view unsupported_api = "EAWR-SCRIPT-0216";
 // A sourced nonfatal Lua API warning. The call and object service continue.
 inline constexpr std::string_view script_warning = "EAWR-SCRIPT-0217";
+// One line of `print` output in ServiceReport::log (informational, never a fault).
+inline constexpr std::string_view script_log = "EAWR-SCRIPT-0218";
 } // namespace codes
 
 // Persistence and state hashing (#248, docs/lua-persistence.md). A changed
 // encoding rule needs a new identity.
 inline constexpr std::string_view save_format_identity = "eawr-script-save-v4";
 // Galactic clock profile plus the shared proximity and object attachment state.
-inline constexpr std::string_view galactic_save_format_identity = "eawr-script-galactic-save-v3";
+inline constexpr std::string_view galactic_save_format_identity = "eawr-script-galactic-save-v4";
 inline constexpr std::string_view query_save_format_identity = "eawr-script-query-save-v1";
 inline constexpr std::string_view state_hash_identity = "eawr-script-state-v1";
 inline constexpr std::string_view authoritative_state_identity = "eawr-authoritative-state-v1";
@@ -168,7 +170,28 @@ struct Quotas {
     std::uint32_t registrations = 65'536;
     // Logical bytes of Lua objects per instance (docs/lua-sandbox.md).
     std::uint64_t memory_bytes = std::uint64_t{64} << 20;
+    // What one instance may stage on the host in one service (docs/lua-sandbox.md, host-side work): commands, posted
+    // events and diagnostics. Exceeding one is the logical-quota fault. Counts, not sizes: the bytes they carry are
+    // charged to the instruction budget. Fixed limits of the host, not saved with the session.
+    std::uint32_t staged_commands = 4'096;
+    std::uint32_t staged_posts = 4'096;
+    std::uint32_t staged_diagnostics = 1'024;
 };
+
+// Headroom report of the per-service limits (diagnostic only, never saved or hashed): the largest use any one instance
+// made of each limit in one service, per scheduler label (SessionConfig::label), since the process started.
+// Weights of host-side work in the units of the instruction budget. A unit is about one Lua step (16 ns on the Windows clang
+// build host); `galactic_control_host_work_bench` measures the loops these weights are set from (PR #6710).
+inline constexpr std::uint64_t host_replay_units = 32;        // one immediate action replayed to rebuild a shadow
+inline constexpr std::uint64_t host_record_visit_units = 16;  // one world record visited by a query
+
+struct HostWorkPeaks {
+    std::uint64_t commands{}, posts{}, diagnostics{};  // against Quotas::staged_*
+    std::uint64_t host_units{};                        // host work charged in one service (arguments, results, scans)
+    std::int64_t instructions{};                       // the script's own steps in one service, against instructions_per_service
+    std::uint64_t services{};                          // instance services observed
+};
+[[nodiscard]] std::vector<std::pair<std::string, HostWorkPeaks>> host_work_peaks();
 
 // Test instrumentation only. The caller owns the sink and serializes its callbacks
 // (or makes them thread safe). No observations enter saves or state hashes.
@@ -188,6 +211,13 @@ struct SessionConfig {
     // Mode time is supplied at a barrier, independently of service/RNG ticks.
     // The GC save identity persists that mode frame; default saves are unchanged.
     bool galactic_clock{};
+    // Galactic clock profile: what an uncaught Lua error does. True (the AI providers' rule): the instance is retired
+    // for the rest of the campaign. False (story and object scripts, whose engine ends only the failing thread or
+    // call): the failing thread ends, its staged output is rolled back and the instance keeps running. Budget and
+    // quota faults retire the instance either way. A host policy, not saved with the session.
+    bool retire_on_lua_error = true;
+    // Names this scheduler in host_work_peaks() ("story", "object"; empty for the rest). Diagnostic only, not saved.
+    std::string label{};
     // Synchronous query sessions receive nondecreasing 1/30-second mode time
     // independently of invocation count. Roots read the last supplied time (0
     // before service); timers use this time. Saves have a distinct identity.
@@ -233,6 +263,13 @@ public:
     [[nodiscard]] virtual std::unique_ptr<ImmediateEffectState> clone() const = 0;
     [[nodiscard]] virtual core::Result<ValueList> apply(std::string_view action, const ValueList&) = 0;
     [[nodiscard]] virtual core::Result<ValueList> query(std::string_view name, const ValueList&) const = 0;
+    // Objects the last query scanned (or similar host-side work it did beyond what it returns), taken once by the
+    // caller and charged to the instance's budget; 0 for a query that scans nothing.
+    [[nodiscard]] virtual std::uint64_t take_query_work() noexcept { return 0; }
+    // What one clone of this state costs in the deterministic units of host work (rows and records it copies; at least
+    // one). A clone is charged this much to the instance that causes it, and a rebuild from the action log is charged
+    // this much plus one unit per replayed action.
+    [[nodiscard]] virtual std::uint64_t clone_units() const noexcept { return 1; }
 };
 
 class ImmediateEffectHost {
@@ -257,6 +294,17 @@ public:
     // instance, so a command's sequence can name what the command creates (#449).
     [[nodiscard]] virtual std::uint64_t command_sequence() const noexcept = 0;
     virtual void issue_command(std::string verb, ValueList arguments) = 0;
+    // The calling instance's own newest staged GlobalValue.Set of `name` in its current transaction: outer empty when it has
+    // staged none, inner empty when the newest one deletes the name. Retail writes the registry at once, so a script that sets a
+    // name and reads it back in the same call sees its own write; the registry itself stays committed once per service, after
+    // every instance ran, so no instance sees another's write early (#7188).
+    [[nodiscard]] virtual std::optional<std::optional<Value>> staged_global_value(std::string_view name) const {
+        (void)name;
+        return std::nullopt;
+    }
+    // Host-side work the binding did beyond the values it takes and returns (a scan of host records), in the same
+    // deterministic units as the instruction budget; the budget fault is raised when the binding returns.
+    virtual void charge_host_work(std::uint64_t units) noexcept = 0;
     // Runs against the ordered service's private shadow. A failed action also
     // discards its partial writes, even if Lua catches the binding error.
     [[nodiscard]] virtual core::Result<ValueList> apply_immediate(std::string_view action, const ValueList& arguments) = 0;
@@ -299,11 +347,17 @@ struct ServiceReport {
     std::uint64_t tick{};
     std::vector<ScriptCommand> commands;
     std::vector<ScriptDiagnostic> diagnostics; // ordered by instance, then occurrence
+    // `print` output (code script_log), ordered by instance, then occurrence. Rate limited per instance, dropped with a
+    // rolled-back call or a faulted instance. Outside authoritative state: never saved, hashed or replayed.
+    std::vector<ScriptDiagnostic> log;
     std::vector<std::uint64_t> removed_instances;
     std::vector<InstanceLoad> loads; // every serviced instance, ascending ID
     ManagedHandleWork managed_handles{};
     std::vector<Handle> managed_releases{}; // ordered observation, never saved
     std::vector<core::LoadNote> load_notes{}; // GC instance retirement, ordered at commit
+    // Instances (ascending ID) a thread of which ended in an uncaught Lua error during this service, whether or not the
+    // instance was retired. A host that ties state to a script thread (story control locks) releases it from here.
+    std::vector<std::uint64_t> thread_failures{};
 };
 
 // Per-service choices of the host. They are inputs of the tick, like its events.
@@ -339,6 +393,7 @@ struct ObjectScript {
     std::uint64_t generation{};
     std::uint64_t instance{};
     std::string module;
+    std::uint64_t registration{}; // GC object-service ordering; zero for the tactical profile
     friend bool operator==(const ObjectScript&, const ObjectScript&) = default;
 };
 
@@ -445,6 +500,10 @@ public:
     // its value when it is nil, a boolean, a number, a string or a handle;
     // nullopt otherwise. Reads only.
     [[nodiscard]] core::Result<std::optional<Value>> read_global(std::uint64_t instance, std::string_view name);
+    // GC object-service tail: after a continuing pump, persist its service stamp and,
+    // on the first pump, consume one synchronized draw from that instance.
+    [[nodiscard]] core::Result<void> stamp_galactic_object_service(std::uint64_t instance, bool first,
+        numeric::LuaNumber rate, numeric::LuaNumber now);
 
     // Diagnostic const query at a completed tick; caller excludes concurrent stepping.
     [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
@@ -457,6 +516,9 @@ public:
     // Before engine preparation/attachment so root chunks see mode time too.
     [[nodiscard]] core::Result<void> set_galactic_frame(std::uint64_t frame);
     [[nodiscard]] std::vector<std::uint64_t> instances() const;
+    // Changes whenever the set of instance ids does (create, remove, a finished instance leaving, a load). A host that caches the id list
+    // reads it again only when this moved. Not saved, not hashed.
+    [[nodiscard]] std::uint64_t instance_revision() const noexcept;
     // GC fault tombstones persist across barriers and restore; a retired ID cannot be reused.
     [[nodiscard]] std::vector<std::uint64_t> retired_instances() const;
     // The thread slots of an instance at the tick barrier, in slot order: true for a live

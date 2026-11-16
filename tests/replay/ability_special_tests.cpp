@@ -528,11 +528,11 @@ void test_fire_range_bonus() {
                 }
                 if (frame == 1) {
                     const auto checkpoint = world.save_checkpoint_state();
-                    const auto domain = scenario == 0 ? 25U : 26U;
+                    const auto domain = scenario == 0 ? 29U : 30U;
                     expect(checkpoint && checkpoint.value().size() >= 4
                         && checkpoint.value()[0] == domain && checkpoint.value()[1] == 0
                         && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
-                        "WFR-01: zero range uses domain 25; nonzero range selects domain 26");
+                        "WFR-01: zero range uses domain 29; nonzero range selects domain 30");
                     auto fresh = tactical::TacticalSession::from_replay(world.record(),
                         std::vector<tactical::SensorProfile>{{corvette_type, units(1500)}, {frigate_type, units(1500)}},
                         health, {}, std::nullopt, combat, {}, {}, economy);
@@ -622,10 +622,10 @@ void test_script_invulnerable() {
             expect(final && final->hull.raw() < full.raw(), "TL-03: privileged script damage reaches a flagged unit");
             const auto checkpoint = session.save_checkpoint_state();
             // The invulnerability bit selects the extended domain; the leading uint32 is little-endian.
-            const unsigned domain = scenario == 1 ? 27U : 25U;
+            const unsigned domain = scenario == 1 ? 31U : 29U;
             expect(checkpoint && checkpoint.value().size() >= 4 && checkpoint.value()[0] == domain
                 && checkpoint.value()[1] == 0 && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
-                "TL-03: the flag selects domain 27; a cleared or absent flag keeps domain 25");
+                "TL-03: the flag selects domain 31; a cleared or absent flag keeps domain 29");
             if (scenario == 1) {
                 // Opcode 34 survives write and parse with its flag and unit list intact.
                 const auto bytes = tactical::write_replay(session.record());
@@ -659,6 +659,17 @@ void test_script_invulnerable() {
                     tampered[0] = 16;
                     auto victim = tactical::TacticalSession::from_replay(session.record(), {}, raw_health);
                     if (victim) expect(!victim.value().load_checkpoint_state(tampered), "TL-03: a mismatched fire-range domain is refused");
+                    // WSPL-08: a save written before the super laser use state (domains 21..28) is refused with a
+                    // diagnostic, never read with the wider ability slot.
+                    for (const std::uint8_t old_domain : {21, 22, 23, 24, 25, 26, 27, 28}) {
+                        auto old = checkpoint.value();
+                        old[0] = old_domain;
+                        auto refused = tactical::TacticalSession::from_replay(session.record(), {}, raw_health);
+                        if (!refused) continue;
+                        const auto result = refused.value().load_checkpoint_state(old);
+                        expect(!result && result.error().message.find("unsupported child state domain") != std::string::npos,
+                            "WSPL-08: a pre-laser-state child domain (21..28) is refused with a diagnostic");
+                    }
                 }
             }
             return true;

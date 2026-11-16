@@ -74,16 +74,31 @@ The factor itself is data: WGM-210 (4x), `galactic::fast_forward_factor_raw`.
 In an online or LAN match the panel gains a network section: a one-line verdict, the lockstep waits (waits per
 second, milliseconds waited in the last second, the longest wait in the last 10 s), the seat the simulation waits
 for right now, and per remote seat the round trip, jitter and packet loss (`rtt -` until the transport has a
-sample; loss is 0 where the transport cannot tell). Every wait counts, however short: the `stall-start` log line
+sample; loss is 0 where the transport cannot tell) and a `route` row naming how that link is carried: `direct`, `relay` or `unknown` (not open yet, or a plain LAN stream).
+A relayed link shows as `relay (own)` or `relay (cloudflare)` (plain `relay` when the transport cannot name the provider).
+When the transport flags a relayed link as lossy for a while (receive loss at or above 15 % for 20 s, cleared below 5 % for
+10 s) the section adds a hint row, `Network route degraded (relay own, 22% loss)`, and the net log gets a `route-degraded` /
+`route-recovered` line with the loss; the summary line marks that peer `degraded`. Observation only: nothing switches the
+route. The skirmish match and the co-op campaign share the row, the hint and the log lines.
+The co-op campaign driver (galaxy and its retained child battles) feeds the same section, and logs `stall-start` and
+`stall-end` lines with the waiting peer and duration, plus one `route` line per peer when its route becomes known. Every wait counts, however short: the `stall-start` log line
 only fires after a second. The verdict reads `network: waiting on peer 1 640 ms` when waits add up to 100 ms or
 more in the last second (or one runs that long now), `game: frame 48 ms, sim 31 ms` when the frame or tick average
 is over one 30 Hz tick, otherwise `ok`. "network" means this machine waited for that peer's inputs: a slow link and a slow peer PC look the same.
 
 While a match runs, godot.log gets one line every 5 s whether or not the overlay is shown:
-`EAWR net summary seat=0 verdict=ok wait_peer=- wait_ms=0 stalls_per_s=0 stalled_ms_1s=0 longest_ms_10s=0 frame_ms=8.0 sim_ms=5.0 peers=1:rtt_ms=80,jitter_ms=5,loss_pct=0.0`.
+`EAWR net summary seat=0 verdict=ok wait_peer=- wait_ms=0 stalls_per_s=0 stalled_ms_1s=0 longest_ms_10s=0 frame_ms=8.0 sim_ms=5.0 peers=1:route=direct,rtt_ms=80,jitter_ms=5,loss_pct=0.0`.
 Map reports carry the latest numbers as a `net_perf` object (the last match's numbers; `null` if no match ran). The model is
 `include/eawr/presentation/ui/net_perf.hpp`, covered by `tests/ui/net_perf_tests.cpp`. Presentation only: it never
 touches lockstep, the simulation or any hash.
 
 The panel shows two rows, "viewer: release" and "engine: 4.7.2 editor, debug-enabled", and a third with the engine signature. The window title says the same, e.g. "EAWR Viewer (viewer: release; engine: Godot 4.7.2 editor, debug-enabled, eawr 5b733a90f) (DEBUG)". An engine with debug support is slower and says so: the title is written once, at startup, and keeps the engine's own " (DEBUG)" suffix at the end.
 The signature comes from the startup engine guard (`current_engine_signature()`, `docs/engine-guard.md`): "eawr <9-character hash>" for our patched engine, or "UNPATCHED ENGINE (<build>)" / "UNPATCHED ENGINE (unverified)" (red on the overlay, spelled out in the title) when the build or hash does not match the pin or the launcher passed `--eawr-engine-unverified`. The report adds `engine_signature` and `engine_patched`. The viewer only displays this; the rule lives in `include/eawr/presentation/engine_signature.hpp`.
+
+## Degradation line (legacy EAWR-6846)
+
+When the session has degraded something (docs/degradation-ledger.md), the panel shows one extra row above the render counts:
+`degraded 12 in 3 classes` (distinct objects, then (code, source) classes), with `, 2 unknown` appended when some items have no
+source. No row while nothing is degraded. The line is `core::degradation::overlay_line`; the caller refreshes it with
+`set_degradation` at most once a second (the galactic view does), so the overlay only shows a string and takes no lock itself.
+The line is observation only: the same distinct-object count the summary file carries, never an input of the session.

@@ -296,6 +296,99 @@ void lua_bridge(const std::filesystem::path& root) {
         expect(run.hash == reference, "the session digest is equal on " + std::to_string(workers) + " workers");
     }
 }
+// #6705: a story script thread that ends in an uncaught error releases the control lock its plot set earlier, though the plot
+// stays active and the script stays installed. A script that does not fail keeps the lock.
+struct LockRun {
+    std::size_t releases{};
+    std::size_t diagnostics{};
+    std::string first_diagnostic;
+    bool plot_active{};
+    bool retired{};
+    bool script_installed{};
+};
+
+LockRun lock_run(const std::filesystem::path& root, bool fails, bool keeper = true) {
+    gc::SyntheticGalaxyOptions shape; shape.players = 2; shape.planets = 4;
+    const auto setup = gc::synthetic_galaxy(shape);
+    const std::string leaf = std::string(fails ? "fails" : "keeps") + (keeper ? "" : "_alone");
+    const auto data = root / leaf / "loose";
+    std::filesystem::remove_all(root / leaf);
+    write(data / "scripts" / "library" / "storyprobe.lua", std::string(library));
+    write(data / "scripts" / "story" / "Lock_Script.lua", std::string(R"LUA(
+require("StoryProbe")
+Ticks = 0
+function Keeper()
+    while true do coroutine.yield(true) end
+end
+function main()
+    )LUA") + (keeper ? "Create_Thread(\"Keeper\")" : "") + R"LUA(
+    while true do
+        Ticks = Ticks + 1
+        if Ticks == 8 and )LUA" + std::string(fails ? "true" : "false") + R"LUA( then Missing_Engine_Function() end
+        coroutine.yield(true)
+    end
+end
+)LUA");
+    eawr::vfs::MountSpec mount; mount.layer_id = "story-lock-" + leaf; mount.data_root = data;
+    const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+
+    auto locker = make("LOCK", "STORY_CLICK_GUI", {"b_a"});
+    locker.perpetual = true; locker.reward_type = "LOCK_CONTROLS"; locker.reward_params[0] = {"1"};
+    const std::vector<st::SubPlotDef> subs{sub("S.xml", 1, {locker}, "Lock_Script")};
+    st::Config config;
+    config.factions = {{"ALPHA", 1}, {"BETA", 2}};
+    const auto content = take(cpn::GalacticStoryScripts::load(files, subs));
+    cpn::GalacticStoryPlayers players;
+    players.factions = {"Alpha", "Beta"};
+    players.players = {{1, "Alpha"}, {2, "Beta"}};
+    auth::SessionConfig scheduler_config;
+    scheduler_config.seed = setup.seed; scheduler_config.galactic_clock = true; scheduler_config.tick_duration = {1, 30};
+    const auto link = std::make_shared<cpn::GalacticStoryLink>();
+    auto ai = take(auth::ScriptScheduler::create(scheduler_config, {}));
+    auto story = take(cpn::create_galactic_story_scheduler(*content, scheduler_config, false, players, {}, {}, link));
+    std::vector<std::string> notes;
+    take(cpn::start_galactic_story_scripts(story, *content, notes));
+
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    auto game = take(cpn::GameSession::create(setup));
+    take(game.install_story(config, {{1, "plot.xml"}}, subs));
+    take(game.install_galactic_scripts(std::move(ai), std::move(story)));
+    game.bind_story_scripts(content);
+    take(game.connect_story_link(link));
+
+    LockRun run;
+    std::uint64_t sequence{};
+    take(game.submit(gc::GameCommand{{game.completed_tick(), {1}, ++sequence}, gc::GuiClick{"b_a"}}));
+    for (int step = 0; step < 16; ++step) {
+        const auto tick = take(game.step(executor));
+        for (const auto& row : tick.story_presentation) {
+            const auto* request = std::get_if<st::ConsumerRequest>(&row.payload);
+            if (request && request->consumer == st::Consumer::control && row.owner == 1 && request->parameters == Names{"0"}) ++run.releases;
+        }
+        for (const auto& row : tick.diagnostics)
+            if (row.code.find("SCRIPT") != std::string::npos && run.diagnostics++ == 0) run.first_diagnostic = row.message;
+    }
+    for (const auto& row : game.story_engine()->state().subplots) if (row.name == "S.xml") run.plot_active = row.active;
+    const auto& scheduler = game.galactic_scripts()->story_scheduler();
+    run.retired = !scheduler.retired_instances().empty();
+    const auto instances = scheduler.instances();
+    run.script_installed = std::binary_search(instances.begin(), instances.end(), content->find("S.xml")->instance);
+    return run;
+}
+
+void thread_failure_releases_lock(const std::filesystem::path& root) {
+    const auto kept = lock_run(root, false);
+    expect(kept.releases == 0 && kept.diagnostics == 0 && kept.plot_active, "a story script that does not fail keeps the lock its plot set");
+    const auto failed = lock_run(root, true);
+    expect(failed.diagnostics == 1 && failed.first_diagnostic.find("Missing_Engine_Function") != std::string::npos
+        && failed.first_diagnostic.find("thread 0:") != std::string::npos, "the failed thread is diagnosed once, naming the thread and the cause: " + std::to_string(failed.diagnostics) + " [" + failed.first_diagnostic + "]");
+    expect(failed.releases == 1, "the failed thread's lock is released once: " + std::to_string(failed.releases));
+    const auto alone = lock_run(root, true, false);
+    expect(alone.releases == 1 && alone.plot_active && !alone.retired && !alone.script_installed,
+        "a script whose only (main) thread failed is not retired, and the host removes it once no thread lives; its lock is still released");
+    expect(failed.plot_active && !failed.retired && failed.script_installed, "the plot stays active and the script is neither retired nor removed (the other thread still lives): active "
+        + std::to_string(failed.plot_active) + " retired " + std::to_string(failed.retired) + " installed " + std::to_string(failed.script_installed));
+}
 } // namespace
 
 int case_galactic_story_ai_bridge_tests(int argc, char** argv) {
@@ -304,6 +397,7 @@ int case_galactic_story_ai_bridge_tests(int argc, char** argv) {
         ai_notification();
         call_time_parameters();
         lua_bridge(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-ai-bridge"));
+        thread_failure_releases_lock((argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-ai-bridge")) / "lock");
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

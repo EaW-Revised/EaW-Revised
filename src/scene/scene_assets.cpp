@@ -21,6 +21,8 @@
 #include <stdexcept>
 #include <mutex>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -103,6 +105,8 @@ const LegacySelector& missing_effect_selector() noexcept {
     return selector;
 }
 
+bool is_planet_effect(const std::string_view program) noexcept { return ieq(program, "Planet.fx"); }
+
 const LegacySelector* material_selector(const std::string_view program, const bool effect_missing) noexcept {
     return effect_missing ? &missing_effect_selector() : find_legacy_selector(program);
 }
@@ -137,6 +141,13 @@ const LegacySelector* material_selector(const std::string_view program, const bo
                 surface.supported = true;
                 surface.technique = std::string(selector->technique);
                 surface.pass = std::string(selector->pass);
+            } else if (!surface.effect_missing && is_planet_effect(submesh.shader)) {
+                // The environment planet adapter draws the stock planet material on a unit or prop as well; its only
+                // implemented technique is the explicitly selected t0 fallback.
+                surface.supported = true;
+                surface.planet_effect = true;
+                surface.technique = "t0";
+                surface.pass = "t0_p0";
             }
             if (surface.effect_missing) {
                 facts.surfaces.push_back(std::move(surface));
@@ -257,6 +268,10 @@ struct VfsAssetCache::ModelStore final {
     };
     std::mutex mutex;
     std::map<Key, Entry> models;
+    // SHA-256 of a model file, by logical path, for every wrapper of this mount: the compose of each arriving slot makes
+    // a fresh wrapper, which would otherwise read and hash the same file again. Only a hash of a file that opened is
+    // kept here (a refused read belongs to the wrapper's own view); the mount's files do not change under it.
+    std::map<std::string, std::string, std::less<>> file_hashes;
     Recency recency;
     std::uint64_t budget_bytes{std::numeric_limits<std::uint64_t>::max()};
     std::uint64_t retained_bytes{};
@@ -438,6 +453,9 @@ bool VfsAssetCache::exists(const std::string_view logical_path) {
 }
 
 namespace {
+// Models at least this large hash on a thread of their own beside the parse; below it the thread costs more than it hides.
+constexpr std::size_t beside_sha_min_bytes = 256U * 1024U;
+
 VfsAssetCache::ModelIdentity resolved_model_identity(const std::string_view logical_path,
     const core::Result<vfs::AssetRecord>& record) {
     const auto canonical = vfs::canonicalize(logical_path);
@@ -493,6 +511,10 @@ std::shared_ptr<const VfsAssetCache::Loaded> VfsAssetCache::loaded_model(const s
         // The same stat/open/parse as assets::load_model(vfs, path), split so the read and the parse are timed apart
         // and the bytes already read can be hashed once (the hash used to re-read the file).
         std::optional<core::Result<std::vector<std::byte>>> bytes;
+        // The file hash of a larger model runs on its own thread beside the parse (both only read `bytes`); the join below
+        // is the only place this thread waits for it. Declared after `bytes`, so it is joined before they are released.
+        std::string beside_sha;
+        std::jthread sha_thread;
         auto decoded = [&]() -> core::Result<assets::Model> {
             const core::load_profile::ModelScope decode_timer(logical_path, core::load_profile::ModelField::decode);
             core::load_profile::Scope load_scope(core::load_profile::Phase::model);
@@ -514,6 +536,18 @@ std::shared_ptr<const VfsAssetCache::Loaded> VfsAssetCache::loaded_model(const s
                 if (*bytes) core::load_profile::count(core::load_profile::Counter::model_read_bytes, bytes->value().size());
             }
             if (!*bytes) return core::Result<assets::Model>::failure(bytes->error());
+            if (verified || loaded->phase != Loaded::Phase::gameplay) {
+                if (bytes->value().size() >= beside_sha_min_bytes) {
+                    try {
+                        sha_thread = std::jthread([&beside_sha, &data = bytes->value()] {
+                            beside_sha = sim::sha256_hex(std::span<const std::uint8_t>(
+                                reinterpret_cast<const std::uint8_t*>(data.data()), data.size()));
+                        });
+                    } catch (const std::system_error&) {
+                        // No thread to be had: the hash runs inline after the parse, as before.
+                    }
+                }
+            }
             core::load_profile::Scope parse_scope(core::load_profile::Phase::model_parse);
             const core::load_profile::ModelScope parse_timer(logical_path, core::load_profile::ModelField::parse);
             return assets::load_model(bytes->value(), assets::source_from(record.value()));
@@ -523,12 +557,19 @@ std::shared_ptr<const VfsAssetCache::Loaded> VfsAssetCache::loaded_model(const s
         // sha256() falls back to its own read there, as before.
         loaded->view_read_failure = verified && bytes && !*bytes;
         if (bytes && *bytes && (verified || loaded->phase != Loaded::Phase::gameplay)) {
+            // model_sha256 on this thread is what the hash costs the loader: the hash itself when small or inline, else
+            // only the wait for the thread started before the parse.
             core::load_profile::Scope sha_scope(core::load_profile::Phase::model_sha256);
             const core::load_profile::ModelScope sha_timer(logical_path, core::load_profile::ModelField::sha);
             core::load_profile::count(core::load_profile::Counter::sha_bytes, bytes->value().size());
             core::load_profile::count(core::load_profile::Counter::sha_reused_bytes, bytes->value().size());
-            loaded->file_sha256 = sim::sha256_hex(std::span<const std::uint8_t>(
-                reinterpret_cast<const std::uint8_t*>(bytes->value().data()), bytes->value().size()));
+            if (sha_thread.joinable()) {
+                sha_thread.join();
+                loaded->file_sha256 = std::move(beside_sha);
+            } else {
+                loaded->file_sha256 = sim::sha256_hex(std::span<const std::uint8_t>(
+                    reinterpret_cast<const std::uint8_t*>(bytes->value().data()), bytes->value().size()));
+            }
             loaded->has_file_sha256 = true;
         }
         bytes.reset();
@@ -876,13 +917,30 @@ VfsAssetCache::ModelLoadScope::~ModelLoadScope() {
 std::string VfsAssetCache::sha256(const std::string_view logical_path) {
     const auto found = hashes_.find(logical_path);
     if (found != hashes_.end()) return found->second;
+    // The mount-wide memo is shared with every view of the mount; a verified preparation view must keep its own read, which
+    // enforces and records its content contract (an out-of-closure file hashes to nothing, a read leaves a receipt).
+    const bool shared_memo = !filesystem_->has_content_contract();
+    if (shared_memo) {
+        std::lock_guard lock(models_->mutex);
+        const auto shared = models_->file_hashes.find(logical_path);
+        if (shared != models_->file_hashes.end()) {
+            hashes_.emplace(std::string(logical_path), shared->second);
+            return shared->second;
+        }
+    }
     std::string hash;
     core::load_profile::Scope sha_scope(core::load_profile::Phase::model_sha256);
     const core::load_profile::ModelScope sha_timer(logical_path, core::load_profile::ModelField::sha);
+    bool opened = false;
     if (auto bytes = filesystem_->open(logical_path)) {
+        opened = true;
         core::load_profile::count(core::load_profile::Counter::sha_bytes, bytes.value().size());
         hash = sim::sha256_hex(std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(bytes.value().data()), bytes.value().size()));
+    }
+    if (opened && shared_memo) {
+        std::lock_guard lock(models_->mutex);
+        models_->file_hashes.try_emplace(std::string(logical_path), hash);
     }
     hashes_.emplace(std::string(logical_path), hash);
     return hash;

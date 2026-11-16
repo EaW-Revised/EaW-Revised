@@ -135,8 +135,8 @@ core::Result<std::shared_ptr<Manager>> Manager::create(LifecycleSetup setup, Cap
         selected.difficulty = ai::upper_case(selected.difficulty);
         const auto type = impl->data.players.find(selected.player_type);
         if (type == impl->data.players.end()) return Result::failure(lifecycle_error("selected galactic AI type is missing: " + selected.player_type));
-        const auto adjustment = type->second.difficulty.find(selected.difficulty);
-        if (adjustment == type->second.difficulty.end() || !impl->data.difficulties.contains(adjustment->second)) return Result::failure(lifecycle_error("selected galactic difficulty is missing: " + selected.difficulty));
+        // CGS-26: a type that authors no adjustment for the selected level (a partial table, none at all, or a name no adjustment
+        // file defines) plays on the dummy adjustment (ai::resolve_difficulty); it is never a startup refusal.
         for (const auto& name : type->second.galactic_templates) if (!impl->data.templates.contains(name)) return Result::failure(lifecycle_error("selected galactic template is missing: " + name));
         PlayerLifecycle player;
         player.selected = std::move(selected);
@@ -259,6 +259,10 @@ core::Result<void> Manager::Impl::serve_player(PlayerLifecycle& player, const Cl
             if (auto changed = templates(player); !changed) return fail(changed.error());
         }
         const ServiceInput input{player.selected.player, service_kind, clocks, world, policy_snapshot(player)};
+        // #6933: which lifecycle service holds the barrier (the Lua plan, goal and perception work runs inside it).
+        constexpr std::array<gc_profile::Phase, service_count> service_phase{gc_profile::Phase::svc_perception, gc_profile::Phase::svc_goals,
+            gc_profile::Phase::svc_planning, gc_profile::Phase::svc_execution, gc_profile::Phase::svc_learning, gc_profile::Phase::svc_templates};
+        gc_profile::Scope service_scope(service_phase[index]);
         if (auto served = capabilities.services->run(input, scripts); !served) return fail(served.error());
     }
     return core::Result<void>::success();
@@ -269,6 +273,7 @@ core::Result<authoritative::ServiceOptions> Manager::before_service(const sim::P
     using Result = core::Result<authoritative::ServiceOptions>;
     if (impl_->phase_abandoned || impl_->service_threw) return Result::failure(lifecycle_error("unsettled lifecycle phase"));
     if (impl_->capabilities.prepare) if (auto prepared = impl_->capabilities.prepare(executor, world, tick); !prepared) return Result::failure(prepared.error());
+    impl_->last_served_tick = tick.completed_tick;
     // The world is the snapshot's (real clocks); the lifecycle runs on the clocks of the batch's current virtual tick.
     const Admission admission = impl_->state.admission;
     if (auto serviced = service_window({tick.completed_tick, world.clock().galactic_frame}, std::span<const Admission>(&admission, 1), scripts,
@@ -311,6 +316,10 @@ void Manager::set_admission(Admission admission) noexcept {
     if (impl_->state.admission != admission) mark_state_changed();
     impl_->state.admission = admission; impl_->update_record();
 }
+Admission Manager::admission() const noexcept { return impl_->state.admission; }
+bool Manager::oracle_capture_due(const std::uint64_t completed_tick) const noexcept {
+    return impl_->schedule.apply_delay == 0 || impl_->last_served_tick == completed_tick;
+}
 LifecycleState Manager::lifecycle() const { return impl_->state; }
 std::optional<gc::PlayerId> Manager::faulted_provider() const noexcept { return impl_->faulted_provider; }
 bool Manager::provider_threw() const noexcept { return impl_->service_threw; }
@@ -322,6 +331,32 @@ core::Result<void> Manager::retire_provider(gc::PlayerId player, NativeProviderF
         || provider_retired(player))
         return core::Result<void>::failure(lifecycle_error("native retirement requires a healthy idle known live provider"));
     impl_->state.retired_providers.emplace(player, reason); impl_->update_record(); mark_state_changed();
+    return core::Result<void>::success();
+}
+std::string Manager::player_type(gc::PlayerId player) const {
+    for (const auto& row : impl_->state.players) if (row.selected.player == player) return row.selected.player_type;
+    return {};
+}
+bool Manager::knows_player_type(std::string_view type) const {
+    const auto found = impl_->data.players.find(ai::upper_case(std::string(type)));
+    if (found == impl_->data.players.end()) return false;
+    for (const auto& name : found->second.galactic_templates) if (!impl_->data.templates.contains(name)) return false;
+    return true;
+}
+core::Result<void> Manager::replace_player_type(gc::PlayerId player, std::string_view type) {
+    if (impl_->phase || impl_->phase_abandoned || impl_->servicing || impl_->service_threw || impl_->failure)
+        return core::Result<void>::failure(lifecycle_error("player type replacement requires a healthy idle lifecycle"));
+    const auto row = std::find_if(impl_->state.players.begin(), impl_->state.players.end(), [&](const auto& entry) { return entry.selected.player == player; });
+    if (row == impl_->state.players.end()) return core::Result<void>::failure(lifecycle_error("player type replacement names a player the lifecycle does not run"));
+    const auto name = ai::upper_case(std::string(type));
+    if (!knows_player_type(name)) return core::Result<void>::failure(lifecycle_error("player type replacement names an unknown galactic AI type: " + name));
+    PlayerLifecycle fresh;
+    fresh.selected = row->selected;
+    fresh.selected.player_type = name;
+    fresh.active_templates.resize(impl_->data.players.at(name).galactic_templates.size());
+    *row = std::move(fresh);
+    impl_->policy_changed(player);
+    impl_->update_record(); mark_state_changed();
     return core::Result<void>::success();
 }
 std::vector<core::LoadNote> Manager::retirement_notes() const {
@@ -372,7 +407,12 @@ core::Result<void> Manager::restore_lifecycle(const LifecycleState& saved) {
         if (!player.initialized && (player.policy != TemplatePolicy{} || player.template_cursor != 0 ||
             !player.activation_order.empty() || std::any_of(player.active_templates.begin(), player.active_templates.end(), [](bool active) { return active; }) ||
             std::any_of(player.deadlines.begin(), player.deadlines.end(), [](std::uint64_t deadline) { return deadline != 0; }))) return core::Result<void>::failure(lifecycle_error("uninitialized galactic lifecycle contains serviced state"));
-        if (player.selected != current.selected || player.active_templates.size() != current.active_templates.size() ||
+        // A control-switch story reward replaces a player's AI type (#6917): the saved row may name another defined type than the
+        // authored one, and its template list is that type's.
+        const auto saved_type = impl_->data.players.find(player.selected.player_type);
+        auto expected = current.selected; expected.player_type = player.selected.player_type;
+        if (saved_type == impl_->data.players.end() || player.selected != expected
+            || player.active_templates.size() != saved_type->second.galactic_templates.size() ||
             (!player.active_templates.empty() && player.template_cursor >= player.active_templates.size()) ||
             (player.active_templates.empty() && player.template_cursor != 0) ||
             (player.initialized && !player.active_templates.empty() && !player.active_templates.front())) return core::Result<void>::failure(lifecycle_error("galactic lifecycle identity/template references differ"));

@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <limits>
 
 namespace {
 using namespace eawr;
@@ -178,6 +179,11 @@ void ai_registry() {
         "the land AI registry holds the pad rows between the forces' rows by authored table order, each type once");
     expect(registry(backward) == registry(forward), "the pad loader's row order does not reach the land AI registry");
     expect(registry({}) == expected({"Company_Member", "Late_Member"}), "a map without pads leaves the registry as the forces' tables make it");
+    // #6591 A: a pad row without a catalog entry carries the loader's last order; it follows every authored row, whatever the arrival order.
+    const auto map_only = row("Map_Only_Pad", std::numeric_limits<std::uint64_t>::max());
+    expect(registry({map_only, forward[0], forward[1]}) == expected({"Company_Member", "Pad_Faction", "Pad_Structure", "Late_Member", "Map_Only_Pad"})
+            && registry({forward[1], forward[0], map_only}) == registry({map_only, forward[0], forward[1]}),
+        "a pad row without a catalog entry sorts after every authored row");
     expect(forces.units.size() == 2, "the caller's tables are not changed by the pad merge");
 }
 
@@ -231,7 +237,103 @@ void merge_types() {
         "LE-LOADER: starting, reserve and campaign spawner references map to their target rows");
 }
 
+// #6993 (LR4-05/06): a completed structure's menu sells land companies at the company object's own price, time, queue, limits and
+// prerequisites through the shared StationMenu/BuildOption path; what the content cannot sell is listed disabled.
+void company_menu() {
+    units::UnitTables land;
+    land.domain = BattleDomain::land;
+    units::UnitType factory; factory.id = "Test_Factory";
+    factory.production.buildable = {{"Rebel", {"Co_Priced", "Co_Free", "Co_Slow", "Test_Upgrade", "Not_Decoded"}}};
+    land.units.push_back(factory);
+    units::UnitType upgrade; upgrade.id = "Test_Upgrade"; upgrade.production.upgrade_object = true;
+    upgrade.production.build_cost_multiplayer = whole(100); upgrade.production.build_time_seconds = whole(10);
+    upgrade.production.production_queue = "Tactical_Upgrades"; upgrade.production.increments_tech = true;
+    land.units.push_back(upgrade);
+    const auto company = [](const std::string& id, const std::optional<Fixed> price, const std::optional<Fixed> seconds) {
+        units::LandCompany row; row.id = id; row.members.push_back({}); row.members.front().type = id + "_Member";
+        row.population_value = 1;
+        row.production.build_cost_multiplayer = price; row.production.build_time_seconds = seconds;
+        row.production.production_queue = "Tactical_Units";
+        return row;
+    };
+    auto priced = company("Co_Priced", whole(900), whole(25));
+    priced.production.prerequisites = {"Tech_Two"};
+    priced.production.current_player = 2;
+    land.land_companies = {priced, company("Co_Free", std::nullopt, std::nullopt), company("Co_Slow", whole(50), whole(100000))};
+    skirmish::StartInputs inputs;
+    skirmish::StartFaction rebel; rebel.name = "Rebel"; rebel.playable = true;
+    inputs.factions.push_back(rebel);
+    skirmish::SkirmishStart start;
+    const auto rules = skirmish::economy_rules(start, inputs, land, false);
+    expect(static_cast<bool>(rules), "a land economy with company menus builds");
+    if (!rules) return;
+    const auto* menu = rules.value().menu(skirmish::type_id("Test_Factory"), skirmish::faction_id("Rebel"));
+    expect(menu && menu->station_producer && menu->options.size() == 5, "the factory has a producer menu with its five entries");
+    if (!menu || menu->options.size() != 5) return;
+    const auto* sold = menu->find(skirmish::type_id("Co_Priced"));
+    expect(sold && sold->kind == BuildKind::unit && sold->queue == BuildQueue::units && sold->price == whole(900)
+            && sold->build_frames == 25 * 30 && sold->ai_build_frames == 25 * 30 && sold->population == 1 && sold->available
+            && sold->requirements.prerequisites == std::vector<TypeId>{skirmish::type_id("Tech_Two")}
+            && sold->requirements.current_player == std::optional<std::uint32_t>(2U),
+        "LR4-05/06: a company entry is a unit at its own price, time (30 frames a second), queue, population, limit and prerequisite");
+    // The shared queue rule: too few credits is refused with nothing debited, queued or pooled; exactly the price is accepted.
+    PlayerEconomy account; account.player = 1; account.credits = whole(899);
+    EconomyPlayer buyer; buyer.player = 1;
+    expect(sold != nullptr && queue_build(account, buyer, rules.value(), *sold, 7, 0) == RejectReason::insufficient_credits
+            && account.credits == whole(899) && account.queues[0].empty() && account.pool.empty(),
+        "a company buy with too few credits is refused: no debit, no queue entry, no pool entry");
+    account.credits = whole(900);
+    expect(sold != nullptr && queue_build(account, buyer, rules.value(), *sold, 7, 0) == RejectReason::none
+            && account.credits == Fixed{} && account.queues[0].size() == 1 && account.queues[0].front().type == sold->type
+            && account.queues[0].front().frames == 25 * 30 && account.pool.empty(),
+        "a company buy with exactly the price is queued for the build time and the credits are debited");
+    const auto* free = menu->find(skirmish::type_id("Co_Free"));
+    expect(free && free->kind == BuildKind::unit && !free->available && free->price == Fixed{},
+        "a company without a price or time is listed and cannot be bought");
+    const auto* slow = menu->find(skirmish::type_id("Co_Slow"));
+    expect(slow && !slow->available && !slow->disabled_reason.empty(), "a company with an out-of-range build time is listed disabled with a reason");
+    const auto* research = menu->find(skirmish::type_id("Test_Upgrade"));
+    expect(research && research->kind == BuildKind::upgrade && !research->available && !research->disabled_reason.empty(),
+        "LE-BONUS: an upgrade entry of a land menu is listed disabled, so no credits are taken for it");
+    const auto* unknown = menu->find(skirmish::type_id("Not_Decoded"));
+    expect(unknown && !unknown->available, "an entry that is neither a type nor a company stays disabled");
+    // The same names in a space table keep the old rule: a company row is a land row.
+    auto space = land;
+    space.domain = BattleDomain::space;
+    const auto space_rules = skirmish::economy_rules(start, inputs, space, false);
+    const auto* space_menu = space_rules ? space_rules.value().menu(skirmish::type_id("Test_Factory"), skirmish::faction_id("Rebel")) : nullptr;
+    const auto* space_company = space_menu ? space_menu->find(skirmish::type_id("Co_Priced")) : nullptr;
+    expect(space_company && !space_company->available && space_company->kind == BuildKind::upgrade,
+        "space tables never read a land company row (the entry stays the unsupported-upgrade listing)");
+}
+
+// #6993: the companies a structure's menu offers join the tables with the unresolved rows that name them, and nothing else.
+void merge_companies() {
+    units::UnitTables base;
+    base.domain = BattleDomain::land;
+    units::LandCompany held; held.id = "Co_Held"; held.production.build_cost_multiplayer = whole(1);
+    base.land_companies.push_back(held);
+    units::UnitTables pads;
+    pads.domain = BattleDomain::land;
+    units::LandCompany again = held; again.production.build_cost_multiplayer = whole(2);
+    units::LandCompany offered; offered.id = "Co_Offered"; offered.team_type = "Offered_Team";
+    offered.members.push_back({}); offered.members.front().type = "Offered_Member";
+    pads.land_companies = {again, offered};
+    pads.unresolved = {{"Offered_Member", "Max_Speed", "x", "bad"}, {"Offered_Team", "FormationSpacing", "y", "bad"},
+        {"Pad_Elsewhere", "Max_Speed", "z", "bad"}, {"Co_Held", "Max_Speed", "w", "bad"}};
+    skirmish::merge_land_pad_types(base, pads);
+    expect(base.land_companies.size() == 2 && base.land_companies.front().production.build_cost_multiplayer == std::optional<Fixed>(whole(1))
+            && base.land_companies.back().id == "Co_Offered",
+        "a company the tables hold is kept as it is; an offered one is appended");
+    expect(base.unresolved.size() == 2 && base.unresolved.front().owner == "Offered_Member" && base.unresolved.back().owner == "Offered_Team",
+        "the unresolved rows of the appended company's members and team type come with it; other rows and a held company's do not");
+    skirmish::merge_land_pad_types(base, pads);
+    expect(base.land_companies.size() == 2 && base.unresolved.size() == 2, "merging the same pad load twice adds nothing");
+}
+
 int main() {
+    company_menu();
+    merge_companies();
     profiles();
     inertness();
     validation();

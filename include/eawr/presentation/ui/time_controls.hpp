@@ -145,6 +145,11 @@ public:
     bool set_speed_step(std::uint32_t step, std::uint64_t next_tick);
     // #453 BEP-02: the battle ended at `tick`; the panel stops and no tick runs any more.
     void end(std::uint64_t tick);
+    // FC-R03: while a cinematic plays, the target is the nominal 30 logical frames per second whatever the speed step
+    // or fast forward say. Pause still pauses. Changing the flag is a time-track change; the player's step and
+    // fast-forward state are kept and return when the cinematic ends. False when nothing changed.
+    bool set_cinematic_pacing(bool on, std::uint64_t next_tick);
+    [[nodiscard]] bool cinematic_pacing() const noexcept { return cinematic_pacing_; }
 
     [[nodiscard]] TimeState state() const noexcept { return state_; }
     [[nodiscard]] bool ended() const noexcept { return ended_; }
@@ -171,6 +176,7 @@ private:
     std::uint32_t speed_step_;
     TimeState state_{TimeState::play};
     bool ended_{};
+    bool cinematic_pacing_{};
     std::vector<TimeChange> track_;
 };
 

@@ -1,6 +1,7 @@
 // #80 part A: where the viewer draws a live session's units between two published ticks
 // (presentation::live::interpolate_units). Synthetic snapshots only.
 
+#include "../../../apps/viewer/src/no_fog_option.hpp"
 #include "../../support/check.hpp"
 #include "eawr/presentation/live/live_units.hpp"
 #include "eawr/presentation/space/snapshot_index.hpp"
@@ -206,6 +207,35 @@ void test_reveal() {
     }
     expect(live::interpolate_units(previous, latest, 0.5, 9, true).size() == 3,
            "reveal draws every instance even for a viewer the snapshot never names");
+}
+
+// --eawr-no-fog (the launcher's "Fog of war: off") is the one flag behind this reveal in a tactical battle
+// (space and land use the same draw path): with it every enemy instance is drawn for the local player, without
+// it only what the player sees, and a multiplayer match refuses it instead of dropping it.
+void test_no_fog_flag() {
+    const auto previous = snapshot(10, {
+        {1, 100, 1, 1, pose(0.0, 0.0, 170.0), 0b01, {}, {}},
+        {2, 100, 2, 2, pose(50.0, 0.0, 0.0), 0b11, {}, {}},
+    });
+    const auto latest = snapshot(11, {
+        {1, 100, 1, 1, pose(10.0, -20.0, -170.0), 0b01, {}, {}},
+        {2, 100, 2, 2, pose(60.0, 0.0, 0.0), 0b10, {}, {}},
+        {4, 100, 1, 1, pose(5.0, 5.0, 90.0), 0b01, {}, {}},
+    });
+    const std::vector<std::string> with_flag{"--eawr-game-root", "game", "--eawr-no-fog"};
+    const std::vector<std::string> without_flag{"--eawr-game-root", "game", "--eawr-no-fog-later"};
+    const bool open = eawr::viewer::no_fog_requested(with_flag);
+    const bool closed = eawr::viewer::no_fog_requested(without_flag);
+    expect(open && !closed && !eawr::viewer::no_fog_requested({}), "only the exact flag turns the fog off");
+    const auto hidden = live::interpolate_units(previous, latest, 0.5, 2, closed);
+    expect(hidden.size() == 1 && hidden[0].entity == 2, "without the flag player 2 sees only its own unit");
+    const auto shown = live::interpolate_units(previous, latest, 0.5, 2, open);
+    expect(shown.size() == 3, "with the flag every enemy instance of the battle is drawn");
+    expect(!eawr::viewer::no_fog_refusal(true, false) && !eawr::viewer::no_fog_refusal(false, true),
+           "single player, or no flag, is never refused");
+    const char* refusal = eawr::viewer::no_fog_refusal(true, true);
+    expect(refusal != nullptr && std::string(refusal).find("single-player only") != std::string::npos,
+           "a multiplayer match refuses the flag with a clear message");
 }
 
 // Rz(yaw) Ry(pitch) Rx(roll) at (x, 0, 0) (space-fighters FM-02; positive pitch lowers the nose).
@@ -424,6 +454,7 @@ int main() {
     test_map_prop_fog_visibility();
     test_roll();
     test_reveal();
+    test_no_fog_flag();
     test_snapshot_index_budget();
     test_stealth_visibility();
     test_pose_worker_budget();

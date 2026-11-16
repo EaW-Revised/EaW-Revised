@@ -578,22 +578,20 @@ void encode_production_hash(std::vector<std::uint8_t>& bytes, const ProductionSe
     const ProductionOfferDigests& digests) {
     encode_production_impl(bytes, production, &digests);
 }
-void encode_production_menu_inputs(std::vector<std::uint8_t>& bytes, const ProductionSetup& production,
-    PlayerId local, std::span<const PlanetId> visible) {
+void encode_production_menu_globals(std::vector<std::uint8_t>& bytes, const ProductionSetup& production, PlayerId local) {
     put_u32(bytes, production.maximum_human_queue);
     for (const auto& player : production.players) if (player.player == local) encode_row(bytes, player);
     put_u8(bytes, production.fleet_blockers ? 1 : 0);
     if (production.fleet_blockers) rows(bytes, *production.fleet_blockers);
-    for (const auto& planet : production.planets) {
-        if (!std::binary_search(visible.begin(), visible.end(), planet.planet)) continue;
-        encode_planet_inputs(bytes, planet);
-        // Admission reads queue membership and types, never countdown or money paid.
-        for (const auto& queue : planet.queues) {
-            put_u32(bytes, static_cast<std::uint32_t>(queue.size()));
-            for (const auto& entry : queue) put_u64(bytes, entry.type);
-        }
-        rows(bytes, planet.objects);
+}
+void encode_production_menu_planet(std::vector<std::uint8_t>& bytes, const PlanetProduction& planet) {
+    encode_planet_inputs(bytes, planet);
+    // Admission reads queue membership and types, never countdown or money paid.
+    for (const auto& queue : planet.queues) {
+        put_u32(bytes, static_cast<std::uint32_t>(queue.size()));
+        for (const auto& entry : queue) put_u64(bytes, entry.type);
     }
+    rows(bytes, planet.objects);
 }
 std::optional<ProductionSetup> decode_production(std::span<const std::uint8_t> bytes, const OfferPool* pool) {
     Reader reader(bytes); ProductionSetup result; std::uint8_t version{}; bool present{};

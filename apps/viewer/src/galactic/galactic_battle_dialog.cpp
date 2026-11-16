@@ -1,4 +1,5 @@
 #include "live_battle_bounty.hpp"
+#include "notice_text.hpp"
 #include "eawr/battle/start.hpp"
 #include "galactic_mode_internal.hpp"
 #include "eawr/data/ui/dialog_catalog.hpp"
@@ -7,6 +8,7 @@
 #include "eawr/data/retail_values.hpp"
 #include "ui/theme_builder.hpp"
 #include <godot_cpp/classes/theme.hpp>
+#include <algorithm>
 
 using namespace godot;
 namespace eawr::presentation::godot_backend {
@@ -128,6 +130,38 @@ void GalacticMode::State::service_battle_dialog(double delta) {
         // Progress and summary retain their modal input barrier.
         if (battle_dialog->view().phase != galactic_view::BattleDialogPhase::choice) held.clear();
         orbiting = false; scrolling = false;
+    }
+}
+void GalacticMode::State::service_battle_advisor() {
+    if (!game || !galaxy || !battle_text || options.hud_provider) return;
+    const auto outcome = battle_dialog_frame().auto_resolve_outcome;
+    if (!galactic_view::advise_outcome(advised_outcome,
+            outcome ? std::optional<std::uint64_t>(outcome->result.conflict) : std::nullopt)) return;
+    const auto local = galaxy->local.player;
+    const auto planet = static_cast<sim::galactic::PlanetId>(outcome->planet);
+    // WGUI-120: an uninvolved observer's result line needs known fleet presence at the planet (read from the
+    // publication shown when the outcome arrives).
+    const bool presence = std::any_of(fleet_intelligence.presence.begin(), fleet_intelligence.presence.end(),
+        [&](const auto& row) { return row.planet == planet; });
+    std::vector<galactic_view::CampaignRecordEntry> record;
+    record.reserve(outcome->record.size());
+    for (const auto& row : outcome->record) record.push_back({row.original_type, row.owner});
+    const auto faction = [this](std::uint32_t owner) { return faction_display_name(owner); };
+    const auto type = [this](std::string_view name) -> const galactic_view::CampaignResultType* {
+        const auto at = battle_result_types.find(std::string(name));
+        return at == battle_result_types.end() ? nullptr : &at->second;
+    };
+    const auto lines = galactic_view::auto_resolve_notices(record, local, outcome->invader, outcome->defender,
+        outcome->result.winner, outcome->land, presence, faction, planet_notice_name(planet),
+        [&](std::string_view name) { const auto* info = type(name); return info && info->hero; },
+        [&](std::string_view name) { const auto* info = type(name); return info ? info->name : std::string(name); });
+    for (const auto& line : lines) {
+        const auto format = battle_text(line.key);
+        if (format.empty() || format == line.key) continue; // no text database entry: no invented wording
+        AdvisorLine entry;
+        entry.text = String::utf8(galactic_view::expand_notice_text(format, line.tokens).c_str());
+        entry.colour = {255, 24, 39, 255}; // WAR-64 / WGUI-120: ordinary red entries with no explicit sound (the queue plays the message cue)
+        approach_text.push_back(std::move(entry));
     }
 }
 }

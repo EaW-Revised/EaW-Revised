@@ -1,12 +1,15 @@
 #include "renderer_test_support.hpp"
 #include "eawr/presentation/render_churn.hpp"
 #include "upload_identity_pool.hpp"
+#include "lighting_propagation.hpp"
 #include "gpu_memory_ledger.hpp"
 #include "texture_budget.hpp"
 #include "device_memory_probe.hpp"
 #include "resource_residency.hpp"
 #include "mesh_rest_pose.hpp"
 #include <sstream>
+#include <stdexcept>
+#include <string_view>
 
 #include <chrono>
 #include <functional>
@@ -214,9 +217,47 @@ void particle_texture_contracts() {
     invalid = top;
     invalid.mips[0].bytes.push_back(std::byte{0});
     check(!prepare_particle_texture(invalid), "overlong mip payload must be rejected");
+    // A stray level after the first 1x1 level is not part of the declared
+    // chain: the upload is the chain up to 1x1, byte for byte.
     invalid = top;
     invalid.mips.push_back(invalid.mips.back());
-    check(!prepare_particle_texture(invalid), "mips after 1x1 must be rejected");
+    const auto with_stray_level = prepare_particle_texture(invalid);
+    const auto without_stray_level = prepare_particle_texture(top);
+    check(with_stray_level && without_stray_level && with_stray_level.bytes == without_stray_level.bytes,
+        "a level after the 1x1 level must be ignored, not uploaded");
+    invalid.mips.back().bytes.clear();
+    check(static_cast<bool>(prepare_particle_texture(invalid)), "a malformed level after the 1x1 level is ignored with it");
+
+    // A 32x32 DXT3 as the asset loader returns a file that declares six levels
+    // (32..1) and carries one more 16-byte block after the 1x1 level: seven
+    // mips, the last one a second 1x1 level. The particle upload ignores it,
+    // notes it, and uploads the declared chain.
+    {
+        assets::Texture dxt3;
+        dxt3.width = 32;
+        dxt3.height = 32;
+        dxt3.format = assets::PixelFormat::bc2;
+        dxt3.has_alpha = true;
+        const std::uint32_t sizes[] = {32, 16, 8, 4, 2, 1, 1};
+        std::size_t declared_bytes{};
+        for (std::size_t level = 0; level < 7; ++level) {
+            const std::uint32_t blocks = (sizes[level] + 3) / 4;
+            const std::uint32_t pitch = blocks * 16;
+            dxt3.mips.push_back({sizes[level], sizes[level], pitch,
+                std::vector<std::byte>(static_cast<std::size_t>(pitch) * blocks, static_cast<std::byte>(10 + level))});
+            if (level < 6) declared_bytes += dxt3.mips.back().bytes.size();
+        }
+        const auto prepared = prepare_particle_texture(dxt3);
+        check(static_cast<bool>(prepared) && prepared.note.find("ignored 1 mip level after the 1x1 level") != std::string::npos,
+            "the particle upload ignores the extra level and says so");
+        check(static_cast<bool>(prepared) && prepared.bytes.size() == declared_bytes
+                && prepared.bytes.back() == static_cast<std::byte>(15),
+            "the upload is exactly the six declared levels");
+        dxt3.mips.pop_back();
+        const auto declared = prepare_particle_texture(dxt3);
+        check(static_cast<bool>(declared) && declared.note.empty() && declared.bytes == prepared.bytes,
+            "the declared chain alone uploads the same bytes with no note");
+    }
 
     assets::Texture bc;
     bc.width = 5;
@@ -430,6 +471,203 @@ void upload_identity_contracts() {
     }
     for (const auto& future : pending)
         check(future.get() == large_expected, "shutdown drains owned work and leaves valid digest futures");
+}
+
+// The identity is hashed from a stream (no buffer) and, on the pool, from shared snapshots: both give exactly the digest of
+// the canonical byte sequence (core::sha256 over upload_identity_bytes).
+void upload_identity_streaming_contracts() {
+    using namespace eawr;
+    using presentation::godot_backend::detail::NamedTexture;
+    using presentation::godot_backend::detail::UploadIdentity;
+    using presentation::godot_backend::detail::UploadIdentityInputs;
+    using presentation::godot_backend::detail::UploadIdentityPool;
+    using presentation::godot_backend::detail::upload_identity;
+    using presentation::godot_backend::detail::upload_identity_bytes;
+    auto model = std::make_shared<assets::Model>();
+    model->bones.resize(3);
+    for (std::size_t mesh_index = 0; mesh_index < 3; ++mesh_index) {
+        assets::Mesh mesh;
+        mesh.bone = static_cast<std::int32_t>(mesh_index);
+        assets::Submesh submesh;
+        // Well past the 64 KiB flush size of the streaming writer, so it flushes mid-vertex-list several times.
+        submesh.vertices.resize(1500 + 700 * mesh_index);
+        for (std::size_t index = 0; index < submesh.vertices.size(); ++index) {
+            submesh.vertices[index].position = {static_cast<float>(index), static_cast<float>(mesh_index), 2.0F};
+            submesh.vertices[index].texcoord[0] = {0.5F, static_cast<float>(index % 7)};
+        }
+        for (std::size_t index = 0; index + 2 < submesh.vertices.size(); ++index)
+            submesh.indices.push_back(static_cast<std::uint16_t>(index));
+        mesh.submeshes.push_back(std::move(submesh));
+        model->meshes.push_back(std::move(mesh));
+    }
+    // A mip larger than the flush size (fed to the hasher without a copy), one below it, and an empty one.
+    auto texture = std::make_shared<assets::Texture>();
+    texture->width = 512;
+    texture->height = 512;
+    texture->mips.push_back({512, 512, 2048, std::vector<std::byte>(300U * 1024U, std::byte{7})});
+    texture->mips.push_back({256, 256, 1024, std::vector<std::byte>(40U * 1024U, std::byte{9})});
+    texture->mips.push_back({1, 1, 4, {}});
+    auto cloud = std::make_shared<assets::Texture>(*texture);
+    cloud->mips[0].bytes[12345] = std::byte{200};
+    presentation::MaterialDescription material;
+    material.route = presentation::MaterialRoute::modern_spatial;
+    material.program = "shader_type spatial; void fragment() { ALBEDO = vec3(1.0); }";
+    material.bindings.push_back({"eawr_scale", 0.5F});
+    material.bindings.push_back({"cloud", std::string("cloud_tex")});
+
+    for (const std::optional<presentation::ModelSurface> surface : {std::optional<presentation::ModelSurface>{},
+             std::optional<presentation::ModelSurface>{presentation::ModelSurface{1, 0, false}}}) {
+        const presentation::ModelView view(*model, surface);
+        const std::array<NamedTexture, 1> named{{{"cloud", cloud.get()}}};
+        const auto bytes = upload_identity_bytes(view, *texture, material, named);
+        check(bytes.size() > 64U * 1024U * 4U, "the streaming test input spans many flushes");
+        const auto expected = core::sha256(bytes);
+        check(upload_identity(view, *texture, material, named) == expected,
+            "the streamed identity equals SHA-256 of the canonical bytes");
+        check(upload_identity(view, *texture, material) == core::sha256(upload_identity_bytes(view, *texture, material)),
+            "the streamed identity without per-binding textures equals the canonical digest");
+
+        auto inputs = std::make_shared<UploadIdentityInputs>();
+        inputs->model = model;
+        inputs->surface = surface;
+        inputs->texture = texture;
+        inputs->material = material;
+        inputs->bindings.emplace_back("cloud", cloud);
+        inputs->cost = 1024U;
+        check(inputs->evaluate() == expected, "an identity job evaluates to the canonical digest");
+
+        UploadIdentityPool pool(2, 4096, 8);
+        std::shared_ptr<const UploadIdentityInputs> shared = inputs;
+        inputs.reset();
+        auto future = pool.submit(shared);
+        check(future.get() == expected, "the pool evaluates the identity from shared snapshots");
+        check(shared.use_count() == 1, "a finished job drops its inputs before the digest is observable");
+        const auto state = pool.stats();
+        check(state.input_capacity == 0 && state.pending == 0 && state.peak_input_capacity == 1024U,
+            "a job's declared cost is its admission size and is released");
+    }
+}
+
+void upload_identity_job_failure_contracts() {
+    using namespace eawr;
+
+    using presentation::godot_backend::detail::UploadIdentity;
+    using presentation::godot_backend::detail::UploadIdentityPool;
+    UploadIdentityPool pool(1, 4096, 8);
+    auto shared = std::make_shared<int>(5);
+    auto failing = pool.submit_job([held = shared]() -> UploadIdentity { throw std::runtime_error("identity job failed"); }, 512U);
+    shared.reset();
+    bool thrown = false;
+    try {
+        static_cast<void>(failing.get());
+    } catch (const std::runtime_error& error) {
+        thrown = std::string_view(error.what()) == "identity job failed";
+    }
+    check(thrown, "a failing identity job delivers its exception through the future, it does not end the worker");
+    const auto after = pool.stats();
+    check(after.pending == 0 && after.input_capacity == 0, "a failed job releases its admission size and its queue slot");
+    UploadIdentity expected{};
+    expected[0] = 42;
+    auto later = pool.submit_job([expected] { return expected; }, 16U);
+    check(later.get() == expected, "the pool keeps serving after a job failed");
+    auto bytes = pool.submit(std::vector<std::uint8_t>{1, 2, 3});
+    check(bytes.get() == core::sha256(std::vector<std::uint8_t>{1, 2, 3}), "the byte path is unchanged");
+}
+
+void lighting_propagation_contracts() {
+    using namespace eawr;
+
+    using presentation::godot_backend::detail::materials_need_lighting;
+    using presentation::godot_backend::detail::same_material_lighting;
+    // The same fields as GodotRenderer::LightingState that the material pass reads, plus the light's own shadow distance.
+    struct Lighting final {
+        std::array<std::array<float, 16>, 3> sph{};
+        std::array<std::array<float, 16>, 3> sph_fill{};
+        std::array<float, 3> sun_diffuse{2.0F, 1.88F, 1.72F};
+        std::array<float, 3> toward_light{0.0F, 1.0F, 0.0F};
+        std::array<float, 3> specular{2.0F, 1.88F, 1.72F};
+        std::array<float, 3> shadow_floor{0.5F, 0.5F, 0.5F};
+        std::array<float, 3> ambient{0.08F, 0.08F, 0.10F};
+        float shadow_max_distance{4096.0F};
+        bool operator==(const Lighting&) const = default;
+    };
+    const Lighting base;
+    check(same_material_lighting(base, base), "equal lighting is the same for the materials");
+    Lighting moved = base;
+    moved.shadow_max_distance = 700.0F;
+    check(same_material_lighting(base, moved) && !materials_need_lighting(std::optional<Lighting>(base), moved),
+        "a different shadow distance alone does not touch the materials");
+    const std::array<std::function<void(Lighting&)>, 7> material_edits{{
+        [](Lighting& l) { l.sph[1][5] += 0.25F; }, [](Lighting& l) { l.sph_fill[2][0] += 0.25F; },
+        [](Lighting& l) { l.sun_diffuse[0] += 0.25F; }, [](Lighting& l) { l.toward_light[2] += 0.25F; },
+        [](Lighting& l) { l.specular[1] += 0.25F; }, [](Lighting& l) { l.shadow_floor[2] += 0.25F; },
+        [](Lighting& l) { l.ambient[0] += 0.25F; }}};
+    for (std::size_t field = 0; field < material_edits.size(); ++field) {
+        Lighting changed = base;
+        material_edits[field](changed);
+        check(!same_material_lighting(base, changed) && materials_need_lighting(std::optional<Lighting>(base), changed),
+            "every value a material reads makes the materials need the new lighting (field " + std::to_string(field) + ")");
+    }
+    Lighting not_a_number = base;
+    not_a_number.specular[0] = std::numeric_limits<float>::quiet_NaN();
+    check(materials_need_lighting(std::optional<Lighting>(not_a_number), not_a_number),
+        "a NaN never compares equal, so it is always pushed");
+    check(materials_need_lighting(std::optional<Lighting>{}, base), "the first lighting always goes to the materials");
+
+    // The renderer's materials: configured under the lighting current at that moment; set_lighting pushes it to all of
+    // them (the old pass) or only when the material values moved (the new one). The compose of every arriving slot sets
+    // lighting twice with only the shadow distance differing, and creates materials in between.
+    struct Store final {
+        std::optional<Lighting> current;
+        std::vector<std::optional<Lighting>> materials; // empty = the frozen constants, never lit
+        std::size_t writes{};
+        bool skip{};
+        void create() { materials.push_back(current); }
+        void set(const Lighting& next) {
+            const bool need = skip ? presentation::godot_backend::detail::materials_need_lighting(current, next) : true;
+            current = next;
+            if (!need) return;
+            for (auto& material : materials) {
+                material = next;
+                ++writes;
+            }
+        }
+    };
+    Store every_call;
+    Store changed_only;
+    changed_only.skip = true;
+    for (Store* store : {&every_call, &changed_only}) {
+        store->create();
+        store->create(); // uploaded before any lighting was set
+        Lighting lighting = base;
+        for (std::size_t slot = 0; slot < 456; ++slot) {
+            if (slot == 200) lighting.sph[0][0] += 1.0F; // a real change in the middle of the growth
+            Lighting start = lighting;
+            start.shadow_max_distance = 4096.0F; // the compose start: the state's own distance
+            store->set(start);
+            store->create();
+            store->create();
+            store->create();
+            Lighting finish = lighting;
+            finish.shadow_max_distance = 900.0F + static_cast<float>(slot); // the closing pass: the reach of the scene
+            store->set(finish);
+            if (slot % 7 == 0) store->create(); // a purchase between slots
+        }
+    }
+    check(every_call.materials.size() == changed_only.materials.size(), "both stores hold the same materials");
+    bool identical = every_call.current == changed_only.current;
+    for (std::size_t index = 0; index < every_call.materials.size(); ++index) {
+        auto left = every_call.materials[index];
+        auto right = changed_only.materials[index];
+        if (left && right) {
+            left->shadow_max_distance = right->shadow_max_distance = 0.0F; // the material holds none: compare the rest
+            identical = identical && *left == *right;
+        } else {
+            identical = identical && !left.has_value() && !right.has_value();
+        }
+    }
+    check(identical, "every material ends with the same lighting whether each call pushed it or only a change did");
+    check(changed_only.writes * 20 < every_call.writes, "the growth no longer pushes the lighting to every material on every slot");
 }
 
 void instance_resource_contracts() {
@@ -646,16 +884,22 @@ void texture_budget_contracts() {
         check(!probe.memory() && !budget.probed(), "a pending VRAM probe leaves the budget unprobed");
         check(probe.begin() && !probe.begin(), "only one render-thread sample is dispatched");
         check(!probe.memory(), "dispatch does not publish a zero-byte fallback while pending");
-        probe.publish({4096, "device sample"});
+        probe.publish({4096, "device sample", 8192});
         const auto memory = probe.memory();
-        check(memory && memory->bytes == 4096 && memory->source == "device sample",
-            "render-thread completion publishes bytes and source together");
+        check(memory && memory->bytes == 4096 && memory->device_local_bytes == 8192 && memory->source == "device sample",
+            "render-thread completion publishes local heap capacity, process budget and source together");
         budget.set_device(memory->bytes, memory->source);
         check(budget.probed() && budget.constrained() && !probe.begin(),
             "the cached render-thread sample enables the budget without another dispatch");
         budget.set_override(2048);
         budget.set_device(memory->bytes, memory->source);
         check(budget.state().device_bytes == 2048, "an explicit budget still wins over the cached sample");
+        check(probe.begin(detail::DeviceMemoryProbe::Clock::now(), true) && !probe.memory()
+                && !probe.begin(detail::DeviceMemoryProbe::Clock::now(), true),
+            "a live target change requests one fresh sample and cannot use the stale budget while pending");
+        probe.publish({3072, "fresh device sample", 8192});
+        check(probe.memory()->bytes == 3072 && budget.state().device_bytes == 2048,
+            "AA refresh sees current device pressure without changing the upload budget override");
         detail::DeviceMemoryProbe unsupported;
         check(unsupported.begin(), "unsupported probes also dispatch once");
         unsupported.publish({0, "unsupported driver"});

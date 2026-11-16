@@ -1,5 +1,6 @@
 #include "revised_layer.hpp"
 #include "eawr/vfs/vfs.hpp"
+#include "eawr/platform/setup_map_facts.hpp"
 #include "viewer_load_notes.hpp"
 #include "viewer_mounted_mods.hpp"
 #include "lan_lobby_screen_internal.hpp"
@@ -124,7 +125,7 @@ bool EawrLanLobby::build(Options options, const skirmish::SetupMapCache* shared_
     else {
         std::string land_failure;
         auto maps = skirmish::setup_domain_maps(filesystem, *resources.content->catalog, query,
-            skirmish::land_skirmish_enabled, &land_failure);
+            skirmish::land_skirmish_enabled, &land_failure, platform::process_setup_map_facts_store().get());
         if (!land_failure.empty()) UtilityFunctions::printerr(String::utf8(land_failure.c_str()));
         if (!maps) {
             failure_ = maps.error().message;
@@ -570,13 +571,27 @@ void EawrLanLobby::_input(const Ref<InputEvent>& event) {
 }
 
 void EawrLanLobby::show_failure(const std::string& message) {
+    model::MessageBoxRequest request;
+    request.lines[0] = message;
+    open_failure_box(std::move(request));
+}
+
+void EawrLanLobby::show_refusal(const std::string& reason, const std::string_view headline) {
+    const auto refusal = model::setup_start_refusal(reason, headline);
+    model::MessageBoxRequest request;
+    for (std::size_t line = 0; line < refusal.lines.size(); ++line) {
+        request.lines[line] = refusal.lines[line];
+        request.literal_lines[line] = true;
+    }
+    open_failure_box(std::move(request), refusal.lines[0] + "\n" + refusal.lines[1] + "\n" + refusal.lines[2]);
+}
+
+void EawrLanLobby::open_failure_box(model::MessageBoxRequest request, const std::string& scrollable) {
     Impl& impl = *impl_;
     if (impl.box != nullptr) return;
-    model::MessageBoxRequest request;
     // Only the staging page carries the host/join header; the browser pages keep the lobby title.
     request.caption = std::string(model::lobby_failure_caption(
         page_ == Page::staging && impl.join_selection.source() == model::LobbySourceKind::online, impl.host));
-    request.lines[0] = message;
     request.buttons.push_back({"TEXT_BUTTON_OK", 1, true});
     Resources& resources = *resources_;
     const MessageBoxContext context{&*resources.dialogs, &*resources.theme_model,
@@ -587,6 +602,7 @@ void EawrLanLobby::show_failure(const std::string& message) {
         memdelete(box);
         return;
     }
+    if (!scrollable.empty()) box->set_scrollable_text(scrollable);
     impl.box = box;
     layout_page();
     box->connect("result_chosen", callable_mp(this, &EawrLanLobby::on_box_result));

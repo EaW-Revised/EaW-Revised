@@ -169,6 +169,11 @@ const IncomeProfile* EconomyRules::stream(const TypeId source) const noexcept {
     return found != income.end() && found->source == source ? &*found : nullptr;
 }
 
+const IncomeProfile* EconomyRules::earner_stream(const TypeId source) const noexcept {
+    const auto* found = stream(source);
+    return found != nullptr && found->event_style == IncomeEventStyle::none ? found : nullptr;
+}
+
 const PadSaleProfile* EconomyRules::pad_sale(const TypeId type) const noexcept {
     const auto found = std::lower_bound(pad_sales.begin(), pad_sales.end(), type,
         [](const PadSaleProfile& entry, const TypeId value) { return entry.type < value; });
@@ -488,7 +493,6 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
             }
         }
     }
-    if (rules.max_queue == 0) return invalid("the queue length is zero");
     for (std::size_t index = 0; index < rules.bounty_values.size(); ++index) {
         const auto& entry = rules.bounty_values[index];
         if (!entry.first || entry.second < math::Fixed{}

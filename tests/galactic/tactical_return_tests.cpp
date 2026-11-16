@@ -576,10 +576,10 @@ void cinematic_authority() {
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
         eawr::platform::ThreadWorkerAdapter executor(workers);
         std::vector<std::string> hashes;
-        // Human absent/stopped/stuck, default disabled AI, explicit disabled human, explicit enabled AI.
+        // Human absent/stopped/stuck, default AI (enabled since #4444), explicit disabled human, explicit enabled AI.
         for (const bool station : {false, true}) for (unsigned mode = 0; mode < 6; ++mode) {
             const bool ai = mode == 3 || mode == 5;
-            const bool enabled = mode != 3 && mode != 4;
+            const bool enabled = mode != 4;
             const auto c = conflict(galaxy()); auto setup = c.tactical; auto binding = content(c);
             std::erase_if(setup.units, [&](const auto& unit) {
                 return unit.entity_id != 20 && unit.entity_id != 40 && unit.entity_id != c.station;
@@ -590,8 +590,8 @@ void cinematic_authority() {
             binding.economy.players = {{1, {}, 10, ai}, {2, {}, 10, true}};
             auto session = checked(tactical::TacticalSession::create(setup, binding));
             const auto resolved_setup = session.record().setup;
-            expect(resolved_setup.cinematic_seats == std::vector<tactical::CinematicSeat>({{1, enabled}, {2, false}}),
-                "trusted creation roles resolve AI false/human true and preserve explicit settings");
+            expect(resolved_setup.cinematic_seats == std::vector<tactical::CinematicSeat>({{1, enabled}, {2, true}}),
+                "every omitted seat resolves enabled (an AI seat too, #4444) and explicit settings are preserved");
             std::uint64_t sequence{};
             const auto report = [&](const bool playing) {
                 tactical::PlayerCommand command{{session.completed_tick(), 1, ++sequence}, {}, tactical::RetreatCinematicPayload{playing, 0}};
@@ -609,7 +609,7 @@ void cinematic_authority() {
                 && session.retreat_state().cinematic_duration == (station ? 450U : 150U),
                 "FC-R02 initializes the engine clock and station-dependent duration");
             expect(session.retreat_state().phase == (enabled ? tactical::RetreatPhase::escaping : tactical::RetreatPhase::escaped),
-                "only the trusted disabled seat completes at initialization k0, without any report");
+                "only the explicitly disabled seat completes at initialization k0, without any report");
             if (!enabled) {
                 // A's AI wire layout remains valid even though no producer is required for k0 completion.
                 report(false);

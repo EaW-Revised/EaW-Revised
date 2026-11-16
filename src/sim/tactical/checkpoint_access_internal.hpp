@@ -139,6 +139,44 @@ struct Access {
             v.concentrate_service_census, v.concentrate_service_last_id,
             v.committed_bonus_profiles, v.named_ability_locks, v.departure_controls, v.basic_ai, v.beacons, v.snapshot_players);
         if (v.setup.campaign) a(v.command_ledger.battlefield_defence, v.command_ledger.reveal_multipliers, v.last_fog_multipliers);
+        // TSW-02: the super weapon records ride the state only when the battle has a TSW setup, so a battle without one
+        // saves the bytes it always did.
+        if (v.setup.tsw) {
+            a(v.tsw_states, v.tsw_world);
+            if constexpr (A::reading) {
+                std::uint32_t holding = 0;
+                for (const auto& [id, record] : v.tsw_states) {
+                    if (id == invalid_entity_id || record.phase > tsw_last_serviced_phase
+                        || record.target > v.setup.tsw->targets.size() || record.speed.raw() < 0
+                        || record.speech_mask >= (1U << tsw_speech_threshold_count))
+                        throw Invalid("invalid super weapon record");
+                    // The sequence runs on a target; a record in it holds the victory tests until it ends (TSW-09).
+                    if (tsw_holds_victory(record.phase)) {
+                        ++holding;
+                        if (record.target == 0 || record.speed.raw() != 0) throw Invalid("invalid super weapon sequence record");
+                    }
+                }
+                const auto& world = v.tsw_world;
+                if (world.victory_hold != holding || (world.victory_hold == 0 && !world.deferred.empty())
+                    || (!world.destroyed_targets.empty() && !world.planet_destroyed))
+                    throw Invalid("invalid super weapon battle state");
+                std::uint32_t previous = 0;
+                for (const auto target : world.destroyed_targets) {
+                    if (target <= previous || target > v.setup.tsw->targets.size()) throw Invalid("invalid destroyed super weapon target");
+                    previous = target;
+                }
+                for (std::size_t index = 0; index < world.deferred.size(); ++index) {
+                    const auto& test = world.deferred[index];
+                    if (test.kind < TswDeferredKind::unit || test.kind > TswDeferredKind::station || test.unit == invalid_entity_id)
+                        throw Invalid("invalid deferred victory test");
+                    // One unit entry per owner (the writer never records a second one).
+                    if (test.kind == TswDeferredKind::unit)
+                        for (std::size_t earlier = 0; earlier < index; ++earlier)
+                            if (world.deferred[earlier].kind == TswDeferredKind::unit && world.deferred[earlier].owner == test.owner)
+                                throw Invalid("invalid deferred victory test");
+                }
+            }
+        }
         bool has_fog = v.fog.has_value();
         a(has_fog);
         if (has_fog != v.fog.has_value()) throw Invalid("fog binding disagrees with content");

@@ -28,7 +28,7 @@ class PackageCrossTests(unittest.TestCase):
         sha = 'a' * 40
         argv = ['--sha', sha, '--version', '0.3.3c', '--build-dir', 'missing',
                 '--engine-dir', 'missing', '--launcher-artifact', 'missing',
-                '--out', 'unused', '--symbol-store', 'unused-symbols']
+                '--out', 'unused', '--symbol-store', 'unused-symbols', '--linux-import-godot', 'missing-godot']
         with patch.object(module.subprocess, 'check_output', return_value='b' * 40), \
              patch.object(module.subprocess, 'run') as run:
             self.assertEqual(module.main(argv), 1)
@@ -45,7 +45,7 @@ class PackageCrossTests(unittest.TestCase):
             launcher.write_bytes(b'wrong')
             argv = ['--sha', sha, '--version', '0.3.3c', '--build-dir', temporary,
                     '--engine-dir', temporary, '--launcher-artifact', str(launcher),
-                    '--out', 'unused', '--symbol-store', 'unused-symbols']
+                    '--out', 'unused', '--symbol-store', 'unused-symbols', '--linux-import-godot', 'missing-godot']
             with patch.object(module.subprocess, 'check_output', return_value=sha), \
                  patch.object(module.subprocess, 'run') as run:
                 self.assertEqual(module.main(argv), 1)

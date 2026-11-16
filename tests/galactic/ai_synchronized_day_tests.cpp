@@ -2,6 +2,7 @@
 #include <array>
 #include <optional>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <map>
 #include <memory>
@@ -43,7 +44,7 @@ using namespace galactic_test;
 
 // W1 S2/S3 P4: what the AI's inbox holds (read from the saved async lane block): an actor loss or change, a bill the world decided
 // against the billing view.
-struct InboxHolds { bool actor_change{}, bill{}; };
+struct InboxHolds { bool actor_change{}, bill{}, stage_loss{}; }; // stage_loss (#6337): the saved lane holds a non-empty stage-loss set
 InboxHolds inbox_holds(cp::GameSession& game) {
     InboxHolds holds;
     const auto saved = must(game.save_galactic_ai());
@@ -52,6 +53,8 @@ InboxHolds inbox_holds(cp::GameSession& game) {
     if (lane == saved.state->components.end()) return holds;
     const auto decoded = must(eawr::script::foc::galactic_ai::decode_outbox_state(lane->second, true));
     if (decoded.tail.empty()) return holds;
+    constexpr std::string_view stage_losses_tag = "eawr-gcai-stage-losses";
+    holds.stage_loss = std::search(decoded.tail.begin(), decoded.tail.end(), stage_losses_tag.begin(), stage_losses_tag.end()) != decoded.tail.end();
     cp::GalacticAiLaneInbox inbox; must(inbox.restore_prefix(decoded.tail)); // the billing view block follows (W1 S3)
     using Change = gc::GalacticSession::NativeActorChange;
     for (const auto& entry : inbox.entries()) {
@@ -76,9 +79,11 @@ struct DayResult {
     // marks_outside_window
     std::array<std::uint64_t, 11> tally{};
     bool opponents{true};
+    bool refusal_floor{true}, strategic_floor{true};
 };
 DayResult run_day(std::size_t workers) {
     DayResult result;
+    std::cout << "GCAI-REFUSAL-RUN workers=" << workers << " begin" << std::endl;
     const auto root = game_root();
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
@@ -145,6 +150,9 @@ DayResult run_day(std::size_t workers) {
     std::map<gc::FleetId, gc::PlayerId> fleet_owners;
     std::map<eawr::sim::EntityId, std::uint64_t> missing_actors; // actor the AI holds that the world never got -> first tick seen
     std::map<eawr::sim::EntityId, std::uint64_t> unmapped_builds; // paid queue entry of an AI builder with no purchase row in the AI state -> first tick seen
+    // build -> the tick its AI purchase row was first seen completed or failed. The AI closes a row when its (staged) decision is made; the
+    // world applies that decision from the apply delay on, so for up to that long a closed row and its still-queued entry are the design.
+    std::map<eawr::sim::EntityId, std::uint64_t> closed_rows;
     for (const auto& fleet : root_owner.game()->galaxy().snapshot()->fleets()) fleet_owners[fleet.id] = fleet.owner;
     // W1 S2 P4 (async only): from the first tick whose inbox holds an actor loss or change, save the game at each of the next
     // 15 ticks (one whole window, so the sweep crosses the drain), then load each save and continue it past the next drain:
@@ -154,29 +162,52 @@ DayResult run_day(std::size_t workers) {
     namespace ck = galactic_campaign_gate::ck;
     const auto identities = ck::game_identities(root_owner.game()->galaxy().setup());
     const bool async = setup->lifecycle.schedule.apply_delay != 0;
+    // A decision the AI makes in the window starting at tick s reaches the world from s + the apply delay: until then the AI's row may be
+    // closed while the world still queues the entry.
+    const std::uint64_t apply_lag = setup->lifecycle.schedule.apply_delay + setup->lifecycle.schedule.batch_ticks;
     constexpr std::uint64_t p4_span = 15, p4_follow = 16;
     struct Sweep {
         const char* trigger{};
-        std::uint64_t first{}, bill_saves{};
+        std::uint64_t first{}, bill_saves{}, loss_saves{};
         bool done{};
         std::vector<std::pair<std::uint64_t, std::vector<std::uint8_t>>> saves;
         std::map<std::uint64_t, std::string> hashes;
     };
-    std::array<Sweep, 2> sweeps{};
+    std::array<Sweep, 4> sweeps{};
+    std::set<std::uint64_t> pause_ticks; // ticks whose events say the galaxy paused
+    std::uint64_t instance_copy_mismatches{}; // step 2c-3 owner check: ticks where the sim-side AI instance id copy differs from the live list
+    // Step 2c-2 (R2): the human seat pauses and resumes the galaxy twice, once across a window boundary and once for two ticks, so the
+    // lane serves windows while the world's tick is held. The fourth sweep saves every tick of the first pause's window and loads it.
+    struct Episode { std::uint64_t tick, sequence; bool pause; };
+    constexpr std::array<Episode, 4> episodes{{{1507, 1, true}, {1530, 2, false}, {3001, 3, true}, {3002, 4, false}}};
+    const auto human_seat = gc::SeatId{options.solo_reference_human.value()};
+    const auto feed = [&](auto& session, std::uint64_t step_tick) {
+        for (const auto& episode : episodes) {
+            if (episode.tick != step_tick) continue;
+            if (episode.pause) must(session.submit({{session.completed_tick(), human_seat, episode.sequence}, gc::PauseGalaxy{}}));
+            else must(session.submit({{session.completed_tick(), human_seat, episode.sequence}, gc::ResumeGalaxy{}}));
+        }
+    };
+    std::uint64_t oracle_due_ticks{}; // step 2c-3 (R5): ticks the native oracle trace would capture the full AI state on
     std::uint64_t published_differs{}, observed_ticks{}; // W1 S4: ticks whose per-tick native digest is not the live composition
-    sweeps[0].trigger = "actor_change"; sweeps[1].trigger = "bill";
+    sweeps[0].trigger = "actor_change"; sweeps[1].trigger = "bill"; sweeps[2].trigger = "stage_loss"; sweeps[3].trigger = "pause";
     for (std::uint64_t tick = 1; tick <= 6000; ++tick) {
+        feed(*root_owner.game(), tick);
         const auto state = must(root_owner.game()->step(*setup->executor));
         result.final_hash = state.state_hash.get();
         const bool sweeping = async && workers == 4 && tick >= 300;
-        const auto holds = sweeping && (!sweeps[0].first || !sweeps[1].first || tick < std::max(sweeps[0].first, sweeps[1].first) + p4_span)
+        const auto last_first = std::max({sweeps[0].first, sweeps[1].first, sweeps[2].first});
+        const auto holds = sweeping && (!sweeps[0].first || !sweeps[1].first || !sweeps[2].first || tick < last_first + p4_span)
             ? inbox_holds(*root_owner.game()) : InboxHolds{};
         if (sweeping && !sweeps[0].first && holds.actor_change) sweeps[0].first = tick;
         if (sweeping && !sweeps[1].first && holds.bill) sweeps[1].first = tick;
+        if (sweeping && !sweeps[2].first && holds.stage_loss) sweeps[2].first = tick;
+        if (sweeping && !sweeps[3].first && tick == episodes[0].tick) sweeps[3].first = tick;
         for (auto& sweep : sweeps) {
             if (!sweep.first || sweep.done) continue;
             if (tick < sweep.first + p4_span) {
                 if (holds.bill) ++sweep.bill_saves;
+                if (holds.stage_loss) ++sweep.loss_saves;
                 sweep.saves.emplace_back(tick, must(ck::save_game_checkpoint(*root_owner.game(), identities)));
             }
             if (tick > sweep.first && tick <= sweep.first + p4_span + p4_follow) sweep.hashes.emplace(tick, state.state_hash.get());
@@ -191,6 +222,7 @@ DayResult run_day(std::size_t workers) {
                     galactic_campaign_gate::check(must(ck::save_game_checkpoint(restored.session, identities)) == bytes,
                         "P4: a save taken while the inbox is non-empty loads and saves the same bytes");
                     for (auto next = saved_tick + 1; next <= sweep.first + p4_span + p4_follow; ++next) {
+                        feed(restored.session, next);
                         const auto resumed = must(restored.session.step(executor));
                         galactic_campaign_gate::check(resumed.completed_tick == next && resumed.state_hash.get() == sweep.hashes.at(next),
                             "P4: a session saved and loaded inside an async window continues exactly as the uninterrupted run");
@@ -200,7 +232,7 @@ DayResult run_day(std::size_t workers) {
             }
             observed->players = players_before;
             std::cout << "GCAI-ASYNC-P4 trigger=" << sweep.trigger << " first_tick=" << sweep.first << " saves=" << sweep.saves.size()
-                << " bill_saves=" << sweep.bill_saves << " compared_ticks=" << compared << " equal=true" << std::endl;
+                << " bill_saves=" << sweep.bill_saves << " stage_loss_saves=" << sweep.loss_saves << " compared_ticks=" << compared << " equal=true" << std::endl;
             sweep.saves.clear(); sweep.done = true;
         }
         const auto engine = observed->runtimes.front().engine.lock();
@@ -214,6 +246,10 @@ DayResult run_day(std::size_t workers) {
             if (row.event == "assembly_sync_expired") ++count.expired;
         }
         for (const auto& fleet : state.galaxy->fleets()) fleet_owners[fleet.id] = fleet.owner;
+        for (const auto& event : state.galaxy->events()) if (event.kind == gc::GalacticEventKind::galaxy_paused) pause_ticks.insert(event.tick);
+        if (const auto* bridge = root_owner.game()->galactic_scripts(); bridge && !bridge->ai_instance_copy_matches()) ++instance_copy_mismatches;
+        if (const auto bought = observed->runtimes.front().actions.lock())
+            for (const auto& [build, row] : bought->purchases()) if ((row.failed || row.completed) && !closed_rows.contains(build)) closed_rows.emplace(build, tick);
         for (const auto& event : state.galaxy->events()) {
             if (event.kind != gc::GalacticEventKind::movement_begin || !moves.emplace(event.tick, event.subject, event.value).second) continue;
             const auto planet = std::find_if(state.galaxy->planets().begin(), state.galaxy->planets().end(),
@@ -239,9 +275,17 @@ DayResult run_day(std::size_t workers) {
                     const auto builder = std::find_if(owners.begin(), owners.end(), [&](const auto& row) { return row.player == entry.builder; });
                     if (builder == owners.end() || builder->human) continue;
                     const auto bought = actions->purchases().find(entry.build_id);
-                    if (bought == actions->purchases().end() || bought->second.completed || bought->second.failed) {
-                        if (unmapped_builds.emplace(entry.build_id, tick).second)
+                    const auto closed = bought != actions->purchases().end() && (bought->second.completed || bought->second.failed);
+                    const auto closed_at = closed_rows.find(entry.build_id);
+                    const bool closed_too_long = closed && (closed_at == closed_rows.end() || tick - closed_at->second > apply_lag);
+                    if (bought == actions->purchases().end() || closed_too_long) {
+                        if (unmapped_builds.emplace(entry.build_id, tick).second) {
                             std::cout << "UNMAPPED_BUILD id=" << entry.build_id << " builder=" << entry.builder << " planet=" << planet.planet << " type=" << entry.type << " tick=" << tick << (bought == actions->purchases().end() ? " no_row" : " row_closed") << std::endl;
+                            if (bought != actions->purchases().end())
+                                std::cout << "UNMAPPED_ROW id=" << entry.build_id << " completed=" << bought->second.completed << " failed=" << bought->second.failed
+                                    << " orphan=" << bought->second.orphan << " task_finished=" << bought->second.task_finished << " closed_at="
+                                    << (closed_at == closed_rows.end() ? 0 : closed_at->second) << " apply_lag=" << apply_lag << std::endl;
+                        }
                     }
                 }
             for (const auto& [id, facts] : store->inventory()) {
@@ -259,6 +303,7 @@ DayResult run_day(std::size_t workers) {
             const auto live = eawr::script::foc::galactic_ai::compose_native_sync_digests(must(composed->sync_digests()));
             if (per_tick != live) ++published_differs;
             ++observed_ticks;
+            if (composed->oracle_capture_due(state.completed_tick)) ++oracle_due_ticks;
         }
         if (tick % 600 == 0) std::cout << "synchronized-day progress tick=" << state.completed_tick << std::endl;
     }
@@ -267,10 +312,20 @@ DayResult run_day(std::size_t workers) {
         std::cout << "GCAI-ASYNC-PUBLISHED workers=4 ticks_reading_publication=" << published_differs << std::endl;
         // Review #6425: the AI-owned state changes on every serviced tick of the stock day, so on the async day every observed tick
         // (6000) reads the publication.
+        std::cout << "GCAI-ASYNC-ORACLE workers=4 capture_ticks=" << oracle_due_ticks << " of " << observed_ticks << std::endl;
+        // Step 2c-3 (R5): the per-tick oracle capture reads the full AI state; on the async schedule only on the ticks the AI ran (at most
+        // one per window, at least one), on the synchronous reference every tick.
+        galactic_campaign_gate::check(async ? (oracle_due_ticks >= 1 && oracle_due_ticks <= 6000 / setup->lifecycle.schedule.batch_ticks)
+            : oracle_due_ticks == observed_ticks, "the native oracle captures the full AI state only on the ticks the async AI ran");
         galactic_campaign_gate::check(observed_ticks == 6000 && (async ? published_differs == observed_ticks : published_differs == 0),
             "W1 S4: the async per-tick native digest reads the window's publication; the reference reads the live state");
     }
     galactic_campaign_gate::check(!async || workers != 4 || sweeps[0].done, "P4: the async day reaches a window whose inbox holds an actor loss or change");
+    // #6337: the day must reach a save that holds a pending stage loss (otherwise the round trip below proves nothing about the set).
+    galactic_campaign_gate::check(!async || workers != 4 || (sweeps[2].done && sweeps[2].loss_saves != 0), "P4: the async day reaches a save holding a non-empty stage-loss set");
+    std::cout << "GCAI-ASYNC-PAUSE workers=" << workers << " pauses=" << pause_ticks.size() << std::endl;
+    galactic_campaign_gate::check(pause_ticks.size() == 2, "the day paused the galaxy twice (the lane served windows while the world's tick was held)");
+    galactic_campaign_gate::check(!async || workers != 4 || sweeps[3].done, "P4: the pause window is saved at every tick, loaded and continued (pause/resume fed again after each load)");
     // Runtime wiring of the identity blocks (W1 S0): on an async schedule every window reserved its entity and invasion blocks in
     // the world when it began, so the world's counters stand at or above the lane frontier (the end of the newest block).
     {
@@ -296,6 +351,36 @@ DayResult run_day(std::size_t workers) {
         std::cout << std::endl;
         result.tally = {tally->overlay_refused, tally->stale, tally->delivered_at_once, tally->queued, tally->drained, tally->late,
             tally->out_of_order, tally->bills_viewed, tally->billing_direct, tally->billing_view_mismatch, tally->marks_outside_window};
+        // Async step 2 exit counter: writes to the AI's own state made while the window body is not open (the world side applying
+        // loss notices and refusal hooks). Printed always; step 2 gates it at zero once the writers are routed through the inbox.
+        if (const auto& probe = observed->runtimes.front().write_probe) {
+            using Writer = eawr::script::foc::GalacticAiWriteProbe::Writer;
+            std::cout << "GCAI-ASYNC-WRITES workers=" << workers << " armed=" << probe->armed()
+                << " outside_engine=" << probe->outside(Writer::engine) << " outside_actions=" << probe->outside(Writer::actions)
+                << " outside_tracked=" << probe->outside(Writer::tracked) << " refusals_queued=" << (observed->runtimes.front().apply_tally ? observed->runtimes.front().apply_tally->refusals_queued : 0)
+                << std::endl;
+        }
+        std::cout << "GCAI-ASYNC-READS workers=" << workers << " live_hash_fallbacks=" << tally->live_hash_fallbacks
+            << " after_bootstrap=" << tally->live_hash_fallbacks_after_bootstrap << " admission_reads=" << tally->admission_reads
+            << " admission_non_default=" << tally->admission_non_default << std::endl;
+        // No AI player is retired by a script or native fault over the day (a retired AI stops for the rest of the campaign).
+        const auto retirements = cp::galactic_ai_provider_retirements(observed->runtimes.front());
+        std::cout << "GCAI-RETIREMENTS workers=" << workers << " provider_retirements=" << retirements << std::endl;
+        galactic_campaign_gate::check(retirements == 0, "no AI player is retired over the stock day");
+        // Step 2c-2 (R2): the lifecycle's admission is read by the sim every tick but nothing ever writes a non-default one, pause included.
+        galactic_campaign_gate::check(!tally->admission_non_default, "the lifecycle admission the sim reads stays the default through pauses, battles and held ticks");
+        // Step 2c-3 (R3): the per-tick disjointness checks read the sim-side copy of the AI instance ids; the scheduler's id list is read
+        // again only when its instance revision moved (setup, a retirement or creation inside a window), never once per tick.
+        const auto* bridge = root_owner.game()->galactic_scripts();
+        const auto list_reads = bridge ? bridge->ai_instance_list_reads() : 0;
+        std::cout << "GCAI-ASYNC-INSTANCES workers=" << workers << " ai_instance_list_reads=" << list_reads
+            << " copy_mismatches=" << instance_copy_mismatches << std::endl;
+        galactic_campaign_gate::check(!instance_copy_mismatches, "the sim-side AI instance id copy equals the live list on every tick (the revision tracks every change)");
+        galactic_campaign_gate::check(list_reads <= std::max<std::uint64_t>(1, 6000 / (async ? setup->lifecycle.schedule.batch_ticks : 1)),
+            "the AI instance id list is re-read at most once per window, not per tick");
+        // Step 2c: once a window publication is visible the sim never hashes the live AI scheduler on the async schedule.
+        if (async) galactic_campaign_gate::check(!tally->live_hash_fallbacks_after_bootstrap,
+            "async per-tick hashes read the published AI digest, never the live AI scheduler, once a window is visible");
         const auto windows = std::max<std::uint64_t>(1, 6000 / (async ? setup->lifecycle.schedule.batch_ticks : 1));
         std::cout << "GCAI-ASYNC-BILLING workers=" << workers << " bills_viewed=" << tally->bills_viewed << " direct=" << tally->billing_direct
             << " view_mismatch=" << tally->billing_view_mismatch << " marks_outside_window=" << tally->marks_outside_window
@@ -315,14 +400,17 @@ DayResult run_day(std::size_t workers) {
         // No funding notice outside the window writes the AI: marks come only from the AI's own admission inside it.
         galactic_campaign_gate::check(!tally->marks_outside_window, "no production mark is noticed outside the AI window");
         // W1 floors A: no apply-time refusal kind beyond the stored base (main after #6336, see floor_base below).
+        // Reviewed ground-production activity: overlay has paused fleet/control, one gone fleet, and two already-refused invasion
+        // records replayed twice (7 attempts). Apply has one gone fleet, two retained invasion refusals and five in-transit orbit
+        // rechecks. Identical on 1/2/4/8 workers, with zero stale identities/outside writes and unchanged strategic floors.
         if (async) {
-            bool refusals_within = tally->overlay_refused <= 5 && tally->stale == 0;
+            bool refusals_within = tally->overlay_refused <= 7 && tally->stale == 0;
             for (std::size_t kind = 0; kind < tally->refused.size(); ++kind) {
                 const std::string name(eawr::script::foc::galactic_ai::intent_kind_name(static_cast<eawr::script::foc::galactic_ai::IntentKind>(kind)));
-                const std::uint64_t allowed = name == "fleet" || name == "invasion" ? 1 : name == "orbit-recheck" ? 5 : 0;
+                const std::uint64_t allowed = name == "invasion" ? 2 : name == "fleet" ? 1 : name == "orbit-recheck" ? 5 : 0;
                 refusals_within = refusals_within && tally->refused[kind] <= allowed;
             }
-            galactic_campaign_gate::check(refusals_within, "W1 floors A: no apply-time refusals beyond the stored base");
+            result.refusal_floor = refusals_within;
         }
         else galactic_campaign_gate::check(!tally->bills_viewed, "reference bills are decided by the AI at once");
         if (async && workers == 4) galactic_campaign_gate::check(!tally->bills_viewed || (sweeps[1].done && sweeps[1].bill_saves),
@@ -360,24 +448,38 @@ DayResult run_day(std::size_t workers) {
             std::cout << "GCAI-ASYNC-FLOORS workers=" << workers << " player=" << base.name << " pass=" << (held ? "true" : "false") << std::endl;
             floors = floors && held;
         }
-        galactic_campaign_gate::check(floors, "W1 floors A: the async stock day stays within the floors of the stored base");
+        result.strategic_floor = floors;
     }
+    std::cout << "GCAI-REFUSAL-RUN workers=" << workers << " end refusal_floor=" << result.refusal_floor
+        << " strategic_floor=" << result.strategic_floor << std::endl;
     return result;
 }
 int run() {
     std::cout << "CTEST_FULL_OUTPUT\n";
+    // The bounded contract explicitly opts into the otherwise disabled, process-local observer.
+#ifdef _WIN32
+    const auto trace_environment = _putenv_s("EAWR_GCAI_TRACE_REFUSALS", "1");
+#else
+    const auto trace_environment = setenv("EAWR_GCAI_TRACE_REFUSALS", "1", 1);
+#endif
+    galactic_campaign_gate::check(trace_environment == 0, "stock-day refusal observer can be enabled");
     // The day on 4 workers (with the P4 sweep), then on 1, 2 and 8: the world and the delivery tally must not depend on it.
     std::optional<DayResult> first;
-    bool opponents = true;
+    bool opponents = true, refusal_floor = true, strategic_floor = true;
     for (const std::size_t workers : {4, 1, 2, 8}) {
         const auto day = run_day(workers);
         if (!first) first = day;
         else galactic_campaign_gate::check(day.final_hash == first->final_hash && day.tally == first->tally,
             "the stock day and its delivery tally are equal on 1/2/4/8 workers (workers " + std::to_string(workers) + ")");
         opponents = opponents && day.opponents;
+        refusal_floor = refusal_floor && day.refusal_floor;
+        strategic_floor = strategic_floor && day.strategic_floor;
     }
     std::cout << "GCAI-ASYNC-WORKERS 4,1,2,8 final_hash_equal=true tally_equal=true" << std::endl;
     galactic_campaign_gate::check(opponents, "both stock opponents produce attributed hostile movement and conflicts by tick6000");
+    // Keep the stored allowances strict, but print every worker's strategic evidence before a floor failure.
+    galactic_campaign_gate::check(refusal_floor, "W1 floors A: no apply-time refusals beyond the stored base");
+    galactic_campaign_gate::check(strategic_floor, "W1 floors A: the async stock day stays within the floors of the stored base");
     return galactic_test::failures == 0 ? 0 : 1;
 }
 }

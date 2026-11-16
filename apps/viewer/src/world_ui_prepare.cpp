@@ -10,6 +10,7 @@
 #include "eawr/data/ui/command_bar.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/data/ui/text_database.hpp"
+#include "eawr/presentation/ui/hud_shell.hpp"
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/presentation/ui/pads.hpp"
 #include "eawr/scene/scene.hpp"
@@ -350,7 +351,7 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
             if (const auto size = number(tag(object.value(), "GUI_Bracket_Size"))) bracket = static_cast<int>(*size);
             ui_type.bounds_scale = number(tag(object.value(), "GUI_Bounds_Scale")).value_or(1.0F);
             ui_type.hide_health_bar = yes(tag(object.value(), "GUI_Hide_Health_Bar"));
-            ui_type.icon = lower(tag(object.value(), "Icon_Name"));
+            ui_type.icon = lower(ui::object_icon_name(object.value(), catalog));
             ui_type.hero_head = ui::hero_world_identity(type.named_hero, yes(tag(object.value(), "Show_Hero_Head")));
         } else {
             unresolved_.push_back("type " + type.id + ": " + core::format_diagnostic(object.error()));

@@ -1,20 +1,25 @@
+#include "render_profile_viewport.hpp"
 #include "viewer_host_internal.hpp"
 #include "lan_match.hpp"
 #include "loading_screen.hpp"
 #include "viewer_mounted_mods.hpp"
 #include "audio_output.hpp"
 #include "startup_trace.hpp"
+#include "startup_window.hpp"
 #include "settings_store.hpp"
 #include "gpu_memory_trace.hpp"
 #include "ui/input_routing.hpp"
 #include "polled_pointer.hpp"
 #include "galactic/galactic_launch_options.hpp"
+#include "no_fog_option.hpp"
+#include "viewer_profile_arguments.hpp"
 #include "skirmish_save_hints.hpp"
 #include "battle_content.hpp" // include-guard: keep -- preflight accesses the mounted filesystem and catalog
 #include "skirmish_prepare.hpp"
 #include "eawr/checkpoint/checkpoint.hpp"
 #include "eawr/platform/saved_games.hpp"
 #include "eawr/platform/live_ai.hpp"
+#include "eawr/presentation/ui/skirmish_setup.hpp"
 #include "eawr/units/simulation_model.hpp"
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/viewport.hpp>
@@ -96,6 +101,30 @@ void ViewerHost::leave_campaign_to_menu() {
     front_end_->return_to_main_menu();
 }
 
+void ViewerHost::switch_campaign(const campaign::CampaignSwitchTarget& target) {
+    UtilityFunctions::print("EAWR campaign switch: ", String::utf8(target.campaign.c_str()), " as ",
+        String::utf8(target.faction.c_str()), " at ", String::utf8(target.difficulty.c_str()));
+    if (target.tech) UtilityFunctions::print("EAWR campaign switch: the technology marker ", static_cast<int64_t>(*target.tech), " is recorded, not applied");
+    world_capture_.clear();
+    galactic_mode_->close();
+    galactic_mode_.reset();
+    if (galactic_host_) {
+        remove_child(galactic_host_);
+        memdelete(galactic_host_);
+        galactic_host_ = nullptr;
+    }
+    // The one start path: the staging screen's request. The entry names its faction; the level picks the difficulty entry.
+    presentation::ui::CampaignStartRequest request;
+    request.campaign = target.campaign;
+    request.faction = target.faction;
+    request.difficulty = target.difficulty;
+    const auto refusal = front_end_->launch_campaign(request);
+    if (!refusal.empty()) {
+        front_end_->return_to_main_menu();
+        front_end_->show_refusal(refusal, "The campaign could not be started.");
+    }
+}
+
 void ViewerHost::start_skirmish_battle() {
     auto selected = std::exchange(pending_start_, std::nullopt);
     const std::string map_path = *selected->map;
@@ -122,17 +151,23 @@ void ViewerHost::start_skirmish_battle() {
         .battle_load = [this](const presentation::ui::SavedGameRequest& request) { return queue_saved_battle(request); },
         .attract = {}});
     if (!map_mode_->ready(*skirmish_battle_host_)) {
-        // A land battle names why it refused (for example a company or locomotion the authored tables lack).
-        const std::string reason = land ? std::string(map_mode_->failure()) : std::string{};
+        // Every refusal names its cause (the scoring script, the content, the AI scripts, the map, a company or
+        // locomotion the authored tables lack ...): the setup screen shows its code and first line (#6816).
+        const std::string cause(map_mode_->failure());
+        const std::string reason = cause.empty() ? "This battle could not start. Check the map and factions or the run report."
+            : land ? "The land battle could not start: " + cause : cause;
         map_mode_.reset();
         if (auto lan = skirmish_setup_->lan_match()) lan->cancel();
         remove_child(skirmish_battle_host_);
         memdelete(skirmish_battle_host_);
         skirmish_battle_host_ = nullptr;
         skirmish_loading_ = nullptr;
-        skirmish_setup_->show(reason.empty() ? "This battle could not start. Check the map and factions or the run report."
-                                             : "The land battle could not start: " + reason);
-        if (options_->skirmish_setup_test) stop(2);
+        skirmish_setup_->show_refusal(reason);
+        if (options_->skirmish_setup_test) {
+            // A capture run keeps the refusal on screen long enough for the setup's returned picture.
+            if (options_->capture_path.empty()) stop(2);
+            else { options_->skirmish_setup_refused = true; frame_ = 0; }
+        }
     }
 }
 
@@ -157,9 +192,8 @@ std::string ViewerHost::queue_saved_battle_checked(const presentation::ui::Saved
     const auto content = skirmish_setup_->content();
     if (!content || !content->filesystem || !content->catalog) return "The mounted game data is unavailable.";
     const auto& filesystem = *content->filesystem;
-    const auto& catalog = *content->catalog;
     // The unit tables and the data identity are built once here; the battle's first load stage takes the result below.
-    auto built = prepare_saved_battle(filesystem, catalog, setup.value());
+    auto built = prepare_saved_battle(content->filesystem, content->catalog, setup.value());
     if (!built) return core::format_diagnostic(built.error());
     auto prepared_battle = std::make_shared<SavedBattlePreparation>(std::move(built).value());
     const auto& prepared = prepared_battle->prepared;
@@ -248,8 +282,9 @@ void ViewerHost::start_saved_battle() {
         skirmish_loading_ = nullptr;
         gpu_memory_trace.battle_released();
         const auto message = reason.empty() ? std::string("The saved battle could not be loaded.") : reason;
-        if (front_end_) { front_end_->return_to_main_menu(); front_end_->show_load_failure(message); }
-        else skirmish_setup_->show(message);
+        // #6611: the load's refusal (unsupported or corrupt checkpoint, other game data) names its code and first line.
+        if (front_end_) { front_end_->return_to_main_menu(); front_end_->show_refusal(message, presentation::ui::saved_battle_refusal_headline); }
+        else skirmish_setup_->show_refusal(message, presentation::ui::saved_battle_refusal_headline);
     } else {
         UtilityFunctions::print("EAWR skirmish battle restored from ", String::utf8(ViewerPath::utf8(saved.path).c_str()));
     }
@@ -299,10 +334,14 @@ void ViewerHost::start_replay_battle(const UiGalleryMode::ReplayRequest& request
 
 void ViewerHost::_process(const double delta) {
     if (completed_) return;
+    refresh_render_viewport_sizes();
     if (startup_splash_pending_) {
         if (startup_splash_frames_++ == 0) return;
         startup_splash_pending_ = false;
         try {
+#ifdef _WIN32
+            StartupFrameMessages startup_messages;
+#endif
             ready_battle_setup();
         } catch (const std::exception& error) {
             status_message_ = std::string("Viewer startup failed: ") + error.what() +
@@ -440,6 +479,12 @@ void ViewerHost::process_campaign_frame(const double delta) {
             String::utf8(galactic_mode_->failure().c_str()));
         stop(*exit_code);
     }
+    else if (const auto target = galactic_mode_->campaign_switch()) {
+        // LOAD_CAMPAIGN: the host owns what a switch means. With the front end behind the campaign (and its start path)
+        // the named campaign starts; a run started straight into the mode has none, so the request is refused.
+        if (galactic_host_ && front_end_) switch_campaign(*target);
+        else galactic_mode_->decline_campaign_switch("this run has no campaign start path (it was not started from the menus)");
+    }
     else if (const auto destination = galactic_mode_->score_destination();
              galactic_mode_->leave_requested()
              || (destination && *destination == platform::CampaignScoreDestination::main_menu)) {
@@ -477,7 +522,12 @@ void ViewerHost::process_battle_frame(const double delta) {
             world_capture_.clear();
             // Quit Game in the battle's menu goes to the main menu, not back to the setup screen.
             const bool to_menu = front_end_ && (saved_battle_from_front_end_ || map_mode_->leave_to_menu());
+            // A battle that stops with an error names it (the load's or the session's own failure text).
+            const std::string stopped_with(*exit_code != 0 ? map_mode_->failure() : std::string_view{});
             saved_battle_from_front_end_ = false;
+            // A save's load runs to completion in start_saved_battle (its refusal is shown there), so an error stop
+            // here is always a running battle's own failure, never a refused save (#6880).
+            constexpr std::string_view headline = "The battle stopped with an error.";
             map_mode_.reset();
             remove_child(skirmish_battle_host_);
             memdelete(skirmish_battle_host_);
@@ -487,10 +537,13 @@ void ViewerHost::process_battle_frame(const double delta) {
             if (to_menu) {
                 // The shell leaves the setup screen on its next frame and shows the main menu.
                 front_end_->return_to_main_menu();
+                // An error exit says why on the main menu instead of dropping there silently.
+                if (!stopped_with.empty()) front_end_->show_refusal(stopped_with, headline);
                 startup_trace.returning(return_start);
                 return;
             }
-            skirmish_setup_->show(*exit_code == 0 ? "Battle finished. Choose your next battle." : "Battle could not finish; see the run report.");
+            if (!stopped_with.empty()) skirmish_setup_->show_refusal(stopped_with, headline);
+            else skirmish_setup_->show(*exit_code == 0 ? "Battle finished. Choose your next battle." : "Battle could not finish; see the run report.");
             startup_trace.returning(return_start);
             RenderingServer::get_singleton()->connect("frame_post_draw",
                 callable_mp(this, &ViewerHost::on_setup_frame_drawn), Object::CONNECT_ONE_SHOT);
@@ -513,6 +566,7 @@ void ViewerHost::process_battle_setup_frame() {
     skirmish_setup_->process();
     gpu_memory_trace.setup_frame();
     if (options_->skirmish_setup_returned && ++frame_ >= 30) { stop(0); return; }
+    if (options_->skirmish_setup_refused && ++frame_ >= 150) { stop(2); return; }
     if (pending_start_) {
         // The screen's Controls draw once in a normal frame before the preparation draws it on the spot.
         if (skirmish_loading_ == nullptr || skirmish_loading_->frames() >= 2) start_skirmish_battle();
@@ -525,6 +579,9 @@ void ViewerHost::process_battle_setup_frame() {
             campaign_options.game_root = options_->game_root;
             campaign_options.mod_root = options_->mod_root;
             campaign_options.save_directory = GalacticMode::from_command_line().save_directory;
+            // A lobby campaign is multiplayer: --eawr-no-fog is carried only so the start refuses it with its message.
+            campaign_options.no_fog = viewer::no_fog_requested(viewer_profile_options().arguments);
+            campaign_options.galactic_reveal = campaign_options.no_fog;
             if (!skirmish_setup_->gc_acceptance_directory().empty()) {
                 campaign_options.lan_acceptance_directory = skirmish_setup_->gc_acceptance_directory();
                 campaign_options.report_path = campaign_options.lan_acceptance_directory / "report.json";
@@ -536,7 +593,7 @@ void ViewerHost::process_battle_setup_frame() {
                 const auto reason = campaign->failure();
                 campaign.reset(); remove_child(campaign_host); memdelete(campaign_host);
                 lan->cancel();
-                skirmish_setup_->show(reason.empty() ? "The campaign could not be started." : reason);
+                skirmish_setup_->show_refusal(reason.empty() ? "The campaign could not be started." : reason, "The campaign could not start.");
                 return;
             }
             skirmish_setup_->hide();

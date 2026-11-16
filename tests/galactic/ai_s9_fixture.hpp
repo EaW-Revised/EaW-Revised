@@ -38,6 +38,8 @@ struct Shape {
     std::string type = "Fixture";               // AI player type name
     std::string first_faction = "Empire", second_faction = "Rebel";
     std::uint32_t seed = 42;
+    std::string level = "NORMAL";                // the level the selected players play at
+    std::vector<std::string> authored_levels{"NORMAL"}; // the levels the AI player type authors an adjustment for
 };
 
 inline ai::AiData data(const Shape& shape) {
@@ -47,7 +49,8 @@ inline ai::AiData data(const Shape& shape) {
     goal.tracking_duration = ai::real(2); goal.activation_tracking_duration = ai::real(1);
     result.goals["GOAL"] = goal;
     result.function_sets["FUNCTIONS"] = {{"GOAL", "Positive"}};
-    ai::PlayerType type; type.name = shape.type; type.function_sets = {"FUNCTIONS"}; type.difficulty["NORMAL"] = "NORMAL";
+    ai::PlayerType type; type.name = shape.type; type.function_sets = {"FUNCTIONS"};
+    for (const auto& level : shape.authored_levels) type.difficulty[level] = "NORMAL";
     result.players[ai::upper_case(shape.type)] = type; result.difficulties["NORMAL"] = {};
     return result;
 }
@@ -74,7 +77,7 @@ inline std::shared_ptr<const gc::GalacticSnapshot> snapshot(const Shape& shape) 
         std::vector<gc::Fleet>{fleet, other}, std::vector<gc::GalacticEvent>{}, std::nullopt, std::nullopt, nullptr);
 }
 inline std::vector<lifecycle::PlayerSelection> selections(const Shape& shape) {
-    return {{shape.first, shape.type, "NORMAL", {}, {}}, {shape.second, shape.type, "NORMAL", {}, {}}};
+    return {{shape.first, shape.type, shape.level, {}, {}}, {shape.second, shape.type, shape.level, {}, {}}};
 }
 
 struct Owner {

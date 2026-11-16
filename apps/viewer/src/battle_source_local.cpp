@@ -72,7 +72,7 @@ void timeline_note(LoadSideChannel& channel, const char* kind, std::string text)
     const auto disk = units::slowest_disk(kinds);
     prefetch_options.solid_state = disk == units::DiskKind::solid_state;
     scene::ModelPrefetch prefetch(filesystem, prefetch_options);
-    auto tables = load_start_tables(filesystem, catalog, failure, map, additional_types, &prefetch, cancel);
+    auto tables = load_start_tables(filesystem, catalog, failure, map, true, additional_types, &prefetch, cancel); // attract: single player
     prefetch.finish();
     const auto stats = prefetch.stats();
     std::ostringstream out;
@@ -111,6 +111,11 @@ std::vector<BattleSource::Stage> BattleSourceState::local_stages(const vfs::Vfs&
     const auto channel = load_channel_;
     // Read here, on the calling (main) thread: the stages may run on the load worker.
     const bool timeline = attract && MenuTimeline::enabled();
+    const bool destroyed_planet = options_.skirmish_destroyed_planet; // the battle starts as at a destroyed planet (WGT-57)
+    const bool tsw_conflict = options_.skirmish_tsw_conflict;         // staging: the super weapon's gate is open (TSW-04)
+    // The one decision point: a multiplayer battle (host, client, rejoin: `options_.lan` is set) neither reads nor writes
+    // the model facts store. Read here for the same reason as the flags above.
+    const bool use_model_facts = !options_.lan;
     if (attract) {
         AttractInputs inputs;
         inputs.map = options_.skirmish.map.value_or(std::string{});
@@ -124,13 +129,13 @@ std::vector<BattleSource::Stage> BattleSourceState::local_stages(const vfs::Vfs&
     // Stages 1-3 of an attract start run on the load worker: they read only `local`, the channel and the filesystem and
     // catalog (immutable once mounted), and write no BattleSourceState member. Stage 1 keeps `this` for the lobby
     // (`selected`) start alone, which is never offloaded.
-    stages.push_back([this, &filesystem, &catalog, kind, attract, local, channel](std::string& failure) -> bool {
+    stages.push_back([this, &filesystem, &catalog, kind, attract, local, channel, use_model_facts](std::string& failure) -> bool {
         auto& fixture = local->fixture;
         // A saved battle the host's queue step already prepared for this very content and save (exact key): take its
         // recorded fixture, tables, inputs and start instead of building them all again.
         const auto& handed = options_.saved_preparation;
         if (kind == LocalStartKind::selected && handed && !handed->consumed && !options_.load_path.empty()
-            && handed->filesystem == &filesystem && handed->catalog == &catalog
+            && handed->filesystem.get() == &filesystem && handed->catalog.get() == &catalog
             && handed->save_path == ViewerPath::utf8(options_.load_path)) {
             handed->consumed = true;
             fixture = std::move(handed->fixture);
@@ -142,6 +147,18 @@ std::vector<BattleSource::Stage> BattleSourceState::local_stages(const vfs::Vfs&
                 return false;
             }
             fixture = std::move(selected).value();
+            if (options_.skirmish_credits) {
+                // --eawr-skirmish-credits: the lobby's credits choice; every other match option keeps the stock default and
+                // the explicit fixture controls (the same carry-over as a fixture without match options).
+                auto defaults = skirmish::read_match_defaults(filesystem);
+                const auto credits = sim::math::Fixed::from_integer(*options_.skirmish_credits);
+                if (!defaults || !credits) { failure = "live skirmish credits: the match defaults or the credits are unusable"; return false; }
+                auto match = std::move(defaults).value();
+                match.credits = credits.value();
+                match.pre_built_base = fixture.pre_built_base;
+                match.free_starting_units = fixture.free_starting_units;
+                fixture.match = std::move(match);
+            }
             if (!options_.load_path.empty()) {
                 std::ifstream input(options_.load_path, std::ios::binary);
                 if (!input) { failure = "The battle save could not be read."; return false; }
@@ -149,7 +166,7 @@ std::vector<BattleSource::Stage> BattleSourceState::local_stages(const vfs::Vfs&
                 auto saved_setup = platform::skirmish_save_setup(bytes);
                 if (!saved_setup) { failure = core::format_diagnostic(saved_setup.error()); return false; }
                 std::string reason;
-                auto tables = load_start_tables(filesystem, catalog, reason, fixture.map);
+                auto tables = load_start_tables(filesystem, catalog, reason, fixture.map, use_model_facts);
                 if (!tables) { failure = reason; return false; }
                 auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, *tables);
                 if (!inputs) { failure = core::format_diagnostic(inputs.error()); return false; }
@@ -170,17 +187,17 @@ std::vector<BattleSource::Stage> BattleSourceState::local_stages(const vfs::Vfs&
             fixture = std::move(selected).value();
         }
         if (kind == LocalStartKind::selected && !local->prepared) {
-            auto result = prepare_skirmish(fixture, filesystem, catalog);
+            auto result = prepare_skirmish(fixture, filesystem, catalog, use_model_facts);
             if (!result) { failure = result.error().message; return false; }
             local->prepared.emplace(std::move(result).value());
         }
         local->tables = local->prepared ? std::optional<units::UnitTables>(std::move(local->prepared->tables))
             : attract ? load_attract_tables(*local->attract, *channel, filesystem, catalog, failure, fixture.map, {}, "tables")
-                      : load_start_tables(filesystem, catalog, failure, fixture.map);
+                      : load_start_tables(filesystem, catalog, failure, fixture.map, use_model_facts);
         return local->tables.has_value();
     });
     // 2: the start inputs (and, for a demo map, the tables of the types its placed forces name).
-    stages.push_back([&filesystem, &catalog, attract, local, channel](std::string& failure) -> bool {
+    stages.push_back([&filesystem, &catalog, attract, destroyed_planet, local, channel](std::string& failure) -> bool {
         auto& tables = local->tables;
         if (local->prepared) {
             local->inputs = std::move(local->prepared->inputs);
@@ -190,6 +207,7 @@ std::vector<BattleSource::Stage> BattleSourceState::local_stages(const vfs::Vfs&
             local->inputs = std::move(inputs).value();
         }
         local->inputs->tables = &*tables;
+        if (destroyed_planet) local->inputs->destroyed_planet_backdrop = true;
         if (attract) {
             const auto missing = missing_placed_types(*local->inputs, *tables);
             if (!missing.empty()) {
@@ -201,9 +219,10 @@ std::vector<BattleSource::Stage> BattleSourceState::local_stages(const vfs::Vfs&
         return true;
     });
     // 3: the start, the session content and what binds to them.
-    stages.push_back([timeline, local, channel](std::string& failure) -> bool {
+    stages.push_back([timeline, destroyed_planet, tsw_conflict, local, channel](std::string& failure) -> bool {
         auto& inputs = *local->inputs;
-        if (local->prepared) {
+        // The staging flag changes the start inputs, so the start prepared from the unflagged inputs is rebuilt.
+        if (local->prepared && !destroyed_planet) {
             local->start = std::move(local->prepared->start);
         } else {
             auto built = skirmish::build_start(local->fixture, inputs);
@@ -211,6 +230,7 @@ std::vector<BattleSource::Stage> BattleSourceState::local_stages(const vfs::Vfs&
             local->start = std::move(built).value();
         }
         auto& start = *local->start;
+        if (tsw_conflict && start.setup.tsw) start.setup.tsw->conflict = tactical::TswConflictSetup{0, true, false};
         // #76: the ability table's human players are the start's human lobby players, as the victory rules'.
         std::vector<tactical::PlayerId> humans;
         for (const battle::StartPlayer& player : start.players) {

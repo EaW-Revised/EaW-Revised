@@ -333,6 +333,18 @@ Presentation tag coverage (legacy EAWR-653). `deferred` movement-constant covera
 `Rotate_Formation_Facing_Moves`, `Short_Range_Attack_Formation_Coefficient`. The two side errors
 matter only to formations of several members (land, squadron escorts, WMV-12).
 
+### Formation priority consumer boundary
+
+A targeted debug-build check found that the ordinary combatant getter reduces
+`Formation_Priority` to zero or one, while the squadron getter returns the authored
+integer. The inspected space formation paths for member admission, composition
+changes, destination mapping, initialization and movement properties did not
+establish a consumer of either getter. The checked member-order comparator uses
+other properties. This bounded caller inspection does not prove that the tag is
+unused elsewhere and does not establish a numeric space slot-order rule; the
+coverage row remains unchanged pending a qualified consumer in the movement tag
+coverage work (legacy EAWR-649).
+
 ## Settled questions from the unverified sweep
 
 Question IDs are retained; these boundaries no longer require a new source read. Opaque evidence IDs identify ignored research receipts. Runtime acceptance and explicitly remaining clauses stay below.

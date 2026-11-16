@@ -204,6 +204,16 @@ core::Result<void> session_detail::Tick::prepare_squadron_frames(detail::MapStag
                     claim_idle(squadron.container, state, carrier);
                 }
                 if (!state.idle_cell) state.anchor = carrier;
+                // FM-20 (#6966): a guard order (not a launched escort, FM-21) flies the guarded unit's
+                // point at its own speed; the near zone is half the craft's attack distance, at most
+                // Space_Guard_Range, and caps the speed at twice the unit's maximum.
+                if (state.diversion == SquadronDiversion::guard && leader != nullptr) {
+                    if (const auto* profile = impl_->motion.find(escorted->state.type_id)) {
+                        const auto half = math::Fixed::from_raw(leader->profile->attack_distance.raw() / 2);
+                        frame.guard = GuardChase{std::min(half, impl_->motion.rules.guard_range),
+                            math::Fixed::from_raw(profile->max_speed.raw() * 2)};
+                    }
+                }
             } else {
                 state.mode = SquadronMode::idle;
                 // WMV-18: retain escort provenance until its pending hold is done.
@@ -778,6 +788,7 @@ core::Result<void> session_detail::Tick::movement() {
                 inputs.approach = frame.approach;
                 inputs.attack_lane = frame.attack_lane;
                 inputs.hold = frame.hold;
+                inputs.guard = frame.guard;
                 inputs.speed_factor = math::multiply(impl_->ability_factor(unit, AbilityModifier::speed),
                     math::Fixed::from_raw(math::Fixed::scale + unit.upgrade_bonuses[5].raw())).value();
                 if (unit.durability && unit.durability->engines_disabled_until) {

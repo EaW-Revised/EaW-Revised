@@ -341,6 +341,10 @@ var frame = 0
 var viewport: SubViewport
 var source: Vector2
 var target: Vector2
+var closed = false
+var base = 0
+var click_at = -1
+var close_point = Vector2.ZERO
 func _initialize():
     viewport = SubViewport.new()
     viewport.size = Vector2i(1280,720)
@@ -371,11 +375,37 @@ func mouse(point, down):
     event.global_position = point
     event.pressed = down
     viewport.push_input(event,true)
+func click_left(point, down):
+    var event = InputEventMouseButton.new()
+    event.button_index = MOUSE_BUTTON_LEFT
+    event.position = point
+    event.global_position = point
+    event.pressed = down
+    viewport.push_input(event,true)
 func _process(delta):
     elapsed += delta
     if elapsed < 2.0: return false
     frame += 1
-    if frame == 1:
+    # The opening story summary is modal over the galaxy on Day 1 (it opens about thirty ticks in): a player closes it with
+    # its Close control before acting, so the scripted input does the same, then starts its own sequence.
+    if not closed:
+        if click_at < 0:
+            var close = root.find_child("IDC_SUMMARY_DIALOG_CLOSE_BUTTON", true, false)
+            if close != null and close.is_visible_in_tree():
+                close_point = close.get_global_rect().get_center()
+                motion(close_point,false)
+                click_left(close_point,true)
+                click_at = frame
+            elif elapsed > 25.0:
+                closed = true
+                base = frame
+        elif frame >= click_at + 2:
+            click_left(close_point,false)
+            closed = true
+            base = frame + 10
+        return false
+    var local = frame - base
+    if local == 1:
         var button = %s
         assert(button != null and button.is_visible_in_tree() and not button.disabled)
         source = button.get_global_rect().get_center()
@@ -383,10 +413,10 @@ func _process(delta):
         %s
         motion(source,false)
         mouse(source,true)
-    if frame == 3 and %s: motion(source + Vector2(24,0),true)
-    if frame == 5 and %s: motion(target,true)
-    if frame == 8: mouse(target,false)
-    if frame == 120:
+    if local == 3 and %s: motion(source + Vector2(24,0),true)
+    if local == 5 and %s: motion(target,true)
+    if local == 8: mouse(target,false)
+    if local == 120:
         viewport.get_texture().get_image().save_png(%s)
         current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
         quit()
@@ -406,7 +436,11 @@ func _process(delta):
             capture_output=True, text=True, timeout=300)
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return json.loads(report.read_text(encoding="utf-8"))
+        data = json.loads(report.read_text(encoding="utf-8"))
+        summary = data.get("story_summary")
+        # The scripted input closed the modal opening story summary like a player (#7030) before acting.
+        self.assertFalse(summary and summary.get("visible"), "the opening story summary is still open over the galaxy")
+        return data
 
     def test_live_campaign_move_and_cancel_request_feedback(self):
         from tests.presentation.renderer import test_viewer_planet_hud_runtime as support

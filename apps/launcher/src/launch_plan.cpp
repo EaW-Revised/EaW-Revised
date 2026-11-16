@@ -1,6 +1,8 @@
 #include "launch_plan.hpp"
 
 #include <algorithm>
+#include <iterator>
+#include <string_view>
 
 namespace eawr::launcher {
 
@@ -41,6 +43,22 @@ bool evidence_requested(const std::vector<std::wstring>& extra) {
     });
 }
 
+bool player_start_requested(const std::vector<std::wstring>& extra) {
+    if (evidence_requested(extra)) return false;
+    // The viewer has many more probe and exercise switches (tactical camera, atlas, map, live session, effects,
+    // diagnostics ...). The player's start is the one whose extra arguments name no viewer switch beyond these:
+    // any other --eawr-* switch keeps the start an evidence run (retail look, no saved settings).
+    constexpr std::wstring_view player_switches[] = {
+        L"--eawr-render-profile", L"--eawr-depth-prepass", L"--eawr-allow-unknown-build", L"--eawr-engine-unverified",
+        L"--eawr-audio", L"--eawr-mod-profile", L"--eawr-save-dir", L"--eawr-digest-cache", L"--eawr-game-root",
+        L"--eawr-front-end", L"--eawr-aa", L"--eawr-launcher-screen",
+    };
+    return std::all_of(extra.begin(), extra.end(), [&](const std::wstring& arg) {
+        if (arg.rfind(L"--eawr-", 0) != 0) return true; // a value, an engine switch or another program's switch
+        return std::find(std::begin(player_switches), std::end(player_switches), arg) != std::end(player_switches);
+    });
+}
+
 std::vector<std::wstring> godot_arguments(const LaunchInputs& inputs) {
     std::vector<std::wstring> args = {L"--path", inputs.project.wstring()};
     if (inputs.safe_render_thread.has_value()) args.insert(args.end(), {L"--render-thread", *inputs.safe_render_thread ? L"safe" : L"separate"});
@@ -50,9 +68,11 @@ std::vector<std::wstring> godot_arguments(const LaunchInputs& inputs) {
         args.push_back(std::to_wstring(*inputs.quit_after));
     }
     args.insert(args.end(), {L"--", L"--eawr-game-root", inputs.game_root.wstring(), L"--eawr-front-end"});
-    if (!evidence_requested(inputs.extra)) args.push_back(L"--eawr-launcher-start");
+    if (player_start_requested(inputs.extra)) args.push_back(L"--eawr-launcher-start");
+    if (inputs.launcher_screen) args.insert(args.end(), {L"--eawr-launcher-screen", std::to_wstring(*inputs.launcher_screen)});
     if (inputs.allow_unknown_build) args.push_back(L"--eawr-allow-unknown-build");
     if (inputs.engine_unverified) args.push_back(L"--eawr-engine-unverified");
+    if (inputs.no_fog) args.push_back(L"--eawr-no-fog");
     args.insert(args.end(), {L"--eawr-report", inputs.report.wstring()});
     if (inputs.depth_prepass_off) args.insert(args.end(), {L"--eawr-depth-prepass", L"off"});
     if (inputs.mod_profile) args.insert(args.end(), {L"--eawr-mod-profile", inputs.mod_profile->wstring()});

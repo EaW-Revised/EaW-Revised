@@ -1,3 +1,4 @@
+#include "eawr/core/gc_profile.hpp"
 #include "eawr/core/tick_profile.hpp"
 #include "ai_engine_internal.hpp"
 #include "ai_learning.hpp"
@@ -191,6 +192,7 @@ void Engine::initialize_goals(PlayerAi& player) {
 
 // GS-02 to GS-05.
 void Engine::service_goals(PlayerAi& player) {
+    const SelectionOrigin origin(1);
     const auto native_record_write = native_record_scope();
     native_records_changed(player.player, {1});
     mark_native_state_changed();
@@ -212,6 +214,7 @@ void Engine::service_goals(PlayerAi& player) {
 
 // GS-04: the proposal pass, a per-frame budget of (function, target) evaluations.
 void Engine::propose(PlayerAi& player) {
+    gc_profile::Scope profile_scope(gc_profile::Phase::goal_propose);
     const auto native_record_write = native_record_scope();
     native_records_changed(player.player, {1});
     core::tick_profile::Scope scope("serial.goal.proposal");
@@ -283,6 +286,7 @@ void Engine::propose(PlayerAi& player) {
             if (global) { ++player.next_function; player.next_target = 0; } else ++player.next_target;
             if (allocated.value()) {
                 auto& retained = player.proposed.back();
+                const SelectionWindow window(*this); // #7056: one selector input for the three checks of this goal
                 const auto refused = !select_units(player, retained, *retained.potential) ? std::optional{GalacticRefusal::units}
                     : !production_time_allowed(player, retained) ? std::optional{GalacticRefusal::time}
                     : !galactic_fundable(player, retained, false) ? std::optional{GalacticRefusal::funds} : std::nullopt;
@@ -564,6 +568,7 @@ void Engine::release(PlayerAi& player, Goal& goal, const bool refund) {
 
 // GS-30: goal set maintenance, category by category in budget order.
 void Engine::maintain(PlayerAi& player) {
+    gc_profile::Scope profile_scope(gc_profile::Phase::goal_maintain);
     const auto native_record_write = native_record_scope();
     native_records_changed(player.player, {2, 3});
     core::tick_profile::Scope scope("serial.goal.maintenance");
@@ -593,10 +598,9 @@ void Engine::maintain(PlayerAi& player) {
                 player.player, {}, function.goal_name, target_name(target(goal.target)),
                 "maintenance_evaluation", std::move(trace)});
         }
-        if (!value) {
-            if (player.galactic) goal.finished = true;
-            continue;
-        }
+        // WGA-495: refresh desire without finishing the goal. Failed evaluation
+        // retains its previous value; culling belongs to category maintenance.
+        if (!value) continue;
         if (!player.galactic) {
             // GS-30: current tactical desire is a fresh raw equation value, not proposal history.
             goal.desire = to_single(std::clamp(to_single(*value), Real{}, huge));
@@ -607,7 +611,6 @@ void Engine::maintain(PlayerAi& player) {
         goal.desire = to_single(*value
             + to_single(function.goal->per_failure_desire_adjust * real(recent_failures(failures == player.goal_outcomes.end() ? nullptr : &failures->second)))
             + to_single(function.goal->per_activation_failure_desire_adjust * real(recent_failures(activations == player.activations.end() ? nullptr : &activations->second))));
-        if (!(Real{} < goal.desire)) goal.finished = true;
     }
     const auto by_desire = [&](const Goal& a, const Goal& b) {
         return maintenance_priority(player, b) < maintenance_priority(player, a);
@@ -742,15 +745,19 @@ void Engine::maintain_category(PlayerAi& player, const std::string& category, st
             if (goal.plan != 0) finish_plan(player, goal.plan, *scripts_, reason != "completed");
         }
     };
+    const auto cullable = [&](const Goal& goal) {
+        const Plan* running = goal.plan != 0 ? plan(goal.plan) : nullptr;
+        return running == nullptr || running->removable || running->exited;
+    };
     const auto budget_running = [&](Goal& goal) {
-        // GS-31: trimming applies even without proposals; protected plans keep zero desire.
-        if (!player.galactic && !(Real{} < goal.desire)) {
-            const Plan* running = goal.plan != 0 ? plan(goal.plan) : nullptr;
-            if (running == nullptr || running->removable) { finish(goal, "nonpositive_desire"); return false; }
+        // WGA-495 / GS-31: trimming applies without proposals too; protection
+        // prevents desire culling while independent funding/contrast still apply.
+        if (!(Real{} < goal.desire) && cullable(goal)) {
+            finish(goal, "nonpositive_desire"); return false;
         }
-        // GS-22/31: budget trimming rechecks a retained tactical allocation too,
-        // including categories without proposals. Protection only exempts desire culling.
-        if (!player.galactic && goal.plan != 0 && goal.potential
+        // WGA-495 / GS-22/31: trimming rechecks the retained allocation even
+        // without proposals. Protection only exempts desire culling.
+        if (goal.plan != 0 && goal.potential
             && !plans_[goal.potential->plan].magic && !test_target_contrast(player, goal)) {
             finish(goal, "target_contrast");
             return false;
@@ -802,9 +809,7 @@ void Engine::maintain_category(PlayerAi& player, const std::string& category, st
             finish(goal);
             continue;
         }
-        const Plan* running = goal.plan != 0 ? plan(goal.plan) : nullptr;
-        const bool cullable = running == nullptr || running->removable;
-        if (!(maintenance_priority(player, goal) < threshold) || !cullable) {
+        if (!(maintenance_priority(player, goal) < threshold) || !cullable(goal)) {
             if (!goal.potential) {
                 keep.push_back(goal);
             } else if (!plans_[goal.potential->plan].magic && !test_target_contrast(player, goal)) {
@@ -1217,7 +1222,12 @@ void Engine::finish_plan(PlayerAi& player, std::uint64_t plan_id, authoritative:
             if (iterator->second.galactic_request && iterator->second.kind == Block::Kind::galactic_invade) {
                 auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
                 if (!actions) throw std::runtime_error("invasion block release requires its native queue owner");
-                const auto retired = actions->retire_invasion(iterator->second.galactic_request);
+                // Present: release its reader. Absent but held by the lane (decided earlier, refused by this window's overlay):
+                // record the release intent alone; the world frees it if it admits the invasion after all. Absent and not held:
+                // refused, nothing to release.
+                const auto request = iterator->second.galactic_request;
+                const auto retired = actions->invasion_status(request) ? actions->retire_invasion(request)
+                    : actions->invasion_pending(request) ? actions->retire_unadmitted_invasion(request) : core::Result<void>::success();
                 if (!retired) throw std::runtime_error(retired.error().message);
             }
             retire_runtime(RuntimeTable::blocks, iterator->first);

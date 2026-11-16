@@ -139,9 +139,11 @@ bool PerfTrace::open(const std::string& path, std::string& error) {
         for (const auto metric : {"submitted", "retained", "eligible_casters", "retained_surfaces"})
             output_ << ',' << name << '_' << metric;
     render_churn::write_csv_header(output_);
-    output_ << ",slots_grown,slot_growth_ms,launch_preload_fallbacks,launch_read_bytes,report_query_ms,report_nonquery_ms,report_render_query_ms,report_performance_query_ms,report_setup_query_ms,report_display_query_ms,sim_profile,lane_wall_ms,lane_start_delay_ms,lane_join_wait_ms,lane_violations"
+    output_ << ",slots_grown,slot_growth_ms,launch_preload_fallbacks,launch_read_bytes,hangar_warm_ms,hangar_warm_slots,report_query_ms,report_nonquery_ms,report_render_query_ms,report_performance_query_ms,report_setup_query_ms,report_display_query_ms,sim_profile,lane_wall_ms,lane_start_delay_ms,lane_join_wait_ms,lane_violations"
                ",lane_main_help_ms,lane_main_help_tasks,lane_retirement_ms,retire_destroys,retire_destroys_reused"
-               ",retire_suspends,retire_suspends_terminal";
+               ",retire_suspends,retire_suspends_terminal"
+               ",idle_placements_uploaded,idle_placements_skipped,idle_instances_visited,idle_placements_disturbed"
+               ",idle_why_missing,idle_why_bind_failed,idle_why_asset,idle_why_billboard,idle_why_other_bind,idle_why_cleared,idle_why_copied,idle_why_removed,idle_why_replaced";
     if (render_categories::fighter_experiment()) {
         output_ << ",fighter_idle_samples,fighter_clip_samples,fighter_sample_cpu_ms,fighter_palette_cpu_ms"
                    ",fighter_binding_cpu_ms,fighter_bindings,fighter_unit_emitters,fighter_particle_emitters"
@@ -158,6 +160,7 @@ bool PerfTrace::open(const std::string& path, std::string& error) {
     for (const char* name : audio_trace::count_names) output_ << ',' << name;
     output_ << ',' << audio_trace::play_ms_name;
     for (const char* name : audio_trace::digest_names) output_ << ',' << name;
+    output_ << ",projectile_observe_ticks_ms,projectile_observe_final_ms,projectile_opacity_ms";
     output_ << '\n';
     return true;
 }
@@ -275,7 +278,8 @@ void PerfTrace::frame(const Frame& frame) {
         output_ << ',' << role.submitted << ',' << role.retained << ',' << role.eligible_casters << ',' << role.retained_surfaces;
     render_churn::write_csv_row(output_, render_churn::frame);
     output_ << ',' << frame.slots_grown << ',' << frame.slot_growth_ms
-            << ',' << frame.launch_preload_fallbacks << ',' << frame.launch_read_bytes;
+            << ',' << frame.launch_preload_fallbacks << ',' << frame.launch_read_bytes
+            << ',' << frame.hangar_warm_ms << ',' << frame.hangar_warm_slots;
     if (fine_particle_timings_) {
         const double query_ms = render_query_ms + performance_query_ms + setup_query_ms + display_query_ms;
         const double report_ms = std::chrono::duration<double, std::milli>(Clock::now() - report_began).count();
@@ -290,7 +294,9 @@ void PerfTrace::frame(const Frame& frame) {
             << ',' << frame.lane_violations;
     output_ << ',' << frame.lane_main_help_ms << ',' << frame.lane_main_help_tasks << ',' << frame.lane_retirement_ms
             << ',' << frame.particle_work.retire_destroys << ',' << frame.particle_work.retire_destroys_reused
-            << ',' << frame.particle_work.retire_suspends << ',' << frame.particle_work.retire_suspends_terminal;
+            << ',' << frame.particle_work.retire_suspends << ',' << frame.particle_work.retire_suspends_terminal
+            << ',' << frame.idle_uploaded << ',' << frame.idle_skipped << ',' << frame.idle_visited << ',' << frame.idle_disturbed;
+    for (const auto cause : frame.idle_causes) output_ << ',' << cause;
     // The renderer already captured these values for this counter frame. Keep
     // every trace row so the JSON logging cadence cannot alias pose updates.
     if (render_categories::fighter_experiment()) {
@@ -316,6 +322,8 @@ void PerfTrace::frame(const Frame& frame) {
     for (const std::uint64_t value : frame.audio_counts) output_ << ',' << value;
     output_ << ',' << frame.audio_play_ms;
     for (const std::uint64_t value : frame.audio_digests) output_ << ',' << value;
+    output_ << ',' << frame.projectile_observe_ticks_ms << ',' << frame.projectile_observe_final_ms
+            << ',' << frame.projectile_opacity_ms;
     output_ << '\n';
     previous_report_end_ = Clock::now();
 }

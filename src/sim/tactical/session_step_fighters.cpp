@@ -871,7 +871,7 @@ core::Result<void> session_detail::Tick::hangars() {
                         || squadron_table.tech_spawners.contains(born.type_id)))
                     spawners.emplace(born.entity_id, initial_spawner(impl_->setup.seed, frame + 1, born.entity_id));
                 if (pending != garrisons.end()) {
-                    if (impl_->economy.stream(born.type_id) != nullptr) earners.emplace_back(born.entity_id, born.owner);
+                    if (impl_->economy.earner_stream(born.type_id) != nullptr) earners.emplace_back(born.entity_id, born.owner);
                 }
             }
             std::vector<EntityId> created;
@@ -897,7 +897,7 @@ core::Result<void> session_detail::Tick::hangars() {
                 impl_->pad_stage.touch(id);
                 pads.emplace(id, PadState{request.owner});
             }
-            if (impl_->economy.stream(request.type) != nullptr) earners.emplace_back(id, request.owner);
+            if (impl_->economy.earner_stream(request.type) != nullptr) earners.emplace_back(id, request.owner);
             next_id = id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : id + 1;
             const std::array<EntityId, 1> created{id};
             if (auto defaults = request_survivor_defaults(created); !defaults) return defaults;

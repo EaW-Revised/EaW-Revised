@@ -343,6 +343,35 @@ void UiGalleryMode::State::build_hud_page(Node3D& parent) {
             panel->show(view);
         }
     }
+    if (!options.hud_switch.empty()) {
+        // HCB-47: the Death Star switch from made-up snapshot rows through the real presenter: ready and ours (lit),
+        // approaching (disabled, readout green), fired (lever down), or no object (hidden).
+        const auto& state = options.hud_switch;
+        if (state != "lit" && state != "approaching" && state != "fired" && state != "hidden") {
+            failure = "--eawr-ui-hud-switch expects lit, approaching, fired or hidden";
+            return;
+        }
+        sim::tactical::TswView row;
+        row.unit = 1; row.owner = 1; row.serviced = true; row.has_target = true; row.gate_open = true;
+        row.phase = state == "lit" ? sim::tactical::TswPhase::ready
+            : state == "approaching" ? sim::tactical::TswPhase::approaching : sim::tactical::TswPhase::powering_up;
+        row.eta_frames = state == "lit" ? 0 : state == "approaching" ? 2933 : sim::tactical::TswView::no_eta;
+        const std::array<sim::tactical::TswView, 1> rows{row};
+        model::SuperweaponSwitchInput input;
+        if (state != "hidden") input.rows = rows;
+        input.local_player = 1;
+        input.completed_tick = 100;
+        input.art = hud->superweapon_art();
+        if (state == "fired") { input.fired.tick = 100; input.completed_tick = 200; } // the animation has run to its last frame
+        hud->set_superweapon_switch(model::superweapon_switch_view(input));
+        // The click runs the presenter's own answer (what the battle's handler does before it sends or plays a cue), and a
+        // one-shot pointer probe over the lever panel counts which clicks reach the switch (the report's `deathstar_switch`).
+        TacticalHud* const switch_hud = hud.get();
+        hud->set_superweapon_handler([switch_hud] {
+            switch_hud->note_superweapon_click(model::superweapon_switch_click(switch_hud->superweapon_switch()).feedback);
+        });
+        if (state != "hidden") hud->probe_superweapon_switch();
+    }
     if (!options.hud_flytext.empty()) {
         const auto& probe = options.hud_flytext;
         if (probe != "start" && probe != "hold" && probe != "fade" && probe != "expired"

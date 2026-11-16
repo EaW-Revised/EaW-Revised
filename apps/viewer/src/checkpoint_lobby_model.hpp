@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/net/galactic_checkpoint_transfer.hpp"
+#include "eawr/net/lobby_session.hpp"
 #include "eawr/mods/save_description.hpp"
 #include "eawr/sim/galactic/mp_roster.hpp"
 
@@ -40,6 +41,31 @@ inline std::string mod_mismatch_message(const mods::ModDescription& host, const 
     }
     return result;
 }
+// #6468: why the host's settled mod list cannot go to the guests, or an empty string when it can. Each reason is its own
+// text: a missing encoding, a list over the room limit and text the room codec refuses are different problems for the host.
+inline std::string host_mod_list_unsendable_reason(const std::optional<std::vector<std::uint8_t>>& encoded) {
+    if (!encoded) return "The mod list could not be prepared for the other players, so they cannot check it against theirs.";
+    if (encoded->size() > net::max_lobby_mod_description_bytes)
+        return "The mod list is too large to send to the other players (" + std::to_string(encoded->size()) + " bytes, the limit is "
+            + std::to_string(net::max_lobby_mod_description_bytes) + "), so they cannot check it against theirs.";
+    if (!net::valid_lobby_mod_description(*encoded))
+        return "The mod list has text the lobby cannot carry (for example hidden direction marks in a mod name), so the other players "
+               "cannot check it against theirs.";
+    return {};
+}
+// #6468: a refused refresh is retried with a growing pause and given up after a few tries, so it never loops per frame.
+struct HostModRefreshRetry {
+    static constexpr unsigned max_attempts = 8;
+    unsigned attempts{};
+    std::chrono::steady_clock::time_point next{};
+    [[nodiscard]] bool ready(const std::chrono::steady_clock::time_point now) const { return now >= next; }
+    // Records one refusal. True once the cap is reached and the caller must stop retrying and say so.
+    bool refused(const std::chrono::steady_clock::time_point now) {
+        ++attempts;
+        next = now + std::chrono::milliseconds(100U << std::min(attempts, 5U));
+        return attempts >= max_attempts;
+    }
+};
 inline bool mod_comparison_incomplete(const mods::ModDescription& host, const mods::ModDescription& local) {
     const auto findings = mods::compare_descriptions(host, local);
     return std::any_of(findings.begin(), findings.end(), [](const auto& finding) {

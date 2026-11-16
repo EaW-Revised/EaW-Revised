@@ -12,6 +12,8 @@ class BattleCamera {
 public:
     virtual ~BattleCamera() = default;
     [[nodiscard]] virtual bool live_camera_free() const { return false; }
+    // A cinematic or battlecam shot owns the drawn camera: the pointer's ground ray means nothing then.
+    [[nodiscard]] virtual bool live_camera_movie() const { return false; }
     [[nodiscard]] virtual std::optional<camera::TacticalFrame> live_camera_frame() const = 0;
     [[nodiscard]] virtual std::optional<camera::SourceTargetBounds> live_camera_bounds() const = 0;
     [[nodiscard]] virtual std::pair<bool, bool> live_camera_pointer_mode(bool ctrl) const = 0;

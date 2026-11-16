@@ -622,9 +622,28 @@ void occupant_determinism_contracts() {
 
 } // namespace
 
+// LC-104 (#5896): the members of a squad inside a garrison host stay registered in the player's free garrison, so garrisoning
+// the whole starting force is not a loss and starts no refill timer.
+void free_garrison_host_contracts() {
+    const sim::InlineExecutor serial;
+    auto fx = bunker_fixture(1, entrant_rule(1), host_rule(5, 100, 40), false);
+    fx.initial.free_garrisons = {{1, 60, {squad_company}, {1}}};
+    auto session = take(TacticalSession::create(fx.initial, fx.tables));
+    must(session.submit({{0, 1, 1}, {1}, LandGarrisonPayload{fx.host, 0}}));
+    bool timer_started = false;
+    for (int tick = 0; tick < 700; ++tick) {
+        const auto stepped = take(session.step(serial));
+        for (const auto& view : stepped.snapshot->garrison_timers()) timer_started = timer_started || view.due_frame.has_value();
+    }
+    expect(hidden_count(session, {1}) == 1 && carried(session, fx.host) == 3,
+        "LC-104: the whole free garrison went inside the host (every member is nested on it)");
+    expect(!timer_started, "LC-104: members inside a garrison host stay registered: entering a host is not a loss and starts no timer");
+}
+
 int main() {
     try {
         capacity_contracts();
+        free_garrison_host_contracts();
         category_contracts();
         exit_contracts();
         fade_contracts();

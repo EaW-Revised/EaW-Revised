@@ -35,6 +35,7 @@ std::string_view to_string(const Removal reason) noexcept {
     case Removal::no_player: return "no_player";
     case Removal::roster_gated: return "roster_gated";
     case Removal::campaign_branch: return "campaign_branch";
+    case Removal::destroyed_planet: return "destroyed_planet";
     }
     return "playable_faction";
 }
@@ -68,6 +69,46 @@ core::Result<std::vector<Vec3>> tactical_super_weapon_targets(const std::vector<
         targets.push_back(*placement.position);
     }
     return core::Result<std::vector<Vec3>>::success(std::move(targets));
+}
+
+core::Result<std::optional<std::uint32_t>> destroyed_backdrop_record(const std::vector<MapPlacement>& placements) {
+    using RecordResult = core::Result<std::optional<std::uint32_t>>;
+    std::optional<std::uint32_t> record;
+    Fixed nearest{};
+    for (const auto& placement : placements) {
+        if (!placement.tactical_super_weapon_target || !placement.position || !detail::iequals(placement.element, "SpaceProp")) continue;
+        const auto distance = sim::math::length(*placement.position);
+        if (!distance) return RecordResult::failure(distance.error());
+        if (!record || distance.value() < nearest) { record = placement.record; nearest = distance.value(); }
+    }
+    return RecordResult::success(record);
+}
+
+std::vector<ReplacementProp> replace_target_prop(const MapPlacement& target, const std::span<const std::string> types,
+    const Vec3 position, const Vec3 orientation_degrees, const std::uint32_t first_record) {
+    std::vector<ReplacementProp> props;
+    props.reserve(types.size());
+    std::uint32_t record = first_record;
+    for (const auto& type : types) {
+        if (type.empty()) continue;
+        props.push_back({record++, type, position, orientation_degrees, target.record});
+    }
+    return props;
+}
+
+sim::tactical::TswSetup tactical_super_weapon_setup(const std::vector<MapPlacement>& placements) {
+    sim::tactical::TswSetup setup;
+    for (const auto& placement : placements) {
+        if (!placement.tactical_super_weapon_target || !placement.position) continue;
+        sim::tactical::TswTargetSetup target;
+        target.record = placement.record;
+        target.faction = placement.owner_faction.empty() ? sim::tactical::FactionId{} : faction_id(placement.owner_faction);
+        target.type = placement.type.empty() ? sim::tactical::TypeId{} : assets::object_type_crc(placement.type);
+        target.position = *placement.position;
+        if (placement.orientation_degrees) target.yaw_degrees = placement.orientation_degrees->z;
+        setup.targets.push_back(target);
+    }
+    return setup;
 }
 
 core::Result<TacticalSuperWeaponStart> tactical_super_weapon_start(const units::UnitType::TacticalSuperWeapon& data,

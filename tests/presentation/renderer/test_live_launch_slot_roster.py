@@ -165,6 +165,7 @@ struct GodotRenderer {
     struct ProxyResult { ProxyOutcome outcome{ProxyOutcome::reserved}; std::size_t bytes{}; };
     static Memory sampled;
     static Memory gpu_memory() { return sampled; }
+    bool play{}; bool play_uploads() const noexcept { return play; } void set_play_uploads(bool on) noexcept { play = on; }
 };
 GodotRenderer::Memory GodotRenderer::sampled{};
 struct FrameTimer { explicit FrameTimer(double*, bool = false) {} };
@@ -182,9 +183,12 @@ namespace core::load_profile {
 inline std::uint64_t asset_read_bytes{};
 inline void slot_composed(std::string_view, std::string_view) {}
 inline void slot_grown(std::string_view) {}
+enum class Phase { slot_prologue, slot_launch_slot, slot_death_clone, slot_ship_meta, slot_append };
+struct DetailScope { explicit DetailScope(Phase) {} };
 }
 float to_float(sim::math::Fixed value) { return static_cast<float>(value.raw); }
 std::string space_model_path(int) { return {}; }
+std::string battle_model_path(int, bool) { return {}; }
 std::string tag_text(int, const char*) { return {}; }
 
 struct SpacePopulation { struct Options { struct PlacedShip {
@@ -217,17 +221,30 @@ struct SpacePopulation { struct Options { struct PlacedShip {
         core::load_profile::asset_read_bytes += 100; appended += ships.size(); composed.insert(composed.end(), ships.begin(), ships.end()); return true;
     }
     bool live_ship_drawn(std::size_t) const { return drawn; }
+    bool begin_live_append(GodotRenderer&, const vfs::Vfs&, std::span<const Options::PlacedShip> ships, std::uint64_t) {
+        appended += ships.size(); composed.insert(composed.end(), ships.begin(), ships.end()); return true;
+    }
     std::string failure() const { return "model unavailable"; }
 
     using PlacedUnit = Options::PlacedShip;
 };
 using BattleScene = SpacePopulation;
 struct DeathClone { std::size_t ship{}; };
+class PlayUploads final {
+public:
+    PlayUploads(GodotRenderer* renderer, const bool on) : renderer_(on ? renderer : nullptr) {
+        if (renderer_) { previous_ = renderer_->play_uploads(); renderer_->set_play_uploads(true); }
+    }
+    ~PlayUploads() { if (renderer_) renderer_->set_play_uploads(previous_); }
+private:
+    GodotRenderer* renderer_{}; bool previous_{};
+};
 namespace live_session { struct SlotIdentity final { std::size_t ship{}; bool held{}; }; }
 
 struct LiveSessionView {
     struct { std::uint32_t purchase_slots = 10, warm_launches = 64, arrival_slot_budget = 8; bool land = false; } options_;
     bool trace_frames_ = false;
+    enum class Phase { loading, ready, running } phase_ = Phase::loading;
     bool warm_recipe_read_ = false;
     std::optional<tactical::MotionTable> motion_;
     const tactical::MotionTable* motion() const { return motion_ ? &*motion_ : nullptr; }
@@ -283,12 +300,14 @@ struct LiveSessionView {
         const std::optional<skirmish::LobbyColour>&, tactical::TypeId = 0, bool = false, std::string_view = "launch");
     void note_spawned(tactical::TypeId) const {}
     void note_preload_fallback(tactical::PlayerId, const std::string&, std::string_view);
-    std::optional<std::size_t> grow_launch_slot(sim::EntityId, tactical::TypeId, tactical::PlayerId);
+    std::optional<std::size_t> grow_launch_slot(sim::EntityId, tactical::TypeId, tactical::PlayerId,
+                                                std::optional<std::uint64_t> stepped = std::nullopt);
     void prepare_launch_slots(const vfs::Vfs& filesystem, const data::Catalog& catalog,
                               std::optional<battle::ArrivalPlan> selected);
     bool warm_campaign_slots(BattleScene&, GodotRenderer&);
     std::optional<std::size_t> ship_of(sim::EntityId entity, tactical::TypeId type, tactical::PlayerId owner);
     std::set<tactical::TypeId> launch_slot_types_;
+    std::set<tactical::TypeId> land_structure_types_;
     std::set<std::pair<tactical::PlayerId, tactical::TypeId>> launch_demand_;
     bool launch_demand_valid_{};
     bool launch_demanded(tactical::PlayerId owner, tactical::TypeId type);
@@ -391,6 +410,31 @@ LiveSessionView session(const bool campaign) {
 
 __STORAGE__
 int main() {
+    // #6992: a land pad completes a structure after tick zero: the entity gets a drawn slot with no plan, no purchase row and
+    // an exhausted per-frame budget; a type that is not a pad's structure still gets none, and neither does a space session.
+    {
+        const vfs::Vfs filesystem; const data::Catalog catalog;
+        SpacePopulation population; GodotRenderer renderer;
+        const auto make = [&](const bool land) {
+            LiveSessionView view;
+            view.options_.land = land;
+            view.start_.emplace(); view.tables_.emplace(); view.setup_.emplace();
+            view.tables_->units = {{"Land_Barracks"}, {"Land_Prop"}};
+            for (const auto& type : view.tables_->units) view.presentation_types_.emplace(skirmish::type_id(type.id), &type);
+            view.land_structure_types_.insert(skirmish::type_id("Land_Barracks"));
+            view.arrival_slots_.filesystem = &filesystem; view.arrival_slots_.catalog = &catalog;
+            view.arrival_slots_.population = &population; view.arrival_slots_.renderer = &renderer;
+            view.arrival_slots_.remaining = 0;
+            return view;
+        };
+        auto land = make(true);
+        const auto ship = land.ship_of(700, skirmish::type_id("Land_Barracks"), 1);
+        if (!ship || land.arrival_slots_.grown != 1 || !land.arrival_slots_.undrawn.empty()) return 30;
+        if (land.ship_of(700, skirmish::type_id("Land_Barracks"), 1) != ship) return 31; // the entity keeps its slot
+        if (land.ship_of(701, skirmish::type_id("Land_Prop"), 1)) return 32;
+        auto space = make(false);
+        if (space.ship_of(702, skirmish::type_id("Land_Barracks"), 1)) return 33;
+    }
     // A tech-selected carrier launch can have no start.launches demand. Provenance
     // permits the squadron's actual members to grow slots, but not unrelated craft.
     {

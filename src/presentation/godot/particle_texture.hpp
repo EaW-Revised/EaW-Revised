@@ -14,6 +14,8 @@ namespace eawr::presentation::godot_backend::detail {
 struct ParticleTexturePreparation final {
     std::vector<std::byte> bytes;
     std::string failure;
+    // A repair the upload made on purpose (e.g. levels it ignored); empty if none.
+    std::string note;
 
     explicit operator bool() const noexcept { return failure.empty(); }
 };
@@ -21,8 +23,8 @@ struct ParticleTexturePreparation final {
 // Godot Image::create_from_data consumes tightly packed, top-left-first mips.
 // The asset decoder deliberately retains the source order, so normalize only
 // this upload copy. Block compression is not row-addressable by pixel.
-[[nodiscard]] inline ParticleTexturePreparation prepare_particle_texture(const assets::Texture& source) {
-    auto reject = [](const char* reason) { return ParticleTexturePreparation{{}, reason}; };
+[[nodiscard]] inline ParticleTexturePreparation prepare_particle_chain(const assets::Texture& source) {
+    auto reject = [](const char* reason) { return ParticleTexturePreparation{{}, reason, {}}; };
     if (source.width == 0 || source.height == 0
         || source.width > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())
         || source.height > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())
@@ -114,6 +116,26 @@ struct ParticleTexturePreparation final {
         result.bytes.insert(result.bytes.end(), tail.begin(), tail.end());
     }
     return result;
+}
+
+// Only the declared chain is uploaded: the levels end at the first 1x1 level,
+// and a stray block some DDS files carry after it is ignored (the loader keeps
+// it as one more 1x1 mip). Anything else about the chain is still validated.
+[[nodiscard]] inline ParticleTexturePreparation prepare_particle_texture(const assets::Texture& source) {
+    for (std::size_t index = 0; index + 1 < source.mips.size(); ++index) {
+        if (source.mips[index].width == 1 && source.mips[index].height == 1) {
+            const std::size_t ignored = source.mips.size() - (index + 1);
+            assets::Texture declared = source;
+            declared.mips.resize(index + 1);
+            ParticleTexturePreparation result = prepare_particle_chain(declared);
+            if (result) {
+                result.note = "ignored " + std::to_string(ignored) + " mip level"
+                    + (ignored == 1 ? "" : "s") + " after the 1x1 level";
+            }
+            return result;
+        }
+    }
+    return prepare_particle_chain(source);
 }
 
 } // namespace eawr::presentation::godot_backend::detail

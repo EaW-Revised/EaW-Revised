@@ -86,4 +86,4 @@ dial (needs the schedule fact, (legacy EAWR-1116)), focused encyclopedia variant
 
 - One retail frame of the opened advanced planetary map on a developed planet (pad placement, header positions, capacity
   colours): owner-capture/rig ticket, retail first.
-- Whether previous/next steps through the planet list, the owner's planets only, or the nearby planets: not in the XML.
+- ~~Whether previous/next steps through the planet list~~ Answered by the 2026-11-13 retail capture (legacy EAWR-5628): the retail focused view and opened map draw no previous/next planet buttons for owned or enemy planets, so row 5 has nothing to copy; the opener for row 4 is the gold magnifier beside the base layout header (not shown for an enemy planet without intel). Details: GPD-34..GPD-38 in [gc-planet-detail.md](gc-planet-detail.md).

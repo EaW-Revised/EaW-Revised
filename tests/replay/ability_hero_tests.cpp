@@ -19,6 +19,78 @@
 namespace ability_tests {
 
 
+// WAB-77 (#6744): a craft that is its own whole container (a solo ship, WHE-SQ-02) uses its own solo-only BUZZ_DROIDS
+// entry; a squadron member's entry never acts, nor does a craft-kind container of several members (AB-60). Equal on
+// 1/2/4/8 workers.
+void test_buzz_solo_craft() {
+    constexpr tactical::TypeId solo_type = 50, team_type = 40, member_type = 41, droid_type = 42;
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto initial = setup();
+        initial.units = {{10, team_type, 1, at(0, 2000), math::identity_quat(), {}},
+            {11, member_type, 1, at(0, 2000), math::identity_quat(), {}},
+            {12, member_type, 1, at(30, 2000), math::identity_quat(), {}},
+            {30, plain_type, 2, at(4000, 4000), math::identity_quat(), {}},
+            {50, solo_type, 1, at(0, 0), math::identity_quat(), {}}};
+        initial.squadrons = {{10, {11, 12}}};
+        auto health = durability();
+        for (const auto type : {team_type, member_type, droid_type, solo_type}) { // ascending
+            tactical::DurabilityProfile profile;
+            profile.type_id = type; profile.max_hull = units(20);
+            health.profiles.push_back(profile);
+        }
+        auto movement = motion();
+        std::vector<tactical::CraftProfile> crafts;
+        for (const auto type : {member_type, solo_type}) {
+            tactical::CraftProfile craft;
+            craft.type_id = type;
+            craft.max_speed = units(3); craft.min_speed = units(2);
+            craft.rate_of_turn = units(6); craft.lift = units(6);
+            craft.thrust = units(1); craft.roll_rate = units(3); craft.bank_angle = units(70);
+            craft.strafe_distance = units(500);
+            crafts.push_back(craft);
+        }
+        movement.squadrons.craft = crafts;
+        movement.squadrons.squadrons = {{team_type, {member_type, member_type}, {at(0, 0), at(30, 0)}, units(1000), units(200), units(300), units(25)},
+            {solo_type, {solo_type}, {at(0, 0)}, units(1000), units(200), units(300), units(25)}};
+        tactical::AbilityProfile buzz;
+        buzz.kind = tactical::AbilityKind::buzz_droids; buzz.recharge_frames = 60; buzz.solo_only = true;
+        buzz.buzz = tactical::BuzzDroidsProfile{droid_type, units(5), units(400), units(300), units(50),
+            units(5), units(1), units(20), 1000, 2, 0};
+        tactical::AbilityTable table; table.profiles = {unit_of(team_type, buzz), unit_of(member_type, buzz), unit_of(solo_type, buzz)}; // sorted by type
+        auto created = tactical::TacticalSession::create(initial, {}, health, movement, std::nullopt, {}, {}, table);
+        expect(static_cast<bool>(created), "#6744: solo craft buzz fixture creates");
+        if (!created) { std::cerr << created.error().message << '\n'; continue; }
+        auto world = std::move(created).value();
+        tactical::AbilityPayload input{tactical::AbilityKind::buzz_droids, tactical::AbilityAction::activate};
+        input.position = at(200, 0);
+        auto member_input = input; member_input.position = at(200, 2000);
+        expect(static_cast<bool>(world.submit(command(0, 1, 0, 50, input))), "#6744: the solo craft's request submits");
+        (void)world.submit(command(0, 1, 1, 11, member_input)); // refused at admission or application, never acts
+        (void)world.submit(command(0, 1, 2, 10, member_input)); // a multi-member container never acts through a solo slot
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (std::uint64_t frame = 0; frame < 120; ++frame) {
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "#6744: solo buzz step succeeds");
+            if (!step) break;
+            hashes.push_back(step.value().state_sha256);
+        }
+        const auto solo_state = world.ability_state(50);
+        const auto member_state = world.ability_state(11);
+        const auto units_now = world.units();
+        const auto droids = std::count_if(units_now.begin(), units_now.end(),
+            [](const tactical::UnitState& unit) { return unit.type_id == droid_type; });
+        expect(solo_state && !solo_state->slots.empty() && solo_state->slots[0].ready_tick > 0,
+            "#6744: a solo craft starts its own buzz droids and its recharge");
+        expect(droids == 1, "#6744: exactly the solo craft's droid appears; a member's and a multi-member container's entries never act");
+        expect(!member_state || member_state->slots.empty() || member_state->slots[0].started_tick == 0,
+            "#6744: a squadron member's own buzz entry never starts (AB-60)");
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "#6744: solo craft buzz agrees on 1/2/4/8 workers");
+    }
+}
+
 // FS-23/FC-51/FD-32: one team request approaches and retries independently of the
 // ordinary target scan. Application starts recharge; UFS-21 also resolves ended approaches.
 void test_buzz_team_request() {
@@ -1020,10 +1092,52 @@ void test_hero_beams() {
             }
         }
     }
+
+    // #7186, WHE-14/57: the order itself refuses a target whose categories the authored filter does not list,
+    // for both of Piett's beams; a listed target is accepted, so the refusal is the filter and nothing else.
+    for (const auto kind : {K::energy_weapon, K::tractor_beam}) {
+        for (const auto target_categories : {std::uint64_t{2}, std::uint64_t{8}, std::uint64_t{10}}) {
+            auto initial = setup();
+            initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+                {2, frigate_type, 2, at(100, 0, 100), math::identity_quat(), {}}};
+            auto health = durability();
+            for (auto& row : health.profiles) { row.max_shields = {}; row.shield_refresh = {}; }
+            tactical::AbilityProfile ordinary;
+            ordinary.kind = kind; ordinary.recharge_frames = 20;
+            ordinary.expiration_frames = kind == K::energy_weapon ? 4 : 0;
+            ordinary.gui_activated_ability_name = "beam";
+            auto holder = unit_of(corvette_type, ordinary);
+            tactical::SpecialAbilityProfile nested;
+            nested.name = "beam"; nested.style = tactical::SpecialActivationStyle::user_input;
+            nested.kind = kind == K::energy_weapon ? tactical::SpecialAbilityKind::energy_weapon
+                : tactical::SpecialAbilityKind::tractor_beam;
+            nested.service_interval = 1; nested.beam_min_range = units(5); nested.beam_max_range = units(300);
+            nested.damage_per_frame = units(50);
+            nested.target_speed_decrease = decimal("0.2"); nested.doubled_speed_categories = 2;
+            nested.filter.applicable_categories = 2 | 4; // the listed ships; the small craft category (8) is not
+            holder.special = {nested};
+            tactical::AbilityTable table; table.profiles = {holder}; table.beam_damage_type = 0;
+            tactical::CombatProfile source; source.type_id = corvette_type; source.category_bits = 1;
+            tactical::CombatProfile target; target.type_id = frigate_type; target.category_bits = target_categories;
+            tactical::CombatTable combat; combat.profiles = {source, target};
+            auto created = tactical::TacticalSession::create(initial, {}, health, motion(), std::nullopt, combat, {}, table);
+            expect(static_cast<bool>(created), "WHE-57: filter fixture binds");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            expect(static_cast<bool>(world.submit(command(0, 1, 0, 1,
+                tactical::AbilityPayload{kind, tactical::AbilityAction::activate, 2}))), "WHE-57: filter fixture command submits");
+            const eawr::platform::ThreadWorkerAdapter executor(1);
+            expect(static_cast<bool>(world.step(executor)), "WHE-57: filter fixture steps");
+            const auto state = world.ability_state(1);
+            // 2 lists the target's category, 8 does not, 10 carries a listed one next to an unlisted one.
+            expect(state && state->slots.front().active == ((target_categories & 6) != 0),
+                "WHE-14/57: an ordered beam locks a target the authored filter admits and refuses one it does not list");
+        }
+    }
 }
 
 
-// WSPL-03/05: a unit that authors SUPER_LASER (no hardpoint gate, no special unit) fires after Fire_Delay,
+// WSPL-03/05: a unit that authors SUPER_LASER (no hardpoint gate, no special unit, no attack clip) fires after Fire_Delay,
 // deals Damage_Per_Frame while the timer runs, ends with it, and the result is worker independent.
 void test_super_laser() {
     for (const auto delay : {0U, 3U}) {
@@ -1068,10 +1182,10 @@ void test_super_laser() {
             }
             expect(!world.ability_state(1)->slots.front().active, "WSPL-05: the super laser ends with its timer");
             const auto final = world.durability_state(2);
-            // The tick's impacts precede its commands, so a switch-on with no delay first hits one tick later;
-            // with a delay the timer starts at the fire frame, so the same window of four ticks is fully served.
-            expect(final && final->hull == units(3600 - (delay == 0 ? 3 : 4) * 50),
-                "WSPL-05: Damage_Per_Frame lands once per frame from the fire frame until the timer ends");
+            // The fire stage is first tested the tick after the lock (or at the end of Fire_Delay) and the expiry timer starts
+            // there; the damage service follows one tick later, so the window of four ticks serves three hits.
+            expect(final && final->hull == units(3600 - 3 * 50),
+                "WSPL-05: Damage_Per_Frame lands once per frame after the fire stage until the timer ends");
             if (baseline.empty()) baseline = hashes;
             else expect(hashes == baseline, "super laser state hashes equal at workers 1 and 8");
         }

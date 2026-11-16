@@ -815,9 +815,13 @@ void encode_special_ability_extensions(Encoder& out, const UnitTables& tables) {
                 out.text(profile.beam_owner_bone);
             }
             if (profile.kind == sim::tactical::SpecialAbilityKind::super_laser) {
-                out.text("super-laser-v1");
+                out.text("super-laser-v2");
                 out.fixed(profile.beam_min_range); out.fixed(profile.beam_max_range);
                 out.fixed(profile.damage_per_frame); out.u32(profile.fire_delay_frames);
+                out.flag(profile.laser_face_target); out.flag(profile.laser_can_turn);
+                out.fixed(profile.laser_turn_rate); out.fixed(profile.laser_firing_cone); out.fixed(profile.laser_fire_frame);
+                out.u32(profile.laser_anim_sub_index); out.u32(profile.laser_continuation_frames);
+                out.u32(profile.attack_clip_frames); out.fixed(profile.attack_clip_fps);
                 for (const auto channel : profile.leech_colour) out.u8(channel);
                 out.fixed(profile.leech_beam_width); out.u32(profile.leech_beam_frames);
                 out.text(profile.beam_owner_particle); out.text(profile.beam_owner_bone); out.text(profile.leech_texture);
@@ -951,7 +955,7 @@ void encode_production_campaign_extensions(Encoder& out, const UnitTables& table
         }
     }
     if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) { return unit.tactical_super_weapon.has_value(); })) {
-        out.text("tactical-super-weapons-v1");
+        out.text("tactical-super-weapons-v2");
         for (const auto& unit : tables.units) {
             if (!unit.tactical_super_weapon) continue;
             out.text(unit.id);
@@ -959,6 +963,10 @@ void encode_production_campaign_extensions(Encoder& out, const UnitTables& table
             out.fixed(unit.tactical_super_weapon->attack_distance);
             out.fixed(unit.tactical_super_weapon->z_adjust);
             out.flag(unit.tactical_super_weapon->start_pos_match_target_z);
+            out.fixed(unit.tactical_super_weapon->power_up_countdown_seconds);
+            out.fixed(unit.tactical_super_weapon->attack_clip_seconds);
+            out.fixed(unit.tactical_super_weapon->explosion_debris_creation_frame_delay);
+            out.fixed(unit.tactical_super_weapon->post_destruction_wait_frames);
         }
     }
     if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
@@ -1104,6 +1112,33 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
             });
         });
     }
+    // LR4-05/06 (#6993): what a producer's menu charges for a company is gameplay content. A trailing record, written only when a
+    // company authors a purchase row, so a table without one keeps its bytes.
+    if (tables.domain == sim::tactical::BattleDomain::land) {
+        const auto purchasable = [](const LandCompany& company) {
+            const auto& production = company.production;
+            return production.build_cost_multiplayer || production.build_time_seconds || !production.production_queue.empty()
+                || production.lifetime_player || production.current_player || production.lifetime_allies
+                || production.current_allies || !production.prerequisites.empty();
+        };
+        if (std::any_of(tables.land_companies.begin(), tables.land_companies.end(), purchasable)) {
+            out.text("land-company-production-v1");
+            for (const auto& company : tables.land_companies) {
+                if (!purchasable(company)) continue;
+                const auto& production = company.production;
+                out.text(company.id);
+                out.fixed(production.build_cost_multiplayer);
+                out.fixed(production.build_time_seconds);
+                out.text(production.production_queue);
+                for (const auto limit : {production.lifetime_player, production.current_player,
+                         production.lifetime_allies, production.current_allies}) {
+                    out.flag(limit.has_value());
+                    if (limit) out.u32(*limit);
+                }
+                out.texts(production.prerequisites);
+            }
+        }
+    }
     // G-01: containment inputs are part of the land content identity.
     if (tables.domain == sim::tactical::BattleDomain::land) {
         out.text("land-garrison-v2");
@@ -1129,13 +1164,15 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
         });
     }
     if (tables.domain == sim::tactical::BattleDomain::land && !tables.land_static_objects.empty()) {
-        out.text("land-static-objects-v5");
+        out.text("land-static-objects-v6");
         out.each(tables.land_static_objects, [&](const LandStaticObject& row) {
             out.flag(row.hq_victory_relevant);
             out.flag(row.victory_relevant); out.flag(row.land_victory_relevant);
             out.text(row.id); out.text(row.xml_type); out.text(row.proxy_type); out.flag(row.land_obstacle);
             out.fixed(row.width); out.fixed(row.height); out.fixed(row.x_offset); out.fixed(row.y_offset);
             out.flag(row.fine_tune.has_value()); out.flag(row.fine_tune.value_or(false));
+            out.flag(row.collision_class.has_value());
+            out.u32(row.collision_class ? static_cast<std::uint32_t>(*row.collision_class) : 0U); // LE-OCCUPY
             out.text(row.secondary_passability); out.text(row.override_passability);
             out.each(row.behaviors, [&](const std::string& behavior) { out.text(behavior); });
             out.text(row.model_path); out.fixed(row.scale_factor); out.flag(row.model_present);
@@ -1163,6 +1200,91 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
         out.each(tables.units, [&](const UnitType& unit) {
             out.text(unit.id); out.flag(unit.dead_projectile_collision); out.flag(unit.influences_capture);
             out.texts(unit.death_clones); out.fixed(unit.death_fade_time); out.fixed(unit.death_persistence_duration);
+        });
+    }
+    // WLAB-01, WLAB-03, WLAB-11 (#3238): the ability rows of the land bodies and of the companies and their containers
+    // that the core unit encoding does not carry (the GUI_Activated_Ability_Name binding, the company rows). Written only
+    // when some land row authors an ability, so a land table without any keeps its bytes.
+    if (tables.domain == sim::tactical::BattleDomain::land
+        && (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) { return !unit.abilities.empty(); })
+            || std::any_of(tables.land_companies.begin(), tables.land_companies.end(), [](const LandCompany& company) {
+                   return !company.abilities.empty() || !company.team_abilities.empty(); }))) {
+        out.text("land-ability-rows-v1");
+        const auto row = [&](const Ability& ability) {
+            out.text(ability.type); out.text(ability.gui_activated_ability_name);
+            out.fixed(ability.expiration_seconds); out.fixed(ability.recharge_seconds);
+            out.each(ability.modifiers, [&](const ModMultiplier& modifier) { out.text(modifier.modifier); out.fixed(modifier.value); });
+            out.flag(ability.supports_autofire);
+        };
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.each(unit.abilities, row);
+        });
+        out.each(tables.land_companies, [&](const LandCompany& company) {
+            out.text(company.id);
+            out.each(company.abilities, row);
+            out.each(company.team_abilities, row);
+        });
+    }
+    // WLAB-15 (#3239): STIM_PACK's self-damage share. Written only when some land row authors one, so a land table without
+    // any keeps its bytes.
+    if (tables.domain == sim::tactical::BattleDomain::land) {
+        const auto authors = [](const Ability& ability) { return ability.damage_percent_when_activated.has_value(); };
+        const bool any = std::any_of(tables.units.begin(), tables.units.end(), [&](const UnitType& unit) {
+                             return std::any_of(unit.abilities.begin(), unit.abilities.end(), authors); })
+            || std::any_of(tables.land_companies.begin(), tables.land_companies.end(), [&](const LandCompany& company) {
+                   return std::any_of(company.abilities.begin(), company.abilities.end(), authors)
+                       || std::any_of(company.team_abilities.begin(), company.team_abilities.end(), authors); });
+        if (any) {
+            out.text("land-ability-activation-damage-v1");
+            const auto row = [&](const Ability& ability) { out.text(ability.type); out.fixed(ability.damage_percent_when_activated); };
+            out.each(tables.units, [&](const UnitType& unit) { out.text(unit.id); out.each(unit.abilities, row); });
+            out.each(tables.land_companies, [&](const LandCompany& company) {
+                out.text(company.id); out.each(company.abilities, row); out.each(company.team_abilities, row);
+            });
+        }
+    }
+    // WLAB-16 (#3239): the locomotor names of the land types that use several. Written only when some land row does.
+    if (tables.domain == sim::tactical::BattleDomain::land && std::any_of(tables.units.begin(), tables.units.end(),
+            [](const UnitType& unit) { return unit.uses_multiple_locomotors; })) {
+        out.text("land-locomotor-names-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            if (!unit.uses_multiple_locomotors) return;
+            out.text(unit.id); out.text(unit.primary_locomotor_name); out.text(unit.secondary_locomotor_name);
+        });
+    }
+    // WLAB-16 (#7084): the jet-pack flight tags of the land types that author them. Written only when some land row does.
+    if (tables.domain == sim::tactical::BattleDomain::land && std::any_of(tables.units.begin(), tables.units.end(),
+            [](const UnitType& unit) { return unit.land_jump.has_value(); })) {
+        out.text("land-jump-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            if (!unit.land_jump) return;
+            out.text(unit.id); out.fixed(unit.land_jump->alternate_max_speed); out.fixed(unit.land_jump->max_lift);
+            out.fixed(unit.land_jump->hover_offset); out.fixed(unit.land_jump->alternate_rate_of_turn);
+        });
+    }
+    // WLAB-19, WLAB-71 (#3239): the land types with more than one projectile type (their count and second projectile) and the
+    // nested permanent weapon swap. Written only when some land row has either, so a land table without any keeps its bytes.
+    if (tables.domain == sim::tactical::BattleDomain::land && std::any_of(tables.units.begin(), tables.units.end(),
+            [](const UnitType& unit) { return unit.projectile_type_count > 1 || unit.permanent_weapon_swap.has_value(); })) {
+        out.text("land-weapon-swap-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            if (unit.projectile_type_count <= 1 && !unit.permanent_weapon_swap) return;
+            out.text(unit.id); out.u32(unit.projectile_type_count); out.text(unit.alternate_projectile);
+            out.flag(unit.permanent_weapon_swap.has_value());
+            if (!unit.permanent_weapon_swap) return;
+            out.text(unit.permanent_weapon_swap->name); out.u32(unit.permanent_weapon_swap->weapon_index);
+            out.flag(unit.permanent_weapon_swap->initially_enabled); out.flag(unit.permanent_weapon_swap->automatic);
+        });
+    }
+    // WLAB-08 (#3238): the Force-disabling carriers of a land table (the behaviour's authored radius). Written only when some
+    // land row is one, so a land table without any keeps its bytes. The window constant is a game constant scalar.
+    if (tables.domain == sim::tactical::BattleDomain::land
+        && std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) { return unit.force_disable_range.has_value(); })) {
+        out.text("land-force-disablers-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            if (!unit.force_disable_range) return;
+            out.text(unit.id); out.fixed(unit.force_disable_range);
         });
     }
     // LC-86 (#6183): the fog inputs of the placed static rows. Written only when a row reveals or samples, so a land table whose

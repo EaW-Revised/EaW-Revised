@@ -43,6 +43,16 @@ struct ReadLocation {
     std::uint64_t offset{0};
 };
 
+// Where a mounted asset's bytes come from, as a cache key for facts derived from them: the container file (the archive, or
+// the loose file itself) by native path, size and modification time, and the entry's byte offset inside it. No byte of
+// the asset is read (docs/mod-content-digest.md has the trust model of path/size/time stamps).
+struct SourceStamp {
+    std::string container;
+    std::uint64_t container_size{0};
+    std::int64_t container_mtime{0}; // the filesystem's own tick count, compared for equality only
+    std::uint64_t entry_offset{0};
+};
+
 struct ArchiveProbe {
     std::string source_id;
     std::uint64_t archive_size{0};
@@ -100,6 +110,10 @@ inline constexpr std::array<std::string_view, 3> revised_presentation_xml{
 
 // A mod may name its containing folder or the data root itself.
 [[nodiscard]] std::filesystem::path mod_data_root(const std::filesystem::path& root);
+
+// The folders of the quoted leaf;parent;... CLI value, one per ';' segment (an empty segment stays an empty path), without
+// losing native path encoding. A directory whose own name contains ';' is one folder. mod_chain_roots names these.
+[[nodiscard]] std::vector<std::filesystem::path> mod_chain_folders(const std::filesystem::path& chain);
 
 // Split the quoted leaf;parent;... CLI value without losing native path encoding.
 [[nodiscard]] std::vector<LayerRoot> mod_chain_roots(const std::filesystem::path& chain);
@@ -161,6 +175,16 @@ public:
         const std::function<void(std::span<const std::byte>)>& consume) const;
     // The disk location of one exact mounted candidate; nullopt when it is not in the mounted view.
     [[nodiscard]] std::optional<ReadLocation> read_location(const AssetRecord& candidate) const;
+    // The stamp of one exact mounted candidate's source (one stat per container, remembered for the life of the mount);
+    // nullopt when the candidate is not in the mounted view, its container cannot be read, or this is a preparation view
+    // (like read_location, a view with a content contract never exposes native locations).
+    [[nodiscard]] std::optional<SourceStamp> source_stamp(const AssetRecord& candidate) const;
+    // A hex SHA-256 of the mounted view: every asset's path, layer, origin, source, size and offset in mount order, and the size
+    // and time of every archive container (one stat per archive, remembered like source_stamp). A loose file counts by path and
+    // size only. Computed once per mount. It identifies "the same files in the same layers" for facts derived from many
+    // files at once (the setup map list); a per-file source_stamp or content hash is still the key of a fact about one file.
+    // nullopt for a preparation view (it never exposes native locations).
+    [[nodiscard]] std::optional<std::string> view_identity() const;
     [[nodiscard]] core::Result<AssetRecord> stat(std::string_view logical_path) const;
     [[nodiscard]] core::Result<std::vector<AssetRecord>> enumerate(
         std::string_view prefix = {},

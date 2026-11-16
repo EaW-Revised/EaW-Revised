@@ -158,6 +158,72 @@ bool has_literal_after(const std::string& line, const std::size_t from) {
     return false;
 }
 
+// #6816: a start the battle load refused is never silent. One case per refusal class the start path names: the
+// scoring script, the content manifest, the AI provider, the map, the mod chain and the script sandbox.
+void start_refusals() {
+    struct Case final {
+        const char* name;
+        std::string reason;
+        std::string code;
+        std::string line;
+    };
+    const std::vector<Case> cases{
+        {"scoring script", "authoritative scoring: EAWR-SCRIPT-0211 [error]: GameScoring.lua:12: attempt to call a nil value\nstack traceback:\n\t[C]: in ?",
+            "EAWR-SCRIPT-0211", "authoritative scoring: EAWR-SCRIPT-0211 [error]: GameScoring.lua:12: attempt to call a nil value"},
+        {"script manifest", "authoritative scoring: EAWR-LUA-0301 [error]: GameScoring requires Foo, which is not in the session manifest",
+            "EAWR-LUA-0301", "authoritative scoring: EAWR-LUA-0301 [error]: GameScoring requires Foo, which is not in the session manifest"},
+        {"content", "live session content: EAWR-UNIT-0102 [error]: unit table is empty", "EAWR-UNIT-0102",
+            "live session content: EAWR-UNIT-0102 [error]: unit table is empty"},
+        {"AI provider", "live session AI scripts: EAWR-AI-0007 [error]: no script for Empire", "EAWR-AI-0007",
+            "live session AI scripts: EAWR-AI-0007 [error]: no script for Empire"},
+        {"map", "EAWR-MAP-0001 [error]: data/art/maps/missing.ted is not found", "EAWR-MAP-0001",
+            "EAWR-MAP-0001 [error]: data/art/maps/missing.ted is not found"},
+        {"mod chain", "EAWR-VFS-0042 [error]: the mod chain names a missing layer", "EAWR-VFS-0042",
+            "EAWR-VFS-0042 [error]: the mod chain names a missing layer"},
+        {"script sandbox", "\n\n  EAWR-SANDBOX-0009 [error]: os.execute is not available  \r\nmore", "EAWR-SANDBOX-0009",
+            "EAWR-SANDBOX-0009 [error]: os.execute is not available"},
+    };
+    for (const auto& item : cases) {
+        const auto refusal = ui::setup_start_refusal(item.reason);
+        const std::string name = std::string("SSC-08 ") + item.name;
+        expect(refusal.code == item.code, name + ": the box names the error code (" + refusal.code + ")");
+        expect(refusal.first_line == item.line, name + ": the box shows the first line (" + refusal.first_line + ")");
+        expect(refusal.lines[0].find(item.code) != std::string::npos, name + ": the heading carries the code");
+        expect(refusal.lines[1] == item.line, name + ": the second line is the first line of the error");
+        expect(refusal.lines[2].find("log") != std::string::npos, name + ": the box says where the full error is");
+        for (const auto& line : refusal.lines) expect(!line.empty() && line.find('\n') == std::string::npos, name + ": each box line is one line");
+    }
+    const auto plain = ui::setup_start_refusal("This battle could not start. Check the map and factions or the run report.");
+    expect(plain.code.empty() && plain.lines[0] == "The battle could not start.",
+           "SSC-08: a refusal without a code still shows the message");
+    expect(plain.lines[1] == "This battle could not start. Check the map and factions or the run report.",
+           "SSC-08: a refusal without a code keeps its text");
+    const auto campaign = ui::setup_start_refusal("EAWR-SIM-0501 [error]: no ground capability", "The campaign could not start.");
+    expect(campaign.lines[0] == "The campaign could not start. (EAWR-SIM-0501)" && campaign.lines[1] == "EAWR-SIM-0501 [error]: no ground capability",
+           "SSC-08: a campaign launch words its own headline and keeps the code and first line");
+    // #6611: a save written before a child-state renumbering is refused by the live session's checkpoint load; the
+    // player gets the save message and the code, not a silent drop to the menu.
+    const auto old_save = ui::setup_start_refusal(
+        "populate: live session: EAWR-CKP-0108 (source checkpoint): section child-state: unsupported child state domain (EAWR-SIM-0305)",
+        ui::saved_battle_refusal_headline);
+    expect(old_save.code == "EAWR-CKP-0108", "SSC-08: a refused saved battle names the checkpoint error code");
+    expect(old_save.lines[0] == "This save can't be loaded. (EAWR-CKP-0108)",
+           "SSC-08: a refused saved battle names the save and the code");
+    expect(old_save.lines[1].find("unsupported child state domain") != std::string::npos,
+           "SSC-08: a refused saved battle shows the first line of the error");
+    expect(old_save.lines[2].find("log") != std::string::npos, "SSC-08: a refused saved battle says where the full error is");
+    const auto no_code = ui::setup_start_refusal("", ui::saved_battle_refusal_headline);
+    expect(no_code.lines[0] == std::string(ui::saved_battle_refusal_headline) && !no_code.lines[1].empty(),
+           "SSC-08: a refused saved battle without a code still shows the message");
+    const auto empty = ui::setup_start_refusal("");
+    expect(!empty.lines[1].empty(), "SSC-08: an empty reason is still a message");
+    const auto trailing = ui::setup_start_refusal("EAWR-SCRIPT-0211- failed");
+    expect(trailing.code == "EAWR-SCRIPT-0211", "SSC-08: a trailing hyphen is not part of the code");
+    const auto long_line = ui::setup_start_refusal("EAWR-X-1 " + std::string(600, 'a') + "\xC3\xA9");
+    expect(long_line.first_line.size() <= 223U && long_line.first_line.ends_with("..."),
+           "SSC-08: a long first line is cut for the box");
+}
+
 // The screen's source sets no caption from a string literal: every call that puts text on a control
 // takes a value (a database caption or data). Empty strings, which clear a text, are allowed.
 void source_has_no_caption_literal() {
@@ -214,6 +280,7 @@ int main() {
     captions();
     game_types();
     blockers();
+    start_refusals();
     advanced_options();
     source_has_no_caption_literal();
     corpus();

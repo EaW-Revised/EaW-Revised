@@ -301,6 +301,28 @@ std::string indexed_selection_contract(const eawr::sim::PartitionExecutor& execu
     expect(denied_hero->complete && !denied_hero->types.at(100).hero
         && denied_hero->types.at(100).hero_weight == ai::Real{} && hero_reads == reads_before_denial,
         "HA-01/HA-04 denied extra attach keeps an explicit named team ordinary without calling its failing hero provider");
+    {
+        // #7056: the pure part of an input is kept while the completed inputs are the same objects, the free-store copy is
+        // read afresh on every call, and an input equal to the uncached one comes back.
+        auto cache = ai::make_selection_input_cache();
+        auto cached = ai::stock_selection_provider(indexed_selection_content(), plans, world, owner.engine, [&] { return published; },
+            heroes, freestore, cache);
+        const auto reads_start = freestore_reads;
+        const auto one = must(cached(1, 10, goal, plan));
+        const auto work_one = ai::galactic_selection_work();
+        const auto two = must(cached(1, 10, goal, plan));
+        const auto work_two = ai::galactic_selection_work();
+        const auto uncached = must(provider(1, 10, goal, plan));
+        expect(one->complete && two->complete && one->producers.size() == two->producers.size()
+            && one->types.at(100).cost == two->types.at(100).cost && one->production_sites == two->production_sites
+            && one->player_tech == two->player_tech && one->types.at(100).cost == uncached->types.at(100).cost
+            && one->producers.size() == uncached->producers.size(),
+            "the cached input equals the uncached one");
+        expect(work_two.proposal_trait_lookups == work_one.proposal_trait_lookups,
+            "the second read of the same completed inputs rebuilds nothing");
+        expect(one->freestore.size() == 1 && two->freestore.size() == 1 && one->freestore.front().object != two->freestore.front().object
+            && freestore_reads - reads_start == 3, "the free-store copy is read afresh on every call, cached or not");
+    }
     plans->constraints.at(plan.name).forces.front().deny_heroes = false;
     refuse_hero = false;
     refuse_freestore = true;
@@ -662,6 +684,8 @@ int main() {
         producer_admission_contracts();
         std::string baseline;
         std::array<std::string, 5> running_baselines;
+        std::array<std::string, 10> zero_desire_baselines;
+        std::array<std::string, 5> refused_invasion_baselines;
         std::array<std::string, 3> native_identity_baselines;
         std::array<std::string, 24> assembly_baselines;
         std::string frontier_baseline;
@@ -1049,6 +1073,113 @@ int main() {
                 const auto before = refused.funding->state(); refused.facts->reachable = false;
                 expect(ai::EngineContractAccess::fresh_estimate_refused(*refused.engine) && refused.funding->state() == before,
                     "fresh rejected estimate refuses with a contextual diagnostic before Q24 conversion or any funding write");
+            }
+            for (const bool competing : {false, true}) for (unsigned scenario = 0; scenario < 5; ++scenario) {
+                auto training_session = must(gc::GalacticSession::create(setup())); Owner training(training_session, executor);
+                const auto identity = must(training.engine->allocate_galactic_goal(1, 0, training.engine->target_of_object(10)->id));
+                expect(identity && ai::EngineContractAccess::selected_reservation(*training.engine),
+                    "zero-desire fixture reserves a real paid roster");
+                auto& p = ai::EngineContractAccess::player(*training.engine); p.next_function = p.functions.size();
+                must(training.engine->service_galactic_system(1, ga::Service::goals, training.scripts, training.sequence));
+                const auto plan = p.active.front().plan;
+                ai::EngineContractAccess::add_tasks(*training.engine);
+                must(training.engine->service_galactic_system(1, ga::Service::execution, training.scripts, training.sequence));
+                const auto build = p.tasks.front().completion;
+                expect(build && !training.actions->purchases().at(build).completed,
+                    "maintenance starts with unfinished admitted training");
+                if (scenario == 3) must(training.funding->remove_goal(1, identity->goal));
+                ai::EngineContractAccess::zero_desire_maintenance(*training.engine, competing, scenario);
+                if (scenario == 0) {
+                    expect(p.active.size() == 1 && p.active.front().plan == plan && !p.active.front().finished
+                        && p.active.front().desire == ai::Real{} && p.running.contains(plan),
+                        "WGA-495 protected running plan survives refreshed zero desire with and without proposals");
+                    expect(training.funding->ledger(1)->goals.at(identity->goal).reassessed
+                        && training.funding->ledger(1)->goals.at(identity->goal).capital == f(100),
+                        "protected zero-desire training retains ordinary running-budget reassessment");
+                } else {
+                    expect(!p.running.contains(plan) && !training.engine->galactic_goal(1, identity->goal),
+                        "removable or exited zero-desire plans are culled; protected plans still stop on funding or contrast failure");
+                }
+                for (unsigned frame = 0; frame < 35; ++frame) (void)must(training_session.step(executor));
+                const auto& purchase = training.actions->purchases().at(build);
+                expect(scenario == 0 ? purchase.completed && !purchase.failed : purchase.failed && !purchase.completed,
+                    "only retained protected training completes; culled training follows real cancellation cleanup");
+                ai::GoalStateContributor retained(training.engine, eawr::core::sha256_hex(std::span<const std::uint8_t>{}));
+                const auto trace = training_session.state_sha256() + must(training.actions->state_hash())
+                    + must(retained.state_hash()) + eawr::core::sha256_hex(must(ga::encode_funding_state(training.funding->state())));
+                const auto index = scenario + (competing ? 5 : 0);
+                if (zero_desire_baselines[index].empty()) zero_desire_baselines[index] = trace;
+                else expect(trace == zero_desire_baselines[index], "zero-desire plan, training, ledger and goal state equal on 1/2/4/8 workers");
+            }
+            // An invasion the world refused when the lane's slice applied is never created there: its block names a request that
+            // is neither in the world nor held by the lane. The block service, the release, the plan's end and a save must read that
+            // as a failed (or still waiting) invasion, never as a fault that retires the AI player (the 11-16 tick-5820 retirement).
+            // 0: refused, block service. 1: still held by the lane: the block keeps waiting. 2: refused, the plan ends before the
+            // block service saw it. 3: held by the lane but absent from this window's overlay, the plan ends inside a native action
+            // phase: the release is recorded without a row. 4: refused, a checkpoint capture before the AI's next service.
+            for (unsigned scenario = 0; scenario < 5; ++scenario) {
+                // Each step names itself, so a throw outside the action under test still says where it came from.
+                const char* stage = "start";
+                try {
+                    stage = "setup";
+                    auto invasion_session = must(gc::GalacticSession::create(setup())); Owner invading(invasion_session, executor);
+                    stage = "allocate";
+                    must(invading.engine->allocate_galactic_goal(1, 0, invading.engine->target_of_object(10)->id));
+                    stage = "reserve";
+                    expect(ai::EngineContractAccess::selected_reservation(*invading.engine), "refused-invasion fixture reserves a real roster");
+                    auto& p = ai::EngineContractAccess::player(*invading.engine); p.next_function = p.functions.size();
+                    stage = "goals service";
+                    must(invading.engine->service_galactic_system(1, ga::Service::goals, invading.scripts, invading.sequence));
+                    const auto plan = p.active.empty() ? 0 : p.active.front().plan;
+                    stage = "add_tasks";
+                    ai::EngineContractAccess::add_tasks(*invading.engine);
+                    stage = "execution service";
+                    must(invading.engine->service_galactic_system(1, ga::Service::execution, invading.scripts, invading.sequence));
+                    constexpr std::uint64_t refused_request = 424242;
+                    expect(plan && p.running.contains(plan), "refused-invasion fixture runs a real plan");
+                    if (!plan || !p.running.contains(plan)) continue;
+                    expect(!invading.actions->invasion_status(refused_request), "refused-invasion fixture: the world holds no such invasion");
+                    if (scenario == 1 || scenario == 3)
+                        invading.actions->bind_invasion_pending([](std::uint64_t request) { return request == refused_request; });
+                    stage = "add_invasion_block";
+                    const auto id = ai::EngineContractAccess::add_invasion_block(*invading.engine, plan, refused_request);
+                    stage = "act";
+                    std::string fault;
+                    std::unique_ptr<gc::GalacticSession::NativeActionBarrier> phase;
+                    try {
+                        if (scenario == 3) {
+                            const std::array<gc::PlayerId, 1> players{1};
+                            phase = must(invasion_session.begin_native_barrier(players, gc::galactic_max_commands));
+                            must(phase->select_player(1));
+                            expect(!invading.actions->invasion_status(refused_request), "the phase's overlay holds no row for the invasion");
+                        }
+                        if (scenario == 2 || scenario == 3) ai::EngineContractAccess::finish_running_plan(*invading.engine, plan, invading.scripts);
+                        else if (scenario == 4) {
+                            ai::GoalStateContributor saved(invading.engine, eawr::core::sha256_hex(std::span<const std::uint8_t>{}));
+                            if (auto captured = saved.capture(); !captured) fault = captured.error().message;
+                        } else ai::EngineContractAccess::service_blocks(*invading.engine);
+                    } catch (const std::exception& error) { fault = error.what(); }
+                    stage = "phase end";
+                    phase.reset();
+                    expect(fault.empty(), "a refused invasion is never a fault of the AI player or of a save (was: " + fault + ")");
+                    stage = "outcome checks";
+                    std::string trace = std::to_string(scenario);
+                    if (scenario == 2 || scenario == 3) {
+                        expect(!p.blocks.contains(id), "the ended plan's invasion block is released");
+                    } else {
+                        const auto& block = ai::EngineContractAccess::retained_block(*invading.engine, id);
+                        if (scenario == 0) expect(block.finished && !block.result && !block.galactic_request,
+                            "a refused invasion finishes its block as a failed invasion");
+                        else expect(!block.finished && block.galactic_request == refused_request,
+                            "a waiting invasion block (still held by the lane, or saved before the AI saw the refusal) is kept as it is");
+                        trace += ':' + std::to_string(block.finished) + std::to_string(block.result) + ':' + std::to_string(block.galactic_request);
+                    }
+                    expect(!invading.engine->galactic_provider_retired(1), "no AI player is retired by a refused invasion");
+                    if (refused_invasion_baselines[scenario].empty()) refused_invasion_baselines[scenario] = trace;
+                    else expect(trace == refused_invasion_baselines[scenario], "refused-invasion outcome equal on 1/2/4/8 workers");
+                } catch (const std::exception& error) {
+                    expect(false, std::string("refused-invasion scenario ") + std::to_string(scenario) + " threw at " + stage + ": " + error.what());
+                }
             }
             for (unsigned scenario = 0; scenario < 5; ++scenario) {
                 auto configured = setup();

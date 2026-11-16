@@ -92,6 +92,42 @@ void test_hangar() {
         tactical::squadron_lost(unlimited_profile, unlimited, 0, from + 299);
     }
     expect(total == 5 && unlimited.entries[0].remaining == tactical::unlimited_reserve, "FL-02: a negative reserve never runs out");
+
+    // C-02 / FL-08: replacement time follows the loss and the retained service phase.
+    // The 418 input below is a controlled boundary case, not a measured detach frame.
+    struct ReplacementClock {
+        std::uint64_t phase{};
+        std::uint64_t loss{};
+        std::uint64_t replacement{};
+    };
+    for (const auto& clock : std::array<ReplacementClock, 4>{{
+            {15, 571, 735}, {27, 418, 597}, {27, 417, 567}, {27, 416, 567}}}) {
+        tactical::SpawnerState timed;
+        timed.next_service_frame = clock.phase;
+        expect(service(profile, timed, 1, clock.loss).size() == 2,
+            "C-02: both starting squadrons launch before the controlled loss");
+        const auto next_service = timed.next_service_frame;
+        tactical::squadron_lost(profile, timed, 0, clock.loss);
+        expect(timed.next_spawn_frame == clock.loss + profile.delay_frames,
+            "FL-08: a full hangar starts the delay at loss, not at the last launch");
+        expect(timed.next_service_frame == next_service,
+            "FL-01: loss preserves the existing service cadence");
+        const auto replacements = service(profile, timed, clock.loss, clock.loss + 181);
+        expect(replacements.size() == 1 && replacements.front().frame == clock.replacement,
+            "C-02: replacement uses the first due service at or after the deadline, including equality");
+    }
+
+    tactical::SpawnerState deficit;
+    deficit.ready = true;
+    deficit.next_spawn_frame = 900;
+    deficit.entries = {{0, 1}, {1, 1}};
+    tactical::squadron_lost(profile, deficit, 1, 571);
+    expect(deficit.next_spawn_frame == 900 && deficit.entries[1].alive == 0,
+        "FL-08: an earlier entry's deficit preserves the running deadline");
+    deficit.entries = {{1, 1}, {0, 1}};
+    tactical::squadron_lost(profile, deficit, 0, 571);
+    expect(deficit.next_spawn_frame == 721 && deficit.entries[0].alive == 0,
+        "FL-08: a later entry's deficit does not prevent restarting the loss delay");
 }
 
 // C-03 (FL-03).
@@ -761,8 +797,8 @@ void test_restore_bindings() {
         archive::Reader reader(saved.value());
         std::uint32_t version{};
         reader(version);
-        reader.fire_range_bonuses = (version - 25U) % 2U == 1U;
-        reader.script_invulnerable = version >= 27U;
+        reader.fire_range_bonuses = (version - 29U) % 2U == 1U;
+        reader.script_invulnerable = version >= 31U;
         archive::Access::state(reader, state);
         std::vector<tactical::LiveUnit> live;
         reader(live);

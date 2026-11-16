@@ -59,10 +59,13 @@ bool LandMovement::configure_contacts(LandContactSettings settings) {
 }
 
 core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
-    const PartitionExecutor& executor, std::uint64_t frame) {
+    const PartitionExecutor& executor, std::uint64_t frame, std::span<const std::int64_t> squad_sides) {
     const auto overflow = [] { return core::Result<void>::failure(core::Diagnostic{
         std::string(math::diagnostic_codes::overflow), core::Severity::error,
         "Land contact prediction is outside fixed-point range.", {}, {}, {}, {}}); };
+    if (!squad_sides.empty() && squad_sides.size() != state_.squads.size()) return core::Result<void>::failure(core::Diagnostic{
+        std::string(math::diagnostic_codes::overflow), core::Severity::error,
+        "Land contact sides do not match the squads.", {}, {}, {}, {}});
     // Calling the same late barrier twice cannot reset a quota or service a deadlock twice.
     if (state_.contacts_serviced && frame <= state_.last_contact_frame) return core::Result<void>::success();
     const auto& settings = state_.contact_settings;
@@ -160,19 +163,26 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
             const auto x = body_index(contact.first), y = body_index(contact.second);
             if (x == bodies_.size() || y == bodies_.size()) continue;
             const auto& a = bodies_[x]; const auto& b = bodies_[y];
-            const auto& as = state_.squads[a.squad]; const auto& bs = state_.squads[b.squad];
             proposal.kind = a.moving && b.moving ? LandContactKind::moving_moving
                 : a.moving || b.moving ? LandContactKind::moving_stopped : LandContactKind::stopped_stopped;
             Arithmetic arithmetic;
-            proposal.predicts = pairs.collision_test(arithmetic, a, b, pairs.settings);
+            // WLPA-97: a pair the sweep held in the latest step still meets, whatever the prediction says (the prediction stops
+            // at the next path node, the step may turn the corner after it), so the row that owns the hold is kept.
+            proposal.predicts = pairs.collision_test(arithmetic, a, b, pairs.settings)
+                || pair_blocker_[x] == b.object || pair_blocker_[y] == a.object;
             proposal.score = arithmetic.length(arithmetic.sub(a.position, b.position));
-            proposal.same_direction = same_heading(as.facing, bs.facing);
+            // LE-OCCUPY: a pad has no squad; its heading is its own fixed pose.
+            const auto first_facing = a.pad ? a.facing : state_.squads[a.squad].facing;
+            const auto second_facing = b.pad ? b.facing : state_.squads[b.squad].facing;
+            proposal.same_direction = same_heading(first_facing, second_facing);
             proposal.first_behind = !ahead_of(a, b);
             proposal.maneuver = a.squad != b.squad && !proposal.same_direction;
             auto primary = x;
             if (proposal.kind == LandContactKind::moving_stopped) primary = a.moving ? y : x;
             else if (a.rank != b.rank) primary = a.rank > b.rank ? x : y;
-            else if (as.has_formation && bs.has_formation) {
+            else if (a.pad || b.pad) primary = a.pad ? x : y; // equal class: the pad, which cannot act, is the primary
+            else if (state_.squads[a.squad].has_formation && state_.squads[b.squad].has_formation) {
+                const auto& as = state_.squads[a.squad]; const auto& bs = state_.squads[b.squad];
                 if (as.formation_length != bs.formation_length) primary = as.formation_length > bs.formation_length ? x : y;
                 else {
                     // Both actors were found in their squad rosters, so these first members exist.
@@ -205,6 +215,48 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
         Fixed radius;
         for (const auto index : squad_members_[body.squad]) radius = std::max(radius, state_.members[index].profile.radius);
         return radius;
+    };
+
+    // Every leg of a contact route must be a step the movement admits (one segment test, #4840 B1). The planner's sight
+    // lines run between cell centres, so a leg from an off-centre start, or to an off-centre end, can cut a blocked corner
+    // that the centres' line does not: such a route first walks to its start cell's centre, or ends through its end cell's
+    // centre. A route that still has a refused leg is no route; installed, it would hold its body for ever (C4). The legs are
+    // tested from the request start with the profile that walks them from there (review #4840 F5, R2-1): a container steps
+    // with its widest soldier's radius and the common mask (the request's own); a generic team's position is its leader
+    // member's at every commit, and the leader walks with its own radius and mask. Other generic members walk their own legs
+    // to the route nodes with their own profile, as before; a refused one gets its own terrain contact.
+    const auto admissible_route = [&](LandPath& route, Fixed radius, std::uint32_t mask) {
+        auto& nodes = route.nodes;
+        if (nodes.size() < 2) return false;
+        const auto pitch = grid.terrain().spacing();
+        const auto centre_of = [&](Vec2 point) -> std::optional<Vec2> {
+            const auto cx = land_cell_of(point.x, pitch, grid.terrain().width());
+            const auto cy = land_cell_of(point.y, pitch, grid.terrain().height());
+            if (!cx || !cy) return std::nullopt;
+            return Vec2{land_cell_centre(*cx, pitch), land_cell_centre(*cy, pitch)};
+        };
+        bool changed = false;
+        if (!land_segment_admitted(grid, nodes[0], nodes[1], radius, mask)) {
+            const auto centre = centre_of(nodes[0]);
+            if (!centre || *centre == nodes[0] || *centre == nodes[1]) return false;
+            nodes.insert(nodes.begin() + 1, *centre); changed = true;
+        }
+        if (nodes.size() > 2 && !land_segment_admitted(grid, nodes[nodes.size() - 2], nodes.back(), radius, mask)) {
+            const auto centre = centre_of(nodes.back());
+            if (!centre || *centre == nodes.back() || *centre == nodes[nodes.size() - 2]) return false;
+            nodes.insert(nodes.end() - 1, *centre); changed = true;
+        }
+        for (std::size_t node = 1; node < nodes.size(); ++node)
+            if (!land_segment_admitted(grid, nodes[node - 1], nodes[node], radius, mask)) return false;
+        if (changed) {
+            Arithmetic geo;
+            Fixed total;
+            for (std::size_t node = 1; node < nodes.size(); ++node)
+                total = geo.add(total, geo.length(geo.sub(nodes[node], nodes[node - 1])));
+            if (!geo.valid) return false;
+            route.length = total;
+        }
+        return true;
     };
 
     // LR3-13: graph construction and search are event work. Ordinary retained service has no search
@@ -296,6 +348,18 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
                 if (!arithmetic.valid) { c.search = LandContactSearch::no_route; return false; }
             }
         }
+        // The lock and route-ownership admission is known before any search: a route this squad could not install costs no
+        // quota and no search (#4840 liveness, B2; a refused retry used to charge a full graph every 30 visits).
+        const auto peer = blocker < body_count ? bodies_[blocker].object : body.object;
+        bool lock_admitted = m.path_around_admitted;
+        if (c.route == LandContactRoute::escape_aligned) lock_admitted &= m.escape_aligned_admitted;
+        if (c.route == LandContactRoute::escape_opposed) lock_admitted &= m.escape_opposed_admitted;
+        for (const auto index : squad_members_[body.squad])
+            lock_admitted &= state_.members[index].collision_lock == 0 || state_.members[index].collision_lock == peer;
+        if (!lock_admitted || (squad.temporary_first
+            && (squad.temporary_first != c.first || squad.temporary_second != c.second))) {
+            c.search = LandContactSearch::install_rejected; return false;
+        }
         // LR3-02/03: charge the entire alternative planner graph, once per attempted pass,
         // before the zero-speed gate. This is a cell graph, not retail visibility-node units.
         const auto nodes = static_cast<std::uint64_t>(grid.cells().size());
@@ -335,24 +399,10 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
                 const auto t = along > zero ? std::clamp(geo.div(geo.dot(off, leg), along), zero, one) : zero;
                 return geo.length(geo.sub(off, geo.mul(leg, t)));
             };
-            const auto point_open = [&](Vec2 point) {
-                const auto cx = land_cell_of(point.x, pitch, columns), cy = land_cell_of(point.y, pitch, rows);
-                if (!cx || !cy) return false;
-                const auto footprint = land_footprint(request.radius, pitch);
-                const auto lx = static_cast<std::int64_t>(*cx) + footprint.low, ly = static_cast<std::int64_t>(*cy) + footprint.low;
-                const auto hx = static_cast<std::int64_t>(*cx) + footprint.high, hy = static_cast<std::int64_t>(*cy) + footprint.high;
-                return lx >= 0 && ly >= 0 && hx < static_cast<std::int64_t>(columns) && hy < static_cast<std::int64_t>(rows)
-                    && grid.admits_footprint(static_cast<std::uint32_t>(lx), static_cast<std::uint32_t>(ly),
-                        static_cast<std::uint32_t>(hx), static_cast<std::uint32_t>(hy), request.mask);
-            };
+            // Each leg must be a step the movement admits (one segment test, C4): a weaker point test would place a leg the
+            // next step refuses, and the escape would hold for ever.
             const auto leg_open = [&](Vec2 from, Vec2 to) {
-                const auto delta = geo.sub(to, from);
-                const auto length = geo.length(delta);
-                const auto samples = std::max<std::int64_t>(1, geo.div(length, Fixed::from_raw(pitch.raw() / 2)).ceil_to_integer());
-                if (!geo.valid) return false;
-                for (std::int64_t sample = 0; sample <= samples; ++sample)
-                    if (!point_open(geo.add(from, geo.mul(delta, Fixed::from_ratio(sample, samples).value())))) return false;
-                return true;
+                return land_segment_admitted(grid, from, to, request.radius, request.mask);
             };
             if (geo.valid && segment_gap(route.nodes[0], route.nodes[1]) < reach) {
                 const auto axis = math::sin_cos_turn(body.facing);
@@ -374,17 +424,13 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
                 if (!placed || !geo.valid) { c.search = LandContactSearch::no_route; return false; }
             }
         }
-        c.search_succeeded = true; c.search = LandContactSearch::found;
-        const auto peer = blocker < body_count ? bodies_[blocker].object : body.object;
-        bool lock_admitted = m.path_around_admitted;
-        if (c.route == LandContactRoute::escape_aligned) lock_admitted &= m.escape_aligned_admitted;
-        if (c.route == LandContactRoute::escape_opposed) lock_admitted &= m.escape_opposed_admitted;
-        for (const auto index : squad_members_[body.squad])
-            lock_admitted &= state_.members[index].collision_lock == 0 || state_.members[index].collision_lock == peer;
-        if (!lock_admitted || (squad.temporary_first
-            && (squad.temporary_first != c.first || squad.temporary_second != c.second))) {
-            c.search = LandContactSearch::install_rejected; return false;
+        {
+            const auto& walker = squad.generic_team ? state_.members[squad_members_[body.squad].front()] : m;
+            const auto leg_radius = squad.generic_team ? walker.profile.radius : request.radius;
+            const auto leg_mask = squad.generic_team ? walker.mask : request.mask;
+            if (!admissible_route(route, leg_radius, leg_mask)) { c.search = LandContactSearch::no_route; return false; }
         }
+        c.search_succeeded = true; c.search = LandContactSearch::found;
         squad.temporary_path = std::move(route); squad.temporary_next = 1;
         squad.temporary_first = c.first; squad.temporary_second = c.second;
         if (squad.generic_team) for (const auto index : squad_members_[body.squad]) state_.members[index].temporary_next = 1;
@@ -492,6 +538,11 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
             const auto after = gap.length(gap.sub(placement.position, other.position));
             if (!gap.valid || after < gap.add(before, one)) { c.search = LandContactSearch::no_route; return false; }
         }
+        // As in the path-around: a lock that refuses the install is known before the search is charged (B2).
+        for (const auto index : squad_members_[pushed.squad])
+            if (state_.members[index].collision_lock != 0 && state_.members[index].collision_lock != other.object) {
+                c.search = LandContactSearch::install_rejected; return false;
+            }
         LandPathRequest request;
         request.entity = pushed.object; request.mask = query.mask; request.radius = query.radius;
         request.start = pushed.position; request.end = placement.position;
@@ -501,12 +552,9 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
         c.charged_nodes += std::min(nodes, std::numeric_limits<std::uint64_t>::max() - c.charged_nodes);
         if (!contact_arena_) contact_arena_ = std::make_unique<LandPathArena>();
         auto route = LandPathService::plan(grid, *contact_arena_, request);
-        if (route.status != LandPathStatus::found || route.nodes.size() <= 1) { c.search = LandContactSearch::no_route; return false; }
+        if (route.status != LandPathStatus::found || route.nodes.size() <= 1
+            || !admissible_route(route, request.radius, request.mask)) { c.search = LandContactSearch::no_route; return false; }
         c.search_succeeded = true; c.search = LandContactSearch::found; c.route_actor = pushed.object;
-        for (const auto index : squad_members_[pushed.squad])
-            if (state_.members[index].collision_lock != 0 && state_.members[index].collision_lock != other.object) {
-                c.search = LandContactSearch::install_rejected; return false;
-            }
         squad.temporary_path = std::move(route); squad.temporary_next = 1;
         squad.temporary_first = c.first; squad.temporary_second = c.second;
         // The pushed container is idle: its base order is complete, so only the temporary route is walked.
@@ -518,14 +566,84 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
         return true;
     };
 
+    // WLPA-97: a squad whose contact has no way out ends its move where it stands, as an arrival would: a container's path is
+    // complete (its soldiers finish passive slot recovery), a generic team releases its path. A temporary route the squad
+    // walks is released with the row that owns it.
+    const auto end_order = [&](std::size_t squad_index) {
+        auto& s = state_.squads[squad_index];
+        if (!order_active(s.order) && s.order != LandMoveOrder::yielded) return;
+        if (s.temporary_first) for (auto& owner : state_.contacts)
+            if (owner.first == s.temporary_first && owner.second == s.temporary_second && owner.state != LandContactState::resolved) {
+                owner.state = LandContactState::resolved; release(owner);
+            }
+        s.order = LandMoveOrder::reached; s.yielding_to = 0;
+        s.next_node = s.path.nodes.size();
+        if (s.generic_team) {
+            s.path = {}; s.next_node = 0;
+            for (const auto member : squad_members_[squad_index]) {
+                state_.members[member].next_node = 0; state_.members[member].temporary_next = 0;
+            }
+        }
+    };
+    // WLPA-97: the second failed resolution attempt without pair progress takes the terminal rung, which ends every hold of
+    // the row: a terrain row, or a mover against an idle body it cannot path round or push, ends that move where it stands
+    // (an idle body is never walked through); every other pair takes no_action (no maneuver, no veto between the two, the
+    // soldiers steer).
+    // WHZ-51: two bodies whose squads are on different sides (both owned by non-neutral players of different teams).
+    const auto hostile = [&](const Body& one, const Body& other) {
+        if (squad_sides.empty()) return false;
+        const auto first = squad_sides[one.squad], second = squad_sides[other.squad];
+        return first >= 0 && second >= 0 && first != second;
+    };
+    // WLPA-97 real progress: a body's straight-line distance to the end of its order (land_contact_no_gap without a moving
+    // order: no baseline, not a zero distance). A pair row keeps, in its terrain_target (a terrain field no pair row uses),
+    // each body's lowest distance at a failed attempt or at the progress that cleared one: x for the first body, y for the
+    // second.
+    const auto body_gap = [this](Arithmetic& arithmetic, const Body& body) {
+        if (!body.moving || body.pad) return land_contact_no_gap; // LE-OCCUPY: a pad has no squad and no order
+        const auto& path = state_.squads[body.squad].path;
+        if (path.nodes.empty()) return land_contact_no_gap;
+        return arithmetic.length(arithmetic.sub(path.nodes.back(), body.position));
+    };
+    const auto goal_gap = [&](Arithmetic& arithmetic, std::size_t index) {
+        return index < body_count ? body_gap(arithmetic, bodies_[index]) : land_contact_no_gap;
+    };
+    const auto failed = [&](LandContact& c) {
+        if (c.retry_failed) return true;
+        c.retry_failed = true;
+        if (c.second) {
+            Arithmetic arithmetic;
+            const auto first = goal_gap(arithmetic, body_index(c.first)), second = goal_gap(arithmetic, body_index(c.second));
+            if (arithmetic.valid)
+                c.terrain_target = {std::min(c.terrain_target.x, first), std::min(c.terrain_target.y, second)};
+        }
+        return false;
+    };
+    const auto exhaust = [&](LandContact& c, std::size_t x, std::size_t y) {
+        c.first_stopped = false; c.second_stopped = false;
+        c.first_speed_limit.reset(); c.second_speed_limit.reset();
+        if (c.kind == LandContactKind::terrain) {
+            end_order(bodies_[x].squad);
+            c.state = LandContactState::resolved;
+            return;
+        }
+        if (c.kind == LandContactKind::moving_stopped) {
+            end_order(bodies_[bodies_[x].moving ? x : y].squad);
+            c.state = LandContactState::resolved; release(c);
+            return;
+        }
+        c.state = LandContactState::no_action;
+    };
+
     bool service_valid = true;
     const auto service = [&](LandContact& c, bool pathfinding) {
+        // A row that another row's terminal rung resolved earlier in this pass keeps that outcome.
+        if (c.state == LandContactState::resolved) return;
         const auto x = body_index(c.first), y = c.second ? body_index(c.second) : body_count;
         if (x == body_count || (c.second && y == body_count)) {
             c.state = LandContactState::resolved; release(c); return;
         }
         const auto& a = bodies_[x];
-        const auto& as = state_.squads[a.squad];
         const bool first_progressed = a.progress > c.first_progress;
         const bool second_progressed = y < body_count && bodies_[y].progress > c.second_progress;
         c.first_progress = a.progress;
@@ -533,52 +651,78 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
         if (c.installed) {
             const auto actor = body_index(c.route_actor);
             if (actor == body_count) { c.state = LandContactState::resolved; release(c); return; }
-            const auto& route_squad = state_.squads[bodies_[actor].squad];
-            const bool actor_progressed = c.route_actor == c.first ? first_progressed : second_progressed;
+            const auto route_index = bodies_[actor].squad;
+            const auto& route_squad = state_.squads[route_index];
+            bool actor_progressed = c.route_actor == c.first ? first_progressed : second_progressed;
+            // A generic team's route lasts until its last member's tracker ends, so the whole team is watched: any member
+            // that committed a moving speed or is turning in place is progress (#5996, B4). This reads committed state only.
+            if (route_squad.generic_team) for (const auto member : squad_members_[route_index]) {
+                const auto& m = state_.members[member];
+                actor_progressed |= m.collision_speed > zero || m.state == LandWalkState::turning;
+            }
             c.motion_observed |= actor_progressed;
             if (route_squad.temporary_first != c.first || route_squad.temporary_second != c.second
                 || route_squad.temporary_next == route_squad.temporary_path.nodes.size()) {
                 c.state = LandContactState::resolved; release(c);
             } else if (actor_progressed) {
-                c.retry_remaining = land_contact_retry_visits; // a generic team's tail is not watched: only containers are released
-            } else if (!route_squad.generic_team && c.retry_remaining > 0 && --c.retry_remaining == 0) {
-                // WLPA-96: an installed route whose actor makes no progress for the retry count is released; the pair is
-                // discovered again and decides afresh.
-                c.state = LandContactState::resolved; release(c);
+                // WLPA-97: walking a contact route keeps a failed attempt. A route that creeps and stalls, chosen again
+                // after a failure, takes the terminal rung when it is released (the partner it holds used to wait for ever
+                // while each new route cleared the failure with its first step).
+                c.retry_remaining = land_contact_retry_visits;
+            } else if (c.retry_remaining > 0 && --c.retry_remaining == 0) {
+                // WLPA-96: an installed route whose team makes no progress for the retry count is released. WLPA-97: the row
+                // is kept and the release is a failed attempt, so the same route chosen again and failing again ends the row
+                // instead of starting over with no history (C5).
+                release(c);
+                c.installed = false; c.retry_remaining = land_contact_retry_visits;
+                if (c.kind == LandContactKind::terrain) c.state = LandContactState::unresolvable;
+                else if (c.kind == LandContactKind::stopped_stopped) c.state = LandContactState::retry_later;
+                else if (c.state == LandContactState::recovery) {
+                    c.state = LandContactState::deadlocked; // a failed escape: the deadlock is not entered afresh
+                } else {
+                    c.state = LandContactState::unresolvable; c.first_stopped = true; c.second_stopped = true;
+                }
+                if (failed(c)) exhaust(c, x, y);
             }
             return;
         }
-        if (c.kind == LandContactKind::terrain) {
-            // Keep denied terrain requests even when their zero speed prevents a fresh physical
-            // collision. Recheck the retained blocked segment against the current committed grid.
+        // WLPA-97: only real progress clears a failed attempt: a body at least one cell pitch closer to the end of its order
+        // than its lowest distance at the last failed attempt (or the last clear). A nudge or a turn in place is not enough
+        // (a released route used to turn into a speed row, count a nudge as progress and be chosen again for ever). Each
+        // clear lowers the baseline by a pitch, so a pair clears a bounded number of times. A deadlocked row keeps it
+        // (LR3-07 escape admission); a terrain row ends when its step is admitted.
+        if (c.retry_failed && c.second && c.state != LandContactState::deadlocked) {
             Arithmetic arithmetic;
-            const auto delta = arithmetic.sub(c.terrain_target, a.position);
-            const auto length = arithmetic.length(delta);
-            const auto half_pitch = Fixed::from_raw(grid.terrain().spacing().raw() / 2);
-            const auto samples = std::max<std::int64_t>(1, arithmetic.div(length, half_pitch).ceil_to_integer());
-            if (!arithmetic.valid) { service_valid = false; return; }
-            const auto mask = terrain_mask(a);
-            const auto radius = terrain_radius(a);
-            bool blocked = !land_cell_of(a.position.x, grid.terrain().spacing(), grid.terrain().width())
-                || !land_cell_of(a.position.y, grid.terrain().spacing(), grid.terrain().height())
-                || !land_cell_of(c.terrain_target.x, grid.terrain().spacing(), grid.terrain().width())
-                || !land_cell_of(c.terrain_target.y, grid.terrain().spacing(), grid.terrain().height());
-            const auto footprint = land_footprint(radius, grid.terrain().spacing());
-            for (std::int64_t sample = 0; !blocked && sample <= samples; ++sample) {
-                const auto point = arithmetic.add(a.position, arithmetic.mul(delta, Fixed::from_ratio(sample, samples).value()));
-                if (!arithmetic.valid) { service_valid = false; return; }
-                const auto xcell = land_cell_of(point.x, grid.terrain().spacing(), grid.terrain().width());
-                const auto ycell = land_cell_of(point.y, grid.terrain().spacing(), grid.terrain().height());
-                if (!xcell || !ycell) { blocked = true; break; }
-                const auto lx = static_cast<std::int64_t>(*xcell) + footprint.low;
-                const auto ly = static_cast<std::int64_t>(*ycell) + footprint.low;
-                const auto hx = static_cast<std::int64_t>(*xcell) + footprint.high;
-                const auto hy = static_cast<std::int64_t>(*ycell) + footprint.high;
-                if (lx < 0 || ly < 0 || hx >= grid.terrain().width() || hy >= grid.terrain().height()
-                    || !grid.admits_footprint(static_cast<std::uint32_t>(lx), static_cast<std::uint32_t>(ly),
-                        static_cast<std::uint32_t>(hx), static_cast<std::uint32_t>(hy), mask)) { blocked = true; break; }
+            const auto pitch = grid.terrain().spacing();
+            const auto first = goal_gap(arithmetic, x), second = goal_gap(arithmetic, y);
+            // A body idle at the failure has no baseline: the first visit it moves sets one and clears nothing (review R1).
+            const auto progressed = [&](Fixed now, Fixed& baseline) {
+                if (now == land_contact_no_gap) return false;
+                if (baseline == land_contact_no_gap) { baseline = now; return false; }
+                return arithmetic.add(now, pitch) <= baseline;
+            };
+            const bool first_real = progressed(first, c.terrain_target.x);
+            const bool second_real = progressed(second, c.terrain_target.y);
+            if (arithmetic.valid && (first_real || second_real)) {
+                c.retry_failed = false;
+                c.terrain_target = {std::min(c.terrain_target.x, first), std::min(c.terrain_target.y, second)};
             }
-            if (!blocked && arithmetic.valid) { c.state = LandContactState::resolved; return; }
+        }
+        if (c.kind == LandContactKind::terrain) {
+            // A body without a moving order takes no step, so it has no refused step to resolve.
+            if (!a.moving) { c.state = LandContactState::resolved; return; }
+            // Keep denied terrain requests even when their zero speed prevents a fresh physical
+            // collision. Recheck the retained blocked segment against the current committed grid with the movement's own
+            // segment test, so the row is cleared only when the next step is admitted (C4).
+            {
+                // An endpoint outside the fixed-point range is a diagnostic, not a route outcome.
+                Arithmetic range;
+                static_cast<void>(range.length(range.sub(c.terrain_target, a.position)));
+                if (!range.valid) { service_valid = false; return; }
+            }
+            if (land_segment_admitted(grid, a.position, c.terrain_target, terrain_radius(a), terrain_mask(a))) {
+                c.state = LandContactState::resolved; return;
+            }
             if (c.state == LandContactState::unresolvable) {
                 if (first_progressed) c.retry_remaining = land_contact_retry_visits;
                 else if (c.retry_remaining > 0) --c.retry_remaining;
@@ -588,13 +732,60 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
             c.retry_remaining = land_contact_retry_visits;
             // WLPA-36: the terrain record acts on the colliding body (a container or a generic member). A failed search is
             // unresolvable and searches again after the WLPA-92 retry count (quota still applies).
-            c.state = path_around(c, x, body_count) ? LandContactState::resolving : LandContactState::unresolvable;
+            if (path_around(c, x, body_count)) { c.state = LandContactState::resolving; return; }
+            c.state = LandContactState::unresolvable;
+            if (failed(c)) exhaust(c, x, body_count);
             return;
         }
         const auto& b = bodies_[y];
-        const auto& bs = state_.squads[b.squad];
         Arithmetic arithmetic;
         const auto& observation = contact_observations_[static_cast<std::size_t>(&c - state_.contacts.data())];
+        if (a.pad || b.pad) {
+            // LE-OCCUPY (WLPA-66, FD-82): a pad is the stopped counterpart of a body that can never move, yield or be pushed.
+            const auto mover = a.pad ? y : x, pad = a.pad ? x : y;
+            const auto& walker = bodies_[mover];
+            if (!observation.predicts) { c.state = LandContactState::resolved; release(c); return; }
+            c.score = observation.score;
+            const auto& walker_squad = state_.squads[walker.squad];
+            c.primary = bodies_[pad].object;
+            if (walker_squad.temporary_first) {
+                // Another contact already owns this squad's temporary tracker: observe it (as for any pair).
+                c.state = LandContactState::existing_path;
+                c.first_stopped = false; c.second_stopped = false;
+                c.first_speed_limit.reset(); c.second_speed_limit.reset();
+                return;
+            }
+            if (c.state == LandContactState::existing_path) { c.state = LandContactState::initial; return; }
+            if (c.kind == LandContactKind::stopped_stopped) {
+                // The mover stopped: an idle body beside a pad has nothing to resolve (see discovery).
+                c.state = LandContactState::resolved; release(c);
+                return;
+            }
+            const bool progressed = first_progressed || second_progressed;
+            const bool searched_before = c.state == LandContactState::unresolvable;
+            if (searched_before) {
+                if (progressed) c.retry_remaining = land_contact_retry_visits;
+                else if (c.retry_remaining > 0) --c.retry_remaining;
+                if (c.retry_remaining > 0) return;
+            }
+            if (!pathfinding) { c.search = LandContactSearch::quota_denied; return; }
+            c.retry_remaining = land_contact_retry_visits;
+            c.first_speed_limit.reset(); c.second_speed_limit.reset();
+            c.route = LandContactRoute::ordinary;
+            c.first_stopped = false; c.second_stopped = false;
+            // WLPA-57 as for any stopped body: a move that ends on the pad is cut short before it touches it.
+            if (ends_on(walker, bodies_[pad]) && truncate(mover, pad, c)) { c.state = LandContactState::resolved; release(c); return; }
+            if (path_around(c, mover, pad)) { c.state = LandContactState::path_around; return; }
+            // WLPA-97 (#4840): a mover against an idle body it cannot path round ends that move where it stands (an idle body
+            // is never walked through, and a pad has no push to fall back on). The first failed attempt retries after the retry
+            // count; the second one without real progress takes the terminal rung, which ends the mover's order.
+            c.state = LandContactState::unresolvable;
+            c.first_stopped = true; c.second_stopped = true;
+            if (failed(c)) exhaust(c, x, y);
+            return;
+        }
+        const auto& as = state_.squads[a.squad];
+        const auto& bs = state_.squads[b.squad];
         // LR3-09 prediction recheck precedes all role or maneuver selection. A retained repulsion row is the steering
         // gate (WLPA-59): it lives until the pair is past each other or out of reach, not only while a hit is predicted.
         if (c.state == LandContactState::repulsion && straggler_repulsion_) {
@@ -603,6 +794,12 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
             c.state = LandContactState::resolved; release(c); return;
         }
         c.score = observation.score;
+        if (c.state == LandContactState::no_action) {
+            // WLPA-97 terminal rung: no maneuver and no hold until the pair no longer meets (the recheck above).
+            c.first_stopped = false; c.second_stopped = false;
+            c.first_speed_limit.reset(); c.second_speed_limit.reset();
+            return;
+        }
         const auto& holder_a = state_.members[a.holder]; const auto& holder_b = state_.members[b.holder];
         if (as.temporary_first || bs.temporary_first) {
             // Another contact already owns this squad's temporary tracker. Observe that
@@ -627,13 +824,18 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
                 if (c.retry_remaining > 0) return;
             }
             const bool a_free = a.container && !deployed(a), b_free = b.container && !deployed(b);
-            if (!a_free && !b_free) { c.state = LandContactState::retry_later; return; }
+            if (!a_free && !b_free) {
+                c.state = LandContactState::retry_later; c.retry_remaining = land_contact_retry_visits;
+                if (failed(c)) exhaust(c, x, y);
+                return;
+            }
             if (!pathfinding) { c.search = LandContactSearch::quota_denied; return; }
             c.retry_remaining = land_contact_retry_visits;
             const bool move_a = a_free && (!b_free || a.maximum_speed >= b.maximum_speed);
             c.primary = move_a ? b.object : a.object;
             if (push(c, move_a ? x : y, move_a ? y : x)) { c.state = LandContactState::infantry_push; return; }
             c.state = LandContactState::retry_later;
+            if (failed(c)) exhaust(c, x, y);
             return;
         }
         if (a.squad == b.squad) {
@@ -676,9 +878,16 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
         }
         const auto primary = c.primary == c.first ? x : y;
         const bool progressed = first_progressed || second_progressed;
+        bool entered = false;
         if (c.kind == LandContactKind::moving_moving
             && land_deadlock_visit(c, a.assigned_speed, b.assigned_speed, a.collision_speed,
                 b.collision_speed, a.acceleration, b.acceleration, true, progressed)) {
+            // WLPA-97 (#6845): entering the deadlock keeps a failed attempt of the same ladder (the path-around that stalled, the
+            // search that failed), so the first escape that fails after it is the second failure and takes the terminal rung. The
+            // entry visit itself escapes at once and is ordinary service (LR3-07 first escape, quota exempt): `entered` is local,
+            // nothing is saved, and a restore always lands after it.
+            entered = c.state != LandContactState::deadlocked;
+            if (entered) c.retry_remaining = land_contact_retry_visits;
             c.state = LandContactState::deadlocked;
         }
         if (c.state == LandContactState::deadlocked) {
@@ -690,19 +899,35 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
                     && (peer.state == LandContactState::deadlocked || peer.state == LandContactState::recovery)
                     && (peer.first == c.primary || peer.second == c.primary)) ++sources;
             c.first_stopped = c.primary != c.first; c.second_stopped = c.primary != c.second;
-            if (sources != 1) return;
-            if (c.escape_retry_pending && !pathfinding) { c.search = LandContactSearch::quota_denied; return; }
+            if (sources != 1) {
+                // LR3-12/13 gives no escape to a primary with several deadlocked sources. WLPA-97: each retry count of visits
+                // without pair progress is a failed attempt, and the second one takes the terminal rung (#5995, C1).
+                if (progressed) c.retry_remaining = land_contact_retry_visits;
+                else if (c.retry_remaining > 0) --c.retry_remaining;
+                if (c.retry_remaining > 0) return;
+                c.retry_remaining = land_contact_retry_visits;
+                if (failed(c)) exhaust(c, x, y);
+                return;
+            }
+            if (c.retry_failed && !entered) {
+                // A failed escape waits like an unresolvable row (WLPA-92): it searches again only after the retry count of
+                // visits without pair progress, and then through quota admission (#4840 liveness, B3: it used to search on
+                // every admitted tick and could take the only admission of a large map for ever).
+                // The count runs in ordinary service; the retry itself is queued (needs_path) once the count is spent.
+                if (progressed) { c.retry_remaining = land_contact_retry_visits; return; }
+                if (c.retry_remaining > 0) { --c.retry_remaining; return; }
+                if (!pathfinding) { c.search = LandContactSearch::quota_denied; return; }
+            }
             const auto actor = c.primary == c.first ? x : y;
             const auto aa = math::sin_cos_turn(a.facing), ba = math::sin_cos_turn(b.facing);
             const bool opposed = arithmetic.dot({aa.cosine, aa.sine}, {ba.cosine, ba.sine}) <= zero;
             c.route = opposed ? LandContactRoute::escape_opposed : LandContactRoute::escape_aligned;
             if (path_around(c, actor, actor == x ? y : x)) {
-                c.state = LandContactState::recovery; c.escape_retry_pending = false;
-            } else c.escape_retry_pending = true;
-            return;
-        }
-        if (c.state == LandContactState::no_action) {
-            c.first_speed_limit.reset(); c.second_speed_limit.reset();
+                c.state = LandContactState::recovery;
+            } else {
+                c.retry_remaining = land_contact_retry_visits;
+                if (failed(c)) exhaust(c, x, y);
+            }
             return;
         }
         if (c.state == LandContactState::unresolvable) {
@@ -733,37 +958,48 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
             return;
         }
         // LR3-10: opposing moving actors can swap roles without rechecking quota within setup.
-        if (c.kind == LandContactKind::moving_moving && c.search != LandContactSearch::install_rejected
-            && path_around(c, blocker, actor)) {
+        // A lock refusal is known before the search (B2) and says nothing about a route, so after any failed path-around the
+        // role swap and the push run (review #4840 F1): as on main when no route existed; where main found a route and was
+        // then refused by the lock it skipped them.
+        if (c.kind == LandContactKind::moving_moving && path_around(c, blocker, actor)) {
             c.primary = bodies_[actor].object; c.state = LandContactState::path_around; return;
         }
-        if (c.kind == LandContactKind::moving_stopped && c.search != LandContactSearch::install_rejected) {
+        // WLPA-57: a moving body never pushes a hostile idle body aside (#6062); the pair goes on to retry and then the terminal rung.
+        if (c.kind == LandContactKind::moving_stopped && !hostile(a, b)) {
             const auto mover = a.moving ? x : y, stopped = a.moving ? y : x;
             if (push(c, stopped, mover)) { c.state = LandContactState::infantry_push; return; }
         }
         // WLPA-57: after path-around and push fail, two soft classes go to repulsion (the mover walks on and the soldiers
-        // steer); only a harder pair retries at zero speed.
-        if (soft_pair && c.kind == LandContactKind::moving_stopped) {
+        // steer); only a harder pair retries at zero speed. A hostile soft pair does not (#6062): the mover would walk on
+        // through the enemy body it may not push, so it retries and its move ends in front of it (WLPA-97). Retail never
+        // uses repulsion when the move ends on the idle body (truncate, path-around, push, else retry at zero speed); the
+        // soft fallthrough is the remake's, and it is kept only for friendly and neutral pairs.
+        if (soft_pair && c.kind == LandContactKind::moving_stopped && !hostile(a, b)) {
             c.state = LandContactState::repulsion;
             c.first_stopped = false; c.second_stopped = false;
             return;
         }
         c.state = LandContactState::unresolvable;
         c.first_stopped = true; c.second_stopped = true;
+        if (failed(c)) exhaust(c, x, y);
     };
 
     for (std::size_t i = 0; i < state_.contacts.size(); ++i) {
         auto& c = state_.contacts[i];
         const auto& observation = contact_observations_[i];
-        if (c.second && c.kind != observation.kind) {
+        // A row whose participant is no longer a body (a retired pad, FD-82) has no observation; its service resolves it.
+        if (c.second && c.kind != observation.kind && body_index(c.first) < body_count && body_index(c.second) < body_count) {
             c.kind = observation.kind;
-            if (!c.installed) {
+            // WLPA-97: no_action is only for two moving bodies; a pair that is no longer moving/moving starts again (the
+            // failed attempt is kept, so its next failure takes the terminal rung and an idle body is never walked through).
+            if (!c.installed && (c.state != LandContactState::no_action || c.kind != LandContactKind::moving_moving)) {
                 // A live subtype change gets its new dispatcher without discarding pair identity or
-                // the quota ledger. It is a new maneuver qualification, not elapsed-time recovery.
+                // the quota ledger. It is a new maneuver qualification, not elapsed-time recovery. WLPA-97: a failed
+                // attempt is kept (a subtype change is no progress), and a terminal row stays terminal while the pair meets.
                 c.state = LandContactState::initial; c.search = LandContactSearch::none;
                 c.first_stopped = false; c.second_stopped = false;
                 c.first_speed_limit.reset(); c.second_speed_limit.reset();
-                c.deadlock_remaining = 30; c.recorded_member = 0; c.escape_retry_pending = false;
+                c.deadlock_remaining = 30; c.recorded_member = 0;
                 c.retry_remaining = land_contact_retry_visits;
             }
         }
@@ -785,7 +1021,7 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
             || (c.kind == LandContactKind::moving_moving && c.state == LandContactState::unresolvable)
             || (c.kind == LandContactKind::stopped_stopped && !c.installed
                 && (c.state == LandContactState::initial || (c.state == LandContactState::retry_later && c.retry_remaining == 0)))
-            || c.escape_retry_pending;
+            || (c.retry_failed && c.retry_remaining == 0);
         if (needs_path) contact_order_.push_back(i);
         else service(c, true);
         if (!service_valid) return overflow();
@@ -814,7 +1050,7 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
                     const auto& body = bodies_[b];
                     // A container holds no occupation of its own; its soldiers do.
                     bool present = true;
-                    if (!body.container) {
+                    if (!body.container && !body.pad) {
                         const auto object = state_.members[body.member].object;
                         const auto at = std::lower_bound(occupations.begin(), occupations.end(), object,
                             [](const auto& o, EntityId id) { return o.object < id; });
@@ -835,7 +1071,10 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
     const bool indexed = !reference_pair_scans_ && neighbours_.safe();
     // Per-body discovery reads only committed occupancy and writes disjoint retained scratch lists.
     // New contacts are not serviced until the next late invocation (LR1-09).
-    struct DiscoveryContext { const LandOccupancy& grid; const LandContactSettings& settings; bool indexed; const decltype(collides)& collision_test; } discovery{grid, settings, indexed, collides};
+    struct DiscoveryContext {
+        const LandOccupancy& grid; const LandContactSettings& settings; bool indexed; const decltype(collides)& collision_test;
+        const decltype(body_gap)& gap;
+    } discovery{grid, settings, indexed, collides, body_gap};
     auto result = land_phase(executor, "land-member-proposals", tick_partition_count,
         [this, &discovery](std::size_t partition) {
         const auto& occupancy = discovery.grid;
@@ -845,30 +1084,52 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
             const auto& a = bodies_[rank];
             auto& found = discovered_[rank]; found.clear();
             Arithmetic arithmetic;
-            const auto& s = state_.squads[a.squad];
-            if (a.container ? s.terrain_blocked : state_.members[a.member].terrain_blocked) {
-                LandContact c; c.first = a.object;
-                c.terrain_target = a.container ? s.terrain_target : state_.members[a.member].terrain_target;
-                found.push_back(c);
+            if (!a.pad) {
+                const auto& s = state_.squads[a.squad];
+                if (a.container ? s.terrain_blocked : state_.members[a.member].terrain_blocked) {
+                    LandContact c; c.first = a.object;
+                    c.terrain_target = a.container ? s.terrain_target : state_.members[a.member].terrain_target;
+                    found.push_back(c);
+                }
             }
             const auto visit = [&](std::size_t j) {
                 if (j >= bodies_.size() || bodies_[j].object <= a.object) return;
                 const auto& b = bodies_[j];
+                // LE-OCCUPY: a pad only ever meets a moving body; an idle body beside a pad has nothing to resolve (project
+                // choice: nothing authored says an idle body must leave a pad, and the pad cannot be pushed away).
+                if ((a.pad || b.pad) && !a.moving && !b.moving) return;
                 if (!discovery.collision_test(arithmetic, a, b, profile)) return;
                 LandContact c; c.first = a.object; c.second = b.object;
                 c.kind = a.moving && b.moving ? LandContactKind::moving_moving
                     : a.moving || b.moving ? LandContactKind::moving_stopped : LandContactKind::stopped_stopped;
                 c.score = arithmetic.length(arithmetic.sub(a.position, b.position));
                 c.first_progress = a.progress; c.second_progress = b.progress;
+                c.terrain_target = {discovery.gap(arithmetic, a), discovery.gap(arithmetic, b)};
                 found.push_back(c);
             };
+            // WLPA-97: a pair the sweep held in the latest step always has a row, even where the prediction misses it.
+            if (const auto blocker = pair_blocker_[rank]; blocker) {
+                const auto j = body_index(blocker);
+                if (j < bodies_.size()) {
+                    const auto& b = bodies_[j];
+                    LandContact c;
+                    c.first = std::min(a.object, b.object); c.second = std::max(a.object, b.object);
+                    c.kind = a.moving && b.moving ? LandContactKind::moving_moving
+                        : a.moving || b.moving ? LandContactKind::moving_stopped : LandContactKind::stopped_stopped;
+                    c.score = arithmetic.length(arithmetic.sub(a.position, b.position));
+                    const auto& low = a.object < b.object ? a : b; const auto& high = a.object < b.object ? b : a;
+                    c.first_progress = low.progress; c.second_progress = high.progress;
+                    c.terrain_target = {discovery.gap(arithmetic, low), discovery.gap(arithmetic, high)};
+                    found.push_back(c);
+                }
+            }
             if (discovery.indexed) {
                 auto& candidates = neighbour_candidates_[rank];
                 neighbours_.query(rank, candidates);
                 for (const auto candidate : candidates) visit(candidate);
             } else {
                 const auto occupied = [&](const Body& body) {
-                    if (body.container) return true;
+                    if (body.container || body.pad) return true;
                     const auto object = state_.members[body.member].object;
                     const auto at = std::lower_bound(occupancy.occupations().begin(), occupancy.occupations().end(), object,
                         [](const auto& o, EntityId id) { return o.object < id; });

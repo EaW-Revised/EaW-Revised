@@ -117,6 +117,6 @@ function(eawr_apply_area_labels)
     if(unlabelled)
         list(JOIN unlabelled "\n  " listed)
         message(FATAL_ERROR "These tests have no area label; add a `test` row (or a `dir` row for a new directory) to "
-                            "tests/test_labels.txt, then run python tools/test_index/generate_test_index.py:\n  ${listed}")
+                            "tests/test_labels.txt (the test index is derived from it; nothing to regenerate):\n  ${listed}")
     endif()
 endfunction()

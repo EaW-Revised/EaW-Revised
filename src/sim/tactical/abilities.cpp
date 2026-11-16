@@ -1,4 +1,5 @@
 #include "eawr/sim/tactical/abilities.hpp"
+#include "eawr/sim/tactical/land_abilities.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 
 #include "../replay_internal.hpp"
@@ -103,6 +104,10 @@ constexpr std::array<KindName, 32> kind_names{{
 
 std::string_view to_string(const AbilityKind kind) noexcept {
     for (const auto& entry : kind_names) {
+        if (entry.kind == kind) return entry.name;
+    }
+    // WLAB-01: the rest of the 75-name vocabulary (the appended land kinds).
+    for (const auto& entry : ability_vocabulary()) {
         if (entry.kind == kind) return entry.name;
     }
     return "NONE";
@@ -235,6 +240,12 @@ bool automatic_ability_style(const std::string_view style, const BattleDomain do
         || (iequals(style, "Ground_Automatic") && domain == BattleDomain::land)
         || (iequals(style, "Skirmish_Automatic") && multiplayer);
 }
+IncomeEventStyle income_event_style(const std::string_view style) noexcept {
+    if (iequals(style, "Special_Attack")) return IncomeEventStyle::special_attack;
+    if (iequals(style, "Take_Damage")) return IncomeEventStyle::take_damage;
+    if (iequals(style, "User_Input")) return IncomeEventStyle::user_input;
+    return IncomeEventStyle::none;
+}
 bool automatic_ability_style(const SpecialActivationStyle style, const BattleDomain domain, const bool multiplayer) {
     // WSH-10: share the automatic mode admission with income; unspecified healing never auto-starts.
     switch (style) {
@@ -310,7 +321,11 @@ void append_special_abilities(std::vector<std::uint8_t>& bytes, const SpecialAbi
     sim::detail::append_u32(bytes, 0);
     sim::detail::append_u64(bytes, state.slots.size());
     for (const auto& slot : state.slots) {
-        sim::detail::append_u32(bytes, (slot.enabled ? 1U : 0U) | (slot.cancelled ? 2U : 0U) | (slot.despawn_success ? 4U : 0U));
+        // WSPL-08: bit 8 announces a SUPER_LASER use block, so every other handler keeps its bytes.
+        const bool laser = slot.laser_face || slot.laser_anim_started || slot.laser_fired || slot.laser_ending
+            || slot.laser_face_target != 0 || slot.laser_fire_start != 0 || slot.laser_anim_tick != 0 || slot.laser_end_tick != 0;
+        sim::detail::append_u32(bytes, (slot.enabled ? 1U : 0U) | (slot.cancelled ? 2U : 0U) | (slot.despawn_success ? 4U : 0U)
+            | (laser ? 8U : 0U));
         sim::detail::append_u32(bytes, slot.context ? 1U : 0U);
         sim::detail::append_u64(bytes, slot.next_service_frame);
         if (slot.context) {
@@ -322,6 +337,14 @@ void append_special_abilities(std::vector<std::uint8_t>& bytes, const SpecialAbi
         }
         sim::detail::append_u64(bytes, slot.targets.size());
         for (const auto target : slot.targets) sim::detail::append_u64(bytes, target);
+        if (laser) {
+            sim::detail::append_u32(bytes, (slot.laser_face ? 1U : 0U) | (slot.laser_anim_started ? 2U : 0U)
+                | (slot.laser_fired ? 4U : 0U) | (slot.laser_ending ? 8U : 0U));
+            sim::detail::append_u64(bytes, slot.laser_face_target);
+            sim::detail::append_u64(bytes, slot.laser_fire_start);
+            sim::detail::append_u64(bytes, slot.laser_anim_tick);
+            sim::detail::append_u64(bytes, slot.laser_end_tick);
+        }
     }
     if (std::any_of(state.slots.begin(), state.slots.end(), [](const auto& slot) {
         return slot.jammer_initialized || slot.jammer_registered || slot.jammer_unregistered
@@ -539,10 +562,10 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
             }
         }
         // AB-60, WAB-70: ION_CANNON_SHOT and BUZZ_DROIDS are team abilities, without a time limit.
-        const bool team_kind = ability.kind == AbilityKind::ion_cannon_shot || ability.kind == AbilityKind::buzz_droids
-            || ability.kind == AbilityKind::lucky_shot;
+        // WLAB-03: the team kinds of the table (adds TARGETED_HACK and TARGETED_REPAIR for land containers).
+        const bool team_kind = ability_kind_flags(ability.kind).team;
         if ((ability.team && !team_kind) || (team_kind && ability.expiration_frames != 0)) {
-            return invalid("only ION_CANNON_SHOT and BUZZ_DROIDS are team abilities, without a time limit" + type);
+            return invalid("only the team kinds (ION_CANNON_SHOT, BUZZ_DROIDS, LUCKY_SHOT, TARGETED_HACK, TARGETED_REPAIR) are team abilities, without a time limit" + type);
         }
         if (ability.kind == AbilityKind::buzz_droids) {
             const auto in = [](const Fixed value) { return value.raw() >= 0 && value.raw() <= 65536 * one_raw; };

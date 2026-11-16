@@ -38,15 +38,26 @@ public:
     void consume(const platform::LiveGalacticEvent&, std::uint32_t local_player);
     void battle_load();
     void tactical();
+    // WGP-107: the campaign end's first movie continuation stops active music and speech; no strategic music follows.
+    void campaign_end_stop();
     void battle_summary(std::uint64_t conflict, bool visible, bool won);
     void sound(audio::GalacticSound cue, std::optional<audio::Vec3> position = std::nullopt);
     // WGEP-96/97: one type's production feedback; `type` is its object type name.
     void build(audio::GalacticBuildCue cue, std::string_view type, bool local_builder);
+    // WGEP-95: a build front's remaining seconds changed from `previous` to `remaining`: the type's countdown speech request
+    // (only a type with Build_Countdown_Timer and a Build_Speech_Countdowns prefix; stock authors no active countdown speech).
+    void build_countdown(std::string_view type, float previous, float remaining);
+    // WGEP-172: a finished build's authored Build_Music_Completed, whoever the builder is.
+    void build_completed_music(std::string_view type);
+    // WGCH-09/128: a direct corruption's authored success speech event, queued behind any speech in progress.
+    // An empty name queues nothing; a name no speech event defines is a recorded problem.
+    void corruption_success_speech(std::string_view event);
     // An authored GUI SFX event by name (command-bar Click_SFX / Mouse_Over_SFX).
     void ui_sound(std::string_view name) { play_event(name); }
     void ability_sound(std::string_view name, audio::Vec3 position);
     void negative_feedback();
     void advisor_urgent();
+    void advisor_message();
     // WGP-182: presenter seams; the caller owns rebuild/reveal admission,
     // including GFC-40 tutorial/cinematic suppression. Live publication: #2042.
     void objectives_rebuilt(const data::ui::CommandBarComponent& icon, bool announce) {

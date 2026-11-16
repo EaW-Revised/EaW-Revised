@@ -164,13 +164,54 @@ void cases(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& h
         expect(refused.galaxy().ability_state()->preparations.empty(), "an unlisted profile prepares nothing on a drop");
         expect(refusal(refused) == gc::GalacticRejectReason::unknown_value, "the unlisted drop is still refused for the seat");
     }
-    {   // An AI seat's landing or arrival never prepares neutralization: it has no chooser for the menu.
-        auto config = setup(); config.ability_host->profiles[0].ground_activated = {gc::AbilityKind::hero_neutralization};
-        for (auto& row : config.economy_corruption->players) if (row.player == 2) row.human = false;
-        auto game = take(eawr::campaign::GameSession::create(config));
-        order(game, 1, gc::DeployGroundAbility{neutralizer(config), config.planets[0].id});
-        hashes.push_back(take(game.step(pool)).state_hash.get());
-        expect(game.galaxy().ability_state()->preparations.empty(), "an AI seat's drop never prepares neutralization");
+    {   // #6270 (WGCH-24/93): an AI seat chooses among the valid options its credits cover and executes the same step;
+        // nothing valid or affordable leaves the hero where it is. A human is given the menu instead (above).
+        const auto ai_seat = [&](auto&& adjust) {
+            auto config = setup(); config.ability_host->profiles[0].ground_activated = {gc::AbilityKind::hero_neutralization};
+            for (auto& row : config.economy_corruption->players) if (row.player == 2) row.human = false;
+            adjust(config);
+            auto game = take(eawr::campaign::GameSession::create(config));
+            order(game, 1, gc::DeployGroundAbility{neutralizer(config), config.planets[0].id});
+            hashes.push_back(take(game.step(pool)).state_hash.get());
+            return std::make_pair(std::move(game), std::move(config));
+        };
+        {
+            auto [game, config] = ai_seat([](auto&) {});
+            expect(credits(game) == f(950), "an AI seat pays the prepared price of its chosen option");
+            expect(!present(game, victim(config)) && !present(game, neutralizer(config)), "an AI neutralization removes victim and actor");
+            const auto* state = game.galaxy().ability_state();
+            expect(state->results.size() == 1 && state->results[0].outcome == gc::AbilityOutcome::purchased
+                && state->results[0].kind == gc::AbilityKind::hero_neutralization, "the AI's neutralization settles as a purchase");
+            expect(state->neutralization_history.size() == 1 && state->neutralization_history[0].count == 1, "and counts in the history");
+            expect(game.return_state().heroes.size() == 2, "both heroes are scheduled to return");
+        }
+        {   // Two admissible options: the one draw picks exactly one, and the same seed picks the same one every time.
+            constexpr eawr::sim::EntityId second = 60000;
+            const auto run = [&] {
+                auto [game, config] = ai_seat([&](auto& c) {
+                    c.fleets[0].members.push_back({second, 1000});
+                    c.census->objects.push_back(ability_fixture::census_actor(second, 1000, 1, c.fleets[0].orbit, c.fleets[0].id));
+                    std::sort(c.census->objects.begin(), c.census->objects.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+                });
+                const bool first_gone = !present(game, victim(config)), second_gone = !present(game, second);
+                expect(first_gone != second_gone, "exactly one of two admissible heroes is neutralized");
+                expect(credits(game) == f(950) && game.galaxy().ability_state()->results.size() == 1, "one purchase of the prepared price");
+                return second_gone;
+            };
+            expect(run() == run(), "a fixed seed picks the same option every time");
+        }
+        {   // The unaffordable option is not chosen: the hero stays, nothing is paid, no menu is left open.
+            auto [game, config] = ai_seat([](auto& c) { c.player_economy->players[1].credits = f(10); });
+            expect(credits(game) == f(10) && present(game, victim(config)) && present(game, neutralizer(config)),
+                "an AI that cannot afford the option does nothing");
+            expect(game.galaxy().ability_state()->preparations.empty() && game.galaxy().ability_state()->results.empty(),
+                "an unaffordable AI option leaves no preparation or result");
+        }
+        {   // A disabled option (the ability may not neutralize major heroes) is not admissible for the AI.
+            auto [game, config] = ai_seat([](auto& c) { c.ability_host->profiles[0].neutralize->can_major = false; });
+            expect(credits(game) == f(1000) && present(game, victim(config)) && game.galaxy().ability_state()->preparations.empty(),
+                "an AI never picks an option the ability may not use");
+        }
     }
     {   // #6120: a human's hero landing from a transport is not a drop. With no hero to neutralize it says nothing (a stale
         // refusal would show on the next plain move of that hero); with one, the menu is prepared as before.

@@ -1121,6 +1121,8 @@ tokens, not M3 acceptance inputs: `AntiStealthEffectiveness`,
 `MaxOwnedPlanetsIncomeUnnormalized`, `NetIncomeNBPTM`, `NetIncomeNBTF`,
 `NumStructure`, `OpenGroundCompanySlots`, `PerTargetMaxBaseIncome`,
 `PerTargetMaxIncome`, `SpaceDefendedPlanets`, `StoryTrigger`, `TargetPlayerID`.
+That static closure missed the two defended-planet tokens in equations selected
+by Lua string names: the attack continuation consumer is now covered by GDT-01..03.
 Two corrections to the list above follow from the same read. The wiki's claim
 that `Timeline` was cut is wrong: stock budgeting and infrastructure equations
 compare `Game.Timeline` with the tech level, and the build has a timeline
@@ -3108,6 +3110,12 @@ module names or hint-value constants are pinned in the runtime.
 | WGA-488 | Planet-target corruption readers: `RetainsResidualInfluence` is the planet type's authored flag (default true); `IsCorruptionTransitionActive` is true while the planet's committed corruption transition is increasing or decreasing; `TimeSinceCorruptionChange` is the seconds since the planet's last corruption change (never changed counts from frame zero), converted at single precision; `BlackMarketPriceModifier` is the planet type's own modifier. `BlackMarketAbilitiesAvailable {Parameter_Faction}` is 0 unless the planet carries black-market corruption, then 1 when an authored market item of the planet owner's faction is still locked for the named faction's player. `BlackMarketMinimumAbilityPrice {Parameter_Faction}` is the cheapest such item's base price (times its uncommon multiplier when the owner's tech is below the item's) plus the planet modifier, with a very large start value when no item qualifies. An unknown faction or missing corruption state stays unavailable. | debug build; synthetic locked/unlocked/price/modifier cases on 1/2/4/8 workers |
 | WGA-489 | A generic hero company with no authored object script on either the company or its members is an ordinary unit in galactic selection. Named heroes, scripted heroes and special weapons remain candidates for hero weighting, subject to HA-01/HA-04: `DenyHeroAttach` controls extra hero attachment, not a team that explicitly requests that type. When no nonempty TaskForce permits hero attachment, a named or generic hero requested by a team uses ordinary candidate classification and a neutral hero contribution; it does not read attach-only object-script weights or apply escort, containment or plan-cost gates. This admits the stock Rebel tech plan's required `Droids_Team` under its authored denial, and applies equally to other explicitly named hero teams. Generic fleet and field commander companies author their script on a member; unscripted generic smuggler, probe-droid and saboteur teams remain ordinary. | debug build; HA-01/HA-03/HA-04; stock Lua and XML; explicit-team, denied-extra, neutral-weight and installed droid-provider cases, equal on 1/2/4/8 workers |
 
+### Active goal desire and cull permission
+
+| Rule | Behaviour | Evidence |
+|---|---|---|
+| WGA-495 | Refreshing an active galactic goal's desire does not finish it. A successful evaluation updates its current desire; a failed evaluation retains the previous value. A running nonremovable plan whose script has not exited prevents desire-based culling, including zero desire, both when competing proposals exist and during budget trimming without proposals. A removable or exited plan has no such protection. Retained plans still require their independent funding and target-contrast checks; the protection does not authorize an unfunded purchase or preserve an invalid allocation. Stock reserve-force training marks its plan nonremovable before waiting for production, so a later loss of proposal desire alone must not cancel that training. | debug build active-goal refresh, category maintenance, budget trimming and cull-permission getter; stock Lua; synthetic paid-production retention/cancellation and independent-stop cases on 1/2/4/8 workers; WGA-12/22/75/348/349, GS-31 |
+
 Synchronized staging evidence extends WGA-485 through read-only debug-build
 readiness, all-task wait, estimate, maximum propagation, countdown, release and
 movement-completion paths. GFC-A11 remains the containing execution schedule;
@@ -3117,6 +3125,14 @@ modifier remain data inputs. Neighboring ground capacity, accessibility,
 blockade, stealth and paid-result staging retain WGA-160/227/228 and the existing
 native providers; the countdown does not bypass them.
 
+Project ownership invariant under WGA-205/GFC-A11: removing a joined assembly
+member by loss or explicit release first fails its unfinished assembly task and
+retires that task's movement listener. Assignment and roster removal therefore
+cannot leave a saved unfinished joined task referring to an unassigned member.
+The production block still reduces the failed task at its next ordinary execution
+service; this adds no service, deadline or archived field. Release-all settles
+the joined tasks in one pass before clearing the roster.
+
 Effective Lua includes `SynchronizedAssemble`, used by the blockade-lifting and
 island-reconnection plan definitions. The defensive goal function is included
 by the standard galactic player definitions, and the generic template includes
@@ -3124,3 +3140,47 @@ the reconnect goal. Thus synchronized staging is reachable stock content as
 well as a mod API; only ordinary `Assemble` calls default false. Targeted stock
 battle and galactic-day receipts bound regression coverage; they do not prove
 that every reachable plan was selected in that particular run.
+
+### Raid and starbase script blocks
+
+| Rule | Behavior | Evidence |
+|---|---|---|
+| GAR-01 | `TaskForce.Is_Raid_Capable()` returns false without a retained fleet. Otherwise it tests a nonempty fleet's flattened current breakdown with the shared WGM-37 faction, category, hero and transport-payload predicate. Destination ownership, surface and story access are separate admission checks. The query uses the native shadow's fleet and the movement/type facts of its captured completed snapshot. | read-only debug-build fleet and TaskForce capability walk |
+| GAR-02 | `TaskForce.Raid(planet)` requires units, a fleet at a planet, raid capability and a valid destination. It returns the ordinary movement block with the goal's reachability. Each native raid admission retains the final target on the fleet while executing only the next ordinary hop; intermediate arrival preserves the target. Destination landing eligibility gates the hop reaching the target, whose arrival uses the existing raid landing owner. The live and shadow owners share this admission, and the native journal retains the full requested route for reconstruction. Ordinary accepted `Move_To` hops use nonraid admission, which clears the fleet's raid destination. No alternate pathfinder or serial per-actor service is introduced. | read-only debug-build raid request walk; WGA-228; WGM-37 |
+| GAR-03 | `WaitForStarbase(planet, level)` requires exactly two arguments: a planet object and a number in the inclusive range 0..5. After the range check the level truncates toward zero. Its block polls the current starbase level and answers finished when that level is at least the requested level; it adds no timeout or ownership test. The global block belongs to the calling plan instance and does not require a TaskForce. Its native record uses that instance's player ownership in both the selected and cold writers, so player-scoped mutation, cleanup and rollback retain the same identity. Missing qualified planetary facts are an error, not a fabricated level. | read-only debug-build argument, initialization and completion walk |
+
+Raid destination eligibility and the existing landing capacity, transport and
+conflict rules remain WGM-37 and their native owners' responsibility. These APIs
+add no XML constants; they consume the existing effective raid and movement inputs.
+
+## Defended territory perceptions
+
+| ID | Rule and conditions | Source |
+|---|---|---|
+| GDT-01 | A player's `SpaceDefendedPlanets` and `GroundDefendedPlanets` visit every planet target in the evaluating context. A `TargetPlayerID` read, truncated to an integer, selects only planets owned by that player. On each selected planet, sum `HasSpaceForce` or `HasGroundForce` and count the selected planets. Return the sum divided by that count when the sum is nonzero; otherwise return zero, including when the player owns no planets. A failed ownership or selected force read makes the aggregate unavailable. The division uses binary64. These are presence fractions, not combat-power totals or starbase/structure counts. | read-only debug-build defended-planet getter and its space/ground wrappers; WGA-184..186 |
+| GDT-02 | The nested force read uses `FriendlyForce` only when the selected player is the evaluating player; every foreign player uses the evaluating context's `EnemyForce`, even if that selected player is allied. Ownership and force reads retain the evaluating context and use fresh empty bindings. Other hostile players' forces at a selected planet can therefore supply its presence result. Existing target observation and cache rules still apply; an aggregate must not bypass them with a direct snapshot count. | read-only debug-build defended-planet getter; WGA-181; WGA-114 |
+| GDT-03 | `Num_Enemy_Space_Territories` and `Num_Enemy_Land_Territories` are mounted XML equations multiplying `Variable_Human.SpaceDefendedPlanets` or `Variable_Human.GroundDefendedPlanets` by `Variable_Human.PlanetsControlledUnnormalized`. They describe the selected human's defended holdings, not all hostile holdings, and remain replaceable by mod equations. Stock attack continuation uses their sum under WGA-43. Missing human context remains unavailable. | XML data; WGA-43/114; GDT-01..02 |
+
+## Ground production and blockade perception leaves
+
+| ID | Rule and conditions | Source |
+|---|---|---|
+| GGL-01 | `Variable_Target.OpenGroundCompanySlots` subtracts the planet's current landed-transport list length from the effective `Max_Ground_Forces_On_Planet`. It counts every list entry, including null or deletion-pending references, without an ownership filter. It does not count production queues, structures, template members or transports still in orbit. The result remains signed and can be negative. A nonplanet target or missing qualified input remains unavailable. | read-only debug-build ground-capacity getter; WGM-39/60; existing validated control and observer inputs |
+| GGL-02 | `Variable_Target.TimeSinceSpaceConflict` initially returns the binary32 representation of 10^18 widened to binary64. A completed space conflict records its synchronization frame for each player evaluator. Subsequently the getter subtracts that frame from current synchronization time and multiplies by the binary32 inverse logical FPS, widened to binary64. Conflict entry, ground conflict completion and ownership changes do not reset this timestamp. Galactic mode time can remain paused while this clock advances. The existing owned battle-return inbox supplies the original committed frame; delayed delivery cannot move an already newer stamp backwards. | read-only debug-build timestamp getter, initialization and signal handling; FS synchronization/mode-clock distinction; GFS-01/02; project inbox publication contract |
+| GGL-03 | A galactic `Script_<module>.Evaluate` lookup uses the mounted evaluator module selected by that name. The shared PE-29/WGA-453 adapter binds `PlayerObject`, `Target` and ordered script string/number arguments, calls `Evaluate`, then cleanup, and accepts only a numeric result. No stock module or goal name is a native special case. Module discovery follows the mounted evaluator directory. Each asynchronous player decision chain has its own Lua evaluator owner, including calls about another player; a separate owner serves serial queries. Memo identity and query time follow that chain's completed world view. Native phase rollback enlists each owner. Synchronous evaluators use one query-clock profile with galactic frame duration. Evaluator query time uses galactic mode time, independently of GGL-02. | read-only debug-build generic evaluator call; PE-29/WGA-453; project partitioned ownership and rollback contract |
+
+The authored ground-production closure reaches `Script_AnyFreeLandSlots.Evaluate`,
+whose mounted Lua queries the authored ground-parking equation. Blockade-lifting
+uses `TimeSinceSpaceConflict` and its authored wait-time comparison. These remain
+XML/Lua relationships, replaceable by mods. GGL-01 consumes the existing applied
+capacity tag; no loader defaults or new XML constants are introduced. GGL-02's
+never-fought sentinel is a sourced engine constant, not a stock-data bound.
+
+Current GGL-03 provider seams: partitioned Lua plan/object callbacks do not select
+an evaluator owner, so a nested `Script_` lookup there remains unavailable. The
+serial fallback is qualified only for the existing serial callers; a new parallel
+caller must supply its decision owner. Evaluator module globals are not archived,
+as in PE-29; stock pure evaluators are covered, while a mod evaluator with mutable
+globals can change its answer after save/load. The extra evaluator schedulers are
+also not yet represented in the memory inventory. These are separate follow-up
+boundaries, not numeric-zero fallbacks.

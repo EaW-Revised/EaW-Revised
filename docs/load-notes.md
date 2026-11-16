@@ -49,15 +49,17 @@ publication limits as a final bound.
 
 `format_diagnostic(load_note_diagnostic(note))` uses the existing engine-log line
 format and severity. It does not replace existing syntax diagnostics.
-`platform::write_load_notes(user_data, header, notes)` atomically overwrites
-`mods/cache/loadcheck/last-<sha256(profile-id)>/load-notes.json` beneath user data.
-The hash is the same one used by the mods service's `last-<hash>.json` marker.
-Unprofiled runs hash `chain:<chain_fingerprint>` instead. There is no session
-history. Redirected descendant folders/files are rejected. Call the sink during
+`platform::write_load_notes(user_data, header, notes)` atomically publishes two files beneath user data, each on its own (the main file first; the session copy is attempted whether or not the main file was written, and one that cannot be written is listed in `leftovers` and does not undo the main file):
+`mods/cache/loadcheck/last-<sha256(profile-id)>/s/<session id>.json` (one file per session, never overwritten
+by a later session; the newest 16 sessions of a profile are kept) and
+`mods/cache/loadcheck/last-<sha256(profile-id)>/load-notes.json`, which is always the newest session's notes and is the
+file the mods service and the launcher read. The hash is the same one used by the mods service's `last-<hash>.json`
+marker. Unprofiled runs hash `chain:<chain_fingerprint>` instead. The session id is the degradation ledger's
+(`docs/degradation-ledger.md`); a header without one is stamped with it. Redirected descendant folders/files are rejected. Call the sink during
 loading or at match shutdown, never in a battle phase; publication failure never
 changes content admission or match state.
 
-The version 1 envelope contains `schema_version`, `chain_fingerprint`,
+The version 1 envelope contains `schema_version`, `session_id`, `chain_fingerprint`,
 `profile_id` (string or null), `game_version` (the engine build identity),
 `written_at` (UTC ISO 8601), `totals` (`{A,B,C}`), `truncated` and `groups`.
 The fingerprint uses the exact shared mods-service loadcheck algorithm: engine

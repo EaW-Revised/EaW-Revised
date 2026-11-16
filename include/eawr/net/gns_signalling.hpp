@@ -26,6 +26,14 @@ struct GnsSignal {
     std::vector<std::uint8_t> bytes;
 };
 
+// Which provider's TURN servers the relay client keeps from the list the introduction service sends (the service can issue
+// Cloudflare and the operator's own coturn together). `automatic` keeps both and puts the operator's own servers first;
+// GNS allocates on the first server that ANSWERS and tries the next only when that one fails, so the second provider is a
+// fallback for a dead server, not for a route that answers but loses packets. `own` / `cloudflare` keep only that provider.
+enum class GnsTurnProvider : std::uint8_t { automatic, own, cloudflare };
+
+// `uri` is a comma-separated list of `turn:` entries. `username` and `password` are one value for every entry or one per entry,
+// in the same order (a service issuing two providers).
 struct GnsTurnCredentials {
     std::string uri;
     std::string username;
@@ -52,6 +60,9 @@ public:
     virtual ~GnsSignallingEndpoint() = default;
     virtual GnsRendezvous rendezvous() const = 0;
     virtual std::optional<GnsTurnCredentials> turn_credentials() const { return {}; }
+    // The numeric TURN entries of the operator's own provider in turn_credentials().uri (comma list, empty = none of them is
+    // the operator's own). nullopt = this endpoint does not classify its servers. Only used to label the route.
+    virtual std::optional<std::string> own_turn_uris() const { return std::nullopt; }
     // Lease of the paired session; empty before pairing or when the service does not report one.
     virtual std::optional<GnsSessionLease> lease() const { return {}; }
     // Credentials delivered by the latest renewal, once. The transport cannot apply them to a live connection

@@ -30,6 +30,7 @@ inline FighterWork fighter_work;
 inline std::set<std::uint64_t> fighter_entities;
 inline void begin_fighter_frame(std::uint64_t) {}
 }
+namespace diagnostic_switches { struct Switches { bool particles{}, turrets{}, skeletons{}, shadows{}; }; inline Switches active{}; }
 #include <string_view>
 namespace core {
 struct Error { std::string text; };
@@ -138,6 +139,16 @@ struct GodotRenderer {
     };
     static inline std::atomic<unsigned> builds{};
     std::vector<Upload> uploads;
+    std::vector<std::uint64_t> disturbed;   // placements the renderer would report as disturbed
+    sim::EntityId fail_entity{~sim::EntityId{0}};
+    static bool same_skin_pose(const PreparedSkinPose& a, const PreparedSkinPose& b) noexcept {
+        return a && b && bytes(*a.bones)==bytes(*b.bones);
+    }
+    std::array<std::uint64_t,9> idle_skin_disturbance_reasons() const { return {}; }
+    void take_idle_skin_disturbance(std::vector<std::uint64_t>& groups) {
+        assert(std::this_thread::get_id()==caller);
+        groups.insert(groups.end(),disturbed.begin(),disturbed.end()); disturbed.clear();
+    }
     bool throw_on_upload{}, batch_open{}; unsigned batch_ends{};
     static PreparedSkinPose prepare_skin_pose(std::span<const animation::BonePose> bones,SkinPoseWork* work=nullptr) {
         ++builds;
@@ -147,6 +158,7 @@ struct GodotRenderer {
     core::Result<int> set_prepared_skin_pose(sim::EntityId entity,sim::AssetId asset,const PreparedSkinPose& pose,std::uint64_t = 0) {
         assert(std::this_thread::get_id()==caller && pose);
         if (throw_on_upload) throw std::runtime_error("injected publication failure");
+        if (entity==fail_entity) return {};
         uploads.push_back({entity,asset,bytes(*pose.bones)}); return {0};
     }
     core::Result<int> set_skin_pose(sim::EntityId entity,sim::AssetId asset,
@@ -222,6 +234,7 @@ struct SpacePopulation {
         SkinPoseWork work;
         double fighter_sample_ms{}, fighter_palette_ms{};
         bool failed{};
+        bool unchanged{};
     };
     struct PreparedTurretBinding {
         sim::EntityId entity;
@@ -230,6 +243,11 @@ struct SpacePopulation {
     };
     std::vector<PreparedIdle> prepared_idle_;
     std::vector<std::uint8_t> idle_consumed_;
+    std::vector<std::uint8_t> idle_clean_, idle_bind_failed_;
+    std::vector<GodotRenderer::PreparedSkinPose> idle_last_palette_;
+    std::vector<std::uint64_t> idle_disturbed_groups_;
+    std::size_t idle_uploaded_{}, idle_skipped_{}, idle_visited_{}, idle_disturbed_{};
+    std::array<std::uint64_t,9> idle_causes_{}, idle_causes_seen_{};
     std::vector<std::vector<PreparedTurretBinding>> turret_staged_;
     std::vector<std::span<const std::size_t>> turret_piece_rows_;
     std::vector<std::string> turret_errors_;
@@ -343,6 +361,41 @@ int main() {
         && turret_renderer.uploads[2].entity==11 && turret_renderer.uploads[3].entity==10);
     auto visibility=visibility_population(); visibility.refresh_instances(nullptr);
     assert(GodotRenderer::builds==0 && visibility.piece_visibility_.empty());
+    {
+        // PF idle skin: a clean placement with a byte-equal palette is not visited again.
+        Executor executor(2); auto p=idle_population(); GodotRenderer r;
+        p.pose_units(r,12,&executor);
+        assert(r.uploads.size()==2 && p.idle_uploaded_==1 && p.idle_skipped_==0 && p.idle_visited_==2);
+        const auto first=r.uploads; r.uploads.clear();
+        p.animation_sample_.reset(); p.pose_units(r,12,&executor);
+        assert(r.uploads.empty() && p.idle_skipped_==1 && p.idle_uploaded_==0 && p.idle_visited_==0);
+        same_contacts(p,idle);   // contacts are still sampled for a skipped placement
+        // A report for placement 0 (group 1) uploads it again; one for a placement without instances does not.
+        r.disturbed={2}; p.animation_sample_.reset(); p.pose_units(r,12,&executor);
+        assert(r.uploads.empty() && p.idle_skipped_==1 && p.idle_disturbed_==1);
+        r.disturbed={1}; p.animation_sample_.reset(); p.pose_units(r,12,&executor);
+        assert(r.uploads==first && p.idle_uploaded_==1 && p.idle_skipped_==0 && p.idle_visited_==2);
+        // A changed pose uploads; an unchanged one after it skips again.
+        r.uploads.clear(); p.animation_sample_.reset(); p.pose_units(r,13,&executor);
+        assert(r.uploads.size()==2 && p.idle_uploaded_==1);
+        r.uploads.clear(); p.animation_sample_.reset(); p.pose_units(r,13,&executor);
+        assert(r.uploads.empty() && p.idle_skipped_==1);
+        // A bind that fails leaves the placement dirty: the next sample uploads it again, then it settles.
+        r.fail_entity=21; r.uploads.clear(); p.animation_sample_.reset(); p.pose_units(r,14,&executor);
+        assert(p.upload_failures_.size()==1 && p.idle_uploaded_==1);
+        r.fail_entity=~sim::EntityId{0}; r.uploads.clear(); p.animation_sample_.reset(); p.pose_units(r,14,&executor);
+        assert(r.uploads.size()==2 && p.idle_uploaded_==1 && p.idle_skipped_==0);
+        r.uploads.clear(); p.animation_sample_.reset(); p.pose_units(r,14,&executor);
+        assert(r.uploads.empty() && p.idle_skipped_==1);
+        // The serial path never vouches for a placement: the next worker sample uploads it.
+        p.animation_sample_.reset(); p.pose_units(r,14,nullptr);
+        r.uploads.clear(); p.animation_sample_.reset(); p.pose_units(r,14,&executor);
+        assert(r.uploads.size()==2 && p.idle_skipped_==0);
+        // A new placement and a shrunk placement list resize the flags without trusting stale entries.
+        p.idle_placements_.push_back({0,0,9}); p.animated_instances_.push_back({23,43,4}); p.live_retired_.push_back(false);
+        p.contact_bones_.resize(5); r.uploads.clear(); p.animation_sample_.reset(); p.pose_units(r,14,&executor);
+        assert(p.idle_skipped_==1 && p.idle_uploaded_==1 && r.uploads.size()==1 && r.uploads[0].entity==23);
+    }
     for(unsigned workers:{1,2,4,8}) {
         Executor executor(workers); auto p=idle_population(); GodotRenderer renderer;
         GodotRenderer::builds=0; p.pose_units(renderer,12,&executor);

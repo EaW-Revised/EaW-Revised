@@ -57,6 +57,18 @@ void ViewerHost::read_host_options(const PackedStringArray& arguments) {
                 break;
             }
             options_->render_profile = utf8(arguments[++index]);
+        } else if (argument == "--eawr-aa") {
+            if (index + 1 >= arguments.size() || utf8(arguments[index + 1]).starts_with("--")) {
+                options_->aa_flag_missing = true;
+                break;
+            }
+            options_->aa_switch = utf8(arguments[++index]);
+        } else if (argument == "--eawr-msaa" || argument == "--eawr-smaa") {
+            if (index + 1 >= arguments.size()) {
+                options_->aa_flag_missing = true;
+                break;
+            }
+            (argument == "--eawr-msaa" ? options_->aa_msaa : options_->aa_smaa) = utf8(arguments[++index]);
         } else if (argument == "--eawr-settings-file") {
             if (!take_path(options_->settings_file)) break;
         } else if (argument == "--eawr-scene") {

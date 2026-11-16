@@ -29,7 +29,10 @@ struct DestructionHudState {
     std::optional<sim::galactic::AbilityKind> drop_label;
     std::uint64_t prepares{};
     std::uint64_t rebuilds{},accepts{};
+    // The reason codes behind every host refusal this seat showed for a dropped hero (newest last, at most 16), for the report.
+    std::vector<std::uint8_t> refusal_reasons;
     viewer::galactic::ObjectId accepted_source{};
+    viewer::galactic::DroppedAbilities dropped; // #5998: every drop still waiting for the host
     sim::galactic::PlanetId accepted_planet{};
     godot::Vector2 authored_offset,text_offset,authored_size;
     bool projected{},enabled{},right_justified{};

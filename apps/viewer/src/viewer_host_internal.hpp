@@ -102,6 +102,12 @@ struct ViewerHost::Options final {
     // --eawr-render-profile retail|enhanced; empty picks default_render_profile().
     std::string render_profile;
     bool render_profile_missing{};
+    // --eawr-msaa 0|2|4|8 and --eawr-smaa on|off: evidence-only overrides of the profile's AA, set after it
+    // is applied so one step can be isolated; empty leaves the profile alone (#6972).
+    std::string aa_msaa;
+    std::string aa_smaa;
+    std::optional<std::string> aa_switch;
+    bool aa_flag_missing{};
     // --eawr-settings-file <path>: the player settings file (default: the user data folder's, #2927).
     std::filesystem::path settings_file;
     bool texture_mip_drop_explicit{};
@@ -119,6 +125,7 @@ struct ViewerHost::Options final {
     // --eawr-allow-unknown-build: extract the fonts from a Forces of Corruption build EAWR has not verified (#3963).
     bool allow_unknown_build{};
     bool skirmish_setup_returned{};
+    bool skirmish_setup_refused{};  // a refused start returned to setup; the capture run waits for its picture
     bool startup_metrics{};
     bool cache_content{true};
     bool cache_shaders{true};

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <iostream>
 #include <sstream>
+#include <string>
 #include <vector>
 
 namespace categories = eawr::presentation::render_categories;
@@ -31,6 +32,29 @@ void expect(bool condition, const char* message) { eawr::test::ui::expect(condit
 }
 
 int main() {
+    {
+        // B stage 0 census: the JSON block names every reason and role, and exists only when valid.
+        categories::Sample sample;
+        std::ostringstream plain;
+        categories::write_json(plain, sample);
+        expect(plain.str().find("\"census\"") == std::string::npos, "no census block unless one was taken");
+        sample.census.valid = true;
+        sample.census.visible = 3;
+        sample.census.pieces[static_cast<std::size_t>(categories::BatchReason::posed)] = 2;
+        sample.census.by_role[static_cast<std::size_t>(categories::BatchReason::posed)][static_cast<std::size_t>(categories::Role::hull)] = 2;
+        sample.census.skin_writes.dirty_skeletons[1] = 5;
+        std::ostringstream text;
+        categories::write_json(text, sample);
+        const auto json = text.str();
+        expect(json.find("\"census\":{\"visible\":3") != std::string::npos, "census block carries the visible count");
+        for (const auto name : categories::batch_reason_names)
+            expect(json.find(std::string("\"") + std::string(name) + "\":{\"pieces\":") != std::string::npos, "every reason is named");
+        expect(json.find("\"posed\":{\"pieces\":2") != std::string::npos, "reason counts are exclusive per reason");
+        expect(json.find("\"dirty_skeletons\":[0,5,0]") != std::string::npos, "skin writes are reported per path");
+        expect(categories::census_bucket(1) == 0 && categories::census_bucket(2) == 1 && categories::census_bucket(3) == 2
+            && categories::census_bucket(4) == 2 && categories::census_bucket(5) == 3 && categories::census_bucket(8) == 3
+            && categories::census_bucket(9) == 4, "moved-bone buckets are 1, 2, 3-4, 5-8, 9+");
+    }
     expect(categories::authored_fighter(" AntiFighter, fighter "), "authored fighter token accepted case insensitively");
     expect(categories::authored_fighter("BOMBER"), "bomber is included");
     expect(!categories::authored_fighter("ANTI_FIGHTER FIGHTERHERO") && !categories::authored_fighter(""), "names and token substrings do not imply fighter class");

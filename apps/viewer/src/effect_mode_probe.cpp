@@ -1,4 +1,5 @@
 #include "effect_mode_internal.hpp"
+#include "particle_texture_load.hpp"
 #include "particle_culling.hpp"
 
 namespace eawr::presentation::godot_backend {
@@ -86,7 +87,7 @@ const assets::Texture* EffectMode::State::resolve(const std::string_view name) {
             if (const auto path = probe_texture(*filesystem, name)) {
                 resolved.logical_path = *path;
                 if (auto bytes = filesystem->open(*path)) resolved.sha256 = hash_bytes(bytes.value());
-                if (auto decoded = assets::load_texture(*filesystem, *path)) resolved.texture = std::move(decoded.value());
+                if (auto decoded = load_particle_texture(*filesystem, *path)) resolved.texture = std::move(decoded.value());
             }
         }
         found = textures.emplace(key, std::move(resolved)).first;

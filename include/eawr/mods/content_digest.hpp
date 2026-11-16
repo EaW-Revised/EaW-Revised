@@ -37,7 +37,22 @@ struct ContentDigestOptions {
     std::chrono::milliseconds yield_for{20};
     // Maximum interval between partial saves while files are completing.
     std::chrono::milliseconds partial_every{10'000};
+    // How often a running job looks at the shared partial file for per-file results another process (the mods service and the
+    // game hash the same layers) finished meanwhile; a file with such a result at the same size and mtime is not read again.
+    // The file is only read when its size or mtime changed, by one thread at a time, never under a lock.
+    std::chrono::milliseconds partial_refresh{2'000};
     std::size_t worker_count = 0; // zero selects hardware count, capped at eight
+    // Readers on a rotational disk (the device reports a seek penalty): concurrent readers make the head seek between their
+    // files. Measured on a cold 36 GB mod chain on one HDD: eight workers 49.5 min, one reader 14.1 min. Zero keeps
+    // worker_count there too. Solid-state, unknown and non-Windows media always use worker_count.
+    std::size_t rotational_worker_count = 1;
+    // Overrides the platform probe: true = treat this folder as a rotational disk. Empty: platform::storage_media_of.
+    std::function<bool(const steam::fs::path&)> is_rotational;
+    // On a rotational disk the single reader also takes the files in on-disk order (first extent, ascending) instead of path order.
+    // Measured on the same cold 36 GB chain: 14.1 min in path order, 9.7 min in on-disk order (one run each). The digest value
+    // never depends on it. Overrides the platform query (tests): returns the position of a file, empty = platform::first_physical_offset.
+    bool disk_order_on_rotational = true;
+    std::function<std::uint64_t(const steam::fs::path&)> physical_offset;
     bool lower_priority = true;       // background priority for every hashing thread
     // background_io false (with lower_priority) lowers only the CPU priority and keeps I/O and memory priority normal. Windows
     // background I/O mode read a cold 7.6 GB mod in 248 s and 43.5 CPU-s, normal I/O priority in 40 s and 11.6 CPU-s
@@ -63,8 +78,11 @@ struct ContentJobStats {
     std::uint64_t files_total = 0;    // known after the listing pass
     std::uint64_t bytes_total = 0;
     std::uint64_t files_hashed = 0;   // files whose bytes this run read
-    std::uint64_t files_reused = 0;   // files taken from the partial cache
+    std::uint64_t files_reused = 0;   // files taken from the partial cache (what an earlier run left, plus files_adopted)
+    std::uint64_t files_adopted = 0;  // of files_reused: results another process added to the partial file while this job ran
     std::uint64_t bytes_read = 0;
+    std::size_t workers = 0;          // hashing threads this job used (known once the listing pass is done)
+    const char* media = "unknown";    // "hdd", "ssd" or "unknown": what the folder's storage was taken for
     bool paused = false;              // waiting on ContentDigestOptions::pause_while right now
     bool adopted = false;             // finished by taking a digest another process cached; no file was read for it
 };

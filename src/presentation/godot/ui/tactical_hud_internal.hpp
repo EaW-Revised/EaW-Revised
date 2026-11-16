@@ -1,6 +1,7 @@
 #pragma once
 #include "ui/movie_player.hpp"
 #include "tactical_hud.hpp"
+#include "ui/hud_icon_text.hpp"
 
 #include "perf_overlay_view.hpp"
 
@@ -12,6 +13,7 @@
 #include "eawr/data/ui/command_bar.hpp"
 #include "eawr/data/ui/shell_anchors.hpp"
 #include "eawr/data/ui/text_database.hpp"
+#include "eawr/presentation/ui/movie_letterbox.hpp"
 #include "eawr/presentation/ui/battle_messages.hpp"
 #include "eawr/presentation/ui/fonts.hpp"
 #include "eawr/presentation/ui/project_hud.hpp"
@@ -49,6 +51,35 @@ using namespace godot;
 
 namespace eawr::presentation::godot_backend {
 namespace model = presentation::ui;
+
+// HCB-63 / CARD-4: the horizontal bar narrows its overlay without moving its left edge.
+class EawrSuperlaserBar final : public TextureButton {
+    GDCLASS(EawrSuperlaserBar, TextureButton)
+public:
+    std::vector<Ref<Texture2D>> backs, overlays;
+    std::int32_t max_level{};
+    bool smooth{};
+    double completion{};
+    Vector2 reference_size;
+    void _draw() override {
+        if (reference_size.x <= 0 || reference_size.y <= 0) return;
+        const Vector2 scale = get_size() / reference_size;
+        const auto draw = [&](const Ref<Texture2D>& texture, const bool narrow) {
+            if (texture.is_null()) return;
+            Vector2 size = texture->get_size() * scale;
+            const Vector2 position = (get_size() - size) / 2.0F;
+            if (narrow) size.x *= static_cast<float>(std::clamp(completion, 0.0, 1.0));
+            if (size.x > 0 && size.y > 0) draw_texture_rect(texture, Rect2(position, size), false);
+        };
+        if (!backs.empty()) draw(backs[std::min(backs.size() - 1, static_cast<std::size_t>(std::max(0, max_level)))], false);
+        if (!overlays.empty()) {
+            const auto level = static_cast<std::size_t>(std::clamp(completion, 0.0, 1.0) * std::max(0, max_level));
+            draw(overlays[std::min(overlays.size() - 1, level)], smooth);
+        }
+    }
+protected:
+    static void _bind_methods() {}
+};
 
 class EawrSpecialWeaponDial final : public Control {
     GDCLASS(EawrSpecialWeaponDial, Control)
@@ -129,6 +160,19 @@ public:
         if (action_) action_();
         else UtilityFunctions::print("[eawr-hud] options pressed (no handler)");
     }
+    // #5922 (WST-37): a control that answers only a right release (a queue slot cancels on it) still raises the story click on
+    // the generic rule's left release, inside the control: a plot's STORY_CLICK_GUI hears a left click on any command-bar button,
+    // and no walked rule says a right release raises it. Not run for a forced press, which does not come through the pointer.
+    void set_left_release_action(std::function<void()> action) {
+        if (!left_release_action_ && action) connect("gui_input", callable_mp(this, &EawrHudButton::left_release_input));
+        left_release_action_ = std::move(action);
+    }
+    void left_release_input(const Ref<InputEvent>& event) {
+        const auto* click = Object::cast_to<InputEventMouseButton>(event.ptr());
+        if (!click || click->get_button_index() != MOUSE_BUTTON_LEFT || click->is_pressed() || !left_release_action_) return;
+        if (is_disabled() || !is_visible_in_tree() || (get_viewport() && get_viewport()->gui_is_dragging())) return;
+        if (Rect2(Vector2(), get_size()).has_point(click->get_position())) left_release_action_();
+    }
     // #459: what a press does (the time panel's buttons and the options button).
     void set_action(std::function<void()> action) { action_ = std::move(action); }
     // #5857 (WST-75): the press a FORCE_CLICK_GUI reward makes. It takes the human press's path, minus the pointer: a
@@ -200,6 +244,9 @@ public:
         refresh_special_overlay();
     }
     void set_special_disabled(bool disabled) { set_disabled(disabled); refresh_special_overlay(); }
+    // The Death Star switch: drawn as disabled (no hover art or hover sound) but still takes the click, so its handler can
+    // answer a pull of the lever that cannot start anything (HCB-47).
+    void set_special_soft_disabled(bool disabled) { soft_disabled_ = disabled; set_disabled(false); refresh_special_overlay(); }
     // GHUD-S73: an authored state quad can differ from the retained icon's size.
     void set_special_overlay_box(const Rect2& box) {
         if (!special_overlay_) return;
@@ -285,11 +332,11 @@ public:
     [[nodiscard]] bool icon_shown() const { return order_icon_ != nullptr && order_icon_->get_texture().is_valid(); }
     [[nodiscard]] const char* overlay_name() const {
         if (special_overlay_ == nullptr) return "none";
-        return is_disabled() ? "disabled" : order_selected_ || is_pressed() ? "selected" : is_hovered() ? "hover" : "none";
+        return looks_disabled() ? "disabled" : order_selected_ || is_pressed() ? "selected" : is_hovered() ? "hover" : "none";
     }
     // The state the button draws, for authored art too (overlay_name only knows the stock overlay layer).
     [[nodiscard]] const char* visual_state() const {
-        return is_disabled() ? "disabled" : order_selected_ || is_pressed() ? "pressed" : is_hovered() ? "hover" : "normal";
+        return looks_disabled() ? "disabled" : order_selected_ || is_pressed() ? "pressed" : is_hovered() ? "hover" : "normal";
     }
     void set_flash_texture(const Ref<Texture2D>& texture) {
         flash_ = memnew(TextureRect);
@@ -348,8 +395,8 @@ private:
     std::optional<CellArt> cell_art_;
     void refresh_special_overlay() {
         if (!special_overlay_) return;
-        const bool selected = !is_disabled() && (order_selected_ || is_pressed());
-        special_overlay_->set_texture(is_disabled() ? special_disabled_
+        const bool selected = !looks_disabled() && (order_selected_ || is_pressed());
+        special_overlay_->set_texture(looks_disabled() ? special_disabled_
             : selected ? special_selected_ : is_hovered() ? special_hover_ : Ref<Texture2D>());
         if (special_overlay_scale_) {
             const auto texture = special_overlay_->get_texture();
@@ -359,7 +406,7 @@ private:
             special_overlay_->set_size(size);
         }
         special_overlay_->set_material(selected ? special_additive_
-            : !is_disabled() && is_hovered() ? special_hover_additive_ : Ref<CanvasItemMaterial>());
+            : !looks_disabled() && is_hovered() ? special_hover_additive_ : Ref<CanvasItemMaterial>());
     }
     std::optional<float> special_overlay_scale_;
     TextureRect* special_overlay_{};
@@ -394,10 +441,13 @@ private:
     bool flashing_{};
     double flash_remaining_{};
     Rect2 hit_rect_;
+    bool soft_disabled_{};
+    [[nodiscard]] bool looks_disabled() const { return is_disabled() || soft_disabled_; }
     std::function<void()> action_;
+    std::function<void()> left_release_action_;
     // #3075: once per hover entry, only from the normal state (not disabled or selected).
     void hover_sound() {
-        if (sound_ && !mouse_over_sfx_.empty() && !is_disabled() && is_visible_in_tree() && !order_selected_ && !is_pressed()) sound_(mouse_over_sfx_);
+        if (sound_ && !mouse_over_sfx_.empty() && !looks_disabled() && is_visible_in_tree() && !order_selected_ && !is_pressed()) sound_(mouse_over_sfx_);
     }
     std::string click_sfx_, mouse_over_sfx_, right_click_sfx_;
     std::function<void(const std::string&)> sound_;
@@ -480,8 +530,7 @@ struct TacticalHud::State final {
     std::optional<float> movie_height;
     std::function<void()> movie_handler;
     std::function<void()> options_handler;
-    bool movie{};
-    float movie_band_progress{};
+    model::CinematicBands bands; // the battle camera's and a tactical script's letterbox request (legacy #6634)
     // #459: the time panel's live buttons, and #453/#459's overlay.
     EawrHudButton* pause_button{};
     EawrHudButton* fast_forward_button{};
@@ -499,6 +548,24 @@ struct TacticalHud::State final {
     EawrSpecialWeaponDial* retreat_dial{};
     model::RetreatButtonView retreat_view;
     std::function<void()> retreat_handler;
+    // HCB-47: the Death Star switch (icons[0] the base art, then the alternates), its readout and the three tooltip keys.
+    EawrHudButton* sl_button{};
+    EawrHudButton* sl_card{};
+    EawrSuperlaserBar* sl_bar{};
+    EawrSpecialWeaponDial* sl_dial{};
+    Ref<Texture2D> sl_base, sl_ready;
+    model::SuperlaserSwitchView sl_view;
+    std::function<void()> sl_handler;
+    EawrHudButton* ds_button{};
+    std::vector<Ref<Texture2D>> ds_icons;
+    Control* ds_readout{};
+    EawrHudText* ds_label{};      // the countdown text band, placed by the layout hook
+    TextureRect* ds_dial{};       // the component's dial art at its texel size times the shell scale
+    Rect2 ds_dial_rect, ds_text_rect; // the last placed rects, for the report
+    int ds_pixels{};              // the glyph height of the last layout
+    model::SuperweaponSwitchView ds_view;
+    std::function<void()> ds_handler;
+    std::array<std::string, 3> ds_tooltips;
     TacticalHud::TimeView time_view;
     bool time_view_set{};
     // #848 V-5b: an overview level is on.
@@ -550,8 +617,18 @@ struct TacticalHud::State final {
     };
     std::vector<Probe> probes;
     bool probed{};
+    // HCB-47: the clicks the switch's handler answered by feedback (none, press, negative), and the pointer probe over the
+    // lever panel (name, point, presses the switch counted).
+    std::array<int, 3> ds_feedback{};
+    struct DsProbe final {
+        std::string name;
+        Vector2 point;
+        int presses{};
+    };
+    std::vector<DsProbe> ds_probes;
 
     void run_probe();
+    void run_switch_probe();
 
     void warn(std::string code, std::string message, std::string path = {});
 };

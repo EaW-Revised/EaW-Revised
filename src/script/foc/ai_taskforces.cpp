@@ -347,11 +347,40 @@ void Engine::return_galactic_actor(const TaskForce& force, sim::EntityId actor) 
     }
 }
 
+void Engine::fail_galactic_assembly_members(const TaskForce& force, std::optional<sim::EntityId> actor) {
+    const auto* running = plan(force.plan);
+    auto* player = running ? player_ai(running->player) : nullptr;
+    if (!player || !player->galactic) return;
+    const auto native_record_write = native_record_scope();
+    auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
+    bool changed{};
+    for (auto& task : player->tasks) {
+        if (task.taskforce != force.id || (actor && task.object != *actor) || !task.joined || task.finished
+            || task.galactic_assembly == BuildTask::GalacticAssembly::none) continue;
+        // WGA-205 / GFC-A11: settle ownership before removing the actor, without
+        // advancing the execution schedule or weakening retained-state validation.
+        native_records_changed(player->player, {4});
+        if (task.galactic_assembly_request) {
+            if (!actions) throw std::runtime_error("assembly member removal requires its native movement owner");
+            const auto retired = actions->retire_movement(task.galactic_assembly_request);
+            if (!retired) throw std::runtime_error(retired.error().message);
+            task.galactic_assembly_request = 0;
+        }
+        task.galactic_assembly = BuildTask::GalacticAssembly::failed;
+        task.finished = task.failed = true;
+        task.state_entered = static_cast<std::uint64_t>(frame_);
+        changed = true;
+    }
+    if (changed) { mark_native_state_changed(); mark_galactic_tasks_changed(); }
+}
+
 void Engine::remove_member(TaskForce& taskforce, sim::EntityId unit) {
     const auto native_record_write = native_record_scope();
     native_record_changed(native_all_players, 21, taskforce.id);
-    if (std::find(taskforce.units.begin(), taskforce.units.end(), unit) != taskforce.units.end())
+    if (std::find(taskforce.units.begin(), taskforce.units.end(), unit) != taskforce.units.end()) {
+        fail_galactic_assembly_members(taskforce, unit);
         return_galactic_actor(taskforce, unit);
+    }
     mark_native_state_changed();
     taskforce.units.erase(std::remove(taskforce.units.begin(), taskforce.units.end(), unit), taskforce.units.end());
     taskforce.last_target.erase(unit);
@@ -815,8 +844,17 @@ void Engine::service_blocks() {
         select_native_fault_context(chain);
         if (block.kind == Block::Kind::galactic_invade && block.galactic_request) {
             const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(host_->galactic_execution.get());
-            const auto* invasion = actions ? actions->invasion_status(block.galactic_request) : nullptr;
-            if (!invasion) throw std::runtime_error("invasion block lost its retained explicit queue owner");
+            if (!actions) throw std::runtime_error("invasion block requires its native action owner");
+            const auto* invasion = actions->invasion_status(block.galactic_request);
+            if (!invasion) {
+                // Decided by the lane, its slice not applied yet: the invasion is still coming.
+                if (actions->invasion_pending(block.galactic_request)) continue;
+                // The world refused the invasion when the lane's slice applied (or released it): the script sees a failed
+                // invasion and carries on, as for a refused movement. Never a fault of the AI player.
+                native_record_changed(native_all_players, 23, id);
+                record(plan_of_instance(block.instance), chain, "invasion_refused", "request " + std::to_string(block.galactic_request));
+                block.finished = true; block.result = false; block.galactic_request = 0; continue;
+            }
             native_record_changed(native_all_players, 23, id);
             block.finished = invasion->state == sim::galactic::GalacticSession::NativeInvasion::State::completed;
             block.result = invasion->success; continue;
@@ -838,7 +876,8 @@ void Engine::service_blocks() {
             }
             continue;
         }
-        if (block.finished || block.kind == Block::Kind::produce || block.kind == Block::Kind::reinforce) continue;
+        if (block.finished || block.kind == Block::Kind::produce || block.kind == Block::Kind::reinforce
+            || block.kind == Block::Kind::galactic_starbase) continue;
         native_record_changed(native_all_players, 23, id);
         if (block.kind == Block::Kind::ambush) {
             const auto tf = taskforces_.find(block.taskforce);

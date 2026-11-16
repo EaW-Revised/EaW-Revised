@@ -7,6 +7,7 @@
 #include "tactical_ai_internal.hpp"
 
 #include "eawr/sim/world.hpp"
+#include "eawr/sim/galactic/types.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -197,14 +198,17 @@ core::Result<std::shared_ptr<ScriptEvaluators>> ScriptEvaluators::create(
     if (impl->catalogue.empty()) return Result::success(std::shared_ptr<ScriptEvaluators>(new ScriptEvaluators(std::move(impl))));
     authoritative::SessionConfig config;
     config.seed = host->setup.seed;
-    config.tick_duration = authoritative::TickDuration{sim::tactical::tick_numerator, sim::tactical::tick_denominator};
-    config.query_clock = true; // synchronous calls: script time follows the world, not the call count
+    const bool galactic = host->ai_world && host->ai_world->goal_mode() == "GALACTIC";
+    config.tick_duration = galactic ? authoritative::TickDuration{1, sim::galactic::galactic_frames_per_second}
+        : authoritative::TickDuration{sim::tactical::tick_numerator, sim::tactical::tick_denominator};
+    // GGL-03/PE-29: one synchronous query profile; upstream mode time is independent of invocation count.
+    config.query_clock = true;
     config.script_directories = {"Data/Scripts/Library/", "Data/Scripts/GameObject/",
-        std::string(ai::ai_mode(host->setup.domain).script_directory)};
+        galactic ? "Data/Scripts/AI/" : std::string(ai::ai_mode(host->setup.domain).script_directory)};
     auto scheduler = authoritative::ScriptScheduler::create(std::move(config), std::move(manifest));
     if (!scheduler) return Result::failure(scheduler.error());
     std::vector<core::Diagnostic> errors;
-    register_globals(scheduler.value(), host, errors);
+    register_globals(scheduler.value(), host, errors, true, !galactic);
     register_methods(scheduler.value(), host, errors);
     if (!errors.empty()) return Result::failure(errors.front());
     impl->scheduler.emplace(std::move(scheduler).value());
@@ -237,7 +241,8 @@ ScriptEvaluators::Outcome ScriptEvaluators::evaluate(std::string_view upper_name
     Impl::Module& module = found->second;
     if (module.faulted) return refuse("evaluator unavailable: " + module.fault);
     const Host& host = *state.host;
-    if (!host.view) return refuse("evaluator needs a completed world view");
+    const auto view = host.ai_world && host.ai_world->goal_mode() == "GALACTIC" ? host.ai_world->view() : host.view;
+    if (!view) return refuse("evaluator needs a completed world view");
     if (host.script_service_active.load(std::memory_order_relaxed) || host.in_object_turn)
         return refuse("evaluators run in the serial AI turn, not inside the partitioned script service");
     struct Busy {
@@ -258,8 +263,8 @@ ScriptEvaluators::Outcome ScriptEvaluators::evaluate(std::string_view upper_name
         else arguments.push_back(authoritative::Value::text(std::get<std::string>(binding.value)));
         signature += key_of(binding.value);
     }
-    if (state.memo_view != host.view) {
-        state.retain_memo_clear(); state.memo_view = host.view;
+    if (state.memo_view != view) {
+        state.retain_memo_clear(); state.memo_view = view;
         state.memo.clear();
     }
     if (const auto memo = state.memo.find(signature); memo != state.memo.end()) {
@@ -303,7 +308,7 @@ ScriptEvaluators::Outcome ScriptEvaluators::evaluate(std::string_view upper_name
             return fault(submitted.error().message);
     }
     authoritative::ServiceOptions options;
-    options.time_tick = std::max(state.last_time_tick, host.view->tick);
+    options.time_tick = std::max(state.last_time_tick, view->tick);
     options.host_paced = [](std::uint64_t) { return true; }; // no thread pumping: a call, not a plan
     const sim::InlineExecutor executor;
     auto serviced = state.scheduler->service(executor, options);
@@ -317,9 +322,13 @@ ScriptEvaluators::Outcome ScriptEvaluators::evaluate(std::string_view upper_name
         module.created = false;
         return fault(note.empty() ? "the evaluator instance stopped" : note);
     }
-    // An evaluator reads the world; a command it issued is dropped and fails the call.
-    if (!serviced.value().commands.empty())
-        return settle(Outcome{std::nullopt, "evaluator issued command " + serviced.value().commands.front().verb});
+    // An evaluator reads the world; a command it issued is dropped and fails the call. The one exception is a
+    // GlobalValue.Set of a table: the project refuses it in every context (L-55, reported above as an unsupported API,
+    // registry unchanged), so dropping the command changes nothing. The mounted Remake team helper writes its cache so.
+    for (const auto& command : serviced.value().commands) {
+        const bool refused_table_write = command.verb == authoritative::global_value_command && command.arguments.size() == 1;
+        if (!refused_table_write) return settle(Outcome{std::nullopt, "evaluator issued command " + command.verb});
+    }
 
     const auto value = state.scheduler->read_global(module.instance, "EAWR_Value");
     if (!value) return settle(Outcome{std::nullopt, value.error().message});

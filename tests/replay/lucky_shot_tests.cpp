@@ -256,8 +256,8 @@ bool spent_checkpoint_roundtrip(const Fixture& f, const std::vector<std::uint8_t
     checkpoint::Reader input(active_bytes);
     std::uint32_t version{};
     input(version);
-    input.fire_range_bonuses = (version - 25U) % 2U == 1U;
-    input.script_invulnerable = version >= 27U;
+    input.fire_range_bonuses = (version - 29U) % 2U == 1U;
+    input.script_invulnerable = version >= 31U;
     checkpoint::Access::state(input, staged);
     std::vector<t::session_detail::LiveUnit> live;
     input(live);
@@ -312,6 +312,60 @@ bool spent_checkpoint_roundtrip(const Fixture& f, const std::vector<std::uint8_t
         "WLK: restored spent lock clears and starts authored recharge");
     return same_bytes;
 }
+// MV-41: a targeted ability must replace the arrival turn even when no approach is needed.
+void arrival_turn_interruption() {
+    auto f = fixture({});
+    const auto source_type = f.setup.units.front().type_id;
+    f.motion.rules = {number(15), number(300)};
+    t::MotionProfile profile;
+    profile.type_id = source_type;
+    profile.max_speed = number(4);
+    profile.acceleration = profile.deceleration = m::Fixed::from_decimal("0.1").value();
+    profile.rate_of_turn = number(1);
+    profile.turn_in_place_slowdown = number(2);
+    f.motion.profiles = {profile};
+    t::MovePayload move{at(0)};
+    move.final_yaw = number(120);
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto made = create(f);
+        expect(made.has_value(), "MV-41: Lucky arrival-turn session loads");
+        if (!made) continue;
+        auto session = std::move(made).value();
+        expect(session.submit({{0, 1, 0}, {1}, move}).has_value(), "MV-41: zero-distance facing move submits");
+        auto ability = f.commands.front();
+        ability.key.tick = 10;
+        expect(session.submit(ability).has_value(), "MV-41: in-range Lucky Shot submits during the turn");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        std::optional<m::Quat> stopped_rotation;
+        std::optional<m::Quat> previous_rotation;
+        for (std::uint64_t tick = 0; tick < 50; ++tick) {
+            const auto result = session.step(executor);
+            expect(result.has_value(), "MV-41: Lucky arrival-turn step succeeds");
+            if (!result) break;
+            hashes.push_back(result.value().state_sha256);
+            const auto units = session.units();
+            const auto source = std::find_if(units.begin(), units.end(), [](const auto& unit) { return unit.entity_id == 1; });
+            expect(source != units.end(), "MV-41: arrival-turn holder remains live");
+            if (source == units.end()) break;
+            if (tick == 9) expect(source->order.final_yaw == move.final_yaw
+                && previous_rotation && source->rotation != *previous_rotation,
+                "MV-41: Lucky interruption starts from a running arrival turn");
+            if (tick == 10) {
+                expect(source->order.kind == t::OrderKind::attack && source->order.target == 2
+                    && !source->order.final_yaw, "MV-41: Lucky replaces the move with an in-range attack");
+                stopped_rotation = source->rotation;
+            }
+            if (tick > 10) expect(stopped_rotation && source->rotation == *stopped_rotation && source->position == at(0),
+                "MV-41: in-range Lucky cancels the old turn without resuming its heading");
+            previous_rotation = source->rotation;
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "MV-41: Lucky interruption hashes agree on 1/2/4/8 workers");
+    }
+}
+
 struct Observation {
     std::vector<std::string> hashes;
     std::int64_t largest_drop{};
@@ -502,6 +556,7 @@ int installed() {
 
 int main(const int argc, char** argv) {
     if (argc > 1 && std::string_view(argv[1]) == "--installed") return installed();
+    arrival_turn_interruption();
     expect(lucky != t::AbilityKind::none, "WLK: LUCKY_SHOT is admitted (fails on the pre-fix main)");
     if (lucky == t::AbilityKind::none) return 1;
     t::AbilityProfile ordinary;

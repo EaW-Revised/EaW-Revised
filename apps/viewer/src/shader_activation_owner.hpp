@@ -45,11 +45,13 @@ private:
 [[nodiscard]] core::Result<void> begin_mod_shaders(ShaderActivationOwner& owner, const vfs::Vfs& mounted,
     std::span<const vfs::LayerRoot> roots, std::string_view profile, godot::Node3D& host,
     std::shared_ptr<GodotShaderCache> shaders);
+// environment_textures: the renderer draws an environment (sky, nebula, planet backdrop), so the translated
+// materials' textures load through load_environment_texture (SKY-6358-07).
 void install_mod_shaders(GodotRenderer& renderer, std::shared_ptr<const shader_activation::Generation> generation,
-    std::shared_ptr<const vfs::Vfs> mounted);
+    std::shared_ptr<const vfs::Vfs> mounted, bool environment_textures = false);
 // Unit preview owns its VFS before its renderer; that VFS must outlive renderer.
 void install_mod_shaders(GodotRenderer& renderer, std::shared_ptr<const shader_activation::Generation> generation,
-    const vfs::Vfs& mounted);
+    const vfs::Vfs& mounted, bool environment_textures = false);
 void admit_scene_shaders(scene::VfsAssetCache& cache, GodotRenderer& renderer);
 void write_shader_route_report(std::ostream& output, const GodotRenderer* renderer);
 } // namespace eawr::presentation::godot_backend

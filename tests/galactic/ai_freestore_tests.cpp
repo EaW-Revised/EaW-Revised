@@ -1043,6 +1043,8 @@ std::string object_callbacks(eawr::platform::ThreadWorkerAdapter& executor) {
     actions.bind_planet_usability([&usability_bound](const auto&, auto planet) {
         usability_bound = true; return eawr::core::Result<bool>::success(planet != 4);
     });
+    // #7188: the stock sabotage plan asks its target planet Is_Corrupted(); planet 2 is the corrupted one here.
+    actions.bind_planet_corruption([](const auto&, auto planet) { return eawr::core::Result<bool>::success(planet == 2); });
     auth::ModuleManifest manifest;
     done(manifest.add("ObjectCallbacks.lua", R"(
 function Base_Definitions() end
@@ -1061,6 +1063,8 @@ function Locate(unit) location = unit.Get_Planet_Location() HasLocation = locati
 function BadCount(unit) unit.Can_Land_On_Planet() end
 function BadType(unit) unit.Can_Land_On_Planet(5) end
 function NotAPlanet(unit, other) Usable = other.Get_Is_Planet_AI_Usable() end
+function Corrupt(planet) IsCorrupt = planet.Is_Corrupted() end
+function CorruptNotAPlanet(other) IsCorrupt = other.Is_Corrupted() end
 )"));
     auth::SessionConfig config; config.tick_duration = {1, 30}; config.galactic_clock = true;
     auto scripts = take(auth::ScriptScheduler::create(config, std::move(manifest)));
@@ -1119,6 +1123,10 @@ function NotAPlanet(unit, other) Usable = other.Get_Is_Planet_AI_Usable() end
     expect(invoke("NotAPlanet", {object(30), object(20)}).diagnostics.size() == 1,
         "Get_Is_Planet_AI_Usable on a non-planet is a script error");
     expect(invoke("Locate", {object(999)}).diagnostics.size() == 1, "unpublished actor facts are unavailable");
+    // #7188: Is_Corrupted answers the committed corruption of a planet receiver; any other receiver is a script error.
+    expect(invoke("Corrupt", {object(2)}).diagnostics.empty() && flag("IsCorrupt") == 1, "Is_Corrupted answers true for a corrupted planet");
+    expect(invoke("Corrupt", {object(1)}).diagnostics.empty() && flag("IsCorrupt") == 0, "Is_Corrupted answers false for an uncorrupted planet");
+    expect(invoke("CorruptNotAPlanet", {object(20)}).diagnostics.size() == 1, "Is_Corrupted on a non-planet is a script error");
     // Removed objects: Is_Transport answers false, the argument of Can_Land_On_Planet is not a planet; no script fault.
     for (const eawr::sim::EntityId gone : {50, 51}) {
         expect(invoke("IsTransportOnly", {object(gone)}).diagnostics.empty() && flag("Transport") == 0,

@@ -143,6 +143,11 @@ public:
         // its default camera. The evidence harness requires it unless an
         // unlocked map camera draws from its authored pose.
         std::string camera;
+        // --eawr-space-sweep deg_per_frame,frames[,row0,row1] (evidence only, #6972): after the warm-up the
+        // fixed camera holds a few frames, then turns about its own eye by deg_per_frame every frame and the
+        // run writes every frame's rows row0..row1 (default all) as <capture stem>.sNNN.png plus a timing
+        // sidecar. Needs --eawr-map-timed-frames >= frames + hold. Off by default.
+        std::string sweep;
         // MAT-10: the main-menu attract's view. The map's saved camera, drawn at the window's size
         // under the Space_Mode clip planes; the view never moves it and takes no camera input.
         std::optional<skirmish::AttractCamera> saved_camera;
@@ -250,9 +255,10 @@ public:
     void live_camera_movie(bool on, const std::array<float, 3>& render_target);
     void live_camera_movie_eye(const std::array<float, 3>& eye);
     void live_camera_movie_fov(std::optional<float> fov);
+    void live_camera_movie_clip(std::optional<std::pair<float, float>> clip); // {near, far}, FS-R09
     [[nodiscard]] bool battlecam_key(const viewer::camera_input::RawEvent& event) const;
     [[nodiscard]] bool preview_key(const viewer::camera_input::RawEvent& event) const;
-    [[nodiscard]] bool live_camera_movie() const;
+    [[nodiscard]] bool live_camera_movie() const; // also the BattleCamera query of the same name (this class marks no overrides)
     [[nodiscard]] std::string live_camera_overview() const;
     void owner_census(diagnostics::OwnerCensus& output) const;
 

@@ -1,18 +1,22 @@
 #include "eawr/core/json_text.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "debris_props.hpp"
+#include "particle_texture_load.hpp"
 #include "eawr/presentation/particles/lane_guard.hpp"
 #include "presentation_constants.hpp"
 
 #include "eawr/scene/scene.hpp"
 #include "eawr/battle/start.hpp"
+#include "eawr/presentation/space/tsw.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cctype>
 #include <cmath>
 #include <chrono>
 #include <set>
 #include <limits>
+#include <random>
 
 namespace eawr::presentation::godot_backend {
 namespace {
@@ -26,6 +30,10 @@ constexpr std::size_t row_limit = 1024;
 // Breakoff props are live ships of their own, never session units: their IDs sit far above
 // the session's and apart from the death clones' (max - unit).
 constexpr sim::EntityId first_prop_entity = std::numeric_limits<sim::EntityId>::max() / 2U;
+// The breakoff props count down from first_prop_entity (one per ready hardpoint), the TSW replacement props from
+// first_prop_entity - tsw_replacement_gap. A battle has far fewer than the gap in either set, so the two id ranges
+// cannot meet (checked at prepare time, prepare_tsw).
+constexpr sim::EntityId tsw_replacement_gap = 0x100000U;
 
 [[nodiscard]] std::string trim(std::string_view text) {
     while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) text.remove_prefix(1);
@@ -104,7 +112,7 @@ const assets::Texture* DebrisProps::resolve_texture(const std::string_view autho
         for (const std::string& candidate : {"data/art/textures/" + name, "data/art/textures/" + stem + ".tga",
                                              "data/art/textures/" + stem + ".dds"}) {
             if (!filesystem_->stat(candidate)) continue;
-            if (auto loaded = assets::load_texture(*filesystem_, candidate)) {
+            if (auto loaded = load_particle_texture(*filesystem_, candidate)) {
                 decoded = std::move(loaded.value());
                 break;
             }
@@ -146,7 +154,8 @@ const DebrisProps::ParticleType* DebrisProps::particle_type(const std::string& n
 }
 
 void DebrisProps::prepare(const units::UnitTables& tables, const tactical::CombatTable& combat,
-                          std::vector<SpacePopulation::Options::PlacedShip>& placed_ships, const std::size_t units) {
+                          std::vector<SpacePopulation::Options::PlacedShip>& placed_ships, const std::size_t units,
+                          const tactical::TswSetup* tsw) {
     std::map<std::string, const units::UnitType*> types;
     for (const units::UnitType& type : tables.units) types.emplace(lower(type.id), &type);
     const std::size_t count = std::min(units, placed_ships.size());
@@ -211,9 +220,11 @@ void DebrisProps::prepare(const units::UnitTables& tables, const tactical::Comba
             props_.push_back(std::move(prop));
         }
     }
+    if (tsw != nullptr) prepare_tsw(*tsw, placed_ships);
     // Populate from the battle's authored references, before any presentation clock starts.
     const auto warm_start=std::chrono::steady_clock::now();
     std::set<std::string> particles_to_warm;
+    for (const TswTarget& target : tsw_targets_) particles_to_warm.insert(target.explosions.begin(), target.explosions.end());
     for(const auto& prop:props_){
         if(!prop.fire.empty())particles_to_warm.insert(prop.fire);
         if(!prop.explosion.empty())particles_to_warm.insert(prop.explosion);
@@ -228,6 +239,110 @@ void DebrisProps::prepare(const units::UnitTables& tables, const tactical::Comba
     warm_emitters_=backend_->prewarmed_emitters();
     warm_texture_bytes_=backend_->prewarmed_texture_bytes();
     prewarm_ms_+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-warm_start).count();
+}
+
+void DebrisProps::prepare_tsw(const tactical::TswSetup& setup, std::vector<SpacePopulation::Options::PlacedShip>& placed_ships) {
+    // TSW-15: the target props the super weapon can destroy. A target's type is found by its CRC among the catalog's
+    // objects (the setup keeps the CRC); one that does not resolve still has its record hidden at the destruction.
+    std::map<tactical::TypeId, std::string> names;
+    for (const data::Definition& definition : catalog_->definitions()) {
+        if (definition.category == data::Category::game_object) names.emplace(battle::type_id(definition.id), definition.id);
+    }
+    const auto binary32 = [](const sim::math::Fixed value) {
+        return static_cast<float>(static_cast<double>(value.raw()) / static_cast<double>(sim::math::Fixed::scale));
+    };
+    std::uint32_t first_record = battle::replacement_prop_record_base;
+    // The breakoff prop ids (first_prop_entity - 0..props_.size()-1) end far above this start, so the replacement ids
+    // below cannot collide with them; the first loop's prop count is the only thing that could close the gap.
+    assert(props_.size() < tsw_replacement_gap);
+    sim::EntityId next_entity = first_prop_entity - tsw_replacement_gap;
+    for (const tactical::TswTargetSetup& source : setup.targets) {
+        TswTarget target;
+        target.record = source.record;
+        target.position = {to_double(source.position.x), to_double(source.position.y), to_double(source.position.z)};
+        target.yaw_degrees = to_double(source.yaw_degrees);
+        target.fixed_position = source.position;
+        target.fixed_yaw = source.yaw_degrees;
+        std::string type_name;
+        std::vector<std::string> replacements;
+        if (const auto found = names.find(source.type); found != names.end()) {
+            type_name = found->second;
+            if (auto object = catalog_->resolve(type_name, data::Category::game_object)) {
+                target.explosions = space::tsw_split_names(tag(object.value(), "Death_Explosions"));
+                replacements = space::tsw_split_names(tag(object.value(), "Death_By_TSW_Replacements"));
+            }
+        }
+        // WGT-57/101: the same function the destroyed-planet battle start stands its props with.
+        battle::MapPlacement placement;
+        placement.record = source.record;
+        const auto props = battle::replace_target_prop(placement, replacements, source.position,
+            battle::Vec3{sim::math::Fixed{}, sim::math::Fixed{}, source.yaw_degrees}, first_record);
+        first_record += static_cast<std::uint32_t>(props.size());
+        for (const battle::ReplacementProp& prop : props) {
+            SpacePopulation::Options::PlacedShip ship;
+            ship.object_id = prop.type;
+            ship.position = assets::SourceVec3{binary32(prop.position.x), binary32(prop.position.y), binary32(prop.position.z)};
+            ship.yaw_degrees = binary32(prop.orientation_degrees.z);
+            ship.live_entity = next_entity--;
+            ship.breakoff = true;
+            target.ships.push_back(placed_ships.size());
+            placed_ships.push_back(std::move(ship));
+        }
+        tsw_prepared_rows_.push_back("{\"record\": " + std::to_string(source.record) + ", \"type\": " + json(type_name)
+            + ", \"explosions\": " + std::to_string(target.explosions.size()) + ", \"replacements\": "
+            + std::to_string(target.ships.size()) + "}");
+        tsw_targets_.push_back(std::move(target));
+    }
+}
+
+std::optional<space::TswClipWindow> DebrisProps::tsw_clip(const sim::EntityId unit) const {
+    const auto found = tsw_clips_.find(unit);
+    if (found == tsw_clips_.end()) return std::nullopt;
+    return found->second;
+}
+
+bool DebrisProps::tsw_event(const std::uint64_t tick, const tactical::Event& event) {
+    const auto row = [&](const char* what, const std::uint64_t target) {
+        if (tsw_event_rows_.size() < row_limit) {
+            tsw_event_rows_.push_back("{\"tick\": " + std::to_string(tick) + ", \"event\": \"" + what + "\", \"unit\": "
+                + std::to_string(event.unit) + ", \"target\": " + std::to_string(target) + "}");
+        }
+    };
+    switch (event.kind) {
+    case tactical::EventKind::tsw_attack_started:
+        // S6: the attack clip runs from here until the target goes (S8 ends it).
+        tsw_clips_[event.unit] = space::TswClipWindow{tick, std::nullopt};
+        row("attack_started", event.sequence);
+        return true;
+    case tactical::EventKind::tsw_target_destroyed: {
+        if (const auto clip = tsw_clips_.find(event.unit); clip != tsw_clips_.end() && !clip->second.end_tick) {
+            clip->second.end_tick = tick;
+        }
+        row("target_destroyed", event.sequence);
+        if (event.sequence == 0 || event.sequence > tsw_targets_.size()) return true;
+        TswTarget& target = tsw_targets_[event.sequence - 1U];
+        if (target.destroyed) return true;
+        target.destroyed = true;
+        if (std::find(tsw_hidden_.begin(), tsw_hidden_.end(), target.record) == tsw_hidden_.end()) {
+            tsw_hidden_.push_back(target.record);
+        }
+        // One of the prop's death explosions, picked by the viewer's own random stream (never the simulation's): a
+        // generator local to the presentation, seeded by the target and the tick so a replayed view repeats itself.
+        std::mt19937 stream(0x5EED0000U ^ static_cast<std::uint32_t>(event.sequence * 2654435761U) ^ static_cast<std::uint32_t>(tick));
+        if (const auto pick = space::tsw_pick_explosion(target.explosions.size(), static_cast<std::uint32_t>(stream()))) {
+            space::DebrisPose pose;
+            pose.position = target.position;
+            pose.facing_degrees = {0.0, 0.0, target.yaw_degrees};
+            pending_.push_back({target.explosions[*pick], static_cast<double>(tick) - 1.0, pose});
+        }
+        return true;
+    }
+    case tactical::EventKind::tsw_debris_created:
+        row("debris_created", event.sequence);
+        if (event.sequence != 0 && event.sequence <= tsw_targets_.size()) tsw_targets_[event.sequence - 1U].debris = true;
+        return true;
+    default: return false;
+    }
 }
 
 space::DebrisPose DebrisProps::pose_at(const space::DebrisFlight& flight, const double presented_tick) const {
@@ -312,6 +427,7 @@ void DebrisProps::pose(const std::span<const platform::LiveTickEvents> reached, 
     };
     for (const platform::LiveTickEvents& record : reached) {
         for (const tactical::Event& event : record.events) {
+            if (tsw_event(record.tick, event)) continue;
             if (event.kind == tactical::EventKind::hardpoint_destroyed) {
                 const auto found = prop_of_.find({event.unit, event.hardpoint});
                 if (found != prop_of_.end()) {
@@ -346,6 +462,17 @@ void DebrisProps::pose(const std::span<const platform::LiveTickEvents> reached, 
                 const auto found = prop_of_.find({event.unit, hardpoint.hardpoint});
                 if (found != prop_of_.end()) throw_prop(found, record.tick, before, true);
             }
+        }
+    }
+    // TSW-15: the replacement props stand from the sim's debris event on, for the rest of the battle.
+    for (const TswTarget& target : tsw_targets_) {
+        if (!target.debris) continue;
+        for (const std::size_t ship : target.ships) {
+            SpacePopulation::LivePose placed;
+            placed.ship = ship;
+            placed.position = target.fixed_position;
+            placed.yaw_degrees = target.fixed_yaw;
+            live.push_back(std::move(placed));
         }
     }
     flights_.expire(presented_tick, ended);
@@ -606,6 +733,8 @@ void DebrisProps::write_report(std::ostream& output) const {
            << ", \"warm_texture_bytes\": " << warm_texture_bytes_
            << ", \"backend_live_rids\": " << backend_->live_rids();
     rows("prepared", prepared_rows_);
+    rows("tsw_prepared", tsw_prepared_rows_);
+    rows("tsw_events", tsw_event_rows_);
     rows("spawned", spawn_rows_);
     rows("expired", expired_rows_);
     counts("effects_started", started_);

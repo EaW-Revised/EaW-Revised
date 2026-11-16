@@ -2,7 +2,7 @@
 // Contract tests for the authoritative Lua sandbox and scheduler (#247,
 // docs/lua-sandbox.md).
 //
-//   lua_sandbox_tests clock_rng | sandbox | iteration | scheduler | workers
+//   lua_sandbox_tests clock_rng | sandbox | iteration | scheduler | workers | policy
 
 #include "eawr/core/sha256.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -161,8 +161,8 @@ void run_sandbox() {
     expect_create_error("local t = setmetatable({}, {__mode = 'k'})", auth::codes::weak_or_finalizer, "weak table");
     expect_create_error("local mt = {}; mt['__' .. 'gc'] = print", auth::codes::weak_or_finalizer, "finalizer key");
     expect_create_error("local mt = {}; rawset(mt, '__mode', 'v')", auth::codes::weak_or_finalizer, "raw weak mode");
-    for (const char* script : {"print('x')", "loadstring('return 1')", "dofile('Main.lua')", "loadfile('Main.lua')",
-                               "gcinfo()", "newproxy(true)", "setfenv(0, {})", "setfenv(1, {})",
+    // Policy v4 allows print, gcinfo and loadstring and removes the newproxy stub: lua_sandbox_policy_tests.cpp.
+    for (const char* script : {"dofile('Main.lua')", "loadfile('Main.lua')", "setfenv(0, {})", "setfenv(1, {})",
                                "string.dump(function() end)"}) {
         expect_create_error(script, auth::codes::forbidden_capability, script);
     }
@@ -220,7 +220,7 @@ void run_sandbox() {
          "1#9 report ababab true false MAIN.LUA:8: bad argument #2 to `rep' (number expected, got no value)"});
 
     expect_runs(
-        "collectgarbage(256); collectgarbage()\n"
+        "collectgarbage(256); collectgarbage(1024); collectgarbage()\n"
         "Test_Report(type(io), type(os), type(debug), type(math), type(package))\n"
         "Test_Report(pcall(rawset, _G, 'pairs', nil), type(pairs))\n"
         "Test_Report(getmetatable(GetEvent), getmetatable(Test_Handle(1, 2)))\n"
@@ -269,7 +269,7 @@ void run_sandbox() {
     };
     for (const char* name : {
              "pairs", "next", "tostring", "collectgarbage",                  // replaced base functions
-             "print", "loadstring", "dofile", "newproxy", "setfenv",           // forbidden stubs
+             "print", "gcinfo", "loadstring", "dofile", "setfenv",             // installed by the sandbox, or its stubs
              "type", "assert", "unpack", "rawset", "getfenv", "_G", "_VERSION", // base library
              "string", "string.Foo", "table.Foo", "coroutine.Foo",             // library tables
              "require", "Create_Thread.Foo", "GetEvent",                       // infrastructure
@@ -365,8 +365,10 @@ int main(int argc, char** argv) {
         run_scheduler();
     } else if (mode == "workers") {
         run_workers();
+    } else if (mode == "policy") {
+        run_policy();
     } else {
-        std::cerr << "usage: lua_sandbox_tests clock_rng | sandbox | iteration | scheduler | workers\n";
+        std::cerr << "usage: lua_sandbox_tests clock_rng | sandbox | iteration | scheduler | workers | policy\n";
         return 2;
     }
     if (failures != 0) {

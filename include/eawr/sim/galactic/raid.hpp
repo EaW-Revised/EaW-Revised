@@ -25,33 +25,11 @@ struct RaidForce {
     return limited != 0;
 }
 
-// Resolve current owner facts before calling the shared predicate. No UI facts
-// enter qualification; missing transport contents and story/access inputs refuse.
-[[nodiscard]] inline bool qualifies_raid(const Fleet& fleet, PlanetId destination,
-    const MovementSetup& movement, const PoliticalControlSetup& control,
-    std::span<const CensusObject> actors, const PlanetAccessState* access = nullptr) {
+// GAR-01: fleet composition alone, independent of destination ownership/access.
+// Landing admission additionally requires a transport (WGM-37).
+[[nodiscard]] inline bool fleet_raid_capable(const Fleet& fleet, const MovementSetup& movement,
+    FactionId faction, std::span<const CensusObject> actors, bool require_transport = false) {
     if (!movement.raid || fleet.members.empty()) return false;
-    const auto planet = std::find_if(control.planets.begin(), control.planets.end(),
-        [&](const auto& row) { return row.planet == destination; });
-    const auto state = std::find_if(control.state.begin(), control.state.end(),
-        [&](const auto& row) { return row.planet == destination; });
-    const auto player = std::find_if(control.players.begin(), control.players.end(),
-        [&](const auto& row) { return row.player == fleet.owner; });
-    if (planet == control.planets.end() || !planet->surface_accessible || planet->destroyed
-        || state == control.state.end() || !state->target_player || state->target_player == fleet.owner
-        || player == control.players.end()) return false;
-    const auto relation = std::find_if(control.relations.begin(), control.relations.end(), [&](const auto& row) {
-        return row.player == fleet.owner && row.other == state->target_player;
-    });
-    if (relation == control.relations.end() || relation->allied) return false;
-    if (access) {
-        const auto row = std::find_if(access->planets.begin(), access->planets.end(),
-            [&](const auto& p) { return p.planet == destination; });
-        if (row == access->planets.end() || row->restricted) return false;
-    }
-    const auto movement_access = std::find_if(movement.access.begin(), movement.access.end(),
-        [&](const auto& row) { return row.player == fleet.owner && row.planet == destination; });
-    if (movement_access == movement.access.end() || !movement_access->accessible) return false;
     std::vector<RaidForce> forces;
     std::set<EntityId> seen;
     bool has_transport{};
@@ -99,7 +77,7 @@ struct RaidForce {
                             [](const auto& row, auto id) { return row.type < id; });
                         if (original != movement.raid->types.end() && original->type == actor->original_type) hero = hero || original->hero;
                     }
-                    forces.push_back({player->faction, payload->categories, hero, true, payload->stays_in_transport});
+                    forces.push_back({faction, payload->categories, hero, true, payload->stays_in_transport});
                     return true;
                 }
                 return false;
@@ -108,10 +86,39 @@ struct RaidForce {
             for (const auto& child : children->children) if (!self(self, child, carried)) return false;
             return true;
         }
-        forces.push_back({player->faction, policy->categories, policy->hero, carried, policy->stays_in_transport});
+        forces.push_back({faction, policy->categories, policy->hero, carried, policy->stays_in_transport});
         return true;
     };
     for (const auto& member : fleet.members) if (!inspect(inspect, member, false)) return false;
-    return has_transport && raid_capable(forces, movement.raid->rules);
+    return (!require_transport || has_transport) && raid_capable(forces, movement.raid->rules);
+}
+
+// Resolve current owner facts before calling the shared predicate. No UI facts
+// enter qualification; missing transport contents and story/access inputs refuse.
+[[nodiscard]] inline bool qualifies_raid(const Fleet& fleet, PlanetId destination,
+    const MovementSetup& movement, const PoliticalControlSetup& control,
+    std::span<const CensusObject> actors, const PlanetAccessState* access = nullptr) {
+    const auto planet = std::find_if(control.planets.begin(), control.planets.end(),
+        [&](const auto& row) { return row.planet == destination; });
+    const auto state = std::find_if(control.state.begin(), control.state.end(),
+        [&](const auto& row) { return row.planet == destination; });
+    const auto player = std::find_if(control.players.begin(), control.players.end(),
+        [&](const auto& row) { return row.player == fleet.owner; });
+    if (planet == control.planets.end() || !planet->surface_accessible || planet->destroyed
+        || state == control.state.end() || !state->target_player || state->target_player == fleet.owner
+        || player == control.players.end()) return false;
+    const auto relation = std::find_if(control.relations.begin(), control.relations.end(), [&](const auto& row) {
+        return row.player == fleet.owner && row.other == state->target_player;
+    });
+    if (relation == control.relations.end() || relation->allied) return false;
+    if (access) {
+        const auto row = std::find_if(access->planets.begin(), access->planets.end(),
+            [&](const auto& p) { return p.planet == destination; });
+        if (row == access->planets.end() || row->restricted) return false;
+    }
+    const auto movement_access = std::find_if(movement.access.begin(), movement.access.end(),
+        [&](const auto& row) { return row.player == fleet.owner && row.planet == destination; });
+    if (movement_access == movement.access.end() || !movement_access->accessible) return false;
+    return fleet_raid_capable(fleet, movement, player->faction, actors, true);
 }
 } // namespace eawr::sim::galactic

@@ -52,7 +52,15 @@ bool TimeControls::set_speed_step(const std::uint32_t step, const std::uint64_t 
     return true;
 }
 
+bool TimeControls::set_cinematic_pacing(const bool on, const std::uint64_t next_tick) {
+    if (ended_ || on == cinematic_pacing_) return false;
+    cinematic_pacing_ = on;
+    record(next_tick, on ? "cinematic" : "cinematic_end");
+    return true;
+}
+
 std::uint32_t TimeControls::target_rate() const noexcept {
+    if (cinematic_pacing_) return nominal_rate;
     return state_ == TimeState::fast_forward ? fast_forward_rate : speed_step_rates[speed_step_];
 }
 

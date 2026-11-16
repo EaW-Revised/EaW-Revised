@@ -15,6 +15,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         particle_render_tests
         render_main.cpp
         render_batch_tests.cpp
+        render_spread_tests.cpp
+        render_diagnostic_tests.cpp
         render_proxy_tests.cpp
         render_stream_tests.cpp
         render_submission_tests.cpp
@@ -80,6 +82,8 @@ else()
     add_executable(particle_render_tests
         render_main.cpp
         render_batch_tests.cpp
+        render_spread_tests.cpp
+        render_diagnostic_tests.cpp
         render_lane_tests.cpp
         render_proxy_tests.cpp
         render_stream_tests.cpp

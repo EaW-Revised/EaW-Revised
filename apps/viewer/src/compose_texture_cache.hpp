@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/assets/assets.hpp"
+#include "eawr/assets/texture_chain.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/scene/texture_prefetch.hpp"
@@ -21,9 +22,10 @@ namespace eawr::presentation::godot_backend {
 
 // What the initial compose has a texture read-ahead do to the BaseTexture of a surface drawn with this effect (#5989):
 // the opaque, lit materials (every selector that is not a transparent-phase effect; ships, but also stations, props,
-// asteroids and debris) get a mip chain when the texture stops above 1x1, because a ship seen from afar otherwise samples
-// the full-size hull texture at 16-64 texels per screen pixel and its surface shimmers. Chosen by effect phase and by the texture's format and chain state (the reader skips
-// anything it cannot complete), never by file or mod name.
+// asteroids and debris) get a mip chain when the texture stops above 1x1, because a ship seen from afar otherwise
+// samples the full-size hull texture at 16-64 texels per screen pixel and its surface shimmers. Chosen by effect phase
+// and by the texture's format and chain state (the reader skips anything it cannot complete), never by file or mod
+// name.
 //
 // Additive ship materials use brightness-compensated chains, keeping the authored top level and the first filtered
 // level unchanged. Other transparent effects are unchanged. Processing is load-time beside the read-ahead.
@@ -32,6 +34,39 @@ namespace eawr::presentation::godot_backend {
         || selector.program == "MeshAdditiveOffset.fx" || selector.program == "MeshAdditiveVColor.fx"
         || selector.program == "RSkinAdditive.fx") return scene::TextureProcessing::compensated_light_mip_chain;
     return selector.transparent ? scene::TextureProcessing::none : scene::TextureProcessing::colour_mip_chain;
+}
+
+// The space compose's own policy for the BaseTexture (legacy #6725): every material gets a chain, the additive ones the
+// brightness-compensated one (as above) and the alpha-blended (non-additive transparent) ones the plain chain, as
+// retail's request does for every effect texture. texture_processing_for above keeps its #5989 meaning (no chain for the
+// alpha-blended effects) for the galaxy scene, which shares it (galactic_texture_chain.hpp).
+[[nodiscard]] inline scene::TextureProcessing space_base_processing_for(const scene::LegacySelector& selector) noexcept {
+    const scene::TextureProcessing opaque_or_additive = texture_processing_for(selector);
+    return opaque_or_additive == scene::TextureProcessing::none ? scene::TextureProcessing::colour_mip_chain
+                                                                  : opaque_or_additive;
+}
+
+// The processing of a family binding other than BaseTexture (gloss, specular, wave, distortion, cloud, ...): the family's
+// flat-normal bindings take the normal chain, every other sampled texture the plain colour chain (legacy #6725).
+[[nodiscard]] inline scene::TextureProcessing binding_processing_for(const bool normal_map) noexcept {
+    return normal_map ? scene::TextureProcessing::normal_mip_chain : scene::TextureProcessing::colour_mip_chain;
+}
+
+// Decodes `path` for a compose that has no read-ahead (the fog-of-war capture path) and completes its chain the way the
+// read-ahead's reader would. Load-time only: never called while a battle is being played.
+[[nodiscard]] inline core::Result<assets::Texture> load_texture_chained(const vfs::Vfs& filesystem,
+    const std::string_view path, const scene::TextureProcessing processing) {
+    auto loaded = assets::load_texture(filesystem, path);
+    if (!loaded) return loaded;
+    switch (processing) {
+    case scene::TextureProcessing::colour_mip_chain: assets::extend_mip_chain(loaded.value(), assets::ChainKind::colour); break;
+    case scene::TextureProcessing::normal_mip_chain: assets::extend_mip_chain(loaded.value(), assets::ChainKind::normal); break;
+    case scene::TextureProcessing::compensated_light_mip_chain:
+        assets::extend_mip_chain(loaded.value(), assets::ChainKind::compensated_light);
+        break;
+    case scene::TextureProcessing::none: break;
+    }
+    return loaded;
 }
 
 // Decoded textures the initial space compose keeps between the surfaces that name them (docs/performance/

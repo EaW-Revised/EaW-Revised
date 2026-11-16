@@ -404,6 +404,17 @@ void test_battle_domain(const std::string& fixtures) {
     tactical::TacticalContent content;
     auto world = tactical::TacticalSession::create(replay.setup, content);
     expect(world && world.value().domain() == tactical::BattleDomain::space, "space content remains the default");
+    // The land-only ability kinds (the vocabulary after the 32 space kinds) are unknown to a space session at submission.
+    if (world) {
+        const auto issuer = std::find_if(replay.setup.players.begin(), replay.setup.players.end(),
+            [](const auto& player) { return (player.flags & tactical::player_flag_commandable) != 0; });
+        if (issuer != replay.setup.players.end()) {
+            const auto land_kind = world.value().submit({{world.value().completed_tick(), issuer->player_id, 9001}, {1},
+                tactical::AbilityPayload{tactical::AbilityKind::sprint, tactical::AbilityAction::activate}});
+            expect(!land_kind && land_kind.error().message.find("unknown ability") != std::string::npos,
+                "a space session refuses a land-only ability kind at submit");
+        }
+    }
     if (world) {
         const auto recorded = tactical::write_replay(world.value().record());
         auto initial = replay;

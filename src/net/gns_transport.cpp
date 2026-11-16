@@ -30,6 +30,13 @@ void GnsTransport::clear_log_sink(std::uint64_t generation) {
     ++log.generation;
     log.pending.clear(); log.limited.clear(); log.dropped = 0; log.has_pending.store(false);
 }
+void GnsTransport::log_event(std::string_view event, std::string_view text) {
+#if EAWR_HAS_GNS
+    gns_log_push(-1, -1, text, false, event);
+#else
+    (void)event; (void)text;
+#endif
+}
 GnsTransport::GnsTransport(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 GnsTransport::GnsTransport(std::unique_ptr<Mesh> mesh) : mesh_(std::move(mesh)) {}
 GnsTransport::~GnsTransport() = default;
@@ -60,16 +67,13 @@ core::Result<std::unique_ptr<GnsTransport>> GnsTransport::create(bool hosting, s
     impl->signalling = std::move(endpoint);
     if (impl->signalling) {
         impl->turn = impl->signalling->turn_credentials();
+        impl->own_turn = impl->signalling->own_turn_uris();
         if (impl->turn && !turn_valid(*impl->turn)) {
             log_turn_refused(static_cast<int>(impl->local_slot), impl->turn);
             return core::Result<std::unique_ptr<GnsTransport>>::failure(error(1519, "Invalid TURN rendezvous credentials"));
         }
         if (impl->turn) {
-            const auto servers = static_cast<std::size_t>(std::count(impl->turn->uri.begin(), impl->turn->uri.end(), ',')) + 1;
-            for (std::size_t i = 0; i < servers; ++i) {
-                impl->turn_users += (i ? "," : "") + impl->turn->username;
-                impl->turn_passwords += (i ? "," : "") + impl->turn->password;
-            }
+            gns_turn_lists(*impl->turn, impl->turn_users, impl->turn_passwords);
         }
         impl->signalling_state = std::make_shared<SignallingState>();
         impl->signalling_state->endpoint = impl->signalling;
@@ -172,6 +176,7 @@ core::Result<std::unique_ptr<GnsTransport>> GnsTransport::create_room(bool hosti
     mesh->room = std::move(room);
     mesh->self = me; mesh->peers = mesh->options.peers;
     mesh->turn = mesh->room->turn_credentials();
+    mesh->own_turn = mesh->room->own_turn_uris();
     if (mesh->turn && !turn_valid(*mesh->turn)) {
         log_turn_refused(static_cast<int>(me), mesh->turn);
         return Failure::failure(error(1519, "Invalid TURN rendezvous credentials"));
@@ -181,11 +186,7 @@ core::Result<std::unique_ptr<GnsTransport>> GnsTransport::create_room(bool hosti
         return Failure::failure(error(1519, "TURN-only connection requires relay credentials"));
     }
     if (mesh->turn) {
-        const auto servers = static_cast<std::size_t>(std::count(mesh->turn->uri.begin(), mesh->turn->uri.end(), ',')) + 1;
-        for (std::size_t i = 0; i < servers; ++i) {
-            mesh->turn_users += (i ? "," : "") + mesh->turn->username;
-            mesh->turn_passwords += (i ? "," : "") + mesh->turn->password;
-        }
+        gns_turn_lists(*mesh->turn, mesh->turn_users, mesh->turn_passwords);
     }
     for (PeerIndex seat = 0; seat < mesh->peers; ++seat) {
         mesh->slot[seat].state = seat == me ? GnsRoomSlotState::attached : GnsRoomSlotState::vacant;
@@ -200,7 +201,7 @@ core::Result<std::unique_ptr<GnsTransport>> GnsTransport::create_room(bool hosti
     {
         // One listener takes every incoming pair connection; the room's signals route each to its slot.
         Impl probe(true, mesh->options);
-        probe.pair_link = true; probe.turn = mesh->turn; probe.turn_users = mesh->turn_users; probe.turn_passwords = mesh->turn_passwords;
+        probe.pair_link = true; probe.turn = mesh->turn; probe.own_turn = mesh->own_turn; probe.turn_users = mesh->turn_users; probe.turn_passwords = mesh->turn_passwords;
         const auto config = probe.config();
         mesh->listener = runtime.sockets->CreateListenSocketP2P(0, static_cast<int>(config.size()), config.data());
     }
@@ -324,6 +325,13 @@ bool GnsTransport::mesh() const { return mesh_ != nullptr; }
 GnsPairDiagnostic GnsTransport::pair(PeerIndex remote) const {
 #if EAWR_HAS_GNS
     if (mesh_) return mesh_->pair(remote);
+    // The two-seat transport has one link: report it for any remote, so a display reads the same accessor for both.
+    if (impl_ && impl_->state == LinkState::open) {
+        GnsPairDiagnostic value;
+        value.phase = GnsPairPhase::open; value.relay_offered = impl_->turn.has_value();
+        value.route = impl_->route; value.relay_provider = impl_->relay_provider; value.route_lossy = impl_->loss_hint.active();
+        return value;
+    }
 #endif
     static_cast<void>(remote);
     return {};

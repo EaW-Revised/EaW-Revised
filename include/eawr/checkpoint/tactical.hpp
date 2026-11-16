@@ -61,7 +61,16 @@ inline constexpr std::uint16_t child_state_section_version = 8; // Combined camp
 // Version 15: walking formations retain their shared centre paths and member slots (LMF-09).
 // Version 16 (land garrisons, G-04..G-09): the garrison records after the walking formations: entrant, host, bone, slot cost, phase,
 // fade frames, the host's last pose, and for an occupant its squad roster, path request, held target and live rows.
-inline constexpr std::uint16_t land_state_section_version = 16;
+// Version 17 (land free garrison, G-14): each landing record ends with the flag that its landed objects join the player's free garrison.
+// Version 18 (Force disabling, WLAB-08, #3238): the Force disabling stamps follow the garrison records: an ascending map from a unit id to the
+// tick a carrier's scan last reached it.
+// Version 19 (land ability motion, WLAB-16/17, #3239): the ability motion records follow the Force disabling stamps: an ascending
+// map from a unit id to its locomotor in use, deploy phase and pending jump (the point is kept with the flag).
+// Version 20 (land projectile index, WLAB-19/71, #3239): each ability motion record ends with the unit's current projectile index
+// (0 the first projectile type, 1 the second); a record is the default one only when that is 0 too.
+// Version 21 (land jump flight, WLAB-16, #7084): each ability motion record carries the jump phase (0 none, 1 waiting, 2 flying, 3
+// coming down) where the pending flag was, and ends with the frames waited, the planar speed and the flying body's position.
+inline constexpr std::uint16_t land_state_section_version = 21;
 // The conflict record is the galactic session's (FT-08); the container bounds it only.
 inline constexpr std::size_t max_conflict_record_bytes = 1U * 1024U * 1024U;
 

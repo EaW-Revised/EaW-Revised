@@ -51,6 +51,15 @@ struct LiveScriptReport {
     std::vector<std::string> diagnostics; // distinct "code message", first seen first, at most 64
 };
 
+// legacy #6634 (HCB-75): a tactical script's Letter_Box_In / Letter_Box_Out as the viewer receives it. `in` raises the cinematic
+// bands (and hides the game GUI) over `seconds` (0 = at once), otherwise lowers them. Local presentation only: it is not part of
+// the world, the replay or a save, and a headless replay makes none.
+struct LiveLetterboxRequest {
+    std::uint64_t tick{}; // the tick whose script service made the call
+    bool in{};
+    double seconds{};
+};
+
 // One order for the session's command queue (scripted and debug orders; a local player's input
 // arrives through Options::command_source instead). The issuer is the commanding player; the
 // units are nonzero and strictly increasing. Without `tick` the order is stamped with the next
@@ -83,6 +92,10 @@ struct LiveLandMemberMotion {
     bool turning{}, spread_out{}, stop_point{};
     sim::math::Fixed heading_error{}, turn_fraction{};
     bool has_motion_input{}, has_turn_fraction{};
+    // #6976 B: the member's squad speed (steady while the team moves; the member's own speed follows its formation
+    // slot and wobbles). The walk/move choice reads this one, as retail reads the team's walk speed.
+    sim::math::Fixed team_speed{};
+    bool has_team_speed{};
 };
 struct LiveLandMotion {
     std::uint64_t tick{};
@@ -91,7 +104,8 @@ struct LiveLandMotion {
 
 // #558: what one completed tick cost the simulation thread, in wall-clock milliseconds. `phases`
 // names the parts that add up to `total_ms` ("step": the session's tick, scripts included; "fog":
-// the fog copy for the world); any producer of a sim phase timing appends its own entry. Presentation
+// the fog copy for the world; "land-motion": the land motion copy, present only in a land session and
+// not part of "fog"); any producer of a sim phase timing appends its own entry. Presentation
 // reads them for the performance overlay; they never enter a snapshot, a hash or the replay.
 struct LivePhaseCost {
     std::string name;
@@ -321,6 +335,9 @@ public:
         // Solo sessions with scripts only: no step driver.
         std::optional<std::uint64_t> save_at{};
         std::function<void(std::uint64_t tick, core::Result<std::vector<std::uint8_t>> checkpoint)> save_sink{};
+        // Diagnostics (legacy #6634): letterbox requests injected as if a tactical script had made them in the service of
+        // the tick each names, through the same path (text arguments, parsing, the request list). Scripted sessions only.
+        std::vector<LiveLetterboxRequest> debug_letterbox{};
     };
 
     // The pool size of the game build: the hardware threads minus the Godot main and render
@@ -445,6 +462,8 @@ public:
     [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
     // The scripts' load and diagnostics so far; empty without scripts.
     [[nodiscard]] LiveScriptReport script_report() const;
+    // The tactical scripts' letterbox requests made since the last call, in script order. Never blocks on a running step.
+    [[nodiscard]] std::vector<LiveLetterboxRequest> take_letterbox_requests();
 
     // Stops and joins the simulation thread; idempotent. The session keeps its last state.
     void stop();

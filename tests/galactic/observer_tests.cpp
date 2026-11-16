@@ -110,6 +110,47 @@ void malformed_observer_facts_restore() {
     refused("intelligence source is invalid", "intelligence source without an identity is refused", [](auto& t) { t->records[0].sources.push_back({}); });
 }
 
+void controller_none_start() {
+    // WGM-66 / #6960: a planet nothing controls (no ground base, starbase, landed force or queue) starts with no controller; the initial
+    // observer validation admits the none the restore path already admits, while an unlisted player is still refused.
+    auto s = setup();
+    for (auto& planet : s.observer->planets) planet.current_controller = 0;
+    expect(static_cast<bool>(gc::validate_observer(s)), "an observer planet with no current controller validates at the start");
+    s.observer->planets[0].allegiance = s.observer->planets[0].target_owner = s.observer->planets[0].current_owner = 0;
+    expect(static_cast<bool>(gc::validate_observer(s)), "an observer planet with no owner facts validates at the start");
+    s.observer->planets[0].current_controller = 99;
+    expect(!gc::validate_observer(s), "an unlisted current controller is still refused");
+}
+
+// #6985: a planet with no owner and no controller publishes the none as an empty optional in every observed fact, never a
+// stored raw 0 (a raw 0 found no faction in the HUD lookup and showed no badge; the empty optional is the Neutral one).
+void none_publishes_as_empty() {
+    auto s = setup();
+    auto& planet = s.observer->planets[0];
+    planet.allegiance = planet.target_owner = planet.current_owner = planet.current_controller = 0;
+    s.observer->records[0].discovered = true;
+    s.observer->records[0].mask = gc::bit(gc::Intelligence::ownership) | gc::bit(gc::Intelligence::political_control);
+    auto game = take(gc::GalacticSession::create(s));
+    const auto& row = view(game, 0);
+    expect(row.discovered && row.knowledge.ownership && row.knowledge.political_control, "the none planet's ownership and control are known");
+    expect(!row.known_owner && !row.known_allegiance && !row.apparent_allegiance_owner,
+        "no owner, allegiance or controller is an empty optional, not a stored raw 0");
+    expect(row.apparent_allegiance_none, "a controller known to be none (control visible) is published as known-none, the Neutral badge");
+    for (const auto& observed : game.snapshot()->observations())
+        expect(observed.known_owner != std::optional<gc::PlayerId>(0) && observed.known_allegiance != std::optional<gc::PlayerId>(0)
+                && observed.apparent_allegiance_owner != std::optional<gc::PlayerId>(0),
+            "no observed fact of any planet holds a raw 0");
+    // The same none that the seat cannot see is unknown, not Neutral: the empty owner alone must not read as a badge.
+    s = setup();
+    s.observer->planets[2].allegiance = s.observer->planets[2].target_owner = s.observer->planets[2].current_owner
+        = s.observer->planets[2].current_controller = 0;
+    s.observer->records[2].discovered = true;
+    auto hidden = take(gc::GalacticSession::create(s));
+    expect(view(hidden, 2).discovered && !view(hidden, 2).knowledge.political_control && !view(hidden, 2).apparent_allegiance_owner
+            && !view(hidden, 2).apparent_allegiance_none,
+        "a discovered no-controller planet whose control the seat cannot see is unknown, not known-none");
+}
+
 void campaign_home_expansion() {
     // WGS-06 installs the home; WGUI-01/04/107 independently qualify seeds.
     // A retail owned home can expand on the first service even while paused.
@@ -906,7 +947,7 @@ int case_galactic_observer_tests() {
     if (!galactic_support_self_test()) return 1;
     black_market_publication();
     discovery_audio_publication();
-    try { malformed_observer_restore(); malformed_observer_facts_restore(); solo_observer_publication(); multiplayer_observer_contexts(); capture_metrics_contract(); planet_spy_non_source_budget(); planet_spy_lifecycle(); predicates(); discovery(); campaign_home_expansion(); arrival_order_and_budget(); landed_ownership(); effects(); staggered_observer_sources(); apparent_memory(); source_lifecycle(); projection_cache(); replay_checkpoint(); }
+    try { malformed_observer_restore(); malformed_observer_facts_restore(); solo_observer_publication(); multiplayer_observer_contexts(); capture_metrics_contract(); planet_spy_non_source_budget(); planet_spy_lifecycle(); predicates(); discovery(); controller_none_start(); none_publishes_as_empty(); campaign_home_expansion(); arrival_order_and_budget(); landed_ownership(); effects(); staggered_observer_sources(); apparent_memory(); source_lifecycle(); projection_cache(); replay_checkpoint(); }
     catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

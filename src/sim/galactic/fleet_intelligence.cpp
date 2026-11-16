@@ -62,7 +62,8 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
     const PlayerId local_player, const std::span<const FleetDisplayType> traits,
     const std::size_t group_capacity, const std::span<const FleetDisplayVisibility> visibility,
     const std::function<std::optional<std::uint32_t>(TypeId)>& icon_rank,
-    const std::span<const std::pair<EntityId, std::int64_t>> presentation_indices) {
+    const std::span<const std::pair<EntityId, std::int64_t>> presentation_indices,
+    const std::function<std::optional<std::int64_t>(TypeId)>& hero_rank) {
     FleetIntelligence output;
     if (!snapshot.observer() || !local_player || (snapshot.view_player() && snapshot.view_player() != local_player)) return output;
     const auto& observer = *snapshot.observer();
@@ -116,6 +117,33 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
             const auto previous = card.overview_type ? icon_rank(*card.overview_type) : std::nullopt;
             if (!previous || *rank > *previous) card.overview_type = type;
         };
+        // #6745: the hero-first image asks each top-level ship (not each leaf) for its named hero. A ship that is a
+        // named hero counts as itself, contents unexamined; otherwise the first named hero found among its contents
+        // counts (depth first, supplied order). Failing that, the ship's own type counts when the supplied rank
+        // accepts it (a generic hero with an icon). A carried generic hero never counts.
+        std::function<std::optional<TypeId>(const FleetMember&, std::size_t)> named_hero;
+        named_hero = [&](const FleetMember& member, const std::size_t depth) -> std::optional<TypeId> {
+            if (depth > 32) return std::nullopt;
+            const auto type = true_type(snapshot, member);
+            const auto trait = flat_find(types, type);
+            if (trait != types.end() && trait->second->named_hero) return type;
+            const auto* children = snapshot.movement() ? observer_detail::find(snapshot.movement()->contents,
+                member.id, [](const auto& row) { return row.container; }) : nullptr;
+            if (children)
+                for (const auto& child : children->children)
+                    if (const auto found = named_hero(child, depth + 1)) return found;
+            return std::nullopt;
+        };
+        if (hero_rank)
+            for (const auto& member : fleet.members) {
+                auto candidate = named_hero(member, 0);
+                if (!candidate && hero_rank(true_type(snapshot, member))) candidate = true_type(snapshot, member);
+                if (!candidate) continue;
+                const auto hero = hero_rank(*candidate);
+                if (!hero) continue;
+                const auto held = card.overview_hero_type ? hero_rank(*card.overview_hero_type) : std::nullopt;
+                if (!held || *hero < *held) card.overview_hero_type = *candidate;
+            }
         for (const auto& member : fleet.members) image(image, member, 0);
         for (const auto& member : fleet.members) {
             if (scan.full) return;
@@ -255,6 +283,94 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
     std::sort(presence.begin(), presence.end());
     presence.erase(std::unique(presence.begin(), presence.end()), presence.end());
     for (const auto& [planet, owner] : presence) output.presence.push_back({planet, owner});
+    return output;
+}
+
+std::vector<ObservedPlanetHeroes> observed_planet_heroes(const GalacticSnapshot& snapshot, const PlayerId local_player,
+    const std::span<const FleetDisplayType> traits, const std::span<const FleetDisplayVisibility> visibility) {
+    std::vector<ObservedPlanetHeroes> output;
+    if (!snapshot.observer() || !local_player || (snapshot.view_player() && snapshot.view_player() != local_player)) return output;
+    const auto& observer = *snapshot.observer();
+    const auto* player = observer_detail::find(observer.players, local_player, [](const auto& row) { return row.player; });
+    if (!player) return output;
+    FlatTable<TypeId, const FleetDisplayType*> types;
+    for (const auto& row : traits) types.emplace_back(row.type, &row);
+    seal(types);
+    // Container contents: the movement owner keeps membership order, actor rows fill in when it has no row.
+    std::map<EntityId, std::vector<FleetMember>> contents;
+    for (const auto& row : snapshot.actor_records())
+        if (row.container) contents[row.container].push_back({row.id, row.current_type});
+    if (snapshot.movement()) for (const auto& row : snapshot.movement()->contents) contents[row.container] = row.children;
+    // The first NAMED hero of a ship: the ship itself, else the first one among its contents (depth first).
+    std::function<std::optional<TypeId>(const FleetMember&, std::size_t)> named_hero;
+    named_hero = [&](const FleetMember& member, const std::size_t depth) -> std::optional<TypeId> {
+        if (depth > 32) return std::nullopt;
+        const auto type = true_type(snapshot, member);
+        const auto trait = flat_find(types, type);
+        if (trait != types.end() && trait->second->named_hero) return type;
+        if (const auto inside = contents.find(member.id); inside != contents.end())
+            for (const auto& child : inside->second)
+                if (const auto found = named_hero(child, depth + 1)) return found;
+        return std::nullopt;
+    };
+    FlatTable<PlanetId, const ObservedPlanet*> planets;
+    for (const auto& row : visibility) {
+        if (!row.current_visible.value_or(false)) continue;
+        for (const auto& observation : snapshot.observations())
+            if (observation.player == local_player && observation.planet == row.planet) { planets.emplace_back(row.planet, &observation); break; }
+    }
+    seal(planets);
+    std::vector<std::pair<PlanetId, ObservedPlanetHeroes>> found;
+    const auto row_for = [&](const PlanetId planet) -> ObservedPlanetHeroes& {
+        for (auto& entry : found) if (entry.first == planet) return entry.second;
+        found.push_back({planet, ObservedPlanetHeroes{planet, false, false, {}, {}}});
+        return found.back().second;
+    };
+    // Landed forces set the owner faction whatever the hero's own visibility (`landed`); orbiting fleets need it.
+    const auto count = [&](const PlanetId planet, const PlayerId owner, const TypeId hero, const bool landed, const bool visible) {
+        const bool allied = observer_detail::allied(*player, owner);
+        if (!landed && !allied && !visible) return;
+        auto& row = row_for(planet);
+        if (allied) row.ally = true; else if (visible) row.foreign = true;
+        // The tooltip lists a hero that is allied or that the knowledge admits (a landed hero that only marks its owner is not).
+        if (allied || visible) row.heroes.push_back({owner, hero, allied});
+        const auto at = std::lower_bound(row.owners.begin(), row.owners.end(), owner);
+        if (at == row.owners.end() || *at != owner) row.owners.insert(at, owner);
+    };
+    const auto hero_visible = [&](const TypeId type, const PlanetKnowledge& knowledge, const bool ground) {
+        const auto trait = flat_find(types, type);
+        const auto* base = observer_detail::find(observer.types, type, [](const auto& row) { return row.type; });
+        if (trait == types.end() || !base) return false;
+        auto view = knowledge;
+        if (ground) view.fleet_contents = knowledge.ground_contents;
+        return hero_known(*trait->second, *base, view, false);
+    };
+    // Orbiting fleets (WGSI-2).
+    for (const auto& fleet : snapshot.fleets()) {
+        if (fleet.motion.transit || !fleet.id) continue;
+        const auto planet = flat_find(planets, fleet.orbit);
+        if (planet == planets.end()) continue;
+        const auto& knowledge = planet->second->knowledge;
+        for (const auto& member : fleet.members) {
+            const auto hero = named_hero(member, 0);
+            if (hero) count(fleet.orbit, fleet.owner, *hero, false, hero_visible(*hero, knowledge, false));
+        }
+    }
+    // Landed forces (WGSI-1).
+    for (const auto& [id, observation] : planets) {
+        const auto& knowledge = observation->knowledge;
+        if (!(knowledge.ground_contents || knowledge.major_stealth || knowledge.force_sensitive)) continue;
+        const auto* surface = observer_detail::find(observer.planets, id, [](const auto& row) { return row.planet; });
+        if (!surface) continue;
+        for (const auto& transport : surface->landed_transports) {
+            if (!transport.id || transport.delete_pending || transport.dead) continue;
+            const auto hero = named_hero(FleetMember{transport.id, TypeId{}}, 0);
+            if (hero) count(id, transport.owner, *hero, true, hero_visible(*hero, knowledge, true));
+        }
+    }
+    std::sort(found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    output.reserve(found.size());
+    for (auto& entry : found) output.push_back(std::move(entry.second));
     return output;
 }
 

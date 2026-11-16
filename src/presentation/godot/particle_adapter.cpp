@@ -30,6 +30,7 @@
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/projection.hpp>
 #include <godot_cpp/variant/rid.hpp>
@@ -410,8 +411,10 @@ public:
             shared != nullptr ? shared->trace_tick : spawn_tick_, plan.texture, plan.emitter_index);
         trace.resource = resource;
         failure_.clear();
+        failure_resource_ = false;
         RenderingServer* rendering = RenderingServer::get_singleton();
         if (rendering == nullptr || !scenario_.is_valid()) {
+            failure_resource_ = true;
             failure_ = "RenderingServer or scenario is unavailable";
             return std::nullopt;
         }
@@ -420,6 +423,7 @@ public:
             return std::nullopt;
         }
         if (static_cast<bool>(fog_.register_material) != static_cast<bool>(fog_.unregister_material)) {
+            failure_resource_ = true;
             failure_ = "fog registration callbacks must include both register and unregister";
             return std::nullopt;
         }
@@ -491,7 +495,15 @@ public:
         trace.lap(detail::ParticleSpawnTrace::shader_compile);
         if (!shader) {
             release_textures();
+            failure_resource_ = true;
             failure_ = "Godot rejected the particle program (EAWR-RENDER-0007)";
+            return std::nullopt;
+        }
+        if (reject_resource_for_test_) {
+            release_new_shader();
+            release_textures();
+            failure_resource_ = true;
+            failure_ = "injected particle resource refusal (test)";
             return std::nullopt;
         }
         const auto priority = render_pass_priority(material.pass)
@@ -545,6 +557,7 @@ public:
         if (!emitter.material.is_valid()) {
             release_new_shader();
             release_textures();
+            failure_resource_ = true;
             failure_ = "Godot rejected the particle material RID";
             return std::nullopt;
         }
@@ -570,6 +583,7 @@ public:
             free_rid(*rendering, emitter.material);
             release_new_shader();
             release_textures();
+            failure_resource_ = true;
             failure_ = "Godot rejected a particle mesh or instance RID";
             return std::nullopt;
         }
@@ -581,6 +595,7 @@ public:
         if (fog_.register_material) {
             const auto registered = fog_.register_material(emitter.material, *shader);
             if (!registered || registered.value() == 0) {
+                failure_resource_ = true;
                 failure_ = "emitter " + std::to_string(plan.emitter_index) + ": "
                     + (registered ? "fog callback returned an empty consumer handle"
                         : core::format_diagnostic(registered.error()));
@@ -1556,6 +1571,7 @@ public:
         return result;
     }
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
+    [[nodiscard]] bool failure_resource() const noexcept { return failure_resource_; }
 
 private:
     std::optional<RID> acquire_texture(RenderingServer& rendering, const std::string& key,
@@ -1576,17 +1592,22 @@ private:
             failure_ = prepared.failure;
             return std::nullopt;
         }
+        if (!prepared.note.empty()) {
+            UtilityFunctions::print(String::utf8(("LoadNote: particle texture " + key + ": " + prepared.note).c_str()));
+        }
         PackedByteArray bytes;
         bytes.resize(static_cast<int64_t>(prepared.bytes.size()));
         if (!prepared.bytes.empty()) std::memcpy(bytes.ptrw(), prepared.bytes.data(), prepared.bytes.size());
         const Ref<Image> image = Image::create_from_data(static_cast<int32_t>(source.width),
             static_cast<int32_t>(source.height), source.mips.size() > 1, *format, bytes);
         if (image.is_null() || image->is_empty()) {
+            failure_resource_ = true;
             failure_ = "Godot rejected prepared image data";
             return std::nullopt;
         }
         const RID rid = rendering.texture_2d_create(image);
         if (!rid.is_valid()) {
+            failure_resource_ = true;
             failure_ = "Godot rejected prepared texture RID";
             return std::nullopt;
         }
@@ -1704,6 +1725,10 @@ private:
     ProgramPrewarmWork warm_program_work_;
     std::map<std::string, Shared> textures_;
     bool spawn_fighter_{};
+    // The last refusal was a resource the engine would not give (not the emitter's data); test hook
+    // makes every create refuse that way.
+    bool failure_resource_{};
+    bool reject_resource_for_test_{};
     std::string spawn_effect_;
     std::uint64_t spawn_tick_{};
     detail::ParticleSpawnJournal spawn_journal_;
@@ -1809,6 +1834,8 @@ GodotParticleBackend::ReuseWork GodotParticleBackend::reuse_work() const noexcep
         cache.hits(), cache.misses(), cache.refusals(), impl_->live_rids()};
 }
 std::string GodotParticleBackend::failure_cause() const { return impl_->failure(); }
+bool GodotParticleBackend::failure_is_resource() const { return impl_->failure_resource(); }
+void GodotParticleBackend::set_reject_resource_for_test(const bool reject) noexcept { impl_->reject_resource_for_test_ = reject; }
 particles::CullingFrame GodotParticleBackend::culling_frame() const {
     impl_->expire_reuse();
     impl_->sample_residency();

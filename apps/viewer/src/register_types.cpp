@@ -4,9 +4,11 @@
 #include "options_screen.hpp"
 #include "particle_workers.hpp"
 #include "startup_trace.hpp"
+#include "startup_window.hpp"
 #include "crash_handler.hpp"
 #include "crash_log_path.hpp"
 #include "depth_prepass_option.hpp"
+#include "model_facts_setup.hpp"
 #include "viewer_path.hpp"
 #include "eawr/core/build_identity.hpp"
 #include "gpu_memory_trace.hpp"
@@ -62,6 +64,8 @@ void initialize_eawr_viewer(const ModuleInitializationLevel level) {
     if (level == MODULE_INITIALIZATION_LEVEL_SCENE) {
         using namespace eawr::presentation::godot_backend;
 #ifdef _WIN32
+        // No startup message pump here: at SCENE level the engine has not created the display server or the
+        // game window yet (kit ddcf crashed in release builds on that path).
         auto* settings = ProjectSettings::get_singleton();
         const String default_log = settings->get_setting("debug/file_logging/log_path", String("user://logs/godot.log"));
         const auto arguments = OS::get_singleton()->get_cmdline_user_args();
@@ -82,6 +86,7 @@ void initialize_eawr_viewer(const ModuleInitializationLevel level) {
         for (int64_t index = 0; index < arguments.size(); ++index)
             if (arguments[index] == "--eawr-test-crash") deliberate_test_crash();
 #endif
+        configure_model_facts_store();
         GDREGISTER_CLASS(eawr::presentation::godot_backend::ViewerHost);
         GDREGISTER_CLASS(eawr::presentation::godot_backend::EawrLoadingScreen);
         GDREGISTER_CLASS(eawr::presentation::godot_backend::EawrGalacticRadar);
@@ -107,6 +112,9 @@ void uninitialize_eawr_viewer(const ModuleInitializationLevel level) {
             UtilityFunctions::printerr("EAWR-VIEWER-LANE-LEAK ", leaked);
             UtilityFunctions::print("EAWR-VIEWER-LANE-LEAK ", leaked);
         }
+        if (const auto facts_line = eawr::platform::model_facts_stats_line(); !facts_line.empty())
+            UtilityFunctions::print(String::utf8(facts_line.c_str()));
+        eawr::platform::shutdown_model_facts_cache();
         eawr::presentation::godot_backend::gpu_memory_trace.shutdown_journal();
         eawr::presentation::godot_backend::shutdown_lan_drains();
         eawr::presentation::godot_backend::uninstall_crash_handler();

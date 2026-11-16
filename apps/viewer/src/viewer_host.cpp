@@ -4,6 +4,7 @@
 #include "eawr/core/text.hpp"
 #include "audio_output.hpp"
 #include "startup_trace.hpp"
+#include "viewer_degradation.hpp"
 #include "viewer_mounted_mods.hpp"
 #include "gpu_memory_trace.hpp"
 #include <godot_cpp/classes/rendering_server.hpp>
@@ -38,9 +39,11 @@ namespace {
 
 } // namespace
 
-ViewerHost::ViewerHost() = default;
+ViewerHost::ViewerHost() { describe_viewer_degradation_session(); }
 ViewerHost::~ViewerHost() {
     shutdown_mounted_mods();
+    // The session's degradation summary and its one log line; the host teardown is the viewer's single end point.
+    publish_viewer_degradation_summary();
     shutdown_trace::mark("viewer host freed (members follow)");
 }
 

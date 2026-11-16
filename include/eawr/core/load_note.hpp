@@ -45,6 +45,9 @@ struct LoadNote {
 };
 struct LoadNoteHeader {
     std::string chain_fingerprint;
+    // The session that wrote the notes (the degradation ledger's session id). Stamped by the sink when empty; it keys
+    // the per-session copy of the file, so a later session of the same profile never overwrites this one's notes.
+    std::string session_id;
     std::optional<std::string> profile_id;
     std::string game_version;
     std::string written_at;

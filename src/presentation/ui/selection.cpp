@@ -273,7 +273,66 @@ std::optional<Vec3f> battle_plane_point(const PickRay& ray) noexcept {
 
 RightRelease right_release(const std::optional<std::array<float, 2>> press, const std::array<float, 2> release) noexcept {
     if (!press) return RightRelease::ignored;
-    return drag_extent(*press, release) > minimum_drag_select_distance ? RightRelease::compass : RightRelease::click;
+    const float extent = drag_extent(*press, release);
+    if (!(extent > minimum_drag_distance)) return RightRelease::click;
+    return extent < minimum_drag_select_distance ? RightRelease::compass : RightRelease::cancel;
+}
+
+std::optional<sim::math::Fixed> compass_yaw(const Vec3f& press, const Vec3f& release) noexcept {
+    if (!finite(press) || !finite(release)) return std::nullopt;
+    const double dx = static_cast<double>(release[0]) - press[0];
+    const double dy = static_cast<double>(release[1]) - press[1];
+    if (dx == 0.0 && dy == 0.0) return std::nullopt;
+    constexpr double degrees = 180.0 / 3.14159265358979323846;
+    const auto tenths = static_cast<std::int64_t>(std::round(std::atan2(dy, dx) * degrees * 10.0));
+    const auto wrapped = (tenths % 3600 + 3600) % 3600;
+    return sim::math::Fixed::from_ratio(wrapped, 10).value();
+}
+
+bool compass_visible(const std::optional<std::array<float, 2>> press,
+    const std::array<float, 2> cursor, const double held_seconds) noexcept {
+    return held_seconds >= 0.5 && right_release(press, cursor) == RightRelease::compass;
+}
+
+std::optional<Vec3f> facing_point(const Vec3f& press, const Vec3f& release, const float range) noexcept {
+    const float dx = release[0] - press[0];
+    const float dy = release[1] - press[1];
+    if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(range) || !(range > 0.0F) || (dx == 0.0F && dy == 0.0F)) {
+        return std::nullopt;
+    }
+    if (!std::isfinite(press[0]) || !std::isfinite(press[1]) || std::abs(press[0]) > facing_target_limit
+        || std::abs(press[1]) > facing_target_limit) {
+        return std::nullopt;
+    }
+    constexpr double pi = 3.14159265358979323846;
+    // 0.1 degree, the precision of the retail heading.
+    const double degrees = std::round(std::atan2(static_cast<double>(dy), static_cast<double>(dx)) * (180.0 / pi) * 10.0) / 10.0;
+    const double radians = degrees * (pi / 180.0);
+    const double cosine = std::cos(radians);
+    const double sine = std::sin(radians);
+    // Cut the range where the line leaves the box the simulation accepts, so the order always arrives valid.
+    double reach = range;
+    const auto bound = [&](const double from, const double step) {
+        if (std::abs(step) < 1.0e-12) return;
+        const double room = ((step > 0.0 ? static_cast<double>(facing_target_limit) : -static_cast<double>(facing_target_limit)) - from) / step;
+        reach = std::min(reach, room);
+    };
+    bound(static_cast<double>(press[0]), cosine);
+    bound(static_cast<double>(press[1]), sine);
+    if (!(reach > 0.0) || (reach < range && reach < static_cast<double>(facing_target_min_range))) return std::nullopt;
+    return Vec3f{press[0] + static_cast<float>(cosine * reach), press[1] + static_cast<float>(sine * reach), 0.0F};
+}
+
+CompassPlan compass_plan(const std::optional<Vec3f>& press, const Vec3f& release, const bool on_selected, const bool space) noexcept {
+    if (!press) return {};
+    CompassPlan plan{CompassPlan::Kind::move, *press, {}};
+    if (on_selected && space) {
+        if (const auto toward = facing_point(*press, release)) {
+            plan.kind = CompassPlan::Kind::face;
+            plan.toward = *toward;
+        }
+    }
+    return plan;
 }
 
 bool allied_inspectable(const BattleUnit& unit, const bool ally_of_local) noexcept {

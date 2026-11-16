@@ -1,4 +1,6 @@
+#include "eawr/core/gc_load_trace.hpp"
 #include "eawr/campaign/ai_selection_content.hpp"
+#include "eawr/campaign/shared_unit_tables.hpp"
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
@@ -122,9 +124,35 @@ core::Result<std::vector<script::foc::galactic_ai::FreestoreFacts>> prepare_fres
         return Result::failure(std::move(diagnostic));
     }
 }
+std::vector<std::string> selection_unit_table_types(const data::Catalog& catalog, const CampaignSetupPlan& plan) {
+    StockNameSkips skips;
+    const auto loadable = [&](std::string_view name) {
+        return required(resolve_stock_name(catalog, name, data::Category::game_object, "selection type", skips)).has_value();
+    };
+    std::vector<std::string> out;
+    for (const auto& binding : plan.type_bindings()) if (loadable(binding.original_type)) out.push_back(binding.original_type);
+    for (const auto& location : plan.locations()) if (location.planet && loadable(location.original_type)) out.push_back(location.original_type);
+    return out;
+}
+
+core::Result<std::shared_ptr<const SharedUnitTables>> prepare_shared_unit_tables(
+    const vfs::Vfs& filesystem, const data::Catalog& catalog, const CampaignSetupPlan& plan) {
+    using Result = core::Result<std::shared_ptr<const SharedUnitTables>>;
+    try {
+        units::LoadInput input; input.catalog = &catalog; input.filesystem = &filesystem;
+        input.types = selection_unit_table_types(catalog, plan);
+        auto tables = units::load_unit_tables(input);
+        if (!tables) return Result::failure(tables.error());
+        return Result::success(std::make_shared<const SharedUnitTables>(std::move(tables).value(), input.types, &filesystem, catalog.generation()));
+    } catch (const std::exception& error) {
+        core::Diagnostic diagnostic; diagnostic.code = "EAWR-GCAI-SHARED-0001"; diagnostic.message = error.what();
+        return Result::failure(std::move(diagnostic));
+    }
+}
+
 core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> prepare_ai_selection_content(
     const vfs::Vfs& filesystem, const data::Catalog& catalog, const data::galactic::GalacticData& data,
-    const units::GalacticTypeTable& types, const CampaignSetupPlan& plan) {
+    const units::GalacticTypeTable& types, const CampaignSetupPlan& plan, std::shared_ptr<const SharedUnitTables> shared) {
     using Result = core::Result<std::shared_ptr<const ai::GalacticSelectionContent>>;
     try {
         auto out = std::make_shared<ai::GalacticSelectionContent>();
@@ -136,7 +164,15 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
         units::LoadInput enums; enums.catalog = &catalog; enums.filesystem = &filesystem;
         for (const auto& binding : plan.type_bindings()) if (loadable(binding.original_type)) enums.types.push_back(binding.original_type);
         for (const auto& location : plan.locations()) if (location.planet && loadable(location.original_type)) enums.types.push_back(location.original_type);
-        const auto vocabulary = required(units::load_unit_tables(enums));
+        std::optional<core::gc_load::DetailScope> phase(std::in_place, "prep.ai_runtime.selection_content.unit_tables");
+        if (core::gc_load::trace.active()) core::gc_load::trace.mark("prep.ai_runtime.selection_content.unit_tables.types=" + std::to_string(enums.types.size()));
+        // The shared load is used only when it was made from these files and catalog and requested with exactly this list; otherwise this step loads for itself.
+        std::optional<units::UnitTables> own_vocabulary;
+        const bool shared_hit = shared && shared->built_for(filesystem, catalog) && shared->requested_exactly(enums.types);
+        if (!shared_hit) own_vocabulary.emplace(required(units::load_unit_tables(enums)));
+        const units::UnitTables& vocabulary = shared_hit ? shared->tables() : *own_vocabulary;
+        if (core::gc_load::trace.active()) core::gc_load::trace.mark(std::string("prep.ai_runtime.selection_content.shared=") + (shared_hit ? "hit" : "own"));
+        phase.emplace("prep.ai_runtime.selection_content.rest");
         for (const auto& row : vocabulary.categories) out->ai.categories.emplace(ai::upper_case(row.name), static_cast<std::uint64_t>(row.value));
         std::vector<FleetTypeBinding> bindings(plan.type_bindings().begin(), plan.type_bindings().end());
         // CRP-01: match the typed planet constructor's location-order bindings.
@@ -233,13 +269,24 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
             row.survival_type = row.name; row.movement_class = text(object, "MovementClass"); row.lua_script = text(object, "Lua_Script");
             if (row.company) {
                 const auto* member = types.find(source.company_units.front());
-                if (!member) throw std::runtime_error("missing first company member");
-                auto resolved_member = catalog.resolve(member->name, data::Category::game_object);
-                if (!resolved_member && !stock_name_skippable(resolved_member.error())) required(std::move(resolved_member));
-                if (resolved_member) {
-                    const auto& original = resolved_member.value();
-                    row.movement_class = text(original, "MovementClass");
-                    if (!flag(original, "Create_Team")) row.survival_type = ai::upper_case(member->name);
+                // CGS-22: a first member that is not in the type table (its variant base resolves to nothing, CGS-13) is a null
+                // reference, never a refusal: it is reported and the company keeps its own movement class and survival type.
+                if (!member) {
+                    // Never stricter than retail: a first member that loads yet is not in the galactic type table (the table
+                    // leaves out types that cannot matter) is simply not a learning/movement source; only a name that cannot
+                    // be loaded at all is reported, as a null reference.
+                    if (!loadable(source.company_units.front())) {
+                        out->unresolved_names.push_back(source.name + " Company_Units: " + source.company_units.front());
+                        out->null_references.push_back(source.company_units.front());
+                    }
+                } else {
+                    auto resolved_member = catalog.resolve(member->name, data::Category::game_object);
+                    if (!resolved_member && !stock_name_skippable(resolved_member.error())) required(std::move(resolved_member));
+                    if (resolved_member) {
+                        const auto& original = resolved_member.value();
+                        row.movement_class = text(original, "MovementClass");
+                        if (!flag(original, "Create_Team")) row.survival_type = ai::upper_case(member->name);
+                    }
                 }
                 for (const auto& unit : source.company_units) { // WGA-489: any member unit's authored object script
                     const auto* found = types.find(unit); if (!found) continue;
@@ -248,9 +295,12 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
                     if (!text(required(std::move(resolved_unit)), "Lua_Script").empty()) row.member_script = true;
                 }
                 if (!source.company_transport.empty()) {
-                    if (!types.find(source.company_transport))
-                        out->unresolved_names.push_back(source.name + " Company_Transport_Unit: " + source.company_transport);
-                    else
+                    if (!types.find(source.company_transport)) {
+                        if (!loadable(source.company_transport)) {
+                            out->unresolved_names.push_back(source.name + " Company_Transport_Unit: " + source.company_transport);
+                            out->null_references.push_back(source.company_transport);
+                        }
+                    } else
                         row.hyperspace_speed = script::numeric::from_fixed(required(units::resolve_initial_galactic_type(types, source.company_transport)).hyperspace_speed.value());
                 }
             }
@@ -374,6 +424,8 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
         // two constructor-owned constants are qualified by WGA-250.
         out->technology_weight = ai::real(1);
         out->population_check = false;
+        std::sort(out->null_references.begin(), out->null_references.end());
+        out->null_references.erase(std::unique(out->null_references.begin(), out->null_references.end()), out->null_references.end());
         return Result::success(std::move(out));
     } catch (const std::exception& error) {
         core::Diagnostic diagnostic; diagnostic.code = "galactic-ai.selection-content"; diagnostic.message = error.what();

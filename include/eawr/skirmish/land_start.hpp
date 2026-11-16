@@ -62,6 +62,9 @@ struct LandStartBindings {
     // applied by the land step and included in content identity.
     sim::tactical::DurabilityTable durability;
     sim::tactical::CombatTable combat;
+    // WLAB-01 (#3238): the land ability rows of the selected companies, their members and the unlisted types. Bound to the
+    // session's ability table; empty when no land row authors a kind of the vocabulary.
+    sim::tactical::AbilityTable abilities;
 };
 struct LandStart {
     SkirmishStart start;
@@ -72,8 +75,22 @@ struct LandStart {
 // WLEN-55: discovery uses the map header and authored Team_NN_ spawn markers.
 [[nodiscard]] core::Result<std::vector<SetupMap>> land_setup_maps(
     const vfs::Vfs&, const data::Catalog&, SetupMapQuery query = {});
+// The same list with a stated number of decode workers (at most 8 are used; 1 reads serially). The list, its order and
+// its entries do not depend on the number.
+[[nodiscard]] core::Result<std::vector<SetupMap>> land_setup_maps(
+    const vfs::Vfs&, const data::Catalog&, SetupMapQuery query, unsigned requested_workers);
+// With a facts store (setup_facts.hpp), as setup_maps: a map whose header facts and finished entry are stored under this
+// view's fingerprint is listed without opening or decoding it. The list is the same either way.
+[[nodiscard]] core::Result<std::vector<SetupMap>> land_setup_maps(
+    const vfs::Vfs&, const data::Catalog&, SetupMapQuery query, unsigned requested_workers, SetupMapFactsStore* facts);
 [[nodiscard]] core::Result<LandStartInputs> read_land_start_inputs(
     const Fixture&, const vfs::Vfs&, const data::Catalog&, const units::UnitTables&);
+// The same read for a caller that reads many land maps against one mounted view (the setup list): the map-independent
+// facts and the catalog's object-type index are built once and reused through `cache`, and the data identity is
+// the caller's. The result is the one the overload above returns.
+[[nodiscard]] core::Result<LandStartInputs> read_land_start_inputs(
+    const Fixture&, const vfs::Vfs&, const data::Catalog&, const units::UnitTables&, const DataIdentity&,
+    CampaignStartInputsCache& cache);
 // The stock vehicle companies a vehicles-only human start gives `faction` (empty for a faction without a set,
 // e.g. a mod faction). Names only; build_land_start checks each is a generic-team vehicle company.
 [[nodiscard]] std::vector<std::string> land_vehicle_start_forces(std::string_view faction);
@@ -93,6 +110,13 @@ void set_land_vehicles_only(LandStartInputs& inputs, bool enabled);
     const Fixture&, const LandStartInputs&, const LandStartBindings&);
 
 struct LandContentInputs;
+// #6993: the companies the structures' menus sell (decoded with the pad types) that `selected` does not name, in the pad load's order.
+// The authored build binds them after the selected ones (build_land_bindings, optional list). An explicit-bindings caller that wants the
+// same content passes the same list and gates (add_offered_collision_classes).
+[[nodiscard]] std::vector<std::string> land_offered_companies(const LandStartInputs&, std::span<const std::string> selected);
+// The collision ordering gate lists the classes of the selected companies only; the classes the offered companies add follow it in sorted
+// order (the assignment is unverified either way, see authored_land_content_inputs). A class of a selected company is not added.
+void add_offered_collision_classes(LandContentInputs& gates, const LandStartInputs&, std::span<const std::string> offered);
 // Authored path: derive physical bindings from the land tables; explicit test path stays above.
 [[nodiscard]] core::Result<LandStart> build_land_start(
     const Fixture&, const LandStartInputs&, const LandContentInputs&);

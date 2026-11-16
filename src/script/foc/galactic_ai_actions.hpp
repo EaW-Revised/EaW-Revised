@@ -9,10 +9,12 @@
 #include <functional> // include-guard: keep
 #include <map>
 #include <optional>
+#include <memory>
 #include <span>
 #include <utility>
 #include <variant>
 #include <vector>
+#include "eawr/script/foc/galactic_ai_write_probe.hpp"
 
 namespace eawr::script::foc::galactic_ai {
 // W1 S3: a pay-as-you-go bill as a pure function of the AI budget, the purchase row and the notice. The direct path decides
@@ -35,6 +37,8 @@ struct BillEffect {
 struct BillDecision {
     gc::GalacticSession::NativeProductionPayment payment;
     BillEffect effect;
+    // Non-empty when this one bill was refused (nothing paid, no ledger effect) instead of ending the session.
+    std::string refusal;
 };
 using BillLedgers = std::function<const gc::funding::Ledger*(gc::PlayerId)>;
 [[nodiscard]] core::Result<BillDecision> decide_bill(const BillRow&, const gc::GalacticSession::NativeProductionNotice&,
@@ -87,7 +91,12 @@ public:
     };
     [[nodiscard]] PlayerFrontier player_frontier(gc::PlayerId player) { return PlayerFrontier(*this, player); }
     [[nodiscard]] std::optional<std::uint64_t> state_revision() const noexcept override { return bound().revision; }
-    void mark_state_changed() const noexcept { if (++bound().revision == 0) std::terminate(); }
+    void mark_state_changed() const noexcept {
+        if (write_probe_) write_probe_->note(GalacticAiWriteProbe::Writer::actions);
+        if (++bound().revision == 0) std::terminate();
+    }
+    // Observer only: counts record writes outside the async window body (the step 2 exit counter).
+    void bind_write_probe(std::shared_ptr<GalacticAiWriteProbe> probe) noexcept { write_probe_ = std::move(probe); }
     struct Purchase {
         gc::PlayerId player{};
         std::uint64_t goal{};
@@ -112,6 +121,9 @@ public:
     [[nodiscard]] const gc::GalacticSession::NativeActionShadow::Work& immediate_work() const noexcept { return bound().immediate_work_; }
     NativeActions(gc::GalacticSession&, std::shared_ptr<ai::GalacticFunding>,
         Placement, std::map<gc::PlayerId, sim::math::Fixed> multipliers, GoalResolver = {}, const sim::PartitionExecutor* = nullptr, BaseCost = {});
+    // #6917: a control-switch story reward changed this player's AI type, so its difficulty's credit multiplier is the new type's.
+    // Written on the sim thread at the window tick before the cut, never from the AI's window.
+    void set_multiplier(gc::PlayerId player, sim::math::Fixed value) { multipliers_.insert_or_assign(player, value); }
     ~NativeActions() override;
     NativeActions(const NativeActions&) = delete;
     NativeActions& operator=(const NativeActions&) = delete;
@@ -140,6 +152,10 @@ public:
     using BillingSink = std::function<std::optional<core::Result<gc::GalacticSession::NativeProductionPayment>>(
         const gc::GalacticSession::NativeProductionNotice&)>;
     using CreditSink = std::function<std::optional<core::Result<void>>(const gc::GalacticSession::CreditNotification&)>;
+    // Where a refused bill is reported (a diagnostic line; the match goes on). Unbound: the refusal is silent.
+    using RefusalSink = std::function<void(const std::string&)>;
+    void bind_bill_refusal_sink(RefusalSink sink) { bill_refusal_sink_ = std::move(sink); }
+    void report_bill_refusal(const std::string& line) const { if (bill_refusal_sink_) bill_refusal_sink_(line); }
     void bind_funding_sinks(BillingSink billing, CreditSink credits) { billing_sink_ = std::move(billing); credit_sink_ = std::move(credits); }
     [[nodiscard]] static BillRow bill_row(const Purchase&);
     [[nodiscard]] std::map<sim::EntityId, BillRow> bill_rows() const;
@@ -152,6 +168,10 @@ public:
         const gc::GalacticSession::NativeActionShadow&, std::span<const gc::GalacticSession::NativeActorChange>,
         const sim::PartitionExecutor&)>;
     void bind_freestore_births(FreestoreBirths callback) { freestore_births_ = std::move(callback); }
+    // A dry run of the births these changes would deliver, on a private copy of the free store: the same read and admission the
+    // actor-change handler does at publication, without touching the AI. Success when no AI reads births.
+    [[nodiscard]] core::Result<void> probe_births(const gc::GalacticSnapshot&, const gc::GalacticSession::NativeActionShadow&,
+        std::span<const gc::GalacticSession::NativeActorChange>, const sim::PartitionExecutor&) const;
     void set_executor(const sim::PartitionExecutor* executor) noexcept { executor_ = executor; }
     // A decision chain selects its inline adapter without changing the barrier's shared adapter.
     class ExecutorScope {
@@ -187,6 +207,7 @@ public:
         std::uint64_t plan_id{}, taskforce_id{}, block_id{};
         bool registered{true};
         sim::EntityId freestore_actor{}; // WGA-307/313: retained selected identity
+        bool raid{}; // GAR-02: retained across ordinary hops and native save/load
         bool operator==(const Movement&) const = default;
     };
     using MovementInventoryValidator = std::function<core::Result<void>(const std::map<std::uint64_t, Movement>&)>;
@@ -223,10 +244,19 @@ public:
     // Ends that player's unfinished block for the actor, as a refused hop does in advance_movement.
     // Returns whether a retained row changed; idempotent.
     [[nodiscard]] core::Result<bool> refuse_movement(gc::PlayerId, gc::FleetId actor);
+    // Async lane: the registered unfinished movement blocks (request identities) a refused hop of `actor` finishes right now, and the
+    // finish of exactly those blocks later. A block made after the refusal (a later movement of the same fleet) is never swept.
+    [[nodiscard]] std::vector<std::uint64_t> unfinished_movements(gc::PlayerId, gc::FleetId actor) const;
+    [[nodiscard]] core::Result<bool> refuse_movements(gc::PlayerId, gc::FleetId actor, std::span<const std::uint64_t> requests);
+    // Whether refuse_purchase would change the retained purchase now (an unfinished purchase of this player).
+    [[nodiscard]] bool purchase_refusable(gc::PlayerId, sim::EntityId build) const;
     // GFS-A22 ordered commit: the merged world refused a speculative paid build. Marks the retained
     // purchase failed, like a failed-build outcome; the goal then refunds its mark as usual.
     // Returns whether a retained row changed; idempotent.
     [[nodiscard]] core::Result<bool> refuse_purchase(gc::PlayerId, sim::EntityId build);
+    // The canonical admission's price is the build's price from then on: the queue entry bills by it, and the AI's own mark was
+    // taken from the shadow view, which can differ when the world moved between the turn and the commit.
+    [[nodiscard]] core::Result<void> adopt_purchase_price(gc::PlayerId, sim::EntityId build, sim::math::Fixed price);
     [[nodiscard]] core::Result<void> retire_freestore_movement(sim::EntityId actor, bool actor_lost = false);
     struct FreestoreMoveInput {
         bool actor_valid{}, source_ai_usable{};
@@ -238,6 +268,10 @@ public:
     // WGA-438: the player-independent planetary predicate behind Lua Get_Is_Planet_AI_Usable.
     using PlanetUsability = std::function<core::Result<bool>(const gc::GalacticSnapshot&, gc::PlanetId)>;
     void bind_planet_usability(PlanetUsability reader) { planet_usability_ = std::move(reader); }
+    // WGA-450/451 (#7188): the planet's committed corruption, behind the object method Is_Corrupted that the stock sabotage plan calls
+    // on its target. The reader sees the completed snapshot this shadow was captured from, like the usability predicate.
+    using PlanetCorruption = std::function<core::Result<bool>(const gc::GalacticSnapshot&, gc::PlanetId)>;
+    void bind_planet_corruption(PlanetCorruption reader) { planet_corruption_ = std::move(reader); }
     struct FreestorePathInput {
         std::vector<gc::PlanetId> planets;
         Number threat{};
@@ -270,6 +304,8 @@ public:
     [[nodiscard]] bool movement_actor_exists(sim::EntityId) const;
     [[nodiscard]] const gc::GalacticSession::NativeInvasion* invasion_status(std::uint64_t request) const noexcept;
     [[nodiscard]] core::Result<void> retire_invasion(std::uint64_t request);
+    // The release of an invasion this lane decided earlier that the current window's overlay refused (no row to update).
+    [[nodiscard]] core::Result<void> retire_unadmitted_invasion(std::uint64_t request);
 
     [[nodiscard]] core::Result<ai::GalacticBuildStatus> build_status(gc::PlayerId, sim::EntityId build) const;
     [[nodiscard]] core::Result<sim::EntityId> build_actor(gc::PlayerId, sim::EntityId build) const;
@@ -383,18 +419,21 @@ private:
     PendingFreestoreReplay pending_freestore_replay_;
     PendingBillRemaining pending_bill_remaining_;
     std::function<sim::EntityId()> identity_ceiling_;
+    std::shared_ptr<GalacticAiWriteProbe> write_probe_;
     std::function<sim::EntityId()> lane_floor_;
     std::function<bool(std::uint64_t)> invasion_pending_;
     ActorFactsReader actor_facts_;
     ActorChanges actor_changes_;
     DeliverySink delivery_sink_;
     BillingSink billing_sink_;
+    RefusalSink bill_refusal_sink_;
     CreditSink credit_sink_;
     LoadNoteSink load_note_sink_;
     void apply_production_outcome(const gc::GalacticSession::NativeProductionOutcome&);
     FreestoreBirths freestore_births_;
     FreestoreMoveProvider freestore_move_;
     PlanetUsability planet_usability_;
+    PlanetCorruption planet_corruption_;
     FreestorePathProvider freestore_path_;
     MovementProvider movement_provider_;
     MovementFrontier movement_frontier_;

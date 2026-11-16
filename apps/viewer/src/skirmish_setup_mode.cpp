@@ -1,11 +1,13 @@
 #include "revised_layer.hpp"
 #include "eawr/vfs/vfs.hpp"
+#include "eawr/platform/setup_map_facts.hpp"
 #include "viewer_load_notes.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/core/text.hpp"
 #include "skirmish_setup_mode.hpp"
 #include "menu_timeline.hpp"
 #include "setup_profile_policy.hpp"
+#include "startup_window.hpp"
 
 #include <cstdio>
 #include "lan_instance_options.hpp"
@@ -26,6 +28,7 @@
 #include "ui/dialog_builder.hpp"
 #include "ui/font_provider.hpp"
 #include "ui/kit.hpp"
+#include "ui/message_box_view.hpp"
 #include "ui/theme_builder.hpp"
 #include "eawr/data/ui/dialog_catalog.hpp"
 #include "eawr/data/xml.hpp"
@@ -226,6 +229,7 @@ struct SkirmishSetupMode::State final {
     bool visible{true}, test{}, captured{}, capture_error_reported{}, bench_started{};
     std::string failure;
     std::string notice;
+    int64_t refusal_id{};  // the open start-refusal box, 0 when none
 
     // A caption from the text database (UI-T3: a missing key shows as written).
     [[nodiscard]] std::string lookup(std::string_view key);
@@ -324,7 +328,7 @@ bool SkirmishSetupMode::State::mount() {
     MenuTimeline::mark("setup_load_begin");
     mount_revised_layer(roots);
     mounted_roots = roots;
-    auto chain = vfs::resolve_manifest_chain(roots);
+    auto chain = read_with_startup_messages([&] { return vfs::resolve_manifest_chain(roots); });
     if (!chain) { failure = core::format_diagnostic(chain.error()); return false; }
     MenuTimeline::mark("manifest_chain_resolved");
     std::vector<vfs::MountSpec> specs;
@@ -332,7 +336,7 @@ bool SkirmishSetupMode::State::mount() {
         mounted_layers.push_back(manifest.mount.layer_id);
         specs.push_back(std::move(manifest.mount));
     }
-    auto mounted = vfs::Vfs::mount(specs);
+    auto mounted = read_with_startup_messages([&] { return vfs::Vfs::mount(specs); });
     if (!mounted) { failure = core::format_diagnostic(mounted.error()); return false; }
     filesystem = std::make_shared<const vfs::Vfs>(std::move(mounted).value());
     MenuTimeline::mark("vfs_mounted");
@@ -399,10 +403,12 @@ void SkirmishSetupMode::State::show_startup() {
 bool SkirmishSetupMode::State::load() {
     data::LoadOptions load_options;
     load_options.parse_unregistered_xml = false;
-    auto objects = data::load_catalog_strict(*filesystem, mounted_profile == "foc" ? data::Profile::foc : data::Profile::remake, load_options);
+    auto objects = read_with_startup_messages([&] {
+        return data::load_catalog_strict(*filesystem, mounted_profile == "foc" ? data::Profile::foc : data::Profile::remake, load_options);
+    });
     if (!objects) { failure = core::format_diagnostic(objects.error()); return false; }
-    publish_viewer_load_notes(std::move(objects.value().notes), mounted_layers);
-    if (!startup_notes.empty()) publish_viewer_load_notes(std::move(startup_notes), {}, true);
+    publish_viewer_load_notes(std::move(objects.value().notes), mounted_layers, false, pump_startup_messages);
+    if (!startup_notes.empty()) publish_viewer_load_notes(std::move(startup_notes), {}, true, pump_startup_messages);
     if (!objects.value().health.clean()) {
         UtilityFunctions::printerr(text("EAWR catalog load: " + data::describe_load_health(objects.value().health)));
     }
@@ -441,7 +447,10 @@ bool SkirmishSetupMode::State::load() {
     skirmish::SetupMapQuery query;
     query.custom.reset();
     query.read_whole_headers = OS::get_singleton()->get_cmdline_user_args().has("--eawr-map-list-whole-read");
-    auto found = all_maps.load(filesystem, catalog, query);
+    // The list's header and entry facts persist in the model facts folder (docs/model-facts-store.md): a second launch lists
+    // the maps without opening or decoding them.
+    all_maps.set_facts_store(platform::process_setup_map_facts_store());
+    auto found = read_with_startup_messages([&] { return all_maps.load(filesystem, catalog, query); });
     if (!found) { failure = found.error().message; return false; }
     if (!all_maps.land_failure().empty()) UtilityFunctions::printerr(text(all_maps.land_failure()));
     for (const auto& map : all_maps) if (map.metadata.custom == false && map.domain == domain) maps.push_back(map);
@@ -2025,6 +2034,37 @@ void SkirmishSetupMode::show(std::string message) {
     UtilityFunctions::print("EAWR skirmish setup returned");
 }
 
+
+void SkirmishSetupMode::show_refusal(const std::string& reason, const std::string_view headline) {
+    const auto refusal = model::setup_start_refusal(reason, headline);
+    UtilityFunctions::printerr(String::utf8(("EAWR skirmish start refused: " + refusal.first_line).c_str()));
+    // The status line carries only the headline and code; the box below carries all three lines (headline and code,
+    // the first line of the error, where the full text is).
+    show(refusal.lines[0]);
+    auto& state = *state_;
+    // The online lobby is the screen here: show() re-showed it, so its own failure box carries the message.
+    if (state.online_mode && state.online_screen) { state.online_screen->show_refusal(reason, headline); return; }
+    if (state.lan_smoke || state.online_mode || !state.dialogs || !state.theme_model) return;
+    if (state.refusal_id != 0 && UtilityFunctions::is_instance_id_valid(state.refusal_id)) return;
+    model::MessageBoxRequest request;
+    request.caption = std::string(model::skirmish_setup_text_key(model::SetupText::start));
+    for (std::size_t line = 0; line < refusal.lines.size(); ++line) {
+        request.lines[line] = refusal.lines[line];
+        request.literal_lines[line] = true;
+    }
+    request.buttons = {model::BoxButton{"TEXT_BUTTON_OK", 0, true}};
+    const MessageBoxContext context{&*state.dialogs, &*state.theme_model, state.text_lookup ? &*state.text_lookup : nullptr,
+        state.theme, state.host->get_viewport()->get_visible_rect().size};
+    auto* box = memnew(EawrMessageBox);
+    if (!box->open(*state.host, context, request)) {
+        UtilityFunctions::printerr("EAWR skirmish start refusal box: ", text(box->failure()));
+        memdelete(box);
+        return;
+    }
+    // The first line can be long: the wrapping text area carries all three lines (as the save and campaign boxes do).
+    box->set_scrollable_text(refusal.lines[0] + "\n" + refusal.lines[1] + "\n" + refusal.lines[2]);
+    state.refusal_id = static_cast<int64_t>(box->get_instance_id());
+}
 
 SkirmishSetupMode::UiResources SkirmishSetupMode::ui_resources() const {
     const auto& state = *state_;

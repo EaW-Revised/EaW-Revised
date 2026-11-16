@@ -49,3 +49,9 @@ pool-overlay.log.jsonl
 
 # Quality-sweep host pools (tools/gc_quality/README.md)
 config/gc-quality-hosts.local.json
+
+# Scheduler deployment identity (URL); rules only go in the tracked policy.
+config/scheduler.local.json
+
+# Optional export; test selection derives this from tracked inputs.
+/tests/test_index.json

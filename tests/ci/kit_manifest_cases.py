@@ -227,6 +227,26 @@ class KitManifestTests(unittest.TestCase):
         self.assertIn('tools/offload/windows_build.py', names)
         self.assertEqual(state['tooling_commit'], run_git(self.repo.root, 'rev-parse', 'HEAD'))
 
+    def test_orchestrator_is_clean_only_when_no_tracked_or_untracked_change_exists_in_the_tool_trees(self):
+        root = self.repo.root
+        self.assertTrue(kit_manifest.orchestrator(root)['clean'])
+        for name, text in (('tools/release/kit_manifest.py', 'edited\n'), ('tools/release/finish_kit.py', 'edited\n'),
+                           ('tools/release/release_version.py', 'a new helper\n'),  # untracked
+                           ('tools/common/helper.py', 'a new helper\n'),  # untracked, outside tools/release
+                           ('tools/offload/helper.py', 'a new helper\n')):
+            with self.subTest(name):
+                existed = (root / name).exists()
+                before = (root / name).read_bytes() if existed else None
+                self.repo.write(name, text)
+                self.assertFalse(kit_manifest.orchestrator(root)['clean'], name)
+                if existed:
+                    (root / name).write_bytes(before)
+                else:
+                    (root / name).unlink()
+                self.assertTrue(kit_manifest.orchestrator(root)['clean'], name)
+        self.repo.write('docs/unrelated.md', 'x\n')  # outside the tool trees: not orchestrating code
+        self.assertTrue(kit_manifest.orchestrator(root)['clean'])
+
     def test_extract_payload_reads_the_commit_not_the_working_tree(self):
         self.repo.write('tools/release/kit_engine.py', 'edited after the cut\n')
         out = kit_manifest.extract_payload(self.repo.root, self.repo.kit, self.root / 'payload')
@@ -445,6 +465,25 @@ class FinishManifestTests(unittest.TestCase):
             self.assertEqual(code, 4)
             self.assertIn("tool: finish_kit.py in this checkout is not the kit commit's copy", output)
             self.assertFalse((root / 'out').exists())
+
+    def test_tooling_commit_is_for_a_release_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            (root / 'repo').mkdir()
+            repo = KitRepo(root / 'repo')
+            work = root / 'work'
+            work.mkdir()
+            player = work / 'kit-player.zip'
+            player.write_bytes(b'original')
+            manifest = kit_manifest.new_manifest(repo.plan())
+            kit_manifest.add_host(manifest, {'host': 'h', 'received_from': 'log', 'outputs': [
+                {'name': player.name, 'size': 8, 'sha256': hashlib.sha256(b'original').hexdigest()}]})
+            kit_manifest.write(work / kit_manifest.MANIFEST_NAME, manifest)
+            (work / 'cut.json').write_text(json.dumps({'ok': True, 'kit_sha': repo.kit, 'player_zip': str(player),
+                                                       'plan_sha256': manifest['plan_sha256'], 'changes': str(player)}))
+            code, output = self.run_finish(work, repo.root, root, '--tooling-commit', repo.kit)
+            self.assertEqual(code, 4)
+            self.assertIn('--tooling-commit is for a release only', output)
 
     def test_delivery_paths_also_protect_the_manifest_sidecar(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -148,11 +148,47 @@ struct SquadronIcon {
 
 // A right-button release (O-1, O-2). Only a release whose press was seen is a gesture: `press` is
 // empty after the host cancelled it (focus loss, pointer exit) and for a release that arrives alone,
-// and such a release does nothing. A press-to-release extent past MinimumDragSelectDistance is the
-// compass; anything smaller is a click.
-enum class RightRelease : std::uint8_t { ignored, compass, click };
+// and such a release does nothing. By the press-to-release extent (the larger screen side): up to
+// MinimumDragDistance is a click (the order is decided at the release point); past it and below
+// MinimumDragSelectDistance is the compass (a move is ordered at the press point); MinimumDragSelectDistance
+// or more cancels a move (an attack or guard is not affected).
+enum class RightRelease : std::uint8_t { ignored, compass, click, cancel };
 [[nodiscard]] RightRelease right_release(std::optional<std::array<float, 2>> press,
                                          std::array<float, 2> release) noexcept;
+
+// O-6 / MV-40: shared group heading in [0, 360), rounded to a tenth of a degree.
+[[nodiscard]] std::optional<sim::math::Fixed> compass_yaw(const Vec3f& press, const Vec3f& release) noexcept;
+// O-2: the hold gates the authored arrow only; quick flicks still order.
+[[nodiscard]] bool compass_visible(std::optional<std::array<float, 2>> press,
+    std::array<float, 2> cursor, double held_seconds) noexcept;
+
+// O-2, O-4: the point a facing-only drag turns the selected ships towards: from `press` (the battle
+// plane point of the press) along the direction to `release`, rounded to 0.1 degree like the retail
+// heading, `range` units out. One far target keeps the ships' headings parallel until the rules carry a
+// heading of their own: a ship `d` units from the press point is off by about d / range radians
+// (2000 units out at the default range is 0.8 degree). The target must stay inside what the simulation
+// accepts (the motion planner drops a target past its coordinate limit and the ships just stop), so the
+// range is cut to keep it within `facing_target_limit` on both axes. Empty when the two points coincide
+// or are not finite, when `press` itself is outside the limit, and when the cut leaves less than
+// `facing_target_min_range` (the heading would no longer be shared by the ships).
+inline constexpr float facing_target_range = 150000.0F;
+inline constexpr float facing_target_limit = 200000.0F;  // below the simulation's 2^18 unit coordinate limit
+inline constexpr float facing_target_min_range = 10000.0F;
+[[nodiscard]] std::optional<Vec3f> facing_point(const Vec3f& press, const Vec3f& release,
+                                                float range = facing_target_range) noexcept;
+
+// O-2, O-4: what a right release between the two drag limits (RightRelease::compass) orders, decided on the
+// battle plane points. `press` is empty when the press ray met no ground: the gesture is then cancelled
+// (nothing is ordered; the release point must not stand in for the press). Otherwise a move at `press`, or
+// in space with the press on a selected ship (`on_selected`) a turn in place towards `toward`.
+struct CompassPlan {
+    enum class Kind : std::uint8_t { cancel, move, face };
+    Kind kind{Kind::cancel};
+    Vec3f press{};
+    Vec3f toward{};
+};
+[[nodiscard]] CompassPlan compass_plan(const std::optional<Vec3f>& press, const Vec3f& release, bool on_selected,
+                                       bool space) noexcept;
 
 // What a right click with a selection does (O-1, O-3), given the armed mode and the unit under the
 // pointer (`over`, null on empty space). Attack mode attacks an enemy and is disarmed by any other

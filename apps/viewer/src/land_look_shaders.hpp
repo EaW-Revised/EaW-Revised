@@ -86,6 +86,22 @@ uniform sampler2D eawr_diffuse : filter_linear_mipmap, repeat_enable;
 uniform sampler2D eawr_clouds : filter_linear_mipmap, repeat_enable;
 uniform sampler2D eawr_scene_depth : hint_depth_texture, filter_nearest;
 uniform vec4 eawr_sky = vec4(0.9, 1.0, 0.0, 0.0);
+// rgb: the linear gain of a MeshGloss-family dome (the space route's unlit
+// policy, 2 * Emissive); w is 1 for such a dome and 0 for Skydome.fx, which is
+// drawn as stored.
+uniform vec4 eawr_sky_tint = vec4(1.0, 1.0, 1.0, 0.0);
+vec3 eawr_srgb_to_linear(vec3 encoded_rgb) {
+    vec3 nonnegative = max(encoded_rgb, vec3(0.0));
+    vec3 low = nonnegative / 12.92;
+    vec3 high = pow((nonnegative + 0.055) / 1.055, vec3(2.4));
+    return mix(high, low, lessThanEqual(nonnegative, vec3(0.04045)));
+}
+vec3 eawr_linear_to_srgb(vec3 linear_rgb) {
+    vec3 nonnegative = max(linear_rgb, vec3(0.0));
+    vec3 low = 12.92 * nonnegative;
+    vec3 high = 1.055 * pow(nonnegative, vec3(1.0 / 2.4)) - 0.055;
+    return mix(high, low, lessThanEqual(nonnegative, vec3(0.0031308)));
+}
 void vertex() {
     vec4 far_a = INV_PROJECTION_MATRIX * vec4(0.0, 0.0, 1.0, 1.0);
     vec4 far_b = INV_PROJECTION_MATRIX * vec4(0.0, 0.0, 0.0, 1.0);
@@ -96,7 +112,9 @@ void fragment() {
     if (texture(eawr_scene_depth, SCREEN_UV).r > 0.00001) discard;
     vec3 base = texture(eawr_diffuse, UV).rgb;
     vec4 cloud = texture(eawr_clouds, UV * eawr_sky.y);
-    ALBEDO = mix(base, cloud.rgb, cloud.a * eawr_sky.w);
+    vec3 color = mix(base, cloud.rgb, cloud.a * eawr_sky.w);
+    if (eawr_sky_tint.w > 0.5) color = eawr_linear_to_srgb(eawr_sky_tint.rgb * eawr_srgb_to_linear(color));
+    ALBEDO = color;
 }
 )GODOT";
 

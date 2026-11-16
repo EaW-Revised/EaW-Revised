@@ -105,11 +105,21 @@ public:
     [[nodiscard]] core::Result<TacticalTick> step_land(TacticalSession& session, const PartitionExecutor& executor);
     // G-04..G-07 (session_land_garrison.cpp): the garrison service seam after the movement and occupancy commit.
     [[nodiscard]] core::Result<void> land_garrison_service(std::vector<LiveUnit>& live, const PartitionExecutor& executor);
+    // WLAB-01..11, WLAB-77 (#3238, session_land_abilities.cpp): a land ability command, the per-tick expiry, and the Force
+    // disabling window the enabled gate reads.
+    void land_ability_command(std::vector<LiveUnit>& live, const PlayerCommand& command, std::vector<core::Diagnostic>& diagnostics);
+    void land_ability_service(std::vector<LiveUnit>& live);
+    [[nodiscard]] bool land_force_disabled(EntityId unit, std::uint64_t tick) const;
+    void land_force_disable_service(const std::vector<LiveUnit>& live);
+    void land_weapon_swap_service(const std::vector<LiveUnit>& live); // WLAB-71 (#3239)
+    void land_jump_service(std::vector<LiveUnit>& live);              // WLAB-16 (#7084, land_jump.cpp)
     [[nodiscard]] std::vector<std::uint8_t> land_bytes(bool partitioned) const;
     void encode_land_partition(std::size_t partition) const;
     [[nodiscard]] core::Result<void> restore_land(std::span<const std::uint8_t> bytes);
     [[nodiscard]] RetreatGate retreat_gate(PlayerId player) const;
     [[nodiscard]] std::vector<RetreatView> retreat_views() const;
+    // TSW-13: the switch presenter's rows from the committed records and the published instances (ascending id).
+    [[nodiscard]] std::vector<TswView> tsw_views(std::span<const TacticalInstance> instances) const;
     [[nodiscard]] std::vector<RetreatActor> retreat_actors(const UnitStage* staged = nullptr) const;
     [[nodiscard]] bool retreat_holds(EntityId id) const;
     [[nodiscard]] bool retreat_escape(EntityId id) const;
@@ -221,7 +231,14 @@ public:
     // targetable hardpoint (authored order on ties), else the hull (no_hardpoint).
     [[nodiscard]] std::uint32_t energy_hardpoint(const LiveUnit& source, const LiveUnit& target) const;
     void register_tractor(const LiveUnit&, const LiveUnit*);
-    [[nodiscard]] core::Result<void> service_beams(std::vector<LiveUnit>&, std::uint64_t, const PartitionExecutor&);
+    // `laser_pass`: the one service per tick that also runs the SUPER_LASER aiming, firing and continuation stages (WSPL-08).
+    [[nodiscard]] core::Result<void> service_beams(std::vector<LiveUnit>&, std::uint64_t, const PartitionExecutor&, bool laser_pass = false);
+    // WSPL-03/04/08: the behaviour's turn toward the locked target, the cone wait, the attack-clip gate and the fire stage.
+    void turn_laser(LiveUnit&, const SpecialAbilityProfile&, SpecialAbilitySlot&, const LiveUnit* target) const;
+    void fire_laser(LiveUnit&, const SpecialAbilityProfile&, std::size_t ability_index, SpecialAbilitySlot&, const LiveUnit& target,
+        std::uint64_t tick) const;
+    // WSPL-08: the target left the world after the beam fired: the use continues without damage for Fire_Continuation.
+    void detach_laser(LiveUnit&, const SpecialAbilityProfile&, SpecialAbilitySlot&, std::uint64_t tick) const;
     [[nodiscard]] bool buzz_request_ready(const LiveUnit&, math::Vec3, std::uint64_t) const;
     [[nodiscard]] core::Result<LiveUnit> create_buzz_droids(LiveUnit&, math::Vec3, std::uint64_t,
         EntityId& allocated_next_id, SeatId controller = {});
@@ -399,6 +416,19 @@ public:
     // LC-48: companies counted against the cap: the shares of the owner's objects plus its companies in flight.
     [[nodiscard]] std::int64_t land_company_count(PlayerId owner, const std::map<EntityId, PopulationShare>& owner_shares,
         const UnitStage& staged) const;
+    // #7190: the read-only verdict a land player's drop preview and drop check use: the company's cap room (LC-46..48) and the
+    // whole-company admission (LC-43..45) at `point`, under the owner's reinforcement facing (LR-FACING). Reads the completed
+    // world only: no RNG, no cache, no state written.
+    [[nodiscard]] core::Result<bool> land_reinforcement_point(PlayerId player, TypeId type, const math::Vec3& point) const;
+    // WLAI-21..23 (#3209), session_land_landing_search.cpp: the position a land AI player's company is offered, ranked from the
+    // player's allied reinforcement points; none when no ring position is admitted. `candidates` counts the admissions tried.
+    [[nodiscard]] core::Result<std::optional<math::Vec3>> land_landing_search(PlayerId player, TypeId type, const math::Vec3& target,
+        math::Fixed yaw_degrees, const UnitStage& staged, const std::map<EntityId, PopulationShare>& shares,
+        std::uint32_t& candidates) const;
+    // The land economy's resolution of an AI search request (WLAI-21..23), against the state the landing is admitted in: true
+    // when the command goes on with the chosen position.
+    [[nodiscard]] core::Result<bool> resolve_land_reinforcement_search(const CommandKey& key, ReinforcePayload& payload, UnitStage& staged,
+        const std::vector<PlayerEconomy>& staged_ledgers, const std::map<EntityId, PopulationShare>& staged_shares);
     [[nodiscard]] core::Result<void> execute_land_reinforcement(const PlayerCommand& command, std::uint64_t tick,
         UnitStage& staged, EconomyStage& stage, PlayerEconomy& ledger, const EconomyPlayer& player, Event& event,
         std::vector<Event>& events);
@@ -479,7 +509,8 @@ public:
     [[nodiscard]] core::Result<PathInputs> path_inputs(const LiveUnit& unit, const std::optional<math::Fixed> max_speed) const;
 
     // plan_path's last step: the unit takes `plan`.
-    static void take_plan(LiveUnit& unit, MotionState plan);
+    [[nodiscard]] core::Result<void> take_plan(LiveUnit& unit, MotionState plan,
+        math::Vec3 target, std::uint64_t start) const;
     static void retain_path_failure(LiveUnit& unit, math::Vec3 target, std::uint64_t frame, math::Fixed max_speed);
 
     // plan_path, whose path search (a tracked unit with a world) is given up once it has counted
@@ -596,6 +627,7 @@ public:
     void append_canonical_garrison_enabled_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_named_locks_state(std::vector<std::uint8_t>& bytes) const;
     void append_canonical_special_weapons_state(std::vector<std::uint8_t>& bytes) const;
+    void append_canonical_tsw_state(std::vector<std::uint8_t>& bytes) const;
     void append_canonical_garrisons_state(std::vector<std::uint8_t>& bytes) const;
     void append_canonical_manual_weapons_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_turrets_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
@@ -638,6 +670,7 @@ public:
     void append_canonical_mc30_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_ion_stuns_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_hazard_moves_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_final_facing_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_asteroids_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_engine_disable_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_nebula_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;

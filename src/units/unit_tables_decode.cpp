@@ -211,6 +211,8 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         unit.kind = hint;
         // Duplicate names retain the first registered definition's position (PL-20); the
         // other definitions stay in the catalog, and separate duplicate type-table entries remain legacy #3741.
+        // A row without a catalog entry (a map-only definition) follows every catalog row; ties keep load order, as for obstacles.
+        unit.table_order = std::numeric_limits<std::uint64_t>::max();
         if (const auto* definition = input_.catalog->find(id, data::Category::game_object))
             unit.table_order = (static_cast<std::uint64_t>(definition->registry_order) << 32) | definition->definition_order;
         auto object = resolve(*input_.catalog, id, data::Category::game_object, id, "type", report_);
@@ -236,8 +238,13 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         if (input_.domain == sim::tactical::BattleDomain::land && land_ground_object(*object)) {
             load_land_body(*object, unit);
             load_land_income_abilities(*object, unit); // LR4-15: authored land income streams.
+            load_land_weapon_swap(*object, unit); // WLAB-71 (#3239): the nested permanent weapon swap
+            load_unit_abilities(*object, unit); // WLAB-01 (#3238): the Unit_Abilities_Data rows of the land object
             // LE-LOADER: a build pad or a construction child also decodes its pad and menu rows.
             if (land_pad_object(*object)) load_land_pad(*object, unit);
+            // LR4-01/06 (#6993): a completed structure that authors a production menu (a factory, a barracks) reads its menu rows,
+            // so its companies are decoded with it and the economy can offer them.
+            else if (!tokens(object->text("Tactical_Buildable_Objects_Multiplayer")).empty()) load_production(*object, unit);
             object->note_duplicates(report_);
             tables_.units.push_back(std::move(unit));
             return;
@@ -522,27 +529,38 @@ SpaceFootprint Loader::read_footprint(Object& object, const Frames* model) {
         return footprint;
     }
 
+ProjectileUse build_projectile_use(const UnitTables& tables) {
+    ProjectileUse use;
+    for (const auto& unit : tables.units) {
+        for (const auto& entry : unit.death_projectiles) use.death.insert(entry);
+        use.retreat.insert(unit.retreat_self_destruct);
+        for (const auto* list : {&unit.abilities, &unit.team_abilities}) for (const auto& ability : *list) {
+            use.spawned.insert(ability.spawned_object);
+            use.fired.insert(ability.projectile_override);
+        }
+        if (unit.weapon) use.fired.insert(unit.weapon->projectile);
+        for (const auto& point : unit.hardpoints) if (point.weapon) use.fired.insert(point.weapon->projectile);
+    }
+    return use;
+}
+
+const ProjectileUse& Loader::projectile_use() {
+    if (!projectile_use_) projectile_use_ = build_projectile_use(tables_);
+    return *projectile_use_;
+}
+
 void Loader::load_projectile(const std::string& id) {
         auto object = resolve(*input_.catalog, id, data::Category::game_object, id, "projectile", report_);
         if (!object) return;
         record_layers(*object);
         Projectile projectile;
         projectile.id = object->effective.object_id;
-        bool spawned = false;
-        bool death_payload = false;
-        bool retreat_payload = false;
-        bool fired = false;
-        for (const auto& unit : tables_.units) {
-            for (const auto& entry : unit.death_projectiles) death_payload |= iequals(entry, projectile.id);
-            retreat_payload |= iequals(unit.retreat_self_destruct, projectile.id);
-            for (const auto* list : {&unit.abilities, &unit.team_abilities}) for (const auto& ability : *list) {
-                spawned |= iequals(ability.spawned_object, projectile.id);
-                fired |= iequals(ability.projectile_override, projectile.id);
-            }
-            if (unit.weapon) fired |= iequals(unit.weapon->projectile, projectile.id);
-            for (const auto& point : unit.hardpoints) if (point.weapon)
-                fired |= iequals(point.weapon->projectile, projectile.id);
-        }
+        // Which loaded unit rows name this projectile: one case-folded lookup per role instead of a walk over every unit.
+        const auto& use = projectile_use();
+        const bool death_payload = use.death.contains(projectile.id);
+        const bool retreat_payload = use.retreat.contains(projectile.id);
+        const bool spawned = use.spawned.contains(projectile.id);
+        const bool fired = use.fired.contains(projectile.id);
         // WHE-61/62: an ordinary ability creates its object directly; gun flight/category
         // fields are not prerequisites for that creation or its countdown detonation.
         const bool spawned_only = spawned && !fired;

@@ -45,6 +45,7 @@ inline FighterWork fighter_work;
 inline std::set<std::uint64_t> fighter_entities;
 inline void begin_fighter_frame(std::uint64_t) {}
 }
+namespace diagnostic_switches { struct Switches { bool particles{}, turrets{}, skeletons{}, shadows{}; }; inline Switches active{}; }
 struct FrameTimer { explicit FrameTimer(double*, bool = false) {} void finish() {} };
 namespace sim { using EntityId = std::uint64_t; using AssetId = std::uint64_t;
 struct RenderInstance { EntityId entity_id{}; AssetId asset_id{}; };

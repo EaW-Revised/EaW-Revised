@@ -223,10 +223,82 @@ void provider_and_captions() {
     quit.explicit_quit = true;
     expect(score::campaign_score_shown(quit), "an explicit quit may enter the score screen (WGS-118)");
 }
+
+// WGP-105..110: the score screen's movie driver over the end chain. Only a Has_Credits declaration plays (the credits
+// roll); any other movie is an open failure that continues synchronously.
+void movie_driver() {
+    const auto declare = [](std::string_view name) -> std::optional<score::CampaignMovieDeclaration> {
+        if (name == "Credits") return score::CampaignMovieDeclaration{true, false};
+        if (name == "Locked_Credits") return score::CampaignMovieDeclaration{true, true};
+        if (name == "E_Win" || name == "E_Finale") return score::CampaignMovieDeclaration{false, false};
+        return std::nullopt;
+    };
+    const auto view = [](bool enabled) {
+        platform::CampaignEndView end;
+        end.route = platform::CampaignEndRoute::score;
+        end.local_won = true;
+        platform::CampaignEndInputs inputs;
+        inputs.generic_win_movie = "E_Win"; inputs.finale_movie = "E_Finale"; inputs.post_credits_movie = "E_Post";
+        inputs.victory_movies_enabled = enabled;
+        end.inputs = inputs;
+        return end;
+    };
+    {
+        // A stock conquest (movies disabled, WGP-105): the empty initial and first finale continue at once to the
+        // looping Credits, which rolls; the first continuation asks for the music and speech stop (WGP-107).
+        platform::CampaignEndPresentation chain(view(false));
+        score::CampaignMovieState state;
+        score::advance_campaign_movies(chain, state, declare);
+        expect(state.rolling && state.name == "Credits" && chain.movie_request() && chain.movie_request()->looping,
+            "WGP-107/108: a stock conquest win reaches the looping Credits roll");
+        expect(chain.take_stop_music_and_speech(), "WGP-107: the first continuation stops music and speech");
+        const auto token = state.token;
+        score::advance_campaign_movies(chain, state, declare);
+        expect(state.token == token && state.rolling, "the same request is not handled twice");
+        // WGP-109: Escape/Space stops a skippable roll; Credits has no local continuation.
+        expect(chain.movie_skip_key(true, true, true, false, state.cannot_skip) && !chain.movie_request(),
+            "WGP-109: the key stops the credits and is consumed");
+        score::advance_campaign_movies(chain, state, declare);
+        expect(!state.rolling && state.name.empty(), "nothing plays after a skipped Credits");
+    }
+    {
+        // Movies enabled (a story, WGP-105): the win and finale movies have no player yet and continue to Credits;
+        // the roll's natural end requests the post-credits movie (WGP-110), which cannot play either.
+        platform::CampaignEndPresentation chain(view(true));
+        score::CampaignMovieState state;
+        score::advance_campaign_movies(chain, state, declare);
+        expect(state.rolling && state.name == "Credits", "WGP-108: unplayable win and finale movies continue to Credits");
+        chain.credits_completed(state.token, true);
+        expect(chain.movie_request() && chain.movie_request()->name == "E_Post", "WGP-110: the roll's end requests post-credits");
+        score::advance_campaign_movies(chain, state, declare);
+        expect(!state.rolling && !chain.movie_request(), "an unplayable post-credits movie ends the chain");
+    }
+    {
+        // A Cannot_Skip roll consumes the key without stopping (WGP-109).
+        platform::CampaignEndView end = view(false);
+        platform::CampaignEndPresentation chain(end);
+        score::CampaignMovieState state;
+        const auto locked = [&](std::string_view name) {
+            return name == "Credits" ? declare("Locked_Credits") : declare(name);
+        };
+        score::advance_campaign_movies(chain, state, locked);
+        expect(state.rolling && state.cannot_skip, "the declaration's Cannot_Skip reaches the roll");
+        expect(chain.movie_skip_key(true, true, true, false, state.cannot_skip) && chain.movie_request(),
+            "WGP-109: a Cannot_Skip movie consumes the key and keeps playing");
+    }
+    {
+        // No credits declaration at all (a mod without Credits): the chain ends without a roll.
+        platform::CampaignEndPresentation chain(view(false));
+        score::CampaignMovieState state;
+        score::advance_campaign_movies(chain, state, [](std::string_view) { return std::optional<score::CampaignMovieDeclaration>{}; });
+        expect(!state.rolling && !chain.movie_request(), "WGP-108: an undeclared Credits ends the chain");
+    }
+}
 } // namespace
 
 int main() {
     provider_and_captions();
+    movie_driver();
     if (failures != 0) { std::cerr << failures << " campaign score checks failed\n"; return 1; }
     std::cout << "campaign score checks passed\n";
     return 0;

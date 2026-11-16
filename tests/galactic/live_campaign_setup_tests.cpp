@@ -10,6 +10,8 @@
 #include "eawr/campaign/galactic_ai_services.hpp"
 #include "../../src/platform/galactic/save_repository.hpp"
 #include "eawr/platform/live_game_session.hpp"
+#include "eawr/core/gc_load_trace.hpp"
+#include "eawr/data/tag_trace.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
 #include "eawr/platform/agreed_campaign.hpp"
 #include "eawr/platform/live_game_lockstep.hpp"
@@ -299,6 +301,53 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
                 if (!prepared) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(prepared.error()));
                 expect(prepared.value()->native_ai_installed() && !prepared.value()->native_ai_players().empty(),
                     "stock MP installs faction-authored native AI after typed protection placement");
+                static bool resolver_inputs_wiring_checked = false;
+                if (!resolver_inputs_wiring_checked) {
+                    resolver_inputs_wiring_checked = true;
+                    // The auto-resolver inputs are built in the main thread's wait for the space preparation; with tag tracing
+                    // (the serial path) they are built inline in the conflict setup. Same prepared campaign either way.
+                    const auto prepare_traced = [&](bool serial) {
+                        eawr::core::gc_load::trace.begin("resolver_inputs_wiring", true);
+                        std::optional<eawr::data::tag_trace::Recording> recording;
+                        if (serial) recording.emplace();
+                        auto made = eawr::platform::PreparedLiveCampaign::from_plan(filesystem_owner, catalog.catalog,
+                            data, types, plan.value(), "Normal_Default");
+                        if (recording) (void)recording->finish();
+                        auto line = eawr::core::gc_load::trace.finish("test");
+                        if (!made) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(made.error()));
+                        return std::pair{std::move(made).value(), line.value_or(std::string{})};
+                    };
+                    const auto start_of = [](const std::string& line, const std::string& span) -> std::optional<double> {
+                        const auto at = line.find(" " + span + "@");
+                        if (at == std::string::npos) return std::nullopt;
+                        return std::stod(line.substr(at + span.size() + 2));
+                    };
+                    const auto overlapped = prepare_traced(false);
+                    const auto serial = prepare_traced(true);
+                    const auto early = start_of(overlapped.second, "prep.resolver_inputs");
+                    const auto early_load = start_of(overlapped.second, "prep.resolver_inputs.load_unit_tables");
+                    const auto setup_start = start_of(overlapped.second, "prep.ai_usability.conflict_setup");
+                    expect(early && early_load && setup_start && *early_load < *setup_start,
+                        "the resolver inputs are built before the conflict setup, in the wait for the space preparation");
+                    // One unit-table load per prepared campaign: every consumer of the shared load takes it (a lost hit is a silent
+                    // slowdown of GC Start). The object-query catalog is built only where world object scripts exist.
+                    const auto has_mark = [](const std::string& line, const std::string& mark) { return line.find(" " + mark + "@") != std::string::npos; };
+                    expect(start_of(overlapped.second, "prep.shared_unit_tables").has_value(),
+                        "the shared unit-table load is made in the wait for the space preparation");
+                    expect(has_mark(overlapped.second, "prep.resolver_inputs.unit_tables.shared=hit")
+                        && has_mark(overlapped.second, "prep.ai_runtime.selection_content.shared=hit"),
+                        "stock GC Start: the resolver inputs and the AI selection content take the shared unit tables (shared=hit)");
+                    expect(overlapped.second.find("shared=own") == std::string::npos,
+                        "stock GC Start: no consumer of the shared unit tables loads for itself (object-query catalog included)");
+                    expect(!start_of(serial.second, "prep.resolver_inputs"), "tag tracing keeps the serial path: no early build step");
+                    const auto serial_load = start_of(serial.second, "prep.resolver_inputs.load_unit_tables");
+                    const auto serial_setup = start_of(serial.second, "prep.ai_usability.conflict_setup");
+                    expect(serial_load && serial_setup && *serial_load >= *serial_setup,
+                        "on the serial path the resolver inputs are built inside the conflict setup");
+                    expect(overlapped.first->snapshot()->sha256() == serial.first->snapshot()->sha256()
+                        && overlapped.first->native_ai_diagnostics() == serial.first->native_ai_diagnostics(),
+                        "the early build and the serial build prepare the same campaign");
+                }
                 std::cout << "MP-protection-inert campaign=" << name << " heroes=" << heroes
                     << " typed_root=passed placed=passed native_ai=installed\n";
             }
@@ -1713,7 +1762,7 @@ void installed_unscouted_intel() {
         };
         const auto owner_of = [&](const gc::ObservedPlanet& view) -> std::optional<gc::PlayerId> {
             for (const auto& planet : campaign.game()->galaxy().setup().planets)
-                if (planet.id == view.planet) return planet.owner;
+                if (planet.id == view.planet) return planet.owner ? std::optional<gc::PlayerId>(planet.owner) : std::nullopt; // none is empty (#6985)
             return std::optional<gc::PlayerId>{};
         };
         const std::string label = empire ? "Empire: " : "Rebel: ";
@@ -2126,6 +2175,18 @@ void installed_guard_load_notes(bool production_guard = false) {
     const auto snapshot_again = services.load_notes();
     const auto expected_snapshot = eawr::core::load_notes_json(notes);
     const auto expected_provider = production_guard ? eawr::core::load_notes_json(services.load_notes()) : expected_snapshot;
+    if (eawr::core::load_notes_json(snapshot_again) != expected_provider) {
+        // Name what differs, so a failure is diagnosable from the log alone.
+        const auto describe = [](const auto& note) { return note.code + " " + note.object + " " + note.tag + " " + note.authored_value; };
+        std::set<std::string> left, right;
+        for (const auto& note : snapshot_again) left.insert(describe(note));
+        for (const auto& note : notes) right.insert(describe(note));
+        std::cout << "load notes: provider " << snapshot_again.size() << ", root " << notes.size() << std::endl;
+        std::size_t shown{};
+        for (const auto& row : right) if (!left.contains(row) && shown++ < 12) std::cout << "  only in root: " << row << std::endl;
+        shown = 0;
+        for (const auto& row : left) if (!right.contains(row) && shown++ < 12) std::cout << "  only in provider: " << row << std::endl;
+    }
     expect(eawr::core::load_notes_json(snapshot_again) == expected_provider,
         "GC provider snapshot merge is deterministic and idempotent");
     std::vector<std::string> baseline;

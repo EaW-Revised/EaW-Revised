@@ -366,6 +366,8 @@ reserved (zero) and unit_count uint64 entity IDs, nonzero and strictly increasin
 | 34 | Script invulnerable (TL-03; OrderKind 28) | uint32 enabled (0 or 1), uint32 reserved (zero); one or more listed units, a squadron also covering its members; script host only | 40 + 8n |
 | 35 | Land garrison | uint64 host, uint32 bone index, uint32 reserved (zero); listed units are entrants | 48 + 8n |
 | 36 | Land unload | uint64 occupant, uint32 all flag (0 or 1), uint32 reserved (zero); one listed host; occupant is zero exactly when all is set | 48 + 8n |
+| 37 | Tactical super weapon switch (TSW-07; OrderKind 31) | uint32 stage (1 start approach, 2 start power-up), uint32 admission (0 player, 1 AI object call; a human wire packet must carry 0); exactly one listed unit | 48 |
+| 38 | Move with a final facing (MV-40; OrderKind 2) | three int64 destination raw values, int64 yaw raw in [0, 360) degrees, uint32 flags (bit 0 through hazards, bit 1 queued), uint32 reserved (zero); listed units | 72 + 8n |
 
 The explicit-facing reinforcement command is an EAWR extension. Its facing drives both the arrival-lane placement sweep and the spawned unit's rotation and flight direction. Each drop carries the local player's chosen value; absence of a wheel choice retains opcodes 11/19 and the player's authored FoC facing, including their existing bytes. A present zero yaw is an explicit choice. Negative yaw and yaw at or above 360 degrees are rejected during command validation.
 
@@ -1228,6 +1230,26 @@ another order resets the flag; movement completion retains the last accepted
 order, as for ordinary movement. The flag is simulation state and does not add
 bytes to the visual snapshot.
 
+# Move with a final facing
+
+Coordinator-reserved opcode **38** (MV-40) records a `MovePayload` whose `final_yaw` is set: the same
+destination as opcode **2**, then the heading in degrees (int64 Q24, in `[0, 360)`, 0 along +X, quantised to
+0.1 degree by the viewer, the quantiser retail uses for this order) and a uint32 flag word. Bit 0 is the
+hazard override of opcode **20** and bit 1 the queued (waypoint) form, so this opcode never carries the
+HCB-57 tail; other bits and a nonzero reserved word are rejected. A yaw outside `[0, 360)` is rejected by command validation, not when the record is written. The command
+keeps move order kind **2**. Opcodes **2** and **20** and their bytes are unchanged, and no replay format
+version changed: a replay that never uses the opcode is byte-identical.
+
+Space ships complete their ordinary path, then turn in place to the heading using the authored turn rate
+and layer slowdown (docs/behaviour/space-movement.md MV-40/MV-41; exact retail timing remains unverified).
+The existing motion plan stores that turn and its checkpoint progress; no new wire fields are needed.
+The facing is part of the authoritative state in two optional places. The
+conditional coordinator-reserved `MVYW` state block follows `MVHZ` and appears when any live unit's order
+holds a facing: a uint64 count, then ascending uint64 entity ID and int64 yaw raw pairs. A queued leg with a
+facing sets bit 2 of that leg's flag word in the `WYPT` block (bit 0 hazards, bit 1 repeat) and appends its
+int64 yaw raw directly after the flag word. Accepting any other order clears the facing. A land session
+rejects the command until land formations take a heading.
+
 # Persistent whole-map reveal
 
 Coordinator-reserved opcode **21** records `RevealAllPayload` (V-20): a uint32 recipient
@@ -1437,6 +1459,17 @@ Standalone playback binds the recorded combat and scene content; restoring a cam
 with its borrowed native child remains the route for parent-owned return and retreat
 services. The native file header's size limits apply at file export/load, never to live
 campaign admission.
+
+## Tactical super weapon setup
+
+Tag 20 (`replay_extension_tactical_superweapon`) is optional and present only when the battle has an object with the
+tactical super weapon behaviour (TSW-03, TSW-04). Its body is version 1: uint32 version, uint32 target count (at most
+256), then per target in map record order 56 bytes: uint32 record, uint32 reserved (zero), uint64 faction ID (zero when the
+target's editor owner maps to no faction), uint64 type ID (zero when the placement names no type), three int64 position
+raw values and an int64 yaw raw (degrees); then uint32 conflict flags (bit 0 a parent conflict exists, bit 1 its planet may be
+destroyed by the super weapon, bit 2 it is already destroyed; bits 1 and 2 require bit 0) and uint32 defender player (zero
+without a conflict, or when the conflict names none). A skirmish records no conflict (flags zero). A battle without such an object
+writes no tag 20 and keeps every other byte.
 
 ## Cooperative battle controllers
 

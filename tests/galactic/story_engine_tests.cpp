@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "../support/env.hpp"
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/game_session.hpp"
@@ -341,13 +342,13 @@ void land_battle_seam() {
     expect(st::known_event_type("STORY_LAND_TACTICAL") && !st::known_event_type("STORY_POLITICAL_CONTROL")
         && !st::known_event_type("STORY_BASE_DESTROYED") && !st::known_event_type("Story_Trigger"), "WST-04/08 name table is exact and omits the dropped names");
     auto link = make("LINK", "STORY_TECH_LEVEL", {"1"}); link.reward_type = "LINK_TACTICAL"; link.reward_params[0] = {"Naboo"};
-    auto e = engine({sub("S.xml", 1, {make("LAND", "STORY_LAND_TACTICAL", {"x.xml"}), make("ENTER", "STORY_ENTER", {"Naboo"}), link,
+    auto e = engine({sub("S.xml", 1, {make("LAND", "STORY_LAND_TACTICAL", {"x.xml"}), make("ENTER", "STORY_SELECT_PLANET", {"Naboo"}), link,
         make("MYSTERY", "STORY_TRIGGER")})});
     int refusals{}, pending{};
     for (const auto& row : e.unavailable()) {
         if (row.reason == st::land_battle_refusal) ++refusals; else if (row.reason.find("no evaluator") != std::string::npos) ++pending;
     }
-    expect(refusals == 2 && pending == 1, "the land event and the LINK_TACTICAL reward are refused, STORY_ENTER waits for its evaluator");
+    expect(refusals == 2 && pending == 1, "the land event and the LINK_TACTICAL reward are refused, STORY_SELECT_PLANET waits for its evaluator");
     take(e.notify(1, tech(1)));
     const auto records = e.take_triggered();
     expect(records.size() == 1 && records[0].reward_type == "LINK_TACTICAL" && records[0].refusal == st::land_battle_refusal,
@@ -650,6 +651,78 @@ void campaign_story_routes(const std::filesystem::path& root) {
     }
 }
 
+// #5916 batch 2 part B: the type names that STORY_CONSTRUCT and STORY_DESTROY events author must resolve to the campaign's
+// type bindings (the table the session names built and lost objects from). Report-only on which names do not resolve; the
+// test fails when no authored name resolves at all. `mod_chain` empty = the installed game alone.
+void installed_type_names(const std::filesystem::path& game_root, const std::optional<std::filesystem::path>& mod_chain, const char* label) {
+    namespace cpn = eawr::campaign;
+    auto roots = decltype(eawr::vfs::mod_chain_roots(std::filesystem::path{})){};
+    if (mod_chain) roots = eawr::vfs::mod_chain_roots(*mod_chain);
+    roots.emplace_back("expansion", game_root / "corruption" / "Data");
+    roots.emplace_back("base", game_root / "GameData" / "Data");
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (auto& layer : take(eawr::vfs::resolve_manifest_chain(roots))) mounts.push_back(std::move(layer.mount));
+    const auto files = take(eawr::vfs::Vfs::mount(mounts));
+    const auto loaded = take(eawr::data::load_catalog(files, mod_chain ? eawr::data::Profile::remake : eawr::data::Profile::foc));
+    const auto data = take(eawr::data::galactic::load_galactic_data(files, loaded.catalog));
+    const auto types = eawr::units::galactic_type_table(loaded.catalog);
+    cpn::CampaignSetupOptions options;
+    for (const auto& faction : data.factions) {
+        const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+        options.players.push_back({{id, id, 0}, faction.name, true});
+    }
+    std::vector<std::string> names;
+    for (const auto& type : types.types) names.push_back(type.name);
+    std::sort(names.begin(), names.end());
+    for (const auto& name : names) options.types.push_back({options.types.size() + 1, name});
+    auto routing_data = data;
+    for (auto& row : routing_data.campaigns) row.starting_forces.clear();
+    std::size_t campaigns{}, skipped{}, events{}, authored{}, resolved{}, hero_names{}, hero_flagged{};
+    std::set<std::string> unresolved, not_heroes;
+    for (const auto& campaign : data.campaigns) {
+        // The stock campaigns reach their plots through the named side routes (WST-87), not `Story_Name` pairs.
+        if (campaign.planets.empty() || campaigns >= 24) continue;
+        const auto human = std::find_if(options.players.begin(), options.players.end(), [&](const auto& row) {
+            return st::upper(row.faction) == st::upper(campaign.starting_active_player);
+        });
+        if (human == options.players.end()) continue;
+        options.solo_reference_human = human->player.player_id;
+        options.seats = {{{1}, human->player.player_id, gc::SeatKind::human, 0, true, 1}};
+        try {
+            const auto plan = take(cpn::plan_campaign_setup(routing_data, types, campaign.name, options));
+            const auto plots = take(cpn::load_story_plots(files, data, plan));
+            ++campaigns;
+            for (const auto& sub : plots.subplots) for (const auto& event : sub.events) {
+                const bool move = event.type == "STORY_MOVE" || event.type == "STORY_DEFEAT_HERO"; // parameter 1 lists heroes: each must be a named hero type
+                if (event.type != "STORY_CONSTRUCT" && event.type != "STORY_DESTROY" && !move) continue;
+                ++events;
+                for (const auto& name : event.params[0]) {
+                    ++authored;
+                    const bool bound = std::any_of(plan.type_bindings().begin(), plan.type_bindings().end(), [&](const auto& binding) {
+                        return st::upper(binding.original_type) == st::upper(name); });
+                    if (bound) ++resolved; else unresolved.insert(name);
+                    if (!move) continue;
+                    ++hero_names;
+                    const auto at = std::find_if(plan.type_bindings().begin(), plan.type_bindings().end(), [&](const auto& binding) {
+                        return st::upper(binding.original_type) == st::upper(name); });
+                    const auto* type = at == plan.type_bindings().end() ? nullptr : plan.original_type(at->id);
+                    if (type && type->named_hero.value_or(false)) ++hero_flagged; else not_heroes.insert(name);
+                }
+            }
+        } catch (const std::exception&) { ++skipped; }
+    }
+    std::cout << "installed type names (" << label << "): campaigns=" << campaigns << " skipped=" << skipped << " construct/destroy events=" << events
+        << " authored type names=" << authored << " resolved=" << resolved << " unresolved distinct=" << unresolved.size()
+        << " move hero names=" << hero_names << " flagged hero=" << hero_flagged << " not heroes distinct=" << not_heroes.size();
+    std::size_t shown{};
+    for (const auto& name : unresolved) { if (shown++ == 12) break; std::cout << (shown == 1 ? " [" : ", ") << name; }
+    std::cout << (unresolved.empty() ? "" : "]") << '\n';
+    expect(campaigns > 0, "installed chain has campaigns with story plots");
+    expect(authored > 0, "the installed plots author construct or destroy type names");
+    expect(resolved == authored && unresolved.empty(), "every authored construct, destroy and move type name resolves to the campaign's type bindings");
+    expect(hero_flagged == hero_names && not_heroes.empty(), "every hero a move event names is a named hero type");
+}
+
 void installed_campaign_routes(const std::filesystem::path& game_root, const std::filesystem::path& mod_chain) {
     namespace cpn = eawr::campaign;
     auto roots = eawr::vfs::mod_chain_roots(mod_chain);
@@ -732,7 +805,7 @@ gc::GalacticSetup session_setup() {
 }
 std::vector<st::SubPlotDef> session_plots() {
     auto one_second = make("START", "STORY_ELAPSED", {"1"});
-    return {sub("S.xml", 1, {one_second, trig("SPAWN", {{"START"}}, "SPAWN_HERO", {"Tarkin"}), make("ENTER", "STORY_ENTER", {"Naboo"}),
+    return {sub("S.xml", 1, {one_second, trig("SPAWN", {{"START"}}, "SPAWN_HERO", {"Tarkin"}), make("ENTER", "STORY_SELECT_PLANET", {"Naboo"}),
                 make("TECH3", "STORY_TECH_LEVEL", {"3"}), trig("GIFT", {{"TECH3"}}, "UNIQUE_UNIT", {"Accuser"}),
                 make("INITIAL", "STORY_TECH_LEVEL", {"2"}), trig("BOBA", {{"INITIAL"}}, "SPAWN_HERO", {"Boba"})}),
         sub("P2.xml", 2, {make("TECH1", "STORY_TECH_LEVEL", {"1"}), trig("P2GIFT", {{"TECH1"}}, "SPAWN_HERO", {"Vader"})})};
@@ -764,7 +837,7 @@ void session() {
             }
             if (i == 0) {
                 expect(std::any_of(tick.diagnostics.begin(), tick.diagnostics.end(), [](const auto& d) {
-                    return d.code == "EAWR-STORY-0001" && d.message.find("STORY_ENTER") != std::string::npos; }),
+                    return d.code == "EAWR-STORY-0001" && d.message.find("STORY_SELECT_PLANET") != std::string::npos; }),
                     "the engine's refusals are published once as diagnostics of the first step");
                 expect(names(tick.story_triggers) == Names{"BOBA"}, "WGS-140 the tech set up before the first step reaches the plots at the first service");
                 first_hash = game.state_sha256(); plain_hash = plain.state_sha256();
@@ -806,6 +879,376 @@ void session() {
         if (workers == 1) baseline = {first_hash, game.state_sha256()};
         else expect(baseline == (std::vector<std::string>{first_hash, game.state_sha256()}), "1/2/4/8 workers give equal plot-state digests");
     }
+}
+
+// ---- WST-32/34/35: the battle, conquest and loss evaluators (#5916 batch 1) ------------------------------------
+
+st::EventDef counting(std::string name, std::string type, std::vector<std::vector<std::string>> params, bool perpetual = false) {
+    st::EventDef e;
+    e.name = std::move(name); e.type = std::move(type); e.perpetual = perpetual;
+    for (std::size_t i = 0; i < params.size(); ++i) e.params[i] = std::move(params[i]);
+    e.reward_type = "CREDITS"; e.reward_params[0] = {"1"};
+    return e;
+}
+st::BattleNotice battle(st::Battle kind, std::string planet, st::BaseKind base) {
+    st::BattleNotice n; n.kind = kind; n.planet = std::move(planet); n.base = base; return n;
+}
+st::ConquestNotice conquest(std::string planet, st::Player new_owner, st::Player old_owner) {
+    return st::ConquestNotice{std::move(planet), new_owner, old_owner, 0};
+}
+st::LossNotice loss(st::Loss kind, std::string type, std::string planet, st::Player owner, st::BaseKind base = st::BaseKind::either) {
+    st::LossNotice n; n.kind = kind; n.type = std::move(type); n.planet = std::move(planet); n.object_owner = owner; n.base = base; return n;
+}
+
+void battle_events() {
+    // WST-35: kind (space/ground), count, then planet; wins and losses are separate events; the notice reaches only its player.
+    auto e = engine({sub("S.xml", 1, {
+        counting("WIN2", "STORY_WIN_BATTLES", {{"2"}, {"SPACE"}}),
+        counting("LOSE1", "STORY_LOSE_BATTLES", {{"1"}, {"SPACE"}}),
+        counting("GROUND", "STORY_WIN_BATTLES", {{"1"}, {"Land"}}),
+        counting("AT", "STORY_WIN_BATTLES", {{"2"}, {"EITHER"}, {}, {"beta"}}),
+        counting("BAD", "STORY_LOSE_BATTLES", {{"1"}, {"BASE_SPACE"}}),
+    }), sub("P2.xml", 2, {counting("OTHER", "STORY_WIN_BATTLES", {{"1"}, {"SPACE"}})})});
+    take(e.notify(1, battle(st::Battle::won, "Alpha", st::BaseKind::space)));
+    expect(!e.triggered("S.xml", "WIN2") && e.take_triggered().empty(), "WST-35 one win of two does not fire");
+    expect(!e.triggered("P2.xml", "OTHER"), "WST-14 a notice for player 1 never reaches the plot of player 2");
+    take(e.notify(1, battle(st::Battle::won, "Alpha", st::BaseKind::ground)));
+    expect(e.triggered("S.xml", "GROUND") && !e.triggered("S.xml", "WIN2"), "a ground win counts for the ground event only; `Land` reads as ground (WST-08)");
+    expect(!e.triggered("S.xml", "AT"), "the second battle is counted but Alpha is not on the list (count, then planet)");
+    take(e.notify(1, battle(st::Battle::won, "Beta", st::BaseKind::space)));
+    expect(e.triggered("S.xml", "WIN2") && e.triggered("S.xml", "AT"), "the second space win fires the space event, and the third count at Beta the planet one");
+    expect(!e.triggered("S.xml", "LOSE1"), "wins never feed a lose event");
+    take(e.notify(1, battle(st::Battle::lost, "Alpha", st::BaseKind::space)));
+    expect(e.triggered("S.xml", "LOSE1") && !e.triggered("S.xml", "BAD"), "a space loss fires the space lose event; BASE_SPACE is not in the table so it reads as ground (WST-08)");
+    take(e.notify(1, battle(st::Battle::lost, "Alpha", st::BaseKind::ground)));
+    expect(e.triggered("S.xml", "BAD"), "and that unknown spelling matches a ground battle");
+    take(e.notify(2, battle(st::Battle::won, "Alpha", st::BaseKind::space)));
+    expect(e.triggered("P2.xml", "OTHER"), "the notice for player 2 reaches the plot of player 2");
+    expect(names(e.take_triggered()) == (Names{"GROUND", "WIN2", "AT", "LOSE1", "BAD", "OTHER"}), "events fire in notice order, then document order");
+    take(e.notify(std::nullopt, battle(st::Battle::retreat, "Alpha", st::BaseKind::space)));
+    expect(e.take_triggered().empty() && e.state().counters.empty(), "retreat and victory notices wait for the next batch and count nothing");
+}
+
+void battle_perpetual_and_classes() {
+    auto repeat = counting("EVERY", "STORY_WIN_BATTLES", {{"2"}, {"EITHER"}}, true);
+    auto classes = counting("CLASSY", "STORY_WIN_BATTLES", {{"1"}, {"SPACE"}, {"FRIENDLY_CONTAINS", "CLASS_CAPITAL"}});
+    auto e = engine({sub("S.xml", 1, {repeat, classes})});
+    for (int i = 0; i < 4; ++i) take(e.notify(1, battle(st::Battle::won, "Alpha", st::BaseKind::space)));
+    expect(names(e.take_triggered()) == (Names{"EVERY", "EVERY"}), "WST-22 a perpetual counting event starts again from zero after each trigger");
+    expect(!e.triggered("S.xml", "CLASSY") && e.diagnostics().size() == 1 && e.diagnostics()[0].event == "CLASSY",
+        "the fleet-content filter is refused with one diagnostic, never a wrong match");
+    // No planet list on a count event and an absent count: one battle is enough (default 1).
+    auto bare = engine({sub("S.xml", 1, {counting("BARE", "STORY_LOSE_BATTLES", {})})});
+    take(bare.notify(1, battle(st::Battle::lost, "Anywhere", st::BaseKind::ground)));
+    expect(bare.triggered("S.xml", "BARE"), "defaults: count one, either kind, any planet");
+}
+
+void conquest_events() {
+    st::Config config;
+    config.relations[{1, 3}] = st::Config::Relation::friendly;
+    config.relations[{1, 2}] = st::Config::Relation::enemy;
+    auto e = engine({sub("S.xml", 1, {
+        counting("FRIENDLY", "STORY_CONQUER", {{}, {}, {"FILTER_FRIENDLY_ONLY"}}),
+        counting("ENEMY", "STORY_CONQUER", {{}, {}, {"FILTER_ENEMY_ONLY"}}),
+        counting("NEUTRAL", "STORY_CONQUER", {{}, {}, {"FILTER_NEUTRAL_ONLY"}}),
+        counting("ANY_NONE", "STORY_CONQUER", {{"Gamma"}, {}, {"FILTER_NONE"}}),
+        counting("TWICE", "STORY_CONQUER", {{"A", "B"}, {"2"}}),
+        counting("THREE", "STORY_CONQUER_COUNT", {{"3"}}),
+    })}, config);
+    take(e.notify(std::nullopt, conquest("A", 1, 9)));
+    take(e.notify(std::nullopt, st::ConquestCountNotice{"A", 0}));
+    expect(names(e.take_triggered()) == (Names{"FRIENDLY"}), "WST-32 the owner's own conquest passes the friendly filter only (the first of two counted for TWICE)");
+    take(e.notify(std::nullopt, conquest("B", 2, 9)));
+    take(e.notify(std::nullopt, st::ConquestCountNotice{"B", 0}));
+    expect(names(e.take_triggered()) == (Names{"ENEMY", "TWICE"}), "an enemy conquest fires the enemy filter; TWICE counts down to zero over its two listed planets");
+    take(e.notify(std::nullopt, conquest("Gamma", 7, 9)));
+    take(e.notify(std::nullopt, st::ConquestCountNotice{"Gamma", 0}));
+    expect(names(e.take_triggered()) == (Names{"NEUTRAL", "ANY_NONE", "THREE"}), "a stranger's conquest is neutral; FILTER_NONE with a listed planet; the third conquest fires the count");
+    auto only = engine({sub("S.xml", 1, {counting("C", "STORY_CONQUER", {})}), sub("P2.xml", 2, {counting("C2", "STORY_CONQUER", {})})});
+    take(only.notify(2, conquest("A", 2, 9)));
+    expect(names(only.take_triggered()) == (Names{"C2"}), "a notice that names a player reaches only the plots of that player (WST-14)");
+}
+
+void loss_events() {
+    st::Config config;
+    config.relations[{1, 2}] = st::Config::Relation::enemy;
+    auto e = engine({sub("S.xml", 1, {
+        counting("TWO", "STORY_DESTROY", {{"Type_One", "Type_Two"}, {}, {"2", "1"}}),
+        counting("HERE", "STORY_DESTROY", {{"Type_Two"}, {"Alpha"}, {}, {"FILTER_ENEMY_ONLY"}}),
+        counting("BASE", "STORY_DESTROY_BASE", {{"Alpha"}, {"SPACE"}, {"FILTER_ENEMY_ONLY"}}),
+        counting("EMPTYLIST", "STORY_DESTROY", {{}, {}, {"1"}}),
+    })}, config);
+    for (const auto& row : e.unavailable()) expect(row.event == "BASE" && row.reason.find("no starbase-loss notice") != std::string::npos,
+        "only the starbase loss lacks an emitter: battle losses are announced");
+    expect(e.unavailable().size() == 1, "the starbase-loss event is listed until the session emits the notice");
+    take(e.notify(std::nullopt, loss(st::Loss::destroy, "type_one", "Anywhere", 2)));
+    expect(!e.triggered("S.xml", "TWO") && e.state().counters.size() == 1 && e.state().counters[0].values == (std::vector<std::int64_t>{1, 1}),
+        "WST-34 the type matches case-insensitively and its own count (2) runs down");
+    take(e.notify(std::nullopt, loss(st::Loss::destroy, "Type_Two", "Anywhere", 2)));
+    expect(e.triggered("S.xml", "TWO") && !e.triggered("S.xml", "HERE"), "the second type has its own count of one; a loss elsewhere never matches the planet event");
+    take(e.notify(std::nullopt, loss(st::Loss::destroy, "Type_Two", "Alpha", 1)));
+    expect(!e.triggered("S.xml", "HERE"), "the owner of the destroyed object must pass the filter when planets are listed");
+    take(e.notify(std::nullopt, loss(st::Loss::destroy, "Type_Two", "Alpha", 2)));
+    expect(e.triggered("S.xml", "HERE") && !e.triggered("S.xml", "EMPTYLIST"), "an enemy loss at the listed planet fires; an empty type list matches nothing");
+    take(e.notify(std::nullopt, loss(st::Loss::destroy_base, "", "Alpha", 2, st::BaseKind::ground)));
+    expect(!e.triggered("S.xml", "BASE"), "a ground base is not a space base");
+    take(e.notify(std::nullopt, loss(st::Loss::destroy_base, "", "Alpha", 2, st::BaseKind::space)));
+    expect(e.triggered("S.xml", "BASE") && e.state().counters.empty(), "WST-34 the enemy space base at Alpha fires, and no counter outlives a fired event");
+}
+
+void counters_save_and_digest() {
+    const auto plots = [] {
+        return std::vector<st::SubPlotDef>{sub("S.xml", 1, {counting("WIN3", "STORY_WIN_BATTLES", {{"3"}, {"SPACE"}}),
+            counting("COUNT", "STORY_CONQUER_COUNT", {{"2"}}), counting("QUIET", "STORY_TECH_LEVEL", {{"9"}})})};
+    };
+    auto a = engine(plots());
+    const auto untouched = a.digest();
+    take(a.notify(1, battle(st::Battle::won, "Alpha", st::BaseKind::ground)));
+    expect(a.digest() == untouched && a.state().counters.empty(), "a notice no event counts leaves the state, and so the digest, as it was");
+    take(a.notify(1, battle(st::Battle::won, "Alpha", st::BaseKind::space)));
+    take(a.notify(std::nullopt, st::ConquestCountNotice{"A", 0}));
+    expect(a.digest() != untouched && a.state().counters.size() == 2, "a counting event adds a sparse row and moves the digest");
+    expect(a.state().counters[0].event == "COUNT" && a.state().counters[1].event == "WIN3", "rows are sorted by event name");
+    auto b = engine(plots());
+    take(b.restore(a.state()));
+    expect(a.digest() == b.digest(), "a restored engine has the same digest with its counters");
+    for (auto* each : {&a, &b}) {
+        take(each->notify(1, battle(st::Battle::won, "Alpha", st::BaseKind::space)));
+        take(each->notify(1, battle(st::Battle::won, "Alpha", st::BaseKind::space)));
+        take(each->notify(std::nullopt, st::ConquestCountNotice{"B", 0}));
+    }
+    expect(names(a.take_triggered()) == names(b.take_triggered()) && a.triggered("S.xml", "WIN3") && b.triggered("S.xml", "COUNT")
+        && a.digest() == b.digest() && a.state().counters.empty(), "both engines count on from the saved values and fire together");
+    auto duplicate = a.state(); duplicate.counters = {{"S.xml", "COUNT", {1}}, {"S.xml", "COUNT", {2}}};
+    auto d = engine(plots());
+    expect(!d.restore(duplicate), "two counter rows for one event are refused (the key must be unique, not the whole row)");
+    auto bad = a.state(); bad.counters = {{"S.xml", "QUIET", {1}}};
+    auto c = engine(plots());
+    expect(!c.restore(bad), "a counter row for an event that does not count is refused");
+    bad.counters = {{"S.xml", "WIN3", {1}}, {"S.xml", "COUNT", {1}}};
+    expect(!c.restore(bad), "unsorted counter rows are refused");
+    bad.counters = {{"S.xml", "GHOST", {1}}};
+    expect(!c.restore(bad), "a counter row for an unknown event is refused");
+}
+
+void counter_restart_after_lua_edit() {
+    // WST-56: an Event_Param edit restarts the count of that event.
+    auto e = engine({sub("S.xml", 1, {counting("WIN3", "STORY_WIN_BATTLES", {{"3"}, {"SPACE"}})})});
+    take(e.notify(1, battle(st::Battle::won, "Alpha", st::BaseKind::space)));
+    take(e.notify(1, battle(st::Battle::won, "Alpha", st::BaseKind::space)));
+    expect(e.state().counters.size() == 1 && e.state().counters[0].values[0] == 2, "two of three counted");
+    st::PlotCommand edit; edit.op = st::PlotCommand::Op::event_param; edit.subplot = "S.xml"; edit.event = "WIN3"; edit.index = 0; edit.values = {"2"};
+    take(e.apply(edit));
+    expect(e.state().counters.empty(), "the edit drops the running count");
+    take(e.notify(1, battle(st::Battle::won, "Alpha", st::BaseKind::space)));
+    take(e.notify(1, battle(st::Battle::won, "Alpha", st::BaseKind::space)));
+    expect(e.triggered("S.xml", "WIN3"), "and the event now fires at the edited count of two");
+}
+
+void counters_in_the_game_checkpoint() {
+    // The counter tail follows the edit and flag tails: absent for a game that counts nothing (the old bytes), present
+    // and restored for one that is part-way through a count. The engine is reached through the session's own pointer.
+    const auto setup = session_setup();
+    const auto ids = cp::game_identities(setup);
+    const auto plots = [] {
+        return std::vector<st::SubPlotDef>{sub("C.xml", 1, {counting("WIN3", "STORY_WIN_BATTLES", {{"3"}, {"SPACE"}})})};
+    };
+    const auto records = std::vector<st::PlotRecord>{{1, "p1.xml"}};
+    eawr::platform::ThreadWorkerAdapter executor(1);
+    cp::GameLoadOptions options;
+    options.configure_session = [&](eawr::campaign::GameSession& fresh) { return fresh.install_story({}, records, plots()); };
+    auto game = take(eawr::campaign::GameSession::create(setup));
+    take(game.install_story({}, records, plots()));
+    for (int i = 0; i < 3; ++i) static_cast<void>(take(game.step(executor)));
+    const auto plain = take(cp::save_game_checkpoint(game, ids));
+    auto* engine_of = const_cast<st::Engine*>(game.story_engine()); // test-only: the session has no public notice entry
+    take(engine_of->notify(1, battle(st::Battle::won, "Alpha", st::BaseKind::space)));
+    const auto counted = take(cp::save_game_checkpoint(game, ids));
+    expect(counted.size() > plain.size(), "a part-way count adds the counter tail to the checkpoint");
+    auto restored = take(cp::load_game_checkpoint(counted, ids, options, executor));
+    expect(restored.session.story_engine()->state().counters == game.story_engine()->state().counters && !game.story_engine()->state().counters.empty(),
+        "the counter rows come back");
+    expect(restored.session.story_engine()->digest() == game.story_engine()->digest(), "with the same plot digest");
+    expect(take(cp::save_game_checkpoint(restored.session, ids)) == counted, "and the restored session saves the same bytes");
+    auto earlier = take(cp::load_game_checkpoint(plain, ids, options, executor));
+    expect(earlier.session.story_engine()->state().counters.empty(), "a save without the tail loads with no counters");
+}
+
+// ---- WST-31: arrivals and bounces (#5916 batch 2, part A) ------------------------------------------------------
+
+st::TravelNotice arrival(st::Travel kind, std::string planet, st::Player owner, std::vector<std::string> types,
+    std::size_t direct = 0, bool stealth = false) {
+    st::TravelNotice n; n.kind = kind; n.planet = std::move(planet);
+    n.fleet.owner = owner; n.fleet.types = std::move(types); n.fleet.direct_members = direct; n.fleet.stealth = stealth;
+    return n;
+}
+
+void travel_events() {
+    st::Config config;
+    config.relations[{1, 2}] = st::Config::Relation::enemy;
+    auto e = engine({sub("S.xml", 1, {
+        counting("ANY", "STORY_ENTER", {}),
+        counting("HERE", "STORY_ENTER", {{"alpha"}}),
+        counting("MINE", "STORY_ENTER", {{}, {"FILTER_FRIENDLY_ONLY"}}),
+        counting("FOES", "STORY_ENTER", {{}, {"FILTER_ENEMY_ONLY"}}),
+        counting("NEEDS", "STORY_ENTER", {{"beta"}, {}, {"Type_One", "Type_Two"}}),
+        counting("ONLY", "STORY_ENTER", {{"gamma"}, {}, {"Type_One"}, {}, {}, {"1"}}),
+        counting("SNEAK", "STORY_ENTER", {{"delta"}, {}, {}, {}, {"1"}}),
+        counting("NOSNEAK", "STORY_ENTER", {{"delta"}}),
+        counting("ORBIT", "STORY_ENTER", {{"epsilon"}, {}, {}, {"Type_One"}}),
+        counting("RAID", "STORY_ENTER", {{"epsilon"}, {}, {}, {}, {}, {}, {"1"}}),
+        counting("BOUNCE", "STORY_FLEET_BOUNCED", {{"alpha"}}),
+        counting("BOUNCE_SNEAK", "STORY_FLEET_BOUNCED", {{"alpha"}, {}, {}, {}, {"1"}}),
+        counting("REFUSED", "STORY_INVASION_BOUNCED", {}),
+    })}, config);
+    for (const auto& row : e.unavailable()) expect(row.event == "REFUSED" && row.reason.find("no refused-invasion notice") != std::string::npos,
+        "only the invasion bounce lacks an emitter");
+    take(e.notify(std::nullopt, arrival(st::Travel::enter, "Alpha", 1, {"Type_One"}, 1)));
+    expect(names(e.take_triggered()) == (Names{"ANY", "HERE", "MINE"}), "WST-31 a planet list, case-insensitive, and the friendly filter relative to the plot's owner");
+    take(e.notify(std::nullopt, arrival(st::Travel::enter, "Zeta", 2, {"Type_One"}, 1)));
+    expect(names(e.take_triggered()) == (Names{"FOES"}), "an enemy fleet fires only the enemy filter");
+    take(e.notify(std::nullopt, arrival(st::Travel::enter, "Beta", 1, {"Type_One"}, 1)));
+    expect(!e.triggered("S.xml", "NEEDS"), "every required type must be inside the fleet");
+    take(e.notify(std::nullopt, arrival(st::Travel::enter, "Beta", 1, {"type_two", "TYPE_ONE", "Type_Three"}, 3)));
+    expect(e.triggered("S.xml", "NEEDS"), "required types match case-insensitively among others");
+    take(e.notify(std::nullopt, arrival(st::Travel::enter, "Gamma", 1, {"Type_One", "Type_Two"}, 2)));
+    expect(!e.triggered("S.xml", "ONLY"), "exclusive: the unflattened member count must equal the number of required types");
+    take(e.notify(std::nullopt, arrival(st::Travel::enter, "Gamma", 1, {"Type_One", "Type_Two"}, 1)));
+    expect(e.triggered("S.xml", "ONLY"), "one direct member holding both flattened types passes the exclusive test for one required type");
+    take(e.notify(std::nullopt, arrival(st::Travel::enter, "Delta", 1, {"Type_One"}, 1, true)));
+    expect(e.triggered("S.xml", "SNEAK") && !e.triggered("S.xml", "NOSNEAK"),
+        "with no required types a stealth fleet passes only when stealth is allowed");
+    take(e.notify(std::nullopt, arrival(st::Travel::enter, "Delta", 1, {"Type_One"}, 1)));
+    expect(e.triggered("S.xml", "NOSNEAK"), "an ordinary fleet passes");
+    take(e.notify(std::nullopt, arrival(st::Travel::enter, "Epsilon", 1, {"Type_One"}, 1)));
+    expect(!e.triggered("S.xml", "ORBIT") && !e.triggered("S.xml", "RAID") && e.diagnostics().size() == 2,
+        "the orbit-type list and the raid flag are refused with one diagnostic each, never a wrong match");
+    take(e.notify(std::nullopt, arrival(st::Travel::enter, "Epsilon", 1, {"Type_One"}, 1)));
+    expect(e.diagnostics().size() == 2, "and not again");
+    take(e.notify(std::nullopt, arrival(st::Travel::fleet_bounced, "Alpha", 1, {"Type_One"}, 1, true)));
+    expect(!e.triggered("S.xml", "BOUNCE"), "a stealth fleet that bounces does not fire a bounce event that does not allow stealth");
+    take(e.notify(std::nullopt, arrival(st::Travel::fleet_bounced, "Alpha", 1, {"Type_One"}, 1)));
+    expect(e.triggered("S.xml", "BOUNCE") && !e.triggered("S.xml", "REFUSED"), "an ordinary bounce reaches only the bounce events");
+    expect(names(e.take_triggered()) == (Names{"NEEDS", "ONLY", "SNEAK", "NOSNEAK", "BOUNCE_SNEAK", "BOUNCE"}), "every fired event left one record, in order");
+    take(e.notify(std::nullopt, arrival(st::Travel::deploy_hero, "Alpha", 1, {"Type_One"}, 1)));
+    expect(e.take_triggered().empty(), "hero deployment waits for a later batch");
+}
+
+// WST-35: STORY_DEFEAT_HERO counts the defeat of a listed hero type; the owner filter is relative to the plot's owner.
+void hero_defeat_events() {
+    st::Config config;
+    config.relations[{1, 2}] = st::Config::Relation::enemy;
+    auto e = engine({sub("S.xml", 1, {
+        counting("ANYFOE", "STORY_DEFEAT_HERO", {{"Hero_One", "Hero_Two"}, {"2", "1"}, {"FILTER_ENEMY_ONLY"}}),
+        counting("OURS", "STORY_DEFEAT_HERO", {{"Hero_One"}, {}, {"FILTER_FRIENDLY_ONLY"}}),
+        counting("NOLIST", "STORY_DEFEAT_HERO", {}),
+        counting("DESTROYED", "STORY_DESTROY", {{"Hero_One"}}),
+    })}, config);
+    expect(e.unavailable().empty(), "STORY_DEFEAT_HERO has an evaluator and an emitter");
+    take(e.notify(std::nullopt, loss(st::Loss::hero_defeat, "hero_one", "Alpha", 1)));
+    expect(names(e.take_triggered()) == (Names{"OURS"}), "a friendly hero fires the friendly filter only, case-insensitively");
+    take(e.notify(std::nullopt, loss(st::Loss::hero_defeat, "Hero_One", "Alpha", 2)));
+    expect(!e.triggered("S.xml", "ANYFOE") && e.state().counters.size() == 1 && e.state().counters[0].values == (std::vector<std::int64_t>{1, 1}),
+        "an enemy hero counts down its own entry of the count list (2)");
+    take(e.notify(std::nullopt, loss(st::Loss::hero_defeat, "Hero_Two", "Beta", 2)));
+    expect(e.triggered("S.xml", "ANYFOE") && !e.triggered("S.xml", "NOLIST"),
+        "the second type has its own count of one and fires the event; an empty type list matches nothing");
+    take(e.notify(std::nullopt, loss(st::Loss::destroy, "Hero_One", "Alpha", 2)));
+    expect(e.triggered("S.xml", "DESTROYED"), "an ordinary destroy notice stays a destroy event");
+}
+
+// WST-31: STORY_MOVE is sent once per named hero in an arriving fleet; hero list and planet list both match.
+st::TravelNotice hero_move(std::string hero, std::string planet, st::Player owner = 1) {
+    auto n = arrival(st::Travel::move_hero, std::move(planet), owner, {}, 0);
+    n.hero = std::move(hero);
+    return n;
+}
+
+void move_events() {
+    st::Config config;
+    config.relations[{1, 2}] = st::Config::Relation::enemy;
+    auto e = engine({sub("S.xml", 1, {
+        counting("ANY", "STORY_MOVE", {}),
+        counting("HERO_ONLY", "STORY_MOVE", {{"Hero_One", "Hero_Two"}}),
+        counting("HERE_ONLY", "STORY_MOVE", {{}, {"alpha"}}),
+        counting("BOTH", "STORY_MOVE", {{"hero_one"}, {"Alpha", "Beta"}}),
+        counting("ENTERS", "STORY_ENTER", {}),
+    })}, config);
+    expect(e.unavailable().empty(), "STORY_MOVE has an evaluator and an emitter");
+    take(e.notify(std::nullopt, hero_move("Hero_Three", "Gamma")));
+    expect(names(e.take_triggered()) == (Names{"ANY"}), "an empty hero and planet list match any hero anywhere");
+    take(e.notify(std::nullopt, hero_move("HERO_TWO", "Gamma", 2)));
+    expect(names(e.take_triggered()) == (Names{"HERO_ONLY"}), "a hero list matches case-insensitively, and an enemy hero counts: there is no owner filter");
+    take(e.notify(std::nullopt, hero_move("Hero_One", "Alpha")));
+    expect(names(e.take_triggered()) == (Names{"HERE_ONLY", "BOTH"}), "hero and planet must both match");
+    take(e.notify(std::nullopt, arrival(st::Travel::enter, "Alpha", 1, {"Hero_One"}, 1)));
+    expect(names(e.take_triggered()) == (Names{"ENTERS"}), "a plain arrival does not fire a move event by itself");
+}
+
+// WST-31: the campaign layer expands one arrival into one move notice per hero (hero_moves), in the order given; two heroes
+// arriving together fire two events in that order, and an arrival without heroes sends none.
+void hero_moves_per_arrival() {
+    auto e = engine({sub("S.xml", 1, {
+        counting("FIRST", "STORY_MOVE", {{"Hero_One"}}),
+        counting("SECOND", "STORY_MOVE", {{"Hero_Two"}}),
+        counting("WRONG_PLACE", "STORY_MOVE", {{"Hero_One"}, {"Beta"}}),
+    })});
+    const auto together = arrival(st::Travel::enter, "Alpha", 1, {"Hero_One", "Hero_Two", "Type_One"}, 2);
+    const std::vector<std::string> heroes{"Hero_One", "Hero_Two"};
+    const auto moves = st::hero_moves(together, heroes);
+    expect(moves.size() == 2 && moves[0].hero == "Hero_One" && moves[1].hero == "Hero_Two" && moves[0].kind == st::Travel::move_hero
+        && moves[0].planet == "Alpha" && moves[1].fleet.owner == 1, "one move notice per hero, in the order given, carrying the arrival's planet and fleet");
+    for (const auto& move : moves) take(e.notify(std::nullopt, move));
+    expect(names(e.take_triggered()) == (Names{"FIRST", "SECOND"}), "two heroes in one arrival fire two events in a fixed order");
+    expect(st::hero_moves(together, {}).empty(), "an arrival without heroes sends no move notice");
+}
+
+// ---- WST-33: builds and base levels (#5916 batch 2, part B) ----------------------------------------------------
+
+st::EconomyNotice built(std::string type, st::Player owner, std::string planet = "alpha") {
+    st::EconomyNotice n; n.kind = st::Economy::construct; n.type = std::move(type); n.planet = std::move(planet); n.object_owner = owner;
+    n.base = st::BaseKind::ground; n.value = 1; return n;
+}
+st::EconomyNotice level(std::int64_t value, st::BaseKind base, st::Player owner, std::string planet = "alpha") {
+    st::EconomyNotice n; n.kind = st::Economy::construct_level; n.value = value; n.base = base; n.planet = std::move(planet); n.object_owner = owner;
+    return n;
+}
+
+void construct_events() {
+    st::Config config;
+    config.relations[{1, 2}] = st::Config::Relation::enemy;
+    auto e = engine({sub("S.xml", 1, {
+        counting("ONE", "STORY_CONSTRUCT", {{"Type_One"}}),
+        counting("THREE", "STORY_CONSTRUCT", {{"Type_Two", "Type_Three"}, {"3", "1"}}),
+        counting("MINE", "STORY_CONSTRUCT", {{"Type_Four"}, {}, {"FILTER_FRIENDLY_ONLY"}}),
+        counting("FOES", "STORY_CONSTRUCT", {{"Type_Four"}, {}, {"FILTER_ENEMY_ONLY"}}),
+        counting("BASE2", "STORY_CONSTRUCT_LEVEL", {{"alpha"}, {"2"}, {"SPACE"}}),
+        counting("ANYBASE", "STORY_CONSTRUCT_LEVEL", {}),
+        counting("GROUNDBASE", "STORY_CONSTRUCT_LEVEL", {{}, {"1"}, {"GROUND"}}),
+    })}, config);
+    expect(e.unavailable().size() == 1 && e.unavailable()[0].event == "GROUNDBASE" && e.unavailable()[0].reason.find("ground base level") != std::string::npos,
+        "a construct-level event that names a ground base is listed as cannot-fire");
+    take(e.notify(std::nullopt, built("type_one", 2)));
+    expect(names(e.take_triggered()) == (Names{"ONE"}), "WST-33 a built type matches case-insensitively, whoever built it");
+    take(e.notify(std::nullopt, built("Type_Two", 1))); take(e.notify(std::nullopt, built("Type_Two", 1)));
+    expect(!e.triggered("S.xml", "THREE") && e.state().counters.size() == 1 && e.state().counters[0].values == (std::vector<std::int64_t>{1, 1}),
+        "the count of the matched type runs down from its own entry");
+    take(e.notify(std::nullopt, built("Type_Three", 2)));
+    expect(names(e.take_triggered()) == (Names{"THREE"}), "the second type has a count of one and fires the event on its own");
+    take(e.notify(std::nullopt, built("Type_Four", 2)));
+    expect(names(e.take_triggered()) == (Names{"FOES"}), "the owner filter is relative to the plot's owner: the enemy build fires only the enemy filter");
+    take(e.notify(std::nullopt, built("Type_Four", 1)));
+    expect(names(e.take_triggered()) == (Names{"MINE"}), "and the own build the friendly one");
+    take(e.notify(1, level(1, st::BaseKind::space, 1)));
+    expect(names(e.take_triggered()) == (Names{"ANYBASE"}), "a base level below the event's level does not fire it; an event with no limits fires at any level");
+    take(e.notify(1, level(2, st::BaseKind::ground, 1)));
+    expect(names(e.take_triggered()) == (Names{"GROUNDBASE"}), "a ground base is not a space base: only the event that names a ground base fires (the session never sends one yet)");
+    take(e.notify(1, level(3, st::BaseKind::space, 1, "beta")));
+    expect(e.take_triggered().empty(), "the planet list is read");
+    take(e.notify(2, level(2, st::BaseKind::space, 2)));
+    expect(e.take_triggered().empty(), "a level notice that names a player never reaches another player's plots");
+    take(e.notify(1, level(2, st::BaseKind::space, 1)));
+    expect(names(e.take_triggered()) == (Names{"BASE2"}), "a level at or above the event's level at a listed planet fires it");
 }
 
 // #2044 / WST-58: the story dialog of a triggered event becomes a holocron goal of the plot's owner, once. The summary
@@ -871,10 +1314,110 @@ void holocron_goals() {
             "the goals are restored with the checkpoint");
         expect(take(cp::save_game_checkpoint(restored.session, ids)) == saved, "the restored session saves the same bytes");
         std::size_t again{};
-        for (int i = 0; i < 40; ++i) again += take(restored.session.step(executor)).story_presentation.size();
+        std::vector<std::string> republished;
+        for (int i = 0; i < 40; ++i)
+            for (const auto& row : take(restored.session.step(executor)).story_presentation) {
+                if (std::holds_alternative<st::SummaryRequest>(row.payload)) ++again;
+                else if (const auto* goal = std::get_if<st::GoalChanged>(&row.payload); goal && goal->value) republished.push_back(goal->tag);
+            }
         expect(again == 0, "WST-58 a loaded game does not show the intro again");
+        expect(republished == (std::vector<std::string>{"Intro_Tag", "Incoming_Hint"}),
+            "a loaded game republishes its goal rows to the HUD, oldest first so the head insertion restores the saved order (legacy #6681)");
         if (workers == 1) baseline = signature;
         else expect(baseline == signature, "1/2/4/8 workers publish the same presentation requests in the same order");
+    }
+}
+
+// #236 PR B (WST-47/65/66/67): the objective rewards change the plot owner's list, an unreadable one is refused by name,
+// the numbering counter and the list ride the checkpoint (owner format 7), and SCREEN_TEXT reaches the HUD as text.
+std::vector<st::SubPlotDef> objective_plots() {
+    const auto note = [](const char* name, const char* trigger, const char* reward, std::vector<std::string> first, std::vector<std::string> second = {}) {
+        auto e = make(name, "STORY_CLICK_GUI", {trigger}); e.perpetual = true;
+        e.reward_type = reward; e.reward_params[0] = std::move(first); e.reward_params[1] = std::move(second);
+        return e;
+    };
+    return {sub("O.xml", 1, {note("ADD1", "b_1", "ADD_OBJECTIVE", {"TEXT_ONE"}), note("ADD2", "b_2", "ADD_OBJECTIVE", {" TEXT_TWO "}),
+        note("ADD1B", "b_3", "ADD_OBJECTIVE", {"TEXT_ONE"}), note("DONE", "b_4", "OBJECTIVE_COMPLETE", {"TEXT_ONE"}),
+        note("FAIL", "b_5", "OBJECTIVE_FAILED", {"TEXT_TWO"}), note("UPD", "b_6", "UPDATE_OBJECTIVE", {"TEXT_TWO"}, {"TEXT_THREE"}),
+        note("REM", "b_7", "REMOVE_OBJECTIVE", {"TEXT_ONE"}), note("HIDE", "b_8", "ENABLE_OBJECTIVE_DISPLAY", {"0"}),
+        note("SHOW", "b_9", "ENABLE_OBJECTIVE_DISPLAY", {}), note("ADD_BAD", "b_a", "ADD_OBJECTIVE", {}),
+        note("UPD_BAD", "b_b", "UPDATE_OBJECTIVE", {"TEXT_ONE"}), note("DISPLAY_BAD", "b_c", "ENABLE_OBJECTIVE_DISPLAY", {"x"}),
+        note("MISS", "b_d", "OBJECTIVE_COMPLETE", {"TEXT_NONE"}), note("ALL", "b_e", "REMOVE_ALL_OBJECTIVES", {}),
+        note("TEXT", "b_f", "SCREEN_TEXT", {"TEXT_HINT"}, {"7"}), note("TEXT_BAD", "b_g", "SCREEN_TEXT", {})})};
+}
+void story_objectives() {
+    const auto setup = session_setup();
+    const auto ids = cp::game_identities(setup);
+    const auto install = [](eawr::campaign::GameSession& game) { return game.install_story({}, {{1, "o.xml"}}, objective_plots()); };
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto game = take(eawr::campaign::GameSession::create(setup));
+        take(install(game));
+        std::uint64_t sequence{};
+        std::map<std::string, std::string> outcome;
+        std::vector<std::string> text;
+        const auto click = [&](const char* control) {
+            take(game.submit(gc::GameCommand{{game.completed_tick(), {1}, ++sequence}, gc::GuiClick{control}}));
+            const auto tick = take(game.step(executor));
+            for (const auto& row : tick.story_triggers) outcome[row.event] = row.outcome;
+            for (const auto& row : tick.story_presentation) {
+                const auto* request = std::get_if<st::ConsumerRequest>(&row.payload);
+                if (request && request->consumer == st::Consumer::text && row.owner == 1) {
+                    std::string line = request->reward_name;
+                    for (const auto& p : request->parameters) line += ":" + p;
+                    text.push_back(std::move(line));
+                }
+            }
+        };
+        const auto ids_now = [&] {
+            std::string out;
+            if (const auto* goals = game.story_goals(1)) for (const auto& o : goals->objectives)
+                out += o.text_id + "#" + std::to_string(o.number) + (o.status == st::ObjectiveStatus::complete ? "+" : o.status == st::ObjectiveStatus::failed ? "-" : "") + ";";
+            return out;
+        };
+        click("b_1"); click("b_2"); click("b_3");
+        expect(ids_now() == "TEXT_ONE#1;TEXT_TWO#2;TEXT_ONE#3;", "ADD_OBJECTIVE appends in order with the counter's numbers, duplicates admitted, the name trimmed");
+        click("b_4"); click("b_5");
+        expect(ids_now() == "TEXT_ONE#1+;TEXT_TWO#2-;TEXT_ONE#3;", "complete and fail hit the first match only");
+        click("b_6");
+        expect(ids_now() == "TEXT_ONE#1+;TEXT_THREE#2;TEXT_ONE#3;", "UPDATE_OBJECTIVE renames in place and resets the status");
+        click("b_7");
+        expect(ids_now() == "TEXT_THREE#2;TEXT_ONE#3;", "REMOVE_OBJECTIVE removes the first match");
+        click("b_8");
+        expect(game.story_goals(1) && !game.story_goals(1)->objectives_visible, "ENABLE_OBJECTIVE_DISPLAY 0 hides the list");
+        click("b_9");
+        expect(game.story_goals(1)->objectives_visible, "an empty parameter shows it again");
+        click("b_a"); click("b_b"); click("b_c"); click("b_d");
+        expect(outcome["ADD_BAD"].starts_with("refused: ADD_OBJECTIVE needs a text identity")
+            && outcome["UPD_BAD"].starts_with("refused: UPDATE_OBJECTIVE needs the new identity")
+            && outcome["DISPLAY_BAD"].starts_with("refused: ENABLE_OBJECTIVE_DISPLAY needs an integer") && outcome["MISS"] == "applied: no objective matched",
+            "an unreadable objective reward is refused by name; a missing match changes nothing");
+        expect(ids_now() == "TEXT_THREE#2;TEXT_ONE#3;", "the refused rewards changed nothing");
+        click("b_f"); click("b_g");
+        expect(text == std::vector<std::string>{"SCREEN_TEXT:TEXT_HINT:7:::::"} && outcome["TEXT_BAD"].starts_with("refused: SCREEN_TEXT needs a text id"),
+            "SCREEN_TEXT reaches the seat with its seven positional parameters; one without a text id is refused");
+        // The list, the counter and the display flag ride the checkpoint (owner format 7), and a load shows nothing again.
+        cp::GameLoadOptions options;
+        options.configure_session = [&](eawr::campaign::GameSession& fresh) { return install(fresh); };
+        const auto saved = take(cp::save_game_checkpoint(game, ids));
+        auto restored = take(cp::load_game_checkpoint(saved, ids, options, executor));
+        const auto* back = restored.session.story_goals(1);
+        expect(back && back->objectives == game.story_goals(1)->objectives && back->next_number == 4 && back->objectives_visible,
+            "the objective list and the numbering counter are restored with the checkpoint");
+        expect(take(cp::save_game_checkpoint(restored.session, ids)) == saved, "the restored session saves the same bytes");
+        {
+            const auto first = take(restored.session.step(executor));
+            std::vector<std::string> republished;
+            for (const auto& row : first.story_presentation)
+                if (const auto* changed = std::get_if<st::ObjectiveChanged>(&row.payload); changed && row.owner == 1 && changed->value)
+                    republished.push_back(changed->value->text_id + "#" + std::to_string(changed->value->number));
+            expect(republished == (std::vector<std::string>{"TEXT_THREE#2", "TEXT_ONE#3"}), "a loaded game republishes the restored objective list to the HUD");
+        }
+        click("b_e");
+        expect(ids_now().empty() && game.story_goals(1)->next_number == 4, "REMOVE_ALL_OBJECTIVES clears the list and keeps the counter");
+        baseline.push_back(game.state_sha256());
+        expect(baseline.back() == baseline.front(), "1/2/4/8 workers keep equal digests across the objective rewards");
     }
 }
 
@@ -972,6 +1515,208 @@ void forced_clicks() {
     }
 }
 
+// #236 (WST-49/75): FLASH_GUI, LOCK_CONTROLS and SCROLL_LOCK become presentation requests for the plot owner's seat, a
+// reward that cannot be read is refused by name without ending the match, and the digest is equal at 1/2/4/8 workers.
+void story_hud_requests() {
+    const auto plots = [](bool with_rewards) {
+        // Each positional reward parameter is its own token list: parameter 1 in reward_params[0], parameter 2 in [1].
+        const auto note = [&](const char* name, const char* trigger, const char* reward, std::vector<std::string> params, std::vector<std::string> second = {}) {
+            auto e = make(name, "STORY_CLICK_GUI", {trigger}); e.perpetual = true;
+            if (with_rewards) { e.reward_type = reward; e.reward_params[0] = std::move(params); e.reward_params[1] = std::move(second); }
+            return e;
+        };
+        return std::vector<st::SubPlotDef>{sub("H.xml", 1, {note("FLASH", "b_a", "FLASH_GUI", {" B_Target "}, {"aux"}), note("FLASH_BAD", "b_b", "FLASH_GUI", {}),
+            note("LOCK", "b_c", "LOCK_CONTROLS", {"7"}), note("UNLOCK", "b_d", "LOCK_CONTROLS", {"0"}), note("LOCK_BAD", "b_e", "LOCK_CONTROLS", {"x"}),
+            note("SCROLL", "b_f", "SCROLL_LOCK", {"1"}), note("SCROLL_BAD", "b_g", "SCROLL_LOCK", {})})};
+    };
+    const auto requests = [](const eawr::campaign::GameTick& tick) {
+        std::vector<std::string> out;
+        for (const auto& row : tick.story_presentation) {
+            const auto* request = std::get_if<st::ConsumerRequest>(&row.payload);
+            if (!request || row.owner != 1) continue;
+            std::string text = request->reward_name + (request->consumer == st::Consumer::gui ? "/gui" : "/control");
+            for (const auto& p : request->parameters) text += ":" + p;
+            out.push_back(std::move(text));
+        }
+        return out;
+    };
+    std::vector<std::string> digests, control_digests;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        for (const bool with_rewards : {true, false}) {
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            auto game = take(eawr::campaign::GameSession::create(session_setup()));
+            take(game.install_story({}, {{1, "h.xml"}}, plots(with_rewards)));
+            std::uint64_t sequence{};
+            std::vector<std::string> seen, outcomes;
+            for (const char* control : {"b_a", "b_b", "b_c", "b_d", "b_e", "b_f", "b_g"}) {
+                take(game.submit(gc::GameCommand{{game.completed_tick(), {1}, ++sequence}, gc::GuiClick{control}}));
+                const auto tick = take(game.step(executor));
+                for (auto& row : requests(tick)) seen.push_back(std::move(row));
+                for (const auto& row : tick.story_triggers) outcomes.push_back(row.outcome);
+            }
+            if (with_rewards) {
+                expect(seen == (std::vector<std::string>{"FLASH_GUI/gui:B_Target:aux", "LOCK_CONTROLS/control:1", "LOCK_CONTROLS/control:0", "SCROLL_LOCK/control:1"}),
+                    "FLASH_GUI, LOCK_CONTROLS and SCROLL_LOCK reach the plot owner's seat with a trimmed name and a normalised lock flag");
+                expect(outcomes.size() == 7 && outcomes[1].starts_with("refused: FLASH_GUI needs one component name")
+                    && outcomes[4].starts_with("refused: LOCK_CONTROLS needs an integer") && outcomes[6].starts_with("refused: SCROLL_LOCK needs an integer"),
+                    "an unreadable HUD reward is refused by name and the match goes on");
+            } else {
+                expect(seen.empty(), "the control run publishes no HUD request");
+            }
+            (with_rewards ? digests : control_digests).push_back(game.state_sha256());
+        }
+    }
+    for (const auto& digest : digests) expect(digest == digests.front(), "1/2/4/8 workers keep equal digests across the HUD requests");
+    for (const auto& digest : control_digests) expect(digest == control_digests.front(), "1/2/4/8 workers keep equal digests in the control run");
+}
+
+// #236 review: a lock never outlives its plot. The plot that set LOCK_CONTROLS and SCROLL_LOCK is suspended; the seat gets
+// both releases once. An explicit unlock clears the claim, so a later plot end publishes nothing for it.
+void story_lock_release() {
+    const auto lock_plot = [] {
+        const auto note = [](const char* name, const char* trigger, const char* reward, const char* value) {
+            auto e = make(name, "STORY_CLICK_GUI", {trigger}); e.perpetual = true;
+            e.reward_type = reward; e.reward_params[0] = {value};
+            return e;
+        };
+        return std::vector<st::SubPlotDef>{sub("H.xml", 1, {note("LOCK", "b_a", "LOCK_CONTROLS", "1"), note("SCROLL", "b_b", "SCROLL_LOCK", "1"),
+            note("UNLOCK", "b_c", "LOCK_CONTROLS", "0")})};
+    };
+    const auto releases = [](const eawr::campaign::GameTick& tick) {
+        std::vector<std::string> out;
+        for (const auto& row : tick.story_presentation) {
+            const auto* request = std::get_if<st::ConsumerRequest>(&row.payload);
+            if (request && request->consumer == st::Consumer::control && row.owner == 1 && request->parameters == Names{"0"}) out.push_back(request->reward_name);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    for (const bool unlock_first : {false, true}) {
+        eawr::platform::ThreadWorkerAdapter executor(1);
+        auto game = take(eawr::campaign::GameSession::create(session_setup()));
+        take(game.install_story({}, {{1, "h.xml"}}, lock_plot()));
+        std::uint64_t sequence{};
+        const auto click_step = [&](const char* control) {
+            take(game.submit(gc::GameCommand{{game.completed_tick(), {1}, ++sequence}, gc::GuiClick{control}}));
+            return take(game.step(executor));
+        };
+        click_step("b_a"); click_step("b_b");
+        if (unlock_first) expect(releases(click_step("b_c")) == Names{"LOCK_CONTROLS"}, "an explicit unlock publishes its release");
+        st::PlotCommand suspend; suspend.op = st::PlotCommand::Op::suspend; suspend.subplot = "H.xml";
+        take(game.apply_story_plot(suspend));
+        const auto ended = take(game.step(executor));
+        expect(releases(ended) == (unlock_first ? Names{"SCROLL_LOCK"} : Names{"LOCK_CONTROLS", "SCROLL_LOCK"}),
+            "a suspended plot releases the locks it set, and only those still held");
+        expect(releases(take(game.step(executor))).empty(), "the release is published once");
+    }
+}
+
+// legacy #6681 / WST-47/58/68: STORY_GOAL_COMPLETED keeps a holocron goal and marks it completed, REMOVE_STORY_GOAL deletes it;
+// a tag that matches nothing changes nothing and an empty tag is refused by name. Both ride the checkpoint (the goal rows are in the
+// owner tail already) and a loaded game republishes the rows that are left, without a summary request.
+std::vector<st::SubPlotDef> goal_reward_plots() {
+    const auto note = [](const char* name, const char* trigger, const char* reward, std::vector<std::string> first) {
+        auto e = make(name, "STORY_CLICK_GUI", {trigger}); e.perpetual = true;
+        e.reward_type = reward; e.reward_params[0] = std::move(first);
+        return e;
+    };
+    auto first = make("GOAL_A", "STORY_ELAPSED", {"1"});
+    first.dialog = "Dialog_A"; first.chapter = 1; first.tag = "Tag_A"; first.popup = false;
+    auto second = make("GOAL_B", "STORY_ELAPSED", {"1"});
+    second.dialog = "Dialog_B"; second.chapter = 2; second.tag = "Tag_B"; second.popup = false;
+    return {sub("G.xml", 1, {first, second, note("DONE_A", "b_done", "STORY_GOAL_COMPLETED", {" Tag_A "}),
+        note("DROP_B", "b_drop", "REMOVE_STORY_GOAL", {"Tag_B"}), note("MISS", "b_miss", "STORY_GOAL_COMPLETED", {"Tag_None"}),
+        note("MISS_DROP", "b_miss_drop", "REMOVE_STORY_GOAL", {"Tag_None"}), note("EMPTY", "b_empty", "STORY_GOAL_COMPLETED", {}),
+        note("EMPTY_DROP", "b_empty_drop", "REMOVE_STORY_GOAL", {})})};
+}
+void story_goal_rewards() {
+    const auto setup = session_setup();
+    const auto ids = cp::game_identities(setup);
+    const auto install = [](eawr::campaign::GameSession& game) { return game.install_story({}, {{1, "g.xml"}}, goal_reward_plots()); };
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto game = take(eawr::campaign::GameSession::create(setup));
+        take(install(game));
+        for (int i = 0; i < 60; ++i) static_cast<void>(take(game.step(executor)));
+        const auto* goals = game.story_goals(1);
+        expect(goals && goals->goals.size() == 2 && !goals->goals[0].completed && !goals->goals[1].completed, "both story goals were added, neither completed");
+        std::uint64_t sequence{};
+        std::map<std::string, std::string> outcome;
+        std::vector<std::string> published; // "tag+" completed, "tag-" removed
+        const auto click = [&](const char* control) {
+            take(game.submit(gc::GameCommand{{game.completed_tick(), {1}, ++sequence}, gc::GuiClick{control}}));
+            const auto tick = take(game.step(executor));
+            for (const auto& row : tick.story_triggers) outcome[row.event] = row.outcome;
+            for (const auto& row : tick.story_presentation)
+                if (const auto* goal = std::get_if<st::GoalChanged>(&row.payload); goal && row.owner == 1)
+                    published.push_back(goal->tag + (goal->value ? (goal->value->completed ? "+" : "") : "-"));
+        };
+        const auto state = [&] {
+            std::string out;
+            if (const auto* now = game.story_goals(1)) for (const auto& goal : now->goals) out += goal.tag + (goal.completed ? "+" : "") + ";";
+            return out;
+        };
+        click("b_done");
+        expect(state() == "Tag_B;Tag_A+;" || state() == "Tag_A+;Tag_B;", "STORY_GOAL_COMPLETED keeps the goal and marks it completed (the name is trimmed)");
+        expect(published == std::vector<std::string>{"Tag_A+"} && outcome["DONE_A"] == "applied", "the completion reaches the seat as the goal's new row");
+        click("b_miss"); click("b_miss_drop"); click("b_empty"); click("b_empty_drop");
+        expect(outcome["MISS"] == "applied: no goal matched" && outcome["MISS_DROP"] == "applied: no goal matched"
+            && outcome["EMPTY"].starts_with("refused: STORY_GOAL_COMPLETED needs a goal tag") && outcome["EMPTY_DROP"].starts_with("refused: REMOVE_STORY_GOAL needs a goal tag"),
+            "a tag that matches nothing changes nothing; an empty tag is refused by name");
+        expect(published.size() == 1, "and none of them published a goal row");
+        // The completed goal and its place ride the checkpoint (owner format 7: the goal rows were already in the owner tail).
+        cp::GameLoadOptions options;
+        options.configure_session = [&](eawr::campaign::GameSession& fresh) { return install(fresh); };
+        const auto saved = take(cp::save_game_checkpoint(game, ids));
+        auto restored = take(cp::load_game_checkpoint(saved, ids, options, executor));
+        const auto* back = restored.session.story_goals(1);
+        expect(back && back->goals == game.story_goals(1)->goals, "the completed goal is restored with the checkpoint");
+        expect(take(cp::save_game_checkpoint(restored.session, ids)) == saved, "the restored session saves the same bytes");
+        {
+            const auto first = take(restored.session.step(executor));
+            std::vector<std::string> rows;
+            std::size_t requests{};
+            for (const auto& row : first.story_presentation) {
+                if (std::holds_alternative<st::SummaryRequest>(row.payload)) ++requests;
+                else if (const auto* goal = std::get_if<st::GoalChanged>(&row.payload); goal && goal->value && row.owner == 1)
+                    rows.push_back(goal->tag + (goal->value->completed ? "+" : ""));
+            }
+            expect(rows.size() == 2 && requests == 0, "a loaded game republishes both goal rows, completed one included, and opens no summary");
+        }
+        click("b_drop");
+        expect(state() == "Tag_A+;" && published.back() == "Tag_B-" && outcome["DROP_B"] == "applied", "REMOVE_STORY_GOAL deletes the goal and publishes its removal");
+        click("b_drop");
+        expect(outcome["DROP_B"] == "applied: no goal matched" && state() == "Tag_A+;", "removing it again changes nothing");
+        baseline.push_back(game.state_sha256());
+        expect(baseline.back() == baseline.front(), "1/2/4/8 workers keep equal digests across the goal rewards");
+    }
+}
+
+// #5922: a click on any command-bar control reaches the plots that name it, including a production card such as BFC's
+// b_Create_26: the listener list excludes no name and the click command triggers the event.
+void click_every_control() {
+    auto e = engine({sub("P.xml", 1, {make("BFC", "STORY_CLICK_GUI", {"b_Create_26"}), make("QUEUE", "STORY_CLICK_GUI", {"b_queue_space_03"}),
+        make("HELP", "STORY_CLICK_GUI", {"b_droid_help"})})});
+    expect(e.click_listeners() == (Names{"B_CREATE_26", "B_DROID_HELP", "B_QUEUE_SPACE_03"}), "a production card, a queue slot and the help button are all listened to");
+    eawr::platform::ThreadWorkerAdapter executor(1);
+    auto game = take(eawr::campaign::GameSession::create(session_setup()));
+    // An event with no reward and no dialog leaves no record, so each carries one (refused here: no provider is bound).
+    const auto rewarded = [](const char* name, const char* control) {
+        auto event = make(name, "STORY_CLICK_GUI", {control});
+        event.reward_type = "CREDITS"; event.reward_params[0] = {"1"};
+        return event;
+    };
+    take(game.install_story({}, {{1, "p.xml"}}, {sub("P.xml", 1, {rewarded("BFC", "b_Create_26"), rewarded("QUEUE", "b_queue_space_03")})}));
+    std::uint64_t sequence{};
+    Names fired;
+    for (const char* control : {"B_CREATE_26", "b_queue_space_03", "b_create_01"}) {
+        take(game.submit(gc::GameCommand{{game.completed_tick(), {1}, ++sequence}, gc::GuiClick{control}}));
+        for (const auto& row : take(game.step(executor)).story_triggers) fired.push_back(row.event);
+    }
+    expect(fired == (Names{"BFC", "QUEUE"}), "a BFC production-card click reaches the story engine as STORY_CLICK_GUI, whatever the case, and an unnamed control does nothing");
+}
+
 void session_rewards() {
     const auto setup = session_setup();
     const auto plots = [] {
@@ -1020,6 +1765,14 @@ void session_rewards() {
 
 int case_galactic_story_engine_tests(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--installed-type-names") {
+            const auto game = eawr::testing::environment("EAWR_EAW_GAME_ROOT");
+            if (!game || game->empty()) { std::cout << "SKIP: set EAWR_EAW_GAME_ROOT\n"; return 77; }
+            installed_type_names(*game, std::nullopt, "stock");
+            const auto mod = eawr::testing::environment("EAWR_REMAKE_MOD_ROOT");
+            if (mod && !mod->empty()) installed_type_names(*game, std::filesystem::path(*mod), "mod");
+            return galactic_test::failures ? 1 : 0;
+        }
         if (argc == 4 && std::string_view(argv[1]) == "--installed-associations") {
             installed_campaign_routes(argv[2], argv[3]);
             return galactic_test::failures ? 1 : 0;
@@ -1028,7 +1781,8 @@ int case_galactic_story_engine_tests(int argc, char** argv) {
         land_battle_seam(); cycles_and_tactical_triggers(); digest_covers_clocks(); multiplayer_gate(); hero_unlock_flavour_probe(); construction_refusals(); save_and_restore();
         loader(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-engine"));
         campaign_story_routes(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-engine"));
-        session(); holocron_goals(); forced_clicks(); session_rewards(); published_story_fault();
+        battle_events(); battle_perpetual_and_classes(); conquest_events(); loss_events(); counters_save_and_digest(); counter_restart_after_lua_edit(); travel_events(); move_events(); hero_moves_per_arrival(); hero_defeat_events(); construct_events();
+        session(); counters_in_the_game_checkpoint(); holocron_goals(); forced_clicks(); story_hud_requests(); story_lock_release(); story_objectives(); story_goal_rewards(); click_every_control(); session_rewards(); published_story_fault();
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

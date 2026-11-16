@@ -74,6 +74,7 @@ std::optional<GalacticSound> galactic_event_sound(const sim::galactic::GalacticE
         case Kind::enemy_approaching: return GalacticSound::enemy_approaching;
         case Kind::planet_corrupted: return GalacticSound::planet_corrupted;
         case Kind::corruption_removed: return GalacticSound::corruption_removed;
+        case Kind::corruption_success_voiced: return std::nullopt; // speech/hologram, not a sound cue
         case Kind::planet_destroyed: return std::nullopt; // WGP-193: the source ability supplies its authored target cue.
         }
         return std::nullopt;
@@ -109,6 +110,23 @@ std::string_view galactic_build_sfx_tag(const GalacticBuildCue cue) noexcept {
     case GalacticBuildCue::stopped: return "SFXEvent_Build_Cancelled";
     }
     return {};
+}
+
+std::string galactic_build_countdown_request(const std::string_view prefix, const float previous, const float remaining) {
+    if (prefix.empty() || previous == remaining) return {};
+    // Integer division and truncation exactly as the original's (WGEP-95).
+    const auto whole = [](const float value) { return static_cast<int>(value); };
+    if (remaining >= 10.0F) {
+        if (remaining >= 60.0F) {
+            const int bucket = whole(remaining) / 60 + 1;
+            if (whole(previous) / 60 + 1 == bucket) return {};
+            return std::string(prefix) + std::to_string(bucket) + "_Minutes";
+        }
+        if (whole(previous) / 10 == whole(remaining) / 10) return {};
+    } else if (whole(previous) == whole(remaining)) {
+        return {};
+    }
+    return std::string(prefix) + std::to_string(whole(remaining) + 1) + "_Seconds";
 }
 
 GalacticBuildFeedback galactic_build_feedback(const GalacticBuildCue cue, std::span<const Field> type,

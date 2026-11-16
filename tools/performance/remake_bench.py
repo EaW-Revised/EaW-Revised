@@ -127,11 +127,26 @@ func write_trace():
 
 
 def scene_args(name: str, mod: bool, ticks: int, fleets: dict[int, tuple[str, ...]] | None, map_path: str,
-               rebel_slot=("1", "Rebel", "0", "human"), empire_slot=("2", "Empire", "1", "ai")) -> list[str]:
+               rebel_slot=("1", "Rebel", "0", "human"), empire_slot=("2", "Empire", "1", "ai"),
+               slots: tuple[tuple[str, ...], ...] | None = None, credits: int | None = None,
+               seed: int | None = None) -> list[str]:
     args = list(LIVE_COMMON)
+    if seed is not None:
+        args[args.index("--eawr-skirmish-seed") + 1] = str(seed)
     if mod:
         args += ["--eawr-mod-root", REMAKE_CHAIN]
-    args += ["--eawr-skirmish-slot", ":".join(rebel_slot), "--eawr-skirmish-slot", ":".join(empire_slot)]
+    # `slots` lists every lobby slot as (slot, faction, team, human|ai[, easy|normal|hard]); the default is the M2 pair.
+    if slots:
+        # The roster is named first (the default has the M2 pair only) and every slot starts without the M2 fixture's fleet:
+        # the owner's lobby saves record an empty fleet for each slot.
+        args += ["--eawr-skirmish-players", ",".join(slot[0] for slot in slots)]
+    for slot in (slots or (rebel_slot, empire_slot)):
+        args += ["--eawr-skirmish-slot", ":".join(slot)]
+    for slot in slots or ():
+        if not (fleets or {}).get(int(slot[0])):
+            args += ["--eawr-skirmish-fleet", f"{slot[0]}:none"]
+    if credits is not None:
+        args += ["--eawr-skirmish-credits", str(credits)]
     for slot, units in (fleets or {}).items():
         args += ["--eawr-skirmish-fleet", f"{slot}:{','.join(units)}"]
     args += ["--eawr-live-ticks", str(ticks), "--eawr-live-capture-ticks", f"0,{ticks}",
@@ -142,8 +157,9 @@ def scene_args(name: str, mod: bool, ticks: int, fleets: dict[int, tuple[str, ..
 def build_scenes() -> dict[str, dict]:
     spec = {}
 
-    def live(name, *, mod, map_path, fleets=None, note, ticks=TICKS, window=WINDOW, tags=(), family=("full",), raw=False):
-        args = scene_args(name, mod, ticks, fleets, map_path)
+    def live(name, *, mod, map_path, fleets=None, note, ticks=TICKS, window=WINDOW, tags=(), family=("full",), raw=False,
+             slots=None, credits=None, seed=None):
+        args = scene_args(name, mod, ticks, fleets, map_path, slots=slots, credits=credits, seed=seed)
         if raw:
             args = [RAW_CHAIN if a == REMAKE_CHAIN else a for a in args]
         spec[name] = dict(kind="live", mod=mod, mod_kind="raw" if raw else "remake" if mod else "stock",
@@ -190,6 +206,34 @@ def build_scenes() -> dict[str, dict]:
              map_path="data/art/maps/_mp_space_coruscant.ted", fleets=fleets,
              ticks=3600, window=(1200, 3500), family=("raw-late-fleet",),
              note=f"RaW: {size} added ships/side (CIS/Rebel vs Republic/Empire), default forces/stations retained; AI on")
+    # Heavy saves of the owner's 11-09/11-10 scenes, re-recorded by a scripted skirmish (out/pf/saves-1115). The setups are
+    # read from the owner's saves (their embedded replay's SKSU record): same map, seed 67, slots, factions, teams, AI levels
+    # and starting credits. The owner's own commands (33 in the Remake battle, 28 in the RaW one) are not replayed: slot 1
+    # idles, so these are the AI/default-economy versions of the same matches. `run --from-save` saves at window start - 120,
+    # i.e. at the owner's save tick (20310; the RaW scene 19700, see below), and measures the ticks after it.
+    # The Remake battle: Rebel human + Rebel AI (Normal) vs Empire AI (Normal), Anaxes Sprawl, 10000 credits.
+    live("heavy-anaxes", mod=True, map_path="data/art/maps/anaxes sprawl.ted", seed=67, credits=10000,
+         slots=(("1", "Rebel", "0", "human"), ("2", "Rebel", "0", "ai", "normal"), ("3", "Empire", "1", "ai", "normal")),
+         ticks=21600, window=(20430, 21500), family=("heavy-save",),
+         note="owner's heavy Remake 4.0 + FFT battle (saved at tick 20310): Anaxes Sprawl, Rebel human (idle) + Rebel AI vs Empire AI, "
+              "10000 credits, seed 67")
+    # The same with the human slot as a Normal AI too: the owner's own slot only issued 33 commands in 11 minutes.
+    live("heavy-anaxes-ai", mod=True, map_path="data/art/maps/anaxes sprawl.ted", seed=67, credits=10000,
+         slots=(("1", "Rebel", "0", "ai", "normal"), ("2", "Rebel", "0", "ai", "normal"), ("3", "Empire", "1", "ai", "normal")),
+         ticks=21600, window=(20430, 21500), family=("heavy-save",),
+         note="heavy-anaxes with slot 1 a Normal AI instead of an idle human")
+    # The RaW battle: 4 Rebel (slot 1 human, three Hard AI) vs 3 Empire Hard AI, Yavin, 16000 credits (the owner's file is
+    # called 3v3; its player table is 4 + 3). The owner's save was taken near the END of its match (10-30 s of battle left).
+    # With all slots on AI this scripted match is decided at about tick 20350 (986 units at 20347); the save tick 19700 leaves
+    # about 650 ticks (22 s) of battle, like the owner's. The end tick moves with the build: re-read it from the recording
+    # run's trace (heavy_save.py record --save-tick) when the sim changes.
+    live("raw-heavy-yavin", mod=True, raw=True, map_path="data/art/maps/_mp_space_yavin.ted", seed=67, credits=16000,
+         slots=(("1", "Rebel", "1", "human"), ("2", "Rebel", "1", "ai", "hard"), ("3", "Rebel", "1", "ai", "hard"),
+                ("4", "Rebel", "1", "ai", "hard"), ("5", "Empire", "0", "ai", "hard"), ("6", "Empire", "0", "ai", "hard"),
+                ("7", "Empire", "0", "ai", "hard")),
+         ticks=20330, window=(19820, 20300), family=("heavy-save",),
+         note="owner's heavy RaW battle (near its end): Yavin, Rebel human (idle) + 3 Hard AI vs 3 Empire Hard AI, 16000 credits, "
+              "seed 67; save at tick 19700, about 650 ticks before the match is decided")
     for source in ("raw-late-fleet60", "remake-dev4"):
         for mode in ("file", "pipe", "nul"):
             control = dict(spec[source], tags=("logger-live-control",), log_mode=mode,
@@ -281,7 +325,7 @@ def write_engagement_camera(path: pathlib.Path, recipe: dict) -> None:
 
 
 def select(names: str) -> list[str]:
-    if names in ("smoke", "full", "ship", "raw-late-fleet", "logger-control", "logger-live-control"):
+    if names in ("smoke", "full", "ship", "raw-late-fleet", "heavy-save", "logger-control", "logger-live-control"):
         chosen = [n for n, s in SCENES.items() if names in s["tags"]]
     else:
         chosen = [n.strip() for n in names.split(",") if n.strip()]
@@ -1246,7 +1290,7 @@ def main() -> int:
     p_run.add_argument("--raw-mod-root", default=os.environ.get("EAWR_BENCH_RAW_MOD_ROOT"),
                        help="explicit RaW roots on the GPU host (raw-late-fleet group)")
     p_run.add_argument("--machine", action="append", default=[], help="GPU host name (repeatable); same host for before/after")
-    p_run.add_argument("--scenes", default="smoke", help="smoke | full | ship | raw-late-fleet | comma list of: " + ", ".join(SCENES))
+    p_run.add_argument("--scenes", default="smoke", help="smoke | full | ship | raw-late-fleet | heavy-save | comma list of: " + ", ".join(SCENES))
     p_run.add_argument("--pacing", choices=("audio", "free"), default="free",
                        help="free = uncapped/vsync off; audio = legacy paced control")
     p_run.add_argument("--prepare-from", help="reuse native start reports from this directory; otherwise prepare them on the rig first")

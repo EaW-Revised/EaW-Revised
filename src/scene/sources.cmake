@@ -4,6 +4,7 @@
 set(EAWR_SCENE_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/idle_tags.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/model_prefetch.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ordered_model_ahead.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/scene.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/scene_assets.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/scene_build.cpp"

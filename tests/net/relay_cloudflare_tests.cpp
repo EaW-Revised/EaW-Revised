@@ -229,6 +229,138 @@ void resolution_contracts() {
         "A stop request ends resolution at once");
 }
 
+void fallback_contracts() {
+    const TurnHostResolver fake = [](const std::string& host, std::uint16_t) -> std::vector<std::string> {
+        if (host == "turn.cloudflare.com") return {"198.51.100.1", "198.51.100.2"};
+        return {};
+    };
+    CloudflareTurnConfig config;
+    config.fallback_uri = "turn:203.0.113.9:3478"; config.fallback_secret = std::string(40, 's');
+    const GnsTurnCredentials cloudflare{"turn:turn.cloudflare.com:3478,turn:turn.cloudflare.com:443", "cfuser", "cfpass", 600s};
+
+    // The operator's own coturn is issued next to Cloudflare: one list, one user and password per server.
+    const auto merged = with_fallback(config, cloudflare);
+    expect(merged.uri == cloudflare.uri + ",turn:203.0.113.9:3478", "Cloudflare first, the operator's coturn after it");
+    expect(merged.username.starts_with("cfuser,cfuser,") && merged.username.find(',', 14) == std::string::npos, "A user per server");
+    expect(merged.password.starts_with("cfpass,cfpass,") && merged.password.find(',', 14) == std::string::npos, "A password per server");
+    expect(merged.lifetime == 600s && merged.username.substr(0, merged.username.find(',')) == "cfuser",
+        "The first username stays Cloudflare's, the one to revoke");
+
+    // The fallback never takes Cloudflare away.
+    auto off = config; off.fallback_uri.clear();
+    expect(with_fallback(off, cloudflare).uri == cloudflare.uri && with_fallback(off, cloudflare).username == "cfuser", "Off leaves the credentials unchanged");
+    GnsTurnCredentials long_user = cloudflare; long_user.username = std::string(250, 'u');
+    expect(with_fallback(config, long_user).uri == long_user.uri, "Lists that would not fit the wire limits fall back to Cloudflare only");
+
+    // Each server keeps its credential through the hostname rewrite; the client's provider choice drops the other provider.
+    const TurnStrings listed{merged.uri, merged.username, merged.password};
+    const auto own_user = merged.username.substr(merged.username.rfind(',') + 1), own_pass = merged.password.substr(merged.password.rfind(',') + 1);
+    const auto all = numeric_turn_credentials(listed, GnsTurnProvider::automatic, fake);
+    expect(all.uri == "turn:203.0.113.9:3478,turn:198.51.100.1:3478,turn:198.51.100.2:3478,turn:198.51.100.1:443,turn:198.51.100.2:443"
+            && all.username == own_user + ",cfuser,cfuser,cfuser,cfuser" && all.password == own_pass + ",cfpass,cfpass,cfpass,cfpass",
+        "Every address keeps the credential of its server; the own server comes first");
+    const auto only_own = numeric_turn_credentials(listed, GnsTurnProvider::own, fake);
+    expect(only_own == TurnStrings{"turn:203.0.113.9:3478", own_user, own_pass}, "own keeps the operator's server");
+    const auto only_cloudflare = numeric_turn_credentials(listed, GnsTurnProvider::cloudflare, fake);
+    expect(only_cloudflare == TurnStrings{"turn:198.51.100.1:3478,turn:198.51.100.2:3478,turn:198.51.100.1:443,turn:198.51.100.2:443", "cfuser", "cfpass"},
+        "cloudflare keeps the Cloudflare servers with one collapsed credential");
+    expect(numeric_turn_credentials({cloudflare.uri, "u", "p"}, GnsTurnProvider::own, fake).uri.empty(), "A provider the service does not offer leaves no relay");
+    const TurnStrings single{cloudflare.uri, "u", "p"};
+    const auto unchanged = numeric_turn_credentials(single, GnsTurnProvider::automatic, fake);
+    expect(unchanged.username == "u" && unchanged.password == "p" && unchanged.uri.starts_with("turn:198.51.100.1:3478"),
+        "A single-provider frame keeps one credential pair");
+    const TurnStrings bad{cloudflare.uri, "a,b,c", "p"};
+    expect(numeric_turn_credentials(bad, GnsTurnProvider::automatic, fake) == bad, "Lists that do not fit are left for the transport to refuse");
+}
+
+// Geography: lowest round-trip time first, a small bias to Cloudflare, never a loss prediction.
+void geography_contracts() {
+    const TurnHostResolver fake = [](const std::string& host, std::uint16_t) -> std::vector<std::string> {
+        if (host == "turn.cloudflare.com") return {"198.51.100.1"};
+        if (host == "stun.cloudflare.com") return {"198.51.100.50"};
+        return {};
+    };
+    const std::string own_ip = "203.0.113.9";
+    const TurnStrings listed{"turn:turn.cloudflare.com:3478,turn:turn.cloudflare.com:443,turn:" + own_ip + ":3478", "cfuser,cfuser,ownuser",
+        "cfpass,cfpass,ownpass"};
+    std::vector<std::string> probed;
+    const auto order = [&](std::optional<int> own, std::optional<int> edge, TurnOrder& report, GnsTurnProvider provider = GnsTurnProvider::automatic) {
+        probed.clear(); report = TurnOrder{};
+        const RttProbe probe = [&](const std::string& address, std::uint16_t port, std::chrono::milliseconds cap, std::stop_token)
+                -> std::optional<std::chrono::microseconds> {
+            probed.push_back(address + ":" + std::to_string(port) + "/" + std::to_string(cap.count()));
+            const auto& value = address == own_ip ? own : edge;
+            if (!value) return std::nullopt;
+            return std::chrono::milliseconds(*value);
+        };
+        return numeric_turn_credentials(listed, provider, fake, 5s, {}, probe, &report);
+    };
+    const auto first = [](const TurnStrings& value) { return value.uri.substr(0, value.uri.find(',')); };
+    const std::string own_uri = "turn:" + own_ip + ":3478", cloudflare_uri = "turn:198.51.100.1:3478";
+    TurnOrder report;
+
+    // Belgium: our server is nearer than Cloudflare's edge.
+    auto result = order(32, 51, report);
+    expect(first(result) == own_uri && report.probed && report.own_first && report.own_ms == 32 && report.cloudflare_ms == 51, "A nearer own server goes first");
+    expect(probed.size() == 2 && probed[0] == own_ip + ":3478/100" && probed[1] == "198.51.100.50:3478/100", "One probe each, capped at 100 ms, Cloudflare through its STUN name");
+    // Far away: Cloudflare's edge is much nearer, and a probe that gets no answer from our server counts as farther still.
+    result = order(180, 20, report);
+    expect(first(result) == cloudflare_uri && !report.own_first, "A far own server goes second");
+    result = order(std::nullopt, 20, report);
+    expect(first(result) == cloudflare_uri && !report.own_first && report.own_ms < 0, "An own server that does not answer goes second");
+    // The bias: own wins unless it is more than 15 ms slower.
+    result = order(65, 50, report);
+    expect(first(result) == own_uri && report.own_first, "Exactly 15 ms slower still keeps our server first");
+    result = order(66, 50, report);
+    expect(first(result) == cloudflare_uri && !report.own_first, "More than 15 ms slower puts Cloudflare first");
+    // Nothing answers, or only Cloudflare does not: the configured order (own first) stays.
+    result = order(std::nullopt, std::nullopt, report);
+    expect(first(result) == own_uri && report.own_first && report.probed, "No answer from either keeps the configured order");
+    result = order(40, std::nullopt, report);
+    expect(first(result) == own_uri && report.own_first && report.cloudflare_ms < 0, "Only our server answering keeps it first");
+    // Reordering keeps each credential with its server and the order inside a provider.
+    result = order(180, 20, report);
+    expect(result.uri == "turn:198.51.100.1:3478,turn:198.51.100.1:443,turn:" + own_ip + ":3478"
+            && result.username == "cfuser,cfuser,ownuser" && result.password == "cfpass,cfpass,ownpass", "Credentials follow their servers");
+    expect(report.classified && report.own_uris == own_uri, "The operator's own entries are reported by name, whatever the probe order");
+
+    // No probe when the player chose a provider or the list has one provider.
+    order(32, 51, report, GnsTurnProvider::own);
+    expect(probed.empty() && !report.probed, "A forced provider is not probed");
+    order(32, 51, report, GnsTurnProvider::cloudflare);
+    expect(probed.empty(), "A forced provider is not probed (cloudflare)");
+    probed.clear();
+    TurnOrder single_report;
+    numeric_turn_credentials({"turn:turn.cloudflare.com:3478", "u", "p"}, GnsTurnProvider::automatic, fake, 5s, {},
+        [&](const std::string&, std::uint16_t, std::chrono::milliseconds, std::stop_token) -> std::optional<std::chrono::microseconds> {
+            probed.push_back("called"); return std::nullopt; }, &single_report);
+    expect(probed.empty() && !single_report.probed, "A single-provider list is not probed");
+    // Without a probe (the default) nothing is measured and the configured order stands.
+    expect(first(numeric_turn_credentials(listed, GnsTurnProvider::automatic, fake)) == own_uri, "No probe: own first");
+}
+
+// The 2-of-3 rule: a server that leaves two or more of its three probes unanswered is unreachable for the order.
+void probe_rule_contracts() {
+    expect(!rtt_from_answers({}) && !rtt_from_answers({30ms}), "Zero or one answer of three: unreachable");
+    expect(rtt_from_answers({40ms, 30ms}) == 40ms, "Two answers: the larger of the two (upper median)");
+    expect(rtt_from_answers({50ms, 30ms, 40ms}) == 40ms, "Three answers: the median");
+}
+
+// The real probe: input checks, and a port nobody answers on ends within its cap.
+void rtt_probe_contracts() {
+    expect(!stun_rtt("not-an-address", 3478, 100ms) && !stun_rtt("203.0.113.9", 0, 100ms) && !stun_rtt("203.0.113.9", 3478, 0ms), "Bad input gives no RTT");
+    const auto listener = socket::udp_open("127.0.0.1", 0, false);
+    expect(listener.handle != socket::invalid && listener.port != 0, "A loopback UDP port opens");
+    const auto started = std::chrono::steady_clock::now();
+    const auto none = stun_rtt("127.0.0.1", listener.port, 100ms);
+    const auto took = std::chrono::steady_clock::now() - started;
+    socket::close(listener.handle);
+    expect(!none && took >= 90ms && took < 1s, "A silent endpoint gives no RTT after about the cap");
+    std::stop_source stopped; stopped.request_stop();
+    const auto stop_started = std::chrono::steady_clock::now();
+    expect(!stun_rtt("127.0.0.1", 9, 5000ms, stopped.get_token()) && std::chrono::steady_clock::now() - stop_started < 500ms, "A stop request ends the probe at once");
+}
+
 void provider_contracts(const std::string& fake_certificate, const std::string& fake_key, const std::string& wrong_name_certificate,
         const std::string& wrong_name_key) {
     {
@@ -559,6 +691,10 @@ int main(int argc, char** argv) {
         require(create_certificate(path("other.pem"), path("other.key"), std::chrono::hours(1), "not-cloudflare.example"));
         response_contracts();
         resolution_contracts();
+        fallback_contracts();
+        geography_contracts();
+        probe_rule_contracts();
+        rtt_probe_contracts();
         provider_contracts(path("cf.pem"), path("cf.key"), path("other.pem"), path("other.key"));
         pairing_contracts(path("cf.pem"), path("cf.key"), path("relay.pem"), path("relay.key"));
         renewal_contracts(path("cf.pem"), path("cf.key"), path("relay.pem"), path("relay.key"));

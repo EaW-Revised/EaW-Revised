@@ -97,7 +97,7 @@ inline void prime_mounted_mods(const std::filesystem::path& game_root) {
     std::lock_guard lock(s.mutex);
     if (s.primed) return;
     s.primed = true;
-    mods::Profile profile = viewer_load_note_context().profile; // Godot state is read here, not on the worker
+    mods::Profile profile = viewer_load_note_context(true).profile; // Godot state is read here, not on the worker
     s.profile = profile;
     auto options = mounted_mods_detail::digest_options();
     s.worker = std::thread([game_root, profile = std::move(profile), options = std::move(options)]() mutable {
@@ -137,7 +137,20 @@ inline void shutdown_mounted_mods() {
         if (record.content.state == mods::ContentDigestState::pending) settled = false;
     }
     auto description = mods::describe_mounted_profile(profile, s.records);
-    if (settled) s.final_description = description;
+    if (settled) {
+        s.final_description = description;
+        // One line per layer when the last digest settles: what this process read itself against what it took from the
+        // partial results another process (the mods service) left in the cache folder.
+        if (s.digests) for (const auto& record : s.records) {
+            const auto stats = s.digests->stats(record.key);
+            if (!stats.known) continue;
+            godot::UtilityFunctions::print(godot::String::utf8(("EAWR mod digest [" + record.key + "]: files " + std::to_string(stats.files_total)
+                + " hashed " + std::to_string(stats.files_hashed) + " reused " + std::to_string(stats.files_reused) + " adopted "
+                + std::to_string(stats.files_adopted) + " bytes_read " + std::to_string(stats.bytes_read) + " of " + std::to_string(stats.bytes_total)
+                + " media " + stats.media + " workers " + std::to_string(stats.workers)
+                + (stats.adopted ? " (whole digest adopted)" : "")).c_str()));
+        }
+    }
     return description;
 }
 // Recheck asynchronous digests on the main thread without waiting for disk I/O.

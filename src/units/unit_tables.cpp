@@ -3,6 +3,7 @@
 #include "eawr/core/load_profile.hpp"
 
 #include <algorithm>
+#include <cassert>
 
 namespace eawr::units::unit_tables_detail {
 
@@ -160,33 +161,35 @@ void Loader::run(const std::vector<std::string>& types, const std::vector<std::s
 void Loader::link() {
         namespace profile = core::load_profile;
         profile::Scope link_scope(profile::Phase::unit_link);
+        // One pass per table builds the case-folded name index; every link below is a hash probe that returns the
+        // same row the old linear scan did: the first unit with a loaded type (xml_type) of that name, the first
+        // projectile of that name, and (as before, with no early exit) the LAST priority set of that name.
+        NameIndexMap unit_names;
+        unit_names.reserve(tables_.units.size());
+        for (std::size_t index = 0; index < tables_.units.size(); ++index) {
+            if (!tables_.units[index].xml_type.empty()) unit_names.try_emplace(tables_.units[index].id, static_cast<std::uint32_t>(index));
+        }
+        NameIndexMap projectile_names;
+        projectile_names.reserve(tables_.projectiles.size());
+        for (std::size_t index = 0; index < tables_.projectiles.size(); ++index)
+            projectile_names.try_emplace(tables_.projectiles[index].id, static_cast<std::uint32_t>(index));
+        NameIndexMap priority_names;
+        priority_names.reserve(tables_.priority_sets.size());
+        for (std::size_t index = 0; index < tables_.priority_sets.size(); ++index)
+            priority_names.insert_or_assign(tables_.priority_sets[index].id, static_cast<std::uint32_t>(index));
+        const auto lookup = [&](const NameIndexMap& names, const std::string& id, const profile::Counter scans,
+                                const profile::Counter steps) {
+            profile::count(scans);
+            profile::count(steps); // one probe
+            const auto found = names.find(std::string_view(id));
+            return found == names.end() ? no_index : found->second;
+        };
         const auto unit_index = [&](const std::string& id) {
-            std::size_t steps = 0;
-            for (std::size_t index = 0; index < tables_.units.size(); ++index) {
-                ++steps;
-                if (iequals(tables_.units[index].id, id) && !tables_.units[index].xml_type.empty()) {
-                    profile::count(profile::Counter::unit_index_scans);
-                    profile::count(profile::Counter::unit_index_steps, steps);
-                    return static_cast<std::uint32_t>(index);
-                }
-            }
-            profile::count(profile::Counter::unit_index_scans);
-            profile::count(profile::Counter::unit_index_steps, steps);
-            return no_index;
+            return lookup(unit_names, id, profile::Counter::unit_index_scans, profile::Counter::unit_index_steps);
         };
         const auto projectile_index = [&](const std::string& id) {
-            std::size_t steps = 0;
-            for (std::size_t index = 0; index < tables_.projectiles.size(); ++index) {
-                ++steps;
-                if (iequals(tables_.projectiles[index].id, id)) {
-                    profile::count(profile::Counter::projectile_index_scans);
-                    profile::count(profile::Counter::projectile_index_steps, steps);
-                    return static_cast<std::uint32_t>(index);
-                }
-            }
-            profile::count(profile::Counter::projectile_index_scans);
-            profile::count(profile::Counter::projectile_index_steps, steps);
-            return no_index;
+            return lookup(projectile_names, id, profile::Counter::projectile_index_scans,
+                profile::Counter::projectile_index_steps);
         };
         for (auto& unit : tables_.units) {
             if (unit.cluster_bomb) unit.cluster_bomb->projectile_index = projectile_index(unit.cluster_bomb->bomb_type);
@@ -202,6 +205,7 @@ void Loader::link() {
                         for (auto& entry : tier) entry.squadron_index = unit_index(entry.squadron);
             }
             if (unit.weapon) unit.weapon->projectile_index = projectile_index(unit.weapon->projectile);
+            if (!unit.alternate_projectile.empty()) unit.alternate_projectile_index = projectile_index(unit.alternate_projectile);
             for (auto* list : {&unit.abilities, &unit.team_abilities}) {
                 for (auto& ability : *list) {
                     ability.projectile_index = projectile_index(ability.projectile_override);
@@ -214,11 +218,10 @@ void Loader::link() {
                     hardpoint.weapon->charged_projectile_index = projectile_index(hardpoint.weapon->charged_projectile);
                 }
             }
-            profile::count(profile::Counter::priority_set_steps, tables_.priority_sets.size());
-            for (std::size_t index = 0; index < tables_.priority_sets.size(); ++index) {
-                if (!unit.targeting_priority_set.empty() && iequals(tables_.priority_sets[index].id, unit.targeting_priority_set)) {
-                    unit.targeting_priority_set_index = static_cast<std::uint32_t>(index);
-                }
+            if (!unit.targeting_priority_set.empty()) {
+                profile::count(profile::Counter::priority_set_steps);
+                const auto found = priority_names.find(std::string_view(unit.targeting_priority_set));
+                if (found != priority_names.end()) unit.targeting_priority_set_index = found->second;
             }
         }
     }
@@ -270,11 +273,40 @@ std::span<const std::string_view> pinned_m2_obstacles() noexcept {
     return pinned_obstacles;
 }
 
-const UnitType* UnitTables::find(const std::string_view id) const noexcept {
+namespace {
+// The rule find() has always had: the first unit in table order whose id matches case-insensitively.
+const UnitType* first_unit_scan(const std::vector<UnitType>& units, const std::string_view id) noexcept {
     for (const auto& unit : units) {
         if (iequals(unit.id, id)) return &unit;
     }
     return nullptr;
+}
+} // namespace
+
+const UnitType* UnitTables::find(const std::string_view id) const noexcept {
+    if (unit_names.built_for == units.size() && !units.empty()) {
+        // A table edited in place after the load can leave a stale row: trust a hit only while it still agrees, and
+        // let a miss take the scan (a miss is the rare case and costs exactly what it always did). A rename, swap or
+        // reorder that keeps the unit count and gives an EARLIER row this name cannot be seen from the hit alone; such
+        // an edit calls rebuild_unit_name_index(), and debug builds check every hit against the scan.
+        const auto found = unit_names.first ? unit_names.first->find(id) : NameIndexMap::const_iterator{};
+        if (unit_names.first && found != unit_names.first->end() && found->second < units.size()
+            && iequals(units[found->second].id, id)) {
+            assert(&units[found->second] == first_unit_scan(units, id)
+                && "unit table edited in place after the load: call rebuild_unit_name_index()");
+            return &units[found->second];
+        }
+    }
+    return first_unit_scan(units, id);
+}
+
+void UnitTables::rebuild_unit_name_index() {
+    auto names = std::make_shared<NameIndexMap>();
+    names->reserve(units.size());
+    for (std::size_t index = 0; index < units.size(); ++index)
+        names->try_emplace(units[index].id, static_cast<std::uint32_t>(index)); // first of a name wins
+    unit_names.first = std::move(names);
+    unit_names.built_for = units.size();
 }
 
 core::Result<UnitTables> load_unit_tables(const LoadInput& input) {
@@ -377,6 +409,7 @@ core::Result<UnitTables> load_unit_tables(const LoadInput& input) {
     tables.unresolved = std::move(report.unresolved);
     tables.notes = std::move(report.notes);
     for (auto& [path, file] : report.inputs) tables.inputs.push_back(std::move(file));
+    tables.rebuild_unit_name_index();
     return core::Result<UnitTables>::success(std::move(tables));
 }
 

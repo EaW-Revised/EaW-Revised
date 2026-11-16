@@ -226,7 +226,12 @@ void admission() {
                 if (at == saved.end() || before.bytes.size() != after.bytes.size())
                     throw std::runtime_error("queued producer checkpoint fixture not found");
                 std::copy(after.bytes.begin(), after.bytes.end(), at);
-                auto restored = take(galactic::GalacticSession::create(input));
+                // Offers are authored once at setup, so the restored owner is built from the saved offer content (a checkpoint
+                // whose offers differ from its owner's setup is refused on load).
+                auto restore_input = input;
+                (ground ? restore_input.production->planets[0].offers[0].required_ground_level
+                        : restore_input.production->planets[0].offers[0].required_space_level) = level;
+                auto restored = take(galactic::GalacticSession::create(restore_input));
                 (void)take(restored.load_checkpoint_state(saved));
                 const auto balance = restored.snapshot()->player_economy()->players[0].credits;
                 const auto result = take(restored.step(pool));
@@ -421,13 +426,18 @@ void offer_projection() {
             "fresh owners cache different immutable offer digests");
         (void)take(original.step(serial));
         const auto saved = take(original.save_checkpoint_state());
-        const auto loaded = different.load_checkpoint_state(saved);
-        if (!loaded) throw std::runtime_error(loaded.error().message);
+        // Offers are authored once at setup and never rewritten, so an owner built from other offer content refuses the
+        // checkpoint instead of adopting its offers (#6601).
+        const auto refused = different.load_checkpoint_state(saved);
+        expect(!refused && refused.error().message.find("production offers differ from setup") != std::string::npos,
+            "a checkpoint whose offer content differs from the owner's setup is refused");
         auto fresh = take(galactic::GalacticSession::create(active));
+        // Prime the target's cached digest first: the load must replace it with the restored owner's state.
+        const auto primed = fresh.cached_state_hash().get();
         const auto restored = fresh.load_checkpoint_state(saved);
         if (!restored) throw std::runtime_error(restored.error().message);
-        expect(different.cached_state_hash().get() == fresh.state_sha256(),
-            "in-place checkpoint load replaces cached immutable offer digests with the restored owner's content");
+        expect(primed != original.state_sha256() && fresh.cached_state_hash().get() == original.state_sha256(),
+            "in-place checkpoint load replaces the cached state digest with the restored owner's content");
     }
     {
         // WGUI-170: renamed/synthetic ground, space and station offers retain
@@ -1048,6 +1058,57 @@ void base_and_tech_completion() {
     for (int i = 0; i < 4; ++i) (void)take(research.step(serial));
     expect(research.snapshot()->player_economy()->players[0].current_tech == 4, "technology sets authored target rather than adding one");
     expect(research.snapshot()->production()->players[0].unlocked == std::vector<galactic::TypeId>{1001, 2000}, "WGEP-147 completion includes registered types absent from all offers");
+}
+
+// WST-33: a starbase on one planet and a ground structure on another complete in the same tick; the story hears the build
+// (and, for the station, its level) in (planet, build, kind) order, the same on every worker count.
+void construct_story_notices() {
+    using Notice = galactic::GalacticSession::ConstructStoryNotice;
+    struct Row {
+        std::uint64_t tick{};
+        Notice::Kind kind{};
+        galactic::PlanetId planet{};
+        galactic::TypeId type{};
+        galactic::PlayerId owner{};
+        bool space{};
+        std::int64_t level{};
+        bool operator==(const Row&) const = default;
+    };
+    std::vector<Row> reference;
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        auto config = setup();
+        auto& first = config.production->planets[0]; first.space_level = 0;
+        auto station = first.offers[0]; station.domain = galactic::ProductionDomain::space;
+        station.kind = galactic::ProductionKind::starbase; station.base_level = 1; station.population = f(0);
+        first.offers[0] = station;
+        auto game = take(galactic::GalacticSession::create(config));
+        std::vector<Row> rows; std::uint64_t now{};
+        game.set_construct_story_handler([&](const Notice& n) {
+            rows.push_back({now, n.kind, n.planet, n.type, n.owner, n.space, n.level});
+            return eawr::core::Result<void>::success();
+        });
+        submit(game, buy(0, 1, 1, 1000, galactic::ProductionDomain::space));
+        submit(game, buy(0, 2, 2, 1001, galactic::ProductionDomain::ground));
+        for (std::uint64_t i = 0; i < 8; ++i) { now = i; (void)take(game.step(pool)); }
+        expect(rows.size() == 3 && rows[0].kind == Notice::Kind::built && rows[1].kind == Notice::Kind::base_level
+            && rows[2].kind == Notice::Kind::built && rows[0].planet == 1 && rows[1].planet == 1 && rows[2].planet == 2
+            && rows[0].type == 1000 && rows[0].space && rows[1].level == 1 && rows[2].type == 1001 && !rows[2].space
+            && rows[0].owner == 1 && rows[0].tick == rows[2].tick,
+            "two builds completing in one tick reach the story in planet order: the station, its level, then the structure");
+        if (workers == 1) reference = rows; else expect(rows == reference, "the construct notices are equal on 1/2/4/8 workers");
+    }
+    // A technology completion is not a construction.
+    auto config = setup(); auto& tech = config.production->planets[0].offers[0];
+    tech.kind = galactic::ProductionKind::technology; tech.target_tech = 4; tech.population = f(0);
+    config.production->technology_types = {{1001, 3, true, true, {1}}, {2000, 0, true, true, {1}}};
+    auto research = take(galactic::GalacticSession::create(config));
+    int heard = 0;
+    research.set_construct_story_handler([&](const Notice&) { ++heard; return eawr::core::Result<void>::success(); });
+    submit(research, buy(0, 1));
+    eawr::sim::InlineExecutor serial;
+    for (int i = 0; i < 6; ++i) (void)take(research.step(serial));
+    expect(research.snapshot()->player_economy()->players[0].current_tech == 4 && heard == 0, "a technology completion sends no construct notice");
 }
 
 galactic::GalacticSetup blocker_setup() {

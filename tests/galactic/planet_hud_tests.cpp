@@ -1,6 +1,7 @@
 #include "galactic/planet_hud.hpp"
 #include "galactic/hud_retained.hpp"
 #include "galactic/command_control_state.hpp"
+#include "eawr/assets/assets.hpp"
 #include "eawr/presentation/ui/encyclopedia_timing.hpp"
 
 #ifdef NDEBUG
@@ -53,7 +54,8 @@ int case_galactic_planet_hud_tests() {
         assert(!command_menu_disabled(CommandMenuAction::story_summary, false, true));
         assert(command_menu_disabled(CommandMenuAction::story_summary, true, true));
         assert(command_menu_disabled(CommandMenuAction::story_summary, true, false));
-        assert(command_menu_disabled(CommandMenuAction::cinematic_camera, false, true));
+        assert(!command_menu_disabled(CommandMenuAction::cinematic_camera, false, false)); // #6291: the camera button has its action
+        assert(command_menu_disabled(CommandMenuAction::cinematic_camera, true, false));
         assert(!command_menu_disabled(CommandMenuAction::options, false, false));
         const std::string mod_xml = "<CommandBarComponents><CommandBarComponent Name='synthetic_filter'>"
             "<Type>Button</Type><Group>Filter_Custom</Group><Toggle>True</Toggle>"
@@ -74,8 +76,16 @@ int case_galactic_planet_hud_tests() {
         const auto near = [](float a, float b) { return a > b - 0.001F && a < b + 0.001F; };
         assert(near(scaled.art.x, 82) && near(scaled.art.y, 34)
             && near(scaled.art.width, 42) && near(scaled.art.height, 28));
-        assert(near(scaled.hit.x, 89) && near(scaled.hit.y, 41)
-            && near(scaled.hit.width, 28) && near(scaled.hit.height, 14));
+        // The hit rectangle is the mesh rectangle moved by the offset, whatever the Scale (legacy #6757).
+        assert(near(scaled.hit.x, 83) && near(scaled.hit.y, 38)
+            && near(scaled.hit.width, 40) && near(scaled.hit.height, 20));
+        // Remake 4.0's filter buttons: hi-res art authored at Scale 0.125 draws at the mesh size, and the hit rectangle
+        // is that same mesh size, not an eighth of it.
+        eawr::data::ui::ShellAnchor filter;
+        filter.rect = {293.0F, 833.0F, 22.5F, 22.5F}; filter.origin = eawr::assets::Vec2f{304.25F, 844.25F};
+        const auto hires = command_button_geometry(filter, {}, 180.0F, 180.0F, 0.125F);
+        assert(near(hires.art.width, 22.5F) && near(hires.art.height, 22.5F));
+        assert(hires.art == filter.rect && hires.hit == filter.rect);
         // A larger icon is centred on a smaller backing, at the same authored and shell scale.
         const auto icon = command_layer_rect(4.5F, 4.375F, 144.0F, 144.0F, 0.125F);
         assert(near(icon.width, 18.0F) && near(icon.height, 18.0F));
@@ -425,6 +435,18 @@ int case_galactic_planet_hud_tests() {
     const auto view = planet_hud_view(&facts, false, 3, 2);
     assert(view.selected == 7 && view.income == "$ 13");
     assert(!view.ground_enabled && view.space_tab && view.accepts_queue);
+    // #6937: the chosen panel is the view's tab with nothing selected (and for a planet that has no ground panel the space
+    // panel shows without the choice being rewritten), so selecting a planet again opens the panel last chosen.
+    assert(planet_hud_view(nullptr, true, 3, 2).space_tab && !planet_hud_view(nullptr, false, 3, 2).space_tab);
+    {
+        auto fogged = facts;
+        fogged.discovered = false;
+        assert(planet_hud_view(&fogged, true, 3, 2).space_tab && !planet_hud_view(&fogged, false, 3, 2).space_tab);
+        auto landable = facts;
+        landable.surface_accessible = true;
+        assert(planet_hud_view(&landable, true, 3, 2).space_tab && !planet_hud_view(&landable, false, 3, 2).space_tab);
+        assert(planet_hud_view(&landable, false, 3, 2).ground_enabled && !planet_hud_view(&landable, false, 3, 2).space_tab);
+    }
     assert(view.queues.size() == 5);
     assert(view.queues[0].icon == "fallback" && view.queues[0].percent == 45);
     assert(view.queues[1].dial == 1.0 && !view.queues[1].percent);
@@ -466,6 +488,100 @@ int case_galactic_planet_hud_tests() {
     assert(status_effect_icon_name(PlanetStatusIcon::smuggler, {"a", "b"}) == "a");
     assert(status_effect_icon_name(PlanetStatusIcon::smuggler, {}).empty());
     assert(status_effect_icon_name(PlanetStatusIcon::build, {"a"}).empty());
+    // #2987 / WGFI-3: the corruption transition text shows the progress as a truncated whole percent.
+    assert(corruption_transition_percent(0.0F) == 0 && corruption_transition_percent(0.5F) == 50);
+    assert(corruption_transition_percent(0.999F) == 99 && corruption_transition_percent(1.0F) == 100);
+    assert(corruption_transition_percent(-0.2F) == 0 && corruption_transition_percent(1.7F) == 100);
+    {
+        // A running transition changes the label placement digest, so the text refreshes.
+        PlanetHudFacts digest_facts; digest_facts.planet = 7; digest_facts.discovered = true;
+        const auto idle = label_placement_digest(digest_facts);
+        digest_facts.corruption_percent = 42;
+        const auto running = label_placement_digest(digest_facts);
+        digest_facts.corruption_percent = 43;
+        assert(idle != running && running != label_placement_digest(digest_facts));
+        digest_facts.corruption_removing = true;
+        assert(label_placement_digest(digest_facts) != running);
+        // WGSI-11: a changed siphon amount refreshes the smuggler tooltip.
+        const auto unsiphoned = label_placement_digest(digest_facts);
+        digest_facts.siphoned_credits = 12;
+        assert(label_placement_digest(digest_facts) != unsiphoned);
+    }
+    {
+        // WGSI-11: the smuggler tooltip shows the siphoned credits rounded to the nearest whole credit.
+        using eawr::sim::math::Fixed;
+        assert(siphon_tooltip_credits(Fixed{}) == 0);
+        assert(siphon_tooltip_credits(Fixed::from_raw(37 * Fixed::scale)) == 37);
+        assert(siphon_tooltip_credits(Fixed::from_raw(37 * Fixed::scale + Fixed::scale / 2 - 1)) == 37);
+        assert(siphon_tooltip_credits(Fixed::from_raw(37 * Fixed::scale + Fixed::scale / 2)) == 38);
+        assert(siphon_tooltip_credits(Fixed::from_raw(Fixed::scale / 2 - 1)) == 0);
+        assert(siphon_tooltip_credits(Fixed::from_raw(-(3 * Fixed::scale + Fixed::scale / 2))) == -4);
+        assert(siphon_tooltip_credits(Fixed::from_raw(-(3 * Fixed::scale + Fixed::scale / 4))) == -3);
+    }
+    // #4375 / WGSI-3: hero icons lead the row; the red/green look shows the ally and foreign icons, the other look the
+    // faction icons, never both.
+    facts.hero_ally = facts.hero_foreign = facts.hero_good = facts.hero_evil = facts.hero_corrupt = true;
+    assert((planet_status_icons(facts) == std::vector<PlanetStatusIcon>{PlanetStatusIcon::hero_good, PlanetStatusIcon::hero_evil,
+        PlanetStatusIcon::hero_corrupt, PlanetStatusIcon::build, PlanetStatusIcon::corruption_info}));
+    facts.hero_red_green = true;
+    assert((planet_status_icons(facts) == std::vector<PlanetStatusIcon>{PlanetStatusIcon::hero_ally, PlanetStatusIcon::hero_foreign,
+        PlanetStatusIcon::build, PlanetStatusIcon::corruption_info}));
+    facts.hero_red_green = false;
+    facts.discovered = false;
+    assert(planet_status_icons(facts).empty());
+    facts.discovered = true;
+    facts.hero_ally = facts.hero_foreign = facts.hero_good = facts.hero_evil = facts.hero_corrupt = false;
+    {
+        const std::vector<std::string> alternates{"you", "enemy", "good", "evil", "corrupt"};
+        assert(hero_status_icon_name(PlanetStatusIcon::hero_ally, alternates) == "you");
+        assert(hero_status_icon_name(PlanetStatusIcon::hero_foreign, alternates) == "enemy");
+        assert(hero_status_icon_name(PlanetStatusIcon::hero_good, alternates) == "good");
+        assert(hero_status_icon_name(PlanetStatusIcon::hero_evil, alternates) == "evil");
+        assert(hero_status_icon_name(PlanetStatusIcon::hero_corrupt, alternates) == "corrupt");
+        assert(hero_status_icon_name(PlanetStatusIcon::hero_corrupt, {"you", "enemy"}).empty());
+        assert(hero_status_icon_name(PlanetStatusIcon::build, alternates).empty());
+        assert(is_hero_status_icon(PlanetStatusIcon::hero_evil) && !is_hero_status_icon(PlanetStatusIcon::smuggler));
+        assert(status_effect_component_name(PlanetStatusIcon::hero_foreign) == "g_enemy_hero");
+        // WGSI-4: sides compare ASCII case-insensitively; an unnamed side or faction never matches.
+        assert(hero_side("Empire", "REBEL", "EMPIRE", "UNDERWORLD") == HeroSide::evil);
+        assert(hero_side("rebel", "REBEL", "EMPIRE", "UNDERWORLD") == HeroSide::good);
+        assert(hero_side("Underworld", "REBEL", "EMPIRE", "UNDERWORLD") == HeroSide::corrupt);
+        assert(hero_side("Hutts", "REBEL", "EMPIRE", "UNDERWORLD") == HeroSide::none);
+        assert(hero_side("Hutts", "REBEL", "EMPIRE", "") == HeroSide::none); // a mod without a corrupt side name
+        assert(hero_side("", "REBEL", "EMPIRE", "") == HeroSide::none);      // a faction without a name
+        assert(hero_side("", "", "", "") == HeroSide::none);
+        assert(hero_side("Empire", "REBEL", "", "UNDERWORLD") == HeroSide::none);
+        assert(status_effect_component_name(PlanetStatusIcon::hero_good) == "g_hero");
+    }
+    // #7177 / WGSI-8/9: what a hero icon's tooltip lists, and the slot grid it sits in.
+    {
+        const std::vector<PlanetHeroTip> tips{{1, 100, true}, {2, 200, false}, {3, 300, false}, {1, 400, true}};
+        const auto side_of = [](const PlayerId owner) { return owner == 1 ? HeroSide::evil : owner == 2 ? HeroSide::good : HeroSide::none; };
+        assert((hero_tooltip_types(tips, PlanetStatusIcon::hero_ally, side_of) == std::vector<eawr::sim::galactic::TypeId>{100, 400}));
+        assert((hero_tooltip_types(tips, PlanetStatusIcon::hero_foreign, side_of) == std::vector<eawr::sim::galactic::TypeId>{200, 300}));
+        assert((hero_tooltip_types(tips, PlanetStatusIcon::hero_evil, side_of) == std::vector<eawr::sim::galactic::TypeId>{100, 400}));
+        assert((hero_tooltip_types(tips, PlanetStatusIcon::hero_good, side_of) == std::vector<eawr::sim::galactic::TypeId>{200}));
+        assert(hero_tooltip_types(tips, PlanetStatusIcon::hero_corrupt, side_of).empty());
+        assert(hero_tooltip_types(tips, PlanetStatusIcon::smuggled, side_of).empty());
+        assert(hero_tooltip_types({}, PlanetStatusIcon::hero_ally, side_of).empty());
+        // Three items: the last listed takes the first cell; one row of three.
+        const auto three = tooltip_icon_slots(3);
+        assert(three.columns == 3 && three.rows == 1 && three.slots.size() == 3);
+        assert((three.slots[2] == TooltipSlot{0, 0}) && (three.slots[1] == TooltipSlot{1, 0}) && (three.slots[0] == TooltipSlot{2, 0}));
+        // Eight items wrap at six per row: the width is the full row, two rows.
+        const auto eight = tooltip_icon_slots(8);
+        assert(eight.columns == 6 && eight.rows == 2);
+        assert((eight.slots[7] == TooltipSlot{0, 0}) && (eight.slots[2] == TooltipSlot{5, 0}) && (eight.slots[1] == TooltipSlot{0, 1})
+            && (eight.slots[0] == TooltipSlot{1, 1}));
+        // The grid holds 36; none is a no-op.
+        assert(tooltip_icon_slots(40).slots.size() == 36 && tooltip_icon_slots(40).rows == 6);
+        assert(tooltip_icon_slots(0).slots.empty() && tooltip_icon_slots(0).columns == 0 && tooltip_icon_slots(0).rows == 0);
+        // A changed hero list refreshes the label placement digest.
+        PlanetHudFacts tip_facts; tip_facts.planet = 7; tip_facts.discovered = true;
+        const auto none = label_placement_digest(tip_facts);
+        tip_facts.hero_tips = {{1, 100, true}};
+        assert(label_placement_digest(tip_facts) != none);
+    }
     {
         const std::vector<ObjectId> ring{ObjectId{4}, ObjectId{9}, ObjectId{2}};
         assert(step_planet(ring, ObjectId{4}, PlanetStep::next) == ObjectId{9});
@@ -510,6 +626,23 @@ int case_galactic_planet_hud_tests() {
         assert(!planet_bonus_icon_style(true, "custom_icon", true, 0.0F, &owner).visible);
         // #6053: retail draws the icon only from the command-bar atlas; a standalone (oversized) texture draws nothing.
         assert(!planet_bonus_icon_style(true, "Loadscreens/Large_Standalone.png", false, 1.0F, &owner).visible);
+        // #6756: the same rule for the weather icon components (card header, opened map): only atlas entries draw.
+        eawr::assets::MegaTexture atlas;
+        atlas.entries.push_back({"i_pa_weather_sun.tga", {0, 0, 64, 64}, true, false, false});
+        assert(command_bar_icon_in_atlas(&atlas, "i_pa_weather_sun.tga"));
+        assert(command_bar_icon_in_atlas(&atlas, "I_PA_Weather_Sun.TGA"));
+        assert(!command_bar_icon_in_atlas(&atlas, "Loadscreens/Ground_Empire_10.png"));
+        assert(!command_bar_icon_in_atlas(&atlas, ""));
+        assert(!command_bar_icon_in_atlas(nullptr, "i_pa_weather_sun.tga"));
+        // #6756: a text component's authored Scale sizes its glyphs.
+        assert(scaled_glyph_pixels(12, 0.7F) == 8 && scaled_glyph_pixels(12, 1.0F) == 12 && scaled_glyph_pixels(1, 0.1F) == 1);
+        // #6756: the Planet Info dialog's weather picture swaps the first four characters for the loading prefix.
+        assert(planet_info_weather_picture("i_pa_weather_sun.tga") == "load_weather_sun.tga");
+        assert(planet_info_weather_picture("Loadscreens/Ground_Empire_10.png") == "loadscreens/Ground_Empire_10.png");
+        // GPI-10 (unlike the loading dialog, BLD-04): the first four characters always go, even without the stock prefix.
+        assert(planet_info_weather_picture("Weather_Storm.tga") == "loadher_Storm.tga");
+        assert(planet_info_weather_picture("ab") == "load");
+        assert(planet_info_weather_picture("").empty());
         // GHUDL-18: authored offset (0 -34) puts the bonus icon centred 34 px below the anchor, scaled by the UI scale.
         const auto rect = planet_bonus_icon_rect(100, 200, 0, -34, 1.0, 40, 30);
         assert(rect.x == 80 && rect.y == 219 && rect.width == 40 && rect.height == 30);

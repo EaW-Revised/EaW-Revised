@@ -57,6 +57,7 @@ const char* const kUsage =
     "  --user-data <folder>    keep the launcher's files here instead of %APPDATA%\\Godot\\app_userdata\\EAWR Viewer\n"
     "  --allow-unknown-build   let the game start on a Forces of Corruption build EAWR has not verified\n"
     "  --render-thread MODE    safe or separate; overrides the saved Performance setting\n"
+    "  --no-fog                single player only: draw every unit and the whole galaxy (not retail; a mod profile's launch option does the same)\n"
     "  --mods                  open EAWR Mods\n"
     "  --instance <n|auto>     run as game instance n (1-8); auto takes the lowest free one from 2. Instance 1 is the normal layout\n"
     "  --profile <id>          start this mod profile directly (no manager)\n"

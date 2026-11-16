@@ -4,8 +4,10 @@
 
 #include "eawr/presentation/camera/overview.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
+#include "eawr/presentation/ui/pads.hpp"
 #include "eawr/presentation/ui/selection.hpp"
 #include "eawr/presentation/ui/world_ui.hpp"
+#include "eawr/sim/tactical/motion.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/world.hpp"
 #include "ui_test_support.hpp"
@@ -18,6 +20,7 @@
 #include <cstdlib>
 #include <new>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <span>
@@ -146,6 +149,30 @@ void picking() {
     expect(ui::pick_unit(down_at(0.0F, 0.0F), units) == sim::EntityId{9}, "the highest contact wins");
     expect(ui::pick_unit(down_at(50.0F, 0.0F), units) == sim::EntityId{2}, "a lone unit is picked");
     expect(!ui::pick_unit(down_at(300.0F, 0.0F), units), "empty space picks nothing");
+
+    // #6992: a squad standing on an owned land pad. The pad is a wide flat plate; the trooper's volume rises above it, so the
+    // highest contact is the trooper over its own footprint and the pad everywhere else on the plate.
+    {
+        ui::BattleUnit pad = unit(20, 50, true, {200.0F, 0.0F, -1.0F}, std::nullopt); // plate top at z 1.5
+        ui::BattleUnit trooper = unit(21, 51, true, {200.0F, 0.0F, 2.5F}, std::nullopt);
+        trooper.box = box_at({200.0F, 0.0F, 2.5F}, 3.0F); // top at z 3.25: a margin of 1.75 over the plate
+        const std::vector<ui::BattleUnit> stood{pad, trooper};
+        expect(ui::pick_unit(down_at(200.0F, 0.0F), stood) == sim::EntityId{21}, "a trooper standing on a pad is picked over the pad");
+        expect(ui::pick_unit(down_at(208.0F, 0.0F), stood) == sim::EntityId{20}, "the rest of the pad plate picks the pad");
+        const std::vector<ui::BattleUnit> reversed{trooper, pad};
+        expect(ui::pick_unit(down_at(200.0F, 0.0F), reversed) == sim::EntityId{21}, "the pick does not depend on the unit order");
+    }
+
+    // #6992: a pad that carries a structure yields the click to the structure only while the structure has a pick volume.
+    {
+        const auto drawn = [](const sim::EntityId id) { return id == sim::EntityId{31}; };
+        expect(ui::pad_yields_to_structure(sim::invalid_entity_id, 31, drawn), "a drawn finished structure takes the click from its pad");
+        expect(ui::pad_yields_to_structure(31, sim::invalid_entity_id, drawn), "a drawn construction takes the click from its pad");
+        expect(!ui::pad_yields_to_structure(sim::invalid_entity_id, 32, drawn), "a structure with no pick volume leaves the pad as the target");
+        expect(!ui::pad_yields_to_structure(32, 33, drawn), "neither entity drawn: the pad stays pickable");
+        expect(!ui::pad_yields_to_structure(sim::invalid_entity_id, sim::invalid_entity_id, drawn), "an empty pad is its own target");
+        expect(ui::pad_yields_to_structure(32, 31, drawn), "the finished structure counts when the construction is not drawn");
+    }
 
     const auto plane = ui::battle_plane_point({{10.0F, 20.0F, 100.0F}, {1.0F, 0.0F, -2.0F}});
     expect(plane && close_to((*plane)[0], 60.0F) && close_to((*plane)[1], 20.0F) && (*plane)[2] == 0.0F,
@@ -589,12 +616,101 @@ void overview_pan_follows_the_screen() {
 void right_clicks() {
     expect(ui::right_release(std::nullopt, {300.0F, 200.0F}) == ui::RightRelease::ignored,
            "a right release without a stored press (cancelled or synthetic) is no click");
-    expect(ui::right_release(std::array<float, 2>{300.0F, 200.0F}, {340.0F, 260.0F}) == ui::RightRelease::click,
-           "a short right drag is a click");
-    expect(ui::right_release(std::array<float, 2>{300.0F, 200.0F}, {300.0F, 301.0F}) == ui::RightRelease::compass,
-           "a right drag past MinimumDragSelectDistance is the compass");
+    // O-2: the larger screen side decides: <= 4 px a click, 4..100 px the compass, 100 px or more a cancel.
+    const std::array<float, 2> press{300.0F, 200.0F};
+    for (const auto& [release, expected, what] : std::vector<std::tuple<std::array<float, 2>, ui::RightRelease, const char*>>{
+             {{300.0F, 200.0F}, ui::RightRelease::click, "no movement"},
+             {{303.0F, 203.0F}, ui::RightRelease::click, "3 px"},
+             {{304.0F, 200.0F}, ui::RightRelease::click, "exactly 4 px"},
+             {{300.0F, 204.0F}, ui::RightRelease::click, "exactly 4 px vertically"},
+             {{304.5F, 200.0F}, ui::RightRelease::compass, "past 4 px"},
+             {{340.0F, 260.0F}, ui::RightRelease::compass, "60 px"},
+             {{399.0F, 200.0F}, ui::RightRelease::compass, "99 px"},
+             {{300.0F, 299.9F}, ui::RightRelease::compass, "99.9 px"},
+             {{400.0F, 200.0F}, ui::RightRelease::cancel, "exactly 100 px"},
+             {{300.0F, 301.0F}, ui::RightRelease::cancel, "101 px"},
+             {{300.0F, 200.0F + 400.0F}, ui::RightRelease::cancel, "far away"},
+             {{396.0F, 296.0F}, ui::RightRelease::compass, "the larger side, not the diagonal: 96 px each way"},
+             {{404.0F, 280.0F}, ui::RightRelease::cancel, "the larger side counts alone: 104 px and 80 px"},
+             {{200.0F, 100.0F}, ui::RightRelease::cancel, "dragging up and left counts the same"},
+         }) {
+        expect(ui::right_release(press, release) == expected,
+               (std::string("right drag release: ") + what).c_str());
+    }
+
+    // O-2: the facing-only drag turns towards the heading from the press to the release ground point,
+    // at the retail 0.1 degree precision, and is empty for a drag that stayed on one point.
+    {
+        const auto east = ui::facing_point({10.0F, 20.0F, 0.0F}, {15.0F, 20.0F, 0.0F}, 1000.0F);
+        expect(east && std::abs((*east)[0] - 1010.0F) < 0.01F && std::abs((*east)[1] - 20.0F) < 0.01F && (*east)[2] == 0.0F,
+               "a drag to the east faces due east along a far line from the press point");
+        const auto north_west = ui::facing_point({0.0F, 0.0F, 0.0F}, {-3.0F, 3.0F, 0.0F}, 1000.0F);
+        expect(north_west && std::abs((*north_west)[0] + 707.1F) < 0.2F && std::abs((*north_west)[1] - 707.1F) < 0.2F,
+               "a 135 degree drag faces 135 degrees");
+        const auto rounded = ui::facing_point({0.0F, 0.0F, 0.0F}, {100.0F, 0.04F, 0.0F}, 10000.0F);
+        // atan2(0.04, 100) = 0.0229 degrees, which rounds to 0.0: the heading is quantised to 0.1 degree.
+        expect(rounded && std::abs((*rounded)[1]) < 1.0e-3F, "the heading is rounded to 0.1 degree");
+        expect(!ui::facing_point({1.0F, 1.0F, 0.0F}, {1.0F, 1.0F, 0.0F}), "a drag with no direction has no facing");
+        expect(!ui::facing_point({0.0F, 0.0F, 0.0F}, {std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F}),
+               "a non-finite release point has no facing");
+    }
+
+    // N2: the target always reaches the simulation inside its coordinate range (a target past it makes the
+    // planner stop the ships without a turn), also with the press at a map edge.
+    {
+        const float sim_limit = static_cast<float>(sim::tactical::max_motion_coordinate);
+        expect(ui::facing_target_limit < sim_limit, "the facing target limit is inside the simulation's coordinate range");
+        const auto inside = [&](const std::optional<ui::Vec3f>& target) {
+            return target && std::abs((*target)[0]) <= ui::facing_target_limit && std::abs((*target)[1]) <= ui::facing_target_limit;
+        };
+        const auto middle = ui::facing_point({0.0F, 0.0F, 0.0F}, {5.0F, 0.0F, 0.0F});
+        expect(middle && std::abs((*middle)[0] - ui::facing_target_range) < 1.0F, "away from the edge the target keeps the full range");
+        const auto edge_east = ui::facing_point({180000.0F, 0.0F, 0.0F}, {180005.0F, 0.0F, 0.0F});
+        expect(inside(edge_east) && (*edge_east)[0] > 180000.0F + ui::facing_target_min_range - 1.0F,
+               "a press near the east edge shortens the range and still turns east");
+        // A heading that still has room is cut to stay inside the box; one with none left makes no target.
+        for (const auto& [from, to, has_room, what] : std::vector<std::tuple<ui::Vec3f, ui::Vec3f, bool, std::string_view>>{
+                 {ui::Vec3f{-190000.0F, 150000.0F, 0.0F}, ui::Vec3f{-190010.0F, 150010.0F, 0.0F}, true, "north-west corner heading north-west"},
+                 {ui::Vec3f{150000.0F, -150000.0F, 0.0F}, ui::Vec3f{150010.0F, -149990.0F, 0.0F}, true, "south-east corner heading north-east"},
+                 {ui::Vec3f{0.0F, 195000.0F, 0.0F}, ui::Vec3f{3.0F, 195010.0F, 0.0F}, false, "north edge heading north"},
+                 {ui::Vec3f{-195000.0F, 0.0F, 0.0F}, ui::Vec3f{-195010.0F, 0.0F, 0.0F}, false, "west edge heading west"}}) {
+            const auto target = ui::facing_point(from, to);
+            expect(has_room ? inside(target) : !target.has_value(), (std::string("the facing target at the ") + std::string(what)).c_str());
+        }
+        expect(!ui::facing_point({199990.0F, 0.0F, 0.0F}, {200000.0F, 0.0F, 0.0F}),
+               "a press with no room left along the heading makes no facing target");
+        expect(!ui::facing_point({250000.0F, 0.0F, 0.0F}, {250010.0F, 0.0F, 0.0F}), "a press outside the limit makes no facing target");
+        expect(inside(ui::facing_point({199990.0F, 0.0F, 0.0F}, {189990.0F, 0.0F, 0.0F})),
+               "the same press heading inwards still has a full-range target");
+    }
+
+    // N1, N3: the compass release is decided on the ground points; no press ground cancels it.
+    {
+        const ui::Vec3f press{40.0F, 50.0F, 0.0F};
+        const ui::Vec3f release{500.0F, 600.0F, 0.0F};
+        using Kind = ui::CompassPlan::Kind;
+        expect(ui::compass_plan(std::nullopt, release, true, true).kind == Kind::cancel,
+               "a press with no ground point cancels the gesture instead of moving to the release point");
+        expect(ui::compass_plan(std::nullopt, release, false, false).kind == Kind::cancel, "and so on land");
+        const auto moving = ui::compass_plan(press, release, false, true);
+        expect(moving.kind == Kind::move && moving.press == press, "a press off the selection moves at the press point");
+        const auto turning = ui::compass_plan(press, release, true, true);
+        expect(turning.kind == Kind::face && turning.press == press && turning.toward[0] > press[0], "a press on a selected ship in space turns");
+        expect(ui::compass_plan(press, release, true, false).kind == Kind::move, "land has no facing-only order: it moves at the press point");
+        expect(ui::compass_plan(press, press, true, true).kind == Kind::move, "a drag with no ground direction is just the move");
+    }
 
     const auto own = unit(1, 7, true, {0.0F, 0.0F, 0.0F}, std::nullopt);
+    // O-2 / O-6: display delay is independent of order admission; yaw wraps after rounding.
+    expect(!ui::compass_visible(std::array<float, 2>{0, 0}, {5, 0}, 0.499), "arrow waits 500 ms");
+    expect(ui::compass_visible(std::array<float, 2>{0, 0}, {5, 0}, 0.5), "arrow appears at 500 ms");
+    expect(!ui::compass_visible(std::array<float, 2>{0, 0}, {4, 0}, 1), "click threshold has no arrow");
+    expect(!ui::compass_visible(std::array<float, 2>{0, 0}, {100, 0}, 1), "cancel threshold hides arrow");
+    expect(!ui::compass_visible(std::nullopt, {5, 0}, 1), "cancelled press has no arrow");
+    expect(ui::compass_yaw({0, 0, 0}, {1, -1, 0}) == sim::math::Fixed::from_integer(315).value(), "negative heading wraps");
+    expect(ui::compass_yaw({0, 0, 0}, {1000, -0.1F, 0}) == sim::math::Fixed{}, "rounding through 360 wraps to zero");
+    expect(ui::compass_yaw({0, 0, 0}, {1, 2, 0}) == sim::math::Fixed::from_ratio(634, 10).value(), "heading rounds to a tenth");
+    expect(!ui::compass_yaw({0, 0, 0}, {0, 0, 0}), "coincident points have no heading");
     const auto ally = unit(20, 7, false, {0.0F, 0.0F, 0.0F}, std::nullopt);
     const auto enemy = unit(30, 7, false, {0.0F, 0.0F, 0.0F}, std::nullopt, true);
     using ui::OrderMode;
@@ -624,6 +740,78 @@ void right_clicks() {
     expect(ui::right_click(input.mode(), nullptr, false) == RightClick::order, "the next right click on empty space orders");
     auto moved = input.world_command({{sim::math::Fixed::from_integer(50).value(), {}, {}}, sim::invalid_entity_id, false, false, false});
     expect(moved && moved.value(), "and the order is a move");
+    (void)scheduler.take(scheduler.open_tick());
+
+    // O-2: a compass drag (4..100 px) orders the plain move at the PRESS point; 100 px or more cancels a
+    // move; a press on a selected ship turns the ships in place; an attack the release point decides
+    // is not touched by any of it.
+    const auto fixed = [](const std::int64_t value) { return sim::math::Fixed::from_integer(value).value(); };
+    const sim::math::Vec3 release_point{fixed(500), fixed(600), {}};
+    const sim::math::Vec3 press_point{fixed(40), fixed(50), {}};
+    const sim::math::Vec3 toward{fixed(9000), fixed(50), {}};
+    const ui::WorldPick empty_ground{release_point, sim::invalid_entity_id, false, false, false};
+    const ui::WorldPick hostile_pick{release_point, 30, true, false, false};
+    const auto issue_drag = [&](const ui::WorldPick& pick, const ui::OrderModifiers modifiers, const ui::RightDrag& drag,
+                                std::optional<tactical::CommandPayload>& payload) {
+        auto issued = input.world_command(pick, ui::CommandOrigin::world_click, modifiers, &drag);
+        expect(static_cast<bool>(issued), "a right drag command is not refused");
+        auto taken = scheduler.take(scheduler.open_tick());
+        expect(taken.size() <= 1, "one gesture issues at most one group command");
+        if (!taken.empty()) expect(taken.front().units == input.selection(), "group members share the one command");
+        payload = taken.empty() ? std::nullopt : std::optional<tactical::CommandPayload>(taken.back().payload);
+        return issued && issued.value();
+    };
+    std::optional<tactical::CommandPayload> payload;
+    expect(issue_drag(empty_ground, {}, ui::RightDrag{press_point, false, std::nullopt}, payload) && payload,
+           "a compass drag orders");
+    const auto* press_move = payload ? std::get_if<tactical::MovePayload>(&*payload) : nullptr;
+    expect(press_move != nullptr && press_move->destination == press_point && !press_move->append,
+           "a compass drag is a plain move at the press point, with no heading");
+    const auto yaw = ui::compass_yaw({0, 0, 0}, {1, 2, 0});
+    input.set_selection({1, 2, 3});
+    expect(issue_drag(empty_ground, {}, ui::RightDrag{press_point, false, {}, yaw}, payload), "space compass move orders once");
+    const auto* faced_move = payload ? std::get_if<tactical::MovePayload>(&*payload) : nullptr;
+    expect(faced_move && faced_move->destination == press_point && faced_move->final_yaw == yaw,
+        "one move carries the press point and quantised final yaw");
+    expect(issue_drag(empty_ground, {false, true, false}, ui::RightDrag{press_point, false, {}, yaw}, payload), "queued compass move orders");
+    faced_move = payload ? std::get_if<tactical::MovePayload>(&*payload) : nullptr;
+    expect(faced_move && faced_move->append && faced_move->final_yaw == yaw, "queued move keeps the heading");
+    expect(!issue_drag(empty_ground, {}, ui::RightDrag{press_point, true, {}, yaw}, payload) && !payload,
+        "cancel sends no heading or move");
+    expect(!issue_drag(empty_ground, {}, ui::RightDrag{{}, true, std::nullopt}, payload) && !payload,
+           "a drag of 100 px or more cancels the move and sends nothing");
+    expect(!issue_drag(empty_ground, ui::OrderModifiers{true, false, false}, ui::RightDrag{{}, true, std::nullopt}, payload) && !payload,
+           "and cancels an attack-move too");
+    input.arm(OrderMode::move);
+    expect(!issue_drag(empty_ground, {}, ui::RightDrag{{}, true, std::nullopt}, payload) && input.mode() == OrderMode::move,
+           "a cancelled drag keeps an armed move mode");
+    expect(issue_drag(empty_ground, {}, ui::RightDrag{press_point, false, std::nullopt}, payload) && input.mode() == OrderMode::none,
+           "a move-mode compass drag moves at the press point and disarms the mode");
+    expect(issue_drag(empty_ground, ui::OrderModifiers{true, false, false}, ui::RightDrag{press_point, false, std::nullopt}, payload),
+           "an attack-move drag orders");
+    const auto* press_attack_move = payload ? std::get_if<tactical::AttackMovePayload>(&*payload) : nullptr;
+    expect(press_attack_move != nullptr && press_attack_move->destination == press_point,
+           "an attack-move drag attack-moves to the press point");
+    expect(issue_drag(empty_ground, {}, ui::RightDrag{press_point, false, toward}, payload), "a facing-only drag orders");
+    const auto* turn = payload ? std::get_if<tactical::FacePayload>(&*payload) : nullptr;
+    expect(turn != nullptr && turn->target == toward, "a press on a selected ship turns the ships in place: no move");
+    // N3: the facing-only drag wins over Ctrl (attack-move) and Alt (queue): it turns in place, never queues.
+    for (const auto& modifiers : {ui::OrderModifiers{true, false, false}, ui::OrderModifiers{false, true, false}}) {
+        expect(issue_drag(empty_ground, modifiers, ui::RightDrag{press_point, false, toward}, payload), "a modified facing drag orders");
+        const auto* modified_turn = payload ? std::get_if<tactical::FacePayload>(&*payload) : nullptr;
+        expect(modified_turn != nullptr && modified_turn->target == toward, "Ctrl or Alt does not change a facing-only drag");
+    }
+    // The release point decides an attack and a guard: no drag rule reaches them.
+    for (const auto& drag : {ui::RightDrag{press_point, false, std::nullopt}, ui::RightDrag{{}, true, std::nullopt},
+                             ui::RightDrag{press_point, false, toward}}) {
+        expect(issue_drag(hostile_pick, {}, drag, payload), "a drag released on an enemy still attacks");
+        const auto* attack = payload ? std::get_if<tactical::AttackPayload>(&*payload) : nullptr;
+        expect(attack != nullptr && attack->target == 30, "the drag released on an enemy is the same attack");
+        expect(issue_drag(empty_ground, ui::OrderModifiers{true, true, false}, drag, payload), "a guard-point drag still guards");
+        const auto* guard_point = payload ? std::get_if<tactical::GuardPayload>(&*payload) : nullptr;
+        expect(guard_point != nullptr && guard_point->destination == release_point,
+               "the guard keeps the release point");
+    }
 }
 
 // #452 (docs/behaviour/space-orders.md OR-01): Ctrl+right click attack-moves, Ctrl+Alt+right click

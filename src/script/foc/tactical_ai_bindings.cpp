@@ -1,6 +1,7 @@
 // FoC tactical space AI host (#79, docs/behaviour/foc-tactical-ai.md "#79 host").
 // Engine rules cite the host rules FH-xx of that note; each names its evidence.
 
+#include "eawr/script/authoritative/letter_box.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 
 #include "tactical_ai_internal.hpp"
@@ -220,7 +221,8 @@ core::Result<ValueList> evaluate_perception(const Host& host, BindingContext& co
 
 } // namespace
 
-void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector<core::Diagnostic>& errors, bool install_type_lists) {
+void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector<core::Diagnostic>& errors, bool install_type_lists,
+    bool tactical_world_queries) {
     const auto add = [&](std::string_view name, Binding binding) {
         // Dynamic manager/parent queries still depend on a completed barrier.
         // Fail before entering their transitive world/snapshot readers in a turn.
@@ -238,11 +240,42 @@ void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector
         context.issue_command("tactical-suspend-ai", {number(*value)});
         return none();
     });
+    // legacy #6634 (HCB-75): the cinematic bands of the battle HUD; presentation only, see verb_letter_box.
+    add("Letter_Box_In", authoritative::letter_box_binding("Letter_Box_In", "in", std::string(verb_letter_box)));
+    add("Letter_Box_Out", authoritative::letter_box_binding("Letter_Box_Out", "out", std::string(verb_letter_box)));
     add("Get_Game_Mode", [host](BindingContext&, const ValueList&) {
         const auto domain = host->world != nullptr ? host->world->domain() : tactical::BattleDomain::space;
         return one(Value::text(domain == tactical::BattleDomain::land ? "Land" : "Space"));
     });
     add("Find_Nearest", [host](BindingContext&, const ValueList& arguments) { return find_nearest(*host, arguments); });
+    // legacy #1713 (RGC-119): the first live object whose current type is the named one, any owner. The view lists
+    // objects in ascending identity (creation order; the retail active-object order is unverified), so the first match
+    // is the lowest. nil when nothing matches or the name is unknown; a missing or non-string first argument is an
+    // error and extra arguments are ignored.
+    if (tactical_world_queries) add("Find_First_Object", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const std::string* name = arguments.empty() ? nullptr : as_text(arguments[0]);
+        if (name == nullptr) return fail("Find_First_Object expects an original type name");
+        const auto key = upper(*name);
+        std::optional<tactical::TypeId> type;
+        if (const auto found = host->types_by_name.find(key); found != host->types_by_name.end()) {
+            type = found->second->type_id;
+        } else if (const auto& names = host->setup.content.catalog_types) {
+            const auto registered = std::lower_bound(names->begin(), names->end(), key,
+                [](const auto& entry, const std::string& value) { return entry.first < value; });
+            if (registered != names->end() && registered->first == key) type = registered->second;
+        }
+        if (!type) return none();
+        // The scan stops at the first match, so it is charged by the units it visited.
+        std::uint64_t visited = 0;
+        for (const ViewUnit& unit : host->view->units) {
+            ++visited;
+            if (unit.type != *type) continue;
+            context.charge_host_work(visited);
+            return one(handle(handle_game_object, unit.id));
+        }
+        context.charge_host_work(visited);
+        return none();
+    });
     add("EvaluatePerception", [host](BindingContext& context, const ValueList& arguments) {
         return evaluate_perception(*host, context, arguments);
     });
@@ -837,6 +870,29 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         }
         return none();
     });
+    // legacy #1713 (TSW-07): the readiness is the object's phase ready; it does not look at the gate or the owner. An
+    // object whose type lacks the behaviour is a script error; an inert behaviour (a battle without the setup) is
+    // never ready.
+    object("Is_Tactical_Superweapon_Ready", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        if (!unit->tsw) return fail("Is_Tactical_Superweapon_Ready: not a tactical superweapon");
+        return one(boolean(unit->tsw->active && unit->tsw->phase == tactical::TswPhase::ready));
+    });
+    // legacy #1713 (TSW-07): the power-up request. Accepted (true) when the object is ready and the gate is open: the
+    // shared switch command is staged with the AI admission and the sequence starts at the next tick boundary, where
+    // the command validator checks the same facts again. False when not ready, the gate is shut, or this instance
+    // already asked for this object in this tick.
+    object("Fire_Tactical_Superweapon", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        if (!unit->tsw) return fail("Fire_Tactical_Superweapon: not a tactical superweapon");
+        if (!unit->tsw->active || unit->tsw->phase != tactical::TswPhase::ready || !unit->tsw->gate_open)
+            return one(boolean(false));
+        if (!host->stage_tsw_once(context.instance(), context.tick(), unit->id)) return one(boolean(false));
+        issue_tsw_request(context, *unit, tactical::TswStage::start_power_up);
+        return one(boolean(true));
+    });
     object("Get_Build_Pad_Contents", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const auto* unit = live_object(*host, arguments[0]);
         if (unit == nullptr || host->world == nullptr) return none();
@@ -927,6 +983,12 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         const auto found = host->players.find(static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id));
         if (found == host->players.end()) return none();
         return one(Value::text(found->second->faction));
+    });
+    // RGC-210: Player.Get_Team answers the player's team number, or -1 for a player the match does not know
+    // (debug build: the player wrapper returns the player's team, and -1 without a player). Allies share it (Is_Ally).
+    player("Get_Team", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewPlayer* found = host->view->player(static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id));
+        return one(number(LuaNumber(found == nullptr ? std::int64_t{-1} : static_cast<std::int64_t>(found->team))));
     });
     // FH-21 Get_Space_Station: the first star base of an allied player.
     player("Get_Space_Station", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {

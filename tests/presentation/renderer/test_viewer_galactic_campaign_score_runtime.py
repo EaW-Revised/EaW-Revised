@@ -79,6 +79,44 @@ func _process(delta):
             Input.parse_input_event(event)
 ''' % (x + w / 2, y + h / 2)
 
+    @staticmethod
+    def keys_body(keys):
+        lines = []
+        for key in keys:
+            lines.append('''        for pressed in [true, false]:
+            var event = InputEventKey.new()
+            event.keycode = %s
+            event.physical_keycode = %s
+            event.pressed = pressed
+            Input.parse_input_event(event)
+''' % (key, key))
+        return "".join(lines)
+
+    def test_stock_conquest_end_rolls_the_credits_under_the_score(self):
+        """WGP-105..110: no win movie in a stock conquest; the chain reaches the looping Credits, rolled under the score.
+
+        Unverified layering (ECE-U02, #7332): the roll draws under the score dialog."""
+        for fixture in ("score-win-empire-space", "score-loss-rebel-land"):
+            with self.subTest(fixture=fixture):
+                score, _, _ = self.capture(fixture)
+                movie = score["movie"]
+                self.assertEqual(score["movie_request"], "Credits")
+                self.assertEqual(movie["name"], "Credits")
+                self.assertTrue(movie["rolling"] and movie["credits_open"], movie)
+                self.assertFalse(movie["cannot_skip"])
+                self.assertLess(movie["credits_layer"], movie["score_layer"], "the roll is under the score")
+                self.assertEqual(movie["credits_rolls"], 1)
+                self.assertEqual(movie["audio_stops"], 1, "WGP-107: the first continuation stops music and speech")
+        # WGP-109: Space stops the roll and is consumed; the score stays up, nothing else plays.
+        report = self.drive("score-win-empire-space", self.keys_body(["KEY_SPACE"]))
+        score = report["campaign_score"]
+        self.assertNotEqual(report["status"], "score-exit")
+        self.assertTrue(score["shown"])
+        self.assertEqual(score["movie"]["keys"], 1)
+        self.assertFalse(score["movie"]["rolling"] or score["movie"]["credits_open"], score["movie"])
+        self.assertEqual(score["movie_request"], "")
+        self.assertEqual(score["exits"], 0)
+
     def test_local_win_and_loss_for_each_faction(self):
         for faction in FACTIONS:
             for result, heading, marker in (("win", "TEXT_VICTORY", "_win"), ("loss", "TEXT_DEFEAT", "_lose")):
@@ -181,14 +219,10 @@ func _process(delta):
         self.assertEqual(clicked["campaign_score"]["destination"], "main_menu")
         self.assertEqual(clicked["campaign_score"]["exits"], 1)
         self.assert_host_decided(clicked)
-        escaped = self.drive("score-loss-underworld-space", '''        for pressed in [true, false]:
-            var event = InputEventKey.new()
-            event.keycode = KEY_ESCAPE
-            event.physical_keycode = KEY_ESCAPE
-            event.pressed = pressed
-            Input.parse_input_event(event)
-''')
+        # WGP-109: the first Escape goes to the credits roll under the score and is consumed; the second quits.
+        escaped = self.drive("score-loss-underworld-space", self.keys_body(["KEY_ESCAPE", "KEY_ESCAPE"]))
         self.assertEqual(escaped["status"], "score-exit")
+        self.assertEqual(escaped["campaign_score"]["movie"]["keys"], 1)
         self.assertEqual(escaped["campaign_score"]["escapes"], 1)
         self.assertEqual(escaped["campaign_score"]["destination"], "main_menu")
         self.assert_host_decided(escaped)

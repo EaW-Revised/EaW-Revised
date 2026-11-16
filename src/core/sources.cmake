@@ -6,12 +6,15 @@ include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/EawrBuildIdentity.cmake")
 
 set(EAWR_CORE_SOURCES
     "${EAWR_BUILD_IDENTITY_CPP}"
+    "${CMAKE_CURRENT_LIST_DIR}/../platform/derived_store.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/degradation_ledger.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/diagnostic.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/host_probe.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/load_note.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/load_profile_io.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/json_text.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/sha256.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/text_bounds.cpp"
 )
 
 set(EAWR_CORE_ROOT_ONLY_SOURCES

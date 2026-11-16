@@ -1,45 +1,12 @@
 #include "space_environment_internal.hpp"
 #include "family_textures.hpp"
+#include "environment_texture.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "render_profile_viewport.hpp"
 #include "shutdown_trace.hpp"
 #include "eawr/presentation/particles/map_attachment_owner.hpp"
 
 namespace eawr::presentation::godot_backend {
-namespace {
-
-// CEM-03: double the sampled product before the legacy fragment saturation.
-// Keep the stock adapter byte-identical for its existing pixel controls.
-[[nodiscard]] const std::string& meshadditive2x_sky_shader() {
-    static const std::string source = [] {
-        std::string text(meshadditive_sky_shader);
-        constexpr std::string_view from = "eawr_vertex_color * texture(BaseTexture, eawr_scrolled_uv).rgb";
-        constexpr std::string_view to = "clamp(2.0 * eawr_vertex_color * texture(BaseTexture, eawr_scrolled_uv).rgb, 0.0, 1.0)";
-        const std::size_t at = text.find(from);
-        if (at != std::string::npos) text.replace(at, from.size(), to);
-        return text;
-    }();
-    return source;
-}
-
-// MeshAdditiveVColor.fx: the MeshAdditive adapter with the authored vertex
-// colour as a further factor (the effect has no Color field; Color is bound
-// to (1, 1, 1, 1)). The same stored-value policy as the MeshAdditive route.
-[[nodiscard]] const std::string& meshadditive_vcolor_sky_shader() {
-    static const std::string source = [] {
-        std::string text(meshadditive_sky_shader);
-        constexpr std::string_view from = "clamp(Color.rgb * eawr_sky_light_scale.rgb";
-        constexpr std::string_view to = "clamp(COLOR.rgb * Color.rgb * eawr_sky_light_scale.rgb";
-        const std::size_t at = text.find(from);
-        if (at != std::string::npos) text.replace(at, from.size(), to);
-        return text;
-    }();
-    return source;
-}
-
-
-} // namespace
-
 namespace space_environment_detail {
 
 std::optional<assets::Texture> EnvironmentView::texture(const std::string& declared, std::string& logical,
@@ -51,12 +18,12 @@ std::optional<assets::Texture> EnvironmentView::texture(const std::string& decla
         return cached->second.second;
     }
     std::optional<assets::Texture> result;
-    const auto path = probe_reference(*filesystem_, "data/art/textures/", declared, texture_suffixes);
+    const auto path = probe_texture(*filesystem_, "data/art/textures/", declared);
     if (!path) {
         failure = "texture " + declared + " is not in the VFS";
     } else {
         logical = *path;
-        auto loaded = assets::load_texture(*filesystem_, *path);
+        auto loaded = load_environment_texture(*filesystem_, *path);
         if (!loaded) {
             failure = core::format_diagnostic(loaded.error());
         } else if (auto normalized = space::normalize_texture(loaded.value()); !normalized) {
@@ -108,10 +75,7 @@ void EnvironmentView::upload(Item item, const space::SceneSurface& surface, cons
         case space::SceneRoute::meshadditive2x:
         case space::SceneRoute::meshadditive_vcolor:
             material.pass = RenderPass::transparent;
-            material.program = surface.route == space::SceneRoute::meshadditive2x
-                ? meshadditive2x_sky_shader()
-                : surface.route == space::SceneRoute::meshadditive
-                    ? std::string(meshadditive_sky_shader) : meshadditive_vcolor_sky_shader();
+            material.program = sky_additive::additive_sky_program(surface.route);
             material.bindings = meshadditive_bindings(*surface.meshadditive, space::meshadditive_default_inputs());
             textures.emplace_back("BaseTexture", surface.base_texture);
             break;
@@ -223,6 +187,7 @@ void EnvironmentView::upload(Item item, const space::SceneSurface& surface, cons
         effect_clock_assets_.push_back(asset);
     }
     instances_.push_back({static_cast<sim::EntityId>(asset), asset, *matrix});
+    if (item.record) record_instances_[*item.record].push_back(instances_.size() - 1);
     renderer_->set_render_category(static_cast<sim::EntityId>(asset),
         item.role == "primary_sky" || item.role == "secondary_sky"
             ? render_categories::Role::sky : render_categories::Role::map);

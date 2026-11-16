@@ -3,6 +3,7 @@
 #include "eawr/net/gns_room.hpp"
 #include "eawr/net/gns_signalling.hpp"
 #include "eawr/net/online_lobby.hpp"
+#include <string_view>
 #include <utility>
 
 namespace eawr::net {
@@ -26,6 +27,12 @@ struct NetworkIntroductionOptions {
     std::size_t queue_frames{64};
     // Only public/direct publications may have a guessable invitation alias.
     bool public_alias{true};
+    // Which of the service's TURN providers this client uses when the service issues Cloudflare and the operator's own coturn
+    // together (the force switch; docs/deploy/coturn-fallback.md). A server the service lists first is tried first.
+    GnsTurnProvider turn_provider{GnsTurnProvider::automatic};
+    // Diagnostics from the endpoint worker thread (the relay order and the RTTs behind it); called from that thread, so it must
+    // be thread-safe. Null = quiet. Never carries credentials or addresses.
+    void (*log)(std::string_view event, std::string_view text){nullptr};
 };
 
 // One persistent TLS connection. Operational calls block their caller for the
@@ -116,6 +123,7 @@ public:
     core::Result<void> send(PeerIndex slot, std::span<const std::uint8_t> blob) override;
     core::Result<std::optional<GnsRoomSignal>> poll() override;
     std::optional<GnsTurnCredentials> turn_credentials() const override;
+    std::optional<std::string> own_turn_uris() const override;
     GnsRoomLease lease() const override;
     core::Result<void> status() const override;
     core::Result<void> leave() override;

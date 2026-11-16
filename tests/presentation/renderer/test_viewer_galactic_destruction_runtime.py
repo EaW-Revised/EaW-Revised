@@ -16,12 +16,15 @@ except ImportError:
 class GalacticDestructionRuntime(unittest.TestCase):
     def drop(self, fixture, cancel=False, repeat=False):
         live = fixture.startswith("destruction-live")
-        effects = fixture == "destruction-live-effects"
+        effects = fixture.startswith("destruction-live-effects")
         # A driven live capture must advance past the queued preparation; copied fixtures need no command.
         preparation_frames = ("--eawr-galactic-paused", "no", "--eawr-galactic-ticks", "3") if live else ()
         initial, _ = support.PlanetHudRuntime.capture(self, "synthetic", "--eawr-galactic-hud-fixture",
                                                     fixture if live else "destruction-ready", *preparation_frames)
         alpha = next(row for row in initial["planets"] if row["id"] == 101)
+        if fixture == "destruction-live-effects-missing-model":
+            self.assertEqual(alpha["model"], "Data/Art/Models/Synthetic_Missing_Planet.alo")
+            self.assertEqual(alpha["drawn"], "placeholder", "the intact model must have failed before destruction")
         camera = dict(initial["camera"])
         x, y, z = alpha["position"]
         camera["target"] = [x, z, -y]
@@ -57,6 +60,7 @@ var frame = 0
 var elapsed = 0.0
 var dropped_at = 0.0
 var effect_captured = false
+var preview_waits = 0
 var centered_at = 0.0
 var source = %s
 var target = %s
@@ -113,6 +117,13 @@ func _process(delta):
         motion(target,true)
     if frame == 40:
         var slot = viewport.find_child("galaxy_destruction_first_slot",true,false)
+        # The live session publishes its prepared ability asynchronously; hold the gesture (held button, frame counter
+        # paused) until the slot shows rather than sampling it on a fixed frame.
+        if %s and not slot.is_visible_in_tree() and preview_waits < 240:
+            preview_waits += 1
+            frame -= 1
+            return false
+%s
         print("S33_PREVIEW=",slot.is_visible_in_tree()," DRAG=",viewport.gui_is_dragging())
         viewport.get_texture().get_image().save_png(%s)
     if frame == 42:
@@ -127,6 +138,9 @@ func _process(delta):
         quit()
     return false
 ''' % (json.dumps(source), json.dumps(target), wait_for_center, actual_source, actual_target,
+       "false" if fixture == "destruction-absent" else "true",
+       # The slot may have moved while the gesture waited for it: aim the release at where it is now.
+       "        target = slot.get_global_rect().get_center()\n        motion(target,true)" if effects else "",
        json.dumps(str(capture).replace("\\","/")),
        "[1260,20]" if cancel else "target",
        "        motion(source,false)\n        mouse(source,true)\n        motion([source[0]+24,source[1]],true)\n        motion(target,true)\n        mouse(target,false)" if repeat else "",
@@ -208,3 +222,20 @@ func _process(delta):
         self.assertEqual(data["corruption"]["resources"], 0)
         self.assertEqual(data["galactic_audio"]["sounds"].get("Planet_Death_SFX"), 1)
         self.assertEqual(data["galactic_audio"]["sounds"].get("GUI_Bad_Sound"), 1, "the generic retry must be refused")
+
+    def test_destroyed_planet_draws_its_destroyed_model(self):
+        # #7187: once the destruction ability has ruined the planet, the map draws the type's destroyed-state model
+        # (the asteroid field) in its place; the other planets keep theirs.
+        data = self.drop("destruction-live-effects")
+        self.assertEqual(data["corruption"]["destruction_effect_events"], 1)
+        planets = {row["id"]: row for row in data["planets"] if row["layer"] == "world"}
+        self.assertEqual(planets[101]["model"], "Data/Art/Models/W_planet_Asteroids.alo")
+        self.assertEqual(planets[101]["drawn"], "model", "the destroyed model must upload and draw, not fall back to a placeholder")
+        self.assertEqual(planets[102]["model"], "Data/Art/Models/W_planet_Ice01.alo")
+
+    def test_destroyed_planet_draws_after_ordinary_model_upload_failed(self):
+        data = self.drop("destruction-live-effects-missing-model")
+        self.assertEqual(data["corruption"]["destruction_effect_events"], 1)
+        planet = next(row for row in data["planets"] if row["id"] == 101 and row["layer"] == "world")
+        self.assertEqual(planet["model"], "Data/Art/Models/W_planet_Asteroids.alo")
+        self.assertEqual(planet["drawn"], "model", "a cached failed ordinary upload must yield to the destroyed model")

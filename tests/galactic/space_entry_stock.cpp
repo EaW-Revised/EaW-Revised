@@ -14,10 +14,12 @@
 #include "eawr/campaign/starting_forces.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/skirmish/ai.hpp"
+#include "eawr/platform/model_facts.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -840,7 +842,60 @@ void orphan_rider_scan(const vfs::Vfs& files, const data::Catalog& catalog, cons
     expect(refused == 0, "no stock start fleet that carries passengers is refused");
 }
 
-void installed(bool garrison_only, bool population_only, bool commander_only, bool superweapon_only, bool layers_only, bool multiplayer_difficulty, bool orphan_only) {
+// G1 slice 2: the model facts store on the GC Start path may only save work. The prepared closure (unit tables, maps, AI
+// sources) must be identical with no store, with an empty store (misses write) and with the store the first Start wrote
+// (hits, read from disk by a new store object); a multiplayer plan never touches the store.
+struct FactsFolder final {
+    std::filesystem::path path;
+    FactsFolder() {
+        path = std::filesystem::temp_directory_path() / ("eawr-gc-facts-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(path);
+    }
+    ~FactsFolder() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+};
+struct Prepared final {
+    std::array<std::uint8_t, 32> digest{};
+    std::vector<std::string> notes;
+};
+Prepared prepared_closure(const vfs::Vfs& files, const data::Catalog& catalog, const data::galactic::GalacticData& authored,
+    const units::GalacticTypeTable& types, const campaign::CampaignSetupPlan& plan) {
+    const auto provider = take(campaign::prepare_stock_space_entry(files, catalog, authored, types, plan));
+    Prepared result;
+    result.digest = provider->prepared_identity(files).digest;
+    for (const auto& note : provider->load_notes()) result.notes.push_back(note.code + "|" + note.message + "|" + note.effective_value);
+    return result;
+}
+void installed_facts(const vfs::Vfs& files, const data::Catalog& catalog, const data::galactic::GalacticData& authored,
+    const units::GalacticTypeTable& types, const campaign::CampaignSetupPlan& plan, const campaign::CampaignSetupOptions& options) {
+    platform::shutdown_model_facts_cache();
+    const auto off = prepared_closure(files, catalog, authored, types, plan);
+    FactsFolder folder;
+    platform::configure_model_facts_cache(folder.path.generic_string());
+    const auto first_store = platform::model_facts_store();
+    expect(first_store != nullptr, "the facts store is configured for the test");
+    if (!first_store) return;
+    const auto cold = prepared_closure(files, catalog, authored, types, plan);
+    first_store->flush();
+    const auto cold_stats = first_store->stats();
+    expect(cold.digest == off.digest && cold.notes == off.notes, "an empty store gives the prepared closure of no store");
+    expect(cold_stats.puts > 0 && cold_stats.hits == 0, "the first Start records its models and reads none");
+    // A new store object over the same folder is a new process: the warm Start reads the records from disk.
+    platform::configure_model_facts_cache(folder.path.generic_string());
+    const auto warm_store = platform::model_facts_store();
+    const auto warm = prepared_closure(files, catalog, authored, types, plan);
+    const auto warm_stats = warm_store ? warm_store->stats() : platform::DerivedStoreStats{};
+    expect(warm.digest == off.digest && warm.notes == off.notes, "a warm store gives the prepared closure of no store");
+    expect(warm_stats.hits == cold_stats.puts && warm_stats.puts == 0, "the second Start hits every recorded model and writes none");
+    // A multiplayer plan decodes from verified bytes: it neither reads nor writes the store.
+    FactsFolder other;
+    platform::configure_model_facts_cache(other.path.generic_string());
+    installed_layer_services(files, catalog, authored, types, options, true);
+    const auto mp_stats = platform::model_facts_store()->stats();
+    expect(mp_stats.lookups == 0 && mp_stats.puts == 0 && mp_stats.hits == 0, "a multiplayer Start never reads or writes the facts store");
+    platform::shutdown_model_facts_cache();
+}
+
+void installed(bool garrison_only, bool population_only, bool commander_only, bool superweapon_only, bool layers_only, bool multiplayer_difficulty, bool orphan_only, bool facts_only) {
     std::optional<std::string> root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
     if (!root || root->empty()) { std::cout << "SKIPPED: stock entry needs EAWR_EAW_GAME_ROOT\n"; return; }
     std::vector<vfs::MountSpec> mounts;
@@ -849,7 +904,7 @@ void installed(bool garrison_only, bool population_only, bool commander_only, bo
     const auto files = take(vfs::Vfs::mount(mounts));
     const auto catalog = take(data::load_catalog(files, data::Profile::foc));
     auto authored = take(data::galactic::load_galactic_data(files, catalog.catalog));
-    if (!garrison_only && !population_only && !commander_only && !layers_only && !multiplayer_difficulty) stock_scene_relation_graphs(authored, files, catalog.catalog);
+    if (!garrison_only && !population_only && !commander_only && !layers_only && !multiplayer_difficulty && !facts_only) stock_scene_relation_graphs(authored, files, catalog.catalog);
     const auto types = units::galactic_type_table(catalog.catalog);
     data::galactic::Campaign fixture; fixture.name = "SpaceEntryFixture";
     fixture.locations = {superweapon_only ? "NalHutta" : "Shola", "Kamino"}; fixture.planets = fixture.locations; fixture.starting_active_player = "Rebel";
@@ -864,6 +919,7 @@ void installed(bool garrison_only, bool population_only, bool commander_only, bo
     if (layers_only) { installed_layer_services(files, catalog.catalog, authored, types, options); return; }
     if (multiplayer_difficulty) { installed_layer_services(files, catalog.catalog, authored, types, options, true); return; }
     const auto plan = take(campaign::plan_campaign_setup(authored, types, fixture.name, options));
+    if (facts_only) { installed_facts(files, catalog.catalog, authored, types, plan, options); return; }
     const auto provider = take(campaign::prepare_stock_space_entry(files, catalog.catalog, authored, types, plan));
     if (commander_only) { installed_commanders(plan,types,authored,provider); return; }
     if (garrison_only) { installed_garrison(provider, plan, authored, files, catalog.catalog); return; }
@@ -883,6 +939,15 @@ void installed(bool garrison_only, bool population_only, bool commander_only, bo
         // #3935: a Death Star in the attacking fleet is deployed at the map's Death_Star_Position marker and keeps
         // its superweapon identity; the same battle without one deploys none.
         const auto super_name = std::string_view{"Death_Star_II"};
+        // WGT-100: the planet's superweapon gate is read from its type; stock authors No on exactly three planets.
+        for (const auto* name : {"Alderaan", "The_Maw", "VergessoAsteroids"}) {
+            const auto* planet = authored.planet(name);
+            expect(planet && planet->planet_is_destroyable_by_tsw == std::optional<bool>{false}, std::string("WGT-100: ") + name + " is not destroyable by the superweapon");
+        }
+        {
+            const auto* nal_hutta = authored.planet("NalHutta");
+            expect(nal_hutta && !nal_hutta->planet_is_destroyable_by_tsw, "WGT-100: an unauthored planet carries no value");
+        }
         for (const bool with_super : {true, false}) {
             gc::GalacticSetup initial; initial.seed = options.seed; initial.content_identity = plan.galaxy().content_identity;
             initial.players = plan.galaxy().players; initial.seats = options.seats; initial.planets = plan.galaxy().planets;
@@ -928,6 +993,14 @@ void installed(bool garrison_only, bool population_only, bool commander_only, bo
             }
 
             expect(resolved.conflict.superweapon == (with_super ? 201U : 0U), "the conflict names the superweapon force");
+            expect(resolved.conflict.planet_destroyable_by_tsw && !resolved.conflict.planet_destroyed,
+                "WGT-100: the conflict carries the planet's gate facts (destroyable, not yet destroyed)");
+            if (with_super) {
+                const auto& tsw = resolved.conflict.tactical.tsw;
+                expect(tsw && tsw->conflict && tsw->conflict->planet_destroyable == resolved.conflict.planet_destroyable_by_tsw
+                        && tsw->conflict->planet_destroyed == resolved.conflict.planet_destroyed,
+                    "WGT-100: the super weapon's gate reads the conflict record's planet facts");
+            }
         }
         return;
     }

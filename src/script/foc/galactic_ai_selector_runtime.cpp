@@ -87,14 +87,35 @@ GalacticExecutionWork galactic_execution_work() noexcept { return completed_exec
 
 std::shared_ptr<const GalacticSelectionInput> Engine::galactic_selection(const PlayerAi& player,
     const Goal& goal, const PlanDef& plan) const {
+    gc_profile::Scope profile_scope(gc_profile::selection_origin == 1 ? gc_profile::Phase::selection_input_goals
+        : gc_profile::selection_origin == 2 ? gc_profile::Phase::selection_input_exec : gc_profile::Phase::selection_input);
     if (!galactic_selection_) return {};
     const auto* at = target(goal.target);
-    return required(galactic_selection_(player.player, at ? at->object : 0,
-        *player.functions.at(goal.function).goal, plan));
+    const auto* goal_type = player.functions.at(goal.function).goal;
+    auto& window = selection_window();
+    const bool windowed = window.depth != 0 && window.engine == this;
+    const auto key = std::make_tuple(static_cast<std::uint64_t>(player.player), static_cast<std::uint64_t>(at ? at->object : 0),
+        goal_type, &plan);
+    if (windowed) if (const auto kept = window.inputs.find(key); kept != window.inputs.end()) return kept->second;
+    auto input = required(galactic_selection_(player.player, at ? at->object : 0, *goal_type, plan));
+    if (windowed && input) window.inputs.emplace(key, input);
+    return input;
+}
+
+std::vector<GalacticSelectionObject> Engine::galactic_freestore(const PlayerAi& player, const Goal& goal, const PlanDef& plan) const {
+    gc_profile::Scope profile_scope(gc_profile::selection_origin == 1 ? gc_profile::Phase::selection_input_goals
+        : gc_profile::selection_origin == 2 ? gc_profile::Phase::selection_input_exec : gc_profile::Phase::selection_input);
+    if (!galactic_freestore_) {
+        const auto input = galactic_selection(player, goal, plan);
+        return input ? input->freestore : std::vector<GalacticSelectionObject>{};
+    }
+    const auto* at = target(goal.target);
+    return required(galactic_freestore_(player.player, at ? at->object : 0, plan));
 }
 
 gg::ProductionEstimate Engine::galactic_estimate(const PlayerAi& player, const Goal& goal,
     const PotentialPlan& potential, bool linear) const {
+    gc_profile::Scope profile_scope(gc_profile::Phase::galactic_estimate);
     const auto input = galactic_selection(player, goal, plans_.at(potential.plan));
     if (!input || !input->complete) return {false, gg::rejected_estimate(), {}, 0};
     return estimate(*input, potential, plans_[potential.plan].magic, goal.target != 0,
@@ -127,6 +148,7 @@ gc::funding::GoalRequest Engine::galactic_funding_request(const PlayerAi& player
     return out;
 }
 bool Engine::galactic_fundable(const PlayerAi& player, const Goal& goal, bool activation) const {
+    gc_profile::Scope profile_scope(gc_profile::Phase::goal_fund);
     if (!player.galactic_funding || !goal.potential) return false;
     if (!galactic_estimate(player, goal, *goal.potential, false).feasible) return false;
     return required(player.galactic_funding->feasible({player.player, galactic_funding_request(player, goal), activation}));
@@ -576,6 +598,7 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
 }
 
 void Engine::service_galactic_execution(PlayerAi& player) {
+    const SelectionOrigin origin(2);
     ExecutionFacts facts(this, player.player);
     auto taskforces_ = all_taskforces();
     auto blocks_ = all_blocks();
@@ -638,11 +661,12 @@ void Engine::service_galactic_execution(PlayerAi& player) {
         } else if (task.source == 0) {
             if (task.galactic_assembly != BuildTask::GalacticAssembly::none) continue;
             const auto* goal = find_goal(player, running->goal);
-            const auto input = goal ? galactic_selection(player, *goal, plans_[running->definition]) : nullptr;
-            if (!input) throw std::runtime_error("galactic assignment facts unavailable");
+            // Only the free store is read here; the rest of the selector input is not built (#7056).
+            if (!goal) throw std::runtime_error("galactic assignment facts unavailable");
+            const auto freestore_rows = galactic_freestore(player, *goal, plans_[running->definition]);
             sim::EntityId fallback{};
             bool waiting{};
-            for (const auto& row : input->freestore) {
+            for (const auto& row : freestore_rows) {
                 const auto reservation = player.reserved.find(row.object);
                 if (row.in_transit && row.type == task.type && !player.assigned.contains(row.object)
                     && (reservation == player.reserved.end() || reservation->second == running->goal)) {

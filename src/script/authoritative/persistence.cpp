@@ -581,6 +581,7 @@ core::Result<std::string> ScriptScheduler::save(const sim::PartitionExecutor& ex
         out.u64(object.object.id);
         out.u64(object.generation);
         out.text(object.module);
+        if (impl_->shared->config.galactic_clock) out.u64(object.registration);
     }
     out.u32(static_cast<std::uint32_t>(impl_->pending.size()));
     for (const auto& [key, event] : impl_->pending) detail::write_event(out, event);
@@ -699,6 +700,7 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
     }
     std::map<std::uint64_t, ObjectScript> objects;
     std::set<std::pair<std::uint32_t, std::uint64_t>> identities;
+    std::set<std::uint64_t> registrations;
     const std::uint32_t object_count = in.count(32);
     for (std::uint32_t index = 0; index < object_count; ++index) {
         if (!in.charge(sizeof(ObjectScript))) return detail::reject("object-script registry");
@@ -708,9 +710,11 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
         object.object.id = in.u64();
         object.generation = in.u64();
         object.module = in.text();
+        if (shared.config.galactic_clock) object.registration = in.u64();
         if (!in.ok() || object.instance == 0 || (!objects.empty() && object.instance <= objects.rbegin()->first) ||
             object.object.id == 0 || object.object.id >= (std::uint64_t{1} << 37) || object.generation == 0 ||
             object.module.empty() || !ModuleManifest::normalise(object.module) ||
+            (shared.config.galactic_clock && (!object.registration || !registrations.insert(object.registration).second)) ||
             !identities.emplace(object.object.kind, object.object.id).second) return detail::reject("object-script registry");
         objects.emplace(object.instance, std::move(object));
     }
@@ -763,6 +767,7 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
 
     // Publish: nothing above touched the scheduler.
     impl_->instances = std::move(instances);
+    ++impl_->instance_revision;
     impl_->retired = std::move(retired);
     impl_->objects = std::move(objects);
     impl_->pending = std::move(pending);
@@ -871,6 +876,7 @@ core::Result<std::string> ScriptScheduler::sync_hash(const sim::PartitionExecuto
     out.u32(static_cast<std::uint32_t>(impl_->objects.size()));
     for (const auto& [id, object] : impl_->objects) {
         out.u64(id); out.u32(object.object.kind); out.u64(object.object.id); out.u64(object.generation); out.text(object.module);
+        if (impl_->shared->config.galactic_clock) out.u64(object.registration);
     }
     out.u32(static_cast<std::uint32_t>(impl_->pending.size()));
     for (const auto& [key, event] : impl_->pending) { static_cast<void>(key); detail::write_event(out, event); }
@@ -955,6 +961,7 @@ core::Result<std::unique_ptr<ScriptScheduler::PhaseSavepoint>> ScriptScheduler::
     out.u32(static_cast<std::uint32_t>(impl_->objects.size()));
     for (const auto& [id, object] : impl_->objects) {
         out.u64(id); out.u32(object.object.kind); out.u64(object.object.id); out.u64(object.generation); out.text(object.module);
+        if (impl_->shared->config.galactic_clock) out.u64(object.registration);
     }
     out.u32(static_cast<std::uint32_t>(impl_->pending.size()));
     for (const auto& [key, event] : impl_->pending) { static_cast<void>(key); detail::write_event(out, event); }

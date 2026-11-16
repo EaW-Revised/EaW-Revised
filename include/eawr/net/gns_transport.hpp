@@ -12,6 +12,10 @@ namespace eawr::net {
 // Path of the established GNS connection: kind of ICE route in use. `unknown` until
 // the first sample, and whenever the SDK text names neither a relay nor a direct kind.
 enum class GnsRoute { unknown, direct, relayed };
+// Which relay provider carries a relayed pair: the TURN server that accepted this process's allocation, matched against the
+// credentials the service issued (own = the operator's coturn, cloudflare = Cloudflare). none = not relayed; unknown = relayed
+// but the server could not be matched (no allocation line seen yet, a fake service, a mixed pair).
+enum class GnsRelayProvider : std::uint8_t { none, own, cloudflare, unknown };
 // Receives one already formatted diagnostic line ("EAWR net event=gns ..."): UTC time, this seat, the peer when the line
 // belongs to one pair, and the text. Addresses are replaced by "<addr>"; no credentials or payloads.
 using GnsLogSink = std::function<void(std::string_view)>;
@@ -53,6 +57,9 @@ struct GnsPairDiagnostic {
     bool relay_failed{};
     // Route of this pair's own connection while it is open (sampled by poll; unknown otherwise).
     GnsRoute route{GnsRoute::unknown};
+    GnsRelayProvider relay_provider{GnsRelayProvider::none};
+    // A relayed pair whose receive loss has stayed at or above 15% for 20 s (cleared below 5% for 10 s). Observation only.
+    bool route_lossy{};
 };
 // Introduction signals carried for one pair (ICE exchange cost), counted at the adapter.
 struct GnsSignalCounts {
@@ -97,6 +104,8 @@ public:
     // it only while it is still the installed one, so a match that was replaced or finished cannot silence its successor.
     static std::uint64_t set_log_sink(GnsLogSink sink);
     static void clear_log_sink(std::uint64_t generation);
+    // One line of the same log from any thread (event is the "event=" word, for example "turn"); a no-op without a sink or without GNS.
+    static void log_event(std::string_view event, std::string_view text);
     static core::Result<std::unique_ptr<GnsTransport>> host(std::string address = "0.0.0.0",
         std::uint16_t port = TcpOptions::default_port, GnsOptions options = {});
     static core::Result<std::unique_ptr<GnsTransport>> connect(std::string address,

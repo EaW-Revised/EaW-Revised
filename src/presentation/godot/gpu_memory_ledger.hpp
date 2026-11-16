@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/assets/assets.hpp"
+#include "eawr/assets/texture_digest.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "texture_mip_tail.hpp"
 
@@ -128,41 +129,7 @@ private:
     return enabled;
 }
 
-// A fast non-cryptographic 64-bit digest (word-wise multiply/xor mixing).
-class ContentDigest final {
-public:
-    ContentDigest() = default;
-    explicit ContentDigest(const std::uint64_t seed) : state_(initial ^ (seed * 0x9e3779b97f4a7c15ULL)) {}
-    void bytes(const void* data, const std::size_t size) {
-        const auto* begin = static_cast<const unsigned char*>(data);
-        std::size_t offset = 0;
-        for (; offset + 8 <= size; offset += 8) {
-            std::uint64_t word{};
-            std::memcpy(&word, begin + offset, 8);
-            mix(word);
-        }
-        std::uint64_t tail{};
-        if (offset < size) std::memcpy(&tail, begin + offset, size - offset);
-        mix(tail ^ (static_cast<std::uint64_t>(size) << 56U));
-    }
-    template <typename T>
-    void scalar(const T value) { bytes(&value, sizeof(T)); }
-    [[nodiscard]] std::uint64_t value() const {
-        std::uint64_t h = state_;
-        h ^= h >> 33U;
-        h *= 0xff51afd7ed558ccdULL;
-        h ^= h >> 33U;
-        return h;
-    }
-
-private:
-    void mix(const std::uint64_t word) {
-        state_ ^= word * 0x9e3779b97f4a7c15ULL;
-        state_ = ((state_ << 31U) | (state_ >> 33U)) * 0xc2b2ae3d27d4eb4fULL;
-    }
-    static constexpr std::uint64_t initial = 0x84222325cbf29ce4ULL;
-    std::uint64_t state_{initial};
-};
+using assets::ContentDigest; // the pair keying a texture lives in eawr/assets/texture_digest.hpp
 
 [[nodiscard]] inline bool block_compressed(const assets::PixelFormat format) {
     switch (format) {
@@ -175,24 +142,19 @@ private:
 // The bytes uploaded for a texture: its stored mip chain. Three-channel
 // sources are padded to four channels on the GPU.
 [[nodiscard]] inline GpuItem texture_item(const assets::Texture& texture) {
-    core::load_profile::Scope hash_scope(core::load_profile::Phase::texture_hash);
-    ContentDigest digest;
-    ContentDigest check(1);
+    // A reader thread may already have taken the digest (Texture::content_digest); the result is the same either way.
+    assets::TextureDigest digest;
+    if (texture.content_digest) {
+        digest = *texture.content_digest;
+    } else {
+        core::load_profile::Scope hash_scope(core::load_profile::Phase::texture_hash);
+        digest = assets::compute_texture_digest(texture);
+    }
     std::uint64_t bytes{};
-    for (ContentDigest* item : {&digest, &check}) {
-        item->scalar(texture.format);
-        item->scalar(texture.width);
-        item->scalar(texture.height);
-        item->scalar(static_cast<std::uint64_t>(texture.mips.size()));
-    }
-    for (const assets::MipLevel& mip : texture.mips) {
-        digest.bytes(mip.bytes.data(), mip.bytes.size());
-        check.bytes(mip.bytes.data(), mip.bytes.size());
-        bytes += mip.bytes.size();
-    }
+    for (const assets::MipLevel& mip : texture.mips) bytes += mip.bytes.size();
     bytes += texture_mip_tail_bytes(texture);
     if (texture.format == assets::PixelFormat::bgr8) bytes = bytes / 3U * 4U;
-    return {GpuCategory::texture, digest.value(), check.value(), bytes, block_compressed(texture.format),
+    return {GpuCategory::texture, digest.key, digest.check, bytes, block_compressed(texture.format),
             texture.format, texture.width, texture.height, static_cast<std::uint32_t>(texture.mips.size())};
 }
 

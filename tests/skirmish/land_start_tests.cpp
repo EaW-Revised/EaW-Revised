@@ -1,6 +1,9 @@
 #include "eawr/skirmish/land_start.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/skirmish/land_content.hpp"
+#include "eawr/skirmish/setup_facts.hpp"
+#include "eawr/core/load_profile.hpp"
+#include "eawr/core/sha256.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
@@ -12,10 +15,12 @@
 #include "../support/check.hpp"
 #include "../support/env.hpp"
 #include "../support/reverse_partition_executor.hpp"
+#include "setup_facts_memory.hpp"
 
 #include <algorithm>
 #include <array>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -220,6 +225,7 @@ void authored_open_ground_rear(const skirmish::LandStart& built) {
         stationary.company.members.front().create_team = false;
         content.land.companies.push_back(std::move(stationary));
         auto setup = built.start.setup; setup.units.clear();
+        setup.free_garrisons.clear(); // two test companies only: the start's free garrison names companies that are gone
         UnitState root; root.entity_id = 1; root.owner = 1; root.type_id = content.land.companies.back().type;
         root.position = {whole(1000), whole(1000), {}}; setup.units.push_back(root);
         root.entity_id = 2; root.type_id = company.type; setup.units.push_back(root);
@@ -939,8 +945,24 @@ void setup_to_land_start(const vfs::Vfs& filesystem, const data::Catalog& catalo
                   << " players=" << built.start.setup.players.size() << " commandable=" << seats.size() << "\n";
 }
 
+// One line per list entry; the frozen golden (tests/skirmish/fixtures/land-list-stock.sha256) is the sha256 of these lines,
+// recorded from main before the facts store existed (d009bb47d).
+std::string land_row(const skirmish::SetupMap& map) {
+    std::string row = map.path + "|" + map.name + "|" + map.display_name + "|" + map.unavailable + "|"
+        + map.context_name.value_or("") + "|" + std::to_string(static_cast<int>(map.domain));
+    for (const auto& team : map.teams) {
+        row += "|T" + std::to_string(team.team) + ":" + (team.spawn_capacity ? std::to_string(*team.spawn_capacity) : std::string("-"));
+        for (const auto& faction : team.factions) row += "," + faction;
+    }
+    return row;
+}
+std::string land_row_hash(const skirmish::SetupMap& map) {
+    const auto row = land_row(map);
+    return core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(row.data()), row.size()));
+}
+
 // The flag decides only the list: off is exactly setup_maps, on appends the land maps behind the space maps.
-void domain_lists(const vfs::Vfs& filesystem, const data::Catalog& catalog) {
+void domain_lists(const vfs::Vfs& filesystem, const data::Catalog& catalog, const std::filesystem::path& fixtures) {
     const skirmish::SetupMapQuery query;
     const auto space = take(skirmish::setup_maps(filesystem, catalog, query));
     const auto off = take(skirmish::setup_domain_maps(filesystem, catalog, query, false));
@@ -950,6 +972,150 @@ void domain_lists(const vfs::Vfs& filesystem, const data::Catalog& catalog) {
     const auto on = take(skirmish::setup_domain_maps(filesystem, catalog, query, true));
     const auto land = take(skirmish::land_setup_maps(filesystem, catalog, query));
     expect(!land.empty() && on.size() == space.size() + land.size(), "flag on: the land maps follow the space maps");
+    {
+        // The frozen pre-change list: every land entry (teams, factions, spawn capacity, unavailable, names, context) of the
+        // stock land maps is the one main d009bb47d listed, and no map is missing or added.
+        std::map<std::string, std::string> frozen;
+        std::ifstream golden_file(fixtures / "land-list-stock.sha256");
+        expect(golden_file.is_open(), "the frozen land list golden is present");
+        for (std::string line; std::getline(golden_file, line);) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const auto space_at = line.rfind(' ');
+            if (space_at != std::string::npos) frozen[line.substr(0, space_at)] = line.substr(space_at + 1);
+        }
+        expect(frozen.size() == land.size(), "the frozen land list has exactly the listed land maps");
+        for (const auto& map : land) {
+            const auto row = frozen.find(map.path);
+            const bool same_row = row != frozen.end() && row->second == land_row_hash(map);
+            expect(same_row, "a land entry equals its frozen pre-change row");
+            if (!same_row) std::cerr << "land entry differs from the frozen row: " << map.path << " | " << land_row(map) << std::endl;
+        }
+    }
+    {
+        // #6948: the land list builds the catalog's object-type index (one resolve of every game object) once for the whole
+        // list, not once per map: the number of catalog resolves does not grow with the number of maps. Counts work, not time.
+        namespace lp = eawr::core::load_profile;
+        lp::Recording recording;
+        lp::active = &recording;
+        const auto counted = skirmish::land_setup_maps(filesystem, catalog, query, 1); // one worker: the recorder is per thread
+        lp::active = nullptr;
+        const auto resolves = recording.costs[static_cast<std::size_t>(lp::Phase::catalog_resolve)].calls;
+        std::cout << "land list: " << land.size() << " land maps, " << resolves << " catalog resolves, "
+                  << catalog.definitions().size() << " definitions" << std::endl;
+        expect(static_cast<bool>(counted) && counted.value().size() == land.size(), "the counted land list is the same list");
+        // Measured 42,872 for 24 stock land maps (5.7 x definitions): one index (about one resolve per game object) plus the per-map
+        // static-type reads. The old path rebuilt the index (about one resolve per game object) for every decoded map.
+        expect(resolves <= 8 * catalog.definitions().size(), "the land list resolves the catalog's objects a bounded number of times");
+        // The header-prefix reject decides exactly as the whole-map decode did: the same maps, in the same order, with the
+        // same entries.
+        skirmish::SetupMapQuery whole = query;
+        whole.read_whole_headers = true;
+        const auto reference = take(skirmish::land_setup_maps(filesystem, catalog, whole));
+        const auto same = [](const skirmish::SetupMap& a, const skirmish::SetupMap& b) {
+            if (a.path != b.path || a.name != b.name || a.display_name != b.display_name || a.unavailable != b.unavailable
+                || a.domain != b.domain || a.context_name != b.context_name || a.teams.size() != b.teams.size()) return false;
+            for (std::size_t index = 0; index < a.teams.size(); ++index)
+                if (a.teams[index].team != b.teams[index].team || a.teams[index].factions != b.teams[index].factions
+                    || a.teams[index].spawn_capacity != b.teams[index].spawn_capacity) return false;
+            return true;
+        };
+        expect(reference.size() == land.size() && std::equal(land.begin(), land.end(), reference.begin(), same),
+            "the prefix-rejected land list is the whole-decode list (same maps, order and entries)");
+        // The decode runs on workers and is merged in record order: one worker and eight give the same list.
+        const auto serial = take(skirmish::land_setup_maps(filesystem, catalog, query, 1));
+        const auto eight = take(skirmish::land_setup_maps(filesystem, catalog, query, 8));
+        expect(serial.size() == land.size() && std::equal(serial.begin(), serial.end(), land.begin(), same)
+            && eight.size() == land.size() && std::equal(eight.begin(), eight.end(), land.begin(), same),
+            "one worker, eight workers and the default give the same land list");
+        // #6948: the persistent facts. A list built with an empty store is the list built without one and stores one header and
+        // one entry per land map; the next list is served from the store (nothing is put, every entry lookup hits) and is the same
+        // list entry for entry, whatever the worker count; a query the stored headers reject needs no map at all.
+        {
+            setup_facts_test::MemoryFacts store;
+            const auto cold = take(skirmish::land_setup_maps(filesystem, catalog, query, 4, &store));
+            expect(cold.size() == land.size() && std::equal(cold.begin(), cold.end(), land.begin(), same),
+                "a land list built with an empty facts store is the list built without one");
+            expect(store.puts["land-entry"] == land.size() && store.puts["map-header"] >= land.size() && store.flushes == 1,
+                "the cold land list stores an entry per land map and flushes once");
+            const auto puts_after_cold = store.total_puts();
+            const auto warm = take(skirmish::land_setup_maps(filesystem, catalog, query, 8, &store));
+            expect(warm.size() == land.size() && std::equal(warm.begin(), warm.end(), land.begin(), same),
+                "the stored land list is the same list, entry for entry (teams, factions, spawn capacity, unavailable)");
+            expect(store.total_puts() == puts_after_cold && store.hits["land-entry"] >= land.size(),
+                "the second land list is served from the store: nothing is put and every entry hits");
+            const auto single = take(skirmish::land_setup_maps(filesystem, catalog, query, 1, &store));
+            expect(single.size() == land.size() && std::equal(single.begin(), single.end(), land.begin(), same),
+                "one worker serves the same stored land list");
+            for (std::size_t index = 0; index < land.size(); ++index)
+                expect(warm[index].metadata.capacity == land[index].metadata.capacity
+                        && warm[index].metadata.game_types == land[index].metadata.game_types
+                        && warm[index].legacy_factions == land[index].legacy_factions
+                        && warm[index].embedded_preview == land[index].embedded_preview,
+                    "a stored land entry keeps its lobby metadata");
+            skirmish::SetupMapQuery too_many = query;
+            too_many.minimum_capacity = 99;
+            const auto none = take(skirmish::land_setup_maps(filesystem, catalog, too_many, 4, &store));
+            expect(none.empty() && store.total_puts() == puts_after_cold, "an ineligible query is answered from the stored header facts alone");
+            // A record this build cannot read is a miss: the entry is built again and the list is the same.
+            store.corrupt = true;
+            const auto healed = take(skirmish::land_setup_maps(filesystem, catalog, query, 4, &store));
+            store.corrupt = false;
+            expect(healed.size() == land.size() && std::equal(healed.begin(), healed.end(), land.begin(), same)
+                    && store.puts["land-entry"] == 2 * land.size(),
+                "an unreadable stored land entry is rebuilt and stored again");
+            // A map file whose stamp changed (its modification time): the stored header and entry miss, both are read and stored
+            // again, and the list is the same.
+            {
+                setup_facts_test::MemoryFacts aged;
+                (void) take(skirmish::land_setup_maps(filesystem, catalog, query, 4, &aged));
+                const auto entries = aged.puts["land-entry"], headers = aged.puts["map-header"];
+                aged.age_stamps("map-header");
+                aged.age_stamps("land-entry");
+                const auto again = take(skirmish::land_setup_maps(filesystem, catalog, query, 4, &aged));
+                expect(again.size() == land.size() && std::equal(again.begin(), again.end(), land.begin(), same)
+                        && aged.puts["land-entry"] == 2 * entries && aged.puts["map-header"] == 2 * headers,
+                    "a land map with another stamp misses its header and entry and is rebuilt, the list unchanged");
+            }
+            // The view's context changed (a changed XML or text record, or another catalog): the entries miss and are rebuilt, while
+            // the map's own header facts, which do not depend on the catalog, still hit.
+            {
+                setup_facts_test::MemoryFacts changed;
+                (void) take(skirmish::land_setup_maps(filesystem, catalog, query, 4, &changed));
+                const auto entries = changed.puts["land-entry"], headers = changed.puts["map-header"];
+                changed.context_salt = "other-view";
+                const auto again = take(skirmish::land_setup_maps(filesystem, catalog, query, 4, &changed));
+                expect(again.size() == land.size() && std::equal(again.begin(), again.end(), land.begin(), same)
+                        && changed.puts["land-entry"] == 2 * entries && changed.puts["map-header"] == headers,
+                    "a land list under another context rebuilds its entries and keeps the header facts");
+            }
+            // The same list through the domain entry point (the viewer's path).
+            setup_facts_test::MemoryFacts both;
+            const auto first = take(skirmish::setup_domain_maps(filesystem, catalog, query, true, nullptr, &both));
+            const auto second = take(skirmish::setup_domain_maps(filesystem, catalog, query, true, nullptr, &both));
+            expect(first.size() == on.size() && second.size() == on.size()
+                    && std::equal(second.begin(), second.end(), on.begin(), [](const auto& x, const auto& y) { return x.path == y.path && x.domain == y.domain && x.name == y.name; }),
+                "the space and land lists through the facts store equal the lists without it");
+        }
+        // The shared object-type index, data identity and start facts give the inputs the per-map read gives.
+        const auto types = assets::object_type_catalog(catalog);
+        const auto identity = take(skirmish::read_data_identity(filesystem));
+        skirmish::CampaignStartInputsCache shared;
+        shared.object_types = &types;
+        const units::UnitTables none;
+        std::size_t sampled = 0;
+        for (std::size_t index = 0; index < land.size() && sampled < 12; index += std::max<std::size_t>(1, land.size() / 12), ++sampled) {
+            skirmish::Fixture fixture; fixture.map = land[index].path;
+            const auto alone = skirmish::read_land_start_inputs(fixture, filesystem, catalog, none);
+            const auto cached = skirmish::read_land_start_inputs(fixture, filesystem, catalog, none, identity, shared);
+            expect(static_cast<bool>(alone) == static_cast<bool>(cached), "a shared-cache read succeeds exactly when the per-map read does");
+            if (!alone || !cached) continue;
+            expect(alone.value().common.placements.size() == cached.value().common.placements.size()
+                && alone.value().common.factions.size() == cached.value().common.factions.size()
+                && alone.value().common.map_sha256 == cached.value().common.map_sha256
+                && alone.value().static_tables.land_static_objects.size() == cached.value().static_tables.land_static_objects.size(),
+                "a shared-cache read gives the per-map read's placements, factions and static types");
+        }
+    }
     expect(std::equal(space.begin(), space.end(), on.begin(), [](const auto& a, const auto& b) { return a.path == b.path; }),
         "flag on: the space maps keep their order and place");
     expect(std::all_of(land.begin(), land.end(), [](const auto& map) { return map.domain == BattleDomain::land; }),
@@ -1097,6 +1263,21 @@ void stock_pads(const skirmish::LandStart& built, const skirmish::LandStartInput
     std::cout << "stock pads map=" << fixture.map << " pads=" << pads << " inert=" << inert << " menus=" << menus
         << " options=" << options << '\n';
     expect(pads > 0 && inert > 0 && menus > 0 && options > 0, "the stock map has inert pads with menus and priced options");
+    // LE-OCCUPY (WLPA-66): a placed pad's authored hard extents and collision class become its dynamic collision body; the static
+    // occupation stays empty (a pad is no terrain raster).
+    {
+        const auto& rows = built.content.land.pad_bodies;
+        std::size_t matched{};
+        for (const auto& row : rows) {
+            const auto object = std::find_if(inputs.static_tables.land_static_objects.begin(), inputs.static_tables.land_static_objects.end(),
+                [&](const auto& candidate) { return skirmish::type_id(candidate.id) == row.type; });
+            const bool found = object != inputs.static_tables.land_static_objects.end();
+            if (found && object->fog.custom_hard_x == std::optional<Fixed>(row.half_x) && object->fog.custom_hard_y == std::optional<Fixed>(row.half_y)
+                && object->collision_class == std::optional<units::LandCollisionGroup>(row.group) && !object->land_obstacle) ++matched;
+        }
+        std::cout << "stock pad bodies map=" << fixture.map << " bodies=" << rows.size() << " matched=" << matched << '\n';
+        expect(!rows.empty() && matched == rows.size(), "every stock pad body row carries its authored hard extents and collision class");
+    }
     // Census of what the map places: every distinct start type with its count, whether it is a pad, and how many reached the session.
     {
         std::map<std::string, std::array<std::size_t, 3>> census; // placed, in session, pad
@@ -1151,7 +1332,32 @@ void stock_pads(const skirmish::LandStart& built, const skirmish::LandStartInput
                 own_rate += stream->per_frame.raw();
         }
         const sim::InlineExecutor income_executor;
-        for (int tick = 0; tick < 30; ++tick) take(prebuilt.step(income_executor));
+        for (int tick = 0; tick < 30; ++tick) {
+            const auto stepped = take(prebuilt.step(income_executor));
+            if (tick != 0) continue;
+            // LC-50 (retail 0/9 at the start): a player whose start companies are all free garrison shows population 0.
+            // #7118: on a stock map both halves are asserted outright (no start company outside the garrison, population 0), and at
+            // least one player must have been checked, so the assertion cannot pass without looking.
+            std::size_t garrisoned_players = 0;
+            for (const auto& view : stepped.snapshot->economy()) {
+                const auto garrison = std::find_if(built.start.setup.free_garrisons.begin(), built.start.setup.free_garrisons.end(),
+                    [&](const auto& row) { return row.player == view.player; });
+                if (garrison == built.start.setup.free_garrisons.end()) continue;
+                ++garrisoned_players;
+                bool other_company = false;
+                for (const auto& unit : built.start.setup.units) {
+                    if (unit.owner != view.player) continue;
+                    const bool company = std::any_of(built.content.land.companies.begin(), built.content.land.companies.end(),
+                        [&](const auto& row) { return row.type == unit.type_id; });
+                    if (company && !std::binary_search(garrison->registered.begin(), garrison->registered.end(), unit.entity_id))
+                        other_company = true;
+                }
+                expect(!other_company, "LC-50: a stock start has no company outside the free garrison");
+                expect(view.population == 0,
+                    "LC-50: the free starting companies do not count against the stock land population (retail 0/9)");
+            }
+            expect(garrisoned_players > 0, "LC-50: a stock start gives at least one player a free garrison to check");
+        }
         expect(prebuilt.ledgers().front().credits > initial, "the stock prebuilt source pays income");
         if (fixture.slots.size() == 2)
             expect(own_rate > 0 && prebuilt.ledgers().front().credits.raw() - initial.raw() == own_rate * 30,
@@ -1191,6 +1397,7 @@ void stock_pads(const skirmish::LandStart& built, const skirmish::LandStartInput
                     return row.entity_id != children[0] && row.entity_id != children[1]
                         && row.entity_id != parents[0] && row.entity_id != parents[1];
                 });
+                setup.free_garrisons.clear(); // the isolated HQ rule keeps no start company
                 std::erase_if(rules.land.initial_pad_children, [&](const auto& link) {
                     return link.second != children[0] && link.second != children[1];
                 });
@@ -1398,7 +1605,7 @@ void stock_pads(const skirmish::LandStart& built, const skirmish::LandStartInput
     }
 }
 
-int installed() {
+int installed(const std::filesystem::path& fixtures) {
     const auto root = testing::environment("EAWR_EAW_GAME_ROOT");
     if (!root || root->empty()) { std::cout << "SKIPPED: no game data\n"; return 77; }
     std::vector<vfs::MountSpec> mounts;
@@ -1504,6 +1711,12 @@ int installed() {
             << " bound-authored-offsets=" << bound_authored_offsets << " bound-model-fallback-offsets=" << bound_test_offsets
             << " scale-only-refused=" << scale_only_refused << " raw-passability-bits=explicit-unverified-input\n";
         const auto authored = take(skirmish::build_land_start(fixture, inputs, gates));
+        // #6144 census: the map objects the start removes (an owner that is a playable faction, or no player). The viewer's land
+        // static composition draws none of them; a stock map that authors some is the real case.
+        std::cout << "stock removed map=" << fixture.map << " players=" << players << " removed=" << authored.start.removed.size() << '\n';
+        for (const auto& removed : authored.start.removed)
+            std::cout << "stock removed record=" << removed.record << " type=" << removed.type << " faction=" << removed.faction
+                << " reason=" << to_string(removed.reason) << '\n';
         stock_fog(authored, inputs, players);
         stock_pads(authored, inputs, fixture, gates, players == 2 ? &capture_pad : nullptr);
         {
@@ -1535,7 +1748,46 @@ int installed() {
         // The authored overload also binds the map's pad types: bind the same merged tables on the explicit path.
         auto bound_tables = tables;
         skirmish::merge_land_pad_types(bound_tables, inputs.pad_tables);
-        const auto bindings = take(skirmish::build_land_bindings(bound_tables, selected_types, gates));
+        // #6992: the land viewer merges the same pad types into its tables and draws every admitted station unit, so each is
+        // pickable when it has a row with a mouse-sensitive flag (a pad's TACTICAL_BUILD_OBJECTS or a structure's SELECTABLE); the model count is
+        // reported. A selectable pre-built structure is the other half (the factory a click should select).
+        {
+            std::map<sim::tactical::PlayerId, std::pair<std::size_t, std::size_t>> pickable; // owner -> pads, selectable structures
+            std::size_t unpickable{}, unmodelled{};
+            std::vector<std::string> unpickable_rows;
+            for (const auto& unit : authored.start.units) {
+                if (unit.role != battle::UnitRole::station) continue;
+                const auto admitted = std::any_of(authored.start.setup.units.begin(), authored.start.setup.units.end(),
+                    [&](const auto& state) { return state.entity_id == unit.state.entity_id; });
+                if (!admitted) continue;
+                const auto* row = bound_tables.find(unit.type);
+                if (row == nullptr || !row->mouse_sensitive) {
+                    ++unpickable;
+                    unpickable_rows.push_back(unit.type + (row == nullptr ? " (no row)" : " (not mouse sensitive)") + " owner=" + std::to_string(unit.state.owner));
+                    continue;
+                }
+                if (row->model_path.empty()) ++unmodelled;
+                if (row->build_pad) ++pickable[unit.state.owner].first;
+                else if (row->selectable) ++pickable[unit.state.owner].second;
+            }
+            std::size_t pads{}, structures{};
+            for (const auto& [owner, counts] : pickable) {
+                (void)owner;
+                pads += counts.first;
+                structures += counts.second;
+            }
+            std::cout << "stock pickable map=" << fixture.map << " players=" << players << " owners=" << pickable.size()
+                << " pads=" << pads << " structures=" << structures << " unpickable=" << unpickable << " unmodelled=" << unmodelled << '\n';
+            for (const auto& row : unpickable_rows) std::cout << "stock unpickable " << row << '\n';
+            expect(pickable.size() >= 2 && pads > 0, "each team base (the markers are per team, not per player) owns pickable pads");
+            expect(authored.content.land.initial_pad_children.empty() || structures > 0,
+                "a pre-built start has a selectable structure (the factory) to click");
+        }
+        // #6993: the authored overload also binds the companies the structures' menus sell, after the selected ones.
+        const auto offered_types = skirmish::land_offered_companies(inputs, selected_types);
+        auto explicit_gates = gates;
+        skirmish::add_offered_collision_classes(explicit_gates, inputs, offered_types);
+        const auto bindings = take(skirmish::build_land_bindings(bound_tables, selected_types, explicit_gates, offered_types));
         expect(authored.start.setup.content_identity == take(skirmish::build_land_start(fixture, inputs, bindings)).start.setup.content_identity,
             "stock L3 authored overload equals the explicit binding path");
         if (players == 2) {
@@ -1550,7 +1802,7 @@ int installed() {
         std::cout << "installed land start players=" << players << " map=" << fixture.map << " authored locomotion; explicit unverified raw-bit/collision-order test gates\n";
     }
     naboo_turning_move(filesystem, loaded.catalog, cache);
-    domain_lists(filesystem, loaded.catalog);
+    domain_lists(filesystem, loaded.catalog, fixtures);
     setup_to_land_start(filesystem, loaded.catalog, cache, maps);
     expect(stock_sampling_structures > 0, "the stock maps place multisampling structures, so the fog box check above is not vacuous");
     return checks.finish();
@@ -1724,7 +1976,7 @@ void live_stock_move(const vfs::Vfs& filesystem, const data::Catalog& catalog, s
 }
 int main(int argc, char** argv) {
     try {
-        if (argc == 2 && std::string_view(argv[1]) == "--installed") return installed();
+        if (argc >= 2 && std::string_view(argv[1]) == "--installed") return installed(argc >= 3 ? std::filesystem::path(argv[2]) : std::filesystem::path());
         contracts(); return checks.finish();
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
 }

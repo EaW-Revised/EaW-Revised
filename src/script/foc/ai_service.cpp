@@ -1,3 +1,4 @@
+#include "eawr/core/gc_profile.hpp"
 #include "eawr/core/tick_profile.hpp"
 #include "ai_engine_internal.hpp"
 #include "galactic_ai_actions.hpp"
@@ -19,6 +20,32 @@
 namespace eawr::script::foc::ai {
 
 using namespace engine_internal;
+
+namespace {
+// The galactic goal functions of a player type's function sets, in order (GS-02). A set whose entry names no equation is
+// skipped whole, as in retail (#4937).
+std::vector<GoalFunctionEntry> galactic_goal_functions(const AiData& data, const PlayerType& type) {
+    std::vector<GoalFunctionEntry> out;
+    for (const auto& set : type.function_sets) {
+        const auto functions = data.function_sets.find(set);
+        if (functions == data.function_sets.end()) continue; // other-mode closure
+        const auto unresolved = std::any_of(functions->second.begin(), functions->second.end(), [&](const auto& function) {
+            const auto goal = data.goals.find(function.goal);
+            return goal != data.goals.end() && goal->second.mode == "GALACTIC" && !data.equations.find(function.function);
+        });
+        if (unresolved) continue;
+        for (const auto& function : functions->second) {
+            const auto goal = data.goals.find(function.goal);
+            if (goal == data.goals.end() || goal->second.mode != "GALACTIC") continue;
+            GoalFunctionEntry entry;
+            entry.goal = &goal->second; entry.goal_name = function.goal;
+            entry.equation = data.equations.find(function.function); entry.equation_name = function.function;
+            out.push_back(std::move(entry));
+        }
+    }
+    return out;
+}
+} // namespace
 
 // ---- The barrier steps ---------------------------------------------------------------------
 
@@ -50,8 +77,6 @@ core::Result<void> Engine::begin_galactic_barrier(const World& world, galactic_a
         for (const auto& selection : selected) {
             const auto type = data_.players.find(upper_case(selection.player_type));
             if (type == data_.players.end()) return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "galactic AI selected player type is missing"));
-            const auto adjustment = type->second.difficulty.find(upper_case(selection.difficulty));
-            if (adjustment == type->second.difficulty.end() || !data_.difficulties.contains(adjustment->second)) return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "galactic AI selected difficulty is missing"));
             PlayerAi player;
             player.player = selection.player;
             player.type = &type->second;
@@ -64,27 +89,10 @@ core::Result<void> Engine::begin_galactic_barrier(const World& world, galactic_a
                 return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "galactic AI player has no identity slot"));
             player.slot = static_cast<std::uint32_t>(position - host_->setup.players.begin());
             player.sync.set_seed(galactic_stream_seed(game_seed_, selection.player));
-            player.difficulty = data_.difficulties.at(adjustment->second);
-            for (const auto& set : type->second.function_sets) {
-                const auto functions = data_.function_sets.find(set);
-                if (functions == data_.function_sets.end()) continue; // other-mode closure
-                // Retail logs an error for an entry that names no equation and does not register the function set. The same
-                // here, without aborting startup: galactic_ai::unresolved_goal_equations names it in the setup diagnostics (#4937).
-                const auto unresolved = std::any_of(functions->second.begin(), functions->second.end(), [&](const auto& function) {
-                    const auto goal = data_.goals.find(function.goal);
-                    return goal != data_.goals.end() && goal->second.mode == "GALACTIC" && !data_.equations.find(function.function);
-                });
-                if (unresolved) continue;
-                for (const auto& function : functions->second) {
-                    const auto goal = data_.goals.find(function.goal);
-                    if (goal == data_.goals.end() || goal->second.mode != "GALACTIC") continue;
-                    const auto* equation = data_.equations.find(function.function);
-                    GoalFunctionEntry entry;
-                    entry.goal = &goal->second; entry.goal_name = function.goal;
-                    entry.equation = equation; entry.equation_name = function.function;
-                    player.functions.push_back(std::move(entry));
-                }
-            }
+            // A type that authors no adjustment for the chosen level (or names one that does not exist) plays on the dummy
+            // adjustment, every multiplier 1, never a refusal (CGS-26).
+            player.difficulty = ai::resolve_difficulty(data_, &type->second, selection.difficulty);
+            player.functions = galactic_goal_functions(data_, type->second);
             players_.push_back(std::move(player));
         }
         std::sort(players_.begin(), players_.end(), [](const auto& a, const auto& b) { return a.player < b.player; });
@@ -124,6 +132,52 @@ core::Result<void> Engine::apply_galactic_policy(tactical::PlayerId id, const ga
         const auto found = policy.goal_types.find(function.goal_name);
         if (found != policy.goal_types.end() && found->second.value) ++player->proposal_counts[function.goal_name];
     }
+    return core::Result<void>::success();
+}
+
+core::Result<void> Engine::replace_galactic_player_type(tactical::PlayerId id, std::string_view type_name, std::string_view level,
+    authoritative::ScriptScheduler& scripts) {
+    const auto native_record_write = native_record_scope();
+    auto* player = player_ai(id);
+    if (!player || !player->galactic) return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "player type replacement has no initialized native player"));
+    const auto type = data_.players.find(upper_case(std::string(type_name)));
+    if (type == data_.players.end()) return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "player type replacement names an unknown galactic AI type"));
+    native_records_changed(id, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 32, 33});
+    native_records_changed(0, {29});
+    mark_native_state_changed();
+    // The old instance's work ends the way a plan's own end does: every running plan is abandoned (finish_plan releases its goal,
+    // task forces, blocks, reservations, pad claims and refunds its funds, and stages its script's removal). The goals that held a
+    // plan were released there; the rest release here.
+    std::set<std::uint64_t> released;
+    std::vector<std::uint64_t> plans;
+    for (const auto& [plan_id, plan] : player->running) { plans.push_back(plan_id); released.insert(plan.goal); }
+    for (const auto plan_id : plans) finish_plan(*player, plan_id, scripts, true);
+    for (auto& goal : player->active) if (!released.contains(goal.id)) release(*player, goal);
+    player->active.clear(); player->proposed.clear();
+    player->proposal_blocks = 0; player->proposal_blockers.clear();
+    player->proposal_counts.clear(); player->exclusion_counts.clear();
+    // The controller is new: no learning, no template policy, nothing due yet.
+    player->activations.clear(); player->goal_outcomes.clear(); player->plan_outcomes.clear(); player->plan_success.clear();
+    player->goal_success.clear(); player->unit_survival.clear(); player->target_goal_success.clear(); player->target_plan_success.clear();
+    player->galactic_policy = {};
+    player->next_goal = player->next_planning = player->next_execution = player->next_learning = 0;
+    player->sleep_frames = 0; player->nontrivial = 0; player->next_function = 0; player->next_target = 0; player->maintenance_due = false;
+    player->type = &type->second;
+    player->difficulty = ai::resolve_difficulty(data_, &type->second, level);
+    player->functions = galactic_goal_functions(data_, type->second);
+    initialize_goals(*player);
+    // The new type's equations read perception tokens the first barrier's table may not hold: intern them here, in the serial gap
+    // (a token met later in a pass would live in its reader's shard only).
+    if (const auto* world_ptr = dynamic_cast<const GalacticWorld*>(host_->ai_world.get())) {
+        std::vector<const Equation*> equations;
+        for (const auto& function : player->functions) equations.push_back(function.equation);
+        world_ptr->freeze_perception_tokens(equations);
+    }
+    // The player's free store script (the old type's own) and any event still addressed to one of its chains.
+    for (const auto instance : scripts.instances())
+        if (instance == id)
+            if (auto removed = scripts.remove_instance(instance); !removed) return removed;
+    std::erase_if(events_, [&](const auto& event) { return galactic_chain_owner(event.target) == id; });
     return core::Result<void>::success();
 }
 
@@ -196,6 +250,7 @@ core::Result<void> Engine::settle_galactic_attaches(PlayerAi& player, authoritat
     auto intents = std::move(player.effects.attaches);
     player.effects.attaches.clear();
     if (intents.empty()) return core::Result<void>::success();
+    gc_profile::Scope profile_scope(gc_profile::Phase::goal_attach);
     const BoundaryScope boundary;
     for (const PendingAttach& intent : intents) {
         Goal* goal = find_goal(player, intent.goal);
@@ -289,14 +344,35 @@ core::Result<void> Engine::before_service(const World& world,
             // PG-01: fog cells of DesiredSpaceFOWCellSize, threat cells of
             // AI_FogCellsPerThreatCell fog cells, both rounded up.
             const AiBounds& bounds = *host_->setup.bounds;
+            const std::int64_t per = data_.constants.fog_cells_per_threat_cell;
+            const auto threat_cells = [&](std::int64_t fog_cells) {
+                return static_cast<std::int32_t>((fog_cells + per - 1) / per);
+            };
             const auto cells = [&](Real extent) {
                 const Real fog = to_single(extent / data_.constants.fog_cell_size);
                 std::int64_t count = truncate(fog);
                 if (real(count) < fog) ++count;
-                const std::int64_t per = data_.constants.fog_cells_per_threat_cell;
-                return static_cast<std::int32_t>((count + per - 1) / per);
+                return threat_cells(count);
             };
-            grid_.partition(bounds, cells(bounds.right - bounds.left), cells(bounds.top - bounds.bottom), data_.constants);
+            // The threat grid is sized from the fog grid the session built: on land that is DesiredLandFOWCellSize cells
+            // (clamped like the fog grid), not the space constant, so the fog row / k stamp lands on the grid's own cells.
+            // Space keeps the space constant over the declared extents.
+            const tactical::FogCells* land_fog =
+                host_->setup.domain == tactical::BattleDomain::land && host_->world != nullptr ? host_->world->fog_cells() : nullptr;
+            if (land_fog != nullptr) {
+                // #6942: the grid's box is the land fog rectangle (terrain origin, width x spacing by height x spacing), so a
+                // position read and the index-placed last-seen stamp name the same threat cell. setup.bounds stays the box of
+                // the point clamp, the ambush walk and the CELL regions. A reading: no retail evidence was read for the box.
+                const tactical::FogRules& rules = land_fog->rules();
+                const std::int64_t wide = static_cast<std::int64_t>(rules.cells_wide) * rules.cell_size.raw();
+                const std::int64_t tall = static_cast<std::int64_t>(rules.cells_tall) * rules.cell_size.raw();
+                const AiBounds rectangle{numeric::from_fixed(rules.map_left), numeric::from_fixed(rules.map_top),
+                    numeric::from_fixed(math::Fixed::from_raw(rules.map_left.raw() + wide)),
+                    numeric::from_fixed(math::Fixed::from_raw(rules.map_top.raw() - tall))};
+                grid_.partition(rectangle, threat_cells(rules.cells_wide), threat_cells(rules.cells_tall), data_.constants);
+            } else {
+                grid_.partition(bounds, cells(bounds.right - bounds.left), cells(bounds.top - bounds.bottom), data_.constants);
+            }
         }
         for (const AiPlayer& setup : host_->setup.players) {
             if (!setup.ai || setup.player_type.empty()) continue;
@@ -618,6 +694,14 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
                     "special_fire", "unit " + std::to_string(*unit) + " target " + std::to_string(*target) +
                     " admission " + std::to_string(truncate(*admission)));
             }
+            if (host_->setup.journal && command.verb == verb_tactical_superweapon && command.arguments.size() == 3) {
+                const Plan* source = plan_of_instance(command.issuer);
+                const auto owner = number_of(command.arguments[0]);
+                const auto unit = handle_id(command.arguments[1], handle_game_object);
+                const auto stage = number_of(command.arguments[2]);
+                if (owner && unit && stage) record(source, static_cast<tactical::PlayerId>(truncate(*owner)),
+                    "tsw_request", "unit " + std::to_string(*unit) + " stage " + std::to_string(truncate(*stage)));
+            }
             if (host_->setup.journal && command.verb == verb_ability) {
                 const Plan* source = plan_of_instance(command.issuer);
                 const auto owner = command.arguments.empty() ? std::nullopt : number_of(command.arguments[0]);
@@ -683,6 +767,11 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
                 || block->second.kind != Block::Kind::galactic_invade || !block->second.galactic_request) continue;
             auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
             const auto* status = actions ? actions->invasion_status(block->second.galactic_request) : nullptr;
+            // A refused invasion (absent from the world, not held by the lane) has nothing to release: a failed result.
+            if (!status && actions && !actions->invasion_pending(block->second.galactic_request)) {
+                block->second.finished = true; block->second.result = false; block->second.galactic_request = 0;
+                continue;
+            }
             if (!status || status->state != sim::galactic::GalacticSession::NativeInvasion::State::completed)
                 return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "terminal invasion release requires its real completed result"));
             block->second.finished = true; block->second.result = status->success;
@@ -710,7 +799,17 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
         if (tf != taskforces_.end()) native_record_changed(native_all_players, 21, tf->first);
         native_record_changed(native_all_players, 23, id);
         native_records_changed(0, {27, 29, 30});
-        if ((operation == "galactic_move" || operation == "galactic_land" || operation == "galactic_launch" || operation == "galactic_form" || operation == "galactic_invade")
+        if (operation == "galactic_starbase" && arguments.size() == 3 && player->galactic) {
+            const auto planet = handle_id(arguments[1], handle_game_object);
+            const auto level = number_of(arguments[2]);
+            if (!planet || !level || *level < real(0) || *level > real(5))
+                return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "invalid starbase wait request"));
+            Block block; block.id = id; block.instance = command.issuer; block.kind = Block::Kind::galactic_starbase;
+            block.destination_object = *planet; block.side = truncate(*level);
+            if (player->blocks.emplace(id, std::move(block)).second) index_runtime(runtime_index_.blocks, id, player->player);
+            continue;
+        }
+        if ((operation == "galactic_move" || operation == "galactic_raid" || operation == "galactic_land" || operation == "galactic_launch" || operation == "galactic_form" || operation == "galactic_invade")
             && tf != taskforces_.end() && player->galactic) {
             auto* actions = dynamic_cast<galactic_ai::NativeActions*>(host_->galactic_execution.get());
             if (!actions) return core::Result<void>::failure(detail::make_error(authoritative::codes::missing_api, "galactic block requires native world owner"));
@@ -718,10 +817,12 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
             request.player = plan->player; request.plan = plan->id; request.taskforce = tf->second.id; request.block = id;
             request.object = tf->second.galactic_fleet; request.members = tf->second.units;
             request.kind = operation == "galactic_move" ? galactic_ai::ActionKind::move
+                : operation == "galactic_raid" ? galactic_ai::ActionKind::raid
                 : operation == "galactic_invade" ? galactic_ai::ActionKind::invade
                 : operation == "galactic_land" ? galactic_ai::ActionKind::land
                 : operation == "galactic_launch" ? galactic_ai::ActionKind::launch : galactic_ai::ActionKind::regroup;
-            if (request.kind == galactic_ai::ActionKind::move) {
+            const bool movement = request.kind == galactic_ai::ActionKind::move || request.kind == galactic_ai::ActionKind::raid;
+            if (movement) {
                 const auto destination = arguments.size() == 3 ? handle_id(arguments[2], handle_game_object) : std::nullopt;
                 const auto reach = galactic_movement_reach(plan->id);
                 if (!destination || !reach) return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "galactic move requires an object destination and retained goal reachability"));
@@ -733,14 +834,14 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
             auto admitted = actions->admit(request);
             if (!admitted) return core::Result<void>::failure(admitted.error());
             Block block; block.id = id; block.instance = command.issuer; block.taskforce = tf->second.id;
-            block.kind = request.kind == galactic_ai::ActionKind::move ? Block::Kind::move
+            block.kind = movement ? Block::Kind::move
                 : request.kind == galactic_ai::ActionKind::invade ? Block::Kind::galactic_invade
                 : request.kind == galactic_ai::ActionKind::land ? Block::Kind::galactic_land
                 : request.kind == galactic_ai::ActionKind::launch ? Block::Kind::galactic_launch : Block::Kind::galactic_form;
             if (request.kind == galactic_ai::ActionKind::invade && admitted.value().admitted) {
                 block.galactic_request = admitted.value().request; block.galactic_actor = request.object;
                 block.finished = false; block.result = false;
-            } else if (request.kind == galactic_ai::ActionKind::move && admitted.value().admitted) {
+            } else if (movement && admitted.value().admitted) {
                 block.galactic_request = admitted.value().request;
                 const auto& status = actions->movements().at(block.galactic_request);
                 block.galactic_actor = status.actor; block.finished = status.finished;
@@ -924,12 +1025,17 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
             plan->purge = true;
         } else if (operation == "removable" && arguments.size() >= 2) {
             if (const auto* flag = std::get_if<bool>(&arguments[1].data)) plan->removable = *flag;
+        } else if (operation == "test_contrast" && arguments.size() >= 2) {
+            // PL-46: the potential plan keeps whether its contrast is tested; no goal or no potential plan leaves nothing to set.
+            if (const auto* flag = std::get_if<bool>(&arguments[1].data))
+                if (auto* goal = find_goal(*player, plan->goal); goal && goal->potential) goal->potential->target_contrast_disabled = !*flag;
         } else if (operation == "release" && tf != taskforces_.end() && arguments.size() >= 3) {
             if (const auto unit = handle_id(arguments[2], handle_game_object)) {
                 remove_member(tf->second, *unit);
                 player->assigned.erase(*unit);
             }
         } else if (operation == "release_all" && tf != taskforces_.end()) {
+            fail_galactic_assembly_members(tf->second, std::nullopt);
             for (const sim::EntityId unit : tf->second.units) {
                 return_galactic_actor(tf->second, unit);
                 player->assigned.erase(unit);

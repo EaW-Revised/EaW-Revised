@@ -4,7 +4,11 @@
 #include "ui/tactical_hud_internal.hpp"
 #include "ui/theme_builder.hpp"
 
+#include "eawr/data/tag_trace.hpp"
+
+#include <godot_cpp/classes/font.hpp>
 #include <godot_cpp/classes/input.hpp>
+#include <godot_cpp/classes/item_list.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/v_scroll_bar.hpp>
 #include <godot_cpp/classes/style_box_texture.hpp>
@@ -25,8 +29,25 @@ page::ReferenceFacts ReferencePages::facts(GalacticMode::State& state) {
     page::ReferenceFacts result;
     result.local_player = state.galaxy->local.player;
     result.history = page::published_history(*state.displayed_snapshot, state.metadata);
-    // Advisor archive and legend providers remain separate GREF seams.
+    // WGP-123..125: the Droid Log copies the archive at activation, the three hint flags and the faction portrait.
+    if (log_stale_) { shown_log_ = state.advisor_archive; log_stale_ = false; }
+    result.log = shown_log_;
+    result.hints = std::array<bool, 3>{state.advisor_hints[0].enabled, state.advisor_hints[1].enabled, state.advisor_hints[2].enabled};
+    if (!droid_icon_) {
+        droid_icon_.emplace();
+        if (state.audio_catalog && state.galaxy)
+            if (const auto faction = state.audio_catalog->resolve(state.galaxy->local.faction, data::Category::faction))
+                if (const auto* field = faction.value().value("Helper_Icon_Name")) {
+                    data::tag_trace::used(field->value);
+                    const auto names = page::hint_keys(field->value.raw_text);
+                    if (!names.empty()) *droid_icon_ = names.front();
+                }
+    }
+    result.droid_icon = *droid_icon_;
+    // The catalog-backed pages below need the reference catalog.
     if (!reference_catalog_) return result;
+    // GREF-19: the ability legend in authored order; text ids resolve through the page's text database.
+    result.legend = page::legend_entries(state.ability_legend_icons, state.ability_legend_text_ids, state.ability_legend_rgb, text_);
     if (types_.empty()) for (const auto& [id, name] : state.production_names)
         if (auto type = reference_catalog_->metadata(name)) {
             type->icon.type = id; types_.emplace(id, std::move(*type));
@@ -38,11 +59,17 @@ page::ReferenceFacts ReferencePages::facts(GalacticMode::State& state) {
     const auto* affiliation = state.content ? page::affiliation_for_owner(*state.content, result.local_player) : nullptr;
     const auto faction = affiliation ? affiliation->faction : state.galaxy->local.faction;
     // GREF-04: choose authored dialogs, preserving their icon positions/arrows.
-    result.tree.combined = faction == "Underworld";
-    const auto stem = result.tree.combined ? "IDD_TECH_TREE_BLACKMARKET" : faction == "Empire"
-        ? "IDD_TECH_TREE_EMPIRE" : faction == "Rebel" ? "IDD_TECH_TREE_REBEL" : "";
-    result.tree.land_dialog = stem;
-    result.tree.space_dialog = result.tree.combined || std::string_view(stem).empty() ? stem : std::string(stem) + "_SPACE";
+    // WGP-147: the faction's authored Tech_Tree_Dialog_Name picks the diagram; a combined diagram has no domain radios.
+    const auto chosen = page::choose_tree_dialogs(affiliation ? affiliation->tech_tree_dialog : std::string_view{},
+        [&](std::string_view name) { return catalog_->script.find(name) != nullptr; },
+        [&](std::string_view name) {
+            const auto* dialog = catalog_->script.find(name);
+            return dialog && std::any_of(dialog->controls.begin(), dialog->controls.end(), [](const auto& control) {
+                return control.id_name == "IDC_TECH_TREE_LAND" || control.id_name == "IDC_TECH_TREE_SPACE"; });
+        });
+    result.tree.combined = chosen.combined;
+    result.tree.land_dialog = chosen.land;
+    result.tree.space_dialog = chosen.space;
     if (state.displayed_snapshot->player_economy())
         for (const auto& player : state.displayed_snapshot->player_economy()->players)
             if (player.player == result.local_player) result.tree.technology = player.current_tech;
@@ -113,7 +140,9 @@ void ReferencePages::service(GalacticMode::State& state) {
             if (!icon.empty()) help->set_texture_normal(state.command_texture(icon.front()));
             const auto hover = component->list(data::ui::Field::mouse_over_texture_name);
             if (!hover.empty()) help->set_texture_hover(state.command_texture(hover.front()));
-            help->set_action([this] { model_.open(); dirty_ = true; });
+            help->set_action([this, &state, name = component->name] {
+                state.raise_story_click(name); model_.open(); log_stale_ = true; snapshot_.reset(); dirty_ = true; // #5922
+            });
             state.command_bar->add_child(help); state.command_buttons.emplace("b_droid_help", help);
         }
     }
@@ -131,7 +160,12 @@ void ReferencePages::service(GalacticMode::State& state) {
 void ReferencePages::activate(GalacticMode::State& state, const std::string& id) {
     using enum page::ReferenceTab;
     if (id == "IDC_BUTTON_CLOSE" || id == "IDC_BUTTON_EXIT") model_.visible = false;
-    else if (id == "IDC_DROID_LOG_RADIO") model_.choose(log);
+    else if (id == "IDC_DROID_LOG_RADIO") { model_.choose(log); log_stale_ = true; snapshot_.reset(); }
+    else if (id == "IDC_HINTS_CHECK") {
+        // WGP-125: the checkbox sets all three mode flags to its value; deadlines and indices stay.
+        for (auto& gadget : dialog_->gadgets) if (gadget.id == id)
+            if (auto* button = Object::cast_to<BaseButton>(gadget.control)) page::set_all_hints(state.advisor_hints, button->is_pressed());
+    }
     else if (id == "IDC_DATA_CHART_RADIO") model_.choose(history);
     else if (id == "IDC_TECH_TREE_RADIO") model_.choose(tree);
     else if (id == "IDC_SUMMARY_SCREEN_RADIO") model_.choose(summary);
@@ -350,7 +384,63 @@ void ReferencePages::refresh(GalacticMode::State& state) {
             }
         }
         for (auto& gadget : dialog_->gadgets) if (gadget.control && gadget.kind == "check")
-            if (auto* button = Object::cast_to<BaseButton>(gadget.control)) button->set_disabled(true);
+            if (auto* button = Object::cast_to<BaseButton>(gadget.control)) {
+                // WGP-125: the hints checkbox shows the OR of the three mode flags; no other check exists on this page.
+                const bool hints = gadget.id == "IDC_HINTS_CHECK" && model_.facts.hints;
+                button->set_disabled(!hints);
+                if (hints) button->set_pressed_no_signal(page::any_hints_enabled(state.advisor_hints));
+            }
+        for (auto& gadget : dialog_->gadgets) {
+            // WGP-124: the local faction's helper portrait, white, no frame.
+            if (gadget.id == "IDC_DROID_PICTURE_" && !model_.facts.droid_icon.empty())
+                if (auto* image = Object::cast_to<TextureRect>(gadget.control))
+                    if (const auto texture = state.command_texture(model_.facts.droid_icon); texture.is_valid()) {
+                        image->set_texture(texture); image->set_modulate(Color(1, 1, 1, 1)); image->show();
+                    }
+            // WGP-123: every archived entry in order; the message part wraps, every row keeps its entry's colour and
+            // nothing is selectable.
+            if (gadget.id == "IDC_DROID_LIST")
+                if (auto* list = Object::cast_to<ItemList>(gadget.control)) {
+                    list->clear();
+                    const Ref<Font> font = list->get_theme_font("font");
+                    const int size = list->get_theme_font_size("font_size");
+                    const float width = std::max(1.0F, list->get_size().x - 24.0F);
+                    for (std::size_t index = 0; index < model_.facts.log.size(); ++index) {
+                        const auto& entry = model_.facts.log[index];
+                        const Color colour(entry.colour[0] / 255.0F, entry.colour[1] / 255.0F, entry.colour[2] / 255.0F,
+                            entry.colour[3] / 255.0F);
+                        std::vector<std::string> rows;
+                        if (index % 3 != 1 || font.is_null()) rows.push_back(entry.text);
+                        else {
+                            // Greedy word wrap at the list's text width; an authored line break always breaks.
+                            std::string row, word;
+                            const auto place = [&](bool line_end) {
+                                if (!word.empty()) {
+                                    const auto candidate = row.empty() ? word : row + " " + word;
+                                    if (!row.empty() && font->get_string_size(String::utf8(candidate.c_str()),
+                                            HORIZONTAL_ALIGNMENT_LEFT, -1, size).x > width) {
+                                        rows.push_back(row); row = word;
+                                    } else row = candidate;
+                                    word.clear();
+                                }
+                                if (line_end) { rows.push_back(row); row.clear(); }
+                            };
+                            for (const char c : entry.text) {
+                                if (c == 0x0A) place(true);
+                                else if (c == ' ' || c == 0x09 || c == 0x0D) place(false);
+                                else word.push_back(c);
+                            }
+                            place(false);
+                            if (!row.empty()) rows.push_back(row);
+                        }
+                        for (const auto& row : rows) {
+                            const auto at = list->add_item(String::utf8(row.c_str()), Ref<Texture2D>(), false);
+                            list->set_item_custom_fg_color(at, colour);
+                        }
+                    }
+                    list->show();
+                }
+        }
     } else {
         const bool fleets = model_.kind == page::SummaryKind::fleets;
         if (fleets) set_text("IDC_HINTS", "Orbital fleet details are unavailable.");

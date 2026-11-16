@@ -45,7 +45,7 @@ class SkirmishSetupGpu(unittest.TestCase):
             script.write_text(USERS_SCRIPT, encoding="utf-8")
             pages = {
                 "performance": {"IDC_PARTICLE_THREADS", "IDC_SIMULATION_THREADS", "IDC_DEPTH_PREPASS", "IDC_RENDER_THREAD"},
-                "keyboard": {"IDC_CAMERA_KEYS", "IDC_SELECTION_ALL_KEY", "IDC_SELECTION_SCREEN_KEY"},
+                "keyboard": {"IDC_CAMERA_KEYS"},
                 "tweaks": {"IDC_SELECTION_HOTKEYS"}, "video": {"IDC_FRAME_RATE_LIMIT"},
                 "skirmish": {"IDC_PLAYER_FACTION_0", "IDC_PLAYER_FACTION_8"},
             }
@@ -128,6 +128,9 @@ class SkirmishSetupGpu(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout[-6000:])
                 reports = json.loads((output / "popup.json").read_text(encoding="utf-8"))
                 self.assertEqual(len(reports), 6)
+                # The authored box keeps its height whatever the list length (blank below a short list).
+                self.assertEqual({round(r["rect"][3]) for r in reports}, {round(reports[0]["rect"][3])},
+                                 [(r["count"], r["rect"]) for r in reports])
                 for report in reports:
                     with self.subTest(control=control, resolution=width, count=report["count"], edge=report["edge"]):
                         x, y, w, h = report["rect"]
@@ -388,6 +391,38 @@ class SkirmishSetupGpu(unittest.TestCase):
             (output / "orders.json").write_text(json.dumps(orders), encoding="utf-8")
             for player in (2, 3):
                 self.assertGreater(orders.get(player, 0), 0, f"AI player {player} issued no orders")
+
+    def test_failed_scoring_script_shows_the_start_refusal(self):
+        # #6816: a start the scoring script refuses returns to setup with the error code and the first line.
+        with tempfile.TemporaryDirectory(prefix="skirmish-refusal-") as temporary:
+            output = Path(os.environ.get("EAWR_SETUP_EYECHECK", temporary)).resolve() / "refusal"
+            output.mkdir(parents=True, exist_ok=True)
+            # A one-file mod: the scoring module the data names (GameScoring) faults when it loads.
+            mod = Path(temporary) / "failing-scoring-mod"
+            scripts = mod / "Data" / "Scripts" / "Miscellaneous"
+            scripts.mkdir(parents=True)
+            (scripts / "GameScoring.lua").write_text('error("forced scoring failure for the start refusal test")\n', encoding="utf-8")
+            result = subprocess.run([
+                os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-skirmish-setup",
+                "--eawr-setup-test", "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                "--eawr-mod-root", str(mod),
+                "--eawr-report", str(output / "refusal.json"), "--eawr-capture", str(output / "setup.png"),
+                "--eawr-font-cache", os.environ.get("EAWR_FONT_CACHE", str(ROOT / "out/fonts")),
+                "--eawr-live-ticks", "90", "--eawr-audio", "off",
+                "--eawr-lighting", "sh", "--eawr-environment", "map", "--eawr-shadows", "on"],
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
+            (output / "refusal.log").write_text(result.stdout, encoding="utf-8")
+            # The test run ends with exit code 2 after the refusal has been on screen.
+            self.assertEqual(result.returncode, 2, result.stdout[-6000:])
+            self.assertNotIn("EAWR live session started", result.stdout)
+            self.assertIn("EAWR skirmish start refused: ", result.stdout)
+            self.assertRegex(result.stdout, r"EAWR skirmish start refused: .*EAWR-[A-Z]+-\d+")
+            self.assertIn("forced scoring failure", result.stdout)
+            self.assertIn("EAWR skirmish setup returned", result.stdout)
+            self.assertNotIn("EAWR skirmish start refusal box:", result.stdout)
+            for name in ("setup.png", "setup.returned.png"):
+                self.assertGreater((output / name).stat().st_size, 10000, name)
 
     def test_two_per_team_gui_reaches_live_battle(self):
         with tempfile.TemporaryDirectory(prefix="skirmish-2v2-") as temporary:

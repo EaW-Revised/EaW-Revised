@@ -26,8 +26,10 @@ namespace {
 
 [[nodiscard]] std::string_view profile_name(const RenderProfileSetting setting) noexcept {
     switch (setting) {
-    case RenderProfileSetting::retail: return "retail";
-    case RenderProfileSetting::enhanced: return "enhanced";
+    case RenderProfileSetting::retail: return "off";
+    case RenderProfileSetting::low: return "low";
+    case RenderProfileSetting::medium: return "medium";
+    case RenderProfileSetting::high: return "high";
     case RenderProfileSetting::automatic: break;
     }
     return "automatic";
@@ -35,8 +37,13 @@ namespace {
 
 [[nodiscard]] std::optional<RenderProfileSetting> parse_profile(const std::string_view text) noexcept {
     if (text == "automatic") return RenderProfileSetting::automatic;
-    if (text == "retail") return RenderProfileSetting::retail;
-    if (text == "enhanced") return RenderProfileSetting::enhanced;
+    if (text == "off") return RenderProfileSetting::retail;
+    if (text == "retail") return RenderProfileSetting::medium; // Old launcher ignored this saved token.
+    if (text == "enhanced") return RenderProfileSetting::medium; // Legacy binary slider.
+    if (text == "low") return RenderProfileSetting::low;
+    if (text == "medium") return RenderProfileSetting::medium;
+    if (text == "high") return RenderProfileSetting::high;
+    if (text == "max") return RenderProfileSetting::high; // Removed top level.
     return std::nullopt;
 }
 
@@ -58,6 +65,8 @@ struct IntField final {
     }
 
 constexpr int speed_last = speed_step_count - 1;
+// DEV-9: the stamp line of a settings file written with the radar default ON (see parse_settings).
+constexpr std::string_view fit_radar_stamp_key = "migrate.fit_radar_default_on";
 constexpr int scroll_last = scroll_stop_count - 1;
 
 const IntField fields[] = {
@@ -74,6 +83,7 @@ const IntField fields[] = {
     EAWR_SETTINGS_FIELD("video.window_width", video.window_width, display_size_minimum, display_size_maximum),
     EAWR_SETTINGS_FIELD("video.window_height", video.window_height, display_size_minimum, display_size_maximum),
     EAWR_SETTINGS_FIELD("video.windowed", video.windowed, 0, 1),
+    EAWR_SETTINGS_FIELD("video.supersampling", video.supersampling, 0, 2),
     EAWR_SETTINGS_FIELD("video.vsync", video.vsync, 0, 1),
     EAWR_SETTINGS_FIELD("video.render_thread", video.render_thread, 0, 1),
     EAWR_SETTINGS_FIELD("video.particle_threads", video.particle_threads, 0, 64),
@@ -92,6 +102,7 @@ const IntField fields[] = {
     EAWR_SETTINGS_FIELD("gameplay.delay_tooltips", gameplay.delay_tooltips, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.reinforcement_areas_only_while_placing", gameplay.reinforcement_areas_only_while_placing, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.fit_radar_to_galaxy", gameplay.fit_radar_to_galaxy, 0, 1),
+    EAWR_SETTINGS_FIELD("gameplay.space_pauses_galactic", gameplay.space_pauses_galactic, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.animated_loading_background", gameplay.animated_loading_background, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.hover_owner_names", gameplay.hover_owner_names, -1, 1),
     EAWR_SETTINGS_FIELD("gameplay.right_button_scroll", gameplay.right_button_scroll, 0, 1),
@@ -244,6 +255,14 @@ struct KeyFact final {
     std::string_view key;
 };
 
+// Bare letters the retail command map and the camera preset already take (the WASD preset also
+// moves W/A/S/D's commands onto U/X/V/H); a selection chord on one would shadow it.
+constexpr std::string_view reserved_command_letters = "FGMERTBKCIP";
+constexpr std::string_view reserved_bare_letters = "FGMERTBKCIPWASDUXVH";
+// Ctrl+letter chords the ability key map takes, and Ctrl+A (select all). This file is linked into tools that
+// do not carry the ability table; settings_tests checks that no usable chord shadows an ability.
+constexpr std::string_view reserved_ctrl_letters = "ADZJKGFOBXHMNCERLSITP";
+
 // The keys the project's battle input binds to a retail command (OR-01, G-1, overview).
 constexpr KeyFact key_facts[] = {
     {"IDC_EDIT_WAYPOINT", "W"},
@@ -271,7 +290,7 @@ constexpr KeyFact key_facts[] = {
 // All other bare defaults in the sourced map (ST-K3), including interface and
 // ability keys. Validate the preset before any event can be dispatched.
 static_assert([] {
-    constexpr std::string_view occupied = "FGMERTBKCIP";
+    constexpr std::string_view occupied = reserved_command_letters;
     for (std::size_t i = 0; i < camera_key_moves.size(); ++i) {
         const char key = camera_key_moves[i].wasd;
         if (occupied.find(key) != std::string_view::npos
@@ -297,19 +316,38 @@ std::string_view project_key_for(const std::string_view control, const bool came
     return project_key_for(control);
 }
 
+std::string selection_chord_for(const char letter, const bool ctrl) {
+    if (letter < 'A' || letter > 'Z') return {};
+    return std::string(ctrl ? "Ctrl+" : "") + letter;
+}
+
+bool selection_chord_usable(const std::string_view chord) noexcept {
+    const bool ctrl = chord.starts_with("Ctrl+");
+    const std::string_view letter = ctrl ? chord.substr(5) : chord;
+    if (letter.size() != 1 || letter[0] < 'A' || letter[0] > 'Z') return false;
+    return (ctrl ? reserved_ctrl_letters : reserved_bare_letters).find(letter[0]) == std::string_view::npos;
+}
+
+SelectionChordStatus selection_chord_status(const PlayerSettings& settings, const std::size_t action,
+    const std::string_view chord) noexcept {
+    const bool ctrl = chord.starts_with("Ctrl+");
+    const std::string_view letter = ctrl ? chord.substr(5) : chord;
+    if (action >= selection_commands.size() || letter.size() != 1 || letter[0] < 'A' || letter[0] > 'Z')
+        return SelectionChordStatus::malformed;
+    if (!selection_chord_usable(chord)) return SelectionChordStatus::reserved;
+    if (chord == selection_key(settings, 1 - action)) return SelectionChordStatus::duplicate;
+    return SelectionChordStatus::ok;
+}
+
 std::string_view selection_key(const PlayerSettings& settings, const std::size_t action) noexcept {
     if (action >= selection_commands.size()) return {};
     const auto found = settings.keys.find(std::string(selection_commands[action]));
-    if (found != settings.keys.end()
-        && std::find(selection_key_choices.begin(), selection_key_choices.end(), found->second) != selection_key_choices.end())
-        return found->second;
+    if (found != settings.keys.end() && selection_chord_usable(found->second)) return found->second;
     return settings.selection_config.actions[action].default_key;
 }
 
 bool set_selection_key(PlayerSettings& settings, const std::size_t action, const std::string_view chord) {
-    if (action >= selection_commands.size()
-        || std::find(selection_key_choices.begin(), selection_key_choices.end(), chord) == selection_key_choices.end()
-        || chord == selection_key(settings, 1 - action)) return false;
+    if (selection_chord_status(settings, action, chord) != SelectionChordStatus::ok) return false;
     settings.keys[std::string(selection_commands[action])] = chord;
     return true;
 }
@@ -386,8 +424,9 @@ std::vector<std::string> clamp_settings(PlayerSettings& settings) {
             repaired.push_back(detail_key(slot));
         }
     }
-    if (static_cast<int>(settings.video.render_profile) > static_cast<int>(RenderProfileSetting::enhanced)) {
-        settings.video.render_profile = RenderProfileSetting::automatic;
+    if (static_cast<int>(settings.video.render_profile) > static_cast<int>(RenderProfileSetting::high)) {
+        settings.video.render_profile = RenderProfileSetting::high;
+        settings.video.supersampling = 2;
         repaired.emplace_back("video.render_profile");
     }
     for (auto it = settings.keys.begin(); it != settings.keys.end();) {
@@ -407,6 +446,8 @@ std::string serialize_settings(const PlayerSettings& settings) {
         if (field.key == "keyboard.selection_hotkeys" && !settings.selection_hotkeys_authored) continue;
         text += std::string(field.key) + "=" + std::to_string(field.get(settings)) + "\n";
     }
+    // DEV-9: every file written by a build whose radar default is ON carries this stamp, so a stored radar value is trusted.
+    text += std::string(fit_radar_stamp_key) + "=1\n";
     for (std::size_t slot = 0; slot < detail_slot_count; ++slot) {
         text += detail_key(slot) + "=" + std::to_string(settings.video.detail[slot]) + "\n";
     }
@@ -422,6 +463,7 @@ std::string serialize_settings(const PlayerSettings& settings) {
     text += "network.online_pin=" + line_value(settings.network.online_pin) + "\n";
     text += "network.online_ca_file=" + line_value(settings.network.online_ca_file) + "\n";
     text += "network.online_relay_only=" + std::to_string(settings.network.online_relay_only) + "\n";
+    text += "network.online_turn_provider=" + line_value(settings.network.online_turn_provider) + "\n";
     for (const auto& [command, key] : settings.keys) {
         if (valid_command_name(command) && valid_key_text(key)) text += "key." + command + "=" + key + "\n";
     }
@@ -432,6 +474,10 @@ SettingsLoad parse_settings(const std::string_view text) {
     SettingsLoad load;
     std::size_t position = 0;
     bool header = false;
+    bool fit_radar_stamped = false;
+    bool legacy_supersampling = false;
+    bool legacy_high = false;
+    bool explicit_supersampling = false;
     while (position <= text.size()) {
         const std::size_t end = std::min(text.find('\n', position), text.size());
         const std::string_view line = trim(text.substr(position, end - position));
@@ -462,6 +508,7 @@ SettingsLoad parse_settings(const std::string_view text) {
         }
         const std::string key(trim(line.substr(0, equals)));
         const std::string_view value = trim(line.substr(equals + 1));
+        if (key == fit_radar_stamp_key) { fit_radar_stamped = true; continue; }
         if (key == "revised_layer_path") {
             if (!value.empty()) load.settings.revised_layer_path = std::string(value);
             else load.settings.revised_layer_path.reset();
@@ -477,6 +524,9 @@ SettingsLoad parse_settings(const std::string_view text) {
             else if (key == "network.online_relay_only") {
                 if (value == "0" || value == "1") network.online_relay_only = value == "1";
                 else load.notes.emplace_back("EAWR-NET-1751: Choose whether online games require the relay.");
+            } else if (key == "network.online_turn_provider") {
+                if (value == "auto" || value == "own" || value == "cloudflare") network.online_turn_provider = value;
+                else load.notes.emplace_back("online relay provider ignored: choose auto, own or cloudflare");
             } else load.notes.emplace_back("unknown online setting ignored");
             continue;
         }
@@ -487,11 +537,16 @@ SettingsLoad parse_settings(const std::string_view text) {
             continue;
         }
         if (key == "video.render_profile") {
-            if (const auto profile = parse_profile(value)) load.settings.video.render_profile = *profile;
+            if (const auto profile = parse_profile(value)) {
+                load.settings.video.render_profile = *profile;
+                legacy_supersampling = value == "high" || value == "max" || value == "enhanced";
+                legacy_high = value == "high";
+            }
             else load.notes.push_back("bad value for " + key + " ignored");
             continue;
         }
         const auto number = parse_int(value);
+        if (key == "video.supersampling" && number) explicit_supersampling = true;
         if (key.rfind("video.detail.", 0) == 0) {
             const auto slot = parse_int(std::string_view(key).substr(13));
             if (slot && *slot >= 0 && *slot < static_cast<int>(detail_slot_count) && number) {
@@ -519,6 +574,15 @@ SettingsLoad parse_settings(const std::string_view text) {
         load.notes.emplace_back("empty settings file; defaults used");
         return load;
     }
+    if (!fit_radar_stamped && load.settings.gameplay.fit_radar_to_galaxy != PlayerSettings{}.gameplay.fit_radar_to_galaxy) {
+        // DEV-9: a file from before the radar default turned ON stored the old default for every profile that saved anything, so a
+        // stored value cannot be told from a choice: it is reset once (the next save stamps the file).
+        load.settings.gameplay.fit_radar_to_galaxy = PlayerSettings{}.gameplay.fit_radar_to_galaxy;
+        load.notes.emplace_back("gameplay.fit_radar_to_galaxy reset once to its new default (on)");
+    }
+    // The separate SS field marks a new-format High (8x). Without it, High meant 4x plus SS2.
+    if (legacy_high && !explicit_supersampling) load.settings.video.render_profile = RenderProfileSetting::medium;
+    if (legacy_supersampling && !explicit_supersampling) load.settings.video.supersampling = 2;
     for (const std::string& repaired : clamp_settings(load.settings)) {
         load.notes.push_back("value out of range clamped: " + repaired);
     }
@@ -547,6 +611,38 @@ std::vector<DisplaySize> resolution_choices(const DisplaySize screen, const std:
     std::sort(sizes.begin(), sizes.end());
     sizes.erase(std::unique(sizes.begin(), sizes.end()), sizes.end());
     return sizes;
+}
+
+std::size_t startup_window_screen(const std::span<const std::string> arguments, const int current, const int count) {
+    const int fallback = current >= 0 && current < count ? current : 0;
+    std::optional<int> requested;
+    for (std::size_t i = 0; i < arguments.size(); ++i) {
+        if (arguments[i] == "--eawr-launcher-screen") {
+            requested = i + 1 < arguments.size() ? parse_int(arguments[++i]) : std::nullopt;
+        }
+    }
+    return static_cast<std::size_t>(requested && *requested >= 0 && *requested < count ? *requested : fallback);
+}
+
+WindowPlacement place_window(const DisplaySize wanted, const FrameInsets frame, const std::span<const ScreenArea> screens,
+                             const std::size_t screen_index, const std::optional<std::pair<int, int>> keep) {
+    if (screens.empty() || screens[std::min(screen_index, screens.size() - 1)].width <= 0
+        || screens[std::min(screen_index, screens.size() - 1)].height <= 0) {
+        return {0, 0, wanted.width, wanted.height};
+    }
+    const ScreenArea& area = screens[std::min(screen_index, screens.size() - 1)];
+    const int across = frame.left + frame.right;
+    const int down = frame.top + frame.bottom;
+    // Shrink the client area until the whole frame fits (at least one pixel is left for a degenerate screen).
+    const int width = std::clamp(wanted.width, 1, std::max(1, area.width - across));
+    const int height = std::clamp(wanted.height, 1, std::max(1, area.height - down));
+    // The client positions that keep the frame inside the area.
+    const int first_x = area.x + frame.left;
+    const int first_y = area.y + frame.top;
+    const int last_x = std::max(first_x, area.x + area.width - frame.right - width);
+    const int last_y = std::max(first_y, area.y + area.height - frame.bottom - height);
+    if (keep) return {std::clamp(keep->first, first_x, last_x), std::clamp(keep->second, first_y, last_y), width, height};
+    return {first_x + (last_x - first_x) / 2, first_y + (last_y - first_y) / 2, width, height};
 }
 
 std::span<const OptionStatus> option_statuses() noexcept { return statuses; }

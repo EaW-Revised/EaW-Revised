@@ -153,6 +153,9 @@ void consumption_and_missions() {
     check(ca::execute(world, p, {}).value().accepted() && world.units[0].present, "nonconsumable retained");
     world = fixture(); p = prepare(world).choices[0]; p.choice.map = 80; p.choice.script = 81; p.choice.mode = ca::MissionMode::land;
     result = ca::execute(world, p, {}).value();
+    check(!result.mission && world.locations[0].model.transition.active() && world.accounts[0].uses[2] == 1, "WGCH-198: a land mission choice takes the timed route");
+    world = fixture(); p = prepare(world).choices[0]; p.choice.map = 80; p.choice.script = 81; p.choice.mode = ca::MissionMode::space;
+    result = ca::execute(world, p, {}).value();
     check(result.mission && !world.locations[0].model.transition.active() && !world.actors[0].present, "mission queued before transition");
     check(world.accounts[0].uses[2] == 0, "queued mission does not increment direct usage");
     auto mission = *result.mission;

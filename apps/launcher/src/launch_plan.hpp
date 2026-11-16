@@ -17,6 +17,7 @@ struct LaunchInputs {
     fs::path report;               // --eawr-report: the viewer writes {"status":"failed","failure":...} here
     bool depth_prepass_off = false; // Saved Off only; otherwise project default.
     bool engine_unverified = false;   // --eawr-engine-unverified: the engine SHA-256 is not the packaged one
+    bool no_fog = false;              // --eawr-no-fog: owner convenience (not retail), the viewer draws every unit
     bool allow_unknown_build = false; // --eawr-allow-unknown-build: accept a game build the viewer has not verified
     std::optional<bool> safe_render_thread;  // Explicit CLI override: true Safe, false Separate
     std::optional<fs::path> mod_profile; // selected by the manager loop
@@ -26,10 +27,15 @@ struct LaunchInputs {
     std::optional<unsigned> lan_game_port; // instance n >= 2: --eawr-lan-game-port (47624 + 2*(n-1))
     std::optional<std::wstring> render_thread; // profile mode or saved fallback, before Godot user arguments
     std::optional<int> quit_after; // smoke checks: Godot --quit-after N frames
+    std::optional<int> launcher_screen; // transient monitor hint from the manager's launch request
     std::vector<std::wstring> extra; // appended after the viewer arguments (after "--")
 };
 
 [[nodiscard]] bool evidence_requested(const std::vector<std::wstring>& extra);
+
+// Whether the start is a player's view and carries --eawr-launcher-start: no evidence switch (above) and no
+// viewer switch other than the few a player run takes (the other probe and exercise switches make an evidence run).
+[[nodiscard]] bool player_start_requested(const std::vector<std::wstring>& extra);
 
 // argv[1..] for the Godot executable.
 [[nodiscard]] std::vector<std::wstring> godot_arguments(const LaunchInputs& inputs);

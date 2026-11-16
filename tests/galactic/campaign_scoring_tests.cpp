@@ -135,7 +135,8 @@ struct Mounted {
     std::shared_ptr<const eawr::data::Catalog> catalog;
     platform::CampaignScoringSource source;
 };
-std::unique_ptr<Mounted> mount(std::string_view module_text, std::string_view constants) {
+std::unique_ptr<Mounted> mount(std::string_view module_text, std::string_view constants,
+    const std::map<std::string, std::string>& extra_scripts = {}) {
     auto out = std::make_unique<Mounted>();
     const auto& root = out->tree.root;
     for (const auto& [name, body] : std::map<std::string, std::string>{
@@ -153,6 +154,7 @@ std::unique_ptr<Mounted> mount(std::string_view module_text, std::string_view co
     if (!constants.empty()) write(root / "XML" / "GameConstants.xml", constants);
     if (!module_text.empty()) write(root / "Scripts" / "Miscellaneous" / "TestScoring.lua", module_text);
     write(root / "Scripts" / "Library" / "placeholder.lua", "-- the library directory exists in every installation\n");
+    for (const auto& [path, text] : extra_scripts) write(root / "Scripts" / path, text);
     const std::array mounts{eawr::vfs::MountSpec{"base", root, "data", {}}};
     auto files = take(eawr::vfs::Vfs::mount(mounts));
     out->files = std::make_shared<const eawr::vfs::Vfs>(std::move(files));
@@ -354,6 +356,37 @@ void mounted_module() {
         "a failing module is a failure the provider turns into an absent half");
 }
 
+
+// ML-31/ML-38: the manifest pins every module of the directories the scheduler searches, so the scoring module can
+// require a sibling from Miscellaneous (a mod's GalacticConquestEndings is one), whatever its file name's case.
+void sibling_admission() {
+    const std::vector<platform::CampaignScoringPlayer> players{{1, "Empire"}, {2, "Rebel"}};
+    const galactic::CampaignScoreLedger empty;
+    const auto with_require = [](std::string_view name) { return "require(\"" + std::string(name) + "\")\n" + std::string(scoring_module); };
+    const auto helper = std::string("function Helper_Value() return 7 end\n");
+
+    const auto sibling = mount(with_require("Helper"), constants_xml, {{"Miscellaneous/Helper.lua", helper}});
+    const auto admitted = platform::evaluate_campaign_scoring(sibling->source, empty, players, 1);
+    expect(admitted && admitted.value().has_value(), "a scoring module requires a sibling Helper.lua from data/scripts/miscellaneous/");
+
+    const auto cased = mount(with_require("GalacticConquestEndings"), constants_xml,
+        {{"Miscellaneous/GALACTICconquestENDINGS.lua", helper}});
+    const auto resolved = platform::evaluate_campaign_scoring(cased->source, empty, players, 1);
+    expect(resolved && resolved.value().has_value(), "a mixed-case module name resolves from a differently cased file");
+
+    const auto library = mount(with_require("Helper"), constants_xml, {{"Library/Helper.lua", helper}});
+    const auto from_library = platform::evaluate_campaign_scoring(library->source, empty, players, 1);
+    expect(from_library && from_library.value().has_value(), "a Library helper still resolves");
+
+    // Negative control: a module outside every configured directory is still refused.
+    for (const auto* outside : {"Story/Helper.lua", "GameObject/Helper.lua", "AI/Helper.lua"}) {
+        const auto refused = mount(with_require("Helper"), constants_xml, {{outside, helper}});
+        const auto result = platform::evaluate_campaign_scoring(refused->source, empty, players, 1);
+        expect(!result && (result.error().code + result.error().message).find("EAWR-SCRIPT-0207") != std::string::npos,
+            std::string("a helper under ") + outside + " is not admitted (EAWR-SCRIPT-0207)");
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 galactic::GalacticSetup ending(std::string_view local_faction, std::string_view other_faction) {
     auto initial = galactic::synthetic_galaxy({.seed = 91, .planets = 16, .players = 3,
@@ -498,6 +531,7 @@ int main(int argc, char** argv) {
             ledger_encoding();
             session_producers();
             mounted_module();
+            sibling_admission();
             production_provider();
         }
     } catch (const std::exception& error) {

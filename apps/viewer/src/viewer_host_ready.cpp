@@ -4,14 +4,17 @@
 #include "viewer_host_internal.hpp"
 #include "audio_buses.hpp"
 #include "audio_output.hpp"
+#include "diagnostic_switch_hooks.hpp"
 #include "font_provision.hpp"
 #include "gpu_memory_trace.hpp"
 #include "menu_timeline.hpp"
 #include "settings_store.hpp"
 #include "startup_trace.hpp"
+#include "startup_window.hpp"
 #include "galactic/gc_setup_memory.hpp"
 #include "eawr/presentation/render_categories.hpp"
 #include "eawr/presentation/hull_batching.hpp"
+#include "eawr/presentation/diagnostic_switches.hpp"
 #include "eawr/platform/saved_games.hpp"
 #include "ui/build_label.hpp"
 #include <chrono>
@@ -92,6 +95,17 @@ void ViewerHost::record_render_categories() {
 // Exceptions must not escape a GDExtension callback into the engine.
 void ViewerHost::_ready() try {
     if (!apply_engine_guard(*this)) return;  // engine guard (owner rule 11-03): engine_guard_startup.hpp
+#ifdef _WIN32
+    pump_startup_messages();
+    UtilityFunctions::print("EAWR startup window pump: ready");
+#endif
+    // One startup activation, before any long load. Windows implements this as
+    // SetForegroundWindow; never repeat it on later frames.
+#ifdef _WIN32
+    if (auto* display = DisplayServer::get_singleton(); display && display->get_name() != String("headless")) {
+        display->window_move_to_foreground();
+    }
+#endif
     mute_lane_audio_output();
     set_process(true);
     // The ONE writer of the window title (the engine guard no longer appends to it). The engine titles the window
@@ -129,6 +143,24 @@ void ViewerHost::_ready() try {
             return;
         }
     }
+    // PF ablation ladder: --eawr-diagnostic-off particles,turrets,skeletons,shadows (measurement hooks, process-local).
+    for (int64_t index = 0; index < arguments.size(); ++index) {
+        if (arguments[index] != String(std::string(diagnostic_switches::flag).c_str())) continue;
+        std::string error;
+        diagnostic_switches::Switches named;
+        if (++index >= arguments.size()
+            || !diagnostic_switches::parse(arguments[index].utf8().get_data(), named, error)) {
+            const std::string message = error.empty() ? std::string(diagnostic_switches::flag) + " requires a list" : error;
+            UtilityFunctions::printerr(message.c_str());
+            get_tree()->quit(2);
+            return;
+        }
+        diagnostic_switches::merge(diagnostic_switches::active, named);  // a repeated flag adds up
+    }
+    apply_diagnostic_switch_hooks(diagnostic_switches::active);
+    for (const std::string& line : diagnostic_switches::announce(diagnostic_switches::active)) {
+        UtilityFunctions::print(line.c_str());
+    }
     // Instanced submission of identical rest-pose hull pieces is on unless the launch asks for it off.
     hull_batching::enabled = hull_batching::launch_state(arguments.has(hull_batching::off_argument));
     UtilityFunctions::print(String("EAWR instanced hulls: ") + hull_batching::state_name(hull_batching::enabled));
@@ -164,7 +196,28 @@ void ViewerHost::_ready() try {
     }
     const std::optional<RenderProfile> requested_render_profile = parse_render_profile(options_->render_profile);
     if (options_->render_profile_missing || (!options_->render_profile.empty() && !requested_render_profile)) {
-        status_message_ = "--eawr-render-profile expects retail or enhanced";
+        status_message_ = "--eawr-render-profile expects retail, enhanced, low, medium, high or max";
+        UtilityFunctions::printerr(String(status_message_.c_str()));
+        static_cast<void>(write_report("failed"));
+        stop(2);
+        return;
+    }
+
+    auto aa_override = parse_aa_override(options_->aa_msaa, options_->aa_smaa);
+    if (options_->aa_switch) {
+        const auto combined = parse_aa_switch(*options_->aa_switch);
+        if (!combined) aa_override = std::nullopt;
+        else if (aa_override) {
+            // The combined switch wins when both spellings are given.
+            if (combined->msaa_samples) aa_override->msaa_samples = combined->msaa_samples;
+            if (combined->smaa) aa_override->smaa = combined->smaa;
+            if (combined->supersampling) aa_override->supersampling = combined->supersampling;
+        }
+    }
+    if (options_->aa_flag_missing || !aa_override) {
+        status_message_ = "--eawr-aa expects comma-separated msaa=0|2|4|8,ss=1|1.5|2,smaa=0|1 "
+                          "(any subset, no duplicate keys); --eawr-msaa expects 0, 2, 4 or 8 and "
+                          "--eawr-smaa expects on or off";
         UtilityFunctions::printerr(String(status_message_.c_str()));
         static_cast<void>(write_report("failed"));
         stop(2);
@@ -192,10 +245,23 @@ void ViewerHost::_ready() try {
     // #2927: a player's view takes the saved settings (the window, vsync, the render profile, and
     // through ActiveSettings the battle's volumes and speed step); a capture, report or test run
     // never does, so evidence runs do not depend on the machine's settings file.
-    const bool evidence_run = !options_->capture_path.empty() || !options_->report_path.empty()
-        || options_->camera_input_selftest || options_->window_resize_test.has_value() || options_->headless_probe
-        || options_->benchmark || options_->renderer_runtime_test || options_->startup_metrics;
+    // The launcher always names a start report (--eawr-report) and marks a player start with --eawr-launcher-start (it
+    // leaves the marker out when the extra arguments ask for evidence): the report alone does not make a launcher
+    // start an evidence run, or the player's saved render profile (and the other saved settings) would never be read.
+    const bool launcher_start = arguments.has("--eawr-launcher-start");
+    const bool evidence_run = is_evidence_run({
+        .capture = !options_->capture_path.empty(),
+        .report = !options_->report_path.empty(),
+        .launcher_start = launcher_start,
+        .self_test = options_->camera_input_selftest,
+        .resize_test = options_->window_resize_test.has_value(),
+        .headless_probe = options_->headless_probe,
+        .benchmark = options_->benchmark,
+        .renderer_runtime_test = options_->renderer_runtime_test,
+        .startup_metrics = options_->startup_metrics,
+    });
     std::optional<RenderProfile> saved_render_profile;
+    float saved_supersampling = 1.0F;
     if (!evidence_run) {
         const SettingsStore store(options_->settings_file);
         presentation::ui::SettingsLoad saved = store.load();
@@ -212,6 +278,8 @@ void ViewerHost::_ready() try {
                 saved_render_profile = resolve_render_profile(saved.settings.video.render_profile,
                                                               RenderProfile::retail);
             }
+            saved_supersampling = presentation::ui::supersampling_scales[
+                static_cast<std::size_t>(saved.settings.video.supersampling)];
             ActiveSettings::set(std::move(saved.settings));
         }
         // A player's start-up receipt includes any changed saved or default setting.
@@ -262,13 +330,18 @@ void ViewerHost::_ready() try {
 
     // Retail for every capture and test, enhanced for a player's view (#184), or what the
     // player chose (#2927); --eawr-render-profile wins over both.
-    apply_render_profile(*get_viewport(), requested_render_profile.value_or(saved_render_profile.value_or(
-        default_render_profile({
-            .interactive = options_->camera_interactive,
-            .self_test = options_->camera_input_selftest,
-            .capture = !options_->capture_path.empty(),
-            .resize_test = options_->window_resize_test.has_value(),
-        }))));
+    apply_render_profile(*get_viewport(), startup_render_profile(requested_render_profile, saved_render_profile, {
+        .interactive = options_->camera_interactive,
+        .launcher_start = launcher_start,
+        .self_test = options_->camera_input_selftest,
+        .capture = !options_->capture_path.empty(),
+        .resize_test = options_->window_resize_test.has_value(),
+    }), profile_text_supersampling(options_->render_profile).value_or(saved_supersampling));
+
+    // Run-local overrides apply after startup selection and survive later Options changes.
+    if (options_->aa_switch || !options_->aa_msaa.empty() || !options_->aa_smaa.empty()) {
+        apply_aa_override(*get_viewport(), *aa_override);
+    }
 
     // The OS window still has the requested size (--resolution, else the
     // project's window size) here: a window manager's resize reaches Godot
@@ -400,12 +473,12 @@ void ViewerHost::ready_battle_setup() {
             return start_galactic(std::move(campaign_options));
         };
         // MNU-34: the staging screen's chosen campaign entry (WGP-29: the set's entry of the chosen
-        // faction). Faction and difficulty need no option of their own: the entry names its faction,
-        // and the mode starts every campaign at the authored difficulty. Accepted technology
-        // options cross the same campaign-creation boundary (WGP-190).
+        // faction). The faction needs no option of its own: the entry names it. The chosen difficulty level
+        // (CGS-26) and the accepted technology options (WGP-190) cross the same campaign-creation boundary.
         front_options.campaign_launcher = [this, start_galactic](const presentation::ui::CampaignStartRequest& request) {
             auto campaign_options = GalacticMode::from_command_line();
             campaign_options.campaign = request.campaign;
+            campaign_options.difficulty_level = request.difficulty;
             campaign_options.custom_economy = request.economy;
             // Load-only diagnostic control: both paths run in the same binary for paired receipts.
             if (!viewer_profile_arguments().has("--eawr-gc-fresh-content"))

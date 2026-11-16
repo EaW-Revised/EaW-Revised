@@ -22,7 +22,7 @@ struct LineStyle final {
 };
 struct RouteStyles final {
     std::map<std::string, std::array<LineStyle, 6>> named;
-    std::string good_faction, evil_faction;
+    std::string good_faction, evil_faction, corrupt_faction;
     std::string fleet_texture, band_texture;
     std::vector<std::string> diagnostics;
 };

@@ -160,6 +160,7 @@ void test_committed_tables_carry_the_feel_check();
 void test_land_pan_is_halved_space_is_not();
 void test_ctrl_orbit_through_the_bridge();
 void test_plain_middle_drag_translates();
+void test_middle_drag_is_frame_rate_independent();
 void test_middle_click_resets_the_view();
 void test_host_and_free_tables_keep_pixel_units();
 void test_land_click_reset_keeps_the_target_height();

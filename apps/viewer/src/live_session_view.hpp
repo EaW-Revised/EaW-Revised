@@ -4,6 +4,7 @@
 #include "live_session_options.hpp"
 #include "load_job.hpp"
 #include "live_session_slots.hpp"
+#include "hangar_warm_plan.hpp"
 #include "live_session_economy_view.hpp"
 #include "live_session_lan.hpp"
 #include "live_session_report.hpp"
@@ -16,13 +17,14 @@
 #include "debris_props.hpp"
 #include "space_environment.hpp"
 #include "battle_scene.hpp"
-#include "../../../src/presentation/animation/land_locomotion_clips.hpp"
 
 #include "eawr/core/result.hpp"
 #include "eawr/data/xml_fwd.hpp"
 #include "eawr/platform/live_session.hpp"
 #include "eawr/platform/tactical_feed.hpp"
+#include "eawr/presentation/animation/land_locomotion_clips.hpp"
 #include "eawr/presentation/animation/unit_clips.hpp"
+#include "eawr/presentation/camera/retreat_flight.hpp"
 #include "eawr/presentation/effects/light_effect.hpp"
 #include "eawr/presentation/live/unit_fade.hpp"
 #include "eawr/presentation/space/snapshot_index.hpp"
@@ -47,6 +49,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <future>
 #include <map>
 #include <memory>
@@ -58,6 +61,8 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+
+namespace eawr::core::load_profile { struct Recording; }
 
 namespace eawr::presentation::godot_backend {
 
@@ -116,6 +121,11 @@ public:
         bool targeted{};                  // BA-53: a confirmed world target, not button arming
     };
     [[nodiscard]] std::vector<AbilityClick> take_ability_clicks() { return std::exchange(ability_clicks_, {}); }
+    // legacy #6634 (HCB-75): the letterbox requests tactical scripts made since the last call, in script order; taken once per
+    // frame by the battle HUD. Local presentation: nothing here is part of the world, the replay or a save.
+    [[nodiscard]] std::vector<platform::LiveLetterboxRequest> take_letterbox_requests() {
+        return session_ ? session_->take_letterbox_requests() : std::vector<platform::LiveLetterboxRequest>{};
+    }
 
     class Abilities final : public ui::AbilityState, public ui::AbilityCommands {
     public:
@@ -222,6 +232,9 @@ public:
         return placed_ships_;
     }
     [[nodiscard]] const std::vector<std::uint32_t>& session_records() const noexcept { return session_records_; }
+    [[nodiscard]] const std::vector<std::uint32_t>& land_session_records() const noexcept { return land_session_records_; }
+    // TSW-15: the battle's super weapon setup (the target props), null when it has no super weapon object.
+    [[nodiscard]] const sim::tactical::TswSetup* tsw_setup() const noexcept { return setup_ && setup_->tsw ? &*setup_->tsw : nullptr; }
     // Presentation preload seeds: initial/contained force, both reserve bars,
     // and the authored purchase/upgrade closure of reachable producers.
     [[nodiscard]] std::set<sim::tactical::TypeId> audio_preload_types() const {
@@ -369,6 +382,9 @@ public:
     [[nodiscard]] const std::optional<platform::TacticalFeed::AgreedPacing>& agreed_pacing() const noexcept { return agreed_pace_; }
     [[nodiscard]] bool shared_fast_forward_pressed() const noexcept { return shared_fast_forward_pressed_; }
     void press_pause();
+    // FC-R03: while a campaign retreat cinematic plays, the battle runs at 30 logical frames per second whatever the
+    // speed step or fast forward say. Ignored for a shared clock (LAN, lockstep): its agreed rate is not ours to change.
+    void set_cinematic_pacing(bool on);
     bool request_speed(std::uint32_t step);
     void press_fast_forward();
     void resume();
@@ -443,8 +459,34 @@ public:
     // #535: the unit's fog fade opacity this frame (space-fog-presentation.md FW-16 to FW-18); 1
     // when it is not fading (or the fade is off, --eawr-live-reveal).
     [[nodiscard]] float unit_opacity(const sim::EntityId entity) const noexcept {
-        return fade_.opacity(entity).value_or(1.0F);
+        return fade_.opacity(entity).value_or(1.0F) * retreat_flight_opacity(entity);
     }
+    // #4444 (FS-R07, FC-R04, FC-R05, RC-07): the drawn escape flight of a campaign retreat cinematic. While set, the
+    // retreating ships are drawn staged around the entry marker and flown along the departure direction by the
+    // simulation's cinematic frame (the simulation keeps them in place); `eye` is the cinematic camera's ship-shot
+    // position, the point the object fade is measured from. Presentation only: no simulation state is read or written.
+    struct RetreatFlightSetup final {
+        presentation::camera::RetreatFlightGeometry geometry;
+        presentation::camera::RetreatFlightRates rates;
+        std::array<float, 3> eye{};
+        float fade_begin{};
+        float fade_end{};
+    };
+    void set_retreat_flight(std::optional<RetreatFlightSetup> setup);
+    [[nodiscard]] bool retreat_flight_active() const noexcept { return retreat_flight_.setup.has_value(); }
+    // FC-R05: the engine brightness a flying ship shows this frame, nullopt while the ship's own stands.
+    [[nodiscard]] std::optional<float> engine_brightness_override(const sim::EntityId entity) const noexcept {
+        const auto found = retreat_flight_.brightness.find(entity);
+        return found == retreat_flight_.brightness.end() ? std::nullopt : std::optional<float>(found->second);
+    }
+    // FC-R05: a ship that began its accelerated flight since the last call (the jump sound's moment).
+    struct RetreatJump final {
+        sim::EntityId entity{};
+        sim::tactical::TypeId type{};
+        sim::tactical::PlayerId owner{};
+        std::array<double, 3> position{};
+    };
+    [[nodiscard]] std::vector<RetreatJump> take_retreat_jumps() const { return std::exchange(retreat_flight_.jumps, {}); }
     // Whether every entity the session holds is still standing (destroyed units leave it).
     [[nodiscard]] const std::vector<sim::EntityId>& alive_units() const noexcept { return snapshot_index_.alive(); }
     [[nodiscard]] const std::vector<sim::EntityId>& sensor_visible_units() const noexcept { return snapshot_index_.visible(); }
@@ -504,9 +546,15 @@ public:
         return arrival_slots_.warm_fallbacks.size() + static_cast<std::size_t>(arrival_slots_.warm_out_of_memory);
     }
     [[nodiscard]] std::uint64_t frame_launch_read_bytes() const noexcept { return arrival_slots_.frame_launch_read_bytes; }
+    [[nodiscard]] double hangar_warm_ms() const noexcept { return arrival_slots_.hangar_frame_ms; }
+    [[nodiscard]] std::size_t hangar_warm_slots() const noexcept { return arrival_slots_.hangar_frame_slots; }
     [[nodiscard]] bool warm_campaign_slots(BattleScene&, GodotRenderer&);
     [[nodiscard]] double pose_ms() const noexcept { return pose_ms_; }
     [[nodiscard]] double opacity_ms() const noexcept { return opacity_ms_; }
+    // Sub-laps of compose_frame_projectiles (--eawr-perf-trace): the per-tick observe loop, the final observe, the opacity pass.
+    [[nodiscard]] double projectile_observe_ticks_ms() const noexcept { return projectile_observe_ticks_ms_; }
+    [[nodiscard]] double projectile_observe_final_ms() const noexcept { return projectile_observe_final_ms_; }
+    [[nodiscard]] double projectile_opacity_ms() const noexcept { return projectile_opacity_ms_; }
     [[nodiscard]] double tick_wait_ms() const noexcept { return tick_wait_ms_; }
     [[nodiscard]] double live_frame_ms() const noexcept { return live_frame_ms_; }
     [[nodiscard]] double session_tail_ms() const noexcept { return session_tail_ms_; }
@@ -572,6 +620,8 @@ public:
     bool repair_hardpoint(sim::EntityId station, std::uint32_t hardpoint);
     bool buy(sim::EntityId station, sim::tactical::TypeId type);
     bool special_fire(sim::EntityId source, sim::EntityId target);
+    // HCB-47: the Death Star switch's request for `stage` on the object; false when the sink refused it or one is pending.
+    bool superweapon_request(sim::EntityId unit, sim::tactical::TswStage stage);
     [[nodiscard]] bool pad_sale_allowed(sim::EntityId child, bool single_step = false) const;
     bool sell_pad_structure(sim::EntityId child, bool single_step = false);
     bool cancel_build(sim::tactical::BuildQueue queue, std::uint64_t entry_id);
@@ -593,6 +643,17 @@ public:
     [[nodiscard]] std::vector<sim::tactical::ReserveView> campaign_reinforcement_pool() const;
     [[nodiscard]] bool select_campaign_reinforcement(std::uint64_t token);
     [[nodiscard]] std::size_t pending_reinforcements() const;
+    // #7190: a land battle's drop ground, the allied reinforcement points at their enabling radius, from the last published
+    // snapshot; empty in space. Presentation input only.
+    struct LandDeployRing { double x{}, y{}, radius{}; };
+    [[nodiscard]] std::vector<LandDeployRing> land_deploy_rings() const;
+    // #7190: the simulation's reason for the local player's latest refused reinforcement, and the tick that decided it.
+    struct ReinforcementRefusal {
+        sim::tactical::RejectReason reason{};
+        std::uint64_t tick{};
+        bool operator==(const ReinforcementRefusal&) const = default;
+    };
+    [[nodiscard]] const std::optional<ReinforcementRefusal>& reinforcement_refusal() const noexcept { return reinforcement_refusal_; }
     // WR-13: preview pose input only; simulation is queried through its nonblocking platform seam.
     void placement_preview(std::optional<sim::tactical::TypeId> type, std::optional<sim::math::Vec3> point);
     [[nodiscard]] bool placement_valid() const noexcept { return preview_valid_ && reinforcement_allowed(); }
@@ -761,6 +822,8 @@ private:
     [[nodiscard]] bool prepare_land(const vfs::Vfs&, const data::Catalog&, std::string_view, std::string&);
     void bind_land_roster(const platform::LiveSession&);
     void advance_land_playback(BattleScene&, const platform::LiveLandMotion&);
+    // UA-04 on land: remembers the tick of each member's latest shot (weapon_fired events of `tick`).
+    void note_land_shots(std::uint64_t tick);
     std::optional<sim::tactical::TacticalContent> land_content_;
     Options options_;
     std::optional<battle::BattleStart> start_;
@@ -800,8 +863,10 @@ private:
         bool initialized{}, blending{}, turning{}, loop{true}, outgoing_loop{true};
         units::LandLocomotionData data;
         bool team{}, bike{};
+        std::uint64_t shot_seen{~std::uint64_t{}}; // the last shot tick this member's clip choice has reacted to
     };
     std::map<sim::EntityId, LandPlayback> land_playback_;
+    std::map<sim::EntityId, std::uint64_t> land_last_shot_;
     std::uint64_t land_playback_tick_{};
     std::vector<platform::LiveLandMotion> land_motion_buffer_;
     bool land_playback_started_{};
@@ -809,6 +874,7 @@ private:
     std::vector<sim::EntityId> unfogged_map_props_;
     std::vector<sim::EntityId> draw_visibility_;
     std::uint64_t reinforcement_notifications_{};
+    std::optional<ReinforcementRefusal> reinforcement_refusal_;
     std::vector<ReinforcementFeedback> reinforcement_feedback_;
     double reinforcement_notification_tick_{};
     std::map<sim::EntityId, std::size_t> ship_of_entity_;
@@ -896,6 +962,33 @@ private:
     mutable std::vector<ui::ObserverOwner> gift_roster_;
     space::SnapshotIndex snapshot_index_;
     std::vector<live::LiveUnitPose> poses_;
+    // #4444: the drawn retreat escape flight (set_retreat_flight). `plan` is built when the escape is first seen with a
+    // setup in place and dropped when the escape ends; the maps are this frame's per-ship results.
+    struct RetreatFlightState final {
+        std::optional<RetreatFlightSetup> setup;
+        bool planned{};
+        std::vector<presentation::camera::RetreatFlightShip> plan;
+        std::map<sim::EntityId, std::size_t> order;
+        std::map<sim::EntityId, float> opacity;
+        std::map<sim::EntityId, float> brightness;
+        std::set<sim::EntityId> jumped;
+        mutable std::vector<RetreatJump> jumps; // drained by the audio, which reads the view const
+    } retreat_flight_;
+    // What the drawn flight did over the run (the report's `retreat_flight`): never reset with the flight itself.
+    struct RetreatFlightReport final {
+        std::size_t ships_max{};
+        float distance_max{};
+        float opacity_min{1.0F};
+        std::size_t jumps{};
+        std::size_t brightened_max{};
+        std::uint32_t frame_max{};
+    } retreat_flight_report_;
+    [[nodiscard]] float retreat_flight_opacity(const sim::EntityId entity) const noexcept {
+        const auto found = retreat_flight_.opacity.find(entity);
+        return found == retreat_flight_.opacity.end() ? 1.0F : found->second;
+    }
+    void apply_retreat_flight(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        BattleScene& population, std::vector<live::LiveUnitPose>& poses);
     std::vector<BattleScene::LivePose> live_poses_;
     std::vector<BattleScene::LiveClipPose> clip_poses_;
     const particles::StepExecutor* pose_workers_{};
@@ -1010,6 +1103,34 @@ private:
     // owner's current tech for the carriers present, then add the missing recipes and warm copies through the same path.
     void warm_live_rosters(BattleScene& population, GodotRenderer& renderer, const sim::tactical::TacticalSnapshot& snapshot);
     bool warm_recipe_read_{}; // set while warm_live_rosters reads a missing recipe: planned work, not a fallback
+    // #5097 PR 2: the hangars of the ships queued, pooled or called in (any owner) are warmed while the ship is still on
+    // its way, in the frames of its build or reinforcement delay: a worker reads the models and textures of every craft
+    // the hangar launches, then the main thread makes the slots (GPU upload only) a few per frame.
+    struct HangarWarmJob final {
+        sim::tactical::PlayerId owner{};
+        std::string craft;                              // the craft type's object id
+        std::size_t slots{};                            // slots of this owner and craft a full launch needs
+        std::size_t added{};                            // slots this job made
+        std::size_t have{};                             // slots that existed when it was planned
+        std::uint64_t ticket{};                         // the scene's read-ahead of the recipe (0: none)
+        std::size_t waited{};                           // frames spent waiting for the read-ahead
+        std::vector<BattleScene::PlacedUnit> staged;    // the hull and death clone the recipe will compose
+        bool started{};
+        // The recipe's compose runs a few steps a frame (BattleScene::begin_live_append) while `composing`.
+        bool composing{};
+        std::size_t first_ship{}, slot_index{};         // the staged hull's ship and launch slot
+        std::size_t compose_steps_frames{};             // frames that ran compose steps
+        double compose_ms{}, compose_worst_ms{};        // main-thread time of those steps, and the worst frame
+        std::uint64_t compose_read_bytes{};
+        std::shared_ptr<core::load_profile::Recording> phases; // trace only: where the time went
+    };
+    std::deque<HangarWarmJob> hangar_warm_jobs_;
+    HangarWarmSeen hangar_warm_seen_;
+    std::map<sim::tactical::TypeId, const units::UnitType*> hangar_names_;
+    void pump_hangar_warm(BattleScene& population, GodotRenderer& renderer, const sim::tactical::TacticalSnapshot& snapshot);
+    void plan_hangar_warm_for(const units::UnitType& type, sim::tactical::PlayerId owner, std::uint32_t tech);
+    [[nodiscard]] std::optional<std::size_t> hangar_recipe_slot(sim::tactical::PlayerId owner, const std::string& craft) const;
+    [[nodiscard]] bool append_recipe_copy(BattleScene& population, GodotRenderer& renderer, std::size_t recipe_index);
     // `selected` is the arrival plan the source chose; the slots below only add to it.
     void prepare_launch_slots(const vfs::Vfs& filesystem, const data::Catalog& catalog,
                               std::optional<battle::ArrivalPlan> selected);
@@ -1019,8 +1140,11 @@ private:
                          std::string_view source = "launch");
     void note_spawned(sim::tactical::TypeId type) const;
     void note_preload_fallback(sim::tactical::PlayerId owner, const std::string& type, std::string_view reason);
+    // `stepped` (a read-ahead ticket, 0 = none): stage the slot and begin its compose as steps the caller runs
+    // (BattleScene::step_live_append) instead of composing in this call; the slot stays reserved until they finish.
     [[nodiscard]] std::optional<std::size_t> grow_launch_slot(sim::EntityId, sim::tactical::TypeId,
-                                                           sim::tactical::PlayerId);
+                                                           sim::tactical::PlayerId,
+                                                           std::optional<std::uint64_t> stepped = std::nullopt);
     // A slot whose unit is no longer in the tactical snapshot, and whose death clone (if any) has
     // left, is free for the next unit of its type (space-purchasing PU-G25).
     void release_dead_slots(const sim::tactical::TacticalSnapshot& latest);
@@ -1035,6 +1159,10 @@ private:
     // `launch` row of the arrival plan (rows change only in prepare_launch_slots). TypeId is the CRC the original any_of
     // compared, so collisions behave exactly as before.
     std::set<sim::tactical::TypeId> launch_slot_types_;
+    // #6992: a land session's structure types a pad can complete into (under construction, finished). Such an entity appears
+    // after tick zero without a planned slot; grow_launch_slot gives it one, unbudgeted, so it is drawn and pickable at once.
+    std::set<sim::tactical::TypeId> land_structure_types_;
+    std::vector<std::uint32_t> land_session_records_; // #6992: map records of the structures the session draws
     std::set<std::pair<sim::tactical::PlayerId, sim::tactical::TypeId>> launch_demand_;
     bool launch_demand_valid_{};
     [[nodiscard]] bool launch_demanded(sim::tactical::PlayerId owner, sim::tactical::TypeId type);
@@ -1050,6 +1178,8 @@ private:
     std::vector<AbilityClick> ability_clicks_;
     Abilities abilities_{*this};
     std::uint64_t sfoil_switches_{};
+    std::uint64_t laser_clip_poses_{}; // #6554: frames a SUPER_LASER unit was posed by its attack clip
+    std::uint64_t laser_clip_poses_before_fire_{}; // ... of which before the fire stage
     // #458: the launch slots' death clones, handed to death_clones_ when a craft binds its slot.
     std::vector<DeathClone> launch_clones_;
     // The clones shown now; one leaves (its ship retired) when it is removed or has faded out.
@@ -1069,6 +1199,9 @@ private:
     double bookkeeping_ms_{};
     double pose_ms_{};
     double opacity_ms_{};
+    double projectile_observe_ticks_ms_{};
+    double projectile_observe_final_ms_{};
+    double projectile_opacity_ms_{};
     double tick_wait_ms_{};
     double live_frame_ms_{};
     double session_tail_ms_{};

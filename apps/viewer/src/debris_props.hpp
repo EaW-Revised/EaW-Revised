@@ -6,9 +6,11 @@
 #include "eawr/presentation/particles/render.hpp"
 #include "eawr/presentation/renderer.hpp"
 #include "eawr/presentation/space/debris.hpp"
+#include "eawr/presentation/space/tsw.hpp"
 #include "eawr/presentation/live/live_units.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
+#include "eawr/sim/tactical/tsw.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/vfs/vfs_fwd.hpp"
 #include "particle_adapter.hpp"
@@ -50,8 +52,11 @@ public:
     // Appends one placed ship per breakoff hardpoint of each session unit (the first `units`
     // entries of `placed_ships`) to `placed_ships`. What does not resolve is reported, never
     // guessed.
+    // `tsw` (TSW-15): the battle's super weapon setup, when it has one; each target prop's replacement props are
+    // appended to `placed_ships` too, hidden until the sim publishes their creation.
     void prepare(const units::UnitTables& tables, const sim::tactical::CombatTable& combat,
-                 std::vector<SpacePopulation::Options::PlacedShip>& placed_ships, std::size_t units);
+                 std::vector<SpacePopulation::Options::PlacedShip>& placed_ships, std::size_t units,
+                 const sim::tactical::TswSetup* tsw = nullptr);
 
     using SnapshotAt = std::function<std::shared_ptr<const sim::tactical::TacticalSnapshot>(std::uint64_t)>;
     // One frame, from LiveSessionView::frame before it poses the population: the hardpoint
@@ -81,6 +86,12 @@ public:
     [[nodiscard]] core::Result<void> set_particle_detail(const particles::ParticleDetail detail) {
         return registry_->set_detail(detail);
     }
+    // TSW-15: the map records of the target props the super weapon has destroyed so far (the environment view stops
+    // drawing them); in the order the destructions were seen. Main thread, like pose().
+    [[nodiscard]] const std::vector<std::uint32_t>& hidden_environment_records() const noexcept { return tsw_hidden_; }
+    // TSW-15: the attack clip window of a super weapon object, from its attack start to its target's destruction;
+    // none before the attack. Main thread, like pose().
+    [[nodiscard]] std::optional<space::TswClipWindow> tsw_clip(sim::EntityId unit) const;
     void release();
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     // The report's "breakoff_props" member, followed by ",\n".
@@ -119,6 +130,9 @@ private:
         space::DebrisPose pose{};
     };
 
+    void prepare_tsw(const sim::tactical::TswSetup& setup, std::vector<SpacePopulation::Options::PlacedShip>& placed_ships);
+    // TSW-15: one super weapon event of the reached ticks; true when it was one (the hardpoint rules skip it).
+    bool tsw_event(std::uint64_t tick, const sim::tactical::Event& event);
     [[nodiscard]] const assets::Texture* resolve_texture(std::string_view name);
     [[nodiscard]] const ParticleType* particle_type(const std::string& name);
     [[nodiscard]] static particles::EmitterFrame frame_of(const space::DebrisPose& pose);
@@ -149,6 +163,23 @@ private:
     std::map<std::string, ParticleType> particle_types_;
     std::vector<Prop> props_;
     std::map<std::pair<sim::EntityId, std::uint32_t>, std::size_t> prop_of_;
+    // TSW-15: one destroyable target prop (the setup's target list, in order) with what its destruction shows.
+    struct TswTarget final {
+        std::uint32_t record{};
+        std::array<double, 3> position{};
+        double yaw_degrees{};
+        std::vector<std::string> explosions;  // Death_Explosions of the prop's type
+        std::vector<std::size_t> ships;       // the replacement props' placed ships
+        sim::math::Vec3 fixed_position{};     // as the sim's setup holds it, for the replacements' LivePose
+        sim::math::Fixed fixed_yaw{};
+        bool destroyed{};
+        bool debris{};
+    };
+    std::vector<TswTarget> tsw_targets_;
+    std::map<sim::EntityId, space::TswClipWindow> tsw_clips_;
+    std::vector<std::uint32_t> tsw_hidden_;
+    std::vector<std::string> tsw_prepared_rows_;
+    std::vector<std::string> tsw_event_rows_;
     space::DebrisFlights flights_;
     std::uint64_t fired_through_{};  // the newest flight serial whose fire started
     std::vector<PendingExplosion> pending_;

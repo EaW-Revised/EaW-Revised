@@ -48,6 +48,22 @@ namespace eawr::presentation::godot_backend {
     return names;
 }
 
+// Every binding, besides BaseTexture, that the effect's family samples as a texture, with whether it is a tangent-space
+// normal map (the flat-normal fallback). The compose gives each its mip chain (#6725): the normal chain for the normal
+// maps, the plain one for gloss, specular, wave, distortion and cloud textures.
+struct SampledBinding final {
+    std::string_view name;
+    bool normal{};
+};
+[[nodiscard]] inline std::vector<SampledBinding> sampled_bindings(const scene::LegacySelector& selector) {
+    std::vector<SampledBinding> bindings;
+    if (const legacy::Family* family = legacy::find_family(selector.program, selector.technique)) {
+        for (const legacy::TextureBinding& binding : family->binding_textures)
+            bindings.push_back({binding.name, binding.placeholder == legacy::TexturePlaceholder::flat_normal});
+    }
+    return bindings;
+}
+
 // One entry per texture the material's family samples besides BaseTexture,
 // loaded by `load(declared name) -> std::optional<assets::Texture>`. A binding
 // that is missing or not a texture gets no entry: the renderer then refuses

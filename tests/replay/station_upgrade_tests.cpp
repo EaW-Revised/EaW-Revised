@@ -254,6 +254,39 @@ void test_level_up_completion_boundary() {
             "WSL-31 holder loss does not undo completed purchase or award replacement tech");
     }
 }
+// WIS-01 (legacy #6266): a level-up whose next level carries an event-styled income stream must not keep paying
+// the old station's automatic stream untriggered. Player 1's income over ticks 30..40 after the replacement is
+// compared with a control whose next level has no stream (no earner on either route).
+Fixed income_after_level_up(const bool next_level_stream, const t::IncomeEventStyle next_style) {
+    auto rules = economy();
+    const auto rate = m::divide(whole(200), whole(300)).value();
+    t::IncomeProfile base{40, rate, {}};
+    base.base_value = whole(200); base.interval_seconds = whole(10);
+    rules.income = {base};
+    if (next_level_stream) {
+        auto next = base; next.source = 41; next.event_style = next_style;
+        rules.income.push_back(next);
+    }
+    auto world = create(rules); if (!world) return {};
+    expect(static_cast<bool>(world->submit(buy(0, 1, 0, 1, 91))), "WIS-01 level-up buy submits");
+    const auto events = through(*world, 30);
+    expect(std::any_of(events.begin(), events.end(), [](const auto& event) { return event.kind == t::EventKind::station_replaced; }),
+        "WIS-01 the level-up replaced the station");
+    const auto before = account(*world, 1).credits;
+    through(*world, 40);
+    return Fixed::from_raw(account(*world, 1).credits.raw() - before.raw());
+}
+void test_level_up_event_stream() {
+    const auto control = income_after_level_up(false, t::IncomeEventStyle::none);
+    expect(control.raw() > 0, "WIS-01 the allied station keeps paying in the control");
+    expect(income_after_level_up(true, t::IncomeEventStyle::take_damage) == control,
+        "WIS-01 an event-styled next level starts untriggered: the old earner entry is not carried over");
+    expect(income_after_level_up(true, t::IncomeEventStyle::special_attack) == control
+        && income_after_level_up(true, t::IncomeEventStyle::user_input) == control,
+        "WIS-01 every event style ends the old earner entry");
+    expect(income_after_level_up(true, t::IncomeEventStyle::none).raw() > control.raw(),
+        "WIS-01 an automatic next level keeps paying from the replacement (stock behaviour)");
+}
 void test_level_up_without_next_type() {
     auto rules = economy();
     for (auto& menu : rules.menus) menu.next_level = 0;
@@ -793,6 +826,7 @@ int main() {
     test_special_hardpoint_upgrade();
     test_level_up_completion_boundary();
     test_level_up_without_next_type();
+    test_level_up_event_stream();
     test_level_up_death_while_held();
     test_level_up_service_boundary();
     test_live_station_repair();

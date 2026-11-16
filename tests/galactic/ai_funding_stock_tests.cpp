@@ -41,7 +41,7 @@ Fixed f(std::int64_t n) { return take(Fixed::from_integer(n)); }
 ai::EvaluatedFundingTemplate policy() {
     return {1, {{1, f(1)}, {2, f(1)}}, {{1, take(Fixed::from_ratio(1, 2))}}};
 }
-galactic::GalacticSetup setup() {
+galactic::GalacticSetup setup(std::int64_t planet_credit = 10) {
     galactic::SyntheticGalaxyOptions options;
     options.players = 1; options.planets = 2;
     options.fleets_per_player = 0;
@@ -49,7 +49,7 @@ galactic::GalacticSetup setup() {
     config.rules.fiscal_cycle_frames = 3;
     config.player_economy = galactic::PlayerEconomySetup{{{1, f(90), f(100), 0, 0}}};
     config.fiscal = galactic::FiscalSetup{f(50), {{1, true, f(2)}}, {}};
-    for (const auto& planet : config.planets) config.fiscal->planets.push_back({planet.id, f(10)});
+    for (const auto& planet : config.planets) config.fiscal->planets.push_back({planet.id, f(planet_credit)});
     return config;
 }
 Fixed cash(const ai::GalacticFunding& manager, eawr::sim::galactic::PlayerId player = 1) {
@@ -99,6 +99,47 @@ void live_fiscal() {
         take(world.apply_session_controls(pause));
         for (unsigned i = 0; i < 6; ++i) (void)take(world.step(workers));
         expect(notifications == before, "paused galaxy delivers no fiscal notifications");
+    }
+}
+// #6842 / CGS-19: a player whose planets have a negative Planet_Credit_Value has a negative total income. The session floors the
+// account at zero and still delivers the signed income to the AI ledger; the ledger accepts it and the galactic session keeps
+// running for many days (before, the ledger refused it and the failure ended the whole session).
+void negative_income_session() {
+    std::optional<std::string> hash;
+    for (const auto count : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter workers(count);
+        auto world = take(galactic::GalacticSession::create(setup(-10)));
+        ai::GalacticFunding manager;
+        const std::array templates{policy()};
+        take(manager.initialize(1, templates, f(90)));
+        unsigned notifications{};
+        bool signed_income_seen = false;
+        world.set_credit_notification_handler([&](const auto& input) {
+            ++notifications;
+            if (input.amount < f(0)) signed_income_seen = true;
+            return manager.notify(input);
+        });
+        bool running = true;
+        for (unsigned i = 0; i < 300 && running; ++i) {
+            const auto stepped = world.step(workers);
+            running = static_cast<bool>(stepped);
+            expect(running, "the session keeps running while an AI player's total income is negative");
+        }
+        expect(signed_income_seen && notifications >= 90, "every fiscal cycle delivers the signed income to the AI ledger");
+        expect(world.snapshot()->player_economy()->players[0].credits == f(0), "negative income debits the account and floors it at zero");
+        expect(cash(manager) == f(0) && manager.isolated_faults().empty(),
+            "the AI ledger follows the floored balance with no isolated fault");
+        if (!hash) hash = world.state_sha256();
+        expect(world.state_sha256() == *hash, "negative-income session 1/2/4/8 equality");
+        // A ledger refusal of one player's fiscal cycle is that player's: it is recorded and the notification still succeeds.
+        ai::GalacticFunding restored; take(restored.restore(manager.state()));
+        expect(restored.state() == manager.state(), "a ledger holding a negative service income restores unchanged");
+        const auto before = manager.state();
+        galactic::GalacticSession::CreditNotification bad{galactic::GalacticSession::CreditNotification::Kind::fiscal, 1, f(-1), f(1),
+            take(Fixed::from_ratio(3, 30))};
+        expect(static_cast<bool>(manager.notify(bad)), "a refused fiscal ledger update does not fail the notification");
+        expect(manager.isolated_faults().size() == 1 && manager.isolated_faults().front().player == 1 && manager.state() == before,
+            "the refusal is recorded for that player and the ledger keeps its previous state");
     }
 }
 void windfalls_and_failure() {
@@ -154,12 +195,11 @@ void zero_income_and_refusal() {
     for (unsigned i = 0; i < 4; ++i) (void)take(world.step(workers));
     expect(notified == 0 && manager.ledger(1)->goals.at(7).remaining == f(1),
         "WGEP-112/WGA-14: zero income skips AI callback and retains goal timer");
-    const auto before = manager.state();
     const galactic::GalacticSession::CreditNotification negative{
         galactic::GalacticSession::CreditNotification::Kind::fiscal, 1, f(89), f(-1), f(1)};
-    const auto refused = manager.notify(negative);
-    expect(!refused && refused.error().code == ai::funding::diagnostic_codes::negative_input
-        && manager.state() == before, "NegativeFiscalIncome seam refuses without inventing clamped savings");
+    expect(static_cast<bool>(manager.notify(negative)) && manager.isolated_faults().empty()
+        && manager.ledger(1)->last_service_income == f(-1), "CGS-19: a negative fiscal income is accepted as a signed income");
+    const auto before = manager.state();
     galactic::GalacticSession::CreditNotification zero_duration = negative;
     zero_duration.seconds = f(0);
     take(manager.notify(zero_duration));
@@ -238,8 +278,9 @@ void retained_transactions() {
     for (const auto& [id, row] : switched.at(1).categories)
         expect(windfall.at(1).categories.at(id).available_cash == row.available_cash,
             "child windfall updates retained totals without making cash available");
-    expect(!manager.notify({galactic::GalacticSession::CreditNotification::Kind::fiscal, 1, tactical, f(3), f(1)})
-        && manager.state() == windfall, "frozen parent refuses fiscal service transactionally");
+    expect(static_cast<bool>(manager.notify({galactic::GalacticSession::CreditNotification::Kind::fiscal, 1, tactical, f(3), f(1)}))
+        && manager.isolated_faults().size() == 1 && manager.isolated_faults().front().player == 1
+        && manager.state() == windfall, "frozen parent refuses fiscal service transactionally and isolates it to that player");
     const auto released = take(manager.release_tactical(1, {f(5), tactical}));
     ai::GalacticFunding restored;
     take(restored.restore(manager.state()));
@@ -625,7 +666,7 @@ void fresh_category_failed_initial_equation() {
 }
 }
 int main() {
-    try { live_fiscal(); windfalls_and_failure(); zero_income_and_refusal(); retained_transactions(); template_untrigger(); orphan_aggregate(); over_cost_mark(); failed_funding_equations(); fresh_category_failed_initial_equation(); funding_owner_partitions(); frozen_funding_frontiers(); private_native_funding_rows(); ordered_funding_and_native_intents(); funding_phase_rollback(); }
+    try { live_fiscal(); negative_income_session(); windfalls_and_failure(); zero_income_and_refusal(); retained_transactions(); template_untrigger(); orphan_aggregate(); over_cost_mark(); failed_funding_equations(); fresh_category_failed_initial_equation(); funding_owner_partitions(); frozen_funding_frontiers(); private_native_funding_rows(); ordered_funding_and_native_intents(); funding_phase_rollback(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures ? 1 : 0;
 }

@@ -486,6 +486,34 @@ double falloff_gain(const double distance, const double saturation_distance, con
     return minimum / (minimum + space.rolloff_factor * (distance - minimum));
 }
 
+double falloff_gain(const double distance, const double saturation_distance, const Space3D& space, const double floor) {
+    return std::max(falloff_gain(distance, saturation_distance, space), std::max(floor, 0.0));
+}
+
+double ProjectAudioRules::floor_for(const std::string_view event_name) const {
+    for (const auto& name : floor_events) if (upper(name) == upper(event_name)) return distance_gain_floor;
+    return 0.0;
+}
+
+ProjectAudioRules project_audio_rules(const std::span<const Field> fields, std::vector<std::string>& problems) {
+    ProjectAudioRules rules;
+    for (const auto& [name, text] : fields) {
+        if (upper(name) == "DISTANCE_GAIN_FLOOR_EVENT") {
+            if (!trim(text).empty()) rules.floor_events.emplace_back(trim(text));
+        } else if (upper(name) == "DISTANCE_GAIN_FLOOR_DB") {
+            const auto raw = trim(text);
+            double decibels{};
+            const auto [end, error] = std::from_chars(raw.data(), raw.data() + raw.size(), decibels);
+            if (error != std::errc{} || end != raw.data() + raw.size() || !std::isfinite(decibels) || decibels > 0.0) {
+                problems.push_back("EAWR-AUDIO-0303: Distance_Gain_Floor_Db: not a number of at most 0 dB; no floor");
+                rules.distance_gain_floor = 0.0;
+            } else rules.distance_gain_floor = std::pow(10.0, decibels / 20.0);
+        }
+    }
+    if (rules.distance_gain_floor <= 0.0) rules.floor_events.clear();
+    return rules;
+}
+
 Listener listener_for_camera(const Vec3& camera, const Vec3& forward, const Space3D& space) {
     Listener listener;
     const double height = std::abs(camera[2] - space.listener_z);
@@ -1087,6 +1115,8 @@ std::optional<MusicDirector::Cue> MusicDirector::tick(const bool attack, Random&
     // BA-43: the quiet count grows each frame; in battle it ends the battle
     // music once it reaches the peace time.
     ++quiet_;
+    // BA-46: the super weapon's music holds against the quiet count and the shots.
+    if (mode_ == Mode::superweapon) return cue;
     if (mode_ == Mode::battle && quiet_ >= peace_ticks_) cue = start(Mode::ambient, random);
     // BA-42: battle music unless it plays; the quiet count restarts.
     if (attack) {
@@ -1096,7 +1126,30 @@ std::optional<MusicDirector::Cue> MusicDirector::tick(const bool attack, Random&
     return cue;
 }
 
-std::optional<MusicDirector::Cue> MusicDirector::track_ended() {
+std::optional<MusicDirector::Cue> MusicDirector::track_ended(Random& random) {
+    if (mode_ == Mode::superweapon && (current_ == nullptr || !current_->loop)) {
+        // BA-46: the activation track is over: the faction's super weapon battle music takes over; when that track
+        // ends in turn (it does not loop), the music goes on the way battle music does, from the battle playlist,
+        // and never ends in silence. The mode stays, so the quiet count and the shots still do not pick the music.
+        const MusicEvent* event = nullptr;
+        if (superweapon_activation_) {
+            superweapon_activation_ = false;
+            event = superweapon_battle_;
+        }
+        if ((event == nullptr || event->files.empty()) && !battle_.empty()) {
+            event = battle_[static_cast<std::size_t>(random.between(0, static_cast<int>(battle_.size()) - 1))];
+        }
+        if (event == nullptr || event->files.empty()) event = superweapon_battle_; // no playlist: repeat the battle track
+        if (event == nullptr || event->files.empty()) {
+            current_ = nullptr;
+            return std::nullopt;
+        }
+        current_ = event;
+        auto& next = next_file_[event];
+        const auto index = next % event->files.size();
+        next = (index + 1) % event->files.size();
+        return Cue{event, event->files[index], mode_};
+    }
     if (current_ == nullptr || !current_->loop || current_->files.empty()) {
         current_ = nullptr;
         return std::nullopt;
@@ -1117,6 +1170,20 @@ std::optional<MusicDirector::Cue> MusicDirector::result(const bool exact_local_w
     const auto index = next % event->files.size();
     next = (index + 1) % event->files.size();
     return Cue{event, event->files[index], mode};
+}
+
+std::optional<MusicDirector::Cue> MusicDirector::superweapon(const MusicEvent* activation, const MusicEvent* battle_event) {
+    if (mode_ == Mode::superweapon || mode_ == Mode::victory || mode_ == Mode::defeat) return std::nullopt;
+    if (activation == nullptr || activation->files.empty()) return std::nullopt;
+    mode_ = Mode::superweapon;
+    superweapon_activation_ = true;
+    superweapon_battle_ = battle_event;
+    quiet_ = 0;
+    current_ = activation;
+    auto& next = next_file_[activation];
+    const auto index = next % activation->files.size();
+    next = (index + 1) % activation->files.size();
+    return Cue{activation, activation->files[index], Mode::superweapon};
 }
 
 } // namespace eawr::presentation::audio

@@ -85,6 +85,8 @@ core::Result<Bytes> encode_scripts(const std::optional<auth::GalacticScriptSave>
     out.u64(row.next_sequence.size());
     for (const auto& [seat, sequence] : row.next_sequence) { out.u32(seat.value); out.u64(sequence); }
     out.u64(row.exhausted_seats.size()); for (const auto seat : row.exhausted_seats) out.u32(seat.value);
+    out.u32(row.objects ? 1 : 0);
+    if (row.objects) text(out, *row.objects);
     if (out.bytes().size() > max_bytes) return fail<Bytes>("section scripts exceeds limit", {}, diagnostic_codes::resource_limit);
     return core::Result<Bytes>::success(std::move(out.bytes()));
 }
@@ -118,6 +120,9 @@ core::Result<std::optional<auth::GalacticScriptSave>> decode_scripts(std::span<c
         if (exhausted > gc::galactic_max_seats || exhausted > in.remaining() / 4) return fail<Save>("section scripts: invalid exhaustion count", path);
         for (std::uint64_t i = 0; i < exhausted; ++i)
             if (!row.exhausted_seats.insert(sim::SeatId{in.u32()}).second) return fail<Save>("section scripts: duplicate exhausted seat", path);
+        const auto objects = in.u32();
+        if (objects > 1) return fail<Save>("section scripts: invalid object host presence", path);
+        if (objects) row.objects = text(in);
     }
     if (in.failed()) return fail<Save>("section scripts: malformed lengths", path);
     consumed = bytes.size() - in.remaining();
@@ -236,6 +241,7 @@ core::Result<Bytes> encode_conflict(const campaign::ConflictRecord& record) {
     out.u64(record.planet); out.u32(record.invader); out.u32(record.defender);
     for (const auto flag : {record.raid, record.corruption_mission, record.tutorial, record.ai_tactical_credits}) out.u8(flag ? 1 : 0);
     out.u64(record.corruption_request);
+    out.u8(record.planet_destroyable_by_tsw ? 1 : 0); out.u8(record.planet_destroyed ? 1 : 0);
     out.u32(static_cast<std::uint32_t>(record.forces.size()));
     for (const auto& row : record.forces) {
         out.u64(row.id); out.u64(row.type); out.u32(row.owner); out.u64(row.parent);
@@ -265,6 +271,7 @@ core::Result<campaign::ConflictRecord> decode_conflict(std::span<const std::uint
     record.planet = in.u64(); record.invader = in.u32(); record.defender = in.u32();
     record.raid = flag(); record.corruption_mission = flag(); record.tutorial = flag(); record.ai_tactical_credits = flag();
     record.corruption_request = in.u64();
+    record.planet_destroyable_by_tsw = flag(); record.planet_destroyed = flag();
     const auto count = [&](std::size_t limit, std::size_t width) {
         const auto value = in.u32();
         if (value > limit || value > in.remaining() / width) { (void)in.take(in.remaining() + 1); return std::uint32_t{}; }
@@ -316,7 +323,8 @@ Bytes encode_result(const campaign::BattleResult& result) {
         out.u64(row.id); out.u8(static_cast<std::uint8_t>(row.disposition));
         out.u32(row.final_blow_player); out.u8(row.hero_defeated ? 1 : 0);
     }
-    out.u32(result.station_level); out.u8(result.superweapon_destroyed ? 1 : 0); out.u32(result.superweapon_killer);
+    // Bit 0: the super weapon was destroyed; bit 1 (TSW-10): the tactical super weapon destroyed the planet.
+    out.u32(result.station_level); out.u8((result.superweapon_destroyed ? 1 : 0) | (result.planet_destroyed ? 2 : 0)); out.u32(result.superweapon_killer);
     out.u8(result.corruption_success ? 1 : 0); if (result.corruption_success) out.u8(*result.corruption_success ? 1 : 0);
     out.u32(static_cast<std::uint32_t>(result.credits.size()));
     for (const auto& row : result.credits) { out.u32(row.player); out.u64(static_cast<std::uint64_t>(row.credits.raw())); }
@@ -353,7 +361,11 @@ core::Result<campaign::BattleResult> decode_result(std::span<const std::uint8_t>
         row.disposition = static_cast<campaign::ForceDisposition>(disposition); row.final_blow_player = in.u32();
         row.hero_defeated = flag(); result.forces.push_back(row);
     }
-    result.station_level = in.u32(); result.superweapon_destroyed = flag(); result.superweapon_killer = in.u32();
+    result.station_level = in.u32();
+    const auto weapon_bits = in.u8();
+    if (weapon_bits > 3) (void)in.take(in.remaining() + 1);
+    result.superweapon_destroyed = (weapon_bits & 1U) != 0; result.planet_destroyed = (weapon_bits & 2U) != 0;
+    result.superweapon_killer = in.u32();
     if (flag()) result.corruption_success = flag();
     const auto credits = count(gc::galactic_max_players, 12);
     for (std::uint32_t i = 0; i < credits; ++i) {
@@ -891,8 +903,9 @@ core::Result<void> validate_checkpoint_recording(const Checkpoint& saved, campai
 core::Result<void> prepare_checkpoint_runtime(const GameLoadOptions& options, auto& prepared_runtime, std::string_view path) {
     auto prepared = options.prepare_galactic();
     if (!prepared) return core::Result<void>::failure(prepared.error());
-    if (!prepared.value().configure_native_ai)
-        return fail<void>("prepared galactic runtime has no native installer", path);
+    if (!prepared.value().configure_native_ai
+        && (!prepared.value().object_scheduler || !prepared.value().configure_world_scripts))
+        return fail<void>("prepared galactic runtime has no native or world-script installer", path);
     if (static_cast<bool>(prepared.value().child_scripts) != static_cast<bool>(prepared.value().configure_child))
         return fail<void>("prepared galactic runtime has an incomplete child script pair", path);
     prepared_runtime.emplace(std::move(prepared).value());
@@ -967,7 +980,8 @@ core::Result<void> restore_checkpoint_scripts(campaign::GameSession& session, au
             return core::Result<GameLoadOptions::GalacticSchedulers>::success(std::move(prepared_runtime->schedulers));
         }();
         if (!schedulers) return core::Result<void>::failure(schedulers.error());
-        auto installed = session.install_galactic_scripts(std::move(schedulers.value().first), std::move(schedulers.value().second), script_save.value());
+        auto installed = session.install_galactic_scripts(std::move(schedulers.value().first), std::move(schedulers.value().second),
+            script_save.value(), prepared_runtime ? std::move(prepared_runtime->object_scheduler) : std::nullopt);
         if (!installed) return core::Result<void>::failure(installed.error());
         if (options.configure_galactic) {
             auto configured = options.configure_galactic(*session.galactic_scripts());
@@ -1243,6 +1257,10 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
         return core::Result<GameRestore>::failure(phase.error());
     if (prepared_native || options.configure_native_ai) {
         auto configured = prepared_native ? prepared_native(session) : options.configure_native_ai(session);
+        if (!configured) return core::Result<GameRestore>::failure(configured.error());
+    }
+    if (prepared_runtime && prepared_runtime->configure_world_scripts) {
+        auto configured = prepared_runtime->configure_world_scripts(session);
         if (!configured) return core::Result<GameRestore>::failure(configured.error());
     }
     if (auto restored = session.restore_galactic_ai(ai_save.value()); !restored)

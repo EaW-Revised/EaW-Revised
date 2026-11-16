@@ -26,9 +26,9 @@ live values after a capture.
 
 Fidelity gap: when a later control commit has no cap controller, the observer
 adapter substitutes the current owner. This fallback is **unverified** against
-retail. Successful observer startup cannot contain an unlisted controller,
-including zero, because setup validation rejects it; the fallback applies to
-later commits rather than changing the startup provider.
+retail. Observer startup admits the none (zero) for a planet nothing controls
+(WGM-66), like the restore path, and still refuses an unlisted player; the
+substitution applies to later commits rather than changing the startup provider.
 
 ## Discovery
 
@@ -63,7 +63,11 @@ the superweapon query is unconditional. Individual-object queries preserve the
 separate minor/major hero detection and orbit/ground container branches.
 
 `known_owner` and `known_political_control` exist only when their current query
-succeeds. Target ownership selects the default mask; current ownership supplies
+succeeds. The none (no owner or controller) is an empty optional in every
+observed player fact, never a stored zero. For the apparent allegiance an empty
+value also means "not visible", so `apparent_allegiance_none` marks the live read
+that found no controller: only that case shows the Neutral badge, and a planet
+the seat cannot see shows no badge. Target ownership selects the default mask; current ownership supplies
 the live owner fact. Apparent ownership returns that fact when visible and
 otherwise the retained owner. Apparent allegiance returns current integer
 control/controller when political control is visible, or when a local orbit

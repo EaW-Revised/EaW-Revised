@@ -7,7 +7,9 @@
 #include "eawr/campaign/tactical_return_live.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/core/gc_load_trace.hpp"
+#include "eawr/core/load_profile.hpp"
 #include "eawr/data/retail_values.hpp"
+#include "eawr/platform/model_facts.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/scene/model_prefetch.hpp"
@@ -19,6 +21,7 @@
 #include <algorithm>
 #include <map>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -54,7 +57,9 @@ std::vector<core::ContentLayerIdentity> prepared_content_layers(std::span<const 
 }
 
 bool stock_name_skippable(const core::Diagnostic& error) {
-    return error.code == data::diagnostic_codes::variant_missing_base;
+    // CGS-22: a name that resolves to nothing is a null reference, whether its variant base is absent or the name itself is
+    // defined in no loaded object file (a mod's file the manifest never lists).
+    return error.code == data::diagnostic_codes::variant_missing_base || error.code == data::diagnostic_codes::object_not_found;
 }
 namespace {
 std::string key(std::string_view value);
@@ -74,6 +79,20 @@ core::Result<std::optional<data::EffectiveObject>> resolve_stock_name(const data
 namespace {
 namespace gc = sim::galactic;
 namespace tt = sim::tactical;
+// Detail timers (presentation only, never read by the simulation; --eawr-load-detail): where the space-entry unit-table
+// block goes. The load thread and the model reader threads each own a recording; the marks carry its phase costs.
+void mark_unit_table_profile(const core::load_profile::Recording& recording, const std::string& prefix) {
+    for (std::size_t i = 0; i < core::load_profile::names.size(); ++i) {
+        const auto& cost = recording.costs[i];
+        if (cost.calls == 0) continue;
+        core::gc_load::trace.mark(prefix + ".profile." + std::string(core::load_profile::names[i]) + "=excl_ms:"
+            + std::to_string(cost.exclusive_ms) + ".incl_ms:" + std::to_string(cost.inclusive_ms) + ".calls:" + std::to_string(cost.calls)
+            + ".io_bytes:" + std::to_string(recording.io_read_bytes[i]));
+    }
+    for (std::size_t i = 0; i < core::load_profile::counter_names.size(); ++i)
+        if (recording.counters[i] != 0)
+            core::gc_load::trace.mark(prefix + ".counter." + std::string(core::load_profile::counter_names[i]) + "=" + std::to_string(recording.counters[i]));
+}
 using sim::math::Fixed;
 template<class T> core::Result<T> fail(std::string message) {
     core::Diagnostic d; d.code = std::string(tt::diagnostic_codes::invalid_setup);
@@ -360,6 +379,7 @@ struct StockSpaceEntry::Impl {
     std::map<std::string, MapContent> maps;
     std::map<std::string, core::Diagnostic> type_refusals;
     std::map<gc::PlanetId, std::string> planet_maps;
+    std::map<gc::PlanetId, bool> planet_destroyable_by_tsw; // WGT-100, per planet of the plan
     struct Station { std::string faction, type; gc::TypeId galactic{}; std::uint32_t level{}; };
     std::vector<Station> stations;
     // WGT-15: copied planet ability upgrade declarations, filtered at the live owner boundary.
@@ -566,6 +586,7 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
     for (const auto& location : plan.locations()) if (location.planet) {
         const auto* planet = data.planet(location.original_type);
         if (!planet) return fail<std::shared_ptr<const StockSpaceEntry>>("missing authored planet");
+        impl->planet_destroyable_by_tsw.emplace(location.planet->id, planet->planet_is_destroyable_by_tsw.value_or(true));
         auto path = map_path(planet->space_tactical_map);
         // Preserve a per-conflict refusal for generic maps without a selection producer; this must
         // not prevent an otherwise usable campaign's automatic/land paths from starting.
@@ -635,6 +656,11 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
     const auto model_loads_before = trace_model_paths ? cache.model_stats().unique_loads : 0;
     std::set<std::string> requested_model_paths, failed_model_paths, late_model_hints, reader_model_paths;
     std::mutex reader_model_paths_mutex;
+    // Detail only: one recording per model reader thread (declared before the prefetch so the readers are joined first).
+    const bool split_profile = trace_model_paths && core::gc_load::detail.load(std::memory_order_relaxed);
+    core::load_profile::Recording consumer_profile;
+    std::mutex reader_profiles_mutex;
+    std::vector<std::unique_ptr<core::load_profile::Recording>> reader_profiles;
     // Loader::Frames needs table inputs for its full lifetime, but render payloads need only survive in the same
     // bounded suffix retained after preparation today. Aliased references retain the original full-sharing policy.
     // Keep the scope around the table load only: projections and any full pins are gone before map/AI preparation.
@@ -652,10 +678,16 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         note.effective_value = "legacy full retention";
         impl->skips.notes.push_back(std::move(note));
     }
+    // Model facts store (G1): a model the store knows is answered from its record (bones, collision meshes) and is neither
+    // read, hashed nor decoded; any other model goes through the preparation exactly as before and is recorded for the next
+    // Start. A multiplayer content contract never reads or writes the store: those models are decoded from verified bytes.
+    platform::ModelFactsScope facts(filesystem, [&](const std::string_view path) { return preparation_models->model(path); },
+        plan.mode() != CampaignSetupMode::multiplayer);
+    const auto facts_lookup = facts.lookup();
     // Preserve BASE's empty model input digests; projections do not change the prepared input report.
     load.model = [&](const std::string_view path) {
         if (trace_model_paths) requested_model_paths.emplace(path);
-        const auto* model = preparation_models->model(path);
+        const auto* model = facts_lookup(path);
         if (trace_model_paths && model == nullptr) failed_model_paths.emplace(path);
         return model;
     };
@@ -672,23 +704,69 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
     model_options.fixed_readers = 2;
     model_options.window_bytes = 256ULL << 20U;
     if (trace_model_paths) model_options.decode_hook = [&](const std::string_view path) {
-        std::lock_guard lock(reader_model_paths_mutex);
-        reader_model_paths.emplace(path);
+        {
+            std::lock_guard lock(reader_model_paths_mutex);
+            reader_model_paths.emplace(path);
+        }
+        // Reader recordings assume ModelPrefetch owns its reader threads and joins them before `reader_profiles` is destroyed
+        // (a shared pool would leave the thread_local `active` pointing at a destroyed recording).
+        if (split_profile && core::load_profile::active == nullptr) {
+            std::lock_guard lock(reader_profiles_mutex);
+            reader_profiles.push_back(std::make_unique<core::load_profile::Recording>());
+            core::load_profile::active = reader_profiles.back().get();
+        }
     };
     scene::ModelPrefetch model_prefetch(filesystem, model_options);
-    load.model_hint = [&](const std::string& path) {
-        if (trace_model_paths && requested_model_paths.contains(path)) late_model_hints.insert(path);
-        preparation_models->hint(model_prefetch, path);
-    };
-    load.model_taken = [&](const std::string& path) { model_prefetch.taken(path); };
-    load.model_skipped = [&](const std::string& path) { model_prefetch.skipped(path); };
+    // A model with a facts record is not offered to the readers (they would read and decode it for nothing).
+    facts.wire_hints(load,
+        [&](const std::string& path) {
+            if (trace_model_paths && requested_model_paths.contains(path)) late_model_hints.insert(path);
+            preparation_models->hint(model_prefetch, path);
+        },
+        [&](const std::string& path) { model_prefetch.taken(path); },
+        [&](const std::string& path) { model_prefetch.skipped(path); });
     std::optional<core::gc_load::Scope> unit_tables(std::in_place, "prep.space_entry.unit_tables_and_models");
-    auto tables = units::load_unit_tables(load);
+    // Restores the load thread's recording even if the load throws: `consumer_profile` lives on this stack frame.
+    struct RecordingGuard final {
+        core::load_profile::Recording* prior;
+        ~RecordingGuard() { core::load_profile::active = prior; }
+    };
+    auto tables = [&] {
+        const RecordingGuard guard{core::load_profile::active};
+        if (split_profile) core::load_profile::active = &consumer_profile;
+        return units::load_unit_tables(load);
+    }();
     model_prefetch.finish();
+    {
+        // Records of the models this Start decoded are written now (load time, never during gameplay).
+        core::gc_load::Scope facts_flush("prep.space_entry.unit_tables_and_models.facts_flush");
+        facts.finish();
+    }
     const auto lifetime_stats = preparation_models->stats();
     preparation_models.reset();
     unit_tables.reset();
+    if (split_profile) {
+        const std::string prefix = "prep.space_entry.unit_tables_and_models";
+        mark_unit_table_profile(consumer_profile, prefix + ".load");
+        core::load_profile::Recording readers;
+        for (const auto& recording : reader_profiles) core::load_profile::merge(readers, *recording);
+        mark_unit_table_profile(readers, prefix + ".readers");
+        const auto ahead = model_prefetch.stats();
+        core::gc_load::trace.mark(prefix + ".prefetch.planned=" + std::to_string(ahead.planned) + ".decoded=" + std::to_string(ahead.decoded)
+            + ".served_ready=" + std::to_string(ahead.served_ready) + ".served_inflight=" + std::to_string(ahead.served_inflight)
+            + ".served_unstarted=" + std::to_string(ahead.served_unstarted) + ".unplanned=" + std::to_string(ahead.unplanned)
+            + ".unrequested=" + std::to_string(ahead.unrequested) + ".skipped=" + std::to_string(ahead.skipped)
+            + ".reader_threads=" + std::to_string(reader_profiles.size()));
+    }
     if (core::gc_load::trace.active()) {
+        const auto facts_stats = facts.stats();
+        core::gc_load::trace.mark("unit_model_facts.active=" + std::to_string(facts.active())
+            + ".requests=" + std::to_string(facts_stats.requests) + ".hits=" + std::to_string(facts_stats.hits)
+            + ".misses=" + std::to_string(facts_stats.misses) + ".puts=" + std::to_string(facts_stats.puts)
+            + ".puts_skipped=" + std::to_string(facts_stats.puts_skipped) + ".unresolved=" + std::to_string(facts_stats.unresolved)
+            + ".records_invalid=" + std::to_string(facts_stats.records_invalid) + ".stamp_changed=" + std::to_string(facts_stats.stamp_changed)
+            + ".not_loadable=" + std::to_string(facts_stats.not_loadable)
+            + ".resolve_ms=" + std::to_string(facts_stats.resolve_ns / 1000000) + ".lookup_ms=" + std::to_string(facts_stats.lookup_ns / 1000000));
         const auto stats = model_prefetch.stats();
         core::gc_load::trace.mark("unit_model_parallel.peak_estimated_bytes=" + std::to_string(stats.held_bytes_peak)
             + ".readers_peak=" + std::to_string(stats.readers_peak));
@@ -775,7 +853,9 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         // Hash the immutable mounted closure at the first original identity-read
         // point, preserving refusal order and avoiding work for an empty map set.
         if (!data_identity) {
+            std::optional<core::gc_load::Scope> identity_scope(std::in_place, "prep.space_entry.data_identity");
             auto identity = skirmish::read_data_identity(filesystem);
+            identity_scope.reset();
             if (!identity) return Result::failure(identity.error());
             data_identity = std::move(identity).value();
         }
@@ -903,6 +983,11 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
         input.upgrade_players.push_back(std::move(player));
     }
     auto conflict = record; conflict.map_identity = path.value();
+    // WGT-100: the superweapon gate's planet facts. An unauthored planet is destroyable (stock authors only the three No rows;
+    // the type default itself was checked in the debug build: destroyable).
+    if (const auto destroyable = impl_->planet_destroyable_by_tsw.find(record.planet); destroyable != impl_->planet_destroyable_by_tsw.end())
+        conflict.planet_destroyable_by_tsw = destroyable->second;
+    if (snapshot.control()) for (const auto& row : snapshot.control()->planets) if (row.planet == record.planet) conflict.planet_destroyed = row.destroyed;
     // Planet entitlements create origin objects; purchased persistent upgrades
     // alone run the holder search. The immutable record retains both for return.
     std::erase_if(conflict.upgrades, [&](const auto& upgrade) { return upgrade.holder == record.planet; });
@@ -911,8 +996,10 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
     input.planet_owner = planet->owner;
     if (snapshot.control()) {
         const auto control = std::find_if(snapshot.control()->planets.begin(), snapshot.control()->planets.end(), [&](const auto& p) { return p.planet == record.planet; });
-        if (control != snapshot.control()->planets.end() && control->destroyed)
-            return fail<ResolvedConflictEntry>("destroyed backdrop replacement producer is unavailable (WGT-57)");
+        // WGT-57, interim: the battle runs on the planet's authored map and only drops the planet backdrop. The
+        // replacement props that retail creates in its place (Death_By_TSW_Replacements) are a later producer; a
+        // destroyed planet never refuses a battle.
+        if (control != snapshot.control()->planets.end() && control->destroyed) input.map.destroyed_planet_backdrop = true;
     }
     if (snapshot.production()) for (const auto& p : snapshot.production()->planets) if (p.planet == record.planet) {
         if (p.space_level < 0 || p.space_level > 5) return fail<ResolvedConflictEntry>("invalid live station level");

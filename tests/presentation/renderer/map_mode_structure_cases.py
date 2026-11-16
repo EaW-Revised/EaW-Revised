@@ -180,11 +180,20 @@ class PopulatedStructureCases:
         # (non-idle) clip storage path, prepare_live_clip: it samples a moving
         # unit's own clip position, not an idle clip.
         live_sample = "row.player->sample_position("
+        # The one idle-position rule is animation::idle_position; the land presenter's thin
+        # land_idle_position wrapper (#6513) may call it, but neither bundle may define or call
+        # any other idle_position of its own.
         for text in (source, space):
-            self.assertNotIn("idle_position(", text)
+            self.assertNotIn("idle_position(", text.replace("animation::idle_position(", "").replace("land_idle_position(", ""))
             self.assertNotIn("sample_position(", text.replace(live_sample, ""))
         self.assertNotIn("sample_position(", source)
-        self.assertLessEqual(space.count(live_sample), 1)
+        # prepare_live_clip samples a moving unit's own clip in a few branches (plain, land blend
+        # fallback, #6513); every direct sample must stay inside that one function.
+        animation_source = source_text("apps/viewer/src/space_populate_animation.cpp")
+        start = animation_source.index("void SpacePopulation::prepare_live_clip(")
+        live_body = animation_source[start:animation_source.index("\nbool SpacePopulation::", start)]
+        self.assertGreaterEqual(space.count(live_sample), 1)
+        self.assertEqual(space.count(live_sample), live_body.count(live_sample))
         self.assertIn("scene::space_object_tags(*object).idle)", space)
         self.assertIn("animation::idle_start_frame(", glue)
         # #81: a death clone's clip is posed by the shared death rule too.

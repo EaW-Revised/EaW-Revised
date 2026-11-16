@@ -66,6 +66,35 @@ public:
     // RP-06..RP-08: the campaign parent publishes the battle's retreat state each frame; the countdown line
     // of the retreating player's faction shows on the command bar's overlay.
     void update_retreat_countdown(const sim::tactical::RetreatState& state, std::uint64_t tick, bool cinematic_playing);
+    // FS-R07..FS-R09, FC-R03: the campaign parent plays the retreat cinematic through this battle's camera.
+    // True when this battle can play it: the map has an attacker entry marker, the Unlocked camera data loads and
+    // In_Game_Cinematics allows cinematics.
+    [[nodiscard]] bool retreat_cinematic_ready();
+    // Once per frame while the local player's retreat escapes: the camera shot for the simulation's cinematic frame
+    // `state.cinematic_frame` (published at battle tick `tick`), input locked and the battle paced at 30 frames per second. `end_retreat_cinematic`
+    // returns the ordinary camera and pacing; safe to call when nothing plays.
+    void update_retreat_cinematic(const sim::tactical::RetreatState& state, std::uint64_t tick);
+    void end_retreat_cinematic();
+    [[nodiscard]] bool retreat_cinematic_active() const noexcept;
+    // SK-ARR-01..SK-ARR-14: the campaign parent plays the arrival cinematic (the attacker's fleet leaving hyperspace, or
+    // the defender's view) through this battle's camera at the start of a campaign space battle.
+    struct ArrivalRequest final {
+        bool attacker{};                 // the local player is the invader
+        std::uint64_t seed{};            // presentation stand-in for the debug build's cinematic random stream (SK-ARR-09)
+        sim::tactical::PlayerId defender{}; // whose star base the defender shot looks at
+    };
+    // True when this battle can play it: the map has an attacker entry marker and In_Game_Cinematics allows cinematics.
+    [[nodiscard]] bool arrival_cinematic_ready();
+    // Once per frame while the battle's first 150 ticks run (`tick` is the simulation's completed tick): the camera shot
+    // for the presented frame, command bar, radar, fog and world input hidden or dropped, the battle paced at 30 frames per
+    // second. After frame 149 the ordinary camera and pacing return and later calls do nothing.
+    void update_arrival_cinematic(const ArrivalRequest& request, std::uint64_t tick);
+    void end_arrival_cinematic();
+    [[nodiscard]] bool arrival_cinematic_active() const noexcept;
+    // The presented cinematic frame of the last drawn shot (eye-check proof naming); empty when none plays.
+    [[nodiscard]] std::optional<std::uint32_t> arrival_cinematic_frame() const noexcept;
+    // Report/test: how often the battle camera was unfocused while the arrival played (the arrival must not do it).
+    [[nodiscard]] std::uint32_t arrival_focus_losses() const noexcept;
     struct Options final {
         std::filesystem::path game_root;
         std::filesystem::path mod_root;

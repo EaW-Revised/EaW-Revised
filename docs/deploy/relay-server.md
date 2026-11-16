@@ -293,6 +293,7 @@ secrets as CLI arguments; keep them in the protected config or environment.
 | `access_token` | Optional publisher-only operator secret when `require_access_token=1`, 32..256 bytes; generate 256 random bits with `--generate-token` |
 | `turn_uri`, `turn_secret` | Empty together disables TURN credentials; otherwise `turn:` URI and 32..256-byte shared secret (coturn provider only) |
 | `turn_provider` | `coturn` (default) or `cloudflare`; mismatched combinations fail startup with `EAWR-NET-1555` |
+| `turn_fallback_uri`, `turn_fallback_secret` | Cloudflare provider only: the operator's own coturn issued after Cloudflare in the same frames, one `turn:` URI and a 32..256-byte secret (`EAWR_RELAY_TURN_FALLBACK_SECRET`, never on the command line); both or neither. See [coturn-fallback.md](coturn-fallback.md) |
 | `cloudflare_turn_key_id`, `cloudflare_turn_api_token` | Secrets of the Cloudflare provider; use `EAWR_RELAY_CLOUDFLARE_TURN_KEY_ID` / `EAWR_RELAY_CLOUDFLARE_TURN_API_TOKEN` or a protected config file |
 | `cloudflare_turn_calls_per_minute`, `cloudflare_turn_timeout_ms` | 120 outbound calls per rolling minute (1..600), 4000 ms request timeout (500..30000) |
 | `max_connections`, `max_sessions` | 1,024, 512 (caps 4096 / 2048); see Capacity |

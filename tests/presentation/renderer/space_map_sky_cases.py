@@ -1,11 +1,122 @@
 """Cases for test_space_map_mode; collected by its legacy facade."""
 
+from unittest import mock
+
 from space_map_test_support import (
     ALDERAAN_BLOCKER, ALDERAAN_SPACE, NONE, REFERENCE_MAPS,
     SPACE_STATUSES, decode_png, fixture, json,
     os, pathlib, read_pgm, scene_fixture,
     tempfile, unittest,
 )
+
+
+def _secondary_scale_changed_pixels(self, scales, fov=60):
+    # The two fixtures differ only in the secondary object's authored scale.
+    # Returns how many sampled pixels differ between the two captures.
+    with tempfile.TemporaryDirectory(prefix="eawr-sky-scale-") as temporary:
+        directory = pathlib.Path(temporary)
+        images = []
+        for scale in scales:
+            root = fixture.write_fixture_root(directory / f"root-{scale}", "meshgloss")
+            xml = root / "GameData" / "Data" / "XML" / "eawr_space_objects.xml"
+            # The secondary layer uses its own additive model over the same
+            # walls, so its contribution is visible against the primary sky.
+            additive = [[("Color", (0.25, 0.5, 0.75, 1.0)),
+                         ("UVScrollRate", (0.0, 0.0, 0.0, 0.0))]] * 2
+            (root / "GameData/Data/Art/Models" / "eawr_space_sky2.alo").write_bytes(
+                fixture.alo_bytes(["MeshAdditive.fx", "MeshAdditive.fx"], materials=additive))
+            xml.write_text(
+                '<SpaceProps><SpaceProp Name="' + fixture.SKY_OBJECT + '">'
+                '<Space_Model_Name>' + fixture.SKY_MODEL + '</Space_Model_Name></SpaceProp>'
+                '<SpaceProp Name="' + fixture.SECONDARY_SKY_OBJECT + '">'
+                '<Space_Model_Name>eawr_space_sky2.alo</Space_Model_Name>'
+                '<Scale_Factor>' + str(scale) + '</Scale_Factor>'
+                '</SpaceProp></SpaceProps>', encoding="utf-8")
+            code, report, capture = self._run(
+                root, fixture.MAP_LOGICAL_PATH, directory, f"sky-{scale}",
+                ("--eawr-space-camera", f"0,0,0,-1,0,0,0,1,0,{fov},1,5000", "--eawr-populate"))
+            self.assertEqual(code, 0, report.get("failure"))
+            self.assertTrue(any(item["role"] == "secondary_sky" and item["status"] == "drawn"
+                                for item in report["space"]["surfaces"]))
+            images.append(decode_png(capture.read_bytes()))
+        width, height, visible = images[0]
+        self.assertEqual((width, height), images[1][:2])
+        clipped = images[1][2]
+        changed = sum(max(abs(a - b) for a, b in zip(visible[y][x], clipped[y][x])) > 16
+                      for y in range(0, height, 4) for x in range(0, width, 4))
+        return changed
+
+
+def test_secondary_sky_authored_scale_changes_its_visible_contribution(self):
+    # Its geometry is visible at scale 1 and entirely beyond the 100,000-unit
+    # far plane at scale 1000. Independent radius normalization makes the two
+    # captures identical and is the negative control for this regression.
+    changed = _secondary_scale_changed_pixels(self, (1, 1000))
+    self.assertGreater(changed, 100, "authored secondary scale must change its visible contribution")
+
+
+def test_sky_between_old_and_retail_far_plane_is_drawn(self):
+    # #6447: at scale 160 the fixture walls lie about 65,000 to 110,000 units
+    # from the eye. The far plane clips by view depth, so a 20 degree view
+    # (depth at least 0.94 x distance) keeps every wall fragment beyond the
+    # former 60,000 far plane and the nearer ones inside the retail background
+    # range of 100,000 (BP-75). Scale 1000 is clipped either way.
+    changed = _secondary_scale_changed_pixels(self, (160, 1000), fov=20)
+    self.assertGreater(changed, 100, "sky geometry between 60,000 and 100,000 units must not be clipped")
+
+
+def test_primary_sky_texture_named_with_source_art_suffix_uses_the_shipped_dds(self):
+    # #6760: a mod's sky model names its texture with a source-art suffix (.jpg, .png) and ships
+    # only the .dds. The material rule retries the authored name's first dot-token with .dds
+    # (RGC-122); the environment loader used to probe only .tga/.dds suffixes and drew no sky.
+    with tempfile.TemporaryDirectory(prefix="eawr-sky-suffix-") as temporary:
+        directory = pathlib.Path(temporary)
+        root = fixture.write_fixture_root(directory / "root", "meshgloss")
+        declared = {"eawr_space_a.tga": "eawr_space_a.jpg", "eawr_space_b.dds": "eawr_space_b.png"}
+        surfaces = [(mesh, declared[texture], *rest) for mesh, texture, *rest in fixture.SURFACES]
+        with mock.patch.object(fixture, "SURFACES", surfaces):
+            model = fixture.alo_bytes(["MeshGloss.fx"] * 2, materials=fixture.MESHGLOSS)
+        data = root / "GameData" / "Data" / "Art"
+        (data / "Models" / fixture.SKY_MODEL).write_bytes(model)
+        (data / "Textures" / "eawr_space_a.tga").unlink()
+        (data / "Textures" / "eawr_space_a.dds").write_bytes(
+            fixture.dds_bgra_bytes(fixture.QUADRANTS["eawr_space_a.tga"]))
+        code, report, _ = self._run(root, fixture.MAP_LOGICAL_PATH, directory, "suffix",
+                                    ("--eawr-space-camera", "0,0,0,-1,0,0,0,1,0,60,1,5000", "--eawr-populate"))
+        self.assertEqual(code, 0, report.get("failure"))
+        sky = [item for item in report["space"]["surfaces"] if item["role"] == "primary_sky"]
+        self.assertEqual(len(sky), 2)
+        self.assertTrue(all(item["status"] == "drawn" for item in sky), sky)
+        self.assertEqual(sorted(item["texture"].rsplit("/", 1)[-1] for item in sky),
+                         ["eawr_space_a.dds", "eawr_space_b.dds"])
+
+
+def test_primary_sky_texture_dotted_name_follows_the_first_dot_token_rule(self):
+    # The retail retry (RGC-122) cuts an authored name that is not a .tga/.dds name at its first dot:
+    # "eawr_space_a.01" loads the shipped eawr_space_a.dds, and "eawr_space_b.02" does not load a file
+    # that is only shipped as eawr_space_b.02.dds. No stock or tested-mod asset relies on a dotted stem
+    # resolving by plain suffix (scan of stock FoC, Remake 4.0/5.0, RaW, BFC and FotR).
+    with tempfile.TemporaryDirectory(prefix="eawr-sky-dotted-") as temporary:
+        directory = pathlib.Path(temporary)
+        root = fixture.write_fixture_root(directory / "root", "meshgloss")
+        declared = {"eawr_space_a.tga": "eawr_space_a.01", "eawr_space_b.dds": "eawr_space_b.02"}
+        surfaces = [(mesh, declared[texture], *rest) for mesh, texture, *rest in fixture.SURFACES]
+        with mock.patch.object(fixture, "SURFACES", surfaces):
+            model = fixture.alo_bytes(["MeshGloss.fx"] * 2, materials=fixture.MESHGLOSS)
+        data = root / "GameData" / "Data" / "Art"
+        (data / "Models" / fixture.SKY_MODEL).write_bytes(model)
+        (data / "Textures" / "eawr_space_a.tga").unlink()
+        (data / "Textures" / "eawr_space_a.dds").write_bytes(
+            fixture.dds_bgra_bytes(fixture.QUADRANTS["eawr_space_a.tga"]))
+        (data / "Textures" / "eawr_space_b.dds").rename(data / "Textures" / "eawr_space_b.02.dds")
+        code, report, _ = self._run(root, fixture.MAP_LOGICAL_PATH, directory, "dotted",
+                                    ("--eawr-space-camera", "0,0,0,-1,0,0,0,1,0,60,1,5000", "--eawr-populate"))
+        self.assertEqual(code, 0, report.get("failure"))
+        sky = {item["mesh"]: item for item in report["space"]["surfaces"] if item["role"] == "primary_sky"}
+        self.assertEqual(sky["SkyA"]["status"], "drawn", sky["SkyA"])
+        self.assertTrue(sky["SkyA"]["texture"].endswith("eawr_space_a.dds"), sky["SkyA"])
+        self.assertEqual(sky["SkyB"]["status"], "not_drawn", sky["SkyB"])
+        self.assertIn("eawr_space_b.02", sky["SkyB"]["cause"])
 
 
 def test_synthetic_primary_sky_draws_each_surface_with_its_own_texture(self):

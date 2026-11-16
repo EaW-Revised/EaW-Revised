@@ -96,8 +96,19 @@ struct NativeMovementAdmission {
     std::span<const Route>, EntityId, std::size_t, bool returning_player);
 template<class Owner>
 void execute_native_movement(Owner& owner, const GameCommand& command, std::uint64_t tick,
-    std::vector<GalacticEvent>& events, bool pending_local_conflict, std::optional<PlayerId> returning_player) {
-    const auto& move = std::get<MoveFleet>(command.payload);
+    std::vector<GalacticEvent>& events, bool pending_local_conflict, std::optional<PlayerId> returning_player,
+    bool single_hop_raid = false) {
+    // GAR-02: native raid requests retain the final target but execute one hop.
+    // The existing native-effect envelope distinguishes these from overview orders.
+    const auto& requested = std::get<MoveFleet>(command.payload);
+    const auto raid_destination = requested.raid ? std::optional<PlanetId>{requested.path.back()} : std::nullopt;
+    std::optional<GameCommand> hop;
+    if (single_hop_raid && requested.raid && requested.path.size() > 2) {
+        hop = command;
+        std::get<MoveFleet>(hop->payload).path.resize(2);
+    }
+    const auto& selected = hop ? *hop : command;
+    const auto& move = std::get<MoveFleet>(selected.payload);
     GalacticEvent event{tick, GalacticEventKind::command_executed, command.key.seat, move.fleet, command.key.sequence, move.path.back(), GalacticRejectReason::none};
     const auto emit = [&](GalacticEventKind kind, GalacticRejectReason reason = GalacticRejectReason::none) {
         auto e = event; e.kind = kind; e.reason = reason; events.push_back(e);
@@ -117,10 +128,13 @@ void execute_native_movement(Owner& owner, const GameCommand& command, std::uint
     if (f.owner != (returning_player ? *returning_player : issuer->player)) return reject(GalacticRejectReason::not_authorized);
     // WGM-84: a fleet with no orbit parent cannot be redirected.
     if (f.orbit == 0 || f.motion.transit) return reject(GalacticRejectReason::movement_blocked);
-    if (move.raid && (!owner.raid_qualified(move.fleet, move.path.back()) || move.destination_slot))
+    // GAR-02: destination landing eligibility gates the final hop, not ordinary
+    // intermediate travel toward the retained target.
+    if (move.raid && (move.destination_slot
+        || (move.path.back() == *raid_destination && !owner.raid_qualified(move.fleet, *raid_destination))))
         return reject(GalacticRejectReason::movement_blocked);
     auto prepared = prepare_native_movement(
-        Fleet{move.fleet, f.owner, f.orbit, f.members, f.orbit_slot, f.motion}, command, *owner.movement_inputs,
+        Fleet{move.fleet, f.owner, f.orbit, f.members, f.orbit_slot, f.motion}, selected, *owner.movement_inputs,
         *owner.setup.fleet_control, *owner.graph, owner.sorted_planets(), owner.sorted_routes(), owner.next_id, owner.live_object_count, bool(returning_player));
     if (prepared.reason != GalacticRejectReason::none) return reject(prepared.reason);
     if (move.destination_actor) {
@@ -178,7 +192,7 @@ void execute_native_movement(Owner& owner, const GameCommand& command, std::uint
     auto& departing = owner.registry.template get<session_detail::FleetData>(owner.fleets.at(move.fleet));
     owner.accrue_departure_piracy(move.fleet, departing.owner, source, departing.members);
     departing.orbit = 0; departing.motion = std::move(motion);
-    departing.raid_destination = move.raid ? std::optional<PlanetId>{move.path.back()} : std::nullopt;
+    departing.raid_destination = raid_destination;
     owner.relocate_actor(move.fleet, departing.owner, 0, 0);
     for (const auto& member : departing.members) owner.relocate_actor(member.id, departing.owner, 0, move.fleet);
     owner.dirty[static_cast<std::size_t>(StateSection::fleets)] = true;

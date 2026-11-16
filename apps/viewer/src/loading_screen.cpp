@@ -3,6 +3,7 @@
 #include "eawr/core/text.hpp"
 #include "loading_screen.hpp"
 #include "loading_planet.hpp"
+#include "loading_texture_names.hpp"
 #include "settings_store.hpp"
 
 #include "viewer_path.hpp"
@@ -93,20 +94,16 @@ constexpr const char* begin_gadget = "IDC_BEGIN_BUTTON";
     return (project / ".." / ".." / ".." / "out" / "fonts").lexically_normal();
 }
 
-// A texture file by the name the data write it: Data/Art/Textures/<stem>.tga, then .dds (the install
-// ships its pictures as DDS under the .tga names the XML uses).
+// A texture file by the name the data write it, found through the shared resolver (ANR-01: the authored name, then the
+// stem with .tga and .dds; the install ships its pictures as DDS under the .tga names the XML uses).
 [[nodiscard]] Ref<ImageTexture> load_named(const vfs::Vfs& filesystem, const std::string& name, std::string& failure) {
     if (name.empty()) return {};
-    const auto dot = name.find_last_of('.');
-    const std::string stem = dot == std::string::npos ? name : name.substr(0, dot);
-    std::vector<std::string> candidates;
-    if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) candidates.push_back(name);
-    for (const char* extension : {".tga", ".dds"}) candidates.push_back("data/art/textures/" + stem + extension);
-    for (const std::string& path : candidates) {
+    if (const std::string path = loading_picture_path(filesystem, name); !path.empty()) {
         auto loaded = assets::load_texture(filesystem, path);
-        if (!loaded) continue;
-        const Ref<Image> image = texture_image(loaded.value(), failure);
-        if (image.is_valid()) return ImageTexture::create_from_image(image);
+        if (loaded) {
+            const Ref<Image> image = texture_image(loaded.value(), failure);
+            if (image.is_valid()) return ImageTexture::create_from_image(image);
+        }
     }
     failure += (failure.empty() ? "" : "; ") + std::string("texture ") + name + " is not in the data";
     return {};
@@ -285,6 +282,9 @@ bool EawrLoadingScreen::build_layout(const Vector2 size) {
             rendering->free_rid(fill_item_);
         }
         fill_item_ = RID();
+        // Leave the tree now: a queued-free sibling still holds the name, and the rebuilt root would be
+        // renamed to an "@EawrLoadingScreen@N" serial name that nothing looks up.
+        if (layout_->root->get_parent() == this) remove_child(layout_->root);
         layout_->root->queue_free();
     }
     layout_ = std::make_unique<Layout>();

@@ -1051,13 +1051,27 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
         // with the step, named by its sub-plot.
         for (const auto& row : hosted.value().story.diagnostics) {
             std::string owner = "instance " + std::to_string(row.instance);
+            std::string module;
             if (impl.story_scripts) {
                 const auto& entries = impl.story_scripts->entries();
                 const auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& entry) { return entry.instance == row.instance; });
-                if (found != entries.end()) owner = found->subplot;
+                if (found != entries.end()) { owner = found->subplot; module = found->module; }
             }
             core::Diagnostic note; note.code = row.code; note.message = "story script " + owner + " at tick " + std::to_string(row.tick) + ": " + row.message;
+            // The script's logical module path: the degradation ledger names the layer it came from (observation only).
+            if (!module.empty()) note.logical_path = std::move(module);
             out.diagnostics.push_back(std::move(note));
+        }
+        // What a game-object script ran into (a module that fails to load, an unbound engine function, a script
+        // error) is published with the step too; the same text from many instances is one line with a count.
+        if (hosted.value().objects) {
+            std::map<std::pair<std::string, std::string>, std::size_t> counted;
+            for (const auto& row : hosted.value().objects->diagnostics) ++counted[{row.code, row.message}];
+            for (const auto& [text, count] : counted) {
+                core::Diagnostic note; note.code = text.first;
+                note.message = "object script: " + text.second + (count > 1 ? " (" + std::to_string(count) + " instances)" : std::string{});
+                out.diagnostics.push_back(std::move(note));
+            }
         }
         hosted.value().world.state_hash = hosted.value().state_hash;
         hosted.value().world.state_sha256 = impl.hasher ? std::string{} : hosted.value().state_hash.get();
@@ -1248,6 +1262,12 @@ core::Result<GameTick> GameSession::finish_step(StepContext& tick_context) {
     out.story_triggers = std::move(impl.story_triggers);
     out.story_presentation = std::move(impl.story_presentation);
     impl.story_presentation.clear();
+    out.campaign_switch = std::exchange(impl.campaign_switch_fresh, std::nullopt); // WST-95: published with the tick that recorded it
+    for (auto& warning : std::exchange(impl.script_warnings, {})) { // a refused LOAD_CAMPAIGN reward, once per reason
+        core::Diagnostic line; line.code = std::string(campaign_switch_warning_code); line.severity = core::Severity::warning;
+        line.message = std::move(warning);
+        out.diagnostics.push_back(std::move(line));
+    }
     for (auto& note : std::exchange(impl.story_notes, {})) { // the plot loader's report, once (WST-02/04)
         core::Diagnostic line; line.code = "EAWR-STORY-0001"; line.severity = core::Severity::info; line.message = "story: " + std::move(note);
         out.diagnostics.push_back(std::move(line));
@@ -1293,17 +1313,27 @@ core::Result<GameTick> GameSession::step(const sim::PartitionExecutor& executor)
         if (!staged) { impl.failure = staged.error(); return core::Result<GameTick>::failure(*impl.failure); }
         impl.replay_conflicts.erase(entry);
     }
-    if (auto processed = process_session_commands(context, executor); !processed)
-        return core::Result<GameTick>::failure(processed.error());
-    if (impl.child) {
-        if (auto stepped = step_child(context, executor); !stepped)
-            return core::Result<GameTick>::failure(stepped.error());
-    } else {
-        if (auto stepped = step_galaxy(context, executor); !stepped)
-            return core::Result<GameTick>::failure(stepped.error());
+    {
+        const gc_profile::Scope scope(gc_profile::Phase::tick_process_commands);
+        if (auto processed = process_session_commands(context, executor); !processed)
+            return core::Result<GameTick>::failure(processed.error());
     }
-    if (auto returned = apply_pending_returns(context, executor); !returned)
-        return core::Result<GameTick>::failure(returned.error());
+    {
+        const gc_profile::Scope scope(gc_profile::Phase::tick_step_world);
+        if (impl.child) {
+            if (auto stepped = step_child(context, executor); !stepped)
+                return core::Result<GameTick>::failure(stepped.error());
+        } else {
+            if (auto stepped = step_galaxy(context, executor); !stepped)
+                return core::Result<GameTick>::failure(stepped.error());
+        }
+    }
+    {
+        const gc_profile::Scope scope(gc_profile::Phase::tick_apply_returns);
+        if (auto returned = apply_pending_returns(context, executor); !returned)
+            return core::Result<GameTick>::failure(returned.error());
+    }
+    const gc_profile::Scope finish_scope(gc_profile::Phase::tick_finish_step);
     return finish_step(context);
     } catch (const std::exception& error) {
         auto failed = fail<GameTick>("game session service threw: " + std::string(error.what()), galactic::diagnostic_codes::worker_failure);
@@ -1408,7 +1438,7 @@ core::Result<std::vector<std::uint8_t>> GameSession::save_checkpoint_state(galac
             return ChildOwner{owner->conflict, std::move(state).value(), std::move(scripts).value(),
                 owner->session.record(), owner->sequences, owner->killers, owner->owns_pause, owner->controller_inputs};
         };
-        Writer out; out(std::uint32_t{6}, world.value()); checkpoint_game_owner(out, *impl_);
+        Writer out; out(std::uint32_t{7}, world.value()); checkpoint_game_owner(out, *impl_);
         out(child(impl_->child), child(impl_->staged));
         std::optional<std::vector<std::uint8_t>> resolver;
         if (auto_resolve_needs_service() && impl_->auto_state_writer) {
@@ -1429,8 +1459,11 @@ core::Result<std::vector<std::uint8_t>> GameSession::save_checkpoint_state(galac
         out(goals);
         // WST-56: Lua edits of plot events, a tail that exists only when something was edited (old bytes otherwise).
         // TRIGGER_AI flags follow it in a second tail; the edit list is then written even when empty.
-        if (story && (!story->edits.empty() || !story->ai_flags.empty())) out(story->edits);
-        if (story && !story->ai_flags.empty()) out(story->ai_flags);
+        // Event counters (WST-32/34/35) follow the flags the same way: the tail grows only for a game that is counting.
+        const bool counting = story && !story->counters.empty();
+        if (story && (!story->edits.empty() || !story->ai_flags.empty() || counting)) out(story->edits);
+        if (story && (!story->ai_flags.empty() || counting)) out(story->ai_flags);
+        if (counting) out(story->counters);
         return core::Result<std::vector<std::uint8_t>>::success(std::move(out.bytes));
     } catch (const Invalid& error) { return fail<std::vector<std::uint8_t>>(error.what()); }
 }
@@ -1442,7 +1475,8 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
             throw Invalid("direct restore requires a fresh private game");
         Reader in(bytes); std::vector<std::uint8_t> world;
         std::uint32_t version{}; in(version);
-        if (version != 6) throw Invalid("unsupported campaign owner format");
+        if (version != 7)
+            throw Invalid("unsupported campaign owner format " + std::to_string(version) + " (expected 7; saves from older builds are refused)");
         in(world);
         if (auto restored = impl_->world().load_checkpoint_state(world, pool); !restored) return restored;
         const auto recorded_base = impl_->history;
@@ -1473,9 +1507,23 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
             if (impl_->story_goals.contains(row.owner)) throw Invalid("saved story goals repeat an owner");
             try { impl_->story_goals.emplace(row.owner, galactic::story::Goals(row.owner, std::move(row.state))); }
             catch (const std::invalid_argument& error) { throw Invalid(error.what()); }
+            // #236 PR B: a loaded game republishes the restored objective list to the HUD (local presentation, never saved):
+            // the HUD mirrors the published events and has seen none of the earlier ones.
+            const auto& restored = impl_->story_goals.at(row.owner).state();
+            for (const auto& objective : restored.objectives)
+                impl_->story_presentation.push_back({row.owner, galactic::story::ObjectiveChanged{
+                    galactic::story::ObjectiveAction::add, objective.text_id, objective, restored.objectives_visible}});
+            if (!restored.objectives_visible)
+                impl_->story_presentation.push_back({row.owner, galactic::story::ObjectiveChanged{
+                    galactic::story::ObjectiveAction::display, {}, std::nullopt, false}});
+            // The goal list likewise (legacy #6681): oldest first, so each insertion at the head restores the saved order.
+            // Goal rows only, never a summary request: a load does not pop the summary open.
+            for (auto at = restored.goals.rbegin(); at != restored.goals.rend(); ++at)
+                impl_->story_presentation.push_back({row.owner, galactic::story::GoalChanged{at->tag, *at}});
         }
         if (story && in.remaining()) in(story->edits); // the optional Lua-edit tail (WST-56)
         if (story && in.remaining()) in(story->ai_flags); // and the optional TRIGGER_AI flag tail
+        if (story && in.remaining()) in(story->counters); // and the optional event-counter tail
         if (story) if (auto restored = impl_->story_engine->restore(std::move(*story)); !restored) return restored;
         if (in.remaining() || impl_->tick > galactic::galactic_max_ticks || impl_->world().completed_tick() > impl_->tick
             || (!child && impl_->world().completed_tick() != impl_->tick)
@@ -1596,6 +1644,9 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
 
 core::Result<GameRecording> GameSession::checkpoint_recording() const {
     if (impl_->failure) return core::Result<GameRecording>::failure(*impl_->failure);
+    if (impl_->campaign_switch) // WST-95: this session is about to be replaced by the campaign a plot named
+        return fail<GameRecording>("a switch to campaign " + impl_->campaign_switch->campaign
+            + " is pending: the session is about to end and cannot be saved");
     auto result = recording();
     const auto pending_begin = result.commands.commands.size();
     for (const auto& [key, command] : impl_->pending) {

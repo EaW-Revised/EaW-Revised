@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <exception>
+#include <iterator>
 #include <optional>
+#include <set>
 #include <utility>
 #include <tuple>
 
@@ -55,6 +57,7 @@ struct ScriptedTacticalSession::Impl {
     tactical::TacticalSession world;
     ScriptScheduler scripts;
     std::map<std::string, CommandTranslator, std::less<>> translators;
+    std::set<std::string, std::less<>> presentation_verbs; // never routed to the world (legacy #6634)
     std::shared_ptr<ScriptEngine> engine;
     std::optional<std::vector<std::uint8_t>> pending_native;
     std::shared_ptr<sim::StateHasher> hasher; // #637: null hashes on the stepping thread
@@ -200,6 +203,16 @@ core::Result<ScriptedTacticalSession> ScriptedTacticalSession::restore(
 ScriptedTacticalSession::ScriptedTacticalSession(ScriptedTacticalSession&&) noexcept = default;
 ScriptedTacticalSession& ScriptedTacticalSession::operator=(ScriptedTacticalSession&&) noexcept = default;
 ScriptedTacticalSession::~ScriptedTacticalSession() = default;
+
+core::Result<void> ScriptedTacticalSession::register_presentation_verb(std::string_view verb) {
+    if (impl_->stepped) {
+        return core::Result<void>::failure(make_error(codes::invalid_request, "verbs are registered before the first step"));
+    }
+    if (verb.empty() || impl_->translators.contains(verb) || !impl_->presentation_verbs.emplace(std::string(verb)).second) {
+        return core::Result<void>::failure(make_error(codes::invalid_request, "a presentation verb needs a new name: " + std::string(verb)));
+    }
+    return core::Result<void>::success();
+}
 
 core::Result<void> ScriptedTacticalSession::register_verb(std::string_view verb, CommandTranslator translator) {
     if (impl_->stepped) {
@@ -347,6 +360,18 @@ core::Result<ScriptedTick> ScriptedTacticalSession::step(
             impl.failure = taken.error();
             return core::Result<ScriptedTick>::failure(taken.error());
         }
+    }
+    // Presentation verbs leave here, before the sort, so the next tick's input and the saved pending list never hold them.
+    if (!impl.presentation_verbs.empty()) {
+        auto& commands = out.scripts.commands;
+        const auto split = std::stable_partition(commands.begin(), commands.end(), [&](const ScriptCommand& command) {
+            return !impl.presentation_verbs.contains(command.verb);
+        });
+        out.presentation.assign(std::make_move_iterator(split), std::make_move_iterator(commands.end()));
+        commands.erase(split, commands.end());
+        std::sort(out.presentation.begin(), out.presentation.end(), [](const auto& left, const auto& right) {
+            return std::tie(left.issuer, left.sequence) < std::tie(right.issuer, right.sequence);
+        });
     }
     // Turn and barrier output share per-instance sequences. The engine merges
     // both services before routing or saving the next tick's commands.

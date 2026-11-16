@@ -17,6 +17,8 @@
 #include <utility>
 #include <vector>
 
+namespace eawr::assets { struct MegaTexture; }
+
 namespace eawr::viewer::galactic {
 
 enum class CommandMenuAction { none, story_summary, options, cinematic_camera };
@@ -34,8 +36,7 @@ enum class CommandMenuAction { none, story_summary, options, cinematic_camera };
 
 // WGUI-36: the goal feed controls story admission. The unpublished HUD-movie gate stays with GHUD-S34.
 [[nodiscard]] inline bool command_menu_disabled(CommandMenuAction action, bool authored_disabled, bool has_goals) noexcept {
-    return authored_disabled || action == CommandMenuAction::cinematic_camera
-        || (action == CommandMenuAction::story_summary && !has_goals);
+    return authored_disabled || (action == CommandMenuAction::story_summary && !has_goals);
 }
 
 [[nodiscard]] inline std::vector<std::string> command_menu_names(const data::ui::CommandBarCatalog& catalog) {
@@ -91,16 +92,17 @@ struct CommandButtonGeometry final {
     data::ui::ReferenceRect art, hit;
 };
 
-// Ordinary rectangles share the bone origin, offset and scale. Composite tabs
-// keep their shell-mesh hit areas, independent of their offset artwork.
+// HCB-66: Scale resizes the artwork (texture size times Scale, centred on the bone origin plus Icon_Offset). The hit
+// rectangle is the shell mesh rectangle moved by the same offset and never scaled: a mod that draws hi-res textures
+// authors a small Scale (0.125 for Remake 4.0's filter buttons) to bring them back to the mesh size, so scaling the mesh
+// too leaves a click area a fraction of the drawn button (legacy #6757). Composite tabs keep their mesh rectangle where it is.
 [[nodiscard]] inline CommandButtonGeometry command_button_geometry(const data::ui::ShellAnchor& anchor,
     data::ui::Vec2 offset, float width, float height, float scale, bool composite_tab = false) noexcept {
     const auto origin = anchor.origin.value_or(assets::Vec2f{
         anchor.rect.x + anchor.rect.width * 0.5F, anchor.rect.y + anchor.rect.height * 0.5F});
     width *= scale; height *= scale;
-    const data::ui::ReferenceRect hit{origin.x + offset.x + (anchor.rect.x - origin.x) * scale,
-         origin.y + offset.y + (anchor.rect.y - origin.y) * scale,
-         anchor.rect.width * scale, anchor.rect.height * scale};
+    const data::ui::ReferenceRect hit{anchor.rect.x + offset.x, anchor.rect.y + offset.y,
+         anchor.rect.width, anchor.rect.height};
     return {{origin.x + offset.x - width * 0.5F, origin.y + offset.y - height * 0.5F, width, height},
         composite_tab ? anchor.rect : hit};
 }
@@ -203,15 +205,33 @@ struct ProductionChoice final {
 // WGUI-170: consume the observer's capability and purchase permission separately.
 [[nodiscard]] ProductionChoice production_choice_facts(const sim::galactic::ObservedProductionOffer& row);
 
+// #7177 / WGSI-8/9: a named hero the hover tooltip of the planet's hero icons may list (the observer's admitted heroes).
+struct PlanetHeroTip final {
+    PlayerId owner{};
+    sim::galactic::TypeId type{};
+    bool allied{};
+    friend bool operator==(const PlanetHeroTip&, const PlanetHeroTip&) = default;
+};
+
 struct PlanetHudFacts final {
     ObjectId planet{};
     // Active planet effects. No sim producer publishes these yet (H062), so
     // they stay false and the icons stay absent until one does.
     bool siphon_source{}, bounty_hunter_active{}, siphon_smuggled{};
+    // WGSI-11: the whole credits the local player's own siphon takes here per income calculation (smuggler tooltip).
+    std::optional<std::int64_t> siphoned_credits;
+    // #4375 / WGSI-1..4: named heroes the local player sees here. The ally and foreign icons belong to the red/green
+    // look, the three faction icons (the command bar's good, evil and corrupt sides) to the other.
+    bool hero_ally{}, hero_foreign{}, hero_good{}, hero_evil{}, hero_corrupt{}, hero_red_green{};
+    std::vector<PlanetHeroTip> hero_tips;
+    // #2987 / WGFI-3: a corruption transition under way shows its progress as text next to the planet (whole percent).
+    std::optional<int> corruption_percent;
+    bool corruption_removing{};
     bool discovered{};
     std::optional<PlayerId> observed_owner;
     // WGUI-100 tooltip/trade readers are separate from current ownership tint.
     std::optional<PlayerId> apparent_owner, apparent_allegiance_owner;
+    bool apparent_allegiance_none{}; // a visible planet with no controller: the Neutral badge (empty owner alone means unknown)
     bool locally_controlled{};
     bool local_allegiance{};
     // #3931: another player's queue, shown read-only because the galaxy reveal is on.
@@ -354,9 +374,10 @@ struct PlanetInfoLayout { float panel_width{}, panel_height{}, close_width{}, cl
 
 // GHUDL-15: the status-icon row under a planet's name. Icons keep the
 // authored component order and sit left to right; only icons whose facts the
-// viewer publishes are listed (conflict, hero, smuggler and bounty icons
-// have no producer yet and are absent, never guessed).
-enum class PlanetStatusIcon : std::uint8_t { build, corruption_info, corruption_type, smuggler, bounty_hunter, smuggled };
+// viewer publishes are listed (the conflict icon has no producer yet and is absent, never guessed; the bounty
+// hunter icon waits for the sim's bounty effect, #4375).
+enum class PlanetStatusIcon : std::uint8_t { build, corruption_info, corruption_type, smuggler, bounty_hunter, smuggled,
+    hero_ally, hero_foreign, hero_good, hero_evil, hero_corrupt };
 // The per-type icon shows only while the corruption filter is on; the information icon is not gated by it.
 [[nodiscard]] std::vector<PlanetStatusIcon> planet_status_icons(const PlanetHudFacts& planet, bool corruption_layer = false);
 // Texture name an icon kind draws from the authored lists: the first build
@@ -368,6 +389,33 @@ inline constexpr std::size_t corruption_information_icon_index = 8;
 // Each draws the first icon of its own authored component (`g_smuggler`,
 // `g_bounty_hunter`, `g_smuggled`); empty when that component has no icon.
 [[nodiscard]] std::string status_effect_component_name(PlanetStatusIcon kind);
+// WGSI-3: a hero icon draws one alternate texture of the authored `g_hero` list: 0 you, 1 enemy, 2..4 the good,
+// evil and corrupt side. Empty when a mod authors a shorter list.
+[[nodiscard]] bool is_hero_status_icon(PlanetStatusIcon kind) noexcept;
+// WGSI-4: which of the command bar's three sides a faction name is, ASCII case-insensitive. A side the data does not
+// name (an empty name) matches nothing, so a mod faction without a side name never takes a hero icon.
+enum class HeroSide : std::uint8_t { none, good, evil, corrupt };
+[[nodiscard]] HeroSide hero_side(std::string_view faction, std::string_view good, std::string_view evil,
+    std::string_view corrupt) noexcept;
+[[nodiscard]] std::string hero_status_icon_name(PlanetStatusIcon kind, const std::vector<std::string>& alternates);
+// WGSI-9: the hero types, in listing order, the tooltip of a hero icon shows. The ally icon lists the allied heroes, the
+// foreign icon the heroes that are not allied, a faction icon the heroes whose owner is of that command bar side
+// (`side_of` names the side of an owner). Any other icon kind lists nothing.
+[[nodiscard]] std::vector<sim::galactic::TypeId> hero_tooltip_types(const std::vector<PlanetHeroTip>& heroes,
+    PlanetStatusIcon kind, const std::function<HeroSide(PlayerId)>& side_of);
+// WGSI-8: the slot grid of an icon tooltip. Items are placed in reverse listing order, each into the first free slot of
+// a six-per-row grid (at most 36), so the last item takes the first slot. `slots[i]` is item i's column and row (rows
+// run downward); `columns` is the widest occupied row and `rows` the occupied row count.
+struct TooltipSlot final {
+    std::size_t column{}, row{};
+    friend bool operator==(const TooltipSlot&, const TooltipSlot&) = default;
+};
+struct TooltipSlots final {
+    std::vector<TooltipSlot> slots;
+    std::size_t columns{}, rows{};
+};
+inline constexpr std::size_t tooltip_slot_columns = 6, tooltip_slot_capacity = 36;
+[[nodiscard]] TooltipSlots tooltip_icon_slots(std::size_t count);
 [[nodiscard]] std::string status_effect_icon_name(PlanetStatusIcon kind, const std::vector<std::string>& component_icons);
 // Previous/next planet buttons (`b_planet_left`/`b_planet_right`): step through
 // an ordered list of planet ids with wrap-around. The list order and filter
@@ -389,12 +437,38 @@ struct StatusRowOrigin final { double x{}, y{}; };
 // Centres of icons of the given widths laid out edge to edge from origin_x.
 [[nodiscard]] std::vector<double> status_row_centres(double origin_x, const std::vector<double>& widths);
 
+// WGFI-3: the transition's progress as the whole percent the text shows (truncated, clamped to 0..100).
+[[nodiscard]] int corruption_transition_percent(float fraction) noexcept;
+
+// WGSI-11: the smuggler icon's tooltip fills its authored text's %d with the siphoned credits rounded to the nearest
+// whole credit (halves away from zero).
+[[nodiscard]] std::int64_t siphon_tooltip_credits(sim::math::Fixed siphoned) noexcept;
+
 // GHUDL-18: the filter controls the authored icon; unknown ownership uses grey. #6053: retail builds the icon from
 // the command-bar mega texture only (debug build: no atlas entry, no quad), so a
 // name outside it draws nothing; an atlas entry keeps its own size.
 struct BonusIconStyle final { bool visible{}; Rgb tint{}; };
 [[nodiscard]] BonusIconStyle planet_bonus_icon_style(bool layer_visible, const std::string& icon, bool in_command_atlas,
     float alpha, const Rgb* owner_colour) noexcept;
+
+// #6756 (same rule as #6053): every command-bar icon component (the planet bonus icon, the weather icon on the opened map
+// and in the planet card header) is set from the command-bar mega texture, so a name that is not an entry of it draws
+// nothing, whatever other texture the mod ships under that name (a mod may author a full-screen loading picture there).
+// A missing atlas holds no entry.
+[[nodiscard]] bool command_bar_icon_in_atlas(const assets::MegaTexture* atlas, std::string_view icon) noexcept;
+
+// #6756: a text component's authored Scale sizes its glyphs (the Remake chain's population readout authors 0.7): the
+// glyph raster height at the natural size, scaled and rounded, never below one pixel; no scale (1) keeps the natural size.
+[[nodiscard]] inline int scaled_glyph_pixels(const int natural_pixels, const float scale) noexcept {
+    return std::max(1, static_cast<int>(static_cast<float>(natural_pixels) * scale + 0.5F));
+}
+
+// GPI-10 (legacy #6756): the Planet Info dialog's weather picture is the planet's weather icon name with its first four characters
+// replaced by the loading-picture prefix, whatever the name: a stock `i_pa_weather_sun.tga` reads
+// `load_weather_sun.tga`, and a name authored as `Loadscreens/<file>` reads the same path.
+[[nodiscard]] inline std::string planet_info_weather_picture(const std::string& icon) {
+    return icon.empty() ? std::string{} : "load" + icon.substr(std::min<std::size_t>(4, icon.size()));
+}
 
 // GHUDL-18: centre of a texture of the given size
 // placed at the authored offset (x right, y up) from the planet anchor, scaled by the UI scale.

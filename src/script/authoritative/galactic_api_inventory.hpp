@@ -5,7 +5,7 @@
 #include <string_view>
 
 namespace eawr::script::authoritative::detail {
-inline constexpr std::array<std::string_view, 107> missing_galactic_globals{{
+inline constexpr std::array<std::string_view, 105> missing_galactic_globals{{
     "Add_Objective",
     "Add_Planet_Highlight",
     "Add_Radar_Blip",
@@ -98,13 +98,11 @@ inline constexpr std::array<std::string_view, 107> missing_galactic_globals{{
     "Target.Force_Test_Space_Conflict",
     "Target.Get_Affiliated_Indigenous_Type",
     "Target.Get_Next_Starbase_Type",
-    "Target.Is_Corrupted",
     "Thread.Kill",
     "ThreadValue.Get",
     "Transition_Cinematic_Camera_Key",
     "Transition_Cinematic_Target_Key",
     "Transition_To_Tactical_Camera",
-    "WaitForStarbase",
     "Weather_Audio_Pause",
     "WeightedTypeList.Create",
     "Zoom_Camera",

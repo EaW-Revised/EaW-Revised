@@ -1,3 +1,4 @@
+#include "eawr/core/gc_profile.hpp"
 #include "eawr/core/tick_profile.hpp"
 #include "ai_engine_internal.hpp"
 
@@ -444,6 +445,7 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
 
 bool Engine::production_time_allowed(const PlayerAi& player, const Goal& goal) const {
     if (player.galactic) {
+        gc_profile::Scope profile_scope(gc_profile::Phase::goal_time);
         if (!goal.potential) return false;
         const auto estimate = galactic_estimate(player, goal, *goal.potential, false);
         const auto linear = galactic_estimate(player, goal, *goal.potential, true);
@@ -463,8 +465,11 @@ bool Engine::test_valid(PlayerAi& player, Goal& goal) {
     mark_native_state_changed();
     if (!goal.potential || !goal.potential->valid) return false;
     if (goal.plan != 0) return player.running.contains(goal.plan);
-    if (player.galactic) return select_units(player, goal, *goal.potential)
-        && production_time_allowed(player, goal) && galactic_fundable(player, goal, true);
+    if (player.galactic) {
+        const SelectionWindow window(*this); // #7056: one selector input for the three checks of this goal
+        return select_units(player, goal, *goal.potential)
+            && production_time_allowed(player, goal) && galactic_fundable(player, goal, true);
+    }
     if (!goal.potential->reserved && !goal.potential->funded)
         return select_units(player, goal, *goal.potential) && production_time_allowed(player, goal);
     for (const sim::EntityId object : goal.potential->freestore) {

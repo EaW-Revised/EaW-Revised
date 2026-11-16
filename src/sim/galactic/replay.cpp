@@ -175,7 +175,7 @@ core::Result<void> validate_replay(const GalacticReplay& replay) {
         const auto& effect = replay.native_effects[i];
         if (effect.sequence != i + 1 || effect.frontier > replay.final_tick_count
             || effect.phase > NativeEffectPhase::world_service || effect.kind < NativeEffectKind::fleet
-            || effect.kind > NativeEffectKind::story_ai_usage
+            || effect.kind > NativeEffectKind::object_despawn
             || (effect.phase == NativeEffectPhase::world_service && effect.frontier == replay.final_tick_count)
             || effect.payload.size() > galactic_replay_max_payload)
             return fail<void>(diagnostic_codes::replay_order, "invalid native effect framing, phase or frontier");

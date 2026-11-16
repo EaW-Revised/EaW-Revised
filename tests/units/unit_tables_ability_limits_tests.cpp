@@ -84,6 +84,61 @@ const t::AbilityProfile* ability_of(const t::AbilityTable& table, const std::str
     return slot ? &profile->abilities[*slot] : nullptr;
 }
 
+// WAB-77 (#6744): a craft (FIGHTER_LOCOMOTOR) that no squadron lists and that authors its own BUZZ_DROIDS and nested
+// data keeps a solo-only entry, last in its profile (a solo ship is its own container, WHE-SQ-02); a ship keeps an
+// ordinary entry; a craft some squadron lists as a member keeps no buzz entry at all (AB-60), so squadron members get
+// no new slot and their ability state is unchanged.
+void solo_buzz_entries() {
+    TempTree tree;
+    write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
+    const auto tables = load_layers({tree.root});
+    if (!tables) return;
+    const auto authored_buzz = [](auto& unit) {
+        eawr::units::Ability ability;
+        ability.type = "BUZZ_DROIDS";
+        ability.authored_type = "BUZZ_DROIDS";
+        ability.recharge_seconds = Fixed::from_decimal("120").value();
+        unit.abilities.push_back(std::move(ability));
+        eawr::units::BuzzDroids buzz;
+        buzz.name = "Test_Drones";
+        buzz.min_range = Fixed{};
+        buzz.max_range = Fixed::from_decimal("500").value();
+        buzz.chase_radius = Fixed{};
+        buzz.damage_radius = Fixed::from_decimal("500").value();
+        buzz.enemy_damage_per_second = Fixed{};
+        buzz.own_damage_per_second = Fixed::from_decimal("1").value();
+        buzz.activation_seconds = Fixed::from_decimal("1").value();
+        buzz.object_type = "Test_Fighter";
+        unit.buzz_droids = std::move(buzz);
+    };
+    for (const bool craft : {false, true}) {
+        auto changed = *tables;
+        changed.constants.scalars.push_back({"Object_Max_Speed_Multiplier_Space", Fixed::from_decimal("1").value(), {}});
+        for (auto& unit : changed.units) {
+            if (unit.id == "Test_Frigate") {
+                unit.kind = craft ? eawr::units::UnitKind::craft : eawr::units::UnitKind::ship;
+                authored_buzz(unit);
+            }
+            if (unit.id == "Test_Fighter") authored_buzz(unit); // listed by Test_Squadron: a squadron member
+        }
+        const auto built = eawr::units::ability_table(changed, std::vector<t::PlayerId>{1});
+        expect(static_cast<bool>(built), "#6744: a unit with its own buzz droids builds an ability table");
+        if (!built) continue;
+        const auto* frigate = built.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+        const auto slot = frigate ? t::ability_slot(*frigate, t::AbilityKind::buzz_droids) : std::nullopt;
+        expect(slot && frigate->abilities[*slot].buzz && frigate->abilities[*slot].solo_only == craft
+                && (!craft || *slot + 1 == frigate->abilities.size()),
+            craft ? "#6744: a solo-capable craft keeps its own buzz entry, solo-only and last"
+                  : "#6744: a ship keeps an ordinary buzz entry, as before");
+        expect(frigate && std::count_if(frigate->abilities.begin(), frigate->abilities.end(),
+                [](const auto& entry) { return entry.solo_only; }) == (craft ? 1 : 0),
+            "#6744: only the craft's own buzz entry is solo-only");
+        const auto* member = built.value().find(eawr::assets::object_type_crc("Test_Fighter"));
+        expect(member == nullptr || !t::ability_slot(*member, t::AbilityKind::buzz_droids),
+            "#6744: a craft that a squadron lists gets no buzz slot, whatever it authors (squadron state is unchanged)");
+    }
+}
+
 void container_replenishment_loading() {
     const std::string refill = "<Unit_Ability><Type>REPLENISH_WINGMEN</Type>"
         "<Recharge_Seconds>60</Recharge_Seconds><Particle_Effect>test_refill</Particle_Effect></Unit_Ability>";
@@ -279,10 +334,11 @@ void bad_entry_skips_only_its_type() {
     expect(static_cast<bool>(t::validate_abilities(lenient.value())), "#4666: the lenient table validates");
 }
 
-// #5696: a bare SELF_DESTRUCT row (no Expiration_Seconds) never starts in retail (WSD-01): the type loads
-// without the row and says so; strict keeps refusing it.
-void bare_stub_rows_are_inert() {
-    for (const auto kind : {"SELF_DESTRUCT"}) {
+// #5696, #5704: a bare SELF_DESTRUCT row (no Expiration_Seconds) never starts in retail (WSD-01), so it is inert.
+// A bare BARRAGE row is not inert there (it runs without a time limit), but the remake has no unlimited barrage
+// (BARR-05, a known deviation). In both cases the type loads without the row and says so; strict keeps refusing it.
+void bare_stub_rows_are_dropped() {
+    for (const auto kind : {"SELF_DESTRUCT", "BARRAGE"}) {
         TempTree tree;
         auto xml = with_second_frigate(layer_xml("15", "0.8"));
         const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
@@ -313,6 +369,40 @@ void bare_stub_rows_are_inert() {
         }), "#5696: a load note, never a type skip");
         expect(static_cast<bool>(t::validate_abilities(lenient.value())), "#5696: the lenient table validates");
     }
+}
+
+// #5704 (WHE-79): a REPLENISH_WINGMEN row on a type that authors no Create_Team_Type has nothing to create; retail has
+// no load check for it, so a lenient load drops the row and keeps the type; strict keeps refusing it.
+void replenish_row_without_a_team_type() {
+    TempTree tree;
+    auto xml = with_second_frigate(layer_xml("15", "0.8"));
+    const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+    const auto begin = xml.find("<Unit_Abilities_Data", ship);
+    const auto end = xml.find("</Unit_Abilities_Data>", begin);
+    xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
+        "<Unit_Abilities_Data><Unit_Ability><Type>REPLENISH_WINGMEN</Type></Unit_Ability>"
+        "<Unit_Ability><Type>TURBO</Type><Recharge_Seconds>1</Recharge_Seconds></Unit_Ability></Unit_Abilities_Data>");
+    write_fixture(tree.root, xml);
+    const auto tables = load_layers({tree.root});
+    expect(tables.has_value(), "#5704: the replenish fixture loads");
+    if (!tables) return;
+    expect(!eawr::units::ability_table(*tables, {}, nullptr, true, eawr::units::ContentErrors::strict),
+        "#5704: strict still refuses a replenish row with no team");
+    std::vector<eawr::core::Diagnostic> diagnostics;
+    const auto lenient = eawr::units::ability_table(*tables, {}, nullptr, true,
+        eawr::units::ContentErrors::skip_object, &diagnostics);
+    expect(static_cast<bool>(lenient), "#5704: a lenient load builds the table");
+    if (!lenient) return;
+    expect(ability_of(lenient.value(), "Test_Frigate", t::AbilityKind::replenish_wingmen) == nullptr,
+        "#5704: the inert replenish row is dropped");
+    expect(ability_of(lenient.value(), "Test_Frigate", t::AbilityKind::turbo) != nullptr,
+        "#5704: the type keeps its other abilities");
+    expect(std::any_of(diagnostics.begin(), diagnostics.end(), [](const auto& row) {
+        return row.severity == eawr::core::Severity::warning && row.message.find("Create_Team_Type") != std::string::npos;
+    }) && std::none_of(diagnostics.begin(), diagnostics.end(), [](const auto& row) {
+        return row.message.find("skipped unit type") != std::string::npos;
+    }), "#5704: a load note, never a type skip");
+    expect(static_cast<bool>(t::validate_abilities(lenient.value())), "#5704: the lenient table validates");
 }
 
 bool has_warning(const std::vector<eawr::core::Diagnostic>& rows, const std::string_view text) {
@@ -590,6 +680,8 @@ void super_laser_loading() {
         const std::string handler = "<Abilities SubObjectList=\"Yes\"><Super_Laser_Ability Name=\"Test_Beam\">"
             "<Activation_Style>User_Input</Activation_Style><Activation_Max_Range>300</Activation_Max_Range>"
             "<Damage_Per_Frame>20</Damage_Per_Frame><Fire_Delay>0.15</Fire_Delay>" + colour
+            + (authored_colour ? "<Face_Target>true</Face_Target><Turn_Rate>-1.0f</Turn_Rate><Firing_Cone>10.0f</Firing_Cone>"
+                "<Fire_Frame>60</Fire_Frame><Attack_Anim_Sub_Index>1</Attack_Anim_Sub_Index><Fire_Continuation>0.5</Fire_Continuation>" : "")
             + "</Super_Laser_Ability></Abilities>";
         write_fixture(tree.root, with_second_frigate(with_abilities(layer_xml("15", "0.8"),
             "<Unit_Ability><Type>SUPER_LASER</Type><GUI_Activated_Ability_Name>Test_Beam</GUI_Activated_Ability_Name>"
@@ -608,6 +700,19 @@ void super_laser_loading() {
         const std::array<std::uint8_t, 4> expected = authored_colour ? std::array<std::uint8_t, 4>{12, 34, 56, 78}
                                                                      : std::array<std::uint8_t, 4>{255, 255, 255, 255};
         expect(special.leech_colour == expected, "WSPL-06: Line_Color applies and Beam_Color does not override white");
+        // WSPL-08: the aiming and firing controls read their authored values, and keep the retail defaults when absent.
+        // The synthetic tree has no model, so no attack clip resolves.
+        const auto ten = eawr::units::Fixed::from_raw(10 * eawr::units::Fixed::scale);
+        expect(special.laser_face_target == authored_colour && special.attack_clip_frames == 0,
+            "WSPL-08: Face_Target reads, defaulting off");
+        expect(special.laser_turn_rate == (authored_colour ? eawr::units::Fixed::from_raw(-eawr::units::Fixed::scale) : ten),
+            "WSPL-08: Turn_Rate reads, defaulting to 10");
+        expect(special.laser_firing_cone == (authored_colour ? ten : eawr::units::Fixed::from_raw(45 * eawr::units::Fixed::scale)),
+            "WSPL-08: Firing_Cone reads, defaulting to 45");
+        expect(special.laser_fire_frame == (authored_colour ? eawr::units::Fixed::from_raw(60 * eawr::units::Fixed::scale) : eawr::units::Fixed{})
+            && special.laser_anim_sub_index == (authored_colour ? 1U : 0U)
+            && special.laser_continuation_frames == (authored_colour ? 15U : 0U),
+            "WSPL-08: Fire_Frame, Attack_Anim_Sub_Index and Fire_Continuation read, defaulting to zero");
     }
 }
 
@@ -1074,6 +1179,7 @@ void area_decal_distance_is_authored() {
 } // namespace
 
 void ability_limits() {
+    solo_buzz_entries();
     area_decal_distance_is_authored();
     container_replenishment_loading();
     rocket_hero_loading();
@@ -1225,7 +1331,8 @@ void ability_limits() {
     leaf_values_reach_the_table();
     three_abilities_are_kept();
     bad_entry_skips_only_its_type();
-    bare_stub_rows_are_inert();
+    bare_stub_rows_are_dropped();
+    replenish_row_without_a_team_type();
     non_blast_self_destruct_is_kept();
     self_destruct_stop_parameter();
     interdict_default_parameter();

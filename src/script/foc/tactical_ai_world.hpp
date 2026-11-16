@@ -109,6 +109,7 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
                 [](const Member& left, const Member& right) { return left.first < right.first; });
         }
     }
+    const bool tsw_gate_open = world.tsw_gate_open();
     view->units.resize(units.size());
     view->capture_candidates.resize(units.size());
     const auto prepared = preparation_executor.execute_phase("ai-world-view",
@@ -145,6 +146,15 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
             entry = std::move(projected);
         }
         if (const auto combat = world.combat_state(unit.entity_id)) entry.attack_target = combat->attack_target;
+        if (const auto* combat_profile = world.combat().find(unit.type_id); combat_profile && combat_profile->tactical_super_weapon) {
+            TswView row;
+            row.gate_open = tsw_gate_open;
+            if (const auto record = world.tsw_state(unit.entity_id)) {
+                row.active = true;
+                row.phase = record->phase;
+            }
+            entry.tsw = row;
+        }
         if (const auto motion = world.motion_state(unit.entity_id)) entry.moving = motion->kind != tactical::MotionKind::none;
         // EX-57: team members cannot join formations independently. Use admitted
         // motion profiles, rather than an XML locomotor declaration on a skipped type.

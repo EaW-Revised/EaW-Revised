@@ -9,11 +9,17 @@
 #include "eawr/sim/math/trig.hpp"
 #include "eawr/core/load_note.hpp"
 #include "skirmish_internal.hpp"
+#include "setup_workers.hpp"
+#include "eawr/skirmish/setup_facts.hpp"
 
 #include <algorithm>
 #include <charconv>
 #include <iterator>
 #include <limits>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <set>
 
 namespace eawr::skirmish {
@@ -310,6 +316,22 @@ void merge_land_pad_types(units::UnitTables& tables, const units::UnitTables& pa
                     for (auto& entry : *entries) translate(entry.squadron_index, unit_remap);
         }
     }
+    // #6993: the companies a structure's menu offers are decoded with the pad types. A company the tables already hold stays as it is;
+    // the others follow in the pads' order, with the unresolved rows that name them or their members and team type (a refused
+    // authored value must refuse the company here as it does for a selected one).
+    for (const auto& company : pads.land_companies) {
+        if (std::any_of(tables.land_companies.begin(), tables.land_companies.end(),
+                [&](const units::LandCompany& row) { return core::iequals(row.id, company.id); })) continue;
+        tables.land_companies.push_back(company);
+        const auto owned = [&](const std::string& owner) {
+            return core::iequals(owner, company.id) || (!company.team_type.empty() && core::iequals(owner, company.team_type))
+                || std::any_of(company.members.begin(), company.members.end(),
+                    [&](const units::LandCompanyMember& member) { return core::iequals(owner, member.type); });
+        };
+        for (const auto& row : pads.unresolved)
+            if (owned(row.owner) && std::find(tables.unresolved.begin(), tables.unresolved.end(), row) == tables.unresolved.end())
+                tables.unresolved.push_back(row);
+    }
 }
 
 void merge_land_pad_rules(sim::tactical::EconomyRules& land, sim::tactical::EconomyRules&& builder) {
@@ -319,15 +341,40 @@ void merge_land_pad_rules(sim::tactical::EconomyRules& land, sim::tactical::Econ
     land.income = std::move(builder.income);
 }
 
+namespace {
+// The one reader. `identity` null: the start's own read, exactly as before (the data identity is read inside the start
+// inputs, after the map, and every index is built for this map alone). Non-null: the setup list's many-map read.
+core::Result<LandStartInputs> read_land_start_inputs_impl(const Fixture& fixture, const vfs::Vfs& filesystem,
+    const data::Catalog& catalog, const units::UnitTables& tables, const DataIdentity* identity,
+    CampaignStartInputsCache& cache);
+} // namespace
+
 core::Result<LandStartInputs> read_land_start_inputs(const Fixture& fixture, const vfs::Vfs& filesystem,
     const data::Catalog& catalog, const units::UnitTables& tables) {
+    CampaignStartInputsCache cache;
+    return read_land_start_inputs_impl(fixture, filesystem, catalog, tables, nullptr, cache);
+}
+
+core::Result<LandStartInputs> read_land_start_inputs(const Fixture& fixture, const vfs::Vfs& filesystem,
+    const data::Catalog& catalog, const units::UnitTables& tables, const DataIdentity& identity,
+    CampaignStartInputsCache& cache) {
+    return read_land_start_inputs_impl(fixture, filesystem, catalog, tables, &identity, cache);
+}
+
+namespace {
+core::Result<LandStartInputs> read_land_start_inputs_impl(const Fixture& fixture, const vfs::Vfs& filesystem,
+    const data::Catalog& catalog, const units::UnitTables& tables, const DataIdentity* identity,
+    CampaignStartInputsCache& cache) {
     using Result = core::Result<LandStartInputs>;
     LandStartInputs result;
-    auto map = assets::load_map(filesystem, fixture.map, assets::object_type_catalog(catalog));
+    // The object-type index resolves every game object of the catalog: build it once per caller, not once per map.
+    const auto own_types = cache.object_types ? assets::ObjectTypeCatalog{} : assets::object_type_catalog(catalog);
+    auto map = assets::load_map(filesystem, fixture.map, cache.object_types ? *cache.object_types : own_types);
     if (!map) return Result::failure(map.error());
     if (map.value().kind != assets::MapKind::land) return Result::failure(invalid("land start requires a land map"));
     result.map = std::move(map).value();
-    auto common = read_start_inputs(fixture, filesystem, catalog, tables);
+    auto common = identity ? read_start_inputs(fixture, filesystem, catalog, tables, *identity, cache)
+                           : read_start_inputs(fixture, filesystem, catalog, tables);
     if (!common) return Result::failure(common.error());
     result.common = std::move(common).value();
     {
@@ -408,6 +455,7 @@ core::Result<LandStartInputs> read_land_start_inputs(const Fixture& fixture, con
     }
     return Result::success(std::move(result));
 }
+} // namespace
 
 std::vector<std::string> land_vehicle_start_forces(std::string_view faction) {
     // Stock vehicle companies per playable faction (catalog scan: no Create_Team_Type, vehicle collision classes).
@@ -435,6 +483,16 @@ void set_land_vehicles_only(LandStartInputs& inputs, bool enabled) {
 
 core::Result<std::vector<SetupMap>> land_setup_maps(const vfs::Vfs& filesystem,
     const data::Catalog& catalog, SetupMapQuery query) {
+    return land_setup_maps(filesystem, catalog, std::move(query), std::thread::hardware_concurrency());
+}
+
+core::Result<std::vector<SetupMap>> land_setup_maps(const vfs::Vfs& filesystem,
+    const data::Catalog& catalog, SetupMapQuery query, const unsigned requested_workers) {
+    return land_setup_maps(filesystem, catalog, std::move(query), requested_workers, nullptr);
+}
+
+core::Result<std::vector<SetupMap>> land_setup_maps(const vfs::Vfs& filesystem,
+    const data::Catalog& catalog, SetupMapQuery query, const unsigned requested_workers, SetupMapFactsStore* const facts) {
     using Result = core::Result<std::vector<SetupMap>>;
     query.kind = assets::MapKind::land;
     auto records = filesystem.enumerate("data/art/maps/", ".ted");
@@ -442,14 +500,96 @@ core::Result<std::vector<SetupMap>> land_setup_maps(const vfs::Vfs& filesystem,
     auto custom = filesystem.enumerate("data/custommaps/", ".ted");
     if (!custom) return Result::failure(custom.error());
     records.value().insert(records.value().end(), custom.value().begin(), custom.value().end());
-    std::vector<SetupMap> result;
     const units::UnitTables empty;
-    auto texts = data::ui::load_language_text_database(filesystem, "ENGLISH");
-    for (const auto& record : records.value()) {
-        auto map = assets::load_map(filesystem, record.canonical_path, assets::object_type_catalog(catalog));
-        if (!map || !setup_map_eligible(map.value(), query)) continue;
+    // One object-type index (it resolves every game object of the catalog), one data identity and one language text
+    // database for the whole list: every map below reads against the same mounted view. They are built by the first map
+    // that is not served from the facts store, so a list served entirely from the store builds none of them.
+    std::once_flag shared_once;
+    std::optional<assets::ObjectTypeCatalog> shared_types;
+    std::optional<core::Result<DataIdentity>> shared_identity;
+    std::optional<decltype(data::ui::load_language_text_database(filesystem, "ENGLISH"))> shared_texts;
+    const auto ensure_shared = [&] {
+        std::call_once(shared_once, [&] {
+            shared_types.emplace(assets::object_type_catalog(catalog));
+            shared_identity.emplace(read_data_identity(filesystem));
+            shared_texts.emplace(data::ui::load_language_text_database(filesystem, "ENGLISH"));
+        });
+    };
+    constexpr std::uint64_t header_prefix_bytes = 64U * 1024U;
+    // Each worker thread owns one start-facts cache (the map-independent facts are read once per thread, not per map).
+    std::mutex caches_mutex;
+    std::map<std::thread::id, CampaignStartInputsCache> caches;
+    const auto cache_of_this_thread = [&]() -> CampaignStartInputsCache& {
+        const std::lock_guard lock(caches_mutex);
+        auto [slot, inserted] = caches.try_emplace(std::this_thread::get_id());
+        if (inserted) slot->second.object_types = &*shared_types;
+        return slot->second;
+    };
+    // The decode runs on workers: each record owns its output slot and the entries are merged in record order, so the
+    // list is the one a serial pass gives.
+    std::vector<std::optional<SetupMap>> candidates(records.value().size());
+    const std::string facts_context = facts ? setup_facts_context(filesystem, catalog, setup_facts_land_kind) : std::string{};
+    const auto errors = detail::run_setup_map_workers(candidates.size(), requested_workers, [&](const std::size_t index) {
+        const auto& record = records.value()[index];
+        // load_map's allocation guard comes before any open: a TED over the limit is skipped without reading it.
+        if (record.size > 512U * 1024U * 1024U) return;
+        const auto stamp = facts ? setup_facts_stamp(filesystem, record) : std::nullopt;
+        const auto remember_header = [&](const assets::Map& header) {
+            if (stamp) facts->put(setup_facts_header_kind, {}, record.canonical_path, *stamp, encode_setup_header_facts(header));
+        };
+        // The map's authored header: from the store, or read (the prefix first, as the space list does) and stored.
+        std::optional<assets::Map> stored_header;
+        if (stamp) {
+            if (const auto body = facts->lookup(setup_facts_header_kind, {}, record.canonical_path, *stamp))
+                stored_header = decode_setup_header_facts(*body);
+        }
+        std::optional<core::Result<std::vector<std::byte>>> bytes;
+        if (stored_header) {
+            if (!setup_map_eligible(*stored_header, query)) return;
+        } else {
+            // The setup list's rule (#5197): a map the picker rejects costs one small read of its header prefix, not a
+            // whole decode. A header that does not fit the prefix, or any prefix failure, takes the whole-map path.
+            if (!query.read_whole_headers && record.size > header_prefix_bytes) {
+                if (auto prefix = filesystem.open_prefix(record.canonical_path, header_prefix_bytes)) {
+                    auto prefix_source = assets::source_from(record);
+                    prefix_source.stored_size = 0;
+                    auto header = assets::load_map_header(prefix.value(), std::move(prefix_source));
+                    if (header && !setup_map_eligible(header.value(), query)) {
+                        remember_header(header.value());
+                        return;
+                    }
+                }
+            }
+            bytes = filesystem.open(record.canonical_path);
+            if (!*bytes) return;
+            auto header = assets::load_map_header(bytes->value(), assets::source_from(record));
+            if (!header) return;
+            remember_header(header.value());
+            if (!setup_map_eligible(header.value(), query)) return;
+        }
+        // A finished entry from the store: nothing of the map is opened or decoded.
+        if (stamp && !facts_context.empty()) {
+            if (const auto body = facts->lookup(setup_facts_land_kind, facts_context, record.canonical_path, *stamp)) {
+                if (auto stored = decode_setup_entry(*body); stored && stored->path == record.canonical_path
+                    && stored->domain == sim::tactical::BattleDomain::land) {
+                    candidates[index] = std::move(*stored);
+                    return;
+                }
+            }
+        }
+        ensure_shared();
+        const auto& types = *shared_types;
+        const auto& identity = *shared_identity;
+        const auto& texts = *shared_texts;
+        if (!bytes) {
+            bytes = filesystem.open(record.canonical_path);
+            if (!*bytes) return;
+        }
+        auto map = assets::load_map(bytes->value(), assets::source_from(record), types);
+        if (!map || !setup_map_eligible(map.value(), query)) return;
         Fixture fixture; fixture.map = record.canonical_path;
-        auto inputs = read_land_start_inputs(fixture, filesystem, catalog, empty);
+        auto inputs = identity ? read_land_start_inputs(fixture, filesystem, catalog, empty, identity.value(), cache_of_this_thread())
+                               : core::Result<LandStartInputs>::failure(identity.error());
         SetupMap entry;
         entry.path = fixture.map; entry.name = map.value().display_name_key.value_or(fixture.map);
         if (map.value().display_name_key && !map.value().display_name_key->empty()) {
@@ -472,17 +612,32 @@ core::Result<std::vector<SetupMap>> land_setup_maps(const vfs::Vfs& filesystem,
             }
             if (entry.teams.size() < 2) entry.unavailable = "Land map needs two authored spawn teams.";
         }
-        result.push_back(std::move(entry));
+        if (stamp && !facts_context.empty())
+            facts->put(setup_facts_land_kind, facts_context, record.canonical_path, *stamp, encode_setup_entry(entry));
+        candidates[index] = std::move(entry);
+    });
+    if (facts) facts->flush();
+    // A worker that threw: the first failing record in record order is the error (as a serial pass would have thrown).
+    for (std::size_t index = 0; index < errors.size(); ++index) {
+        if (!errors[index]) continue;
+        try { std::rethrow_exception(errors[index]); }
+        catch (const std::exception& error) {
+            return Result::failure(invalid("Could not prepare land map " + records.value()[index].canonical_path + ": " + error.what()));
+        } catch (...) {
+            return Result::failure(invalid("Could not prepare land map " + records.value()[index].canonical_path + ": unknown worker exception"));
+        }
     }
+    std::vector<SetupMap> result;
+    for (auto& candidate : candidates) if (candidate) result.push_back(std::move(*candidate));
     std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.path < b.path; });
     return Result::success(std::move(result));
 }
 
 core::Result<std::vector<SetupMap>> setup_domain_maps(const vfs::Vfs& filesystem, const data::Catalog& catalog,
-    const SetupMapQuery& query, const bool land, std::string* const land_failure) {
-    auto maps = setup_maps(filesystem, catalog, query);
+    const SetupMapQuery& query, const bool land, std::string* const land_failure, SetupMapFactsStore* const facts) {
+    auto maps = setup_maps(filesystem, catalog, query, std::thread::hardware_concurrency(), facts);
     if (!land || !maps || query.kind != assets::MapKind::space) return maps;
-    auto lands = land_setup_maps(filesystem, catalog, query);
+    auto lands = land_setup_maps(filesystem, catalog, query, std::thread::hardware_concurrency(), facts);
     if (!lands) {
         if (land_failure) *land_failure = "EAWR land setup maps: " + core::format_diagnostic(lands.error());
         return maps;
@@ -525,6 +680,7 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
     result.content.land.reinforcement = inputs.reinforcement_constants; // LC-44..52; the per-type rows are bound below
     result.content.durability = bindings.durability;
     result.content.combat = bindings.combat;
+    result.content.abilities = bindings.abilities; // WLAB-01 (#3238)
     auto terrain = bind_land_terrain(result.content, start.setup, inputs.map, bindings.movement_masks, bindings.bounds);
     if (!terrain) return Result::failure(terrain.error());
     // LC-85/86: the land fog grid over the whole terrain rectangle, and the sensor rows of the land types. The land
@@ -536,6 +692,19 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
         if (!fog) return Result::failure(fog.error());
         result.content.fog = std::move(fog).value();
         result.content.sensors = sensor_table(*inputs.common.tables);
+        // #6993: a company a structure's menu sells lands later with members the start's own tables may not hold; their sensor
+        // rows come from the pad load that decoded them, or they would never reveal.
+        units::UnitTables offered;
+        for (const auto& binding : bindings.land.companies) for (const auto& member : binding.company.members) {
+            const auto named = [&](const units::UnitType& row) { return detail::iequals(row.id, member.type); };
+            if (std::any_of(inputs.common.tables->units.begin(), inputs.common.tables->units.end(), named)
+                || std::any_of(offered.units.begin(), offered.units.end(), named)) continue;
+            const auto found = std::find_if(inputs.pad_tables.units.begin(), inputs.pad_tables.units.end(), named);
+            if (found != inputs.pad_tables.units.end()) offered.units.push_back(*found);
+        }
+        for (const auto& row : sensor_table(offered))
+            if (std::none_of(result.content.sensors.begin(), result.content.sensors.end(),
+                    [&](const auto& seen) { return seen.type_id == row.type_id; })) result.content.sensors.push_back(row);
     }
     std::vector<std::uint8_t> identity(start.setup.content_identity.begin(), start.setup.content_identity.end());
     identity.insert(identity.end(), bindings.identity.begin(), bindings.identity.end());
@@ -681,6 +850,14 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
         auto built = economy_rules(start, inputs.common, inputs.pad_tables, false);
         if (!built) return Result::failure(built.error());
         merge_land_pad_rules(result.content.economy, std::move(built).value());
+        // #6993: a menu sells a company only when the content binds it (a company the land content refused cannot land, so its
+        // entry is listed disabled instead of taking the player's credits).
+        for (auto& menu : result.content.economy.menus) for (auto& option : menu.options) {
+            if (option.kind != BuildKind::unit || binding_for(option.type) != bindings.land.companies.end()) continue;
+            option.available = false;
+            if (option.disabled_reason.empty())
+                option.disabled_reason = "Not available yet: this company cannot be placed in a land battle in this version.";
+        }
         // WBP-50: the capture and proximity candidates are the projectile-collidable types. The land member types are not pad types, so
         // their candidate rows come from the land tables (a candidate unless the type opts out; collidable only when it authors it).
         // A placed static structure has no row and stays a candidate (LE-CANDIDATE, open: its flags are not read on land).
@@ -796,6 +973,28 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
         }
         result.content.land.occupations.push_back(std::move(occupation).value());
         start.setup.units.push_back(unit.state);
+    }
+    // LC-104 (G-11, G-14a): the starting forces are the player's free garrison. The binding names the start company types
+    // and the setup ids of the companies; the session registers the members those companies create. The refill delay is the
+    // faction's Garrison_Reinforcement_Delay_Seconds; a faction without it has no refill and therefore no binding.
+    if (start.match.free_starting_units) for (const auto& player : start.players) {
+        if (!player.lobby) continue;
+        const auto forces = std::find_if(inputs.common.faction_forces.begin(), inputs.common.faction_forces.end(),
+            [&](const auto& value) { return detail::iequals(value.faction, player.faction); });
+        if (forces == inputs.common.faction_forces.end() || !forces->garrison_delay_frames) continue;
+        sim::tactical::FreeGarrisonSetup binding;
+        binding.player = player.player.player_id;
+        binding.delay_frames = *forces->garrison_delay_frames;
+        for (const auto& company : start.units) {
+            if (company.state.owner != binding.player || company.role != UnitRole::free_unit) continue;
+            const auto placed = std::lower_bound(start.setup.units.begin(), start.setup.units.end(), company.state.entity_id,
+                [](const auto& value, const auto id) { return value.entity_id < id; });
+            if (placed == start.setup.units.end() || placed->entity_id != company.state.entity_id) continue;
+            binding.templates.push_back(company.state.type_id);
+            binding.registered.push_back(company.state.entity_id);
+        }
+        std::sort(binding.registered.begin(), binding.registered.end());
+        if (!binding.templates.empty()) start.setup.free_garrisons.push_back(std::move(binding));
     }
     {
         auto& land_rules = result.content.land.reinforcement;
@@ -949,6 +1148,27 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
     if (!session) return Result::failure(session.error());
     return Result::success(std::move(result));
 }
+std::vector<std::string> land_offered_companies(const LandStartInputs& inputs, const std::span<const std::string> selected) {
+    std::vector<std::string> offered;
+    for (const auto& company : inputs.pad_tables.land_companies)
+        if (std::none_of(selected.begin(), selected.end(), [&](const auto& name) { return core::iequals(name, company.id); }))
+            offered.push_back(company.id);
+    return offered;
+}
+
+void add_offered_collision_classes(LandContentInputs& gates, const LandStartInputs& inputs, const std::span<const std::string> offered) {
+    std::set<std::string> missing;
+    for (const auto& company : inputs.pad_tables.land_companies) for (const auto& member : company.locomotion) {
+        if (std::none_of(offered.begin(), offered.end(), [&](const auto& name) { return core::iequals(name, company.id); })) continue;
+        const std::string name(units::to_string(member.collision_class));
+        if (std::none_of(gates.collision_class_order.begin(), gates.collision_class_order.end(),
+                [&](const auto& row) { return core::iequals(row.name, name); })) missing.insert(name);
+    }
+    auto next = std::uint32_t{};
+    for (const auto& row : gates.collision_class_order) next = std::max(next, row.order + 1);
+    for (const auto& name : missing) gates.collision_class_order.push_back({name, next++});
+}
+
 core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStartInputs& inputs,
     const LandContentInputs& content) {
     if (!inputs.common.tables)
@@ -961,7 +1181,11 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
             [&](const auto& row) { return core::iequals(row.id, object.id); })) tables.land_static_objects.push_back(object);
     tables.unresolved.insert(tables.unresolved.end(), inputs.static_tables.unresolved.begin(), inputs.static_tables.unresolved.end());
     merge_land_pad_types(tables, inputs.pad_tables); // LE-LOADER: durability, combat and sensor rows of pads and their children
-    auto bindings = build_land_bindings(tables, companies, content);
+    // #6993: the companies the structures' menus sell are bound after the selected ones.
+    const auto offered = land_offered_companies(inputs, companies);
+    auto gates = content;
+    add_offered_collision_classes(gates, inputs, offered);
+    auto bindings = build_land_bindings(tables, companies, gates, offered);
     if (!bindings) return core::Result<LandStart>::failure(bindings.error());
     return build_land_start(fixture, inputs, bindings.value());
 }

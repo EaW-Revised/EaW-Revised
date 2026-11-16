@@ -68,6 +68,10 @@ class RuntimeRendererExercise(unittest.TestCase):
             self.assertIn(LEGACY_SELECTOR_MARKER, completed.stdout)
             self.assertIn("EAWR runtime: shader cache binding admission, byte and entry budgets passed",
                           completed.stdout)
+            # One cache serving several renderers (a campaign session's layers and battles): hits add no
+            # entry, programs outlive the renderer that introduced them and the cache's creator.
+            self.assertIn("EAWR runtime: shared shader cache programs outlive renderers and owners",
+                          completed.stdout)
             self.assertEqual(output.count("SHADER ERROR"), 1, output)
             result = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(HARNESS.verify_runtime_report(result), [])

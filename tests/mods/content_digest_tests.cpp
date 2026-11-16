@@ -3,6 +3,7 @@
 #include "eawr/mods/content_digest.hpp"
 #include "eawr/mods/discovery.hpp"
 #include "eawr/mods/fingerprint.hpp"
+#include "eawr/platform/native_read.hpp"
 
 #define XXH_INLINE_ALL
 #include "../../third_party/xxhash/xxhash.h"
@@ -11,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <mutex>
@@ -18,6 +20,7 @@
 #include <string>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace eawr::mods;
@@ -522,6 +525,123 @@ void test_parallel_worker_counts() {
     }
 }
 
+// G7 (a): reader selection by storage media. A rotational disk gets rotational_worker_count readers (one by default), solid-state
+// and unknown media keep worker_count; the digest value never depends on it.
+void test_reader_selection_by_media() {
+    Scratch scratch;
+    const auto mod = scratch.path() / "media";
+    for (int i = 0; i < 24; ++i) write(mod / ("file" + std::to_string(i)), std::string(4096 + i, static_cast<char>('a' + i)));
+    const auto record = record_for(mod);
+    const auto run = [&](const std::function<bool(const fs::path&)>& probe, const std::size_t rotational_workers, const std::size_t workers) {
+        auto options = fast({});
+        options.worker_count = workers;
+        options.rotational_worker_count = rotational_workers;
+        options.is_rotational = probe;
+        ContentDigests digests(options);
+        (void)digests.lookup(record, true);
+        const auto result = digests.wait(record, 30s);
+        CHECK(result.state == ContentDigestState::ready);
+        return std::make_pair(result.sha256, digests.stats(record.key));
+    };
+    const auto hdd = [](const fs::path&) { return true; };
+    const auto ssd = [](const fs::path&) { return false; };
+    const auto on_hdd = run(hdd, 1, 4);
+    CHECK(on_hdd.second.workers == 1 && std::string(on_hdd.second.media) == "hdd");
+    const auto on_ssd = run(ssd, 1, 4);
+    CHECK(on_ssd.second.workers == 4 && std::string(on_ssd.second.media) == "ssd");
+    const auto two_on_hdd = run(hdd, 2, 4);
+    CHECK(two_on_hdd.second.workers == 2);
+    const auto never_more_than_asked = run(hdd, 8, 3);   // rotational_worker_count only lowers the count
+    CHECK(never_more_than_asked.second.workers == 3);
+    const auto off = run(hdd, 0, 4);                     // 0: no special case for rotational media
+    CHECK(off.second.workers == 4 && std::string(off.second.media) == "hdd");
+    CHECK(on_hdd.first == on_ssd.first && on_hdd.first == two_on_hdd.first && on_hdd.first == off.first);
+    CHECK(on_hdd.first == ContentDigests::compute_now(mod).sha256);
+    // Read order: a rotational disk reads in on-disk order (here: reversed names), solid-state and the off switch in listing order.
+    const auto order_of = [&](const std::function<bool(const fs::path&)>& probe, const bool disk_order) {
+        auto options = fast({});
+        options.is_rotational = probe;
+        options.disk_order_on_rotational = disk_order;
+        options.physical_offset = [](const fs::path& file) {   // file0 .. file23: later names sit earlier on the "disk"; file5 has no position
+            const auto name = file.filename().string();
+            if (name == "file5") return std::uint64_t{0};
+            return static_cast<std::uint64_t>(1000 - std::stoi(name.substr(4)));
+        };
+        std::vector<std::string> opened;
+        options.on_open = [&](std::string_view name) { opened.emplace_back(name); };
+        ContentDigests digests(options);
+        (void)digests.lookup(record, true);
+        const auto result = digests.wait(record, 30s);
+        CHECK(result.state == ContentDigestState::ready);
+        CHECK(result.sha256 == on_hdd.first);
+        return opened;
+    };
+    const auto listing_order = order_of(ssd, true);
+    CHECK(listing_order.size() == 24 && std::is_sorted(listing_order.begin(), listing_order.end()));
+    CHECK(order_of(hdd, false) == listing_order);
+    const auto disk_order = order_of(hdd, true);
+    CHECK(disk_order.size() == 24 && disk_order.front() == "file5" && disk_order[1] == "file23" && disk_order.back() == "file0");
+    // No probe override: the platform probe never throws; it answers for the volume, so a missing path under an existing folder
+    // gets that folder's answer.
+    CHECK(eawr::platform::storage_media_of(scratch.path() / "does-not-exist") == eawr::platform::storage_media_of(scratch.path()));
+    const auto media = eawr::platform::storage_media_of(mod);
+    CHECK(media == eawr::platform::StorageMedia::unknown || media == eawr::platform::StorageMedia::solid_state
+        || media == eawr::platform::StorageMedia::rotational);
+    auto options = fast({});
+    options.worker_count = 3;
+    ContentDigests platform_probe(options);
+    (void)platform_probe.lookup(record, true);
+    CHECK(platform_probe.wait(record, 30s).sha256 == on_hdd.first);
+    const auto stats = platform_probe.stats(record.key);
+    CHECK(stats.workers == (media == eawr::platform::StorageMedia::rotational ? 1u : 3u));
+}
+
+// G7 (a): the on-disk-order pre-pass opens every file for its position, so it pauses with pause_while like the workers do.
+void test_disk_order_pass_obeys_pause() {
+    Scratch scratch;
+    const auto mod = scratch.path() / "mod", cache = scratch.path() / "cache";
+    make_tiny(mod);
+    const auto record = record_for(mod);
+    std::atomic<bool> pause{true};
+    std::atomic<int> position_queries{0}, opens{0};
+    auto options = fast(cache);
+    options.is_rotational = [](const fs::path&) { return true; };
+    options.physical_offset = [&](const fs::path&) { ++position_queries; return std::uint64_t{1}; };
+    options.pause_while = [&] { return pause.load(); };
+    options.pause_poll = 20ms;
+    options.on_open = [&](std::string_view) { ++opens; };
+    ContentDigests digests(options);
+    CHECK(digests.lookup(record, true).state == ContentDigestState::pending);
+    std::this_thread::sleep_for(400ms);
+    CHECK(position_queries == 0 && opens == 0);   // started under pause: no file touched, not even for its position
+    CHECK(digests.stats(record.key).paused);
+    pause = false;
+    const ContentDigest done = digests.wait(record, 30s);
+    CHECK(done.state == ContentDigestState::ready && done.sha256 == kTinyDigest);
+    CHECK(position_queries == 3 && opens == 3);
+    // A digest another process finishes while this one is paused makes the order unnecessary: still no file is touched.
+    Scratch other_scratch;
+    const auto other_mod = other_scratch.path() / "mod", other_cache = other_scratch.path() / "cache";
+    make_tiny(other_mod);
+    const auto other_record = record_for(other_mod);
+    std::atomic<int> queries2{0}, opens2{0};
+    auto paused_options = fast(other_cache);
+    paused_options.is_rotational = [](const fs::path&) { return true; };
+    paused_options.physical_offset = [&](const fs::path&) { ++queries2; return std::uint64_t{1}; };
+    paused_options.pause_while = [] { return true; };
+    paused_options.pause_poll = 20ms;
+    paused_options.on_open = [&](std::string_view) { ++opens2; };
+    ContentDigests paused(paused_options);
+    CHECK(paused.lookup(other_record, true).state == ContentDigestState::pending);
+    std::this_thread::sleep_for(200ms);
+    ContentDigests game(fast(other_cache));
+    (void)game.lookup(other_record, true);
+    CHECK(game.wait(other_record, 30s).sha256 == kTinyDigest);
+    const ContentDigest adopted = paused.wait(other_record, 30s);
+    CHECK(adopted.state == ContentDigestState::ready && adopted.sha256 == kTinyDigest);
+    CHECK(queries2 == 0 && opens2 == 0 && paused.stats(other_record.key).adopted);
+}
+
 void test_old_cache_versions() {
     Scratch scratch;
     const auto mod = scratch.path() / "mod", cache = scratch.path() / "cache";
@@ -728,6 +848,93 @@ void test_pause_and_adopt() {
     }
 }
 
+// G7 (c): two jobs on one mod and one cache folder (the viewer and the mods service). A job takes per-file results the other
+// process saved while it was running, so no file is hashed twice, and partial saves merge rather than replace.
+void test_shared_partial_between_processes() {
+    {
+        Scratch scratch;
+        const auto mod = scratch.path() / "mod", cache = scratch.path() / "cache";
+        make_tiny(mod);
+        const auto record = record_for(mod);
+        std::atomic<bool> release{false}, held{false};
+        auto options = fast(cache);
+        options.partial_refresh = 5ms;
+        options.on_open = [&](std::string_view) {   // the first file is held open until the other job has finished everything
+            if (held.exchange(true)) return;
+            while (!release) std::this_thread::sleep_for(5ms);
+        };
+        ContentDigests first(options);
+        CHECK(first.lookup(record, true).state == ContentDigestState::pending);
+        while (!held) std::this_thread::sleep_for(5ms);
+        {
+            ContentDigests other(fast(cache));
+            (void)other.lookup(record, true);
+            CHECK(other.wait(record, 30s).sha256 == kTinyDigest);
+            CHECK(other.stats(record.key).files_hashed == 3);
+        }
+        release = true;
+        const ContentDigest done = first.wait(record, 30s);
+        const ContentJobStats stats = first.stats(record.key);
+        CHECK(done.state == ContentDigestState::ready && done.sha256 == kTinyDigest);
+        CHECK(done.sha256 == ContentDigests::compute_now(mod).sha256);
+        CHECK(stats.files_hashed == 1);
+        CHECK(stats.files_adopted == 2 && stats.files_reused == 2);
+        CHECK(stats.bytes_read < 38);   // not every byte: two of the three files came from the other job
+    }
+    {
+        // A result for a file whose size or mtime moved on is not taken.
+        Scratch scratch;
+        const auto mod = scratch.path() / "mod", cache = scratch.path() / "cache";
+        make_tiny(mod);
+        {
+            const auto record = record_for(mod);
+            ContentDigests seed(fast(cache));
+            (void)seed.lookup(record, true);
+            CHECK(seed.wait(record, 30s).state == ContentDigestState::ready);
+        }
+        write(mod / "a.txt", "alpha, longer now");
+        const auto changed = record_for(mod);
+        ContentDigests next(fast(cache));
+        (void)next.lookup(changed, true);
+        const ContentDigest done = next.wait(changed, 30s);
+        CHECK(done.state == ContentDigestState::ready && done.sha256 == ContentDigests::compute_now(mod).sha256);
+        CHECK(next.stats(changed.key).files_hashed == 1 && next.stats(changed.key).files_reused == 2);
+    }
+    {
+        // Two writers at once: both finish with the uncached digest, and the partial file left behind is readable.
+        Scratch scratch;
+        const auto mod = scratch.path() / "mod", cache = scratch.path() / "cache";
+        for (int i = 0; i < 60; ++i) write(mod / ("d" + std::to_string(i % 4)) / ("f" + std::to_string(i) + ".bin"), std::string(100 + i, static_cast<char>('a' + i % 26)));
+        const auto record = record_for(mod);
+        const std::string expected = ContentDigests::compute_now(mod).sha256;
+        auto options = fast(cache);
+        options.worker_count = 2;
+        options.partial_every = 5ms;
+        options.partial_refresh = 2ms;
+        options.on_open = [](std::string_view) { std::this_thread::sleep_for(3ms); };
+        std::uint64_t hashed_total = 0;
+        {
+            ContentDigests a(options), b(options);
+            (void)a.lookup(record, true);
+            (void)b.lookup(record, true);
+            CHECK(a.wait(record, 60s).sha256 == expected);
+            CHECK(b.wait(record, 60s).sha256 == expected);
+            hashed_total = a.stats(record.key).files_hashed + b.stats(record.key).files_hashed;
+        }
+        CHECK(hashed_total >= 60 && hashed_total <= 120);
+        for (const auto& entry : fs::directory_iterator(cache))   // no leftover temporary files
+            CHECK(entry.path().string().find(".tmp-") == std::string::npos);
+        // Drop the finished digest; a third run reads the partial file the two writers left (a save by the writer that finished
+        // first can be replaced by the later one, so only "a readable file with some results" is certain).
+        for (const auto& entry : fs::directory_iterator(cache))
+            if (entry.path().extension() == ".json" && entry.path().string().find(".partial.") == std::string::npos) fs::remove(entry.path());
+        ContentDigests third(fast(cache));
+        (void)third.lookup(record, true);
+        CHECK(third.wait(record, 30s).sha256 == expected);
+        CHECK(third.stats(record.key).files_hashed + third.stats(record.key).files_reused == 60 && third.stats(record.key).files_reused > 0);
+    }
+}
+
 void test_background_io_off_same_digest() {
     Scratch scratch;
     const auto mod = scratch.path() / "mod";
@@ -758,6 +965,9 @@ void test_json_roundtrip() {
 int main() {
     test_pause_and_adopt();
     test_background_io_off_same_digest();
+    test_shared_partial_between_processes();
+    test_reader_selection_by_media();
+    test_disk_order_pass_obeys_pause();
     test_old_cache_versions();
     test_screen_wait_leases();
     test_forged_cache_and_metadata_change();

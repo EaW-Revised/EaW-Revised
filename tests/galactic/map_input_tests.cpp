@@ -278,6 +278,28 @@ void queued_ability_drop_is_scoped_to_preparation_and_owner() {
     owner.reset();
     assert(!pending.matches(restored_lifetime, capability));
 }
+// #5998: each hero ability drop waits for its own host answer.
+void every_dropped_ability_waits_for_its_own_answer() {
+    const std::map<ObjectId, ObjectId> carried{{901, 70}}; // hero 901 rides transport 70
+    const auto container = [&](ObjectId id) -> ObjectId {
+        const auto at = carried.find(id);
+        return at == carried.end() ? 0 : at->second;
+    };
+    DroppedAbilities dropped;
+    dropped.dropped(50);
+    dropped.dropped(60); // a second drop before the first one's distant answer
+    assert(dropped.answered(50, container)); // the first drop's refusal still shows
+    assert(!dropped.answered(50, container)); // once
+    assert(!dropped.answered(99, container)); // an unrelated refusal shows nothing
+    assert(dropped.answered(60, container)); // the host settled the second drop
+    assert(!dropped.answered(60, container)); // so a later refusal for that actor is not a drop notice
+    dropped.dropped(70);
+    assert(dropped.answered(901, container)); // the host answered for the bearer the dropped transport carries
+    for (ObjectId id = 1; id <= 17; ++id) dropped.dropped(id);
+    assert(dropped.sources.size() == 16 && !dropped.answered(1, container) && dropped.answered(17, container));
+    dropped.dropped(0);
+    assert(dropped.sources.size() == 15);
+}
 // WGCH-151..155: the parked hero fleet's authored action at a hostile planet starts through the typed inbox.
 void hero_fleet_drop_offers_authored_ability() {
     namespace gc = eawr::sim::galactic;
@@ -492,6 +514,9 @@ void probe_move_and_ground_admission() {
     gc::FleetControlSetup fleet_control;
     fleet_control.types = {{8, false, false, false}, {9, false, true, false}, {10, true, true, false}};
     gc::PoliticalControlSetup control;
+    control.types = {{8}, {9}, {10}};
+    control.relations = {{1, 1, true}, {1, 2, false}};
+    gc::PlayerId destination_owner = 2;
     control.ground_capability_types = {{8, Fixed::from_integer(1).value(), false, true},
         {9, Fixed::from_integer(1).value(), false, false}, {10, {}, true, false}};
     auto movement = std::make_shared<gc::MovementSetup>();
@@ -499,7 +524,7 @@ void probe_move_and_ground_admission() {
     movement->contents = {{30, {{31, 8}}}};
     std::vector<gc::Fleet> fleets{{10, 1, 1, {{30, 10}}}};
     const auto snapshot = [&] {
-        return gc::GalacticSnapshot(0, {}, {}, {{1, {}, 1}, {2, {}, 2}}, {}, fleets, {},
+        return gc::GalacticSnapshot(0, {}, {}, {{1, {}, destination_owner}, {2, {}, 2}}, {}, fleets, {},
             std::nullopt, fleet_control, movement, std::nullopt, {}, std::nullopt, std::nullopt, control);
     };
     const gc::MoveFleet move{10, {1, 2}, {}};
@@ -520,6 +545,12 @@ void probe_move_and_ground_admission() {
     assert(!fleet_can_land(snapshot(), 2, 10));
     movement->contents[0].children.clear();
     assert(!fleet_can_land(snapshot(), 1, 10));
+    destination_owner = 1;
+    assert(fleet_can_land(snapshot(), 1, 10)); // GGS-11: allied linking requires a transport, not combat cargo.
+    movement->contents[0].children = {{31, 8}};
+    assert(!gc::has_ground_capability(control, {30, 10}, movement.get()).value());
+    assert(fleet_can_land(snapshot(), 1, 10));
+    destination_owner = 2;
     movement->contents[0].children = {{31, 8}};
     movement->contents.push_back({40, {{41, 9}}});
     fleets.push_back({11, 1, 1, {{40, 10}}});
@@ -537,6 +568,51 @@ void probe_move_and_ground_admission() {
     fleets.back().owner = 2;
     assert(!ability_move_order(snapshot(), 1, move, spy, stack));
     assert(!fleet_can_land(snapshot(), 1, 10, stack));
+}
+// #7178: dragging one unit cell lands that unit only; its fleet-mates stay in orbit.
+void dragged_unit_landing_names_only_the_dragged_unit() {
+    namespace gc = eawr::sim::galactic;
+    using eawr::sim::math::Fixed;
+    gc::FleetControlSetup fleet_control;
+    fleet_control.types = {{8, false, false, false}, {9, false, true, false}, {10, true, true, false}};
+    gc::PoliticalControlSetup control;
+    control.types = {{8}, {9}, {10}};
+    control.relations = {{1, 1, true}, {1, 2, false}};
+    control.ground_capability_types = {{8, Fixed::from_integer(1).value(), false, true},
+        {9, Fixed::from_integer(1).value(), false, false}, {10, {}, true, false}};
+    auto movement = std::make_shared<gc::MovementSetup>();
+    movement->types = {{8}, {9}, {10}}; movement->types[2].transport = true;
+    // Three ground companies (type 10) carrying a combat payload (type 9), plus one ship (type 8) in the same fleet.
+    movement->contents = {{30, {{31, 9}}}, {40, {{41, 9}}}, {50, {{51, 9}}}};
+    std::vector<gc::Fleet> fleets{{10, 1, 1, {{30, 10}, {40, 10}, {50, 10}, {60, 8}}}, {11, 2, 1, {{70, 10}}}};
+    movement->contents.push_back({70, {{71, 9}}});
+    const auto snapshot = [&] {
+        return gc::GalacticSnapshot(0, {}, {}, {{1, {}, 1}, {2, {}, 2}}, {}, fleets, {},
+            std::nullopt, fleet_control, movement, std::nullopt, {}, std::nullopt, std::nullopt, control);
+    };
+    const auto one = std::array<gc::FleetMemberRef, 1>{{{10, 40}}};
+    const auto landed = dragged_units_landing(snapshot(), 1, 1, one);
+    assert(landed && *landed == std::vector<ObjectId>{40});
+    const auto two = std::array<gc::FleetMemberRef, 2>{{{10, 50}, {10, 30}}};
+    const auto both = dragged_units_landing(snapshot(), 1, 1, two);
+    assert(both && *both == (std::vector<ObjectId>{50, 30}));
+    // The fleet-wide check still answers for the whole fleet; the dragged unit never widens to it.
+    assert(fleet_can_land(snapshot(), 1, 10));
+    const auto ship = std::array<gc::FleetMemberRef, 1>{{{10, 60}}};
+    assert(!dragged_units_landing(snapshot(), 1, 1, ship));
+    const auto twice = std::array<gc::FleetMemberRef, 2>{{{10, 30}, {10, 30}}};
+    assert(!dragged_units_landing(snapshot(), 1, 1, twice));
+    const auto stranger = std::array<gc::FleetMemberRef, 1>{{{10, 99}}};
+    assert(!dragged_units_landing(snapshot(), 1, 1, stranger));
+    const auto foreign = std::array<gc::FleetMemberRef, 1>{{{11, 70}}};
+    assert(!dragged_units_landing(snapshot(), 1, 1, foreign));
+    assert(!dragged_units_landing(snapshot(), 1, 2, one)); // another planet than the fleet's orbit
+    assert(!dragged_units_landing(snapshot(), 1, 1, {}));
+    movement->contents[1].children = {{41, 8}}; // Stay-in-transport passengers cannot fight, but can land here.
+    assert(!gc::has_ground_capability(control, {40, 10}, movement.get()).value());
+    assert(dragged_units_landing(snapshot(), 1, 1, one));
+    movement->contents[1].children.clear();
+    assert(dragged_units_landing(snapshot(), 1, 1, one)); // Landing uses the live transport identity.
 }
 void fleet_destination_uses_live_routes() {
     namespace gc = eawr::sim::galactic;
@@ -1155,9 +1231,11 @@ int main() {
     live_fleet_traits_follow_the_authored_art();
     live_hero_containment_and_home();
     queued_ability_drop_is_scoped_to_preparation_and_owner();
+    every_dropped_ability_waits_for_its_own_answer();
     typed_ability_intents_preserve_capabilities();
     hero_fleet_drop_offers_authored_ability();
     probe_move_and_ground_admission();
+    dragged_unit_landing_names_only_the_dragged_unit();
     fleet_destination_uses_live_routes();
     dragged_card_moves_as_one_stack();
 }

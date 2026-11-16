@@ -3,6 +3,7 @@
 #include "eawr/net/galactic_recovery.hpp"
 #include "eawr/net/galactic_clock_policy.hpp"
 #include "eawr/net/transport.hpp"
+#include "eawr/presentation/ui/net_perf.hpp"
 
 #include <functional>
 #include <filesystem>
@@ -11,6 +12,7 @@
 #include <optional>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // GCMP-03 (#4359): the galactic counterpart of the tactical LanMatch driver. It owns the lockstep core of one LAN
@@ -48,6 +50,11 @@ struct GalacticLanView {
     std::uint64_t clock_change_tick{};
     sim::SeatId clock_actor{};
     std::string clock_action; // Last executed pause/resume/speed event; presentation only.
+    // Network diagnostics for the F3 overlay and the 5 s summary line (same shapes as the skirmish LanView); never
+    // read by the simulation.
+    std::uint32_t net_seat{};
+    std::vector<presentation::ui::NetPeerLink> net_peers; // per remote peer: RTT, jitter, loss
+    presentation::ui::NetStallSnapshot net_stall;          // lockstep waits, short ones included
 };
 // #5355: a Q24 speed factor as the players read it ("2x", "0.5x", "1.25x"); presentation only.
 [[nodiscard]] inline std::string speed_factor_text(const std::int64_t raw) {
@@ -77,6 +84,12 @@ struct GalacticLanOptions {
     // One entry per transport peer, in peer-index order; may_submit false makes a peer an observer.
     std::vector<net::PeerSeat> seats;
     std::uint64_t input_delay{3};
+    // The host proposes the delay from measured RTT (online sessions only). Off keeps the offered delay fixed. It stays
+    // off while recovery frontiers refuse an adaptive session (every galactic recovery path reads one).
+    bool adaptive_timing{};
+    // Replaces the transport's measured round trip for the host's delay policy (qualification and tests); empty reads
+    // MessageTransport::link_stats. Diagnostics and timing only.
+    std::function<std::optional<std::uint64_t>(net::PeerIndex)> adaptive_rtt_ms;
     std::uint64_t final_tick_count{sim::galactic::galactic_max_ticks};
     std::uint64_t exchange_every{30};          // desync monitor hash exchange period, completed ticks
     std::uint64_t completeness_timeout_ms{30'000};
@@ -95,6 +108,11 @@ struct GalacticLanOptions {
     std::function<void(net::PeerIndex)> quarantine_recovery_peer;
     // A buffered transport must send its final hash exchange before the viewer may close it.
     std::function<bool()> final_output_drained;
+    // Diagnostic log lines (stall-start/stall-end, link changes); empty disables them. No addresses or payloads.
+    std::function<void(std::string_view)> diagnostic_sink;
+    // How a peer's link is carried (direct or relayed), read from the transport on the simulation thread; empty
+    // reports unknown. Diagnostics only.
+    std::function<presentation::ui::NetRouteInfo(net::PeerIndex)> link_route;
 };
 
 // Optional loading-barrier capture. Failure disables recovery without failing launch.

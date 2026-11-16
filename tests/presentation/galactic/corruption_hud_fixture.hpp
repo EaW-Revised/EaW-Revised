@@ -4,7 +4,7 @@
 
 namespace eawr::viewer::galactic {
 [[nodiscard]] inline bool corruption_fixture(std::string_view name) {
-    return name == "corruption" || name == "corruption-gaps" || name == "corruption-locked";
+    return name == "corruption" || name == "corruption-gaps" || name == "corruption-locked" || name == "corruption-no-mission-service";
 }
 [[nodiscard]] inline std::shared_ptr<const sim::galactic::GalacticSnapshot> corruption_fixture_snapshot(
     sim::galactic::PlayerId local, std::string_view name) {
@@ -33,6 +33,8 @@ namespace eawr::viewer::galactic {
     g::ObservedPlanet row; row.player = local; row.planet = 101; row.discovered = true;
     const std::array<c::Id, 1> names{7};
     auto menu = g::observed_corruption_menu(world, local, row, 10, true, names);
+    // Slot 1 stands for a mission choice this host cannot start: every other requirement stays satisfied.
+    if (name == "corruption-no-mission-service" && menu) menu->choices.at(0).mission_available = false;
     g::ObserverSetup observer; observer.human_observers = {local}; observer.solo_reference_human = local;
     return std::make_shared<const g::GalacticSnapshot>(0, g::GalacticClock{}, std::vector<g::GalacticPlayer>{},
         std::vector<g::Planet>{}, std::vector<g::Route>{}, std::vector<g::Fleet>{}, std::vector<g::GalacticEvent>{},
