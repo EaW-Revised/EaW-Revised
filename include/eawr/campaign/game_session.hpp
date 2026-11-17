@@ -436,6 +436,11 @@ public:
         const sim::galactic::GalacticSnapshot&, const sim::galactic::LiveCorruptionMission&,
         const sim::galactic::CorruptionChoice&, sim::EntityId)>;
     void set_corruption_mission_service(CorruptionMissionService);
+    // WGCH-197: the pure check the corruption menu and the pre-debit probe ask before a space mission is offered or paid
+    // for (choice, invader, defender). Unset means a set service is taken as ready.
+    using CorruptionMissionReadiness = std::function<bool(const sim::galactic::CorruptionChoice&,
+        sim::galactic::PlayerId invader, sim::galactic::PlayerId defender)>;
+    void set_corruption_mission_readiness(CorruptionMissionReadiness);
     [[nodiscard]] core::Result<void> finish_corruption_mission(std::uint64_t, sim::galactic::CorruptionMissionState);
     // WGCH-67/140: trusted shared ruins request (native effect 17); false means nothing was applied.
     [[nodiscard]] core::Result<bool> request_planet_ruins(sim::galactic::PlanetId, bool destroy = true);

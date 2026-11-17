@@ -6,6 +6,8 @@
 #include "../texture_census_journal.hpp"
 #include "live_battle_bounty.hpp"
 #include "galactic_mode_internal.hpp"
+#include "planet_thumbnails.hpp"
+#include "galactic_error_log.hpp"
 #include "render_profile_viewport.hpp"
 #include "capture_viewport.hpp"
 #include "viewer_path.hpp"
@@ -58,8 +60,7 @@ using namespace galactic_detail;
 
 namespace {
 // Project keyboard-pan binding; retail pan speed remains unverified.
-// #6291 / DEV-13: THE Space binding, read from Options > Tweaks "Space pauses the galactic game" when the key is used. Off (the
-// default) = the original's: Space starts the galactic cinematic tour (docs/behaviour/walks/gc-cinematic-tour.md) and does not
+// #6291 / DEV-13: THE Space binding, read from Options > Tweaks "Space pauses the galactic game" when the key is used. Off = the original's: Space starts the galactic cinematic tour (docs/behaviour/walks/gc-cinematic-tour.md) and does not
 // pause; on = Space only pauses, and the tour stays on the camera button.
 galactic_view::SpaceKey space_key() {
     const auto* saved = ActiveSettings::get();
@@ -356,6 +357,7 @@ bool GalacticMode::State::build_view() {
 }
 
 bool GalacticMode::State::start_game(platform::LiveGameSession::Options live_options) {
+    configure_galactic_error_logging(live_options);
     live_options.load_note_sink = [](std::span<const core::LoadNote> notes) {
         publish_viewer_load_notes({notes.begin(), notes.end()}, {}, true);
     };
@@ -515,6 +517,10 @@ void GalacticMode::State::sync_net_perf(const double delta) {
     report.seat = lan.net_seat;
     report.peers = lan.net_peers;
     report.stall = lan.net_stall;
+    report.input_delay_ticks = lan.net_input_delay;
+    report.lead_ticks = lan.net_lead_ticks;
+    report.local_tick_ms = lan.net_local_tick_ms;
+    report.max_poll_gap_ms = lan.net_poll_gap_ms;
     report.frame_ms = summary.frame_avg_ms;
     report.sim_ms = summary.tick_avg_ms;
     net_report = std::move(report);
@@ -599,6 +605,9 @@ bool GalacticMode::State::refresh_game() {
     const auto measured = measure_frame(FramePhase::snapshot);
     if (!game) return true;
     if (const auto error = game->failure()) { failure = core::format_diagnostic(*error); return false; }
+    // Read retained events first: the following frame is at least as recent, even if a render frame skipped a tick.
+    const auto landing_events = game->galactic_events_after(orbit_landing_event_cursor, sim::SeatId{galaxy->local.seat});
+    orbit_landing_event_cursor = landing_events.through;
     const auto frame = game->frame(sim::SeatId{galaxy->local.seat});
     if (!frame.latest) return true;
     if (options.all_ai_capture || ai_activity) {
@@ -611,6 +620,12 @@ bool GalacticMode::State::refresh_game() {
     pending_battle_planet = galactic_view::pending_battle_radar_planet(frame, galaxy->local.player);
     published_system_hold = bool(frame.pending_conflict) || frame.summary_hold != 0 || bool(frame.battle);
     published_hero_returns = frame.hero_returns;
+    const auto& departing = orbit_landing_view.observe(frame, landing_events.events);
+    if (departing != departing_transports) {
+        departing_transports = departing;
+        fleet_layout_dirty = true;
+        fleet_popup_publication.reset();
+    }
     if (frame.latest == published_snapshot) return true;
     // #3931: with the reveal on, every presentation reader gets the omniscient draw view of this publication.
     const auto shown = options.galactic_reveal ? galactic_view::reveal_snapshot(frame.latest) : frame.latest;
@@ -1906,6 +1921,20 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
     if (!state.interactive || state.completed || event.is_null() || !state.galaxy) return;
     if (!state.map_input.gates.world_allowed()) return;
     if (state.map_input.gates.tutorial_locked) { cancel_input(); return; }
+    // PS-05: the search owns text/navigation through the kit controls. The
+    // window remains usable while paused, but never opens over a prompt/tour.
+    if (state.planet_search && state.planet_search->visible()) return;
+    if (const auto* key = Object::cast_to<InputEventKey>(event.ptr());
+        key && key->is_pressed() && !key->is_echo() && key->is_ctrl_pressed()
+        && !key->is_shift_pressed() && !key->is_alt_pressed() && !key->is_meta_pressed()
+        && key->get_keycode() == KEY_F && !state.tour && !state.galaxy_modal_open()) {
+        cancel_input();
+        if (!state.planet_search) state.planet_search = std::make_unique<PlanetSearchWidget>();
+        // PS-08: the live row pictures exist from the first open only; a never-opened search costs nothing.
+        if (!state.planet_search_thumbnails) state.planet_search_thumbnails = std::make_unique<PlanetThumbnails>(state);
+        state.planet_search->open(state);
+        return;
+    }
     if (state.tour_input(event)) return; // #6291 (GCT-08): the tour takes the mouse events that end it, or ignores small pointer moves
     const auto* wheel_button = Object::cast_to<InputEventMouseButton>(event.ptr());
     const bool wheel = wheel_button && (wheel_button->get_button_index() == MOUSE_BUTTON_WHEEL_UP

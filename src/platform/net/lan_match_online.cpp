@@ -157,6 +157,11 @@ bool TcpLanMatch::drain_mesh_events() {
 
 void TcpLanMatch::begin_online(bool hosting, std::string code, std::optional<net::OnlineRoomAdmission> admission) {
         cancel();
+        online_host_build_ = admission ? admission->build_identity : std::string{};
+        if (!online_host_build_.empty()) {
+            auto compatible = net::validate_online_build(online_host_build_, online_options_->build_identity);
+            if (!compatible) { set_failure(compatible.error()); return; }
+        }
         // The screen configures its logger before host/join. cancel() retires the old sink but keeps that logger; the new
         // online attempt must install it again before creating or polling GNS, including after a failed admission retry.
         install_gns_log();

@@ -2,6 +2,7 @@
 #include "eawr/skirmish/setup.hpp"
 #include "eawr/presentation/ui/lan_lobby.hpp"
 #include "eawr/units/unit_tables.hpp"
+#include "eawr/core/prepared_content.hpp"
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -9,6 +10,9 @@
 #include <set>
 namespace eawr::scene { class ModelPrefetch; }
 namespace eawr::presentation::godot_backend {
+// Run on a preparation worker. Hash the effective XML/Lua and available lobby maps, never profile IDs or disk paths.
+[[nodiscard]] core::Result<core::PreparedContentIdentity> skirmish_room_content(const vfs::Vfs&,
+    std::span<const skirmish::SetupMap>, const std::vector<std::string>& mod_labels);
 // LLB-18: one row control model for editing, canonical staging and match preparation.
 using LanSeatKind = presentation::ui::RowKind;
 [[nodiscard]] LanSeatKind lan_seat_kind(const skirmish::FixtureOptions&, std::uint32_t slot);

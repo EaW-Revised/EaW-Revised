@@ -48,3 +48,7 @@ map and fixture columns stay as captured.
   the synthetic row the cause was checked: the same inputs with the manifest digest of the v3 identity hash to the
   value captured before this update. The installed rows were taken from the test's own mismatch output (their
   manifests also hold the installed scripts, so the v3 value cannot be recomputed without the old build).
+- 2026-11-17, unit-table identity v7 to v8 (legacy EAWR-7453): only the complete StartInputs hash column moves for the populated
+  synthetic team and all 24 installed maps. The recovered capture front-end ran against current sources; every list,
+  map and Fixture column stayed identical. Substituting the prior empty-table identity reproduced the committed files
+  byte for byte, while the ordinary capture used v8. Independent Windows output matched all 24 Linux installed rows.

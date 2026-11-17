@@ -221,6 +221,14 @@ std::string_view online_failure_text(const OnlineFailure failure) noexcept {
     return "Online play is not available right now. Try again shortly.";
 }
 
+std::string online_failure_message(const std::string_view code, const std::string_view detail) {
+    if (code != "EAWR-NET-1503") return std::string(online_failure_text(classify_online_failure(code)));
+    std::string message(detail.empty() ? "All players need the same game build." : detail.substr(0, 512));
+    for (char& value : message)
+        if (static_cast<unsigned char>(value) < 32 || value == 127) value = ' ';
+    return "EAWR-NET-1503: " + message;
+}
+
 bool online_failure_keeps_prompt(const OnlineFailure failure) noexcept {
     return failure == OnlineFailure::wrong_password || failure == OnlineFailure::cooldown;
 }
@@ -391,6 +399,40 @@ void ChatLog::add(const ChatKind kind, std::string text, std::string sender) {
     lines_.push_back({kind, std::move(text), std::move(sender)});
     ++total_;
     if (lines_.size() > capacity_) lines_.erase(lines_.begin(), lines_.begin() + static_cast<std::ptrdiff_t>(lines_.size() - capacity_));
+}
+
+std::string status_counter_stem(const std::string_view status) {
+    const auto digit = [](const char c) { return c >= '0' && c <= '9'; };
+    const auto word = [&](const char c) { return digit(c) || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '-' || c == '_'; };
+    std::string stem;
+    stem.reserve(status.size());
+    for (std::size_t at = 0; at < status.size();) {
+        if (!digit(status[at])) { stem.push_back(status[at++]); continue; }
+        std::size_t end = at;
+        while (end < status.size() && digit(status[end])) ++end;
+        const std::string_view rest = status.substr(end);
+        // Only a counter: a run of seconds ("12 s") or the done part of "N of M". Codes (EAWR-NET-0207), seat numbers and
+        // other numbers stay, so two different messages never merge.
+        const bool seconds = rest.starts_with(" s") && (rest.size() == 2 || !word(rest[2]));
+        const bool counter = (at == 0 || !word(status[at - 1])) && (seconds || rest.starts_with(" of "));
+        if (counter) stem.push_back('#');
+        else stem.append(status.substr(at, end - at));
+        at = end;
+    }
+    return stem;
+}
+
+StatusChatPost StatusChatThrottle::note(const std::string_view status, const std::uint64_t now_ms, const bool shown_in_place) {
+    if (status.empty()) { reset(); return StatusChatPost::none; }
+    auto stem = status_counter_stem(status);
+    if (stem != stem_) {
+        stem_ = std::move(stem);
+        posted_ms_ = now_ms;
+        return StatusChatPost::first;
+    }
+    if (shown_in_place || now_ms < posted_ms_ || now_ms - posted_ms_ < lan_status_chat_repeat_ms) return StatusChatPost::none;
+    posted_ms_ = now_ms;
+    return StatusChatPost::repeat;
 }
 
 std::optional<std::string> chat_line_to_send(const std::string_view typed) {

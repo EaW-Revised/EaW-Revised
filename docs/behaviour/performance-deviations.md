@@ -23,7 +23,7 @@ PD-01 is an explicitly approved exception to the initial Retail-exact default: i
 | Rule | Setting key | Name | Scope | Default | Retail behaviour | Our behaviour |
 |---|---|---|---|---|---|---|
 | PD-01 | gameplay.reinforcement_areas_only_while_placing | Reinforcement areas only while placing | presentation | 1 | Panel or data-authored drag rule | Only while placing |
-| SH-01 | keyboard.selection_hotkeys | Selection hotkeys | presentation | 0 | Existing selection gestures | Optional bulk selection keys |
+| SH-01 | keyboard.selection_hotkeys | Selection hotkeys | presentation | 1 | Existing selection gestures | Optional bulk selection keys |
 <!-- performance-deviations:end -->
 
 ## PD-01 measured evidence
@@ -51,7 +51,7 @@ Frame-rate limit and vsync stay under **Video**. See [player settings](../ui/ui-
 ## SH-01 optional selection hotkeys
 
 Owner request (legacy EAWR-5131) (2026-10-28) authorizes this convenience deviation, with no performance claim.
-Options > Performance enables it (default off); Options > Controls binds both actions independently.
+Options > Tweaks enables it (default on, owner decision 2026-11-17); Options > Controls binds both actions independently.
 The defaults are physical Ctrl+Q (all own units) and Q (own units on screen). E, Shift+E,
 Shift+Q and Ctrl+E are reserved by the existing command/ability map. The Controls rows are press-to-bind
 (legacy EAWR-5131): any letter, alone or with Ctrl, that no command, camera-preset or ability chord holds, refusing
@@ -88,7 +88,7 @@ definitions win. Primary presets load before layer additions. Without additions,
 repetition and sequential registration retain their existing behavior.
 
 The optional Data/XML/SelectionControls.xml document contains Selection_Advisor_Enabled
-(default No) and optional Selection_Action entries with Name SELECT_OWN_ALL or SELECT_OWN_SCREEN.
+(default Yes) and optional Selection_Action entries with Name SELECT_OWN_ALL or SELECT_OWN_SCREEN.
 Name is required only on an authored action. Optional Default_Key retains Ctrl+Q / Q; optional
 Faction_SFXEvent contains explicit faction,event overrides from layers above Revised (or from any layer when Revised is absent); Advisor_SFXEvent maps advisor events to cues and Default_Faction_SFXEvent supplies the name-based fallback. Rows are repeatable and keys are case-insensitive.
 Missing mappings preserve unit responses. Invalid/occupied keys retain safe defaults; duplicate

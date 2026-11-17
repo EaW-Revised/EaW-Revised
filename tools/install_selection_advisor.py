@@ -15,6 +15,7 @@ SKIP_LOCAL = "964037908"
 # destination file equal to one of these (or to the current template) was never
 # hand-edited, so the installer may update it; anything else is the owner's.
 KNOWN_TEMPLATES = {
+    "RevisedPlanetSearch.xml": frozenset(),
     "SelectionControls.xml": frozenset({
         "1fea04d62f745b14dd6b6687184f0322805c46246d4e481e8856d4129fa98c17"}),
     "SFXEventFilesAdditions.xml": frozenset({
@@ -39,6 +40,7 @@ def install(source: Path, destination: Path, force: bool = False,
     templates = Path(__file__).with_name("revised_gift_sfx")
     config_bytes = {name: (templates / name).read_bytes() for name in
                     ("SelectionControls.xml", "SFXEventFilesAdditions.xml", "RevisedGiftSFX.xml")}
+    config_bytes["RevisedPlanetSearch.xml"] = (templates.parent / "revised_planet_search" / "RevisedPlanetSearch.xml").read_bytes()
     copies = []
     counts = {}
     # Validate the complete selection before changing the destination.

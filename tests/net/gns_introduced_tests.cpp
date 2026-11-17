@@ -1,8 +1,11 @@
 #include "../support/check.hpp"
 #include "../support/result_require.hpp"
 #include "eawr/net/gns_transport.hpp"
+#include "eawr/net/network_introduction.hpp"
 #include "../../src/net/platform_socket.hpp"
 #include "../../src/net/gns_frame_codec.hpp"
+#include "../../src/net/gns_packet_delivery.hpp"
+#include "gns_permission_signal.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -175,11 +178,13 @@ public:
     GnsRendezvous rendezvous() const override { return rendezvous_; }
     std::optional<GnsTurnCredentials> turn_credentials() const override { return turn_; }
     void use_turn(GnsTurnCredentials turn) { turn_ = std::move(turn); }
+    void poison_permission() { poison_permission_ = true; }
     eawr::core::Result<void> send(std::span<const std::uint8_t> signal) override {
         if (outage_.load()) return eawr::core::Result<void>::failure(failure("Injected established signalling outage"));
         if (signal.empty() || signal.size() > 60000)
             return eawr::core::Result<void>::failure(failure("IPC signal capacity"));
-        Bytes packet{2, role_}; packet.insert(packet.end(), signal.begin(), signal.end());
+        const auto edited = poison_permission_ ? permission_test::inject(signal) : Bytes(signal.begin(), signal.end());
+        Bytes packet{2, role_}; packet.insert(packet.end(), edited.begin(), edited.end());
         std::lock_guard lock(send_mutex_);
         if (!udp_.send(broker_port_, packet)) return eawr::core::Result<void>::failure(failure("IPC signal send"));
         return eawr::core::Result<void>::success();
@@ -235,6 +240,7 @@ public:
         for (unsigned i = 0; i < 3; ++i) { expect(udp_.send(broker_port_, Bytes{3, role_}), "IPC finish"); std::this_thread::sleep_for(1ms); }
     }
 private:
+    bool poison_permission_{};
     Udp udp_;
     std::uint8_t role_{};
     std::uint16_t broker_port_{};
@@ -374,19 +380,27 @@ void peer(std::uint8_t role, std::uint16_t port) {
 // #4021: the same run also proves the diagnostics reach the log sink: a TURN reply line (and the repeat line when the server
 // rotates its nonce) from GNS, and the 1507 stop with this seat and its peer when the path goes silent.
 void turn_peer(std::uint8_t role, std::uint16_t port, const std::string& turn_address, unsigned seconds, bool silent,
-    bool nonce = false) {
+    bool nonce = false, bool denied = false, std::shared_ptr<GnsSignallingEndpoint> live = {}) {
+    const bool live_mode = static_cast<bool>(live);
     std::vector<std::string> log_lines;
     struct SinkGuard { ~SinkGuard() { GnsTransport::set_log_sink({}); } } sink_guard;
-    GnsTransport::set_log_sink([&log_lines](std::string_view line) { log_lines.emplace_back(line); });
+    GnsTransport::set_log_sink([&log_lines, live_mode](std::string_view line) {
+        log_lines.emplace_back(line);
+        if (live_mode) std::cout << line << '\n' << std::flush;
+    });
     const auto turn_host = turn_address.substr(0, turn_address.rfind(':'));
     const auto logged = [&](std::string_view text) {
         return std::any_of(log_lines.begin(), log_lines.end(), [&](const std::string& line) {
             return line.starts_with("EAWR net event=gns utc=") && line.find(text) != std::string::npos; });
     };
-    auto endpoint = std::make_shared<ProxyEndpoint>(role, port);
-    endpoint->use_turn(GnsTurnCredentials{"turn:" + turn_address, "eawr-turn-test", "eawr-turn-secret", 3600s});
+    auto proxy = live_mode ? std::shared_ptr<ProxyEndpoint>{} : std::make_shared<ProxyEndpoint>(role, port);
+    if (denied) proxy->poison_permission();
+    if (proxy) proxy->use_turn(GnsTurnCredentials{"turn:" + turn_address, "eawr-turn-test", "eawr-turn-secret", 3600s});
+    std::shared_ptr<GnsSignallingEndpoint> endpoint = live_mode ? std::move(live) : proxy;
     GnsOptions options; options.build_identity = "introduced-process-test";
-    options.turn_only = true; options.timeout = 80s; options.handshake_timeout = 30s;
+    // A public TURN server may deny its own IP, including another allocation's relay candidate. For the live proof
+    // only the host is relay-only; the guest advertises host/reflexive candidates. The observed pair must still relay.
+    options.turn_only = !live_mode || role == 0; options.timeout = 80s; options.handshake_timeout = 30s;
     // The shipped default: the silent case below must be named inside 30 s with it, not with a shortened test value.
     expect(options.ack_silence_timeout == 15s, "The acknowledgement-silence default is 15 s");
     auto transport = require(role == 0 ? GnsTransport::host_introduced(endpoint, options)
@@ -399,6 +413,7 @@ void turn_peer(std::uint8_t role, std::uint16_t port, const std::string& turn_ad
     }
     const auto begin = Clock::now(), end = begin + std::chrono::seconds(silent ? 30u : seconds);
     auto last_send = begin, last_receive = begin;
+    auto next_report = begin + 2s;
     std::uint64_t sent = 0, received = 0;
     std::chrono::milliseconds worst_gap{0};
     while (Clock::now() < end) {
@@ -414,6 +429,20 @@ void turn_peer(std::uint8_t role, std::uint16_t port, const std::string& turn_ad
         }
         const auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - last_receive);
         worst_gap = std::max(worst_gap, gap);
+        if (live_mode && now >= next_report) {
+            const auto pair = transport->pair(1 - role);
+            // The guest may not identify its provider until its unused allocation's first successful Refresh:
+            // its only remote IP is the server's own relay IP, for which CreatePermission is deliberately refused.
+            expect(pair.route == GnsRoute::relayed && (pair.relay_provider == GnsRelayProvider::own
+                || (role == 1 && pair.relay_provider == GnsRelayProvider::unknown)), "Live soak must remain relayed by own TURN");
+            std::cout << "SOAK route=" << (pair.relay_provider == GnsRelayProvider::own ? "relay(own)" : "relay(unknown)")
+                << " local_relay=" << (role == 0 ? 1 : 0) << " elapsed_ms="
+                << std::chrono::duration_cast<std::chrono::milliseconds>(now - begin).count()
+                << " received=" << received << " last_recv_ms="
+                << std::chrono::duration_cast<std::chrono::milliseconds>(last_receive - begin).count()
+                << " gap_ms=" << gap.count() << '\n' << std::flush;
+            next_report = now + 60s;
+        }
         if (silent && transport->diagnostic()) {
             const auto& diagnostic = *transport->diagnostic();
             expect(diagnostic.code == "EAWR-NET-1507" && diagnostic.message.find("GNS link silent") != std::string::npos
@@ -424,7 +453,7 @@ void turn_peer(std::uint8_t role, std::uint16_t port, const std::string& turn_ad
                 + " link stops: EAWR-NET-1507 GNS link silent"), "The 1507 stop reaches the log sink with seat and peer");
             for (const auto& line : log_lines) std::cout << line << '\n';
             GnsTransport::set_log_sink({});
-            endpoint->finish();
+            if (proxy) proxy->finish();
             return;
         }
         if (transport->diagnostic()) throw std::runtime_error("Relayed link failed after "
@@ -440,22 +469,75 @@ void turn_peer(std::uint8_t role, std::uint16_t port, const std::string& turn_ad
     while (transport->poll()) {}
     expect(logged("ICE: TURN server <addr> accepted a request"), "A TURN refresh reply reaches the log sink, address redacted");
     if (nonce) expect(logged("answered 438, repeating the request"), "The nonce repeat reaches the log sink");
+    if (denied) {
+        expect(logged("answered error 403"), "The refused candidate reaches the log sink");
+        expect(logged("other permissions continue"), "Permission refusal is a loud, isolated diagnostic");
+    }
+    if (live_mode) {
+        const auto pair = transport->pair(1 - role);
+        expect(pair.route == GnsRoute::relayed && pair.relay_provider == GnsRelayProvider::own,
+            "Both live endpoints must identify relay(own) by the end of the soak");
+        const auto permissions = std::count_if(log_lines.begin(), log_lines.end(), [](const auto& line) {
+            return line.find("accepted a request (message 0x108)") != std::string::npos;
+        });
+        // Only the host uses its local allocation. The guest receives a remote relay candidate, so its unused local
+        // allocation may refuse that server IP; it needs no permission to send directly to the host's relay socket.
+        if (role == 0) expect(permissions >= 6, "Live local-relay soak must record successful permission refreshes");
+        expect(!logged("failed for ACTIVE RELAY"), "The active relay IP must never fail a permission refresh");
+        std::cout << "SOAK PASS route=relay(own) duration_ms="
+            << std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - begin).count()
+            << " local_relay=" << (role == 0 ? 1 : 0) << " permission_successes=" << permissions << " last_recv_ms="
+            << std::chrono::duration_cast<std::chrono::milliseconds>(last_receive - begin).count()
+            << " worst_gap_ms=" << worst_gap.count() << '\n' << std::flush;
+    }
     expect(!turn_host.empty() && std::none_of(log_lines.begin(), log_lines.end(), [&](const std::string& line) {
-        return line.find(turn_host) != std::string::npos || line.find("127.0.0.1") != std::string::npos; }), "The log carries no address");
+        return (!live_mode && line.find(turn_host) != std::string::npos) || line.find("127.0.0.1") != std::string::npos;
+    }), "The log carries no address");
     std::cout << "Peer " << static_cast<unsigned>(role) << ": " << log_lines.size() << " log lines, first: "
               << (log_lines.empty() ? std::string{} : log_lines.front()) << '\n';
     GnsTransport::set_log_sink({});
     // Closing needs the peer's frames drained too; the host leaves first.
+    if (live_mode && role == 0) {
+        // Let the guest reach its own full-duration boundary before initiating the close handshake.
+        const auto grace = Clock::now() + 2s;
+        while (Clock::now() < grace) {
+            while (transport->poll()) {}
+            expect_clean(*transport, "Live soak failed before clean close"); std::this_thread::sleep_for(1ms);
+        }
+    }
     if (role == 0) transport->close();
     const auto close_deadline = Clock::now() + 20s;
     while (!transport->closed()) {
         while (transport->poll()) {}
         expect(Clock::now() < close_deadline, "Relayed close deadline"); std::this_thread::sleep_for(1ms);
     }
-    endpoint->finish();
+    if (proxy) proxy->finish();
     std::cout << "Peer " << static_cast<unsigned>(role) << ": " << sent << " frames sent, " << received
               << " received over " << seconds << " s through a permission-expiring TURN relay, worst gap "
               << worst_gap.count() << " ms\n";
+}
+// Manual two-host proof, deliberately outside CTest: no service address, invitation or credential is committed.
+// live-turn-host <service> <port> <seconds>; live-turn-join <service> <port> <seconds> <invitation>.
+void live_turn_peer(bool host, const char* address, const char* port, const char* duration, const char* invitation) {
+    NetworkIntroductionOptions options;
+    options.address = address; options.certificate_name = address;
+    const auto port_number = std::stoul(port), seconds = std::stoul(duration);
+    expect(port_number > 0 && port_number <= 65535 && seconds >= 720 && seconds <= 3600, "Live soak arguments");
+    options.port = static_cast<std::uint16_t>(port_number); options.turn_provider = GnsTurnProvider::own;
+    NetworkGnsIntroduction service(options);
+    std::shared_ptr<GnsSignallingEndpoint> endpoint;
+    if (host) {
+        auto publication = require(service.publish("permission-soak-host", 5min));
+        endpoint = publication.endpoint;
+        std::cout << "INVITATION " << publication.join_code << '\n' << std::flush;
+    } else endpoint = require(service.join(invitation, "permission-soak-guest"));
+    const auto paired_deadline = Clock::now() + 30s;
+    while (endpoint->rendezvous().remote_identity.empty()) {
+        require(endpoint->status());
+        expect(Clock::now() < paired_deadline, "Live introduction pairing deadline");
+        std::this_thread::sleep_for(10ms);
+    }
+    turn_peer(host ? 0 : 1, 0, "live", static_cast<unsigned>(seconds), false, false, false, std::move(endpoint));
 }
 #if EAWR_HAS_GNS
 void u32(Bytes& bytes, std::uint32_t value) {
@@ -496,7 +578,7 @@ void delayed_ack_peer(std::uint16_t port, bool retry_case, bool native_reason = 
             sdk.RunCallbacks();
             SteamNetworkingMessage_t* message{};
             while (sdk.ReceiveMessagesOnConnection(connection, &message, 1) > 0) {
-                const bool hello = message->m_cbSize > 0 && static_cast<const std::uint8_t*>(message->m_pData)[0] == static_cast<std::uint8_t>(TcpMessage::hello);
+                const bool hello = message->m_cbSize > 8 && static_cast<const std::uint8_t*>(message->m_pData)[8] == static_cast<std::uint8_t>(TcpMessage::hello);
                 message->Release();
                 // Receiving the host hello proves its ICE path is ready. Send
                 // no application hello, so service closure precedes admission.
@@ -511,6 +593,7 @@ void delayed_ack_peer(std::uint16_t port, bool retry_case, bool native_reason = 
                 u32(packet, mismatch.protocol_version); u32(packet, static_cast<std::uint32_t>(mismatch.build_identity.size()));
                 packet.insert(packet.end(), mismatch.build_identity.begin(), mismatch.build_identity.end());
                 u32(packet, mismatch.max_frame_size); u32(packet, 1); u32(packet, mismatch.peers); packet.push_back(1);
+                packet.insert(packet.begin(), 8, 0); // first delivery ordinal on this raw connection
                 expect(sdk.SendMessageToConnection(connection, packet.data(), static_cast<uint32>(packet.size()),
                     k_nSteamNetworkingSend_ReliableNoNagle, nullptr) == k_EResultOK, "Raw mismatched hello send");
                 refusal_sent = true;
@@ -522,14 +605,17 @@ void delayed_ack_peer(std::uint16_t port, bool retry_case, bool native_reason = 
     }
     GnsOptions options; options.build_identity = "introduced-process-test";
     GnsFrameDecoder decoder(options, false);
+    GnsPacketDelivery delivery(options.queue_bytes, options.queue_frames);
     bool hello_sent = false, hello_seen = false, accepted = false, ack_sent = false, close_seen = false, tail_sent = false;
     bool first_departed = false, retry_connected = false;
     std::optional<eawr::core::Diagnostic> refusal;
     std::vector<Bytes> received;
     const auto deadline = Clock::now() + 40s;
     auto send = [&](const Bytes& packet) {
-        expect(sdk.SendMessageToConnection(connection, packet.data(), static_cast<uint32>(packet.size()),
+        auto wire = delivery.encode(packet);
+        expect(sdk.SendMessageToConnection(connection, wire.data(), static_cast<uint32>(wire.size()),
             k_nSteamNetworkingSend_Reliable, nullptr) == k_EResultOK, "Raw reliable send");
+        delivery.sent(std::move(wire), Clock::now(), false);
     };
     auto frame = [&](const Bytes& bytes) {
         std::size_t offset = 0;
@@ -573,9 +659,16 @@ void delayed_ack_peer(std::uint16_t port, bool retry_case, bool native_reason = 
         }
         SteamNetworkingMessage_t* message{};
         while (sdk.ReceiveMessagesOnConnection(connection, &message, 1) > 0) {
-            auto decoded = decoder.receive({static_cast<const std::uint8_t*>(message->m_pData), static_cast<std::size_t>(message->m_cbSize)},
-                {hello_seen, accepted, close_seen, 0, 0}, (message->m_nFlags & k_nSteamNetworkingSend_Reliable) != 0);
+            const auto bytes = std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(message->m_pData),
+                static_cast<std::size_t>(message->m_cbSize));
+            const bool reliable = (message->m_nFlags & k_nSteamNetworkingSend_Reliable) != 0;
+            if (!reliable && bytes.size() == 1 && bytes.front() == static_cast<std::uint8_t>(TcpMessage::keepalive)) {
+                message->Release(); continue;
+            }
+            auto envelopes = require(delivery.receive(bytes, reliable));
             message->Release();
+            for (const auto& envelope : envelopes) {
+            auto decoded = decoder.receive(envelope, {hello_seen, accepted, close_seen, 0, 0});
             if (!decoded && retry_case && decoded.error().code == "EAWR-NET-1517") {
                 refusal = decoded.error();
                 expect(refusal->message == (native_reason ? "Invalid or unauthorized GNS signal" : "GNS introduction service failed"),
@@ -589,12 +682,14 @@ void delayed_ack_peer(std::uint16_t port, bool retry_case, bool native_reason = 
                     expect(!first_departed, "Retry accepted without a new hello");
                     sdk.CloseConnection(connection, 1506, "Injected departure before ACK", false);
                     connection = k_HSteamNetConnection_Invalid; first_departed = true;
-                    hello_sent = hello_seen = accepted = false; decoder.reset(); break;
+                    hello_sent = hello_seen = accepted = false; decoder.reset(); delivery.reset(); break;
                 }
                 accepted = true; endpoint->expire_host();
             }
             else if (value.frame) received.push_back(std::move(*value.frame));
             else if (value.kind == TcpMessage::close) { close_seen = true; send({static_cast<std::uint8_t>(TcpMessage::close)}); }
+            }
+            if (refusal || connection == k_HSteamNetConnection_Invalid) break;
         }
         if (accepted && endpoint->expiry_observed() && !ack_sent) {
             Bytes packet; packet.reserve(5); packet.push_back(static_cast<std::uint8_t>(TcpMessage::accept));
@@ -643,6 +738,12 @@ int main(int argc, char** argv) {
     try {
         if (!GnsTransport::available()) { std::cout << "GNS disabled: introduced test skipped\n"; return 77; }
         expect(argc >= 2, "introduced test mode required");
+        if (std::string_view(argv[1]) == "live-turn-host" || std::string_view(argv[1]) == "live-turn-join") {
+            const bool host = std::string_view(argv[1]) == "live-turn-host";
+            expect(argc == (host ? 5 : 6), "Live TURN service, port, duration and join invitation required");
+            live_turn_peer(host, argv[2], argv[3], argv[4], host ? "" : argv[5]);
+            return 0;
+        }
         if (std::string_view(argv[1]) == "broker") broker();
         else {
             expect(argc == 4 || ((argc == 6 || argc == 7) && std::string_view(argv[1]) == "turn-peer"),
@@ -653,7 +754,7 @@ int main(int argc, char** argv) {
                 expect(argc >= 6, "TURN peer address and duration required");
                 turn_peer(static_cast<std::uint8_t>(role), static_cast<std::uint16_t>(port), argv[4],
                     static_cast<unsigned>(std::stoul(argv[5])), argc == 7 && std::string_view(argv[6]) == "silent",
-                    argc == 7 && std::string_view(argv[6]) == "nonce");
+                    argc == 7 && std::string_view(argv[6]) == "nonce", argc == 7 && std::string_view(argv[6]) == "denied");
             } else if (std::string_view(argv[1]) == "closure-refusal-host") {
                 expect(role == 0, "Closure refusal host role"); closure_refusal_host(static_cast<std::uint16_t>(port));
             } else if (std::string_view(argv[1]) == "closure-refusal-peer") {

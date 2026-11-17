@@ -270,7 +270,10 @@ conversion; the retail rotation read-back remains unverified.
   the chaser's chase; the chaser's timer runs on (FD-08).
 - **WSQ-35** (debug build, E457-07; FD-10) Avoidance of ships and static objects (not asteroid
   fields, ion storms or nebulae) while idling, forming up, closing, on a run and heading for a
-  chased craft it cannot follow; then 15 frames straight on.
+  chased craft it cannot follow; then 15 frames straight on. The narrow phase uses an explicit
+  transformed model box when supplied, otherwise eligible model surfaces (FD-10,
+  E6234-FD01). Only the explicit box reports a contained start; the mesh path reports surface
+  contacts without inferring volume containment from either its bounds or a broad sphere.
 - **WSQ-36** (debug build, E457-08; FD-11) Craft never avoid each other.
 - **WSQ-37** (debug build, EWSQ-04 to EWSQ-06) *Speeds while fighting.* No service clamps a
   craft's speed. The asked speed exceeds `Max_Speed` only through the formation speed of a

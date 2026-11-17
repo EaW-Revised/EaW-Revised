@@ -3,6 +3,7 @@
 #include "../../src/net/gns_frame_codec.hpp"
 #include "../../src/net/gns_log_redact.hpp"
 #include "../../src/net/gns_room_signal.hpp"
+#include "../../src/net/gns_packet_delivery.hpp"
 #include "eawr/net/gns_transport.hpp"
 
 #include <array>
@@ -200,7 +201,7 @@ Bytes words(std::initializer_list<std::uint32_t> values, std::initializer_list<s
     bytes.insert(bytes.end(), tail.begin(), tail.end());
     return bytes;
 }
-void room_signal_attempts() {
+void room_attempts() {
     GnsFormationSecret old_grant{}, current_grant{};
     old_grant.fill(11); current_grant.fill(29);
     const Bytes request{1, 2, 3, 4}; // opaque native request/proof signalling
@@ -307,7 +308,81 @@ static void log_redaction() {
     expect(redact_log_text("tick 18603 of 1.2 s, version 1.2.3") == "tick 18603 of 1.2 s, version 1.2.3", "Numbers that are not addresses stay");
     expect(redact_log_text("got 'a\001b'") == "got 'a?b'", "Control characters are replaced");
 }
+static void redundant_delivery() {
+    using namespace std::chrono_literals;
+    using Delivery = eawr::net::GnsPacketDelivery;
+    const Delivery::Clock::time_point now{};
+    Delivery sender(1024, 32), receiver(1024, 32);
+    auto current = options(); current.protocol_version = gns_protocol_version;
+    auto previous = current; --previous.protocol_version;
+    Delivery legacy(1024, 32);
+    const auto old_hello = require(legacy.receive(hello(previous), true));
+    expect(old_hello.size() == 1, "Previous patch hello reaches the existing version decoder");
+    const auto mismatch = GnsFrameDecoder(current, true).receive(old_hello.front(), {});
+    expect(!mismatch && mismatch.error().code == "EAWR-NET-1502", "Unwrapped previous patch gets the typed protocol mismatch");
+    expect(!legacy.receive(hello(previous), true), "Legacy escape is limited to the first reliable message");
+    legacy.reset();
+    expect(require(legacy.receive(hello(previous), true)).size() == 1, "A listener retry resets the legacy hello boundary");
+    std::vector<Bytes> originals;
+    const std::vector<Bytes> envelopes{{1, 2}, {3, 4}, {5}, {6, 7, 8}};
+    for (const auto& envelope : envelopes) {
+        auto wire = sender.encode(envelope); originals.push_back(wire);
+        sender.sent(std::move(wire), now, true);
+    }
+    auto copies = sender.redundancy(now);
+    expect(copies.size() <= Delivery::datagram_bytes, "Redundant data fits a single WAN datagram");
+    // All reliable originals are held for multiple RTTs. The copy carries
+    // the missing input and every following control in their original order.
+    expect(require(receiver.receive(copies, false)) == envelopes, "History bypasses reliable HOL without changing order");
+    for (const auto& original : originals)
+        expect(require(receiver.receive(original, true)).empty(), "Late reliable originals cannot deliver twice");
+    expect(require(receiver.receive(copies, false)).empty(), "Duplicate history cannot deliver twice");
+    expect(sender.redundancy(now + 99ms).empty(), "Polling cannot bypass the 100ms copy cadence");
+    expect(!sender.redundancy(now + 100ms).empty(), "Final input retries without another tick being sealed");
+    expect(sender.redundancy(now + 750ms).empty(), "Idle sender expires its history");
+
+    Delivery burst_sender(1024, 32), burst_receiver(1024, 32);
+    auto seal = burst_sender.encode(envelopes[0]); burst_sender.sent(seal, now, true);
+    // Three consecutive lost copy datagrams plus a held reliable original.
+    // No later tick is needed to heal the gap, and the result is byte-identical.
+    for (int attempt = 0; attempt < 3; ++attempt)
+        expect(!burst_sender.redundancy(now + attempt * 100ms).empty(), "Loss-burst retry is emitted on schedule");
+    expect(require(burst_receiver.receive(burst_sender.redundancy(now + 300ms), false)) == std::vector<Bytes>{envelopes[0]},
+        "Final seal recovers after three lost copies without native retransmission");
+    expect(require(burst_receiver.receive(seal, true)).empty(), "Fallback after loss-burst repair cannot duplicate input");
+
+    Delivery reordered(1024, 32);
+    const auto bundle = [](const Bytes& packet) {
+        Bytes bytes{static_cast<std::uint8_t>(packet.size()), static_cast<std::uint8_t>(packet.size() >> 8)};
+        bytes.insert(bytes.end(), packet.begin(), packet.end()); return bytes;
+    };
+    expect(require(reordered.receive(bundle(originals[2]), false)).empty(), "Future copy waits for the missing ordinal");
+    expect(require(reordered.receive(originals[0], true)) == std::vector<Bytes>{envelopes[0]}, "Original fills first gap");
+    expect(require(reordered.receive(bundle(originals[1]), false)) == std::vector<Bytes>{envelopes[1], envelopes[2]},
+        "A redundant missing packet releases buffered successors in order");
+    expect(require(reordered.receive(originals[1], true)).empty(), "Late original stays idempotent after reorder");
+    auto conflict = originals[3]; conflict.back() ^= 1;
+    Delivery contradictory(1024, 32);
+    require(contradictory.receive(bundle(originals[3]), false));
+    expect(!contradictory.receive(bundle(conflict), false), "Conflicting queued copies fail closed");
+    Delivery bounded(1, 1);
+    expect(require(bounded.receive(bundle(originals[3]), false)).empty(), "Optional copies beyond the lookahead bound are discarded");
+    for (std::size_t i = 0; i < originals.size(); ++i)
+        expect(require(bounded.receive(originals[i], true)) == std::vector<Bytes>{envelopes[i]}, "Reliable fallback survives copy capacity");
+    expect(!bounded.receive(Bytes{}, false) && !bounded.receive(Bytes{1}, true)
+        && !bounded.receive(Bytes(Delivery::datagram_bytes + 1), false), "Malformed and oversized delivery envelopes fail closed");
+    Delivery gap(1024, 32);
+    expect(!gap.receive(originals[1], true), "Native reliable ordinal gap is a protocol failure");
+    sender.reset(); receiver.reset();
+    auto fresh = sender.encode(envelopes[0]); sender.sent(fresh, now, true);
+    expect(require(receiver.receive(fresh, true)) == std::vector<Bytes>{envelopes[0]}, "New connection resets all ordinals");
+    expect(!receiver.receive(hello(previous), true), "Unwrapped hello cannot enter an established ordinal stream");
+    for (unsigned i = 0; i < 100; ++i) {
+        auto packet = sender.encode(Bytes(100, 42)); sender.sent(std::move(packet), now, true);
+    }
+    expect(sender.redundancy(now).size() <= Delivery::datagram_bytes, "Bursts have a bounded redundancy byte budget");
+}
 int main() {
-    try { log_redaction(); handshake(); hello_revisions(); framing(); refusals(); room_signal_attempts(); mesh_controls(); std::cout << "GNS-independent envelope failure contracts passed\n"; return 0; }
+    try { redundant_delivery(); log_redaction(); handshake(); hello_revisions(); framing(); refusals(); room_attempts(); mesh_controls(); std::cout << "GNS-independent envelope failure contracts passed\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -458,6 +458,8 @@ std::string serialize_settings(const PlayerSettings& settings) {
     };
     if (settings.revised_layer_path) text += "revised_layer_path=" + line_value(*settings.revised_layer_path) + "\n";
     text += "network.online_host=" + line_value(settings.network.online_host) + "\n";
+    // Clearing the host in Options is an explicit opt-out, unlike older empty defaults.
+    if (settings.network.online_host.empty()) text += "network.online_unconfigured=1\n";
     text += "network.online_port=" + std::to_string(settings.network.online_port) + "\n";
     text += "network.online_trust=" + line_value(settings.network.online_trust) + "\n";
     text += "network.online_pin=" + line_value(settings.network.online_pin) + "\n";
@@ -478,6 +480,8 @@ SettingsLoad parse_settings(const std::string_view text) {
     bool legacy_supersampling = false;
     bool legacy_high = false;
     bool explicit_supersampling = false;
+    bool online_host_stored = false;
+    bool online_unconfigured = false;
     while (position <= text.size()) {
         const std::size_t end = std::min(text.find('\n', position), text.size());
         const std::string_view line = trim(text.substr(position, end - position));
@@ -516,7 +520,8 @@ SettingsLoad parse_settings(const std::string_view text) {
         }
         if (key.rfind("network.online_", 0) == 0) {
             auto& network = load.settings.network;
-            if (key == "network.online_host") network.online_host = value;
+            if (key == "network.online_host") { network.online_host = value; online_host_stored = true; }
+            else if (key == "network.online_unconfigured") online_unconfigured = value == "1";
             else if (key == "network.online_trust") network.online_trust = value;
             else if (key == "network.online_pin") network.online_pin = value;
             else if (key == "network.online_ca_file") network.online_ca_file = value;
@@ -573,6 +578,18 @@ SettingsLoad parse_settings(const std::string_view text) {
         load.defaulted = true;
         load.notes.emplace_back("empty settings file; defaults used");
         return load;
+    }
+    if (!online_host_stored || (load.settings.network.online_host.empty() && !online_unconfigured)) {
+        // ST-N2: migrate the former unconfigured default, preserving every LAN option.
+        const NetworkSettings defaults;
+        auto& network = load.settings.network;
+        network.online_host = defaults.online_host;
+        network.online_port = defaults.online_port;
+        network.online_trust = defaults.online_trust;
+        network.online_pin = defaults.online_pin;
+        network.online_ca_file = defaults.online_ca_file;
+        network.online_relay_only = defaults.online_relay_only;
+        network.online_turn_provider = defaults.online_turn_provider;
     }
     if (!fit_radar_stamped && load.settings.gameplay.fit_radar_to_galaxy != PlayerSettings{}.gameplay.fit_radar_to_galaxy) {
         // DEV-9: a file from before the radar default turned ON stored the old default for every profile that saved anything, so a

@@ -2,6 +2,7 @@
 
 #include "eawr/net/transport.hpp"
 #include <functional>
+#include <optional>
 #include <string_view>
 
 namespace eawr::net {
@@ -27,6 +28,12 @@ public:
         static_cast<void>(delay); static_cast<void>(retained_delay);
         return core::Result<void>::success();
     }
+    // Tick-deterministic comparison lead: active delay and retained delay from
+    // already activated events only. The input horizon can also include proposals.
+    virtual core::Result<void> on_activated_input_delay(std::uint64_t delay, std::uint64_t retained_delay) {
+        static_cast<void>(delay); static_cast<void>(retained_delay);
+        return core::Result<void>::success();
+    }
     // LAN-6: exclude this peer from pending/future exchanges at the agreed boundary.
     virtual core::Result<void> on_departure(PeerIndex peer, std::uint64_t tick) {
         static_cast<void>(peer); static_cast<void>(tick);
@@ -37,6 +44,9 @@ public:
     virtual std::vector<PeerIndex> waiting_for_peers() const { return {}; }
     virtual bool frozen() const { return false; }
     virtual bool ready_for_resync() const { return false; }
+    // A code-only deferred monitor can receive another peer's recovery vote
+    // before executing its last bounded ticks. Other monitors never defer it.
+    virtual std::optional<std::uint64_t> deferred_resync_frontier() const { return {}; }
     virtual core::Result<void> on_resync(std::uint64_t tick, std::string_view hash) {
         static_cast<void>(tick); static_cast<void>(hash);
         core::Diagnostic error;

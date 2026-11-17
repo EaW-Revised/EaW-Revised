@@ -80,12 +80,46 @@ struct Bounds final {
 }
 } // namespace
 
+// WU-21 / CARD-4: native atlas quads; only the smooth overlay narrows, with its left edge fixed.
+void WorldUiView::draw_identity_bar(const RID canvas_item, const std::array<float, 2> centre,
+                                     const float fraction, const float ui_scale) {
+    if (identity_bar_.scale <= 0.0F || identity_bar_.max_level < 0) return;
+    const float health = std::isfinite(fraction) ? std::clamp(fraction, 0.0F, 1.0F) : 0.0F;
+    const auto level = static_cast<std::size_t>(std::ceil(static_cast<double>(health) * identity_bar_.max_level));
+    const Vector2 origin(centre[0] + identity_bar_.offset[0] * ui_scale,
+                         centre[1] - identity_bar_.offset[1] * ui_scale);
+    const auto draw = [&](const std::vector<std::string>& names, std::size_t index, bool overlay) {
+        if (names.empty()) return;
+        const auto region = atlas_region(names[std::min(index, names.size() - 1)]);
+        if (!region) return;
+        Vector2 size = region->size * (identity_bar_.scale * ui_scale);
+        Rect2 quad(origin - size * 0.5F, size);
+        if (identity_bar_.pixel_align) {
+            quad.position.x = std::floor(quad.position.x);
+            quad.position.y = std::ceil(quad.position.y);
+        }
+        // WSU-60: the outline stays one display pixel, independently of UI/bar scale.
+        if (!overlay) RenderingServer::get_singleton()->canvas_item_add_rect(canvas_item,
+            Rect2(quad.position - Vector2(1, 1), quad.size + Vector2(2, 2)), Color(0, 0, 0, 1));
+        if (overlay && identity_bar_.smooth) quad.size.x *= health;
+        if (quad.size.x > 0.0F && quad.size.y > 0.0F) {
+            RenderingServer::get_singleton()->canvas_item_add_texture_rect_region(canvas_item, quad, art_texture(names[std::min(index, names.size() - 1)]), *region);
+            identity_quads_.push_back({overlay ? "bar_overlay" : "bar_back", names[std::min(index, names.size() - 1)],
+                {quad.position.x, quad.position.y, quad.size.x, quad.size.y}});
+        }
+    };
+    draw(identity_bar_.back, static_cast<std::size_t>(identity_bar_.max_level), false);
+    draw(identity_bar_.overlay, level, true);
+}
+
 void WorldUiView::draw_bars(const Frame& frame, const RID canvas_item, const float ui_scale) {
     health_bars_ = 0;
     shield_bars_ = 0;
     bar_rows_.clear();
+    bar_geometry_.clear();
     bracket_flag_rows_.clear();
-    if (!frame.camera) return;
+    if (!frame.camera || !settings_.health_bar_scale || !settings_.min_health_bar_scale
+        || !settings_.health_bar_spacing) return;
     const auto snapshot = frame.live->battle_frame().latest;
     const auto& squadron_of = frame.live->squadron_of();
     // WU-16 (#502): the unit under the pointer (for a squadron, the craft), then the selection.
@@ -149,7 +183,9 @@ void WorldUiView::draw_bars(const Frame& frame, const RID canvas_item, const flo
         // WU-18: the anchor over the unit's bounds along the camera's up axis. A craft of a
         // squadron uses its own pick volume.
         const Bounds bounds = world_bounds(unit.box);
-        const float lift = ui::bar_anchor_lift(bounds.half, up, type->second.bounds_scale);
+        if (type->second.team && !settings_.team_offset) continue;
+        const float lift = ui::bar_anchor_lift(bounds.half, up, type->second.bounds_scale,
+            type->second.team ? settings_.team_offset : std::nullopt);
         const Vec3 anchor{bounds.centre[0] + up[0] * lift, bounds.centre[1] + up[1] * lift, bounds.centre[2] + up[2] * lift};
         auto screen = frame.project(anchor);
         if (!screen) continue;
@@ -159,16 +195,17 @@ void WorldUiView::draw_bars(const Frame& frame, const RID canvas_item, const flo
         (*screen)[1] = std::trunc((*screen)[1]);
         const float distance = std::sqrt((unit.position[0] - eye[0]) * (unit.position[0] - eye[0])
             + (unit.position[1] - eye[1]) * (unit.position[1] - eye[1]) + (unit.position[2] - eye[2]) * (unit.position[2] - eye[2]));
-        const float scale = ui::bar_scale(distance) * ui_scale;
+        const float scale = ui::bar_scale(distance, *settings_.health_bar_scale, *settings_.min_health_bar_scale) * ui_scale;
         const float width = ui::bar_width(type->second.bar) * scale;
         const float height = ui::bar_height * scale;
         float y = (*screen)[1];
+        bar_geometry_.push_back({candidate.entity, (*screen)[0], y, width, height, lift, *settings_.health_bar_spacing});
         std::string row = std::to_string(candidate.entity) + ":";
         if (shown.shield) {
             const float max_shields = to_float(*durability.max_shields);
             const float shields = durability.shields ? to_float(*durability.shields) / max_shields : 0.0F;
             bar(canvas_item, (*screen)[0], y, width, height, shields, ui::shield_bar_colour);
-            y += height * ui::health_bar_spacing;
+            y += height * *settings_.health_bar_spacing;
             ++shield_bars_;
             row += "s" + std::to_string(ui::bar_level(shields));
         }
@@ -177,7 +214,7 @@ void WorldUiView::draw_bars(const Frame& frame, const RID canvas_item, const flo
             bar(canvas_item, (*screen)[0], y, width, height, rules.health, ui::health_bar_colour(level));
             ++health_bars_;
             row += "h" + std::to_string(level);
-            y += height * ui::health_bar_spacing;
+            y += height * *settings_.health_bar_spacing;
         }
         // WBP-37: reuse world-bar geometry; exact stock capture artwork remains U-BP-7. #3150: retail's health
         // bars are white-tinted texture bars (no owner colour); the capture tint is the model colour (WBP-52).
@@ -201,14 +238,15 @@ void WorldUiView::draw_bars(const Frame& frame, const RID canvas_item, const flo
         const bool ally = frame.live->is_ally_of_local(instance->owner);
         draw_abilities(frame, canvas_item, candidate.entity, type->second, ally, bracket, false, height, ui_scale);
         // WU-39a (#6931): a marked ally's bracket carries the garrison flag, single ships included.
-        if (atlas_.is_valid() && ui::bracket_garrison_flag_shown(instance->garrison_unit, ally)) {
-            if (const auto region = atlas_region("i_garrison_flag.tga")) {
-                const auto flag = ui::bracket_garrison_flag_rect(bracket[0], bracket[1], width,
-                                                                 type->second.bounds_scale, ui_scale);
+        if (art_texture(garrison_icon_).is_valid() && ui::bracket_garrison_flag_shown(instance->garrison_unit, ally)) {
+            if (const auto region = atlas_region(garrison_icon_)) {
+                const float flag_scale = type->second.bounds_scale * ui_scale;
+                const ui::BracketFlagRect flag{bracket[0] + width * 0.5F + region->size.x * flag_scale * 0.5F,
+                    bracket[1], region->size.x * flag_scale, region->size.y * flag_scale};
                 const float flag_x = flag.centre_x - flag.width * 0.5F;
                 const float flag_y = flag.centre_y - flag.height * 0.5F;
                 RenderingServer::get_singleton()->canvas_item_add_texture_rect_region(
-                    canvas_item, Rect2(flag_x, flag_y, flag.width, flag.height), atlas_->get_rid(), *region);
+                    canvas_item, Rect2(flag_x, flag_y, flag.width, flag.height), art_texture(garrison_icon_), *region);
                 const std::string flagged = std::to_string(candidate.entity);
                 bracket_flag_rows_.push_back(flagged + ":x=" + std::to_string(std::lround(flag_x))
                                              + ",y=" + std::to_string(std::lround(flag_y)));

@@ -312,6 +312,9 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
     style.endpoint_offset = settings.number("Corruption_Line_Start_End_Offset").value_or(0);
     style.grow_seconds = settings.number("Corruption_Line_Grow_Seconds").value_or(0);
     style.path_width = settings.number("Corruption_Path_Width").value_or(0);
+    // WGP-20: corruption links join the planets the galactic path graph joins; its proximity limit is this constant (WGM-16).
+    if (const auto distance = settings.number("MaximumFleetMovementDistance"); distance && *distance >= 0)
+        style.link_distance = static_cast<double>(*distance);
     style.path_texture = settings.text("Fleet_Hyperspace_Band_Texture_Name");
     if (const auto colour = settings.components("Corruption_Path_Color", 4))
         std::copy(colour->begin(), colour->end(), style.path_colour.begin());

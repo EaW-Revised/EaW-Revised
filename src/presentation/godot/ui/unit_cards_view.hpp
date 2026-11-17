@@ -258,4 +258,14 @@ void fill_encyclopedia_popup(EncyclopediaPopupStyle& setup, const data::ui::Comm
     const vfs::Vfs& filesystem, FontProvider& fonts, std::string_view language,
     const data::ui::TextDatabase* text, std::vector<core::Diagnostic>& diagnostics);
 
+// CARD-19 / WGUI-69: the popup frame shared by the encyclopedia and the galactic advisor popup. Around the backdrop
+// panel: the first alternate texture as a one-unit edge, the second as an additive glow eight units larger on every
+// side tinted 128,128,128,128, and the measured lower-left connector. Units are shell units (times `scale`).
+inline constexpr float popup_edge_units = 1.0F;
+inline constexpr float popup_glow_units = 8.0F;
+[[nodiscard]] godot::Color popup_glow_tint(float alpha);
+// The connector triangle at the panel's lower-left corner, with its vertex colours at `alpha`.
+void popup_connector(const godot::Rect2& panel, float scale, float alpha, godot::PackedVector2Array& points,
+    godot::PackedColorArray& colours);
+
 } // namespace eawr::presentation::godot_backend

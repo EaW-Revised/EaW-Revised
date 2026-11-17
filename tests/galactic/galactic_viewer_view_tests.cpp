@@ -11,6 +11,7 @@
 #include "galactic/galactic_reveal.hpp"
 #include "no_fog_option.hpp"
 #include "galactic/map_input.hpp"
+#include "galactic/orbit_landing_view.hpp"
 #include "galactic/native_ai_flag.hpp"
 #include "galactic/planet_hud.hpp"
 #include "galactic/ground_stack.hpp"
@@ -40,6 +41,62 @@
 using namespace eawr::viewer::galactic;
 
 namespace {
+
+void invading_transports_leave_the_orbit_card_until_resolution() {
+    namespace gc = eawr::sim::galactic;
+    auto setup = synthetic_live_setup();
+    std::vector<gc::FleetDisplayType> traits;
+    std::vector<gc::FleetDisplayVisibility> visibility;
+    std::map<gc::TypeId, std::string> names;
+    configure_ground_fixture(setup, 1, "ground-invasion", traits, visibility, names);
+    const auto make = [&](std::vector<gc::GalacticEvent> events) {
+        return std::make_shared<const gc::GalacticSnapshot>(gc::GalacticSnapshot(0, {}, setup.players,
+            setup.planets, setup.routes, setup.fleets, std::move(events), {}, setup.fleet_control,
+            {}, {}, {}, {}, {}, setup.control, {}, {}, setup.observer));
+    };
+    eawr::platform::LiveGameFrame frame;
+    frame.latest = make({{0, gc::GalacticEventKind::land_conflict_requested, {}, 601, 1, 101}});
+    auto pending = std::make_shared<eawr::campaign::PendingConflictView>();
+    pending->conflict.id = 9000; pending->conflict.planet = 101;
+    pending->conflict.invader = 1; pending->conflict.defender = 2;
+    pending->conflict.layer = eawr::campaign::BattleLayer::land;
+    frame.pending_conflict = pending;
+    OrbitLandingView view;
+    const auto before = frame.latest->canonical_bytes();
+    const auto hidden = view.observe(frame);
+    assert((hidden == std::vector<eawr::sim::EntityId>{7001, 7002}));
+    const auto cards = gc::observed_fleets(*frame.latest, 1, traits, 32, visibility, {}, {}, {}, hidden);
+    const auto ship = std::find_if(cards.cards.begin(), cards.cards.end(), [](const auto& row) { return row.fleet == 601; });
+    assert(ship != cards.cards.end() && ship->count == 1 && ship->groups.size() == 1
+        && ship->groups.front().representative == 7003);
+    assert(frame.latest->canonical_bytes() == before);
+    frame.latest = make({});
+    assert(view.observe(frame) == hidden); // Request event has expired; prompt remains.
+    OrbitLandingView loaded;
+    assert(loaded.observe(frame).empty()); // Documented mid-prompt reload seam.
+    eawr::platform::LiveGalacticEvent retained;
+    retained.cursor = 1;
+    retained.event = {0, gc::GalacticEventKind::land_conflict_requested, {}, 601, 1, 101};
+    const std::array retained_events{retained};
+    OrbitLandingView skipped_frame;
+    assert(skipped_frame.observe(frame, retained_events) == hidden);
+    frame.conflict = std::make_shared<const eawr::campaign::ConflictRecord>(pending->conflict);
+    frame.pending_conflict.reset();
+    assert(view.observe(frame) == hidden);
+    frame.conflict.reset();
+    assert(view.observe(frame).empty()); // Surviving transports return with the next ordinary card projection.
+    // A one-unit invasion is a separate fleet sharing its source's slot; the source's other members stay.
+    setup.fleets.front().members.erase(setup.fleets.front().members.begin());
+    setup.fleets.push_back({605, 1, 101, {{7001, 1000}}, 0});
+    frame.latest = make({{0, gc::GalacticEventKind::land_conflict_requested, {}, 605, 2, 101}});
+    frame.pending_conflict = pending;
+    const auto subset = view.observe(frame);
+    assert((subset == std::vector<eawr::sim::EntityId>{7001}));
+    const auto remaining = gc::observed_fleets(*frame.latest, 1, traits, 32, visibility, {}, {}, {}, subset);
+    const auto source = std::find_if(remaining.cards.begin(), remaining.cards.end(), [](const auto& row) { return row.fleet == 601; });
+    assert(source != remaining.cards.end() && source->count == 2);
+    assert(std::none_of(remaining.cards.begin(), remaining.cards.end(), [](const auto& row) { return row.fleet == 605; }));
+}
 
 [[nodiscard]] bool same(float a, float b);
 
@@ -102,6 +159,35 @@ void ggs_02_known_ground_counts_and_ggs_04_local_launches() {
         }
         assert(snapshot.canonical_bytes() == before);
     }
+}
+
+// GGS-05 (owner rule 2026-11-16): while a local orbit fleet holding landable ground units is dragged, its planet's
+// ground control is the drop target whoever holds the surface and whatever is known of it; an unknown enemy surface
+// shows an empty stack (nothing revealed) and is never a launch source.
+void hostile_ground_slot_shows_while_a_landing_fleet_is_held() {
+    namespace gc = eawr::sim::galactic;
+    auto setup = synthetic_live_setup();
+    configure_synthetic_hud_clock(setup);
+    std::vector<gc::FleetDisplayType> traits;
+    std::vector<gc::FleetDisplayVisibility> visibility;
+    std::map<gc::TypeId, std::string> names;
+    configure_ground_fixture(setup, 1, "ground-invasion", traits, visibility, names);
+    for (auto& record : setup.observer->records) if (record.player == 1 && record.planet == 101)
+        record.mask &= ~(gc::bit(gc::Intelligence::ground_contents) | gc::bit(gc::Intelligence::ground_count));
+    const gc::GalacticSnapshot snapshot(0, {}, setup.players, setup.planets, setup.routes,
+        setup.fleets, {}, {}, setup.fleet_control, {}, {}, {}, {}, {}, setup.control,
+        {}, {}, setup.observer);
+    const auto roster = ground_roster(snapshot, 1, 101);
+    assert(roster.accessible && !roster.allied && !roster.contents_known && !roster.count_known);
+    assert(!ground_stack(snapshot, 1, 101, 6));           // unknown enemy ground: no stack at rest
+    assert(!ground_drop_stack(snapshot, 1, 101, 6, 0));   // nor without a dragged fleet
+    assert(fleet_can_land(snapshot, 1, 601));
+    const auto target = ground_drop_stack(snapshot, 1, 101, 6, 601);
+    assert(target && target->count == 0 && target->texture == 0 && !target->allied);
+    assert(target->contents.empty() && ground_stack_units(*target).empty());
+    assert(!ground_drop_stack(snapshot, 1, 102, 6, 601)); // Same-planet landing only.
+    const std::array<gc::FleetMemberRef, 1> ship{{{601, 7003}}};
+    assert(!ground_drop_stack(snapshot, 1, 101, 6, 601, {}, false, ship)); // a space unit exposes no ground target
 }
 
 void empty_ground_slot_returns_only_while_ground_units_are_held() {
@@ -632,6 +718,57 @@ void corruption_projection_rejects_undiscovered_and_other_observers() {
     view.local.player = 2;
     assert(observed_corruption(snapshot, view, "authored-particle").planets.empty());
     assert(snapshot.canonical_bytes() == bytes);
+}
+
+// WGP-20 / WGM-16: corruption links follow the planet graph, which joins every pair within the authored movement distance
+// as well as every routed pair, so two nearby corrupted planets are linked without a drawn lane.
+void corruption_links_follow_the_planet_graph_not_only_drawn_routes() {
+    GalaxyView view; view.local.seat = 1;
+    const auto planet = [](const ObjectId id, const float x) {
+        PlanetView value; value.id = id; value.position = {x, 0, 0}; return value;
+    };
+    view.planets = {planet(1, 0), planet(2, 60), planet(3, 400), planet(4, 470)};
+    CorruptionPublication publication; publication.seat = 1;
+    for (const ObjectId id : {1U, 2U, 3U, 4U}) {
+        CorruptionPlanetFact fact; fact.planet = id; fact.corrupted = true; fact.particle_type = "particle";
+        publication.planets.push_back(fact);
+    }
+    const auto pairs = [](const CorruptionVisuals& visuals) {
+        std::set<std::pair<ObjectId, ObjectId>> result;
+        for (const auto& line : visuals.connections)
+            result.emplace(std::min(line.from, line.to), std::max(line.from, line.to));
+        return result;
+    };
+    using Pairs = std::set<std::pair<ObjectId, ObjectId>>;
+    // No distance and no route: nothing is linked (the earlier route-only rule).
+    CorruptionVisuals none; none.update(view, publication);
+    assert(none.connections.empty());
+    // With the authored limit, the two close pairs link and no far pair does; a pair exactly at the limit counts (at most).
+    CorruptionVisuals near; near.update(view, publication, 100.0);
+    assert((pairs(near) == Pairs{{1, 2}, {3, 4}}));
+    assert(near.work().pair_tests == 6 && near.work().adjacency_rebuilds == 1);
+    CorruptionVisuals exact; exact.update(view, publication, 60.0);
+    assert((pairs(exact) == Pairs{{1, 2}}));
+    // A route joins planets beyond the limit, and a pair that is both close and routed is one link.
+    RouteView far; far.from = 2; far.to = 3;
+    RouteView both; both.from = 1; both.to = 2;
+    view.routes = {far, both};
+    CorruptionVisuals routed; routed.update(view, publication, 100.0);
+    assert((pairs(routed) == Pairs{{1, 2}, {2, 3}, {3, 4}}));
+    assert(routed.connections.size() == 3);
+    // The pair test reruns only when the planets, routes or limit change, never per presented frame.
+    routed.update(view, publication, 100.0);
+    assert(routed.work().adjacency_rebuilds == 0 && routed.work().pair_tests == 0);
+    routed.update(view, publication, 70.0);
+    assert(routed.work().adjacency_rebuilds == 1 && routed.work().pair_tests == 6);
+    view.planets[1].position = {500, 0, 0};
+    routed.update(view, publication, 70.0);
+    assert(routed.work().adjacency_rebuilds == 1);
+    // A neighbour that is not corrupted gets no settled line, however near it is.
+    publication.planets[1].corrupted = false;
+    CorruptionVisuals partial; partial.update(view, publication, 1000.0);
+    assert(!partial.connections.empty());
+    for (const auto& line : partial.connections) assert(line.from != 2 && line.to != 2);
 }
 
 void corruption_connection_work_follows_edges() {
@@ -1703,8 +1840,10 @@ void pathfinder_slot_contracts() {
 }
 
 int main() {
+    invading_transports_leave_the_orbit_card_until_resolution();
     ggs_02_known_ground_counts_and_ggs_04_local_launches();
     empty_ground_slot_returns_only_while_ground_units_are_held();
+    hostile_ground_slot_shows_while_a_landing_fleet_is_held();
     empty_owned_planet_without_a_base_is_a_ground_receiver();
     ggs_09_sanitized_ground_representatives();
     ggs_09_native_fixture_qualifies_all_live_combat_queries();
@@ -1717,6 +1856,7 @@ int main() {
     corruption_attachment_edges_and_events_follow_admitted_facts();
     corruption_parameters_and_retained_pairs();
     corruption_projection_rejects_undiscovered_and_other_observers();
+    corruption_links_follow_the_planet_graph_not_only_drawn_routes();
     corruption_connection_work_follows_edges();
     live_fleets_follow_observer_presence_and_transit_visibility();
     transit_reveal_range_and_path_context();

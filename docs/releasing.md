@@ -60,7 +60,7 @@ project version, the mods service version and the default build identity follow 
 suffix (`python tools/release/release_version.py label <suffix>`), and a release tag must equal `v` plus that version
 (`python tools/release/release_version.py check-tag <tag>`; `cut_kit.py --release-tag` runs the same check). The launcher executables' file and product versions are generated from the same
 version. The launcher pin (`config/launcher-pin.json`) is a separate
-product and keeps its own version. The last published release is v0.3.3.
+product and keeps its own version. The last published release is v0.3.4.
 The published release includes the portable player download with its double-click launcher,
 a debug download, playable space skirmish, LAN and online multiplayer and a partially working Galactic Conquest. The galactic AI is on by default
 in live campaigns; `--eawr-galactic-ai off` switches it off. Keep a candidate local until the

@@ -271,11 +271,12 @@ std::optional<Vec3f> battle_plane_point(const PickRay& ray) noexcept {
     return Vec3f{ray.origin[0] + t * ray.direction[0], ray.origin[1] + t * ray.direction[1], 0.0F};
 }
 
-RightRelease right_release(const std::optional<std::array<float, 2>> press, const std::array<float, 2> release) noexcept {
+RightRelease right_release(const std::optional<std::array<float, 2>> press, const std::array<float, 2> release,
+    const float drag_select_distance, const float drag_click_distance) noexcept {
     if (!press) return RightRelease::ignored;
     const float extent = drag_extent(*press, release);
-    if (!(extent > minimum_drag_distance)) return RightRelease::click;
-    return extent < minimum_drag_select_distance ? RightRelease::compass : RightRelease::cancel;
+    if (!(extent > drag_click_distance)) return RightRelease::click;
+    return extent < drag_select_distance ? RightRelease::compass : RightRelease::cancel;
 }
 
 std::optional<sim::math::Fixed> compass_yaw(const Vec3f& press, const Vec3f& release) noexcept {
@@ -290,8 +291,10 @@ std::optional<sim::math::Fixed> compass_yaw(const Vec3f& press, const Vec3f& rel
 }
 
 bool compass_visible(const std::optional<std::array<float, 2>> press,
-    const std::array<float, 2> cursor, const double held_seconds) noexcept {
-    return held_seconds >= 0.5 && right_release(press, cursor) == RightRelease::compass;
+    const std::array<float, 2> cursor, const double held_seconds, const float drag_select_distance,
+    const float drag_click_distance) noexcept {
+    return held_seconds >= 0.5
+        && right_release(press, cursor, drag_select_distance, drag_click_distance) == RightRelease::compass;
 }
 
 std::optional<Vec3f> facing_point(const Vec3f& press, const Vec3f& release, const float range) noexcept {

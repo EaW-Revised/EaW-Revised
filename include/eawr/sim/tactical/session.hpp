@@ -197,6 +197,11 @@ public:
     [[nodiscard]] StateHashPolicy state_hash_policy() const noexcept;
     // Diagnostic publication only; changing it leaves canonical state/checkpoints identical.
     void set_damage_notifications(bool enabled) noexcept;
+    struct PredictionPathWork {
+        std::uint64_t units_visited{}, plans_copied{}, cached_plans{};
+    };
+    // PL-01: derived presentation work only; stock keeps all three counts zero.
+    [[nodiscard]] PredictionPathWork prediction_path_work() const noexcept;
     // #3644: installs (or, with null, removes) the object-turn provider. Not state: a session with none
     // installed steps exactly as before. The provider is called from inside step(), at the seam after the
     // ability service and its special handlers and before tracking, late impacts and the commands (see
@@ -222,6 +227,7 @@ public:
         std::uint64_t pad_death_membership_work{}; // WBP-27: queries/comparisons, never hashed
         std::uint64_t concentrate_queries{}, concentrate_candidates{}, concentrate_batches{};
         std::uint64_t corrupt_queries{}, corrupt_candidates{}, corrupt_recipients{};
+        std::uint64_t avoidance_queries{}, avoidance_triangles{}; // FD-10 narrow-query work, never hashed
     };
     [[nodiscard]] TickWork tick_work() const noexcept;
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;

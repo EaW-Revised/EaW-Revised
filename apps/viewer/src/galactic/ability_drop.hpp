@@ -39,6 +39,7 @@ struct AbilityPreviewPolicy {
     case GalacticRejectReason::neutralize_allied_hero: return "The only heroes on that planet belong to an ally.";
     case GalacticRejectReason::neutralize_not_targetable: return "The enemy heroes on that planet cannot be neutralized by this hero.";
     case GalacticRejectReason::neutralize_unavailable: return "Neutralize Hero cannot be used on that planet right now.";
+    case GalacticRejectReason::ability_target_undiscovered: return "That planet has not been explored yet.";
     case GalacticRejectReason::insufficient_credits: return "You cannot afford that.";
     // A drop on a distant planet is a move first; its refusals are the movement owner's, not the ability's.
     case GalacticRejectReason::invalid_path: return "There is no route for the hero to that planet.";

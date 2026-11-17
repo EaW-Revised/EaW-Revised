@@ -51,6 +51,10 @@ struct AdaptiveTiming {
     // (closed or still connecting) or a pending departure fails closed at once.
     bool hold_on_expiry{};
     std::uint32_t max_deferrals{4};
+    // Online campaign policy: inspect rises every 8 ticks; require four stable slow
+    // policy samples before lowering. Only the host samples; ordinary timing controls
+    // still agree, retain and activate the resulting change at one shared boundary.
+    bool responsive{};
 };
 
 namespace session_errors {
@@ -238,6 +242,12 @@ struct PumpResult {
     std::vector<sim::SeatCommandKey> departures; // MP-36 frame-tail notifications; policy is external.
 };
 
+enum class SessionWaitKind : std::uint8_t { batch, queued, hash, timing, other, none };
+struct InputReceiptStats {
+    std::uint64_t samples{}, total_us{}, max_us{};
+    std::optional<std::chrono::steady_clock::time_point> window_at{};
+};
+
 // Caller-driven and single-threaded; adapter, transport, monitor outlive this session.
 // An agreed setup/tick-zero barrier precedes play. The adapter is exclusively driven here.
 class LockstepSession final {
@@ -264,6 +274,9 @@ public:
     [[nodiscard]] std::uint64_t received_through(PeerIndex peer) const { return received_through_.at(peer); }
     [[nodiscard]] std::optional<std::uint64_t> last_sent_batch(PeerIndex peer) const { return last_sent_batch_.at(peer); }
     [[nodiscard]] std::uint64_t input_delay() const noexcept { return options_.input_delay; }
+    [[nodiscard]] SessionWaitKind wait_kind(bool due, bool stepped) const;
+    [[nodiscard]] const InputReceiptStats& input_receipts(PeerIndex peer) const { return input_receipts_.at(peer); }
+    [[nodiscard]] double max_poll_gap_ms() const noexcept { return max_poll_gap_ms_; }
     // Times an adaptive timing vote outlived completeness_timeout_ms and kept waiting (AdaptiveTiming::hold_on_expiry).
     [[nodiscard]] std::uint64_t timing_deferrals() const noexcept { return timing_deferrals_; }
     // A timing proposal, a roster/departure agreement or a held seat is in flight: a save barrier begun now is refused as busy.
@@ -406,6 +419,7 @@ private:
     [[nodiscard]] bool mesh_excluded(PeerIndex peer) const noexcept { return (mesh_removed_ & mesh_seat(peer)) != 0; }
     [[nodiscard]] core::Result<void> receive_resync(const Received& received);
     [[nodiscard]] core::Result<bool> service_resync();
+    [[nodiscard]] core::Result<void> service_deferred_resync();
     [[nodiscard]] core::Result<void> start_resync(std::uint64_t epoch, std::uint64_t tick);
     [[nodiscard]] core::Result<void> resync_broadcast(std::span<const std::uint8_t> frame);
     [[nodiscard]] std::string resync_log_hash() const;
@@ -529,6 +543,12 @@ private:
     std::optional<TimingAgreement> timing_;
     std::optional<TimingEvent> last_timing_;
     std::uint64_t next_policy_tick_{}, retained_delay_{}, retain_until_{};
+    std::uint64_t lower_delay_candidate_{};
+    unsigned lower_delay_samples_{};
+    std::vector<InputReceiptStats> input_receipts_;
+    std::optional<std::chrono::steady_clock::time_point> last_pump_at_;
+    std::optional<std::chrono::steady_clock::time_point> poll_window_at_;
+    double max_poll_gap_ms_{};
     std::uint64_t timing_deferrals_{};
     std::optional<HeldSeat> held_;
     std::uint64_t reconnect_epoch_{};
@@ -568,6 +588,8 @@ private:
     std::vector<MeshIncidentResult> mesh_results_;
     std::uint64_t resync_epoch_{}, initial_input_delay_{};
     std::optional<std::uint64_t> refused_resync_epoch_;
+    std::map<PeerIndex, Received> deferred_resync_votes_; // at most one fixed-size vote per active peer
+    std::optional<std::uint64_t> deferred_resync_since_;
     bool resync_staging_{};
     bool recovery_split_{};
     std::optional<SeatInput> recovery_rejoin_;

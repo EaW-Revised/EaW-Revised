@@ -1,6 +1,7 @@
 #pragma once
 #include "lan_match.hpp"
 #include "eawr/core/build_identity.hpp"
+#include "eawr/net/desync_monitor.hpp"
 #include "eawr/net/network_introduction.hpp"
 #include "eawr/net/online_lobby_source.hpp"
 #include <atomic>
@@ -23,7 +24,7 @@ struct OnlineMatchOptions {
     // Test harness only, empty in production and never set by UI/settings.
     // Called on the I/O owner; retained transports and fault calls stay on that owner.
     std::function<void(net::GnsTransport&)> transport_observer{};
-    std::uint64_t hash_exchange_every{30};
+    std::uint64_t hash_exchange_every{net::default_hash_exchange_every};
     // Host: the directory room the room source published and its owner principal (docs/net-online-npeer.md, section 2),
     // polled on the bridge worker until it exists. hosting_failure reports a publication that cannot succeed (the service
     // refused or is unreachable) so the host fails with that typed diagnostic instead of waiting for the lifetime to pass.

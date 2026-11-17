@@ -574,6 +574,16 @@ std::optional<core::Diagnostic> append_object_combat_weapon(const UnitType& unit
 
 std::optional<core::Diagnostic> append_combat_collision_geometry(const UnitType& unit, tactical::CombatProfile& profile,
     const PointPlacement& place) {
+    if (unit.model_collision_box) {
+        auto low = place(unit.model_collision_box->min);
+        auto high = place(unit.model_collision_box->max);
+        if (!low || !high) return failure(unit.id + ": scaled model collision box overflows");
+        const auto& a = low.value();
+        const auto& b = high.value();
+        profile.model_collision_box = tactical::CollisionBox{
+            Vec3{std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)},
+            Vec3{std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)}};
+    }
     if (unit.collision) {
         // The turned box: x from -max.y to -min.y, y from min.x to max.x.
         auto low = place(unit.collision->min);
@@ -619,6 +629,7 @@ std::optional<core::Diagnostic> append_combat_collision_geometry(const UnitType&
             const auto source = mesh.hardpoint == no_index ? tactical::no_hardpoint : mesh.hardpoint;
             profile.meshes.push_back(
                 tactical::collision_mesh(std::move(triangles), damaged, source, same_name(mesh.name, "shield")));
+            profile.meshes.back().pose_visible = mesh.pose_visible;
         }
         profile.mesh_bounds = bounds;
         // #669 (DG-39): a shot aimed at a hardpoint damages the hardpoint its Collision_Mesh
@@ -640,6 +651,36 @@ std::optional<core::Diagnostic> append_combat_collision_geometry(const UnitType&
             }
             profile.sphere_modifier = *unit.collision_box_modifier;
         }
+    }
+    // FD-10: enclose every corner under any rotation, including attachments. Pad for mesh
+    // endpoint/vertex grid rounding and Q24 placement; none of this changes the narrow shape.
+    const auto* bounds = profile.model_collision_box ? &*profile.model_collision_box
+        : (profile.mesh_bounds ? &*profile.mesh_bounds : nullptr);
+    if (bounds != nullptr) {
+        const std::array<Fixed, 3> low{bounds->min.x, bounds->min.y, bounds->min.z};
+        const std::array<Fixed, 3> high{bounds->max.x, bounds->max.y, bounds->max.z};
+        std::array<Fixed, 3> extent{};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            auto opposite = sim::math::negate(low[axis]);
+            if (!opposite) return failure(unit.id + ": model collision broad radius overflows");
+            extent[axis] = std::max(opposite.value(), high[axis]);
+        }
+        auto radius = sim::math::length(Vec3{extent[0], extent[1], extent[2]});
+        if (!radius) return failure(unit.id + ": model collision broad radius overflows");
+        auto placement_guard = sim::math::multiply(radius.value(), Fixed::from_raw(32));
+        if (!placement_guard) return failure(unit.id + ": model collision broad radius overflows");
+        Fixed grid_guard{};
+        if (!profile.model_collision_box) for (const auto& mesh : profile.meshes) {
+            if (mesh.grid_exponent <= 6) grid_guard = std::max(grid_guard,
+                Fixed::from_raw((Fixed::scale / 16) * (std::int64_t{1} << mesh.grid_exponent)));
+        }
+        auto padding = sim::math::add(grid_guard, placement_guard.value());
+        if (!padding) return failure(unit.id + ": model collision broad radius overflows");
+        auto conservative = sim::math::add(radius.value(), padding.value());
+        if (!conservative) return failure(unit.id + ": model collision broad radius overflows");
+        auto rounded = sim::math::add(conservative.value(), Fixed::from_raw(1));
+        if (!rounded) return failure(unit.id + ": model collision broad radius overflows");
+        profile.model_collision_radius = rounded.value();
     }
     for (const auto& bone : unit.target_bones) {
         if (!bone.position) continue;
@@ -817,6 +858,30 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
         }
     }
     std::map<std::uint32_t, std::uint32_t> set_index; // unit tables' set index -> combat table's
+    const auto clear_oversized_geometry = [&](tactical::CombatProfile& profile, const std::string& id) {
+        if (policy != ContentErrors::skip_object) return;
+        // #5704: oversized scaled props keep their type and lose unsupported collision geometry.
+        const auto limit = tactical::max_combat_distance * Fixed::scale;
+        const auto inside = [&](const Vec3& p) {
+            return p.x.raw() >= -limit && p.x.raw() <= limit && p.y.raw() >= -limit && p.y.raw() <= limit
+                && p.z.raw() >= -limit && p.z.raw() <= limit;
+        };
+        const auto outside = [&](const std::optional<tactical::CollisionBox>& box) {
+            return box && (!inside(box->min) || !inside(box->max));
+        };
+        if (!outside(profile.collision) && !outside(profile.model_collision_box)) return;
+        profile.collision.reset();
+        profile.model_collision_box.reset();
+        profile.model_collision_radius = {};
+        profile.meshes.clear();
+        profile.mesh_bounds.reset();
+        if (shot_profile.notes != nullptr) {
+            auto note = failure("unit type '" + id + "' collision box exceeds the supported combat domain: "
+                "the type keeps no collision box (retail has no such limit)");
+            note.severity = core::Severity::warning;
+            shot_profile.notes->push_back(std::move(note));
+        }
+    };
     // One unit type's rows, built whole before any is added: a type that fails adds nothing.
     const auto build_unit = [&](const std::size_t unit_index) -> std::optional<core::Diagnostic> {
         const auto& unit = tables.units[unit_index];
@@ -882,24 +947,7 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
         }
         if (auto phase_error = append_combat_collision_geometry(unit, profile, place))
             return phase_error;
-        if (shot_profile.notes != nullptr && profile.collision) {
-            // #5704: a scaled backdrop (Scale_Factor 300 on a planet model) can span more than the combat domain; retail
-            // has no such limit. A tolerant load leaves the prop without a collision box and meshes, with a note.
-            const auto limit = tactical::max_combat_distance * Fixed::scale;
-            const auto inside = [&](const Vec3& p) {
-                return p.x.raw() >= -limit && p.x.raw() <= limit && p.y.raw() >= -limit && p.y.raw() <= limit
-                    && p.z.raw() >= -limit && p.z.raw() <= limit;
-            };
-            if (!inside(profile.collision->min) || !inside(profile.collision->max)) {
-                profile.collision.reset();
-                profile.meshes.clear();
-                profile.mesh_bounds.reset();
-                auto note = failure("unit type '" + unit.id + "' collision box exceeds the supported combat domain: "
-                    "the type keeps no collision box (retail has no such limit)");
-                note.severity = core::Severity::warning;
-                shot_profile.notes->push_back(std::move(note));
-            }
-        }
+        clear_oversized_geometry(profile, unit.id);
         table.footprints.push_back({footprint.value().type_id, footprint.value().radius,
             footprint.value().x_extent, footprint.value().y_extent});
         if (unit.unit_ai) table.unit_ai_types.push_back(assets::object_type_crc(unit.id));
@@ -924,11 +972,62 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
             return Result::failure(failure("two unit types share type ID " + std::to_string(table.profiles[index].type_id)));
         }
     }
-    // Each used set, resolved against every type of the table (R-09 set side, attack_priority).
+    // WHZ-08 / FD-10: solid map props borrow the same placed model geometry without becoming combat targets.
+    const FootprintTypeSelection obstacle_selection(tables);
+    for (const auto& obstacle : tables.obstacles) {
+        if (!obstacle_selection.keeps(obstacle) || !obstacle.footprint.hazard.impassable_asteroid) continue;
+        UnitType shape;
+        shape.id = obstacle.id;
+        shape.scale_factor = obstacle.scale_factor;
+        shape.collision = obstacle.collision;
+        shape.model_collision_box = obstacle.model_collision_box;
+        shape.collision_meshes = obstacle.collision_meshes; // indexed triangle buffers share immutable storage
+        const auto scale = shape.scale_factor.value_or(Fixed::from_raw(Fixed::scale));
+        const auto footprint_profile = [&] {
+            tactical::CombatProfile fallback;
+            fallback.type_id = assets::object_type_crc(obstacle.id);
+            fallback.living_projectile_collision = false;
+            return fallback;
+        };
+        auto profile = footprint_profile();
+        const PointPlacement place{shape, scale};
+        const auto bind_geometry = [&]() -> std::optional<core::Diagnostic> {
+            if (const auto error = append_combat_collision_geometry(shape, profile, place)) return error;
+            clear_oversized_geometry(profile, obstacle.id);
+            tactical::CombatTable checked;
+            checked.avoidance_obstacles.push_back(std::move(profile));
+            if (const auto valid = tactical::validate_combat(checked); !valid) return valid.error();
+            profile = std::move(checked.avoidance_obstacles.front());
+            return std::nullopt;
+        };
+        if (const auto error = bind_geometry()) {
+            if (policy == ContentErrors::strict) return Result::failure(*error);
+            if (skipped != nullptr) skipped->push_back(*error);
+            profile = footprint_profile();
+        }
+        // The ordinary FD-10 mesh query ignores shield surfaces and pose-hidden meshes.
+        // A solid prop with no eligible surface must retain its footprint avoidance.
+        if (!profile.model_collision_box && std::none_of(profile.meshes.begin(), profile.meshes.end(),
+                [](const auto& mesh) { return mesh.pose_visible && !mesh.shield; })) {
+            profile = footprint_profile();
+            // Geometry-free authored props already emitted the loader note. Warn here only
+            // when authored geometry became unusable during combat binding.
+            if (skipped != nullptr && (obstacle.model_collision_box || !obstacle.collision_meshes.empty())) {
+                auto note = failure("unit type '" + obstacle.id
+                    + "' has no usable model collision shape: solid-asteroid avoidance uses its footprint sphere (FD-10)");
+                note.severity = core::Severity::warning;
+                skipped->push_back(std::move(note));
+            }
+        }
+        table.avoidance_obstacles.push_back(std::move(profile));
+    }
+    std::sort(table.avoidance_obstacles.begin(), table.avoidance_obstacles.end(),
+        [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
     std::sort(table.unit_ai_types.begin(), table.unit_ai_types.end());
     std::sort(table.retaliation_team_types.begin(), table.retaliation_team_types.end(),
         [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
     table.priority_sets.resize(set_index.size());
+    // Each used set, resolved against every type of the table (R-09 set side, attack_priority).
     for (const auto& [source, target] : set_index) {
         auto& set = table.priority_sets[target];
         set.unlisted = unlisted_priority;

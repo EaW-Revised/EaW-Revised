@@ -108,6 +108,41 @@ struct WaypointDisplayPoint {
     friend bool operator==(const WaypointDisplayPoint&, const WaypointDisplayPoint&) = default;
 };
 
+// PL-01: one node of a ship's planned path as the move planner stored it (frame reached, place,
+// heading in degrees and speed there). The presentation samples it with the same Hermite rule.
+struct PredictedPathNode {
+    math::Fixed frame{};
+    math::Vec3 position{};
+    math::Fixed yaw{};
+    math::Fixed speed{};
+    friend constexpr bool operator==(const PredictedPathNode&, const PredictedPathNode&) noexcept = default;
+};
+
+// PL-01: an immutable copy of one move plan, shared by every snapshot published while the plan
+// stands (a snapshot copies a pointer, not the nodes). Presentation only: never part of canonical
+// bytes or checkpoints.
+struct PredictedPath {
+    std::vector<PredictedPathNode> nodes;
+    friend bool operator==(const PredictedPath&, const PredictedPath&) = default;
+};
+
+// A pointer to a shared immutable plan. Equality compares the plan, not the address, so two
+// sessions that published the same plan compare equal.
+struct PredictedPathHandle {
+    std::shared_ptr<const PredictedPath> path;
+    [[nodiscard]] explicit operator bool() const noexcept { return path != nullptr; }
+    friend bool operator==(const PredictedPathHandle& a, const PredictedPathHandle& b) {
+        return a.path == b.path || (a.path && b.path && *a.path == *b.path);
+    }
+};
+
+// PL-01: optional snapshot sidecar, outside the ordinary per-unit publication path.
+struct SnapshotPredictedPath {
+    EntityId entity{};
+    PredictedPathHandle plan;
+    friend bool operator==(const SnapshotPredictedPath&, const SnapshotPredictedPath&) = default;
+};
+
 // visible_to bit k is the k-th snapshot player; reveal_range is the type's sensor profile.
 struct TacticalInstance {
     EntityId entity_id{};

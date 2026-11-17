@@ -336,7 +336,7 @@ no `Space_Layer` and gets no footprint.
 ## Content identity
 
 `content_identity(tables)` is SHA-256 over `canonical_encoding(tables)`. The encoding
-starts with the length-framed text `eawr-unit-tables-v7` (v7 adds independent hazard flags, ordered general and space behavior lists, service opt-ins and raw obstacle offsets; v6 adds production limits, prerequisites, next-level types and automatic upgrade bonuses; v5 predates those fields, v4 predates station purchasing, v3 predates fighter simulation, v2 predates formation and avoidance, and v1 predates priority-set exclusions and properties). It
+starts with the length-framed text `eawr-unit-tables-v8` (v8 makes model-box presence and collision-mesh pose visibility explicit flags; v7 adds independent hazard flags, ordered general and space behavior lists, service opt-ins and raw obstacle offsets; v6 adds production limits, prerequisites, next-level types and automatic upgrade bonuses; v5 predates those fields, v4 predates station purchasing, v3 predates fighter simulation, v2 predates formation and avoidance, and v1 predates priority-set exclusions and properties). It
 then writes every unit (with its avoidance footprint fields after its inactive abilities), the
 pinned map obstacles (ID, XML type, `Space_Layer`, `Scale_Factor`, model path, footprint
 fields), projectile, priority set, category and property enum value, combat scalar and

@@ -37,16 +37,25 @@ private:
 // shows a request only after the input delay. One strategic speed request is in flight per seat: further presses wait
 // until the published speed equals the request, this seat's speed event or a sim refusal of its SetSpeed is published,
 // the adapter's budget refusal arrives (reset()), or one speed window of session ticks has passed (never stuck).
-// Speeds are Q24 raw factors; ticks are agreed session ticks. Presentation only.
+// Speeds are Q24 raw factors; ticks are agreed session ticks. A request back to normal (1x) is never held behind a
+// faster one in flight: it replaces it, so the seat that asked for fast forward can always end it with its own button
+// (owner online test 2026-11-17). Presentation only.
 class SpeedToggleGuard final {
 public:
     static constexpr std::uint64_t release_ticks = 300; // one ClockThrottle window
+    static constexpr std::int64_t normal = std::int64_t{1} << 24; // 1x as a Q24 raw factor
 
     [[nodiscard]] bool begin(std::int64_t current, std::int64_t target, std::uint64_t tick) {
-        if (pending_ || current == target) return false;
+        if (pending_) {
+            if (target != normal || pending_->target == target) return false;
+        } else if (current == target) {
+            return false;
+        }
         pending_ = Pending{target, tick};
         return true;
     }
+    // What the button shows and what its next press acts on: the request in flight, else the current speed.
+    [[nodiscard]] std::int64_t shown(std::int64_t current) const noexcept { return pending_ ? pending_->target : current; }
     void observe(std::int64_t current, sim::SeatId seat, std::span<const sim::galactic::GalacticEvent> events, std::uint64_t tick) {
         if (!pending_) return;
         if (current == pending_->target || tick >= pending_->since + release_ticks) { pending_.reset(); return; }

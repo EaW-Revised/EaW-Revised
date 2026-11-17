@@ -611,6 +611,8 @@ void synthetic_start() {
         std::filesystem::create_directories(mod / "xml");
         std::ofstream(directory / "xml/SelectionControls.xml") << "stock";
         std::ofstream(revised / "xml/SelectionControls.xml") << "presentation";
+        std::ofstream(revised / "xml/RevisedPlanetSearch.xml") << "<Planet_Search/>";
+        std::ofstream(revised / "xml/RevisedGiftSFX.xml") << "<SFXEvents/>";
         const eawr::vfs::MountSpec revised_mount{.layer_id = std::string(eawr::vfs::revised_layer_id),
             .data_root = revised, .loose_logical_prefix = "data", .active_archives = {}};
         const eawr::vfs::MountSpec mod_mount{.layer_id = "mod", .data_root = mod,
@@ -624,6 +626,11 @@ void synthetic_start() {
         const auto with = read_layers({revised_mount, mount});
         expect(without && with && without.value().ai_data_digest == with.value().ai_data_digest,
             "presentation layer falls back to stock identity");
+        std::ofstream(revised / "xml/RevisedPlanetSearch.xml") << "<Planet_Search>restyled</Planet_Search>";
+        std::ofstream(revised / "xml/RevisedGiftSFX.xml") << "<SFXEvents><!-- alternate presentation --></SFXEvents>";
+        const auto restyled = read_layers({revised_mount, mount});
+        expect(without && restyled && without.value().ai_data_digest == restyled.value().ai_data_digest,
+            "restyling Revised search and gift presentation leaves identity unchanged");
         if (without && with) {
             auto host = inputs;
             host.script_manifest_digest = with.value().script_manifest_digest;
@@ -659,6 +666,15 @@ void synthetic_start() {
         const auto override_result = read_layers({mod_mount, revised_mount, mount});
         expect(without && override_result && without.value().ai_data_digest != override_result.value().ai_data_digest,
             "user mod winner remains in identity");
+        std::filesystem::remove(mod / "xml/SelectionControls.xml");
+        for (const auto name : {"RevisedPlanetSearch.xml", "RevisedGiftSFX.xml"}) {
+            const auto path = mod / "xml" / name;
+            std::ofstream(path) << "user mod presentation";
+            const auto mod_presentation = read_layers({mod_mount, revised_mount, mount});
+            expect(without && mod_presentation && without.value().ai_data_digest != mod_presentation.value().ai_data_digest,
+                "user mod search and gift XML remains in identity");
+            std::filesystem::remove(path);
+        }
         const auto base = read();
         write("scripts/test.lua", "return 2");
         const auto script = read();

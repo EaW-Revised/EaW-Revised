@@ -17,6 +17,14 @@
 
 namespace eawr::net {
 
+// Hash cadence: five seconds at the normal 30 Hz match rate.
+// Shared by online/LAN setup and recovery; tick-zero and end checks stay immediate.
+inline constexpr std::uint64_t default_hash_exchange_every = 150;
+// Asynchronous desync check (#7462 stage 4): ordinary exchange points compare up to K ticks
+// behind simulation instead of holding it. Code-only, no user setting; every DesyncOptions and
+// online/LAN path defaults from this one constant. Setup, finish and match end stay barriers.
+inline constexpr bool default_deferred_compare = true;
+
 class MessageTransport;
 
 // Net kinds 32..39 are coordinator-reserved for desync diagnostics.
@@ -77,7 +85,7 @@ struct DesyncReport {
 
 struct DesyncOptions {
     std::uint64_t initial_tick{}; // Agreed restored boundary; the first row always exchanges.
-    std::uint64_t exchange_every{30}; // 1..4096 completed ticks; zero barrier and end always exchange
+    std::uint64_t exchange_every{default_hash_exchange_every}; // 1..4096 ticks; zero barrier and end always exchange
     std::uint64_t input_delay{3}; // Match SessionOptions; bounds an agreed departure cutoff by 2*D+2.
     std::size_t keep_exchange_points{2};
     // Payload budget; row metadata additionally bounded by interval/roster. Sized so keep_exchange_points canonical encodings
@@ -98,6 +106,12 @@ struct DesyncOptions {
     // to the bundle as session-journal.bin when it fits max_journal_bytes. Called on the monitor's thread.
     std::function<std::vector<std::uint8_t>()> replay_journal;
     std::size_t max_journal_bytes{32 * 1024 * 1024};
+    // Code-only rollout: ordinary checks may run up to K=max(delay, retained delay)
+    // ticks behind simulation. Setup, finish and match end remain barriers.
+    // Defaults ON from default_deferred_compare; false pins the synchronous barrier path.
+    bool deferred_compare{default_deferred_compare};
+    // When known, cap the recovery frontier at the match's final completed tick.
+    std::optional<std::uint64_t> final_tick;
 };
 
 // Driven by LockstepSession: never polls the transport itself, sleeps or starts threads.
@@ -120,6 +134,7 @@ public:
     [[nodiscard]] core::Result<void> on_link_repair(PeerIndex peer, std::function<bool(PeerIndex)> ownership = {}) override;
     [[nodiscard]] core::Result<void> on_departure(PeerIndex peer, std::uint64_t tick) override;
     [[nodiscard]] core::Result<void> on_input_delay(std::uint64_t delay, std::uint64_t retained_delay) override;
+    [[nodiscard]] core::Result<void> on_activated_input_delay(std::uint64_t delay, std::uint64_t retained_delay) override;
     [[nodiscard]] core::Result<void> on_reconnect(std::uint64_t tick, std::string_view hash,
         std::span<const PeerIndex> inactive) override;
     std::optional<std::uint64_t> reconnect_floor_;
@@ -127,10 +142,14 @@ public:
     [[nodiscard]] core::Result<void> receive(std::uint32_t from, std::span<const std::uint8_t> frame);
     [[nodiscard]] core::Result<void> receive(const Received& received) override { return receive(received.from, received.frame); }
     [[nodiscard]] bool may_step() const noexcept override { return can_step(); }
-    [[nodiscard]] bool can_step() const noexcept { return started_ && setup_agreed_ && !waiting_ && !frozen_ && !ended_ && !failed_
+    [[nodiscard]] bool can_step() const noexcept { return started_ && setup_agreed_ && !waiting() && !frozen_ && !ended_ && !failed_
         && active_peers_[transport_.self()]; }
     [[nodiscard]] bool frozen() const noexcept override { return frozen_; }
     [[nodiscard]] bool ready_for_resync() const override;
+    [[nodiscard]] std::optional<std::uint64_t> deferred_resync_frontier() const override {
+        return options_.deferred_compare && inflight_
+            ? std::optional<std::uint64_t>{pending_end_ && completed_ < deadline_ ? completed_ : deadline_} : std::nullopt;
+    }
     [[nodiscard]] core::Result<void> on_resync(std::uint64_t tick, std::string_view hash) override;
     [[nodiscard]] const std::optional<DesyncReport>& recovered_report() const noexcept { return recovered_report_; }
     // True while an active incident still lacks a peer's evidence (DesyncOptions::share_evidence). Deliberately not part
@@ -141,7 +160,7 @@ public:
             if (peer != transport_.self() && active_peers_[peer] && !evidence_received_.contains(peer)) return true;
         return false;
     }
-    [[nodiscard]] bool waiting() const noexcept { return waiting_; }
+    [[nodiscard]] bool waiting() const noexcept { return waiting_ || (inflight_ && completed_ >= deadline_); }
     [[nodiscard]] bool setup_agreed() const noexcept { return setup_agreed_; }
     [[nodiscard]] std::optional<std::uint64_t> peer_confirmed_tick() const noexcept {
         if (!previous_ || frozen_ || failed_ || previous_->summaries.empty()
@@ -155,7 +174,7 @@ public:
     // Read-only GC checkpoint source election: only the diagnosed minority
     // chooses a source, from a strict majority of at least three active peers.
     [[nodiscard]] std::optional<PeerIndex> checkpoint_recovery_source() const;
-    [[nodiscard]] bool agreed_end() const noexcept { return ended_ && !waiting_ && !frozen_ && !failed_; }
+    [[nodiscard]] bool agreed_end() const noexcept { return ended_ && !waiting() && !frozen_ && !failed_; }
     [[nodiscard]] const std::optional<DesyncReport>& report() const noexcept { return report_; }
     [[nodiscard]] std::size_t retained_bytes() const noexcept { return retained_bytes_; }
 
@@ -171,6 +190,12 @@ private:
         bool rows_sent{};
     };
     std::optional<AgreedWindow> previous_;
+    // Local summary/rows are sealed once at exchange; only authenticated peer
+    // replies and rows_sent change. rows_ belongs exclusively to the next window.
+    std::optional<AgreedWindow> inflight_;
+    std::uint64_t deadline_{};
+    std::optional<std::uint64_t> freeze_at_;
+    bool pending_end_{};
     // A retry can carry the sender's previous window after we have already
     // agreed its current one. Keep only the last retired digest per peer, no rows.
     std::map<std::uint32_t, Summary> retired_summaries_;
@@ -198,6 +223,7 @@ private:
     std::vector<std::optional<std::uint64_t>> departure_ticks_;
     std::vector<DepartedDivergence> departed_divergences_;
     std::uint64_t retained_input_delay_{};
+    std::uint64_t comparison_input_delay_{};
     // Incident evidence: the remote peers' authenticated differing input batches and who has sent theirs.
     std::map<std::uint32_t, std::map<std::uint64_t, std::vector<std::uint8_t>>> remote_inputs_;
     std::set<std::uint32_t> evidence_received_;
@@ -207,6 +233,7 @@ private:
 
     [[nodiscard]] core::Result<void> exchange(bool end, std::span<const std::uint8_t> encoding);
     [[nodiscard]] core::Result<void> evaluate();
+    [[nodiscard]] core::Result<void> evaluate_inflight();
     [[nodiscard]] core::Result<void> broadcast(std::span<const std::uint8_t> frame);
     [[nodiscard]] core::Result<void> fail(std::string message);
     [[nodiscard]] std::size_t active_remote_count() const noexcept;

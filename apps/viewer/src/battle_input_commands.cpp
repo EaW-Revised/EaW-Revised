@@ -39,6 +39,8 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
                         BattleCamera& space) {
     scene_ = &population;
     if (event.is_null()) return false;
+    if (const auto* modified = Object::cast_to<InputEventWithModifiers>(event.ptr()))
+        right_modifiers_ = modifiers_of(*modified);
     // Capture before refreshing/picking; decoding an input may span simulation
     // frames. LAN reserves this epoch until its intent reaches the core.
     const auto input_epoch = live.input_epoch();
@@ -322,7 +324,7 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
     if (!left_) return;
     const Drag drag = *left_;
     left_.reset();
-    if (drag.moved && ui::drag_extent(drag.start, at) > ui::minimum_drag_select_distance) {
+    if (drag.moved && ui::drag_extent(drag.start, at) > *world_ui_settings_.drag_select_distance) {
         ++boxes_;
         if (!modifiers.shift) inspect_.reset(); // #4919: a box drag leaves the inspect card
         auto icons = world_ui_->box_icons();
@@ -413,6 +415,7 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
         ++ability_targeted_;
         note("ability " + std::string(ui::ability_name(request.ability)) + " at " + std::to_string(request.target));
         if (ability_commands_ != nullptr) ability_commands_->request(request);
+        live.flash_order_target(request.target);  // WU-60
         acknowledge(Acknowledgement::Kind::attack);
         return;
     }
@@ -476,7 +479,8 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
         cancel_ability_target("right click");
         return;
     }
-    auto gesture = ui::right_release(start, at);
+    auto gesture = ui::right_release(start, at, *world_ui_settings_.drag_select_distance,
+                                     *world_ui_settings_.drag_click_distance);
     if (gesture == ui::RightRelease::ignored) return;  // the press was cancelled (focus loss, pointer exit) or never seen
     // O-2: the double-click move ignores the drag rules (the release point orders it, as a click does).
     if (right_double_click_) gesture = ui::RightRelease::click;
@@ -574,7 +578,9 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
                 const bool fighters = std::any_of(units_.begin(), units_.end(), [&](const auto& unit) {
                     return selection_.contains(unit.entity) && unit.part != sim::invalid_entity_id;
                 });
-                if (!fighters) drag->final_yaw = ui::compass_yaw(plan.press, *point);
+                const bool plain_move = mode == ui::OrderMode::move || mode == ui::OrderMode::waypoint
+                    || (mode == ui::OrderMode::none && !modifiers.ctrl);
+                if (!fighters && plain_move) drag->final_yaw = ui::compass_yaw(plan.press, *point);
             }
         }
     }
@@ -606,6 +612,7 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
                 + std::to_string(static_cast<double>(drag->face_toward->y.raw()) / sim::math::Fixed::scale);
         } else if (attacked) {
             what = "attack " + std::to_string(pick.entity);
+            live.flash_order_target(pick.entity);  // WU-60
             if (pick.hardpoint != sim::tactical::attack_hull) {
                 what += " hardpoint " + std::to_string(pick.hardpoint);
                 world_ui_->flash_reticle(pick.entity, pick.hardpoint);  // WU-42

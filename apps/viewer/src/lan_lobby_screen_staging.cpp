@@ -1,4 +1,5 @@
 #include "lan_lobby_screen_internal.hpp"
+#include "viewer_mounted_mods.hpp"
 
 namespace eawr::presentation::godot_backend {
 void EawrLanLobby::fill_host_seats(const std::uint32_t requested_count) {
@@ -129,6 +130,22 @@ bool EawrLanLobby::publish_staging_selection() {
 
 void EawrLanLobby::configure_staging() {
     const auto content = resources_->content;
+    std::vector<std::string> labels;
+    const auto profile = viewer_load_note_context(true).profile;
+    if (const auto mods = mounted_mod_description()) for (std::size_t i = 0; i < mods->entries.size(); ++i) {
+        const auto& entry = mods->entries[i];
+        std::string label = entry.name.empty() ? profile.name : entry.name;
+        if (entry.version) label += " " + *entry.version;
+        const auto key = !entry.key.empty() ? entry.key : i < profile.layers.size() ? profile.layers[i].key : std::string{};
+        if (key.starts_with("workshop:")) {
+            const auto end = key.find('#');
+            label += " (Workshop " + key.substr(9, end == std::string::npos ? end : end - 9) + ")";
+        }
+        labels.push_back(std::move(label));
+    }
+    match_->configure_skirmish_content([content, maps = resources_->maps, labels = std::move(labels)] {
+        return skirmish_room_content(*content->filesystem, maps, labels);
+    });
     configure_galactic_content();
     match_->configure_factions(scene::faction_order(*content->catalog));
     match_->configure_lobby(impl_->name, impl_->colour, resources_->maps,

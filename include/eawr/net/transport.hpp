@@ -19,6 +19,9 @@ enum class LinkState : std::uint8_t { connecting, open, closed };
 struct Received {
     PeerIndex from{};
     std::vector<std::uint8_t> frame;
+    // Local receipt of the native message that made this ordered frame ready.
+    // Diagnostics only: never encoded, hashed or used for admission.
+    std::optional<std::chrono::steady_clock::time_point> received_at{};
 };
 
 // Local transport observations only; never part of sealed input or simulation state.
@@ -43,6 +46,8 @@ public:
     // and for adapters without a measurement facility. Consumers can detect
     // stale observations when sample_count stops advancing.
     virtual std::optional<LinkStats> link_stats(PeerIndex) const { return std::nullopt; }
+    // Already decoded application frames awaiting this consumer, not native packet ACKs.
+    virtual std::size_t queued_received(PeerIndex) const { return 0; }
     // Changes only when a replacement authenticated stream is published. Zero
     // means the adapter has no stream-generation observation.
     virtual std::uint64_t edge_identity(PeerIndex) const { return 0; }

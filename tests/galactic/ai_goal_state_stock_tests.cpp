@@ -188,6 +188,30 @@ struct EngineContractAccess {
         e.players_.front().tasks.clear(); e.events_.clear(); e.orders_.clear(); e.pending_attach_.clear(); e.pad_reservations_.clear();
         return block.id;
     }
+    static void finish_desire_caller(Engine& e, std::uint64_t instance, authoritative::ScriptScheduler& scripts) {
+        // As in service_galactic_system: publish after the complete turn, including the finished flag.
+        const auto write = e.native_record_scope();
+        // No paid goal in this synthetic owner: the real cleanup still requires its funding capability.
+        e.set_galactic_funding(std::make_shared<GalacticFunding>());
+        const auto* plan = e.plan_of_instance(instance);
+        auto* owner = e.player_ai(plan->player);
+        const auto goal = plan->goal;
+        e.finish_plan(*owner, plan->id, scripts, true);
+        for (auto& retained : owner->active) if (retained.id == goal) retained.finished = true;
+    }
+    static bool desire_caller_released(const Engine& e, std::uint64_t instance) {
+        if (e.plan_of_instance(instance)) return false;
+        for (const auto& player : e.players_) for (const auto& [id, block] : player.blocks) {
+            static_cast<void>(id);
+            if (block.instance == instance) return false;
+        }
+        return std::none_of(e.orders_.begin(), e.orders_.end(), [&](const auto& command) { return command.issuer == instance; });
+    }
+    static void desire_raw(Engine& e, tactical::PlayerId player, std::uint64_t goal, Real raw) {
+        const auto write = e.native_record_scope();
+        e.native_record_changed(player, 2, goal); e.mark_native_state_changed();
+        for (auto& row : e.player_ai(player)->proposed) if (row.id == goal) row.desire = raw;
+    }
     static std::size_t pending_events(const Engine& e) { return e.events_.size(); }
     static bool completed_learning(const Engine& e, std::uint64_t target) {
         const auto& p = *e.player_ai(1);
@@ -208,7 +232,7 @@ struct EngineContractAccess {
 }
 
 namespace {
-void galactic_budget_and_desire_stub_contracts() {
+void galactic_budget_and_desire_creation_contracts() {
     const std::vector<lifecycle::PlayerSelection> selected{{1, "FIXTURE", "NORMAL", {}, {}}};
     std::string reference;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
@@ -249,7 +273,7 @@ Create_Thread("Worker")
         control.scripts = must(auth::ScriptScheduler::create(config, modules));
         std::vector<eawr::core::Diagnostic> errors;
         foc::detail::register_plan_bindings(control.scripts, control.host, errors);
-        expect(errors.empty(), "budget method and desire stub register without protecting the Budget variable");
+        expect(errors.empty(), "budget method and desire request register without protecting the Budget variable");
         must(control.scripts.create_instance(instance, control.engine->plans().at(plan->definition).module));
         std::uint64_t sequence{};
         const auto post = [&](auth::ScriptEvent::Kind kind, std::string name, std::optional<auth::Value> value = {}) {
@@ -283,15 +307,14 @@ Create_Thread("Worker")
         const auto value = must(control.scripts.read_global(instance, "Count"));
         const auto bonus = must(control.scripts.read_global(instance, "Bonus"));
         expect(value && std::get<ai::Real>(value->data) == ai::real(2) && bonus
-            && std::holds_alternative<std::monostate>(bonus->data), "warned nil bonus lets the plan continue past both calls");
+            && std::holds_alternative<auth::Handle>(bonus->data), "creation returns a block without preventing the independent flush calls");
         const auto after = funding->ledger(1);
         expect(after->categories.at(1).available_cash == fixed(0) && after->categories.at(1).cash == before.categories.at(1).cash,
             "WGA-24 native flush zeros available category cash without a credit refund");
         const auto emitted = notes.snapshot();
-        expect(emitted.size() == 1 && emitted.front().tag == "GiveDesireBonus"
-            && emitted.front().code == "EAWR-LOAD-1400", "unsupported timed bonus emits one LoadNote per plan type");
+        expect(emitted.empty(), "implemented proposal-search requests emit no unsupported degradation");
         const auto hash = must(control.scripts.state_hash()) + funding->record_sync_hash(true);
-        if (workers == 1) reference = hash; else expect(hash == reference, "budget flush and warned bonus stub agree on 1/2/4/8");
+        if (workers == 1) reference = hash; else expect(hash == reference, "budget flush and desire request creation agree on 1/2/4/8");
         const auto funding_hash = funding->record_sync_hash(true);
         auth::ScriptEvent bad; bad.key = {4, 16, instance, sequence++}; bad.target = instance;
         bad.kind = auth::ScriptEvent::Kind::call; bad.name = "BadCategory";
@@ -303,6 +326,225 @@ Create_Thread("Worker")
         expect(funding->record_sync_hash(true) == funding_hash, "rejected budget input cannot change the native ledger");
     }
 }
+// WGA-497..503: actual Lua requests/polls, native ownership and reconstructed continuation.
+void desire_bonus_contracts() {
+    const std::vector<lifecycle::PlayerSelection> selected{{1, "FIXTURE", "NORMAL", {}, {}}, {2, "FIXTURE", "NORMAL", {}, {}}};
+    const auto data = [] {
+        auto value = fixture_data();
+        value.goals["OTHER"] = value.goals.at("GOAL");
+        value.goals["OTHER"].name = "Other";
+        value.goals["OTHER"].is_like = {"GOAL"};
+        return value;
+    };
+    const std::string source = R"LUA(
+function Create(p, g, t, b, d)
+    Bonus = GiveDesireBonus(p, g, t, b, d)
+    CheckStaging()
+end
+function CreatePoll(p, g, t, b, d)
+    Create(p, g, t, b, d)
+    Poll()
+end
+function Poll()
+    Done = Bonus.IsFinished()
+    NilResult = Bonus.Result() == nil
+end
+function Twice()
+    Done = Bonus.IsFinished() and Bonus.IsFinished()
+end
+function Validate(p, t)
+    Rejected = not pcall(GiveDesireBonus, p, 'Goal', t, 1)
+        and not pcall(GiveDesireBonus, p, 'Missing', t, 1, 1)
+        and not pcall(GiveDesireBonus, p, 'Goal', t, 'bad', 1)
+        and not pcall(GiveDesireBonus, p, 'Goal', t, 1, 'bad')
+        and not pcall(GiveDesireBonus, p, 'Goal', nil, 1, 1)
+        and not pcall(GiveDesireBonus, nil, 'Goal', t, 1, 1)
+end
+-- Synthetic blocking caller: the authored command loop stops at its first true poll.
+function BlockOnCommand(command)
+    while not command.IsFinished() do coroutine.yield(true) end
+    return command.Result()
+end
+function WaitWorker()
+    WaitResult = BlockOnCommand(Bonus)
+    WaitEnded = true
+end
+function StartWait() Create_Thread('WaitWorker') end
+function OtherInstance() CheckStaging() end
+)LUA";
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const auto failures_before = failures;
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        Owner owner(fixture_setup(), data(), fixture_plans(), selected);
+        owner.begin(fixture_snapshot(), executor, selected, 100); policy(owner, 1); policy(owner, 2);
+        const auto caller = must(owner.engine->allocate_galactic_goal(1, 0, owner.engine->target_of_object(10)->id));
+        ai::EngineContractAccess::movement_fixture(*owner.engine, caller->goal, 0);
+        const auto instance = owner.engine->plan(owner.engine->galactic_goal(1, caller->goal)->running_plan)->instance;
+        const auto target = owner.engine->target_of_object(20)->id;
+        const auto proposal = must(owner.engine->allocate_galactic_goal(2, 0, target));
+        expect(bool(proposal), "bonus fixture retains a foreign player's real proposed goal");
+        auth::ModuleManifest modules; must(modules.add("first.lua", source)); must(modules.add("second.lua", source));
+        const auto scripts = [&](Owner& control) {
+            auth::SessionConfig config; config.galactic_clock = true;
+            control.scripts = must(auth::ScriptScheduler::create(config, modules));
+            std::vector<eawr::core::Diagnostic> errors;
+            foc::detail::register_plan_bindings(control.scripts, control.host, errors);
+            expect(errors.empty(), "proposal request and poll methods register");
+            must(control.scripts.register_binding("CheckStaging", [](auth::BindingContext& context, const auth::ValueList&) {
+                context.issue_command("fixture-own-view", {});
+                const auto own = context.staged_commands();
+                expect(!own.empty() && std::all_of(own.begin(), own.end(), [&](const auto& command) {
+                    return command.issuer == context.instance();
+                }), "read-only staged payloads contain this instance only, never another plan/player");
+                return eawr::core::Result<auth::ValueList>::success({});
+            }));
+        };
+        scripts(owner);
+        const auto module = owner.engine->plans().at(owner.engine->plan_of_instance(instance)->definition).module;
+        must(owner.scripts.create_instance(instance, module));
+        // Both instances stage commands in one partitioned service. The native binding sees only its own span.
+        must(owner.scripts.create_instance(instance + 1, module));
+        std::uint64_t sequence{};
+        const auto post = [&](Owner& control, std::string name, auth::ValueList args = {}, std::uint64_t recipient = 0) {
+            auth::ScriptEvent event; event.key = {control.scripts.completed_tick() + 1, 16, recipient ? recipient : instance, sequence++};
+            event.target = recipient ? recipient : instance; event.kind = auth::ScriptEvent::Kind::call;
+            event.name = std::move(name); event.arguments = std::move(args);
+            must(control.scripts.submit_event(std::move(event)));
+        };
+        const auto service = [&](Owner& control, bool callbacks = true) {
+            auth::ServiceOptions options;
+            if (callbacks) options.host_paced = [](std::uint64_t) { return true; };
+            auto report = must(control.scripts.service(executor, options));
+            expect(report.diagnostics.empty() && control.scripts.retired_instances().empty(), "desire request service has no script/provider fault");
+            must(control.engine->after_service(report));
+            expect(std::none_of(report.commands.begin(), report.commands.end(), [](const auto& command) { return command.verb == ai::verb_ai; }),
+                "ordered commit consumes every staged desire create/poll command");
+            expect(report.load_notes.empty(), "implemented desire requests have no degraded fallback");
+        };
+        const auto args = [&](std::uint32_t player = 2, std::string name = "Goal", std::uint64_t object = 20,
+                              ai::Real bonus = ai::real(15), ai::Real seconds = ai::real(5)) {
+            return auth::ValueList{auth::Value{auth::Handle{foc::handle_player, player}}, auth::Value::text(std::move(name)),
+                auth::Value{auth::Handle{foc::handle_game_object, object}}, auth::Value::number(bonus), auth::Value::number(seconds)};
+        };
+        const auto flag = [&](Owner& control, const char* name) {
+            const auto value = must(control.scripts.read_global(instance, name));
+            return value && std::get<bool>(value->data);
+        };
+        const auto desire = [&](Owner& control) {
+            const auto request = must(control.engine->make_desire_request(2, "Goal", target, ai::real(0), ai::real(0)));
+            return control.engine->proposed_desire_goal(request)->desire;
+        };
+        const auto block = [&](Owner& control) {
+            const auto value = must(control.scripts.read_global(instance, "Bonus"));
+            return std::get<auth::Handle>(value->data).id;
+        };
+        post(owner, "Create", args()); post(owner, "OtherInstance", {}, instance + 1); service(owner);
+        expect(desire(owner) == ai::real(1), "request creation alone leaves current raw desire unchanged");
+        const auto request_id = block(owner);
+        const auto* pending = owner.engine->block(request_id);
+        expect(pending && pending->instance == instance && pending->taskforce == 0 && pending->desire_request
+            && pending->desire_request->player == 2 && pending->desire_request->expiry == 250,
+            "typed block belongs to the calling plan, retaining a foreign selected owner and absolute sync expiry");
+        ai::GoalStateContributor state(owner.engine, fixture_identity());
+        const auto bytes = must(state.capture()); const auto lua = must(owner.scripts.save());
+        const auto sync = must(state.record_sync_hash());
+        expect(sync == must(state.record_sync_hash(true)), "new block publishes exact cold records");
+        Owner restored(fixture_setup(), data(), fixture_plans(), selected);
+        must(restored.world->bind(fixture_snapshot(), {}, executor, 100, 1000));
+        ai::GoalStateContributor loaded(restored.engine, fixture_identity()); must(loaded.restore(bytes));
+        scripts(restored); must(restored.scripts.load(lua));
+        expect(must(loaded.capture()).components == bytes.components && must(loaded.record_sync_hash()) == sync
+            && must(loaded.record_sync_hash(true)) == sync, "pending block cold-restores every field and semantic owner exactly");
+        post(owner, "Poll"); post(restored, "Poll"); service(owner); service(restored);
+        expect(flag(owner, "Done") && flag(owner, "NilResult") && desire(owner) == ai::real(16)
+            && desire(restored) == ai::real(16), "success adds raw desire once and Result is nil after real Lua restore");
+        expect(must(loaded.capture()).components == must(state.capture()).components
+            && must(loaded.record_sync_hash()) == must(state.record_sync_hash()), "loaded request continues with identical native bytes/digest");
+        post(owner, "Twice"); service(owner);
+        expect(desire(owner) == ai::real(46), "two explicit successful polls apply twice without a success latch");
+        post(owner, "CreatePoll", args(2, "Goal", 20, ai::real(4), ai::real(-1))); service(owner);
+        expect(flag(owner, "Done") && desire(owner) == ai::real(50), "same-pump first poll tries the proposal before an already-expired timeout");
+        post(owner, "CreatePoll", args(2, "Goal", 20, ai::real(-100), ai::real(0))); service(owner);
+        expect(desire(owner) == ai::real(0), "negative bonus clamps current raw desire at zero");
+        post(owner, "CreatePoll", args(2, "Goal", 20, ai::real(2000000000000000000LL))); service(owner);
+        expect(desire(owner) == ai::to_single(ai::real(1000000000000000000LL)), "positive bonus uses the sourced 1e18 single-precision ceiling");
+        ai::EngineContractAccess::desire_raw(*owner.engine, 2, proposal->goal, ai::real(1));
+        const auto before = must(state.capture()); const auto before_hash = must(state.record_sync_hash());
+        {
+            auto phase = must(state.begin_phase());
+            const auto lua_before = must(owner.scripts.state_hash());
+            auto lua_phase = must(owner.scripts.begin_phase(executor));
+            post(owner, "CreatePoll", args()); service(owner);
+            expect(desire(owner) == ai::real(16) && must(state.record_sync_hash()) == must(state.record_sync_hash(true)),
+                "foreign proposal and calling-plan block writes enter the same incremental native phase");
+            must(phase->rollback()); must(lua_phase->rollback());
+            expect(must(owner.scripts.state_hash()) == lua_before, "Lua phase restores the pending handle and command sequence before retry");
+            expect(must(state.capture()).components == before.components && must(state.record_sync_hash()) == before_hash
+                && must(state.record_sync_hash(true)) == before_hash, "rollback restores both owners and every typed block field");
+        }
+        // Retry after both the native owner and the real Lua transaction have rolled back.
+        post(owner, "CreatePoll", args()); service(owner);
+        expect(desire(owner) == ai::real(16), "retry applies one bonus after rollback, without retaining a speculative addition");
+        for (const auto& wrong : {args(1), args(2, "Other"), args(2, "Goal", 10)}) {
+            post(owner, "CreatePoll", wrong); service(owner);
+            expect(!flag(owner, "Done") && desire(owner) == ai::real(16), "wrong owner, exact type (not Is_Like) and target never redirect a bonus");
+        }
+        post(owner, "CreatePoll", args(1, "Goal", 10)); service(owner);
+        expect(!flag(owner, "Done"), "an active goal is excluded from the proposed-only lookup");
+        // A proposal which appears after timeout can still be boosted by a later explicit poll.
+        must(owner.engine->release_galactic_goal(2, proposal->goal));
+        post(owner, "CreatePoll", args(2, "Goal", 20, ai::real(3), ai::real(0))); service(owner);
+        expect(flag(owner, "Done") && flag(owner, "NilResult"), "a zero timeout with no proposal finishes with nil Result");
+        const auto replacement = must(owner.engine->allocate_galactic_goal(2, 0, target));
+        expect(bool(replacement), "later matching proposal is allocated independently");
+        post(owner, "Poll"); service(owner);
+        expect(desire(owner) == ai::real(4), "a poll after earlier timeout still attempts the newly present proposal");
+        must(owner.engine->release_galactic_goal(2, replacement->goal));
+        post(owner, "CreatePoll", args(2, "Goal", 20, ai::real(3), *ai::parse_real("0.09"))); service(owner);
+        expect(!flag(owner, "Done") && owner.engine->block(block(owner))->desire_request->expiry == 102,
+            "fractional timeout rounds single-precision multiplication then truncates synchronization frames");
+        owner.begin(fixture_snapshot(), executor, selected, 101);
+        post(owner, "Poll"); service(owner); expect(!flag(owner, "Done"), "one sync frame before expiry remains unfinished");
+        owner.begin(fixture_snapshot(), executor, selected, 102);
+        post(owner, "Poll"); service(owner); expect(flag(owner, "Done"), "exact sync expiry finishes despite a paused galactic frame");
+        post(owner, "CreatePoll", args(2, "Goal", 20, ai::real(3), ai::real(-1))); service(owner);
+        expect(flag(owner, "Done"), "negative search duration expires without any positivity restriction");
+        const auto later = must(owner.engine->allocate_galactic_goal(2, 0, target));
+        post(owner, "Create", args()); service(owner);
+        owner.begin(fixture_snapshot(), executor, selected, 200); service(owner);
+        expect(desire(owner) == ai::real(1), "execution and time alone never apply an unpolled request");
+        post(owner, "StartWait"); service(owner, false); service(owner, false);
+        expect(flag(owner, "WaitEnded") && desire(owner) == ai::real(16), "retained Lua blocking caller stops at first successful poll");
+        post(owner, "Validate", {args()[0], args()[2]}); service(owner);
+        expect(flag(owner, "Rejected"), "wrong arity, unknown goal and wrong wrapper/numeric types raise catchable script errors");
+        ai::EngineContractAccess::finish_desire_caller(*owner.engine, instance, owner.scripts);
+        const auto live_instances = owner.scripts.instances();
+        expect(desire(owner) == ai::real(16) && !owner.engine->block(request_id)
+            && ai::EngineContractAccess::desire_caller_released(*owner.engine, instance)
+            && std::find(live_instances.begin(), live_instances.end(), instance) == live_instances.end(),
+            "calling-plan cleanup removes its request blocks without reversing another player's applied raw desire");
+        const auto final_hash = must(state.record_sync_hash());
+        expect(final_hash == must(state.record_sync_hash(true)), "cleanup incremental digest equals cold record reconstruction");
+        const auto cleaned = state.capture();
+        expect(bool(cleaned), cleaned ? "cleanup archive is valid" : cleaned.error().message);
+        if (cleaned) {
+            Owner final_owner(fixture_setup(), data(), fixture_plans(), selected);
+            must(final_owner.world->bind(fixture_snapshot(), {}, executor, 200, 1000));
+            ai::GoalStateContributor final_state(final_owner.engine, fixture_identity());
+            must(final_state.restore(cleaned.value()));
+            expect(must(final_state.capture()).components == cleaned.value().components
+                && must(final_state.record_sync_hash()) == final_hash && must(final_state.record_sync_hash(true)) == final_hash
+                && ai::EngineContractAccess::desire_caller_released(*final_owner.engine, instance),
+                "fresh restore retains the applied bonus but no departed plan/block/poll record");
+        }
+        if (workers == 1) reference = final_hash; else expect(final_hash == reference, "proposal polls and clocks agree on 1/2/4/8 workers");
+        static_cast<void>(later);
+        std::cout << "desire bonus workers=" << workers << " foreign-owner/save/rollback/poll/timeout/clamp/cleanup "
+            << (failures == failures_before ? "PASS" : "FAIL") << '\n';
+    }
+}
+
 void degraded_battle_entry_contracts() {
     namespace ga = foc::galactic_ai;
     std::vector<std::string> reference;
@@ -1015,7 +1257,8 @@ void goal_state_contracts() {
     }
     movement_delivery_contracts();
     degraded_battle_entry_contracts();
-    galactic_budget_and_desire_stub_contracts();
+    galactic_budget_and_desire_creation_contracts();
+    desire_bonus_contracts();
 }
 
 void installed_goal_state(const eawr::vfs::Vfs& filesystem, ai::AiData ai_data, std::vector<ai::PlanDef> plans, std::string identity) {

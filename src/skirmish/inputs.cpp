@@ -1,4 +1,5 @@
 #include "eawr/skirmish/start.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/skirmish/setup.hpp"
@@ -260,7 +261,7 @@ constexpr std::string_view colour_prefix = "MP_Color_";
     placement.loads_when_faction_present = detail::retail_flag(text_of(object, "Loads_When_Faction_Present"), false);
     // SK-05: only placements that become map objects take their height here; SpaceProps are drawn
     // by the view and their Layer_Z_Adjust is #649's row.
-    if (!detail::iequals(placement.element, "SpaceProp") || placement.special_weapon_source) {
+    if (!core::is_space_prop_element(placement.element) || placement.special_weapon_source) {
         placement.layer_z_adjust = detail::number(text_of(object, "Layer_Z_Adjust"));
     }
     for (const auto& candidate : detail::tokens(text_of(object, "Marker_For_Specific_Object_Type"))) {

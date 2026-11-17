@@ -30,6 +30,7 @@ PublishReport write_degradation_summary(const std::filesystem::path& file, const
 ScriptFaultLedger::ScriptFaultLedger(std::shared_ptr<const vfs::Vfs> files) : files_(std::move(files)) {}
 
 std::string ScriptFaultLedger::source_of(const core::Diagnostic& fault) {
+    if (fault.source_id && !fault.source_id->empty()) return core::degradation::source_for_session_layer(*fault.source_id);
     if (!files_ || !fault.logical_path || fault.logical_path->empty()) return {};
     if (const auto cached = sources_.find(*fault.logical_path); cached != sources_.end()) return cached->second;
     std::string source;

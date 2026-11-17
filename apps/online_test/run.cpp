@@ -1,6 +1,8 @@
 #include "run.hpp"
 #include "log.hpp"
 #include "setup_test_support.hpp"
+#include "skirmish_prepare.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "online_match.hpp"
 #include "online_service_settings.hpp"
 #include "eawr/net/gns_transport.hpp"
@@ -40,8 +42,13 @@ tactical::TacticalSetup initial_setup() {
     return initial;
 }
 
-viewer::LanLobbyBuilder make_builder(const tactical::TacticalSetup& initial) {
-    return [initial](const auto& choices) {
+std::uint64_t steady_ms(std::chrono::steady_clock::time_point at) {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(at.time_since_epoch()).count());
+}
+
+viewer::LanLobbyBuilder make_builder(const tactical::TacticalSetup& initial, std::chrono::milliseconds prepare = {}) {
+    return [initial, prepare](const auto& choices) {
+        if (prepare.count() > 0) std::this_thread::sleep_for(prepare);
         auto built = initial;
         built.seed = choices.seed.value_or(initial.seed);
         built.skirmish->match = *choices.match;
@@ -102,6 +109,12 @@ int play(const Options& options, std::istream& in, std::ostream& out, Log& log) 
         if (!rooms) throw Failure{"", "The room could not be configured."};
     }
     auto match = viewer::make_online_match(match_options);
+    if (!options.content_root.empty()) match->configure_skirmish_content([root = options.content_root] {
+        const std::array specs{eawr::vfs::MountSpec{"diagnostic", root, "data", {}}};
+        auto mounted = eawr::vfs::Vfs::mount(specs);
+        if (!mounted) return eawr::core::Result<eawr::core::PreparedContentIdentity>::failure(mounted.error());
+        return viewer::skirmish_room_content(mounted.value(), {}, {"Diagnostic XML/Lua"});
+    });
     match->configure_factions({"Rebel", "Empire", "Underworld"});
     const auto initial = initial_setup();
     eawr::skirmish::FixtureOptions selected;
@@ -117,8 +130,9 @@ int play(const Options& options, std::istream& in, std::ostream& out, Log& log) 
     map.metadata.new_markers = true;
     map.metadata.start_positions.emplace(4);
     map.teams = {{1, {"Rebel"}, 1}, {2, {"Empire"}, 1}, {3, {"Underworld"}, 1}};
+    // The room prepares through the (optionally slow) builder; the battle below rebuilds the agreed setup without the delay.
     const auto builder = make_builder(initial);
-    match->configure_lobby(host ? "Host" : "Guest", host ? 4 : 5, {map}, builder);
+    match->configure_lobby(host ? "Host" : "Guest", host ? 4 : 5, {map}, make_builder(initial, options.prepare));
 
     auto deadline = std::chrono::steady_clock::now() + options.timeout;
     net::GnsRoute route{};
@@ -126,7 +140,7 @@ int play(const Options& options, std::istream& in, std::ostream& out, Log& log) 
         const auto view = match->view();
         if (view.online_route != net::GnsRoute::unknown) route = view.online_route;
         if (view.phase == viewer::LanPhase::ended)
-            throw Failure{view.diagnostic_code, std::string("The session ended during ") + stage + "."};
+            throw Failure{view.diagnostic_code, view.message.empty() ? std::string("The session ended during ") + stage + "." : view.message};
         if (std::chrono::steady_clock::now() >= deadline)
             throw Failure{view.diagnostic_code, std::string("Timed out during ") + stage + "."};
         std::this_thread::sleep_for(2ms);
@@ -137,14 +151,15 @@ int play(const Options& options, std::istream& in, std::ostream& out, Log& log) 
     if (host) match->host(0);
     else { out << log.line("Joining..."); out << '\n'; match->join(code); }
 
-    bool announced{}, ready_requested{};
+    bool announced{}, ready_requested{}, ready_echoed{}, peer_ready_seen{};
     std::uint64_t ready_revision{};
+    std::chrono::steady_clock::time_point ready_clicked{};
     log.line("stage=connect");
     while (true) {
         match->pump_setup(selected);
         const auto view = match->view();
         if (view.phase == viewer::LanPhase::ended)
-            throw Failure{view.diagnostic_code, "The online session ended before the match started."};
+            throw Failure{view.diagnostic_code, view.message.empty() ? "The online session ended before the match started." : view.message};
         if (host && !announced && !view.invitation_code.empty()) {
             // The code is the only secret shown; it goes to the console and never to the log.
             code = view.invitation_code;
@@ -155,6 +170,9 @@ int play(const Options& options, std::istream& in, std::ostream& out, Log& log) 
             deadline = std::chrono::steady_clock::now() + options.timeout;
         }
         const auto state = match->lobby_state();
+        if (state && state->notice && state->notice->reason == net::LobbyReason::setup_failed
+            && state->notice->message.starts_with("mod content"))
+            throw Failure{net::lobby_diagnostic(state->notice->reason, "").code, state->notice->message};
         if (state && ready_requested && !state->preparing && !state->local_ready && state->snapshot.revision != ready_revision)
             ready_requested = false;
         if (state && !ready_requested && state->snapshot.phase == net::LobbyPhase::staging
@@ -162,8 +180,21 @@ int play(const Options& options, std::istream& in, std::ostream& out, Log& log) 
             && state->snapshot.seats.front().selection.name == "Host" && state->snapshot.seats.back().selection.name == "Guest"
             && !state->identity_pending && !state->local_ready && !state->preparing) {
             log.line("stage=staging-ready");
+            ready_clicked = std::chrono::steady_clock::now();
             ready_requested = match->lobby_ready(true);
             ready_revision = state->snapshot.revision;
+            // Steady clocks are machine-wide: two roles on one machine give the host-sees latency from these two lines.
+            if (ready_requested) { log.line("ready_click_steady_ms=" + std::to_string(steady_ms(ready_clicked))); ready_echoed = false; }
+        }
+        if (state && ready_requested && !ready_echoed && state->local_ready) {
+            // Click to the host's snapshot with this seat ready, back on this machine.
+            ready_echoed = true;
+            log.line("ready_echo_ms=" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - ready_clicked).count()));
+        }
+        if (host && state && !peer_ready_seen && state->snapshot.seats.size() == 2 && state->snapshot.seats.back().ready) {
+            peer_ready_seen = true;
+            log.line("peer_ready_steady_ms=" + std::to_string(steady_ms(std::chrono::steady_clock::now())));
         }
         if (host && view.start_enabled) match->start(selected);
         if (auto chosen = match->take_start()) { selected = std::move(*chosen); break; }

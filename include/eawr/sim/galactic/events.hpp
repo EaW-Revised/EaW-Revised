@@ -97,6 +97,9 @@ enum class GalacticRejectReason : std::uint8_t {
     neutralize_no_hero = 22,     // no other player's hero stands in orbit or on the ground of that planet
     neutralize_allied_hero = 23, // every hero there belongs to an ally of the neutralizer
     neutralize_not_targetable = 24, // heroes stand there but none has a neutralization price or permits this actor
+    // #7426: a human player's hero menu is only shown for a planet that player has discovered, so the host refuses to
+    // open one on an undiscovered planet instead of holding a preparation nobody can see or cancel.
+    ability_target_undiscovered = 25,
 };
 
 // One event. `producer` is the seat whose command produced it; `subject` the object it is

@@ -1241,6 +1241,33 @@ void test_quit_publication_halts_the_live_thread() {
     }
 }
 
+void test_realtime_driver_services_between_ticks() {
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
+    std::atomic<unsigned> held{}, advanced{};
+    std::atomic<bool> serviced_at_zero{};
+    LiveSession::Options options; options.target_rate = 10;
+    options.step_driver = [&](eawr::platform::LiveStepContext& context,
+        std::span<const tactical::PlayerCommand>, std::uint64_t) {
+        using Result = eawr::core::Result<bool>;
+        if (!context.advance_allowed) {
+            ++held;
+            if (context.completed_tick() == 0) serviced_at_zero = true;
+            return Result::success(false);
+        }
+        ++advanced;
+        auto tick = context.step();
+        return tick ? Result::success(true) : Result::failure(tick.error());
+    };
+    auto live = LiveSession::start(setup, {}, {}, {}, {}, options);
+    expect(static_cast<bool>(live), "realtime service fixture starts");
+    if (!live) return;
+    expect(live.value()->wait_for(2, std::chrono::seconds(3)), "healthy driver advances at simulation deadlines");
+    live.value()->stop();
+    expect(serviced_at_zero && held.load() > advanced.load(), "transport service runs before the first tick and between healthy ticks");
+    expect(advanced.load() == live.value()->frame().latest->completed_tick(), "service-only calls never advance simulation");
+}
+
 void test_driver_digest_reuses_completed_world() {
     tactical::TacticalSetup setup;
     setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
@@ -1698,6 +1725,7 @@ int main(const int argc, const char* const argv[]) {
     }
     test_start_rejects_worker_counts();
     test_driver_digest_reuses_completed_world();
+    test_realtime_driver_services_between_ticks();
     test_on_demand_state_hash_policy(argv[1]);
     test_scripted_on_demand_state_hash_policy();
     test_admission_driver_holds_and_publishes_once();

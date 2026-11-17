@@ -388,6 +388,9 @@ struct LifecycleState {
     std::vector<PlayerLifecycle> players; // ascending player identity
     ServicePeriods service_periods{retail_service_periods};
     std::map<gc::PlayerId, NativeProviderFault> retired_providers; // optional compatible native tail, sorted owner identity
+    // WGA-496: players whose fresh free store's starting units have not yet been through its added hook (false) or whose starting
+    // batch is submitted but not yet run (true); their perception has no value meanwhile. Optional compatible tail, sorted owner.
+    std::map<gc::PlayerId, bool> startup_windows;
     bool operator==(const LifecycleState&) const = default;
 };
 // Process-local work counters for the immutable per-player policy snapshots that
@@ -447,6 +450,10 @@ public:
     [[nodiscard]] AsyncSchedule schedule() const noexcept;
     [[nodiscard]] core::Result<authoritative::ServiceOptions> before_service(
         const sim::PartitionExecutor&, const gc::GalacticSession&, const gc::GalacticTick&, authoritative::ScriptScheduler&) override;
+    // Async step 3 (a): the AI window body's form. The galactic frame is the window input's; the session is not read (and the
+    // capabilities' prepare hook, which takes the session, is not called: the galactic runtime prepares its own inputs).
+    [[nodiscard]] core::Result<authoritative::ServiceOptions> before_window_service(
+        const sim::PartitionExecutor&, std::uint64_t galactic_frame, const gc::GalacticTick&, authoritative::ScriptScheduler&);
     [[nodiscard]] bool admits_service(const gc::GalacticTick&) const noexcept override;
     [[nodiscard]] bool perception_due(std::uint64_t synchronization) const noexcept;
     // True when this barrier will run `service` for `player`: the player is initialized, processing is admitted
@@ -463,6 +470,12 @@ public:
     [[nodiscard]] std::optional<gc::PlayerId> faulted_provider() const noexcept;
     [[nodiscard]] bool provider_threw() const noexcept;
     [[nodiscard]] core::Result<void> retire_provider(gc::PlayerId, NativeProviderFault);
+    // WGA-496 free-store startup window: opened at a fresh free-store attach, marked delivered with the free store's first service
+    // batch (the starting units' added hooks), closed once the scripts have run that batch. Saved with the lifecycle.
+    [[nodiscard]] bool startup_window_open(gc::PlayerId) const noexcept;
+    void open_startup_window(gc::PlayerId);
+    void deliver_startup_window(gc::PlayerId);
+    void close_delivered_startup_windows();
     // #6917 (the control-switch reward): the player's current AI player type, upper case; empty for a player the manager does not run.
     [[nodiscard]] std::string player_type(gc::PlayerId) const;
     // Whether the loaded data defines this AI player type (any case) with every galactic template it names.

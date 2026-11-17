@@ -523,7 +523,10 @@ void Loader::load_body(Object& object, UnitType& unit) {
         unit.powered = has_behavior(object, "POWERED"); // #361: the energy pool
         unit.ion_stun_effect = has_behavior(object, "ION_STUN_EFFECT"); // #561: IS-02
         unit.damage_tracking = has_behavior(object, "DAMAGE_TRACKING"); // WCC-82
-        if (model != nullptr) unit.collision = collision_bounds(*model->model, model->frames);
+        if (model != nullptr) {
+            unit.collision = collision_bounds(*model->model, model->frames);
+            unit.model_collision_box = collision_bounds(*model->model, model->frames, true);
+        }
         const auto victory = flag(object, "Victory_Relevant", station);
         unit.victory_relevant = victory.value_or(false);
         unit.destroyed_with_hardpoints =

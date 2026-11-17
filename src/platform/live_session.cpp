@@ -349,7 +349,7 @@ public:
         if (auto motion = capture_land_motion()) land_motion_history_.push_front(std::move(*motion));
         if (auto fog = capture_fog()) fog_history_.push_front(std::move(fog));
         frame_ = {zero, zero, Clock::now()};
-        interval_ = tick_interval(options_.target_rate);
+        interval_ = paced_interval(options_.target_rate);
         paused_ = options_.initially_paused;
         if (options_.pacing == Pacing::driven) target_ = world().completed_tick();
         if (launch) thread_ = std::thread([this] { run(); });
@@ -434,10 +434,14 @@ public:
         wake_.notify_all();
     }
 
+    [[nodiscard]] Clock::duration paced_interval(const std::uint32_t frames_per_second) const noexcept {
+        return tick_interval(options_.max_rate != 0 ? std::min(frames_per_second, options_.max_rate) : frames_per_second);
+    }
+
     void set_target_rate(const std::uint32_t frames_per_second) {
         {
             const std::lock_guard lock(mutex_);
-            const Clock::duration interval = tick_interval(frames_per_second);
+            const Clock::duration interval = paced_interval(frames_per_second);
             if (interval == interval_) return;
             interval_ = interval;
             rebase_ = true;
@@ -747,7 +751,10 @@ private:
                 } else {
                     const auto next = clock_start + interval_ * static_cast<std::int64_t>(
                         frame_.latest->completed_tick() + 1U - clock_tick);
-                    wake_.wait_until(lock, next, due);
+                    // Network service has its own bounded wake cadence. A healthy
+                    // lockstep match must receive/send between simulation deadlines too.
+                    const auto service = options_.step_driver ? std::min(next, Clock::now() + std::chrono::milliseconds(2)) : next;
+                    wake_.wait_until(lock, service, due);
                 }
                 if (stopping_ || failure_) return;
                 std::move(inbox_.begin(), inbox_.end(), std::back_inserter(held_));
@@ -796,7 +803,10 @@ private:
                 }
                 step_now = behind > 0U;
             }
-            if (!step_now) continue;
+            if (!step_now) {
+                if (options_.step_driver && options_.pacing == Pacing::real_time && !step(executor, false)) return;
+                continue;
+            }
             submit_due(world().completed_tick(), true);
             const auto before = world().completed_tick();
             if (!step(executor)) return;
@@ -1179,7 +1189,7 @@ private:
                   land_motion_history_.push_front(std::move(*motion));
               frame_ = {snapshot, snapshot, Clock::now()};
               event_log_ = LiveEventLog({options_.event_history, options_.event_bytes});
-              interval_ = tick_interval(staged->options_.target_rate); rebase_ = true;
+              interval_ = paced_interval(staged->options_.target_rate); rebase_ = true;
             }
             return core::Result<void>::success();
         };

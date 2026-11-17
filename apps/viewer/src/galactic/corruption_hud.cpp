@@ -6,6 +6,8 @@
 #include <godot_cpp/classes/text_server.hpp>
 #include <pugixml.hpp>
 #include <algorithm>
+#include <functional>
+#include <set>
 #include <sstream>
 #include <ostream>
 
@@ -177,7 +179,14 @@ void GalacticMode::State::update_corruption_hud() {
     auto& state = corruption_menu;
     if (!state.blocker || !displayed_snapshot) return;
     const auto publication = state.fixture ? state.fixture : displayed_snapshot;
-    const bool changed = !state.publication || publication->corruption_menu() != state.publication->corruption_menu();
+    const auto* next = publication->corruption_menu();
+    const auto* last = state.publication ? state.publication->corruption_menu() : nullptr;
+    const bool fresh = !state.publication || next != last;
+    // #7357: a republished menu with the same facts keeps the dialog as it is and only refreshes the facts a choice sends.
+    // Laying the dialog out again used to hide and disable every button for a moment, and a click whose press and release
+    // straddled a republication was lost (Close, a choice): the dialog stayed open and no Cancel was sent.
+    const bool changed = fresh && (!next || !last || next->preparation != last->preparation || !same_menu(*next, *last));
+    if (fresh && !changed && next && state.facts && next->player == galaxy->local.player) state.facts = *next;
     state.publication = publication;
     const bool enabled = map_input.gates.hud_enabled && !map_input.gates.tutorial_locked;
     if (!changed && state.width == camera.width && state.height == camera.height && enabled == state.enabled) return;
@@ -200,7 +209,7 @@ void GalacticMode::State::update_corruption_hud() {
         control->set_size(Vector2(static_cast<float>(rect.width),static_cast<float>(rect.height)));
     };
     for (const auto& [name,label] : state.labels) {
-        position(label,name); label->set_text({}); label->hide();
+        position(label,name); label->set_text({}); label->hide(); label->set_modulate(Color(1.0F,1.0F,1.0F));
         const auto* component = command_catalog.find(name);
         if (name.starts_with("corrupt_text")) {
             // Text components author the wrap width in the second Size field;
@@ -213,9 +222,19 @@ void GalacticMode::State::update_corruption_hud() {
         label->add_theme_font_size_override("font_size",std::max(1,presentation::ui::font_pixel_height(
             component->integer(data::ui::Field::font_point_size).value_or(0),camera.height)));
     }
+    // #7357: a button shown again below keeps its visibility and enabled state through the re-layout, so a press in progress
+    // still releases into its action; only the buttons this layout does not show are hidden and disabled, at the end.
+    std::set<EawrHudButton*> shown;
+    struct Settle { std::function<void()> run; ~Settle() { run(); } } settle{[&] {
+        for (const auto& [name,button] : state.icons) {
+            static_cast<void>(name);
+            if (!shown.contains(button)) { button->hide(); button->set_disabled(true); }
+        }
+    }};
     for (const auto& [name,button] : state.icons) {
-        position(button,name); button->set_hit_rect({{},button->get_size()}); button->hide();
-        button->set_icon_texture({}); button->set_tooltip_text({}); button->set_disabled(true);
+        position(button,name); button->set_hit_rect({{},button->get_size()});
+        button->set_icon_texture({}); button->set_tooltip_text({});
+        button->set_modulate(Color(1.0F,1.0F,1.0F));
     }
     for (const auto& [name,indicator] : state.satisfaction) { static_cast<void>(name); indicator->hide(); }
     const auto text = [&](const std::string& name, const std::string& value) {
@@ -223,7 +242,10 @@ void GalacticMode::State::update_corruption_hud() {
             found->second->set_text(String::utf8(value.c_str())); found->second->set_visible(!value.empty());
         }
     };
-    if (state.close) { state.close->show(); state.close->set_disabled(!enabled); text("corrupt_close",battle_text("TEXT_BUTTON_CLOSE")); }
+    if (state.close) {
+        state.close->show(); shown.insert(state.close);
+        state.close->set_disabled(!enabled); text("corrupt_close",battle_text("TEXT_BUTTON_CLOSE"));
+    }
     if (!available) return;
     text("corrupt_planet_title00",battle_text("TEXT_CORRUPTION_TITLE"));
     if (const auto planet = hud_facts.find(state.facts->planet); planet != hud_facts.end())
@@ -240,11 +262,18 @@ void GalacticMode::State::update_corruption_hud() {
         if (row.slot < 1 || row.slot > 3) continue;
         const auto tail = suffix(row.slot); const auto& choice = row.prepared.choice;
         auto* button = state.choices[row.slot-1]; if (!button) continue;
-        button->show(); button->set_icon_texture(command_texture(display(0,choice.type)));
+        button->show(); shown.insert(button); button->set_icon_texture(command_texture(display(0,choice.type)));
         button->set_tooltip_text(String::utf8(battle_text(display(4,choice.type)).c_str()));
         button->set_disabled(!enabled || !admitted(row) || (!state.fixture && !row.live_prepared));
         text("corrupt_title_"+tail,battle_text(display(1,choice.type)));
         text("corrupt_cost_"+tail,"$ "+galactic_view::credit_balance(choice.credits));
+        // WGCH-122/188 (#7357): a row the player cannot choose shows grey (its button and icon, title and price), as the
+        // hero action dialog greys a row it will not accept; the paragraphs keep their colour so the reason stays readable.
+        if (!admitted(row)) {
+            button->set_modulate(Color(0.5F,0.5F,0.5F));
+            for (const auto& name : {"corrupt_title_"+tail, "corrupt_cost_"+tail})
+                if (const auto found = state.labels.find(name); found != state.labels.end()) found->second->set_modulate(Color(0.5F,0.5F,0.5F));
+        }
         text("corrupt_text00"+tail,battle_text(display(2,choice.type)));
         // The controlled fixture supplies this map. Live content-ID resolution
         // remains a named producer seam; missing keys stay blank.
@@ -269,7 +298,7 @@ void GalacticMode::State::update_corruption_hud() {
             const auto name = "corrupt_icon_" + (icon < 10 ? std::string("0") : std::string{}) + std::to_string(icon) + tail;
             ++icon;
             const auto found = state.icons.find(name); if (found == state.icons.end()) return;
-            found->second->show(); found->second->set_icon_texture(command_texture(texture));
+            found->second->show(); shown.insert(found->second); found->second->set_icon_texture(command_texture(texture));
             found->second->set_tooltip_text(String::utf8(title.c_str()));
             text(name,count ? std::to_string(count) : std::string{});
             // Separate satisfaction from affordability; requirement icons keep
@@ -323,6 +352,7 @@ void GalacticMode::State::write_corruption_report(std::ostream& output) const {
         if (!button->is_visible()) continue;
         const auto rect = button->get_global_rect();
         output << (comma ? ", " : "") << "{\"name\": " << json(name) << ", \"enabled\": " << (!button->is_disabled() ? "true" : "false")
+            << ", \"shaded\": " << (button->get_modulate().r < 1.0F ? "true" : "false")
             << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
         comma = true;
     }
@@ -340,6 +370,7 @@ void GalacticMode::State::write_corruption_report(std::ostream& output) const {
     for (const auto& [name,label] : state.labels) if (label->is_visible()) {
         const auto rect = label->get_global_rect();
         output << (comma ? ", " : "") << "{\"name\": " << json(name) << ", \"text\": " << json(utf8(label->get_text()))
+            << ", \"shaded\": " << (label->get_modulate().r < 1.0F ? "true" : "false")
             << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
         comma = true;
     }

@@ -1046,6 +1046,15 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
             return space->decorate_result(record, battle, result);
         };
         if (auto bound = space->bind_game(game); !bound) return bound;
+        // WGCH-126/197 (#7357): a solo human's space corruption choice queues its mission battle through the prepared
+        // entry. Fresh starts and checkpoint restores both pass here, so a restored session keeps the service.
+        game.set_corruption_mission_service([space](const gc::GalacticSnapshot& snapshot, const gc::LiveCorruptionMission& mission,
+            const gc::CorruptionChoice& choice, sim::EntityId first_free) {
+            return space->corruption_mission(snapshot, mission, choice, first_free);
+        });
+        game.set_corruption_mission_readiness([space](const gc::CorruptionChoice& choice, gc::PlayerId invader, gc::PlayerId defender) {
+            return space->corruption_mission_ready(choice, invader, defender);
+        });
         auto ai = space_entry_script_services(space, game.conflict_parent_queries(BattleLayer::space));
         layer.scripts = std::move(ai.scripts);
         layer.configure = std::move(ai.bind);

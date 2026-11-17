@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <Selection_Controls>
-  <Selection_Advisor_Enabled>No</Selection_Advisor_Enabled>
+  <Selection_Advisor_Enabled>Yes</Selection_Advisor_Enabled>
   <Selection_Action Name="SELECT_OWN_ALL">
     <Default_Key>Ctrl+Q</Default_Key>
     <Default_Faction_SFXEvent>Empire, Revised_Selection_Empire_allunits</Default_Faction_SFXEvent>

@@ -8,7 +8,10 @@ enough for several expiries, and requires the frames to keep flowing in both dir
 The `nonce` case rotates the server nonce every two seconds, so each Refresh and CreatePermission is answered with
 438 Stale Nonce first; the client has to repeat it with the new nonce or the relay lapses after one lifetime.
 
-Usage: gns_turn_processes.py <net_gns_introduced_tests> [permission|silent|nonce]
+The `denied` case advertises a CGNAT candidate beside the real relay candidate. The server rejects a whole request
+containing it with 403, as coturn does: the allowed peer must still be refreshed and deliver frames across expiries.
+
+Usage: gns_turn_processes.py <net_gns_introduced_tests> [permission|silent|nonce|denied]
 """
 import os
 import queue
@@ -30,10 +33,12 @@ def run_case(executable, mode):
         print("No non-loopback IPv4 address: relayed TURN case skipped")
         return 77
     silent = mode == "silent"
+    seconds = 40 if mode == "denied" else SECONDS
     # `silent`: nothing expires, but the path dies for good a few seconds after the first relayed packet.
     server = TurnServer(address, allocation_lifetime=3600 if silent else LIFETIME,
                         permission_lifetime=3600 if silent else LIFETIME, blackhole_after=5 if silent else None,
-                        nonce_lifetime=2 if mode == "nonce" else None)
+                        nonce_lifetime=2 if mode == "nonce" else None,
+                        denied_peers={"100.64.0.1"} if mode == "denied" else ())
     server.start()
     turn = f"{address}:{server.port}"
     processes = []
@@ -55,7 +60,7 @@ def run_case(executable, mode):
             print(line.strip())
             return 77
         port = str(int(line.strip()))
-        peers = [start("turn-peer", str(role), port, turn, str(SECONDS), *(["silent"] if silent else ["nonce"] if mode == "nonce" else []))
+        peers = [start("turn-peer", str(role), port, turn, str(seconds), *([mode] if mode != "permission" else []))
                  for role in range(2)]
         failed = False
         for child in peers + [broker]:
@@ -68,6 +73,13 @@ def run_case(executable, mode):
             return 1
         if silent:
             return 0
+        if mode == "denied":
+            allocations = server.statistics()
+            if len(allocations) != 2 or any(entry["permission_denials"] < 2 or entry["max_permission_peers"] != 1
+                    or not entry["permission_successes"] or min(entry["permission_successes"].values()) < 3
+                    for entry in allocations):
+                print(f"Expected isolated 403 retries and repeated allowed-IP refreshes, got {allocations}", file=sys.stderr)
+                return 1
         if mode == "nonce":
             print(f"TURN stale nonce replies: {server.stale_nonce_replies}")
             refreshes = [entry for entry in server.statistics() if entry["refreshes"] >= 3]

@@ -427,10 +427,18 @@ void campaign_list() {
     const auto& first = list[0];
     expect(first.supports_custom_settings && first.minimum_custom_tech == 1 && first.maximum_custom_tech == 5 && !list[1].supports_custom_settings,
         "custom settings and their limits come from the campaign");
-    expect(first.factions.size() == 4 && first.factions[0] == gc::MpLobbyFaction{1, 1, 0, "REBEL", true, false}
-        && first.factions[2] == gc::MpLobbyFaction{3, 3, 0, "UNDERWORLD", false, false}
-        && first.factions[3] == gc::MpLobbyFaction{4, 4, 0, "NEUTRAL", false, true},
+    expect(first.factions.size() == 4 && first.factions[0] == gc::MpLobbyFaction{1, 1, 0, "REBEL", true, false, true}
+        && first.factions[2] == gc::MpLobbyFaction{3, 3, 0, "UNDERWORLD", false, false, false}
+        && first.factions[3] == gc::MpLobbyFaction{4, 4, 0, "NEUTRAL", false, true, false},
         "faction rows follow the data's faction order; the neutral faction is listed and unplayable");
+    // GCMP-AI-01/03: a playable faction's AI seat runs its Basic_AI; an ambient faction's runs only the entry's own pair.
+    {
+        auto assigned = local.data;
+        assigned.campaigns.front().ai_player_control = {{"underworld", "Pirate_AI"}};
+        const auto rows = cp::list_mp_lobby_campaigns(assigned).front().factions;
+        expect(rows[2].ai_controller && !rows[3].ai_controller,
+            "an ambient faction with an authored AI_Player_Control pair has a controller; Neutral never has one");
+    }
     // A mod that renames and adds factions needs no code change.
     Local modded(Names{"CORPORATE_SECTOR", "ZANN_CONSORTIUM", "HUTT_CARTEL", "UNCLAIMED"});
     const auto modded_list = modded.catalog();
@@ -980,7 +988,9 @@ public:
             return net::follow_galactic_choice(before, candidate, who, peers[peer].backend->campaigns());
         };
         value.offer = [this, peer](const net::LobbySnapshot& snapshot, const std::vector<net::SetupSeat>& seats) {
-            return peers[peer].backend->offer(snapshot, seats);
+            auto result = peers[peer].backend->offer(snapshot, seats);
+            if (result && amend_offer) amend_offer(peer, result.value());
+            return result;
         };
         value.setup = [this, peer](net::MessageTransport& transport, const net::LobbySnapshot&) -> eawr::core::Result<net::LobbySetupContext> {
             ++peers[peer].contexts;
@@ -996,12 +1006,26 @@ public:
             context.options.session.initial_tick = peers[peer].backend->initial_tick();
             context.options.session.producer_sequences = peers[peer].backend->producer_sequences();
             context.options.session.final_tick_count = peers[peer].backend->final_tick_count();
+            if (online_timing) {
+                context.options.session.non_lan = true;
+                context.options.session.adaptive_timing = net::AdaptiveTiming{};
+                context.options.session.adaptive_timing->responsive = true;
+                context.options.session.adaptive_timing->rtt_ms = [this, peer](net::PeerIndex) {
+                    return std::optional<std::uint64_t>{measured_rtt[peer]};
+                };
+                // An endpoint may have a different local estimate. SetupSession
+                // must replace it with the single delay in the accepted offer.
+                context.options.session.input_delay = net::adaptive_input_delay(measured_rtt[peer]);
+            }
             return eawr::core::Result<net::LobbySetupContext>::success(std::move(context));
         };
         value.remove_peer = [](auto, auto) {};
         return value;
     }
     bool concurrent_prepare;
+    bool online_timing{};
+    std::array<std::uint64_t, net::max_match_seats> measured_rtt{};
+    std::function<void(unsigned, net::SetupOffer&)> amend_offer;
     eawr::testing::FakeNetwork network;
     sim::InlineExecutor executor;
     std::shared_ptr<eawr::platform::ThreadWorkerAdapter> resumed_workers;
@@ -1981,6 +2005,66 @@ void check_committed(GcRoom& room, const std::string& label, std::size_t humans,
     }
 }
 
+void online_start_uses_host_delay() {
+    // Both the concurrent preparation used by new campaigns and the ordinary
+    // admission path retain one host delay despite different RTT measurements.
+    for (const bool concurrent : {false, true}) {
+        auto locals = locals_of(2);
+        const auto options = two_side_options(*locals[0]);
+        GcRoom room(locals, options, 1, 0, concurrent);
+        room.online_timing = true;
+        room.measured_rtt[0] = 120; room.measured_rtt[1] = 700;
+        expect(net::adaptive_input_delay(room.measured_rtt[0]) != net::adaptive_input_delay(room.measured_rtt[1]),
+            "the endpoints would choose different delays from their local RTT measurements");
+        if (!concurrent) room.amend_offer = [](unsigned peer, net::SetupOffer& offer) {
+            if (peer == 1) offer.input_delay = net::adaptive_input_delay(700);
+        };
+        room.admit(1, 2, "guest");
+        room.commit();
+        std::string tick_zero;
+        for (auto& session : room.sessions) {
+            auto result = require(session.take_result());
+            expect(result.setup().offer().input_delay == options.input_delay
+                && result.setup().session().input_delay() == options.input_delay,
+                "both online GC endpoints accept the host delay rather than their local estimate");
+            const auto hash = result.setup().adapter().state_hash();
+            if (tick_zero.empty()) tick_zero = hash;
+            else expect(hash == tick_zero, "different RTT measurements retain the identical GC tick-zero state");
+        }
+    }
+}
+
+void offer_refusal_names_every_field() {
+    const std::array<std::string_view, 7> names{"seed", "domain", "setup", "seats", "input_delay", "final_tick_count", "recovery"};
+    for (const auto name : names) {
+        auto locals = locals_of(2);
+        GcRoom room(locals, two_side_options(*locals[0]), 1);
+        room.amend_offer = [name](unsigned peer, net::SetupOffer& offer) {
+            if (peer != 1) return;
+            if (name == "seed") ++offer.seed;
+            if (name == "domain") offer.domain = std::string(net::tactical_setup_domain);
+            if (name == "setup") {
+                auto payload = require(net::decode_galactic_setup(offer.setup));
+                ++payload.roster.vote_timeout_seconds;
+                offer.setup = require(net::encode_galactic_setup(payload));
+            }
+            if (name == "seats") ++offer.seats.back().seat.value;
+            if (name == "input_delay") ++offer.input_delay; // LAN retains strict frozen-delay agreement.
+            if (name == "final_tick_count") --offer.final_tick_count;
+            if (name == "recovery") ++offer.recovery.grace_ms;
+        };
+        room.admit(1, 2, "guest"); room.propose();
+        static_cast<void>(room.sessions[1].accept_setup()); room.rounds(30);
+        expect(room.host().notice().has_value(), "a differing " + std::string(name) + " refuses setup");
+        const auto& message = room.host().notice()->message;
+        expect(message.find("; " + std::string(name) + "(host=") != std::string::npos
+            && message.find(",local=") != std::string::npos,
+            "the refusal names both values for " + std::string(name) + ": " + message);
+        if (name == "input_delay") expect(message.find("input_delay(host=3,local=4)") != std::string::npos,
+            "the diagnostic retains exact input-delay values");
+    }
+}
+
 void two_peer_room() {
     auto locals = locals_of(2);
     const auto options = two_side_options(*locals[0]);
@@ -2166,7 +2250,7 @@ void refused_start_is_diagnosed() {
         const auto options = two_side_options(*locals[0]);
         GcRoom room(locals, options, 1);
         const auto notice = refused(room);
-        expect(notice.message == "host offer differs from frozen room choices: ai-configuration",
+        expect(notice.message.starts_with("host offer differs from frozen room choices: ai-configuration; setup(host="),
             "the guest names its differing AI claim: " + notice.message);
         expect(text_of(notice) == "The campaign could not be set up with the other player. The AI configuration differs between your games." + tail,
             "a differing AI claim is named in plain words");
@@ -3398,7 +3482,7 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
         const auto pending = host->lobby_state();
         expect(start_returned < slow_load / 2, "#6045 the host's Start returns at once: the derivation is not on the calling thread");
         expect(pending && pending->start_preparing && !pending->start_enabled && !pending->ready_enabled
-            && pending->prepare_status.find("Preparing the campaign for all players") != std::string::npos && !host->galactic_start(),
+            && pending->prepare_status.find("Preparing the campaign (") != std::string::npos && !host->galactic_start(),
             "the host shows pending preparation with a progress line before setup is published");
         expect(pending && pending->snapshot.phase == net::LobbyPhase::starting, "the manifest freezes inputs before the host prepares");
         wait([&] { return guest->lobby_state()->snapshot.phase == net::LobbyPhase::starting
@@ -3425,7 +3509,7 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
     milestone = "Start frozen";
     bool guest_status_seen = false, host_waited_visibly = false;
     wait([&] {
-        if (const auto guest_state = guest->lobby_state(); guest_state && guest_state->prepare_status.find("Preparing your copy") != std::string::npos)
+        if (const auto guest_state = guest->lobby_state(); guest_state && guest_state->prepare_status.find("Preparing your copy (") != std::string::npos)
             guest_status_seen = true;
         if (const auto host_state = host->lobby_state(); host_state && host_state->start_preparing) host_waited_visibly = true;
         return host->galactic_start() && guest->galactic_start() && guest->lobby_state()->snapshot.phase == net::LobbyPhase::starting;
@@ -3935,6 +4019,77 @@ void faction_captions_and_selection() {
     expect(!eawr::viewer::galactic::faction_choice_player(joiner, joiner.rows.size()), "invalid picker row is ignored");
 }
 
+// The workshop folder of a mod id on this host (a pool mod host names one item, EAWR_REMAKE_MOD_ROOT; its siblings are the
+// other items it holds), or empty.
+std::filesystem::path workshop_item(const std::filesystem::path& game, const std::string& id) {
+    std::vector<std::filesystem::path> roots;
+    if (const auto configured = eawr::testing::environment("EAWR_WORKSHOP_ROOT")) roots.emplace_back(*configured);
+    if (const auto mod_root = eawr::testing::environment("EAWR_REMAKE_MOD_ROOT"))
+        roots.push_back(std::filesystem::path(*mod_root).parent_path());
+    roots.push_back(game.parent_path().parent_path() / "workshop" / "content" / "32470");
+    roots.push_back(game.parent_path() / "workshop" / "content" / "32470");
+    for (const auto& base : roots) {
+        std::error_code unreadable;
+        if (std::filesystem::is_directory(base / id, unreadable) && !unreadable) return base / id;
+    }
+    return {};
+}
+
+// The owner's online room (11-17): host and guest hold the entry's two human sides and every other listed faction is an AI
+// seat. Through the real lobby loader, offer, agreement and campaign preparation, as a host's Start runs them. The native AI
+// is installed exactly when an AI seat's faction acquires a controller (GCMP-AI-01/03): a room whose AI seats are all
+// ambient factions without an authored pair starts with none, where it used to refuse with 'selected stock players'.
+// A co-op entry seats both players on its one human side.
+int mod_versus_start(const std::string& mod_id) {
+    const auto root = eawr::testing::game_root();
+    if (!root) { std::cout << "SKIPPED: the modded lobby start requires EAWR_EAW_GAME_ROOT\n"; return 77; }
+    const auto item = workshop_item(*root, mod_id);
+    if (item.empty()) { std::cout << "SKIPPED: workshop mod " << mod_id << " is not installed on this host\n"; return 77; }
+    auto layers = eawr::vfs::mod_chain_roots(item);
+    layers.emplace_back("expansion", std::filesystem::path(*root) / "corruption" / "Data");
+    layers.emplace_back("base", std::filesystem::path(*root) / "GameData" / "Data");
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (auto& manifest : require(eawr::vfs::resolve_manifest_chain(layers))) mounts.push_back(std::move(manifest.mount));
+    const auto files = std::make_shared<const eawr::vfs::Vfs>(require(eawr::vfs::Vfs::mount(mounts)));
+    const auto catalog = require(eawr::data::load_catalog(*files, eawr::data::Profile::remake));
+    auto loaded = require(viewer::load_galactic_lobby_content(*files, catalog.catalog, files));
+    loaded.local.data = loaded.data.get(); loaded.local.types = loaded.types.get();
+    auto campaigns = cp::list_mp_lobby_campaigns(*loaded.data, loaded.local.ai_levels);
+    const auto coop = cp::list_coop_sp_lobby_campaigns(*loaded.data, loaded.local.ai_levels);
+    if (!coop.empty()) campaigns.push_back(coop.front()); // co-op still starts, with its authored pairs
+    expect(!campaigns.empty(), "mod " + mod_id + " lists a lobby campaign");
+    std::size_t ambient_only{};
+    for (const auto& campaign : campaigns) {
+        auto options = require(net::default_galactic_lobby_options(campaign, difficulty, 42));
+        std::vector<gc::PlayerId> humans;
+        bool controlled_ai = false;
+        for (std::size_t index = 0; index < options.rows.size(); ++index) {
+            if (options.rows[index].human) humans.push_back(options.rows[index].player);
+            else controlled_ai = controlled_ai || campaign.factions.at(index).ai_controller;
+        }
+        if (humans.empty()) continue;
+        const auto guest_row = humans.size() > 1 ? humans[1] : humans[0];
+        auto snapshot = snapshot_of(options, {seat_of(0, 1, options, humans[0], "host"), seat_of(1, 2, options, guest_row, "guest")});
+        for (auto& seat : snapshot.seats) seat.ready = true;
+        viewer::GalacticLobbyBackend backend(loaded.local);
+        const auto offered = backend.offer(snapshot, {{0, {1}, humans[0]}, {1, {2}, guest_row}});
+        expect(offered.has_value(), "mod " + mod_id + " " + campaign.name + " starts through the lobby"
+            + (offered ? std::string{} : ": " + eawr::core::format_diagnostic(offered.error())));
+        if (!offered) continue;
+        require(backend.identify(offered.value()));
+        const auto agreement = backend.agreement();
+        expect(agreement && agreement->session, "mod " + mod_id + " " + campaign.name + " prepares a tick-zero session");
+        if (!agreement || !agreement->session) continue;
+        expect(agreement->session->native_ai_installed() == controlled_ai, "mod " + mod_id + " " + campaign.name
+            + (controlled_ai ? " runs the native AI of its controlled AI seats" : " starts its ambient-only AI seats without a native AI"));
+        if (!controlled_ai) ++ambient_only;
+        std::cout << "mod lobby start mod=" << mod_id << " campaign=" << campaign.name << " co_op=" << campaign.single_player_rules
+                  << " native_ai=" << agreement->session->native_ai_installed() << '\n';
+    }
+    std::cout << "mod lobby starts: " << campaigns.size() << " campaigns, " << ambient_only << " with ambient-only AI seats\n";
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -3945,7 +4100,12 @@ int main(int argc, char** argv) {
             std::cout << "stock galactic lobby AI contracts passed\n";
             return 0;
         }
-        if (argc != 1) throw std::runtime_error("usage: net_galactic_lobby_tests [--stock-ai]");
+        if (argc == 3 && std::string_view(argv[1]) == "--mod-versus") {
+            const int code = mod_versus_start(argv[2]);
+            viewer::shutdown_lan_drains();
+            return code;
+        }
+        if (argc != 1) throw std::runtime_error("usage: net_galactic_lobby_tests [--stock-ai | --mod-versus <workshop id>]");
         checkpoint_buffered_departure();
         checkpoint_failure_stays_visible();
         for (const auto workers : {1U, 2U, 4U, 8U})
@@ -3986,6 +4146,8 @@ int main(int argc, char** argv) {
         ai_seat_caption_follows_room_difficulty();
         roster_draft();
         two_peer_room();
+        online_start_uses_host_delay();
+        offer_refusal_names_every_field();
         saved_mapping_clears_every_acceptance();
         host_toggles_row_open_ai();
         nine_seat_room();

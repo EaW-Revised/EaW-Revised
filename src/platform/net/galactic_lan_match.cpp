@@ -77,10 +77,14 @@ public:
     core::Result<void> on_input_delay(std::uint64_t delay, std::uint64_t retained) override {
         return monitor->on_input_delay(delay, retained);
     }
+    core::Result<void> on_activated_input_delay(std::uint64_t delay, std::uint64_t retained) override {
+        return monitor->on_activated_input_delay(delay, retained);
+    }
     core::Result<void> on_departure(net::PeerIndex peer, std::uint64_t tick) override { return monitor->on_departure(peer, tick); }
     std::vector<net::PeerIndex> waiting_for_peers() const override { return monitor->waiting_for_peers(); }
     bool frozen() const override { return monitor->frozen(); }
     bool ready_for_resync() const override { return monitor->ready_for_resync(); }
+    std::optional<std::uint64_t> deferred_resync_frontier() const override { return monitor->deferred_resync_frontier(); }
     core::Result<void> on_resync(std::uint64_t tick, std::string_view hash) override { return monitor->on_resync(tick, hash); }
     core::Result<void> on_link_repair(net::PeerIndex peer, std::function<bool(net::PeerIndex)> ownership = {}) override {
         return monitor->on_link_repair(peer, std::move(ownership));
@@ -286,7 +290,7 @@ public:
         // connection: repair must not turn a conclusive close into a new grace.
         if (options_.repair_recovery_links && !recovery_split_) static_cast<void>(options_.repair_recovery_links());
         if (!pumped) return end_with_failure(pumped.error());
-        observe_network(context.advance_allowed, now);
+        observe_network(context.advance_allowed, pumped.value().completed.has_value(), now);
         std::optional<campaign::GameTick> tick;
         if (pumped.value().completed) {
             tick = adapter_->take_tick();
@@ -511,6 +515,7 @@ private:
         const std::uint64_t frontier_delay = package.session_frontier->input_delay;
         net::DesyncOptions monitor_options; monitor_options.initial_tick = package.frontier.completed_tick;
         monitor_options.input_delay = frontier_delay; monitor_options.exchange_every = options_.exchange_every;
+        monitor_options.deferred_compare = options_.deferred_compare; monitor_options.final_tick = options_.final_tick_count;
         auto monitor = std::make_unique<net::DesyncMonitor>(transport_, monitor_options);
         auto gate = std::make_unique<CadenceGate>(); gate->monitor = monitor.get();
         net::SessionOptions config = session_->recovery_options();
@@ -591,6 +596,7 @@ private:
         net::DesyncOptions monitor_options;
         monitor_options.input_delay = options_.input_delay;
         monitor_options.exchange_every = options_.exchange_every;
+        monitor_options.deferred_compare = options_.deferred_compare; monitor_options.final_tick = options_.final_tick_count;
         monitor_options.initial_tick = context.game.completed_tick();
         owned_monitor_.emplace(transport_, monitor_options);
         monitor_ = &*owned_monitor_;
@@ -613,6 +619,7 @@ private:
         if (options_.adaptive_timing) {
             session_options.non_lan = true;
             session_options.adaptive_timing = net::AdaptiveTiming{.host = 0, .broadband = true, .rtt_ms = options_.adaptive_rtt_ms, .hold_on_expiry = true};
+            session_options.adaptive_timing->responsive = true;
         }
         auto created = net::LockstepSession::create(*adapter_, transport_, options_.seats, session_options, &gate_);
         if (!created) return core::Result<void>::failure(created.error());
@@ -665,7 +672,7 @@ private:
 
     // Network diagnostics only: log lines and the view's overlay data. Nothing here reaches the simulation, a hash, a
     // save or the wire. Runs on the simulation thread once per poll, like the skirmish driver's equivalent.
-    void observe_network(bool due, std::uint64_t now) {
+    void observe_network(bool due, bool stepped, std::uint64_t now) {
         diagnostics_.seat = transport_.self();
         diagnostics_.tick = adapter_->completed_tick();
         // Say once which input-delay mode this match runs, then every agreed change: proposals should be rare (a stable
@@ -681,9 +688,11 @@ private:
         const auto& completeness = session_->waiting_for();
         const bool core_waiting = due && completeness && !completeness->peers.empty();
         const std::vector<net::PeerIndex> missing = core_waiting ? completeness->peers : monitor_->waiting_for_peers();
-        const bool waiting = !missing.empty();
+        const auto wait_kind = session_->wait_kind(due, stepped);
+        const bool waiting = wait_kind != net::SessionWaitKind::none;
         diagnostics_.stall(waiting, now, missing);
-        diagnostics_.ledger.observe(now, waiting, waiting ? missing.front() : net::PeerIndex{});
+        diagnostics_.ledger.observe(now, waiting, missing.empty() ? net::PeerIndex{} : missing.front(),
+            waiting ? static_cast<presentation::ui::NetWaitKind>(wait_kind) : presentation::ui::NetWaitKind::batch);
         diagnostics_.links(transport_, [](net::PeerIndex) { return "transport"; });
         // The ledger scan is bounded but the driver polls far more often than the overlay redraws.
         if (net_view_at_ && now >= *net_view_at_ && now - *net_view_at_ < 100) return;
@@ -701,10 +710,20 @@ private:
                 : presentation::ui::NetPeerLink{peer, false, 0.0, 0.0, 0.0, route.route, route.lossy});
         }
         auto stall = diagnostics_.ledger.snapshot(now);
+        for (auto& peer : peers) {
+            peer.input_tick_ms = diagnostics_.input_tick_ms(peer.peer, session_->received_through(peer.peer), now);
+            LanDiagnostics::receipts(peer, *session_, peer.peer);
+        }
+        const auto local_tick_ms = diagnostics_.input_tick_ms(transport_.self(), adapter_->completed_tick(), now);
         const std::lock_guard lock(mutex_);
         view_.net_seat = transport_.self();
         view_.net_peers = std::move(peers);
         view_.net_stall = stall;
+        view_.net_input_delay = session_->input_delay();
+        view_.net_lead_ticks = session_->next_seal() > adapter_->completed_tick()
+            ? session_->next_seal() - adapter_->completed_tick() : 0;
+        view_.net_local_tick_ms = local_tick_ms;
+        view_.net_poll_gap_ms = session_->max_poll_gap_ms();
     }
 
     void refresh(const net::PumpResult& pumped, bool due, std::uint64_t now) {

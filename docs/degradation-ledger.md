@@ -46,8 +46,8 @@ A distinct key is (code, source, object).
 Per (code, source) the ledger keeps `objects` (distinct objects, counted by a 64-bit hash of the bounded object text: a
 hash count, so a collision of two different objects would count as one, and there is no per-class object cap because no
 per-object text is stored beyond the one example, so the total never truncates), `occurrences` (every record call, which can differ with frame rate) and the first example:
-the lexically smallest (object, detail) pair seen, so it does not depend on the order or the thread the records came
-from. A gate compares `objects`, not `occurrences`.
+the lexically smallest (object, detail) pair at the highest severity seen, so it does not depend on the order or the thread the records came
+from. Each class publishes that highest `severity` (`info`, `warning` or `error`). A gate compares `objects`, not `occurrences`.
 
 ## Classes fed in step 1a
 
@@ -62,14 +62,28 @@ from. A gate compares `objects`, not `occurrences`.
 
 | Code | Source of the record | Feeds from |
 |---|---|---|
-| `EAWR-SCRIPT-0211`, `-0215`, `-0216`, `-0217` | the layer the failing story script is mounted from (`unknown` when the data cannot place it) | the diagnostics a completed galactic step publishes (story scripts, game-object scripts), recorded by the live session on the simulation thread after the step; the object is the fault text without its tick |
+| `EAWR-SCRIPT-*`, except `-0218` print output | the script's mounted layer, or the AI campaign source when no module is attached | completed galactic step diagnostics from AI, story and game-object scripts, recorded by the live session after the step; internal errors/exceptions are ERROR, while `-0216` stand-ins and `-0217` sourced warnings remain WARNING |
 | `EAWR-SCRIPT-0211` (refusal), `EAWR-GCFUND-0001`, `EAWR-GCAI-*` runtime lines | `campaign_source()` | the native AI's runtime lines (a bill the AI's ledger refused, a fiscal cycle skipped, ...): the serial side of each AI tick forwards the lines that arrived since the last tick |
-| `EAWR-GCAI-PROVIDER-0001` | `campaign_source()` | a native AI provider retiring: its runtime load note reaches the ledger through `record_load_notes` (the default source applies because the note names no layer) |
+| `EAWR-GCAI-PROVIDER-0001` and its cause's diagnostic code | `campaign_source()` | the serial retirement flush records ERROR entries with player, authored faction, tick, reason and original diagnostic id/text. The generic retirement load note uses the same provider object, so it does not add another distinct retirement. |
+| `EAWR-GCAI-INTERNAL-0001` | `campaign_source()` | an unrecoverable native AI service Result, including infrastructure faults that do not retire a player: ERROR with available provider context and original diagnostic id; the original Result and control flow are unchanged |
 | `EAWR-LOAD-1xxx` runtime-degraded notes | the note's layer | the runtime notes of a live galactic session reach the same sink as the load notes |
 
-Not fed, on purpose: the fatal AI inbox errors (`EAWR-GCAI-ASYNC-0002` to `-0005`) end the session as failed, which the summary's `ended` already says;
-they are not degradations the session carried on from. A failed story-plot request (`EAWR-SCRIPT-0215` from the plot applier)
-returns to the script that asked and shows up as that script's fault.
+Fatal AI/script Results also reach the ledger before the session returns failure; a failed session must not erase its
+error classes. A failed story-plot request returns to the script that asked and shows up as that script's fault.
+
+## AI failure visibility
+
+Owner policy: every native provider retirement is an ERROR, never an ordinary gameplay refusal hidden as a warning.
+The serial owner flush logs one line and publishes one observer notice per retired player. Its authored faction label
+comes from the campaign perception setup, not the AI player-type name. Internal script diagnostics carry their player,
+faction, tick and diagnostic code; unavailable owner context is explicit rather than guessed.
+
+The notice text is `AI player <faction> stopped after an internal error`. A completed service hands it to the campaign
+as observer output; the campaign emits an existing `SCREEN_TEXT` presentation request for each active human owner
+(including the multiplayer host's human recipients), deduplicating co-op seats. It remains visible for 15 presentation
+seconds. It never enters native story events, plot inputs, gameplay commands, saves, hashes or replays. Loading a
+retired provider does not itself replay a mid-campaign retirement notice. The underlying retirement state and its
+checkpoint/replay behavior are unchanged. These are project diagnostics, not original-game behavior rules.
 
 Not yet fed: tactical script and bridge drops, audio fallbacks, scene placement issues and render/shader fallbacks. To add a class, call `record` at the emit
 site with the class's code, the source mod and the object, in the owner/serial context, and add a test that a forced
@@ -81,7 +95,7 @@ degradation lands in the summary.
 {"schema_version":1,"session_id":"20261113T093000Z-1a2b3c4d","mode":"skirmish","run":"<map name>","build":"0.3.4+<commit>","commit":"<commit>",
  "chain_fingerprint":"<loadcheck fingerprint or empty>","mods":["<mod id>"],"ended":"ok","written_at":"2026-11-13T09:35:12Z",
  "totals":{"items":12,"classes":3,"unattributed":0},
- "classes":[{"code":"EAWR-ASSET-NAME-0001","source":"<mod id>","objects":12,"occurrences":40,
+ "classes":[{"code":"EAWR-ASSET-NAME-0001","source":"<mod id>","severity":"warning","objects":12,"occurrences":40,
              "first_example":{"object":"texture ...","detail":"not found (site ...)"}}]}
 ```
 

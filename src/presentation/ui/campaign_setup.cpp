@@ -63,15 +63,39 @@ CampaignSetupModel::CampaignSetupModel(std::vector<CampaignFacts> campaigns, std
     std::stable_partition(factions_.begin(), factions_.end(), [](const FactionChoice& choice) {
         return choice.title.find_first_not_of(" \t\r\n") != std::string::npos;
     });
+    all_factions_ = factions_;
     if (!factions_.empty()) faction_ = factions_.size() - 1;
 }
 
-void CampaignSetupModel::reset() noexcept {
+void CampaignSetupModel::reset() {
     accepted_.reset(); editing_.reset();
     row_.reset();
+    refresh_factions();
     faction_ = factions_.empty() ? std::nullopt : std::optional<std::size_t>(factions_.size() - 1);
     difficulty_ = CampaignDifficulty::normal;
     refresh_options_visible();
+}
+
+void CampaignSetupModel::refresh_factions() {
+    // DEV-26: playable means an authored player variant of the selected campaign set.
+    const std::string previous = faction_ ? factions_[*faction_].name : std::string{};
+    factions_.clear();
+    for (const auto& side : all_factions_) {
+        if (row_) {
+            const auto& listed = campaigns_[rows_[*row_].campaign];
+            const auto& set = listed.campaign_set.empty() ? listed.name : listed.campaign_set;
+            const bool offered = std::any_of(campaigns_.begin(), campaigns_.end(), [&](const auto& entry) {
+                const auto& key = entry.campaign_set.empty() ? entry.name : entry.campaign_set;
+                return same(key, set) && same(entry.faction, side.name);
+            });
+            if (!offered) continue;
+        }
+        factions_.push_back(side);
+    }
+    faction_.reset();
+    for (std::size_t i = 0; i < factions_.size(); ++i)
+        if (same(factions_[i].name, previous)) faction_ = i;
+    if (!faction_ && !factions_.empty()) faction_ = factions_.size() - 1;
 }
 
 void CampaignSetupModel::refresh_options_visible() noexcept {
@@ -82,6 +106,7 @@ void CampaignSetupModel::refresh_options_visible() noexcept {
 void CampaignSetupModel::select_row(const std::optional<std::size_t> row) {
     accepted_.reset(); editing_.reset(); // WGP-67
     row_ = row && *row < rows_.size() ? row : std::nullopt;
+    refresh_factions();
     refresh_options_visible();
 }
 

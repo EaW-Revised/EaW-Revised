@@ -166,6 +166,10 @@ public:
             instance_.tick, instance_.id, instance_.command_sequence++, ::std::move(verb), ::std::move(arguments)});
     }
 
+    [[nodiscard]] ::std::span<const ScriptCommand> staged_commands() const noexcept override {
+        return instance_.staging.commands;
+    }
+
     [[nodiscard]] ::std::optional<::std::optional<Value>> staged_global_value(const ::std::string_view name) const override {
         for (auto at = instance_.staging.commands.rbegin(); at != instance_.staging.commands.rend(); ++at) {
             if (at->verb != global_value_command || at->arguments.empty()) continue;

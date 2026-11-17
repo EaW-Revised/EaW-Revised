@@ -69,6 +69,16 @@ add_test(NAME net_galactic_lobby_stock_ai COMMAND net_galactic_lobby_tests --sto
 # The combined contract measured 776 s on the MSVC pool; allow twice that upper bound.
 set_tests_properties(net_galactic_lobby_stock_ai PROPERTIES
     LABELS "long;batch-only" TIMEOUT 1560 SKIP_REGULAR_EXPRESSION "SKIPPED:")
+# An online versus room whose AI seats are all ambient factions (no authored AI_Player_Control pair) starts without a
+# native AI instead of refusing; co-op keeps its AI (GCMP-AI-03). Real lobby, RaW and BFC; skips (77) without the mod.
+foreach(mod raw:1129810972 bfc:2712013423)
+    string(REPLACE ":" ";" parts "${mod}")
+    list(GET parts 0 name)
+    list(GET parts 1 id)
+    eawr_add_game_data_test(NAME net_galactic_lobby_mod_versus_${name} COMMAND net_galactic_lobby_tests --mod-versus ${id})
+    set_tests_properties(net_galactic_lobby_mod_versus_${name} PROPERTIES
+        LABELS "game-data;mod-data" TIMEOUT 1800 SKIP_RETURN_CODE 77)
+endforeach()
 add_executable(net_viewer_lan_tests
     viewer_lan_tests.cpp
     viewer_lan_mesh_tests.cpp
@@ -136,6 +146,11 @@ add_test(NAME net_gns_turn_nonce COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/gns_turn_processes.py" "$<TARGET_FILE:net_gns_introduced_tests>" nonce)
 set_tests_properties(net_gns_turn_nonce PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
 
+# A denied CGNAT candidate must not poison the real relay IP's permission or its refreshes.
+add_test(NAME net_gns_turn_denied COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_turn_processes.py" "$<TARGET_FILE:net_gns_introduced_tests>" denied)
+set_tests_properties(net_gns_turn_denied PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 150)
+
 # The fake TURN server's loss knob (relay-switch tests): pure Python, no GNS.
 add_test(NAME net_gns_turn_loss_rig COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/gns_turn_loss_check.py")
 set_tests_properties(net_gns_turn_loss_rig PROPERTIES TIMEOUT 60)
@@ -187,6 +202,44 @@ add_executable(net_gns_transport_tests gns_transport_tests.cpp)
 target_link_libraries(net_gns_transport_tests PRIVATE eawr::net)
 eawr_target_project_warnings(net_gns_transport_tests)
 add_test(NAME net_gns_transport_contracts COMMAND net_gns_transport_tests)
+add_test(NAME net_gns_wan_zero_loss COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_wan_processes.py" "$<TARGET_FILE:net_gns_transport_tests>"
+    --loss 0 --out "${PROJECT_BINARY_DIR}/gns-wan-zero-artifacts")
+add_test(NAME net_gns_wan_lockstep COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_wan_processes.py" "$<TARGET_FILE:net_gns_transport_tests>"
+    --out "${PROJECT_BINARY_DIR}/gns-wan-artifacts")
+add_test(NAME net_gns_wan_bulk COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_wan_processes.py" "$<TARGET_FILE:net_gns_transport_tests>"
+    --loss 0 --ticks 60 --bulk-bytes 65536 --out "${PROJECT_BINARY_DIR}/gns-wan-bulk-artifacts")
+set_tests_properties(net_gns_wan_zero_loss net_gns_wan_lockstep net_gns_wan_bulk PROPERTIES
+    SKIP_RETURN_CODE 77 TIMEOUT 200 RUN_SERIAL TRUE LABELS optional-gns)
+add_executable(net_gns_campaign_wan_tests gns_campaign_wan_tests.cpp)
+target_link_libraries(net_gns_campaign_wan_tests PRIVATE eawr::net)
+eawr_target_project_warnings(net_gns_campaign_wan_tests)
+add_test(NAME net_gns_campaign_wan_timing COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_campaign_wan_processes.py" "$<TARGET_FILE:net_gns_campaign_wan_tests>"
+    --polling continuous --out "${PROJECT_BINARY_DIR}/gns-campaign-wan-artifacts")
+set_tests_properties(net_gns_campaign_wan_timing PROPERTIES
+    SKIP_RETURN_CODE 77 TIMEOUT 280 RUN_SERIAL TRUE LABELS optional-gns)
+add_test(NAME net_gns_hash_interval_wan COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_campaign_wan_processes.py" "$<TARGET_FILE:net_gns_campaign_wan_tests>"
+    --policies adaptive skirmish --polling continuous --intervals 30 150 --phase-lags 0 100
+    --out "${PROJECT_BINARY_DIR}/gns-hash-interval-artifacts")
+set_tests_properties(net_gns_hash_interval_wan PROPERTIES
+    SKIP_RETURN_CODE 77 TIMEOUT 400 RUN_SERIAL TRUE LABELS optional-gns)
+add_test(NAME net_gns_deferred_compare_wan COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_campaign_wan_processes.py" "$<TARGET_FILE:net_gns_campaign_wan_tests>"
+    --policies skirmish --polling continuous --intervals 150 --phase-lags 0 --deferred off on
+    --out "${PROJECT_BINARY_DIR}/gns-deferred-compare-artifacts")
+set_tests_properties(net_gns_deferred_compare_wan PROPERTIES
+    SKIP_RETURN_CODE 77 TIMEOUT 280 RUN_SERIAL TRUE LABELS optional-gns)
+foreach(polling tick continuous)
+    add_test(NAME net_gns_skirmish_service_${polling} COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gns_campaign_wan_processes.py" "$<TARGET_FILE:net_gns_campaign_wan_tests>"
+        --policies skirmish --polling ${polling} --out "${PROJECT_BINARY_DIR}/gns-skirmish-service-${polling}-artifacts")
+    set_tests_properties(net_gns_skirmish_service_${polling} PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 150 RUN_SERIAL TRUE LABELS optional-gns)
+endforeach()
 set_tests_properties(net_gns_transport_contracts PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 add_test(NAME net_gns_turn_refusal_contracts COMMAND net_gns_transport_tests --turn-refusals)
 set_tests_properties(net_gns_turn_refusal_contracts PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
@@ -328,6 +381,8 @@ add_executable(net_galactic_live_driver_tests galactic_live_driver_tests.cpp)
 target_link_libraries(net_galactic_live_driver_tests PRIVATE eawr::platform_net_galactic eawr::net_galactic eawr::platform eawr::ui_model)
 eawr_target_project_warnings(net_galactic_live_driver_tests)
 add_test(NAME net_galactic_live_driver_contracts COMMAND net_galactic_live_driver_tests)
+add_test(NAME net_galactic_deferred_contracts COMMAND net_galactic_live_driver_tests --deferred)
+set_tests_properties(net_galactic_deferred_contracts PROPERTIES TIMEOUT 180)
 add_test(NAME net_galactic_live_raid_contracts COMMAND net_galactic_live_driver_tests --raid)
 add_test(NAME net_galactic_netdiag_contracts COMMAND net_galactic_live_driver_tests --netdiag)
 add_test(NAME net_galactic_adaptive_contracts COMMAND net_galactic_live_driver_tests --adaptive)
@@ -365,7 +420,7 @@ set_tests_properties(net_galactic_tray_landing_contracts PROPERTIES TIMEOUT 120)
 # preset skips them; they run only where the provider is built.
 set_property(TEST
     net_gns_dependency_smoke net_gns_introduced_paths net_gns_turn_permission
-    net_gns_turn_silent net_gns_turn_nonce net_gns_mesh_paths net_gns_lobby_retry
+    net_gns_turn_silent net_gns_turn_nonce net_gns_turn_denied net_gns_mesh_paths net_gns_lobby_retry
     net_gns_mesh_twice net_gns_mesh_twice_late net_gns_mesh_gave_up gns_mesh_nine_process
     net_gns_transport_contracts net_gns_turn_refusal_contracts
     net_gns_setup_contracts net_gns_lockstep_contracts net_gns_desync_contracts

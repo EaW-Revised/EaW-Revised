@@ -10,7 +10,8 @@ LockstepSession::LockstepSession(SessionAdapter& adapter, MessageTransport& tran
     std::vector<PeerSeat> seats, SessionOptions options, SessionMonitor* monitor)
     : adapter_(&adapter), transport_(&transport), seats_(std::move(seats)), options_(options), self_(transport.self()),
       received_through_(seats_.size()), command_cursors_(seats_.size()), accepted_(seats_.size()), monitor_(monitor), departed_(seats_.size()), quit_in_batch_(seats_.size()), quit_seen_(seats_.size()), recovery_(seats_.size()),
-      next_policy_tick_(options.initial_tick + 64 * std::max<std::uint64_t>(1, options.input_delay / 2)), initial_input_delay_(options.input_delay) {
+      next_policy_tick_(options.initial_tick + (options.adaptive_timing && options.adaptive_timing->responsive
+          ? 8 : 64 * std::max<std::uint64_t>(1, options.input_delay / 2))), initial_input_delay_(options.input_delay) {
     initial_tick_ = options.initial_tick;
     next_seal_ = initial_tick_;
     std::fill(received_through_.begin(), received_through_.end(), initial_tick_);
@@ -23,6 +24,7 @@ LockstepSession::LockstepSession(SessionAdapter& adapter, MessageTransport& tran
             ? at->second : at->second + 1;
     }
     last_sent_batch_.resize(seats_.size());
+    input_receipts_.resize(seats_.size());
     if (options_.mesh)
         mesh_ = std::make_unique<MeshIncident>(transport, static_cast<MeshSeats>((1U << seats_.size()) - 1U), *options_.mesh);
 }
@@ -99,6 +101,13 @@ core::Result<PumpResult> LockstepSession::fail(core::Diagnostic error) {
 }
 
 core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
+    const auto poll_at = std::chrono::steady_clock::now();
+    if (!poll_window_at_ || poll_at - *poll_window_at_ >= std::chrono::seconds(1)) {
+        poll_window_at_ = poll_at; max_poll_gap_ms_ = 0.0;
+    }
+    if (last_pump_at_) max_poll_gap_ms_ = std::max(max_poll_gap_ms_,
+        std::chrono::duration<double, std::milli>(poll_at - *last_pump_at_).count());
+    last_pump_at_ = poll_at;
     if (failure_) return core::Result<PumpResult>::failure(*failure_);
     if (encode_departure_ && departed_[self_]) return core::Result<PumpResult>::success({});
     if (last_now_ && now_ms < *last_now_) return fail(diagnostic(session_errors::clock, "caller clock went backwards"));
@@ -136,6 +145,9 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
     // closed stream or alter the held epoch. The simulation prefix stays frozen.
     if (receive_drained)
         if (auto checked = check_held_survivors(); !checked) return fail(checked.error());
+    if (!deferred_resync_votes_.empty()) {
+        if (auto serviced = service_deferred_resync(); !serviced) return fail(serviced.error());
+    }
     if (options_.resync && (resync_ || (monitor_ && monitor_->frozen()))) {
         auto serviced = service_resync();
         if (!serviced) return fail(serviced.error());
@@ -365,6 +377,21 @@ core::Result<PumpResult> LockstepSession::pump(const std::uint64_t now_ms) {
         if (!begun) return fail(begun.error());
     }
     return core::Result<PumpResult>::success(std::move(result));
+}
+
+SessionWaitKind LockstepSession::wait_kind(bool due, bool stepped) const {
+    // Recording the completed tick can itself open an exchange. Start its wait
+    // at that boundary, including when the next caller poll is much later.
+    if (monitor_ && !monitor_->waiting_for_peers().empty()) return SessionWaitKind::hash;
+    if (stepped) return SessionWaitKind::none;
+    if (!due) return SessionWaitKind::none;
+    if (timing_ && adapter_->completed_tick() >= timing_->event.tick) return SessionWaitKind::timing;
+    if (waiting_ && !waiting_->peers.empty()) {
+        for (const auto peer : waiting_->peers)
+            if (transport_->queued_received(peer)) return SessionWaitKind::queued;
+        return SessionWaitKind::batch;
+    }
+    return SessionWaitKind::other;
 }
 
 } // namespace eawr::net

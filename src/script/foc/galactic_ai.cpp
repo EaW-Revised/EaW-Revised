@@ -273,15 +273,22 @@ core::Result<authoritative::ServiceOptions> Manager::before_service(const sim::P
     using Result = core::Result<authoritative::ServiceOptions>;
     if (impl_->phase_abandoned || impl_->service_threw) return Result::failure(lifecycle_error("unsettled lifecycle phase"));
     if (impl_->capabilities.prepare) if (auto prepared = impl_->capabilities.prepare(executor, world, tick); !prepared) return Result::failure(prepared.error());
+    return before_window_service(executor, world.clock().galactic_frame, tick, scripts);
+}
+core::Result<authoritative::ServiceOptions> Manager::before_window_service(const sim::PartitionExecutor& executor,
+    const std::uint64_t galactic_frame, const gc::GalacticTick& tick, authoritative::ScriptScheduler& scripts) {
+    using Result = core::Result<authoritative::ServiceOptions>;
+    if (impl_->phase_abandoned || impl_->service_threw) return Result::failure(lifecycle_error("unsettled lifecycle phase"));
+    static_cast<void>(executor);
     impl_->last_served_tick = tick.completed_tick;
     // The world is the snapshot's (real clocks); the lifecycle runs on the clocks of the batch's current virtual tick.
     const Admission admission = impl_->state.admission;
-    if (auto serviced = service_window({tick.completed_tick, world.clock().galactic_frame}, std::span<const Admission>(&admission, 1), scripts,
+    if (auto serviced = service_window({tick.completed_tick, galactic_frame}, std::span<const Admission>(&admission, 1), scripts,
         impl_->virtual_tick); !serviced) return Result::failure(serviced.error());
     if (auto finished = impl_->capabilities.services->finish_barrier(scripts); !finished) return Result::failure(finished.error());
     authoritative::ServiceOptions options;
     options.host_paced = [](std::uint64_t) { return true; }; // plan/freestore pumps belong to their admitted services.
-    options.time_tick = world.clock().galactic_frame;
+    options.time_tick = galactic_frame;
     return Result::success(std::move(options));
 }
 
@@ -332,6 +339,19 @@ core::Result<void> Manager::retire_provider(gc::PlayerId player, NativeProviderF
         return core::Result<void>::failure(lifecycle_error("native retirement requires a healthy idle known live provider"));
     impl_->state.retired_providers.emplace(player, reason); impl_->update_record(); mark_state_changed();
     return core::Result<void>::success();
+}
+bool Manager::startup_window_open(gc::PlayerId player) const noexcept { return impl_->state.startup_windows.contains(player); }
+void Manager::open_startup_window(gc::PlayerId player) {
+    impl_->state.startup_windows[player] = false; impl_->update_record(); mark_state_changed();
+}
+void Manager::deliver_startup_window(gc::PlayerId player) {
+    const auto found = impl_->state.startup_windows.find(player);
+    if (found == impl_->state.startup_windows.end() || found->second) return;
+    found->second = true; impl_->update_record(); mark_state_changed();
+}
+void Manager::close_delivered_startup_windows() {
+    if (!std::erase_if(impl_->state.startup_windows, [](const auto& row) { return row.second; })) return;
+    impl_->update_record(); mark_state_changed();
 }
 std::string Manager::player_type(gc::PlayerId player) const {
     for (const auto& row : impl_->state.players) if (row.selected.player == player) return row.selected.player_type;

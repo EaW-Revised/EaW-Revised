@@ -634,6 +634,11 @@ public:
     [[nodiscard]] std::vector<std::string> take_path_coefficient_diagnostics();
     [[nodiscard]] core::Result<void> publish_execution_route_generations(bool available, std::uint64_t revision,
         std::map<tactical::PlayerId, std::shared_ptr<const std::vector<GalacticExecutionRoute>>>);
+    // #7457: a load restores the cache rows saved under the last bound publication, but the world itself starts from the
+    // install-time publication. The load adopts the rebuilt publication's revision, so its first bind is not taken for a
+    // connectivity change (which drops the connectivity rows, see bind_connectivity). The content still binds at that
+    // next bind, and a real change after the load still drops the rows.
+    void adopt_restored_connectivity_revision(std::uint64_t revision);
     // nullopt: production-site relation not supplied; false: known nonmember.
     [[nodiscard]] std::optional<bool> goal_reachable(tactical::PlayerId, galactic::PlanetId,
         galactic::PlanetId, std::string_view) const;

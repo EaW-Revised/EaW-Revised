@@ -692,6 +692,10 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
             options.speed_step = static_cast<std::uint32_t>(*step);
             options.speed_step_given = true;
         }
+    } else if (name == "--eawr-live-max-rate") {
+        const auto rate = parse_u64(text);
+        if (!rate || *rate == 0 || *rate > 1000) error = "--eawr-live-max-rate expects 1 to 1000 ticks a second";
+        else options.max_rate = static_cast<std::uint32_t>(*rate);
     } else if (name == "--eawr-live-workers") {
         const auto workers = parse_u64(text);
         if (!workers || *workers == 0 || *workers > 256) error = "--eawr-live-workers expects 1 to 256";

@@ -4183,6 +4183,113 @@ void landing_admission_and_result() {
     expect(!world.apply_control_battle(invalid) && world.canonical_state_bytes() == before,
         "unallocated future identity cannot enter the absent roster and suppress a later force");
 }
+// WGM-39/42, GGS-10 (P1 regression of #7178): units selected from an orbit fleet and dropped on a defended
+// non-allied surface invade alone. They leave their fleet as one new orbit fleet whose landing requests the
+// conflict; the rest of the fleet stays in orbit and the surface is untouched until the battle returns.
+void selected_units_invade_defended_ground() {
+    using Units = decltype(gc::LandUnits{}.units);
+    auto base = setup();
+    base.fleets[0].orbit = 2; base.fleets[0].members = {{20, 1}, {21, 2}, {31, 2}, {33, 2}};
+    base.control->planets[1].ground_base = {2, 1}; base.planets[1].owner = 2;
+    const auto conflict_of = [](const gc::GalacticSnapshot& snapshot) -> gc::FleetId {
+        for (const auto& event : snapshot.events())
+            if (event.kind == gc::GalacticEventKind::land_conflict_requested) return event.subject;
+        return 0;
+    };
+    const auto fleet_of = [](const gc::GalacticSnapshot& snapshot, gc::FleetId id) -> const gc::Fleet* {
+        for (const auto& fleet : snapshot.fleets()) if (fleet.id == id) return &fleet;
+        return nullptr;
+    };
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter pool(workers);
+        auto world = gc::GalacticSession::create(base).value();
+        world.enable_conflict_requests(true);
+        expect(bool(world.submit({{0, gc::SeatId{1}, 1}, gc::LandUnits{2, Units{21, 33}}})), "subset invasion has valid shape");
+        const auto tick = world.step(pool).value();
+        const auto invading = conflict_of(*tick.snapshot);
+        const auto* left = fleet_of(*tick.snapshot, 10);
+        const auto* landing = fleet_of(*tick.snapshot, invading);
+        expect(invading && invading != 10 && landing && landing->owner == 1 && landing->orbit == 2
+            && landing->members == std::vector<gc::FleetMember>{{21, 2}, {33, 2}},
+            "the dragged units alone form the invading fleet, in their named order");
+        expect(left && left->members == std::vector<gc::FleetMember>{{20, 1}, {31, 2}} && left->orbit == 2,
+            "the space unit and the undragged ground unit stay in orbit in the original fleet");
+        expect(tick.snapshot->control()->planets[1].landed.empty() && tick.snapshot->control()->planets[1].ground_base.level == 1,
+            "the defended surface is untouched until the battle returns");
+        // A checkpoint taken with the invasion requested continues identically.
+        const auto saved = world.save_checkpoint_state().value();
+        auto loaded = gc::GalacticSession::create(base).value();
+        loaded.enable_conflict_requests(true);
+        expect(bool(loaded.load_checkpoint_state(saved)), "mid-invasion checkpoint loads");
+        std::vector<std::string> hashes{tick.state_hash.get()};
+        for (int step = 0; step < 2; ++step) {
+            hashes.push_back(world.step(pool).value().state_hash.get());
+            expect(loaded.step(pool).value().state_hash.get() == hashes.back(), "mid-invasion checkpoint continuation agrees");
+        }
+        const auto replay = world.record();
+        expect(gc::parse_replay(gc::write_replay(replay).value()).value() == replay, "subset invasion replay round trip");
+        if (workers == 1) reference = hashes; else expect(hashes == reference, "subset invasion agrees on 1/2/4/8 workers");
+    }
+    const eawr::sim::InlineExecutor executor;
+    // Refusals are atomic: no split fleet is left behind.
+    for (const bool conflicts : {false, true}) {
+        auto world = gc::GalacticSession::create(base).value();
+        world.enable_conflict_requests(conflicts);
+        const Units units = conflicts ? Units{20} : Units{21}; // a ship never lands; without the conflict owner nothing invades
+        expect(bool(world.submit({{0, gc::SeatId{1}, 1}, gc::LandUnits{2, units}})), "refused subset has valid shape");
+        const auto tick = world.step(executor).value();
+        expect(!conflict_of(*tick.snapshot) && tick.snapshot->fleets().size() == base.fleets.size()
+            && fleet_of(*tick.snapshot, 10)->members == base.fleets[0].members,
+            conflicts ? "a nontransport selection refuses without splitting the fleet"
+                      : "without the conflict owner the subset invasion refuses without splitting the fleet");
+    }
+    // An undefended enemy surface keeps the direct one-unit landing (#7178).
+    auto open = base; open.control->planets[1].ground_base = {};
+    auto world = gc::GalacticSession::create(open).value();
+    world.enable_conflict_requests(true);
+    expect(bool(world.submit({{0, gc::SeatId{1}, 1}, gc::LandUnits{2, Units{21}}})), "undefended landing has valid shape");
+    const auto tick = world.step(executor).value();
+    expect(!conflict_of(*tick.snapshot) && tick.snapshot->control()->planets[1].landed.size() == 1
+        && tick.snapshot->control()->planets[1].landed[0].id == 21
+        && fleet_of(*tick.snapshot, 10)->members == std::vector<gc::FleetMember>{{20, 1}, {31, 2}, {33, 2}},
+        "an undefended enemy surface takes the dragged unit directly");
+    // GGS-13 / WGM-42/107: noncombat occupation is not a capable battle defender.
+    std::vector<std::vector<std::uint8_t>> noncombat_reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter pool(workers);
+        for (const bool whole : {false, true}) {
+            auto noncombat = open;
+            noncombat.fleet_control->types[2].transport = true;
+            noncombat.control->types[2].ground_capable = false;
+            noncombat.control->planets[1].landed = {{50, 3, 2}};
+            expect(!gc::surface_defended_against(*noncombat.control, 1, 2, &*noncombat.movement),
+                "noncombat enemy occupation does not defend a landing");
+            auto landing_world = gc::GalacticSession::create(noncombat).value();
+            landing_world.enable_conflict_requests(true);
+            gc::CommandPayload payload = whole ? gc::CommandPayload{gc::LandFleet{10, 2}}
+                : gc::CommandPayload{gc::LandUnits{2, Units{21}}};
+            expect(bool(landing_world.submit({{0, gc::SeatId{1}, 1}, payload})), "noncombat-surface landing submitted");
+            const auto landed = landing_world.step(pool).value().snapshot;
+            expect(!conflict_of(*landed) && landed->fleets().size() == noncombat.fleets.size()
+                && landed->control()->planets[1].landed.size() == (whole ? 4U : 2U),
+                "both landing commands directly link without creating an orphan invasion fleet");
+            const auto bytes = landing_world.canonical_state_bytes();
+            if (workers == 1) noncombat_reference.push_back(bytes);
+            else expect(bytes == noncombat_reference[whole ? 1U : 0U], "noncombat landing is equal on 1/2/4/8 workers");
+            noncombat.control->planets[1].landed.push_back({51, 2, 2});
+            expect(gc::surface_defended_against(*noncombat.control, 1, 2, &*noncombat.movement),
+                "the first capable entry after noncombat occupation supplies defense");
+            noncombat.control->planets[1].landed.back().owner = 1;
+            noncombat.control->planets[1].landed.push_back({52, 2, 2});
+            expect(!gc::surface_defended_against(*noncombat.control, 1, 2, &*noncombat.movement),
+                "the first capable allied entry ends the scan before later enemies");
+            noncombat.control->absent_forces = {51};
+            expect(gc::surface_defended_against(*noncombat.control, 1, 2, &*noncombat.movement),
+                "absent capable entries do not supply defense");
+        }
+    }
+}
 void child_battle_control() {
     namespace campaign = eawr::campaign;
     namespace tactical = eawr::sim::tactical;
@@ -4478,7 +4585,7 @@ int main(int argc, const char* const argv[]) {
             capture_build_and_ground_views(); return galactic_test::failures == 0 ? 0 : 1;
         }
         selected_landing_commands(); ground_layout_commands(); load_guard_contracts(); authored_mixed_surface_owners(); native_view_reuse_is_exact(); native_invasion_cash_reconciliation(); native_finish_orbit_reconciliation(); native_production_reconciliation(); native_force_reconciliation(); world_immediate_host_contract(); world_script_despawn_contract(); script_despawn_leaves_no_dangling_rows(); world_script_despawn_is_atomic(); world_script_force_failure_is_atomic(); world_script_journal_bound_contract(); world_script_birth_probe_contract(); world_script_sale_contract(); world_script_perception_diagnostic(); world_script_perception_contract(); orbital_stand_in_leaves_by_script_contract(); wide_galactic_lua_handles(); independent_native_barrier();
-        native_control_reconciliation(); native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); space_only_conquest(); alignment_strength(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); signed_capture_rewards(); capture_structure_cleanup(); ground_structure_base_level(); hostile_landing_refreshes_ground_base_level(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); child_battle_control(); adapter();
+        native_control_reconciliation(); native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); space_only_conquest(); alignment_strength(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); signed_capture_rewards(); capture_structure_cleanup(); ground_structure_base_level(); hostile_landing_refreshes_ground_base_level(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); selected_units_invade_defended_ground(); child_battle_control(); adapter();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;
 }

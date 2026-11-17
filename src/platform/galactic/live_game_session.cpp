@@ -435,14 +435,9 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
         return campaign_retreat_policy(*plan, *data, conflict, prevented_types);
     };
     const auto& campaign_plan = plan;
-    const bool has_ai = std::any_of(campaign_plan.galaxy().seats.begin(), campaign_plan.galaxy().seats.end(),
-        [&](const auto& seat) {
-            if (!seat.active || seat.kind != galactic::SeatKind::ai) return false;
-            const auto binding = std::find_if(campaign_plan.player_bindings().begin(), campaign_plan.player_bindings().end(),
-                [&](const auto& player) { return player.active && player.player.player_id == seat.player; });
-            const auto* faction = binding == campaign_plan.player_bindings().end() ? nullptr : data.faction(binding->faction);
-            return faction && !faction->is_neutral.value_or(false);
-        });
+    // Only a seat that acquires a controller runs the native AI: under multiplayer rules a room whose AI seats are all
+    // ambient factions without an authored campaign assignment (GCMP-AI-03) starts like an all-human one.
+    const bool has_ai = campaign::galactic_ai_selects_any_player(data, campaign_plan);
     std::vector<NativeAiPlayer> native_ai_players;
     step.emplace("prep.ai_runtime");
     std::shared_ptr<const campaign::GalacticAiRuntimeSetup> installed_runtime;

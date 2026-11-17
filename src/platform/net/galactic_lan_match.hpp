@@ -1,4 +1,5 @@
 #pragma once
+#include "eawr/net/desync_monitor.hpp"
 #include "eawr/net/lockstep_session.hpp"
 #include "eawr/net/galactic_recovery.hpp"
 #include "eawr/net/galactic_clock_policy.hpp"
@@ -55,6 +56,9 @@ struct GalacticLanView {
     std::uint32_t net_seat{};
     std::vector<presentation::ui::NetPeerLink> net_peers; // per remote peer: RTT, jitter, loss
     presentation::ui::NetStallSnapshot net_stall;          // lockstep waits, short ones included
+    std::uint64_t net_input_delay{}, net_lead_ticks{};
+    double net_local_tick_ms{};
+    double net_poll_gap_ms{};
 };
 // #5355: a Q24 speed factor as the players read it ("2x", "0.5x", "1.25x"); presentation only.
 [[nodiscard]] inline std::string speed_factor_text(const std::int64_t raw) {
@@ -84,14 +88,15 @@ struct GalacticLanOptions {
     // One entry per transport peer, in peer-index order; may_submit false makes a peer an observer.
     std::vector<net::PeerSeat> seats;
     std::uint64_t input_delay{3};
-    // The host proposes the delay from measured RTT (online sessions only). Off keeps the offered delay fixed. It stays
-    // off while recovery frontiers refuse an adaptive session (every galactic recovery path reads one).
+    // Standalone driver only: production configures the session before lobby setup.
+    // Recovery carries the agreed delay; a pending transition refuses a frontier.
     bool adaptive_timing{};
     // Replaces the transport's measured round trip for the host's delay policy (qualification and tests); empty reads
     // MessageTransport::link_stats. Diagnostics and timing only.
     std::function<std::optional<std::uint64_t>(net::PeerIndex)> adaptive_rtt_ms;
     std::uint64_t final_tick_count{sim::galactic::galactic_max_ticks};
-    std::uint64_t exchange_every{30};          // desync monitor hash exchange period, completed ticks
+    std::uint64_t exchange_every{net::default_hash_exchange_every}; // hash period, completed ticks
+    bool deferred_compare{net::default_deferred_compare}; // code-only; tests may pin the barrier path
     std::uint64_t completeness_timeout_ms{30'000};
     std::uint64_t waiting_notice_ms{3000};     // MP-33: show "waiting for <peer>" after this long
     // Immutable PR2 transfer bytes, retained only after all-peer restore agreement.

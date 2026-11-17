@@ -4,7 +4,8 @@
 
 namespace eawr::viewer::galactic {
 [[nodiscard]] inline bool corruption_fixture(std::string_view name) {
-    return name == "corruption" || name == "corruption-gaps" || name == "corruption-locked" || name == "corruption-no-mission-service";
+    return name == "corruption" || name == "corruption-gaps" || name == "corruption-locked" || name == "corruption-no-mission-service"
+        || name == "corruption-republish";
 }
 [[nodiscard]] inline std::shared_ptr<const sim::galactic::GalacticSnapshot> corruption_fixture_snapshot(
     sim::galactic::PlayerId local, std::string_view name) {

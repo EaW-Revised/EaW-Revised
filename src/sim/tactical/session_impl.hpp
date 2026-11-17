@@ -358,6 +358,12 @@ public:
         TypeId free_type = 0, PlayerId free_owner = 0, std::vector<EntityId>* registered = nullptr,
         std::map<EntityId, ArrivalState>* lane_arrivals = nullptr, SeatId controller = {}) const;
 
+    // PL-01: the shared immutable copy of a moving ship's plan (presentation only).
+    [[nodiscard]] bool flies_plan(const LiveUnit& unit) const;
+    [[nodiscard]] std::shared_ptr<const PredictedPath> cached_plan(const LiveUnit& unit) const;
+    [[nodiscard]] std::shared_ptr<const PredictedPath> remember_plan(const LiveUnit& unit);
+    void sweep_plans();
+
     // Publishes the snapshot of the staged units at the completed tick, with the given events.
     void publish_staged(const std::vector<LiveUnit>& live, std::vector<Event> events,
         std::vector<CombatEvent> combat_events);

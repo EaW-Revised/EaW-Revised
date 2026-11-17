@@ -88,11 +88,13 @@ assets::Mesh mesh(const std::string& name, const bool collidable, const std::int
 std::map<std::string, assets::Model> rich_models() {
     auto result = models(5.0F);
     for (auto& [path, asset] : result) {
+        if (!asset.bones.empty()) asset.bones.front().visible = false;
         asset.notices.push_back({7, 0, 4, "notice"});
         asset.meshes.push_back(mesh("heavy_render_only", false, 0, false));
         if (path.find("test_frigate") != std::string::npos) {
             asset.meshes.push_back(mesh("hull_collision", true, 0, false));
             asset.meshes.push_back(mesh("skinned_collision", true, 1, true));
+            asset.meshes.push_back(mesh("cOlLiSiOnBoX", false, 1, false));
         } else if (path.find("test_turret") != std::string::npos) {
             asset.meshes.push_back(mesh("turret_collision", true, 1, true));
         }
@@ -113,9 +115,13 @@ void projection_keeps_only_what_tables_read() {
     const auto kept = units::simulation_projection(full);
     expect(kept.source.logical_path == full.source.logical_path && kept.source.layer_id == full.source.layer_id
         && kept.source.source_id == full.source.source_id, "the projection keeps the source identity");
-    expect(kept.bones.size() == full.bones.size(), "the projection keeps every bone");
-    expect(kept.meshes.size() == 2 && kept.meshes[0].name == "hull_collision" && kept.meshes[1].name == "skinned_collision",
-        "the projection keeps the collidable meshes in order and drops the others");
+    expect(kept.bones.size() == full.bones.size() && !kept.bones.empty() && !kept.bones.front().visible,
+        "the projection keeps every bone and its reference-pose visibility");
+    expect(kept.meshes.size() == 3 && kept.meshes[0].name == "hull_collision" && kept.meshes[1].name == "skinned_collision",
+        "the projection keeps collision geometry and named box metadata in model order");
+    expect(kept.meshes.size() == 3 && !kept.meshes[2].collidable && kept.meshes[2].name == "cOlLiSiOnBoX"
+        && kept.meshes[2].bone == 1 && kept.meshes[2].bounds_min.x == -3 && kept.meshes[2].bounds_max.z == 1
+        && kept.meshes[2].submeshes.empty(), "noncollidable named boxes keep their bounds and placement without render geometry");
     expect(kept.notices.empty(), "the projection drops notices");
     if (kept.meshes.size() < 2) return;
     const auto& part = kept.meshes[1].submeshes.at(0);

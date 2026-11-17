@@ -176,6 +176,11 @@ core::Result<ValueList> evaluate_perception(const Host& host, BindingContext& co
     if (arguments.size() < 2 || as_text(arguments[0]) == nullptr) return fail("EvaluatePerception expects a name and a player");
     const Handle* player = as_handle(arguments[1], handle_player);
     if (player == nullptr) return fail("EvaluatePerception: parameter 2 is not a player");
+    // A galactic player's starting free-store units reach the added hook before its AI is initialized: no value then, which the
+    // stock free-store helpers read as 'no destination'. Only a galactic engine arms this window, and only for the player's own
+    // free-store instance: tactical calls, plans and other scripts never see it.
+    if (host.engine != nullptr && host.engine->startup_perception_pending(static_cast<tactical::PlayerId>(player->id), context.instance()))
+        return none();
     if (host.ai_world && host.ai_world->goal_mode() == "GALACTIC") {
         const auto immediate = context.query_immediate("galactic.markup_perception", arguments);
         if (immediate && !immediate.value().empty()) {

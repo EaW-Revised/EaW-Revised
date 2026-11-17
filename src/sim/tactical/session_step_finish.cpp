@@ -852,7 +852,7 @@ core::Result<TacticalTick> session_detail::Tick::finish() {
         std::move(instances), std::move(events), std::move(combat_events), impl_->projectiles, impl_->outcome,
         std::move(spinning), std::move(squadron_targets), impl_->squadrons,
         impl_->economy_views(impl_->ledgers, impl_->shares), impl_->pad_views(), impl_->quits, impl_->losses, impl_->productions,
-        impl_->manual_clock_views(), impl_->economy_cues, impl_->ability_spawns, session_.retreat_views(), impl_->garrison_timer_views(), impl_->beacons, impl_->setup.controllers, std::move(tsw_rows));
+        impl_->manual_clock_views(), impl_->economy_cues, impl_->ability_spawns, session_.retreat_views(), impl_->garrison_timer_views(), impl_->beacons, impl_->setup.controllers, std::move(tsw_rows), std::move(systems_->predicted_paths));
     snapshot_scope.reset();
     std::vector<std::pair<EntityId, PlayerId>> deaths;
     if (impl_->setup.first_free_entity_id) {

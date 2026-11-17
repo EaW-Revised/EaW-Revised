@@ -57,6 +57,56 @@ std::string reject_text(const std::vector<gc::GalacticEvent>& rejected) {
     return text.empty() ? " none" : text;
 }
 
+// #7357, the owner's acceptance for the whole class of hero menus: Cancel on the menu (`preparation`) starts nothing and
+// leaves the hero in place, and the hero then takes an ordinary move order on to another planet B (not the one it stands at,
+// not `start`). With no `preparation` (the host prepared a menu the player was never shown) only the move is checked.
+template <class Live, class Step>
+void cancel_and_move_on(Live& live, const Step& step, gc::SeatId seat, gc::PlayerId player, gc::TypeId type, gc::PlanetId start,
+    std::uint64_t actor, std::uint64_t preparation, std::vector<gc::GalacticEvent>& rejected, const std::string& label) {
+    rejected.clear();
+    if (preparation) live->submit(eawr::platform::LiveGameOrder{seat, gc::CancelGalacticAbility{actor, preparation}, {}});
+    for (int wait = 0; wait < 8; ++wait) step();
+    const auto snapshot = live->frame().latest;
+    const auto parked = find_hero_place(*snapshot, player, type);
+    std::cout << label << " cancel=" << (preparation != 0) << " menu=" << (snapshot->hero_action_menus() != nullptr)
+        << " parked=" << (parked ? static_cast<long long>(parked->planet) : -1) << " transit=" << (parked && parked->transit)
+        << " rejected:" << reject_text(rejected) << '\n';
+    if (preparation) expect(rejected.empty() && snapshot->hero_action_menus() == nullptr, "Cancel closes the hero menu and starts nothing");
+    expect(parked.has_value() && !parked->transit, "the hero is alive and in place after the menu");
+    if (!parked) return;
+    auto planets = input_planets(*snapshot, player);
+    for (auto& planet : planets) planet.discovered = true;
+    gc::PlanetId other{};
+    std::size_t best{};
+    for (const auto& planet : planets) {
+        if (planet.id == parked->planet || planet.id == start) continue;
+        const auto path = view::destination_path(*snapshot, player, parked->planet, planet.id, planets, true);
+        if (path && (!other || path->size() < best)) { other = planet.id; best = path->size(); }
+    }
+    expect(other != 0, "another planet B is reachable from the hero's planet");
+    if (!other) return;
+    view::MapInput input;
+    std::optional<gc::CommandPayload> onward;
+    if (parked->fleet) {
+        if (const auto movement = view::fleet_destination_intent(*snapshot, player, parked->dragged, other, planets, {}))
+            onward = input.command(*movement, planets);
+    } else if (const auto path = view::destination_path(*snapshot, player, parked->planet, other, planets, true)) {
+        onward = gc::LaunchFleet{{parked->dragged}, *path, std::nullopt, 0};
+    }
+    expect(onward.has_value(), "the hero has a move order to planet B");
+    if (!onward) return;
+    rejected.clear();
+    live->submit(eawr::platform::LiveGameOrder{seat, *onward, {}});
+    bool moving = false;
+    for (int wait = 0; wait < 30 && !moving; ++wait) {
+        step();
+        const auto now = find_hero_place(*live->frame().latest, player, type);
+        moving = now && (now->transit || now->planet == other);
+    }
+    std::cout << label << " planet B=" << other << " moving=" << moving << " rejected:" << reject_text(rejected) << '\n';
+    expect(moving && rejected.empty(), "the hero takes an ordinary move order to another planet after the menu");
+}
+
 // The owner's order of play with `in_orbit`: travel first, then release on the tile of the planet the team orbits.
 // Without it the release is on the distant planet's tile and the move and the menu are one order.
 // A bearer other than the droid stops at the assassinate's tile check below.
@@ -258,6 +308,7 @@ void run(const std::shared_ptr<const eawr::vfs::Vfs>& filesystem, const eawr::da
     std::size_t affordable{};
     for (const auto& row : *menu->theft) { affordable += row.affordable; expect(row.live_prepared.has_value(), "each row carries its prepared order"); }
     std::cout << label << " offered=" << menu->theft->size() << " affordable=" << affordable << " tech=" << menu->tech << '\n';
+    cancel_and_move_on(live, step, seat, rebel, bearer_type, team->planet, menu->actor, menu->preparation, rejected, label + " theft");
     live->stop();
 }
 
@@ -409,13 +460,14 @@ void boba_neutralize(const std::vector<eawr::vfs::MountSpec>& mounts, std::strin
         step(); // one more frame: the discovery and the menu views follow the arrival
     }
     const auto snapshot = live->frame().latest;
-    std::cout << label << " discovered=" << view::observer_discovery(*snapshot, empire, boba->planet).value_or(false) << '\n';
+    const bool discovered = view::observer_discovery(*snapshot, empire, boba->planet).value_or(false);
+    std::cout << label << " discovered=" << discovered << '\n';
     std::cout << label << " boba=" << boba->bearer << " dragged=" << boba->dragged << " planet=" << boba->planet
         << " fleet=" << boba->fleet << " transit=" << boba->transit << '\n';
     auto planets = input_planets(*snapshot, empire);
-    // The owner's fleet (ships, not only the stealth hero) revealed the planet; a lone stealth team does not discover it, and the
-    // menu view needs that discovery. The host's own preparation does not, so the drop is mapped as the viewer would map it
-    // and the host's answer is what is asserted.
+    // The owner's fleet (ships, not only the stealth hero) revealed the planet; a lone stealth team does not discover it
+    // (WGUI-01), and the menu view needs that discovery. The drop is mapped as the viewer would map it on a discovered map, and
+    // the host's answer is what is asserted: on an undiscovered planet it refuses (#7426) instead of holding a hidden menu.
     for (auto& planet : planets) if (planet.id == boba->planet) planet.discovered = true;
     const auto here = view::ability_drop_candidate(*snapshot, empire, boba->dragged, host, {}, boba->planet);
     std::cout << label << " tile=" << (here ? static_cast<int>(here->kind) : -1) << '\n';
@@ -446,7 +498,13 @@ void boba_neutralize(const std::vector<eawr::vfs::MountSpec>& mounts, std::strin
             << " affordable=" << row.affordable << " live=" << row.live_prepared.has_value() << '\n';
         tyber = tyber || name_of(row.current_type) == "Tyber_Zann" || name_of(row.original_type) == "Tyber_Zann";
     }
-    if (expect_menu) {
+    if (expect_menu && !discovered) {
+        // #7426: the Empire has not discovered the planet, so no menu could be shown for it: the host refuses the drop with a
+        // reason the seat is told, and holds no preparation.
+        expect(!menu && prepared_events == 0 && std::any_of(rejected.begin(), rejected.end(), [](const auto& event) {
+            return event.reason == gc::GalacticRejectReason::ability_target_undiscovered; }),
+            "a hero menu on an undiscovered planet is refused as undiscovered, not prepared out of sight");
+    } else if (expect_menu) {
         expect(rejected.empty(), "the neutralize drop is not rejected");
         expect(prepared_events > 0, "the host prepared the neutralization menu for the drop");
         // The host prepares only when it finds a hero that is not the seat's own on that planet. The overlay put exactly one
@@ -463,6 +521,9 @@ void boba_neutralize(const std::vector<eawr::vfs::MountSpec>& mounts, std::strin
         } else if (menu && menu->neutralization) expect(tyber, "Tyber Zann is in the published neutralization menu");
         // The host emits ability_prepared only when it found a hero to offer: Tyber Zann's team on the planet's ground.
         std::cout << label << " menu view=" << (menu != nullptr) << " tyber_in_menu=" << tyber << '\n';
+        // #7357: Cancel on the shown menu frees Boba. (An undiscovered planet no longer gets a hidden menu: #7426, above.)
+        cancel_and_move_on(live, step, seat, empire, boba_type, gc::PlanetId{}, menu ? menu->actor : 0, menu ? menu->preparation : 0,
+            rejected, label + " neutralize");
     } else {
         // No enemy hero stands on the Empire's own planet: the refusal is right, and it says so.
         expect(!menu && std::any_of(rejected.begin(), rejected.end(), [](const auto& event) {

@@ -18,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+#include "gns_wan_peer.hpp"
+
 namespace {
 using namespace eawr::net;
 using namespace std::chrono_literals;
@@ -360,6 +362,9 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--turn-refusals") {
             turn_refusal_logs(); std::cout << "TURN refusal diagnostics passed\n"; return 0;
         }
+        if ((argc == 5 || argc == 6) && std::string_view(argv[1]) == "--wan")
+            return wan_test::peer(std::string_view(argv[2]) == "host", static_cast<std::uint16_t>(std::stoul(argv[3])),
+                std::stoull(argv[4]), argc == 6 ? std::stoull(argv[5]) : 0);
         invalid_options(); room_contracts(); frames(); mismatch(0); mismatch(1); mismatch(2); link_stats(); lifecycle(); capacity();
         std::cout << "GNS message/lifecycle contracts passed\n"; return 0;
     } catch (const std::exception& failure) { std::cerr << failure.what() << '\n'; return 1; }

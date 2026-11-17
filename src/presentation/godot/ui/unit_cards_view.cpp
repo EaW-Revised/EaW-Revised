@@ -754,22 +754,13 @@ void EncyclopediaPopupRenderer::draw(Control& owner, const EncyclopediaPopupStyl
         if (setup.texture && popup_glow_item_.is_valid()) {
             const auto glow = setup.texture(setup.popup_glow);
             if (glow.is_valid()) RenderingServer::get_singleton()->canvas_item_add_texture_rect(
-                popup_glow_item_, popup_rect_.grow(8.0F * scale), glow->get_rid(), false,
-                Color(128.0F / 255.0F, 128.0F / 255.0F, 128.0F / 255.0F, 128.0F / 255.0F * alpha));
+                popup_glow_item_, popup_rect_.grow(popup_glow_units * scale), glow->get_rid(), false, popup_glow_tint(alpha));
         }
-        draw_asset(setup.popup_frame, popup_rect_.grow(scale));
+        draw_asset(setup.popup_frame, popup_rect_.grow(popup_edge_units * scale));
         draw_asset(setup.popup_background, popup_rect_);
-        // CARD-19: measured retail lower-left connector, in shell units; it tapers
-        // from the help-droid side of the popup into the lower edge.
-        const Vector2 corner = popup_rect_.position + Vector2(0, popup_rect_.size.y);
         PackedVector2Array connector;
-        connector.push_back(corner);
-        connector.push_back(corner + Vector2(148.0F, 0) * scale);
-        connector.push_back(corner + Vector2(-11.0F, 19.0F) * scale);
         PackedColorArray connector_colours;
-        connector_colours.push_back(Color(127.0F / 255.0F, 244.0F / 255.0F, 1, alpha));
-        connector_colours.push_back(Color(87.0F / 255.0F, 114.0F / 255.0F, 197.0F / 255.0F, 0));
-        connector_colours.push_back(Color(122.0F / 255.0F, 241.0F / 255.0F, 249.0F / 255.0F, alpha));
+        popup_connector(popup_rect_, scale, alpha, connector, connector_colours);
         owner.draw_polygon(connector, connector_colours);
         draw_asset(popup_content_.population ? "e_topbar.tga" : "e_topbar2.tga", popup_title_rect_);
         if (!popup_content_.icon_back.empty()) {
@@ -975,6 +966,26 @@ void fill_encyclopedia_popup(EncyclopediaPopupStyle& setup, const data::ui::Comm
     setup.vulnerable_to_text = popup_text("TEXT_VULNERABLE_TO");
     // GameConstants.xml Encyclopedia_Delay: 750 ms before a hovered card opens its encyclopedia.
     setup.timing = constants.timing;
+}
+
+Color popup_glow_tint(const float alpha) {
+    // WGUI-69: the shadow/glow colour code 128,128,128,128, faded with the popup.
+    return Color(128.0F / 255.0F, 128.0F / 255.0F, 128.0F / 255.0F, 128.0F / 255.0F * alpha);
+}
+
+void popup_connector(const Rect2& panel, const float scale, const float alpha, PackedVector2Array& points,
+    PackedColorArray& colours) {
+    // CARD-19: measured retail lower-left connector, in shell units; it tapers
+    // from the help-droid side of the popup into the lower edge.
+    const Vector2 corner = panel.position + Vector2(0, panel.size.y);
+    points.clear();
+    points.push_back(corner);
+    points.push_back(corner + Vector2(148.0F, 0) * scale);
+    points.push_back(corner + Vector2(-11.0F, 19.0F) * scale);
+    colours.clear();
+    colours.push_back(Color(127.0F / 255.0F, 244.0F / 255.0F, 1, alpha));
+    colours.push_back(Color(87.0F / 255.0F, 114.0F / 255.0F, 197.0F / 255.0F, 0));
+    colours.push_back(Color(122.0F / 255.0F, 241.0F / 255.0F, 249.0F / 255.0F, alpha));
 }
 
 } // namespace eawr::presentation::godot_backend

@@ -187,8 +187,10 @@ public:
     void set_corruption_mission_handler(CorruptionMissionHandler);
     // Pure routability probe for a human solo choice that would start a mission battle: no RNG, no state write.
     // It runs before any debit and in the corruption menu. The request is the one an execution would allocate
-    // (nullopt in the menu). Unset means the mission handler alone decides.
-    using CorruptionMissionProbe = std::function<bool(const CorruptionChoice&, std::optional<std::uint64_t> request)>;
+    // (nullopt in the menu). The invader is the choosing player, the defender the target planet's owner. Unset means the
+    // mission handler alone decides.
+    using CorruptionMissionProbe = std::function<bool(const CorruptionChoice&, PlayerId invader, PlayerId defender,
+        std::optional<std::uint64_t> request)>;
     void set_corruption_mission_probe(CorruptionMissionProbe);
     void set_corruption_completion_handler(CorruptionCompletionHandler);
     using CorruptionResultHandler = std::function<core::Result<void>(const LiveCorruptionMission&)>;
@@ -748,6 +750,10 @@ public:
         [[nodiscard]] core::Result<void> discard();
         [[nodiscard]] core::Result<void> commit();
         [[nodiscard]] Work work() const noexcept;
+        // The calling thread's view of this barrier: the shadow its session's own reads (snapshot(), next_entity_id(), ...)
+        // return while the barrier is open on this thread (the selected player layer, the tail, or a player scope). Null when the
+        // thread holds no open scope of it. Read-only; lets the barrier's owner read its world without going through the session.
+        [[nodiscard]] const NativeActionShadow* view() const noexcept;
     private:
         struct State;
         struct PlayerScope;

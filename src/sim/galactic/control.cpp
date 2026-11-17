@@ -174,6 +174,27 @@ core::Result<bool> can_land_transport(const PoliticalControlSetup& control,
     return has_ground_capability(control, member, movement);
 }
 
+PlayerId surface_ground_holder(const PoliticalControlSetup& control, PlanetId planet) {
+    const auto* surface = find_row(control.planets, planet, [](const auto& row) { return row.planet; });
+    if (!surface) return 0;
+    return surface->ground_base.level ? surface->ground_base.owner
+        : (surface->landed.empty() ? 0 : surface->landed.front().owner);
+}
+
+bool surface_defended_against(const PoliticalControlSetup& control, PlayerId player, PlanetId planet,
+    const MovementSetup* movement) {
+    const auto* surface = find_row(control.planets, planet, [](const auto& row) { return row.planet; });
+    if (!surface) return false;
+    if (surface->ground_base.level) return !allied(control, player, surface->ground_base.owner);
+    for (const auto& force : surface->landed) {
+        if (std::binary_search(control.absent_forces.begin(), control.absent_forces.end(), force.id)) continue;
+        const auto capable = has_ground_capability(control, {force.id, force.type}, movement);
+        // Missing provider facts must not turn a hostile defended surface into a direct landing.
+        if (!capable || capable.value()) return !allied(control, player, force.owner);
+    }
+    return false;
+}
+
 namespace {
 // Admission is computed before the surface or fleet is changed. The strict form
 // is for an explicit selection; the whole-fleet form retains fleet order and
@@ -930,7 +951,10 @@ GalacticRejectReason GalacticSession::Impl::admit_selected_landing(PlayerId play
     const auto* surface = find_row(control->planets, planet, [](const auto& row) { return row.planet; });
     if (!surface) return GalacticRejectReason::unknown_value;
     if (units.empty()) return GalacticRejectReason::invalid_membership;
-    const auto available = control->max_ground_forces - surface->landed.size();
+    // WGM-39/42, GGS-10: on a defended non-allied surface the named units invade. No surface capacity applies
+    // (as for the whole-fleet invasion), and each must be ground-capable against the ground holder.
+    const bool invasion = surface_defended_against(*control, player, planet, movement_inputs.get());
+    const auto available = invasion ? units.size() : control->max_ground_forces - surface->landed.size();
     if (units.size() > available) return GalacticRejectReason::resource_limit;
     std::set<EntityId> seen;
     std::vector<SelectedLandingMember> selected;
@@ -944,15 +968,13 @@ GalacticRejectReason GalacticSession::Impl::admit_selected_landing(PlayerId play
             if (member == fleet.members.end()) continue;
             if (found) return GalacticRejectReason::invalid_membership;
             if (const auto reason = validate_landing(player, fleet_id, planet, pending_local_conflict); reason != GalacticRejectReason::none) return reason;
-            const PlayerId ground = surface->ground_base.level ? surface->ground_base.owner
-                : (surface->landed.empty() ? 0 : surface->landed.front().owner);
-            if (ground && !allied(*control, fleet.owner, ground)) return GalacticRejectReason::movement_blocked;
             selected.push_back({fleet_id, *member}); members.push_back(*member); found = true;
         }
         if (!found) return GalacticRejectReason::invalid_membership;
     }
     std::vector<FleetMember> qualified;
-    const auto planet_owner = registry.get<session_detail::PlanetData>(planets.at(planet)).owner;
+    const auto planet_owner = invasion ? PlayerId{}
+        : registry.get<session_detail::PlanetData>(planets.at(planet)).owner;
     if (const auto reason = select_landing_members(*control, *setup.fleet_control,
         movement_inputs ? movement_inputs.get() : nullptr, player, planet_owner, members, available, true, qualified);
         reason != GalacticRejectReason::none) return reason;
@@ -970,6 +992,32 @@ void GalacticSession::Impl::execute_land_units(const GameCommand& command, const
     std::vector<SelectedLandingMember> selected;
     if (const auto reason = admit_selected_landing(issuer->player, order.planet, order.units, pending_local_conflict, selected);
         reason != GalacticRejectReason::none) return reject(reason);
+    if (surface_defended_against(*control, issuer->player, order.planet, movement_inputs.get())) {
+        // WGM-39/42, GGS-10: retail removes each dragged transport from its fleet and lands it; on a defended
+        // non-allied surface that landing starts the invasion. The named units leave their fleets together as one
+        // new orbit fleet (the ordinary member transfer), whose whole-fleet landing requests the conflict for
+        // them alone. Every other member stays in orbit in its own fleet.
+        if (!conflict_requests_enabled) return reject(GalacticRejectReason::movement_blocked);
+        if (std::all_of(selected.begin(), selected.end(), [&](const auto& row) {
+                return std::binary_search(control->absent_forces.begin(), control->absent_forces.end(), row.member.id);
+            })) return reject(GalacticRejectReason::invalid_membership);
+        std::vector<FleetMemberRef> refs;
+        for (const auto& row : selected) refs.push_back({row.fleet, row.member.id});
+        const auto slot = registry.get<session_detail::FleetData>(fleets.at(selected.front().fleet)).orbit_slot;
+        std::vector<GalacticEvent> transfer;
+        execute_fleet({command.key, TransferFleetMembers{std::move(refs), 0, slot}}, tick, transfer, pending_local_conflict,
+            false, session_detail::PausedKind::surface_deploy);
+        const auto refused = std::find_if(transfer.begin(), transfer.end(),
+            [](const auto& row) { return row.kind == GalacticEventKind::command_rejected; });
+        if (refused != transfer.end()) return reject(refused->reason);
+        FleetId invading{};
+        for (const auto& row : transfer) {
+            if (row.kind == GalacticEventKind::command_executed) invading = row.subject;
+            else events.push_back(row);
+        }
+        execute_landing({command.key, LandFleet{invading, order.planet}}, tick, events, pending_local_conflict);
+        return;
+    }
     const auto* supplied = find_row(control->planets, order.planet, [](const auto& row) { return row.planet; });
     const auto index = static_cast<std::size_t>(supplied - control->planets.data());
     auto& planet = control->planets[index];
@@ -1021,11 +1069,9 @@ void GalacticSession::Impl::execute_landing(const GameCommand& command, const st
     const auto found = fleets.find(order.fleet);
     auto& fleet = registry.get<session_detail::FleetData>(found->second);
     const auto* supplied = find_row(control->planets, order.planet, [](const auto& row) { return row.planet; });
-    const PlayerId ground = supplied->ground_base.level ? supplied->ground_base.owner
-        : (supplied->landed.empty() ? 0 : supplied->landed.front().owner);
     // WGM-39/42/53: only the sourced empty-surface uncontested branch is owned here.
     // Defended and special hero invasions need the conflict-admission service.
-    if (ground && !allied(*control, fleet.owner, ground)) {
+    if (surface_defended_against(*control, fleet.owner, order.planet, movement_inputs.get())) {
         if (!conflict_requests_enabled) return reject(GalacticRejectReason::movement_blocked);
         // WGM-39/42: retain a transport as a live object; its qualified ground predicate
         // belongs to the payload owner. Flatten fleet containers, never substitute a

@@ -1,4 +1,5 @@
 #include "eawr/scene/scene.hpp"
+#include "eawr/core/text.hpp"
 
 #include "scene_internal.hpp"
 
@@ -263,7 +264,7 @@ void resolve_object(Placement& placement, const assets::Placement& source,
     }
 
     // LZ-01 includes map SpaceProps; only the presentation transform is raised.
-    if (kind == assets::MapKind::space && ieq(object.type_name, "SpaceProp")) {
+    if (kind == assets::MapKind::space && core::is_space_prop_element(object.type_name)) {
         if (const auto height = declared(object, "Layer_Z_Adjust")) {
             auto value = data::fixed_value(*height->node);
             if (value) placement.layer_z_adjust_raw = value.value().raw();

@@ -509,7 +509,8 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
             impl.pending = out.ai->commands;
             // WGP-146: one admitted History turn after all committed player AI,
             // outside its parallel phases, before the global story reader.
-            if (auto recorded = impl.world.service_admitted_history(history_tick, executor); !recorded) return abort(recorded.error());
+            if (auto recorded = gc_profile::timed(gc_profile::Phase::tick_history, [&] {
+                    return impl.world.service_admitted_history(history_tick, executor); }); !recorded) return abort(recorded.error());
             out.world.snapshot = impl.world.snapshot();
         }
         auto serviced = gc_profile::timed(gc_profile::Phase::tick_story_service, [&] { return impl.service(executor, out.world, impl.story, impl.story_engine, true); });
@@ -519,7 +520,8 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
         // galactic object-script host design; no binding chooses its own phase.
         if (impl.objects && out.world.work.serviced) {
             if (!impl.object_engine) return abort(error(codes::invalid_request, "object scheduler has no engine"));
-            auto object_result = impl.object_engine->service(executor, impl.world, *impl.objects);
+            auto object_result = gc_profile::timed(gc_profile::Phase::tick_object_scripts, [&] {
+                return impl.object_engine->service(executor, impl.world, *impl.objects); });
             if (!object_result) return abort(object_result.error());
             out.objects = std::move(object_result).value();
             if (impl.story_command_committer) {

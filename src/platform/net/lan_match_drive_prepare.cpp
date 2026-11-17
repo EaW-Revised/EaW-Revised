@@ -82,6 +82,8 @@ std::optional<DriverResult> TcpLanMatch::drive_prepare(const tactical::TacticalS
             };
             diagnostic_sink_ = options.diagnostic_sink;
             options.input_delay = offer.input_delay;
+            // deferred_compare stays at the shared default; the agreed limit caps a window's deadline.
+            options.final_tick = offer.final_tick_count;
             // An incident leaves every peer a complete bundle: the other peers' differing input batches and the
             // replayable session journal come with it (the journal is read on the pump thread that owns the adapter).
             options.share_evidence = true;

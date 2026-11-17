@@ -176,7 +176,8 @@ void EawrPerfOverlay::draw_overlay() {
     const std::string route_hint = network_ ? model::net_route_hint(*network_) : std::string();
     const float height = pad * 2.0F + (big_row + small_row + graph_height + gap) * 2.0F + small_row + small_row + small_row + small_row + small_row
         + (tick_source_ ? small_row : 0.0F) + big_row
-        + (network_ ? small_row * static_cast<float>(3 + 2 * network_->peers.size() + (route_hint.empty() ? 0 : 1)) + gap : 0.0F)
+        + (network_ ? small_row * static_cast<float>(4 + 2 * network_->peers.size() + (route_hint.empty() ? 0 : 1)
+            + (network_->input_delay_ticks ? 1 + network_->peers.size() : 0)) + gap : 0.0F)
         + (degradation_.empty() ? 0.0F : small_row)
         + (render_categories::enabled ? small_row * 5.0F : 0.0F);
 
@@ -273,6 +274,10 @@ void EawrPerfOverlay::draw_overlay() {
              HORIZONTAL_ALIGNMENT_RIGHT);
         y += small_row;
         const model::NetStallSnapshot& stall = network_->stall;
+        text(format("wait/s B%u Q%u H%u T%u O%u", stall.stalls_by_kind[0], stall.stalls_by_kind[1], stall.stalls_by_kind[2],
+                    stall.stalls_by_kind[3], stall.stalls_by_kind[4]), small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
+        text(format("poll max %.1f ms", network_->max_poll_gap_ms), small, dim_colour, HORIZONTAL_ALIGNMENT_RIGHT);
+        y += small_row;
         text(format("stalls %u/s  %llu ms/s", stall.stalls_last_second, static_cast<unsigned long long>(stall.stalled_ms_last_second)),
              small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
         text(format("longest %llu ms / 10 s", static_cast<unsigned long long>(stall.longest_ms_10s)), small, dim_colour,
@@ -282,12 +287,25 @@ void EawrPerfOverlay::draw_overlay() {
                            : String("no input wait"),
              small, stall.waiting ? warn_colour : dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
         y += small_row;
+        if (network_->input_delay_ticks) {
+            text(format("lead %llu ticks  delay %.0f ms", static_cast<unsigned long long>(network_->lead_ticks),
+                        static_cast<double>(network_->input_delay_ticks) * 1000.0 / 30.0), small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
+            text(format("seat %u tick %.1f ms", network_->seat, network_->local_tick_ms), small, dim_colour, HORIZONTAL_ALIGNMENT_RIGHT);
+            y += small_row;
+        }
         for (const model::NetPeerLink& peer : network_->peers) {
             text(format("peer %u", peer.peer), small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
             text(peer.measured ? format("rtt %.0f  jitter %.0f  loss %.1f%%", peer.rtt_ms, peer.jitter_ms, peer.loss_pct)
                                : String("rtt -"),
                  small, dim_colour, HORIZONTAL_ALIGNMENT_RIGHT);
             y += small_row;
+            if (network_->input_delay_ticks) {
+                text(peer.input_tick_ms > 0.0 ? format("input tick %.1f ms", peer.input_tick_ms) : String("input tick unmeasured / stopped"),
+                     small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
+                text(peer.receipt_samples ? format("recv avg/max %.1f/%.1f ms", peer.receipt_avg_ms, peer.receipt_max_ms) : String("recv age unmeasured"),
+                     small, dim_colour, HORIZONTAL_ALIGNMENT_RIGHT);
+                y += small_row;
+            }
             // How the link is carried: direct, relayed (and by whom) or not known yet.
             text(String("route"), small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
             text(String(model::net_route_text(peer.route)), small,

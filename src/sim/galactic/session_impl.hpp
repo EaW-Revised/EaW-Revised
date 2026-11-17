@@ -113,7 +113,10 @@ public:
     CorruptionMissionHandler corruption_mission_handler;
     CorruptionMissionProbe corruption_mission_probe;
     bool corruption_choice_tactical(const CorruptionChoice&, PlayerId owner) const;
-    bool corruption_mission_routable(const CorruptionChoice&, PlayerId owner, std::optional<std::uint64_t> request) const;
+    // WGCH-199: true when the choice plays its mission battle; false takes the direct route. Pure: the menu and the
+    // execution ask the same question.
+    bool corruption_mission_route(const CorruptionChoice&, PlayerId owner, PlanetId target,
+        std::optional<std::uint64_t> request) const;
     CorruptionCompletionHandler corruption_completion_handler;
     CorruptionResultHandler corruption_result_handler;
     std::map<std::uint64_t, std::vector<PlanetId>> corruption_due;

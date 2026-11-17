@@ -12,6 +12,7 @@
 #include <charconv>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <span>
 #include <algorithm>
 #include <exception>
@@ -980,13 +981,23 @@ GameSession::GameSession(galactic::GalacticSession galaxy) : impl_(std::make_uni
         auto queued = owner->queue_conflict(std::move(admission.conflict), admission.arbitration);
         return queued ? R::success(true) : R::success(false); // WGCH-08: prepaid queue refusal, not campaign failure
     });
-    impl_->world().set_corruption_mission_probe([owner = impl_.get()](const auto& choice, const std::optional<std::uint64_t> request) {
+    impl_->world().set_corruption_mission_probe([owner = impl_.get()](const auto& choice, const galactic::PlayerId invader,
+        const galactic::PlayerId defender, const std::optional<std::uint64_t> request) {
         if (request) {
             const auto entries = owner->replay_admissions.equal_range(owner->tick);
             for (auto at = entries.first; at != entries.second; ++at)
                 if (at->second.conflict.corruption_request == *request && at->second.conflict.corruption_mission) return true;
         }
-        return owner->corruption_mission_service && choice.mode == 2; // only the space mission seam is routed here; land is timed (WGCH-198)
+        // Only the space mission seam is routed here; land is timed (WGCH-198). A mission the entry cannot build (an
+        // unprepared or refused map, a missing faction cap) takes the direct route instead (WGCH-199).
+        // A battle needs two different sides: queue_conflict refuses a record whose invader is its defender (a stale
+        // preparation against a planet the player has since taken), and that refusal is not one of the original's (#7466).
+        if (!owner->corruption_mission_service || choice.mode != 2 || !invader || !defender || invader == defender
+            || (owner->corruption_mission_readiness && !owner->corruption_mission_readiness(choice, invader, defender))) return false;
+        // #7466: at execution (a request is named) the service's other input is the conflict allocator, which must have room
+        // for the mission's record. The sim has already found the target planet. Checked here, before the debit, so the
+        // only refusal left after the charge is the original's own queue refusal (WGCH-72/127).
+        return !request || owner->world().next_entity_id() != std::numeric_limits<sim::EntityId>::max();
     });
     impl_->world().set_corruption_completion_handler([owner = impl_.get()](galactic::PlanetId planet, galactic::corruption_fixture::Type old, galactic::corruption_fixture::Type next, galactic::CorruptionCompletionPhase phase, std::span<const galactic::PlanetAbilityEntitlements> entitlements) -> core::Result<void> {
         if (phase == galactic::CorruptionCompletionPhase::state_committed) {
@@ -1536,6 +1547,9 @@ core::Result<void> GameSession::set_ability_lifecycle(sim::EntityId actor, bool 
     return impl_->world().set_ability_lifecycle(actor, enabled, cancelled, kind);
 }
 void GameSession::set_corruption_mission_service(CorruptionMissionService service) { impl_->corruption_mission_service = std::move(service); }
+void GameSession::set_corruption_mission_readiness(CorruptionMissionReadiness readiness) {
+    impl_->corruption_mission_readiness = std::move(readiness);
+}
 core::Result<bool> GameSession::request_planet_ruins(galactic::PlanetId planet, bool destroy) {
     return impl_->world().request_planet_ruins(planet, destroy);
 }

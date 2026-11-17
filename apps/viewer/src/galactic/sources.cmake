@@ -9,6 +9,8 @@ set(EAWR_VIEWER_GALACTIC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/reference_pages_widget.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/pause_banner_widget.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_tour_service.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/planet_search_widget.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/planet_thumbnails.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/story_summary_widget.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/story_text_widget.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/story_letterbox.cpp"

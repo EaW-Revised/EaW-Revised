@@ -8,12 +8,15 @@ session tick; the HUD reads the published state. Waiting notices never pause or 
 spend no budget: resume is always allowed, and a pause is only debounced one session second after the same seat's
 previous pause or resume (double clicks). Strategic and tactical speed changes are limited to two per seat in a
 rolling window of 300 session ticks (10 seconds at 30 ticks per second), an owner decision of 2026-11-07 (legacy EAWR-5355)
-and a deliberate deviation from the debug build's local throttle of two per 45 seconds. The refusal names the limit and the
-whole session seconds until the next speed change is allowed. Refused requests do not terminate the match.
+and a deliberate deviation from the debug build's local throttle of two per 45 seconds. A change back to normal (1x) is
+never refused and does not count (owner online test 2026-11-17: the seat that asked for fast forward must always be
+able to end it); like every admission it is decided at the executing tick on every peer. The refusal names the limit
+and the whole session seconds until the next speed change is allowed. Refused requests do not terminate the match.
 The window uses session ticks, including paused and child-battle ticks, rather than local wall time or
 strategic calendar time. `unrestricted` reverses this project policy without changing single-player rules.
 Tactical LAN battles use the same constants: the pause clock applies the debounce at execution, and the local
-speed request window (`MatchSpeedWindow`) allows two requests per 10 session seconds (300 session ticks) before they are sent.
+speed request window (`MatchSpeedWindow`) allows two requests per 10 session seconds (300 session ticks) before they are sent;
+a request back to the default speed step is always allowed and does not count, so a seat can always end a 2x it asked for.
 The adapter includes policy and retained per-seat request ticks in its canonical state and agreed hash: peers
 must agree on the history that decides future admission, as well as on the campaign state.
 

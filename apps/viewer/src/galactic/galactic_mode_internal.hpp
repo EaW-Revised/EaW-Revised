@@ -32,6 +32,7 @@
 #include "hud_retained.hpp"
 #include "fleet_stacks.hpp"
 #include "fleet_panels.hpp"
+#include "orbit_landing_view.hpp"
 #include "fleet_traits.hpp"
 #include "fleet_drag.hpp"
 #include "ground_hud.hpp"
@@ -68,6 +69,8 @@
 #include "galactic_tour.hpp"
 #include "pause_banner_widget.hpp"
 #include "story_summary_widget.hpp"
+#include "planet_search_layout.hpp"
+#include "planet_search_widget.hpp"
 #include "story_text_widget.hpp"
 #include "galactic_save.hpp"
 
@@ -89,6 +92,8 @@
 #include <godot_cpp/variant/rid.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/classes/texture_rect.hpp>
+
+namespace godot { class Polygon2D; }
 
 #include <array>
 #include <cstdint>
@@ -310,6 +315,9 @@ struct GalacticMode::State final {
     std::unique_ptr<StoryTextWidget> story_text; // #236 PR B: objectives and SCREEN_TEXT lines
     std::unique_ptr<PauseBannerWidget> pause_banner; // the "Game Paused" banner with its Resume Game button (#6759)
     std::unique_ptr<StorySummaryWidget> story_summary; // WST-58: the summary of the intro holocron goal
+    std::unique_ptr<PlanetSearchWidget> planet_search;
+    std::unique_ptr<PlanetSearchThumbnails> planet_search_thumbnails;
+    std::optional<galactic_view::PlanetSearchLayout> planet_search_layout;
     EawrTacticalHud* command_bar{};
     std::optional<assets::MegaTextureAtlas> command_atlas;
     std::unique_ptr<UiTextures> command_textures;
@@ -480,6 +488,8 @@ struct GalacticMode::State final {
     [[nodiscard]] sim::galactic::TypeId focused_planet_hover_type() const;
     bool encyclopedia_existing_object{};
     bool encyclopedia_ability{}, encyclopedia_weather{}; // the special popup is the weather one
+    bool encyclopedia_corruption{}; // the special popup is a per-type corruption icon's (WGCI-1)
+    std::uint8_t encyclopedia_corruption_type{};
 
     [[nodiscard]] bool encyclopedia_admitted() const;
     DestructionHudState destruction_hud;
@@ -545,6 +555,8 @@ struct GalacticMode::State final {
     std::map<galactic_view::ObjectId, godot::TextureRect*> planet_bonus_icons; // Filtered bonus icon per planet (GHUDL-18).
     std::map<galactic_view::ObjectId, godot::Vector2> hud_planet_anchors; // Projected planet points of the last label pass.
     std::vector<std::string> corruption_planet_icons; // GameConstants, by corruption type then the information icon.
+    // WGCI-1: the per-type icon's popup lists (GameConstants), each indexed by corruption type.
+    std::vector<std::string> corruption_requirement_icons, corruption_icon_names, corruption_icon_descriptions;
     std::size_t choice_page{};
     galactic_view::ObjectId choice_planet{};
     [[nodiscard]] godot::Ref<godot::Texture2D> command_texture(std::string_view name);
@@ -685,6 +697,9 @@ struct GalacticMode::State final {
     std::map<galactic_view::ObjectId, std::vector<godot::TextureButton*>> visible_fleet_badges;
     std::shared_ptr<const sim::galactic::GalacticSnapshot> fleet_publication;
     sim::galactic::FleetIntelligence fleet_intelligence;
+    viewer::galactic::OrbitLandingView orbit_landing_view;
+    std::uint64_t orbit_landing_event_cursor{};
+    std::vector<sim::EntityId> departing_transports;
     std::vector<sim::galactic::FleetDisplayType> fleet_display_traits;
     // WGUI-06/28: live current sight comes from the displayed publication;
     // synthetic fixtures may supply explicit predicate overrides.
@@ -1174,7 +1189,9 @@ struct GalacticMode::State final {
     // WGUI-66: the advisor text queue. Urgent lines go to the front and cut the removal delay; ordinary lines append.
     struct AdvisorLine {
         godot::String text;
-        std::array<std::uint8_t, 4> colour{0, 193, 91, 255}; // the hint colour unless the producer supplies one
+        // The producer's code colour (the hint colour unless the producer supplies one). WGUI-68: it goes to the history (the
+        // Droid Log) only; the popup draws every line in the authored advisor text style.
+        std::array<std::uint8_t, 4> colour{0, 193, 91, 255};
         bool urgent{};
         std::string sound; // WGUI-66/WGP-127: an explicit SFX event wins over the faction message/urgent cue
     };
@@ -1195,11 +1212,15 @@ struct GalacticMode::State final {
     std::vector<std::string> ability_legend_icons, ability_legend_text_ids;
     std::vector<int> ability_legend_rgb;
     godot::Label* approach_label{};
-    // #7196: the advisor popup's authored back (the shell's help back: backdrop and faction frame) behind every advisor line.
+    // #7196/#7444: the advisor popup's authored back (`help_back`) behind every advisor line, drawn as the encyclopedia's
+    // CARD-19 frame (WGUI-69): the backdrop, its first alternate texture as a one-unit edge, the second as an additive glow
+    // and the lower-left connector. Bottom-left at the advisor point, growing upward like the encyclopedia.
     godot::TextureRect* approach_back{};
     godot::TextureRect* approach_frame{};
+    godot::TextureRect* approach_glow{};
+    godot::Polygon2D* approach_connector{};
     float approach_back_width_units{}; // the authored width of that back, in shell units (0: not authored, no back)
-    float approach_back_alpha{1.0F};   // its authored colour alpha
+    godot::Vector2 approach_text_offset_units{}; // the back's authored Offset: where its text starts inside it
     // `--eawr-galactic-test-advisor` (test only): posts one enemy-approach line and one control-changed line once the HUD is up,
     // so a GPU test can read where the advisor popup draws them.
     bool test_advisor{}, test_advisor_posted{};

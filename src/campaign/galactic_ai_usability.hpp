@@ -5,6 +5,7 @@
 #include "../script/foc/galactic_ai_actions.hpp"
 #include "../script/foc/galactic_ai_world.hpp"
 #include "eawr/sim/galactic/graph.hpp"
+#include "galactic_ai_world_reader.hpp"
 
 namespace eawr::campaign {
 // Immutable campaign identities; each fresh/load runtime owns a distinct cache.
@@ -85,9 +86,15 @@ public:
         const sim::galactic::GalacticSnapshot&, sim::galactic::PlanetId) const;
     [[nodiscard]] core::Result<MovementInput> movement(sim::galactic::PlayerId,
         const sim::galactic::GalacticSnapshot&, const World&, const Engine&, const sim::PartitionExecutor&);
+    // Async step 3 (a): the world is read through a reader (the runtime passes its window input); the provider keeps the reader for
+    // its later phase reads, so it must outlive the provider's use. The session forms read the session as it stands.
+    [[nodiscard]] core::Result<script::foc::ai::GalacticConnectivity> connectivity(
+        const GalacticAiWorldReader&, World&, const Engine&, const sim::PartitionExecutor&);
     [[nodiscard]] core::Result<script::foc::ai::GalacticConnectivity> connectivity(
         const sim::galactic::GalacticSession&, World&, const Engine&, const sim::PartitionExecutor&);
     using ConnectivityPublication = std::shared_ptr<const script::foc::ai::GalacticConnectivity>;
+    [[nodiscard]] core::Result<ConnectivityPublication> connectivity_publication(
+        const GalacticAiWorldReader&, World&, const Engine&, const sim::PartitionExecutor&);
     [[nodiscard]] core::Result<ConnectivityPublication> connectivity_publication(
         const sim::galactic::GalacticSession&, World&, const Engine&, const sim::PartitionExecutor&);
     // #2676/WGA-185: an ability producer must resolve the live fleet predicate
@@ -112,8 +119,9 @@ private:
     [[nodiscard]] GalacticAiUsabilityProvider* selected_frontier() const noexcept;
     [[nodiscard]] const Cache* find_cache(sim::galactic::PlayerId) const;
     [[nodiscard]] core::Result<void> prepare_stealth(const sim::galactic::GalacticSnapshot&);
-    // Bound by connectivity to the same live owners that use this contributor.
-    const sim::galactic::GalacticSession* observed_session_{};
+    // Bound by connectivity to the same live owners that use this contributor (the session forms bind session_reader_).
+    const GalacticAiWorldReader* observed_reader_{};
+    std::optional<GalacticAiSessionReader> session_reader_;
     const World* observed_world_{};
     std::optional<std::uint64_t> stealth_generation_;
     std::set<sim::EntityId> stealth_fleets_; // derived from the saved world owner, never archived twice

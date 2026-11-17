@@ -685,11 +685,12 @@ struct AdaptiveOpaque {
     std::vector<net::LockstepSession> sessions;
     explicit AdaptiveOpaque(std::uint64_t timeout = 1000, bool override_provider = true,
         std::function<eawr::core::Result<void>(std::uint64_t, std::span<const std::uint8_t>)> retain = {},
-        std::uint64_t initial_delay = 4, unsigned peers = 2, bool hold_on_expiry = false, std::uint32_t max_deferrals = 4)
+        std::uint64_t initial_delay = 4, unsigned peers = 2, bool hold_on_expiry = false, std::uint32_t max_deferrals = 4,
+        bool responsive = false)
         : network(peers), adapters(peers) {
         net::SessionOptions options;
         options.input_delay = initial_delay;
-        options.final_tick_count = 500;
+        options.final_tick_count = responsive ? 1200 : 500;
         options.non_lan = true;
         options.retain_timing_event = std::move(retain);
         options.completeness_timeout_ms = timeout;
@@ -697,6 +698,7 @@ struct AdaptiveOpaque {
         if (!override_provider) options.adaptive_timing->rtt_ms = {};
         options.adaptive_timing->hold_on_expiry = hold_on_expiry;
         options.adaptive_timing->max_deferrals = max_deferrals;
+        options.adaptive_timing->responsive = responsive;
         transports.reserve(peers);
         std::vector<net::PeerSeat> roster;
         for (unsigned peer = 0; peer < peers; ++peer) {
@@ -708,6 +710,76 @@ struct AdaptiveOpaque {
                 roster, options)));
     }
 };
+
+void input_wait_and_receipt_diagnostics() {
+    class ObservedTransport final : public net::MessageTransport {
+    public:
+        explicit ObservedTransport(FakeNetwork& network) : delegate(network, 0) {}
+        FakeTransport delegate;
+        bool queued{};
+        eawr::core::Result<void> send(net::PeerIndex to, std::span<const std::uint8_t> bytes) override { return delegate.send(to, bytes); }
+        std::optional<net::Received> poll() override {
+            auto frame = delegate.poll();
+            if (frame) frame->received_at = std::chrono::steady_clock::now() - std::chrono::milliseconds(10);
+            return frame;
+        }
+        net::LinkState link(net::PeerIndex peer) const override { return delegate.link(peer); }
+        net::PeerIndex self() const override { return 0; }
+        std::uint32_t peer_count() const override { return 2; }
+        std::size_t queued_received(net::PeerIndex) const override { return queued ? 1 : 0; }
+    };
+    FakeNetwork network(2);
+    std::array<OpaqueAdapter, 2> adapters;
+    ObservedTransport local(network);
+    FakeTransport remote(network, 1);
+    Monitor monitor; monitor.allowed = true; monitor.final_tick = 100;
+    const std::vector<net::PeerSeat> seats{{{1}, true}, {{2}, true}};
+    auto first = require(net::LockstepSession::create(adapters[0], local, seats, {}, &monitor));
+    auto second = require(net::LockstepSession::create(adapters[1], remote, seats));
+    require(first.pump(0));
+    expect(first.wait_kind(true, false) == net::SessionWaitKind::batch, "missing input without a decoded backlog is a peer-batch wait");
+    local.queued = true;
+    expect(first.wait_kind(true, false) == net::SessionWaitKind::queued, "a decoded backlog is a separate consumption wait");
+    local.queued = false;
+    expect(first.wait_kind(false, false) == net::SessionWaitKind::none, "cadence holds are not network stalls");
+    monitor.missing_voters = {1};
+    expect(first.wait_kind(true, false) == net::SessionWaitKind::hash, "hash-voter barriers have their own cause");
+    expect(first.wait_kind(true, true) == net::SessionWaitKind::hash,
+        "a tick opening a hash exchange starts its wait at the completed boundary");
+    monitor.missing_voters.clear();
+    network.round = 1; require(second.pump(1));
+    network.round = 2; const auto pumped = require(first.pump(2));
+    expect(first.wait_kind(true, pumped.completed.has_value()) == net::SessionWaitKind::none, "a completed tick is not a stall");
+    const auto& receipt = first.input_receipts(1);
+    expect(receipt.samples > 0 && receipt.max_us >= 10'000 && receipt.total_us >= receipt.samples * 10'000,
+        "each accepted sealed batch retains its local receive-to-consume age outside canonical state");
+}
+
+void responsive_campaign_timing() {
+    std::vector<std::pair<std::uint64_t, std::vector<std::uint8_t>>> retained;
+    AdaptiveOpaque match(1000, false, [&](auto tick, auto bytes) {
+        retained.emplace_back(tick, std::vector<std::uint8_t>(bytes.begin(), bytes.end()));
+        return eawr::core::Result<void>::success();
+    }, 3, 2, true, 4, true);
+    std::array<std::vector<std::uint64_t>, 2> changes;
+    for (std::uint64_t round = 0; round < 4000 && (match.adapters[0].tick < 1200 || match.adapters[1].tick < 1200); ++round) {
+        match.network.round = round;
+        for (unsigned peer = 0; peer < 2; ++peer) {
+            if (match.adapters[peer].tick >= 80) match.transports[peer].stats->smoothed_rtt = std::chrono::microseconds{0};
+            const auto delay = match.sessions[peer].input_delay();
+            const auto tick = match.adapters[peer].tick;
+            require(match.sessions[peer].pump(round));
+            if (delay != match.sessions[peer].input_delay()) changes[peer].push_back(tick);
+            if (tick >= 80 && tick < 1024) expect(match.sessions[peer].input_delay() == 8,
+                "a recovered link retains the larger lead for four slow policy samples");
+        }
+    }
+    expect(changes[0] == std::vector<std::uint64_t>{45, 1061} && changes[1] == changes[0],
+        "campaign raises on the first fast policy pass and lowers slowly at identical voted boundaries");
+    expect(retained.size() == 4 && retained[0] == retained[1] && retained[2] == retained[3],
+        "both peers retain identical immutable timing controls for each activation");
+    expect(match.adapters[0].state_hash() == match.adapters[1].state_hash(), "responsive peers retain identical canonical hashes");
+}
 
 std::vector<std::uint8_t> timing_frame(std::uint8_t kind, std::uint64_t tick, std::uint64_t delay) {
     std::vector<std::uint8_t> bytes{kind};
@@ -1146,6 +1218,7 @@ void script_hash_only_on_exchange_ticks() {
         for (unsigned peer = 0; peer < 2; ++peer) {
             transports.push_back(std::make_unique<FakeTransport>(network, peer));
             net::DesyncOptions monitor_options; monitor_options.exchange_every = 5;
+            monitor_options.deferred_compare = false; // Counts hashes up to the barrier freeze at tick 10.
             monitors.push_back(std::make_unique<net::DesyncMonitor>(*transports.back(), monitor_options));
             net::SessionOptions options; options.final_tick_count = 12;
             sessions.push_back(require(net::LockstepSession::create(adapters[peer], *transports.back(), roster, options, monitors.back().get())));
@@ -1308,6 +1381,8 @@ int main() {
             }
         }
         adaptive_policy_and_refusals();
+        responsive_campaign_timing();
+        input_wait_and_receipt_diagnostics();
         adaptive_wire_and_gate();
         adaptive_hold_on_expiry();
         adaptive_frontier_carries_the_delay();

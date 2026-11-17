@@ -19,6 +19,14 @@ std::uint32_t admitted_seats(const net::LobbySnapshot& snapshot) {
 
 bool TcpLanMatch::lobby_enabled() const  { return static_cast<bool>(lobby_builder_); }
 
+void TcpLanMatch::configure_skirmish_content(std::function<core::Result<core::PreparedContentIdentity>()> builder) {
+    if (admission_content_ || admission_content_job_.valid()) return;
+    admission_content_builder_ = builder;
+    auto work = std::make_shared<std::packaged_task<core::Result<core::PreparedContentIdentity>()>>(std::move(builder));
+    admission_content_job_ = work->get_future();
+    drain_workers().start(std::function<void()>([work] { (*work)(); }));
+}
+
 void TcpLanMatch::configure_lobby(std::string name, std::uint32_t colour, std::vector<skirmish::SetupMap> maps, LanLobbyBuilder builder)  {
         // This staging slice has no recovery provisioning; preserve explicit caller policies for typed refusal.
         if (default_credentials_) set_recovery_policy({});
@@ -78,27 +86,59 @@ bool TcpLanMatch::lobby_game(const skirmish::FixtureOptions& options)  {
 bool TcpLanMatch::lobby_ready(bool ready)  {
         if (!lobby_mutable()) return false;
         if (ready && lobby_state()->identity_pending) return lobby_feedback(lobby_fail<void>(net::LobbyReason::not_ready, "TEXT_WAITING"));
-        if (!ready) {
-            ready_pending_ = false;
-            return lobby_feedback(lobby_->request(net::LobbyAction::unready, lobby_->snapshot().revision));
-        }
-        if (galactic_room()) {
-            // GC has nothing to prepare at Ready: the offer is built from the frozen revision at Start.
-            if (auto valid = validate_lobby(lobby_->snapshot(), true); !valid) return lobby_feedback(std::move(valid));
-            return lobby_feedback(lobby_->request(net::LobbyAction::ready, lobby_->snapshot().revision));
-        }
-        auto options = decode_lan_lobby_game(lobby_->snapshot());
-        if (!options) return lobby_feedback(core::Result<void>::failure(options.error()));
+        if (!ready) return lobby_feedback(lobby_->request(net::LobbyAction::unready, lobby_->snapshot().revision));
         if (auto valid = validate_lobby(lobby_->snapshot(), true); !valid) return lobby_feedback(std::move(valid));
-        if (preparing_.valid()) return false;
-        auto canonical = encode_lan_lobby_game(options.value()); if (!canonical) return false;
+        // GC has nothing to prepare at Ready: the offer is built from the frozen revision at Start.
+        if (!galactic_room()) {
+            // Skirmish: the Ready signal goes out now; the match setup is prepared on a worker meanwhile and gates
+            // Start (the host's offer and every guest's own expected offer wait for it), never the Ready itself.
+            // A click after a failed prepare tries the same choices again.
+            prepare_failed_game_.reset();
+            if (auto prepared = ensure_lobby_prepare(lobby_->snapshot()); !prepared) return lobby_feedback(std::move(prepared));
+        }
+        return lobby_feedback(lobby_->request(net::LobbyAction::ready, lobby_->snapshot().revision));
+    }
+
+void TcpLanMatch::adopt_lobby_prepare() {
+        if (!preparing_.valid() || preparing_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        auto prepared = preparing_.get();
+        if (prepared) {
+            // A result for choices that changed meanwhile is dropped by the staging check in pump_lobby.
+            prepared_setup_ = std::move(prepared).value(); prepared_game_ = preparing_game_;
+            return;
+        }
+        prepare_failed_game_ = preparing_game_;
+        prepare_failure_ = "Could not prepare the match setup: " + prepared.error().message;
+        if (!lobby_) return;
+        // The failure belongs to these choices only; Ready for them is withdrawn with the reason, so Start never
+        // waits on (or runs with) a seat that cannot build the match.
+        const auto& snapshot = lobby_->snapshot();
+        const auto local = std::find_if(snapshot.seats.begin(), snapshot.seats.end(), [&](const auto& seat) { return seat.peer == lobby_self_; });
+        auto options = decode_lan_lobby_game(snapshot);
+        auto canonical = options ? encode_lan_lobby_game(options.value()) : core::Result<net::LobbyGame>::failure(options.error());
+        if (snapshot.phase == net::LobbyPhase::staging && local != snapshot.seats.end() && local->ready
+            && canonical && canonical.value() == preparing_game_)
+            (void)lobby_->request(net::LobbyAction::unready, snapshot.revision);
+        (void)lobby_feedback(lobby_fail<void>(net::LobbyReason::setup_failed, prepare_failure_));
+    }
+
+core::Result<void> TcpLanMatch::ensure_lobby_prepare(const net::LobbySnapshot& state) {
+        auto options = decode_lan_lobby_game(state);
+        if (!options) return core::Result<void>::failure(options.error());
+        auto canonical = encode_lan_lobby_game(options.value());
+        if (!canonical) return core::Result<void>::failure(canonical.error());
+        if (prepared_setup_ && canonical.value() == prepared_game_) return core::Result<void>::success();
+        if (prepare_failed_game_ && *prepare_failed_game_ == canonical.value())
+            return lobby_fail<void>(net::LobbyReason::setup_failed, prepare_failure_);
+        // One prepare at a time; a stale one finishes, is dropped, and the next pump starts the current choices.
+        if (preparing_.valid()) return core::Result<void>::success();
+        prepare_failed_game_.reset();
         preparing_game_ = std::move(canonical).value();
-        ready_pending_ = true; preparing_revision_ = lobby_->snapshot().revision;
         auto work = std::make_shared<std::packaged_task<core::Result<tactical::TacticalSetup>()>>(
             [builder = lobby_builder_, selected = std::move(options).value()] { return builder(selected); });
         preparing_ = work->get_future();
         drain_workers().start(std::function<void()>([work] { (*work)(); }));
-        return true;
+        return core::Result<void>::success();
     }
 
 bool TcpLanMatch::lobby_chat(std::string text)  {
@@ -237,8 +277,10 @@ std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
         const bool start_pending = lobby_->start_pending();
         state.start_preparing = hosting && start_pending;
         state.prepare_status = galactic_prepare_status();
-        if (start_pending && state.start_reason.empty()) state.start_reason = "The campaign is being prepared; the room is locked until it is done or cancelled.";
-        state.ready_enabled = !state.preparing && !state.identity_pending && local != state.snapshot.seats.end() && !start_pending
+        if (start_pending && state.start_reason.empty())
+            state.start_reason = galactic_room() ? "The campaign is being prepared; the room is locked until it is done or cancelled."
+                : "The match is being prepared; the room is locked until it is done or cancelled.";
+        state.ready_enabled = !state.identity_pending && local != state.snapshot.seats.end() && !start_pending
             && state.snapshot.phase == net::LobbyPhase::staging && (state.local_ready || valid);
         // An online room starts only complete: every seat present and every pair verified (docs/net-online-npeer.md, section 3).
         state.start_enabled = hosting && state.snapshot.seats.size() >= 2 && state.snapshot.phase == net::LobbyPhase::staging
@@ -298,6 +340,12 @@ core::Result<void> TcpLanMatch::validate_galactic_lobby(const net::LobbySnapshot
     }
 
 core::Result<void> TcpLanMatch::validate_lobby(const net::LobbySnapshot& state, bool starting) const {
+        // Recheck the directory's host build at Ready and immediately before
+        // freeze. GNS also verifies the actual peer identity on every connection.
+        if (online_options_ && !online_host_build_.empty()) {
+            auto compatible = net::validate_online_build(online_host_build_, online_options_->build_identity);
+            if (!compatible) return compatible;
+        }
         if (net::lobby_game_mode(state.game) == net::LobbyGameMode::galactic) return validate_galactic_lobby(state, starting);
         auto options = decode_lan_lobby_game(state);
         if (!options) return core::Result<void>::failure(options.error());
@@ -400,6 +448,12 @@ core::Result<void> TcpLanMatch::provision_mesh_repair(const net::SetupOffer& off
 
 net::LobbyHooks TcpLanMatch::lobby_hooks() {
         net::LobbyHooks hooks;
+        hooks.setup_pump_ready = [this] { return galactic_room() || gate_.monitor != nullptr; };
+        if (!galactic_host_game_) hooks.admission_content = admission_content_;
+        hooks.setup_difference = [this](std::string summary) {
+            diagnostics_->emit("offer-compare", "refused", io_->transport.self(), summary);
+            const std::lock_guard lock(mutex_); view_.setup_difference = std::move(summary);
+        };
         hooks.preparation_inputs = [this](const net::LobbySnapshot& state, const std::vector<net::SetupSeat>& seats)
             -> core::Result<std::vector<sim::IdentityDomain>> {
             if (net::lobby_game_mode(state.game) != net::LobbyGameMode::galactic)
@@ -493,15 +547,41 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
                     return core::Result<net::SetupOffer>::failure(provisioned.error());
                 return built;
             }
+            // Re-read effective inputs before this exact revision freezes. Workshop updates during staging
+            // must produce the named layer refusal too, rather than the later byte-for-byte offer refusal.
+            if (admission_content_builder_ && (admission_recheck_revision_ != state.frozen_revision || admission_recheck_job_.valid())) {
+                if (admission_recheck_revision_ != state.frozen_revision || !admission_recheck_job_.valid()) {
+                    auto work = std::make_shared<std::packaged_task<core::Result<core::PreparedContentIdentity>()>>(admission_content_builder_);
+                    admission_recheck_job_ = work->get_future();
+                    admission_recheck_revision_ = state.frozen_revision;
+                    drain_workers().start(std::function<void()>([work] { (*work)(); }));
+                }
+                if (admission_recheck_job_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+                    return core::Result<net::SetupOffer>::failure(net::start_pending_diagnostic("Checking mod content before Start."));
+                auto current = admission_recheck_job_.get();
+                admission_recheck_revision_ = 0;
+                if (!current) return core::Result<net::SetupOffer>::failure(current.error());
+                if (!state.content) return lobby_fail<net::SetupOffer>(net::LobbyReason::setup_failed, "Room content identity is unavailable.");
+                if (auto valid = net::validate_lobby_content(*state.content, current.value()); !valid)
+                    return core::Result<net::SetupOffer>::failure(valid.error());
+                admission_recheck_revision_ = state.frozen_revision;
+            }
             std::uint64_t delay{};
             auto selected = decode_lan_lobby_game(state, &delay);
             auto canonical = selected ? encode_lan_lobby_game(selected.value()) : core::Result<net::LobbyGame>::failure(selected.error());
+            // The default LAN lobby does not provision confidential recovery. Existing legacy setup retains that path.
+            if (recovery_policy_.reconnect || recovery_policy_.resync) return lobby_fail<net::SetupOffer>(net::LobbyReason::recovery_unavailable, "Recovery provisioning for staging is unavailable.");
+            // Ready went out before this seat's setup was prepared. Start (the host's offer, and each guest's own
+            // expected offer before it accepts) waits here, pumping, until the prepare for the frozen choices is done.
+            adopt_lobby_prepare();
+            if (canonical && !(prepared_setup_ && canonical.value() == prepared_game_)) {
+                if (auto prepared = ensure_lobby_prepare(state); !prepared) return core::Result<net::SetupOffer>::failure(prepared.error());
+                if (preparing_.valid()) return core::Result<net::SetupOffer>::failure(net::start_pending_diagnostic("Preparing the match setup."));
+            }
             if (!prepared_setup_ || !prepared_setup_->match_identity || !canonical || canonical.value() != prepared_game_) return lobby_fail<net::SetupOffer>(net::LobbyReason::setup_failed, "Current staging choices have not been prepared.");
             auto bytes = net::encode_skirmish_setup(*prepared_setup_); if (!bytes) return core::Result<net::SetupOffer>::failure(bytes.error());
             net::SetupOffer offer; offer.setup = std::move(bytes).value(); offer.seed = prepared_setup_->seed;
             offer.identity = {std::string(core::build_identity()), *prepared_setup_->match_identity}; offer.seats = seats; offer.input_delay = delay;
-            // The default LAN lobby does not provision confidential recovery. Existing legacy setup retains that path.
-            if (recovery_policy_.reconnect || recovery_policy_.resync) return lobby_fail<net::SetupOffer>(net::LobbyReason::recovery_unavailable, "Recovery provisioning for staging is unavailable.");
             if (auto provisioned = provision_mesh_repair(offer, state.frozen_revision); !provisioned)
                 return core::Result<net::SetupOffer>::failure(provisioned.error());
             return core::Result<net::SetupOffer>::success(std::move(offer));
@@ -543,8 +623,9 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
                 if (!options) return core::Result<net::LobbySetupContext>::failure(options.error());
                 net::DesyncOptions monitor_options;
                 monitor_options.input_delay = options.value().input_delay;
-                monitor_options.exchange_every = 30;
+                monitor_options.exchange_every = net::default_hash_exchange_every;
                 monitor_options.initial_tick = galactic_ ? galactic_->initial_tick() : 0;
+                if (galactic_) monitor_options.final_tick = galactic_->final_tick_count();
                 context.options.session.initial_tick = monitor_options.initial_tick;
                 if (galactic_) context.options.session.producer_sequences = galactic_->producer_sequences();
                 io_->monitor = std::make_unique<net::DesyncMonitor>(stream, monitor_options);
@@ -611,7 +692,7 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
 void TcpLanMatch::reset_lobby() {
         if (io_->transport.tcp) io_->transport.tcp->stop_checkpoint();
         gate_.reset();
-        lobby_.reset(); lobby_result_.reset(); lobby_stream_ = nullptr; prepared_setup_.reset(); ready_pending_ = false; lobby_setup_accepted_ = false; lobby_room_committed_ = false;
+        lobby_.reset(); lobby_result_.reset(); lobby_stream_ = nullptr; prepared_setup_.reset(); prepare_failed_game_.reset(); lobby_setup_accepted_ = false; lobby_room_committed_ = false;
         removed_peers_.clear(); known_edges_.clear(); mod_review_edges_.clear(); closing_peers_.clear(); lobby_notice_.reset(); last_lobby_state_.reset(); identity_retry_at_ms_ = 0;
         galactic_host_game_.reset(); galactic_start_.reset(); galactic_flush_started_.reset(); galactic_pending_start_.reset();
         if (galactic_) galactic_->release_prepare();
@@ -623,12 +704,10 @@ std::string TcpLanMatch::galactic_prepare_status() const {
     const bool guest_waits = !view().host && lobby_->setup_pending();
     if (!host_waits && !guest_waits) return {};
     const auto progress = galactic_->prepare_progress();
-    const auto minutes = progress.elapsed.count() / 60;
-    const std::string so_far = minutes <= 0 ? std::string("under 1 min so far") : std::to_string(minutes) + " min so far";
+    const auto seconds = progress.elapsed.count() > 0 ? static_cast<std::uint64_t>(progress.elapsed.count()) : std::uint64_t{0};
     if (progress.state == GalacticLobbyBackend::PrepareProgress::State::waiting_for_earlier)
-        return "Waiting for an earlier campaign preparation to finish before this one can start (" + so_far
-            + "). The window stays usable; it cannot be speeded up.";
-    return net::galactic_prepare_wait_text(host_waits, so_far);
+        return "Waiting for an earlier campaign preparation to finish (" + std::to_string(seconds) + " s).";
+    return net::galactic_prepare_wait_text(host_waits, seconds);
 }
 
 // #6130: one line per seat when the staging checkpoint has fully arrived (host: every guest restored; guest: its own
@@ -694,7 +773,10 @@ void TcpLanMatch::start_galactic_lobby() {
 void TcpLanMatch::start_lobby() {
         if (galactic_room()) { start_galactic_lobby(); return; }
         const auto state = lobby_state();
-        if (!state || !state->start_enabled || !prepared_setup_ || handed_over_) return;
+        // The host's own setup may still be preparing: the offer hook keeps this Start pending until it is done.
+        if (!state || !state->start_enabled || handed_over_) return;
+        // A cancelled attempt can retry the same room revision after the files changed.
+        admission_recheck_job_ = {}; admission_recheck_revision_ = 0;
         auto started = lobby_->start(state->snapshot.revision);
         if (!started) {
             if (online_options_) handle_online_start_failure(started.error(),
@@ -702,6 +784,11 @@ void TcpLanMatch::start_lobby() {
                 [this](const core::Diagnostic& error) { set_failure(error); });
             else (void)lobby_feedback(started);
             return;
+        }
+        // An asynchronous content recheck has not created setup or frozen the room yet.
+        // Keep staging ownership until its resumed Start publishes the actual setup.
+        if (lobby_->snapshot().phase != net::LobbyPhase::starting) {
+            last_lobby_state_ = lobby_state(); return;
         }
         auto raw = io_->transport.tcp->poll();
         if (raw) { io_->transport.pending_bytes += raw->frame.size(); io_->transport.pending.push_back(std::move(*raw)); }
@@ -721,6 +808,22 @@ void TcpLanMatch::start_lobby() {
 
 void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
         if (handed_over_ || !io_->transport.tcp || view().phase == LanPhase::ended) return;
+        if (admission_content_job_.valid()) {
+            if (admission_content_job_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+                // Keep native admission/ICE serviced while the content worker reads files.
+                if (auto raw = io_->transport.poll_socket()) {
+                    constexpr std::size_t limit = 8U * 1024U * 1024U;
+                    if (io_->transport.pending.size() >= 256 || raw->frame.size() > limit - std::min(limit, io_->transport.pending_bytes)) {
+                        set_failure(net::lobby_diagnostic(net::LobbyReason::resource_limit, "Too much room traffic while checking content.")); return;
+                    }
+                    io_->transport.pending_bytes += raw->frame.size(); io_->transport.pending.push_back(std::move(*raw));
+                }
+                return;
+            }
+            auto content = admission_content_job_.get();
+            if (!content) { set_failure(content.error()); return; }
+            admission_content_ = std::move(content).value();
+        }
         if (view().mod_review_pending) {
             if (auto raw = io_->transport.poll_socket()) {
                 constexpr std::size_t limit = 8U * 1024U * 1024U;
@@ -777,11 +880,11 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
                     static_cast<void>(lobby_->pump(lobby_clock_));
                     pending_.reset(); set_failure(*error); return;
                 }
-                if (view().host && !pending_ && io_->transport.tcp->staging_mesh_ready()) {
-                    auto options = decode_lan_lobby_game(lobby_->snapshot());
-                    if (!options) { set_failure(options.error()); return; }
-                    pending_ = std::move(options).value();
-                }
+            }
+            if (view().host && !pending_ && (!io_->transport.tcp->staging_capacity() || io_->transport.tcp->staging_mesh_ready())) {
+                auto options = decode_lan_lobby_game(lobby_->snapshot());
+                if (!options) { set_failure(options.error()); return; }
+                pending_ = std::move(options).value();
             }
             return; // No core pump or tick-zero publication before live bind.
         }
@@ -834,7 +937,7 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
                 if (!created) { set_failure(created.error()); return; }
                 lobby_ = std::make_shared<net::LobbySession>(std::move(created).value()); io_->room_lifetime = lobby_; lobby_self_ = io_->transport.self();
             } else {
-                auto raw = io_->transport.tcp->poll();
+                auto raw = io_->transport.poll();
                 if (!raw) {
                     // The wait for the host's first snapshot starts once the host pair is verified: ICE has its own deadline.
                     if (!online_snapshot_deadline_ && online_options_ && io_->transport.link(0) == net::LinkState::open)
@@ -987,22 +1090,20 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
             for (const auto& seat : seats) if (seat.player != seat.selection.slot)
                 (void)lobby_feedback(lobby_->assign(seat.peer, seat.selection, seat.selection.slot, lobby_->snapshot().revision));
         }
-        if (preparing_.valid() && preparing_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-            auto prepared = preparing_.get();
-            if (prepared && preparing_revision_ == lobby_->snapshot().revision && ready_pending_) {
-                prepared_setup_ = std::move(prepared).value(); prepared_revision_ = preparing_revision_; prepared_game_ = preparing_game_;
-                (void)lobby_feedback(lobby_->request(net::LobbyAction::ready, prepared_revision_));
-            } else if (!prepared) (void)lobby_feedback(lobby_fail<void>(net::LobbyReason::setup_failed, prepared.error().message));
-            ready_pending_ = false;
-        }
+        adopt_lobby_prepare();
         std::uint64_t delay{};
         auto options = decode_lan_lobby_game(lobby_->snapshot(), &delay);
         if (options) {
             offered_delay_ = delay;
             auto canonical = encode_lan_lobby_game(options.value());
-            if (prepared_setup_ && canonical && canonical.value() == prepared_game_) prepared_revision_ = lobby_->snapshot().revision;
-            else if (prepared_setup_) prepared_setup_.reset();
+            if (prepared_setup_ && (!canonical || canonical.value() != prepared_game_)) prepared_setup_.reset();
             offered_ = std::move(options).value();
+        }
+        if (!galactic_room() && lobby_->snapshot().phase == net::LobbyPhase::staging) {
+            // A ready seat keeps its setup prepared for the current choices (a stale prepare ends first, then the next starts).
+            const auto& seats = lobby_->snapshot().seats;
+            const auto self = std::find_if(seats.begin(), seats.end(), [&](const auto& seat) { return seat.peer == lobby_self_; });
+            if (self != seats.end() && self->ready) (void)ensure_lobby_prepare(lobby_->snapshot());
         }
         const auto state = lobby_state();
         if (!state) return;
@@ -1031,7 +1132,8 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
             erase_credentials();
             io_->transport.tcp->close(); (void)io_->transport.tcp->poll();
         }
-        if (state->snapshot.phase == net::LobbyPhase::starting && !view().host && offered_) { accepted_ = true; pending_ = offered_; }
+        if (state->snapshot.phase == net::LobbyPhase::starting && !view().host && offered_
+            && !lobby_->setup_pending() && lobby_->setup_phase().has_value()) { accepted_ = true; pending_ = offered_; }
         if (state->snapshot.phase == net::LobbyPhase::starting && !view().host && !galactic_start_ && galactic_room() && galactic_
             && !lobby_->setup_pending() && lobby_->setup_phase().has_value()) {
             // GC guest: the host started the room; the galactic driver (GCMP-03) finishes the barrier from here.

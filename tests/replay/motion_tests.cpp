@@ -24,6 +24,7 @@
 #include <ios>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -801,6 +802,101 @@ void test_bank_session() {
     expect(mirrored, "BK-02: a right turn banks the mirror of a left turn");
 }
 
+// PL-01: a ship that flies a move plan publishes one shared immutable copy of it per plan.
+void test_predicted_path() {
+    tactical::TacticalReplay replay;
+    replay.setup = setup({
+        {1, corvette_type, 1, at(0, 100, 0), yaw(0), {}},
+        {2, station_type, 2, at(500, -900, 0), yaw(0), {}},
+    });
+    replay.final_tick_count = 120;
+    replay.commands = {
+        command(5, 1, 0, 1, tactical::MovePayload{at(3000, 600, 0)}),
+        command(60, 1, 1, 1, tactical::MovePayload{at(-800, 900, 0)}),
+        command(110, 1, 2, 1, tactical::StopPayload{}),
+    };
+    std::optional<std::vector<tactical::PredictedPathNode>> first_plan;
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        auto on_motion = foc_table();
+        on_motion.prediction_paths = true;
+        auto session = tactical::TacticalSession::from_replay(replay, {}, {}, on_motion);
+        auto off = tactical::TacticalSession::from_replay(replay, {}, {}, foc_table());
+        expect(static_cast<bool>(session), "PL-01: session starts");
+        expect(static_cast<bool>(off), "PL-01: stock session starts");
+        if (!session || !off) return;
+        // Mutating caller-owned content cannot change the session's load-time decision.
+        on_motion.prediction_paths = false;
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::shared_ptr<const tactical::PredictedPath> plan_a;
+        std::shared_ptr<const tactical::PredictedPath> plan_a_later;
+        std::shared_ptr<const tactical::PredictedPath> plan_b;
+        for (std::uint64_t tick = 0; tick < replay.final_tick_count; ++tick) {
+            const auto stepped = session.value().step(executor);
+            expect(static_cast<bool>(stepped), "PL-01: session steps");
+            if (!stepped) return;
+            const auto stock = off.value().step(executor);
+            expect(static_cast<bool>(stock), "PL-01: stock session steps");
+            if (!stock) return;
+            expect(stock.value().snapshot->predicted_paths().empty(), "PL-01: stock publishes no path fields");
+            expect(stock.value().snapshot->canonical_bytes() == stepped.value().snapshot->canonical_bytes()
+                && off.value().canonical_state_bytes() == session.value().canonical_state_bytes(),
+                "PL-01: ON and OFF preserve sim-visible bytes on every tick and worker count");
+            const auto& instances = stepped.value().snapshot->instances();
+            const auto ship = std::find_if(instances.begin(), instances.end(), [](const auto& i) { return i.entity_id == 1; });
+            const auto station = std::find_if(instances.begin(), instances.end(), [](const auto& i) { return i.entity_id == 2; });
+            expect(ship != instances.end() && station != instances.end() && !stepped.value().snapshot->predicted_path(2),
+                "PL-01: a unit without a locomotor has no predicted path");
+            if (ship == instances.end()) return;
+            const auto completed = stepped.value().completed_tick;
+            const auto* plan = stepped.value().snapshot->predicted_path(1);
+            if (completed < 5) expect(!plan, "PL-01: no plan before the order");
+            if (completed > 110) expect(!plan, "PL-01: stop clears the published plan");
+            if (completed == 10 && plan) {
+                // Restoring invokes publish_staged before a tick runs: exercise its ON path.
+                const auto saved = session.value().save_checkpoint_state();
+                auto restore_motion = foc_table();
+                restore_motion.prediction_paths = true;
+                auto restored = tactical::TacticalSession::from_replay(replay, {}, {}, restore_motion);
+                expect(saved && restored, "PL-01: checkpoint and restoration session are available");
+                if (saved && restored) {
+                    expect(static_cast<bool>(restored.value().load_checkpoint_state(saved.value())),
+                        "PL-01: ON checkpoint restores");
+                    const auto snapshot = restored.value().snapshot();
+                    const auto* restored_plan = snapshot ? snapshot->predicted_path(1) : nullptr;
+                    expect(restored_plan && restored_plan->path->nodes == plan->path->nodes,
+                        "PL-01: staged ON publication reconstructs the current move plan");
+                    expect(snapshot && !snapshot->predicted_path(2),
+                        "PL-01: staged ON publication excludes the stationary unit");
+                    expect(restored.value().canonical_state_bytes() == session.value().canonical_state_bytes(),
+                        "PL-01: staged path publication preserves canonical state");
+                    expect(snapshot && snapshot->canonical_bytes() == stepped.value().snapshot->canonical_bytes(),
+                        "PL-01: staged and tick snapshots preserve canonical bytes");
+                }
+                plan_a = plan->path;
+            }
+            if (completed == 50 && plan) plan_a_later = plan->path;
+            if (completed == 100 && plan) plan_b = plan->path;
+        }
+        const auto stock_work = off.value().prediction_path_work();
+        const auto on_work = session.value().prediction_path_work();
+        expect(stock_work.units_visited == 0 && stock_work.plans_copied == 0 && stock_work.cached_plans == 0,
+            "PL-01: stock performs zero prediction work for moving/replanning ships");
+        expect(on_work.units_visited > 0 && on_work.plans_copied >= 2 && on_work.cached_plans > 0,
+            "PL-01: enabled content still visits, copies and retains the plans");
+        expect(plan_a && plan_a->nodes.size() >= 2 && plan_a == plan_a_later,
+            "PL-01: snapshots of one plan share one immutable copy");
+        expect(plan_b && plan_b != plan_a && plan_b->nodes.size() >= 2 && plan_b->nodes.front().frame >= units(60),
+            "PL-01: a new order publishes a new plan from the order tick");
+        if (plan_a) {
+            expect(near(plan_a->nodes.back().position.x, units(3000), 16 * one)
+                && near(plan_a->nodes.back().position.y, units(600), 16 * one),
+                "PL-01: the plan ends on the order's target");
+            if (!first_plan) first_plan = plan_a->nodes;
+            else expect(plan_a->nodes == *first_plan, "PL-01: the plan is equal on 1/2/4/8 workers");
+        }
+    }
+}
+
 void test_fixtures(const std::filesystem::path& fixtures, const bool regenerate) {
     const auto moved = check_fixture(fixtures, "tactical-motion", single_move(), regenerate);
     if (moved) {
@@ -1507,6 +1603,7 @@ int main(const int argc, char** argv) {
     test_super_capital_math();
     test_bank_rules();
     test_bank_session();
+    test_predicted_path();
     test_fixtures(argv[1], regenerate);
     if (failures != 0) {
         std::cerr << failures << " motion contract(s) failed\n";

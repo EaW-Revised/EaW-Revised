@@ -43,7 +43,14 @@ bool TcpLanMatch::request_pause(bool paused) {
 bool TcpLanMatch::request_speed(std::uint32_t step)  {
         const std::lock_guard lock(mutex_);
         if (!lan_gameplay_enabled(view_) || step >= presentation::ui::speed_step_rates.size()) return false;
-        if (!speed_window_.accept(view_.session_tick)) return false;
+        // The = / - keys read the agreed step, so repeated presses while a change waits would queue the same step again:
+        // a repeat of the last queued step is already requested and adds no input.
+        if (!speed_requests_.empty() && speed_requests_.back().tactical_speed == step) return true;
+        if (!speed_window_.accept(view_.session_tick, step == presentation::ui::default_speed_step)) {
+            view_.input_feedback = "Speed changes are limited to " + std::to_string(net::ClockThrottle::speed_changes_per_window)
+                + " per " + std::to_string(net::ClockThrottle::window_seconds) + " seconds; normal speed is always allowed.";
+            return false;
+        }
         auto options = view_.options;
         options.tactical_speed = step;
         speed_requests_.push_back(options); view_.input_feedback.clear();

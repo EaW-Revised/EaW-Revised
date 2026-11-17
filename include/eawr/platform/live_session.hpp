@@ -286,6 +286,9 @@ public:
         // Real-time pacing's target in logical frames per wall-clock second (TM-01 to TM-03:
         // 10, 20, 30, 45, 60 or 120), 1 to 1000; set_target_rate() changes it.
         std::uint32_t target_rate{30};
+        // Test knob: a ceiling on real-time pacing (0 = none), so a fixture can stand in for a machine that cannot
+        // reach a requested rate. Pacing only: what a tick does is unchanged.
+        std::uint32_t max_rate{};
         std::uint64_t max_catch_up{5};
         // Snapshots kept for snapshot_at(), newest first; at least 2.
         std::size_t history{64};

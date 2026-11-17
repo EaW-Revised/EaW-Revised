@@ -151,6 +151,7 @@ struct UnitType final {
     bool ion_stun_effect{}; // ION_STUN_EFFECT in its Behavior or SpaceBehavior list: it can be ion stunned (#561)
     bool damage_tracking{}; // DAMAGE_TRACKING in its Behavior or SpaceBehavior list: its rate of damage taken (WCC-82)
     std::optional<CollisionBounds> collision; // collidable meshes of its model (#74)
+    std::optional<CollisionBounds> model_collision_box; // FD-10: authored COLLISIONBOX, before type scale
     // #536: the model's collidable meshes, then each hardpoint's attached model's, placed at its
     // attachment bone; and Collision_Box_Modifier (a value above 1 adds the sphere of DG-37).
     std::vector<CollisionMesh> collision_meshes; // immutable indexed geometry shared by table copies

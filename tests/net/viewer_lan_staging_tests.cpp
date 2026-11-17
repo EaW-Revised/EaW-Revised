@@ -8,6 +8,7 @@
 #include "../skirmish/setup_map_golden.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -289,6 +290,95 @@ void editable_staging_team_rules() {
         && host->lobby_state()->ready_enabled && join->lobby_state()->ready_enabled, "corrected setup clears reason and enables Ready");
     expect(host->lobby_ready(true) && join->lobby_ready(true), "both players Ready after correcting teams");
     wait([&] { return host->lobby_state()->start_enabled; });
+    host->cancel(); join->cancel();
+}
+
+// A skirmish Ready once prepared the whole match setup before it was sent, so the host saw it seconds late. Ready now
+// goes out at once; the prepare runs on a worker and gates Start; a failed prepare withdraws the Ready with its reason.
+void ready_reaches_host_before_prepare() {
+    stage = "ready latency with a slow prepare";
+    const auto initial = setup();
+    eawr::skirmish::FixtureOptions selected;
+    selected.map = initial.skirmish->map; selected.match = initial.skirmish->match;
+    selected.slots = std::vector<eawr::skirmish::LobbySlot>{{1, "Rebel", 0, true, {}, 0}, {2, "Empire", 1, true, {}, 1}};
+    eawr::skirmish::SetupMap map; map.path = *selected.map; map.metadata.capacity = 2;
+    map.metadata.new_markers = true; map.metadata.start_positions.emplace(2);
+    map.teams = {{0, {"Rebel", "Empire"}, 1}, {1, {"Rebel", "Empire"}, 1}};
+    static constexpr auto ready_bound = std::chrono::milliseconds(300); // loopback: one request, one snapshot, plus pump slack
+    struct Prepare { std::chrono::milliseconds time{}; std::atomic<int> finished{}; std::atomic<bool> fail{}; };
+    const auto host_prepare = std::make_shared<Prepare>(), guest_prepare = std::make_shared<Prepare>();
+    // The guest's prepare outlasts the host's, so the host publishes Start while the guest still prepares.
+    host_prepare->time = std::chrono::milliseconds(1000); guest_prepare->time = std::chrono::milliseconds(2500);
+    const auto slow = [&initial](std::shared_ptr<Prepare> prepare) -> viewer::LanLobbyBuilder {
+        return [initial, prepare](const auto&) {
+            std::this_thread::sleep_for(prepare->time);
+            const bool fail = prepare->fail.load();
+            ++prepare->finished;
+            if (!fail) return eawr::core::Result<tactical::TacticalSetup>::success(initial);
+            eawr::core::Diagnostic failure; failure.code = "EAWR-TEST-0003"; failure.message = "test unit table is missing";
+            return eawr::core::Result<tactical::TacticalSetup>::failure(std::move(failure));
+        };
+    };
+    auto host = make_match(), join = make_match();
+    host->configure_lobby("Host", 0, {map}, slow(host_prepare)); join->configure_lobby("Guest", 1, {map}, slow(guest_prepare));
+    host->host(0); host->pump_setup(selected);
+    join->join("127.0.0.1:" + std::to_string(host->view().port));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    std::string_view step = "admission";
+    const auto wait = [&](const auto& predicate) {
+        while (true) {
+            host->pump_setup(selected); join->pump_setup({});
+            if (predicate()) return;
+            expect(std::chrono::steady_clock::now() < deadline, "ready latency deadline: " + std::string(step));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    const auto guest_ready_at_host = [&] {
+        const auto state = host->lobby_state();
+        return state && state->snapshot.seats.size() == 2 && state->snapshot.seats.back().ready;
+    };
+    wait([&] { return host->lobby_state() && host->lobby_state()->snapshot.seats.size() == 2
+        && join->lobby_state() && join->lobby_state()->snapshot == host->lobby_state()->snapshot
+        && !join->lobby_state()->identity_pending && join->lobby_state()->ready_enabled; });
+
+    // 1. A prepare that fails: the host still sees Ready within the bound, then sees it withdrawn with a named reason.
+    guest_prepare->fail = true;
+    auto clicked = std::chrono::steady_clock::now();
+    expect(join->lobby_ready(true), "guest Ready is accepted while its setup prepares");
+    step = "ready before a failing prepare";
+    wait(guest_ready_at_host);
+    auto latency = std::chrono::steady_clock::now() - clicked;
+    expect(latency < ready_bound && guest_prepare->finished == 0, "the host sees the guest's Ready before its prepare ends ("
+        + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(latency).count()) + " ms)");
+    step = "failed prepare withdraws Ready";
+    wait([&] { return guest_prepare->finished == 1 && !guest_ready_at_host() && !join->lobby_state()->local_ready; });
+    expect(join->lobby_state()->notice && join->lobby_state()->notice->reason == net::LobbyReason::setup_failed
+        && join->lobby_state()->notice->message.find("Could not prepare the match setup: test unit table is missing") != std::string::npos,
+        "a failed prepare names its reason to the player whose Ready it withdrew");
+
+    // 2. Ready again (it retries the prepare); Start waits until the guest's prepare is done.
+    guest_prepare->fail = false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2001)); // a fresh room request window
+    step = "ready enabled again";
+    wait([&] { return join->lobby_state()->ready_enabled; });
+    clicked = std::chrono::steady_clock::now();
+    expect(join->lobby_ready(true) && host->lobby_ready(true), "both players Ready");
+    step = "ready with a passing prepare";
+    wait(guest_ready_at_host);
+    latency = std::chrono::steady_clock::now() - clicked;
+    expect(latency < ready_bound && guest_prepare->finished == 1, "a retried Ready also reaches the host at once ("
+        + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(latency).count()) + " ms)");
+    step = "start enabled";
+    wait([&] { return host->lobby_state()->start_enabled; });
+    expect(host_prepare->finished == 0, "Start is enabled while the host's own setup still prepares");
+    host->start(selected);
+    step = "host publishes Start";
+    wait([&] { return host->lobby_state()->snapshot.phase == net::LobbyPhase::starting; });
+    expect(host_prepare->finished == 1 && guest_prepare->finished == 1, "the host's Start waited for its own prepare, not for the guest's");
+    step = "guest handover";
+    std::optional<eawr::skirmish::FixtureOptions> handover;
+    wait([&] { handover = join->take_start(); return handover.has_value(); });
+    expect(guest_prepare->finished == 2 && host_prepare->finished == 1, "Start hands over only after every seat finished its prepare");
     host->cancel(); join->cancel();
 }
 

@@ -1,9 +1,13 @@
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <list>
+#include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -20,6 +24,9 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "ai_campaign_gate.hpp"
 #include "eawr/script/foc/galactic_ai_state.hpp"
+#include "eawr/checkpoint/checkpoint.hpp"
+#include "eawr/checkpoint/game.hpp"
+#include "galactic_ai_world.hpp"
 #include "../../src/campaign/galactic_ai_usability.hpp"
 #include "eawr/campaign/live_conflict.hpp"
 #include "eawr/campaign/space_entry.hpp"
@@ -98,6 +105,142 @@ int run_all() {
     galactic_campaign_gate::check(observed->runtimes.size() == 1, "the stock campaign start owns one galactic AI runtime");
     for (std::uint64_t tick = 1; tick <= 8; ++tick) must(root_owner.game()->step(*setup->executor));
     std::cout << "GCAI-RUNTIME-START stock campaign started and stepped 8 ticks" << std::endl;
+
+    // #7457: perception evaluated on the exact save tick survives a disk save and load. Step to the first tick on which the
+    // stock AI caches a connectivity row (IsConnectedTo and the other connectivity tokens), then save on that tick and on
+    // every tick of the async window after it (a route refresh inside a window must not make the uninterrupted run drop rows
+    // that a resumed run keeps). The first save loads on 1/2/4/8 workers, every later one on 1 worker; each branch steps
+    // next to the uninterrupted run and keeps equal perception bytes, native components and state hash.
+    auto& game = *root_owner.game();
+    const auto view = observed->runtimes.front();
+    const auto connectivity_rows_on_this_tick = [&] {
+        const auto world = view.world.lock();
+        galactic_campaign_gate::check(static_cast<bool>(world), "the control runtime keeps its perception world");
+        const auto state = world->state();
+        return static_cast<std::size_t>(std::count_if(state.cache.begin(), state.cache.end(), [&](const auto& row) {
+            return row.frame == game.completed_tick() && eawr::script::foc::ai::galactic_connectivity_token(row.key.tokens);
+        }));
+    };
+    std::size_t first_rows = connectivity_rows_on_this_tick();
+    while (first_rows == 0 && game.completed_tick() < 900) {
+        must(game.step(*setup->executor));
+        first_rows = connectivity_rows_on_this_tick();
+    }
+    galactic_campaign_gate::check(first_rows > 0, "the stock AI caches a connectivity row on some tick of the first 900");
+    const auto first_saved_tick = game.completed_tick();
+    const auto natives = [](const cp::GameSession& session) { return must(session.save_galactic_ai()).state->components; };
+    const auto identities = eawr::checkpoint::game_identities(game.galaxy().setup());
+    struct Branch {
+        std::uint64_t saved_tick{};
+        std::size_t workers{};
+        std::unique_ptr<eawr::platform::ThreadWorkerAdapter> executor;
+        eawr::checkpoint::GameRestore restore;
+        cp::GalacticAiRuntimeView runtime;
+        std::uint64_t compared{};
+    };
+    std::list<Branch> branches;
+    std::set<std::uint64_t> saved_ticks;
+    std::size_t finished{};
+    const auto save_and_load = [&](const auto& worker_counts) {
+        const auto bytes = must(eawr::checkpoint::save_game_checkpoint(game, identities));
+        const auto saved_natives = natives(game);
+        for (const auto workers : worker_counts) {
+            auto executor = std::make_unique<eawr::platform::ThreadWorkerAdapter>(workers);
+            auto restored = must(eawr::checkpoint::load_game_checkpoint(bytes, identities, configuration.restore, *executor));
+            galactic_campaign_gate::check(must(eawr::checkpoint::save_game_checkpoint(restored.session, identities)) == bytes,
+                "a load reproduces the saved checkpoint bytes (tick " + std::to_string(game.completed_tick()) + ")");
+            galactic_campaign_gate::check(natives(restored.session) == saved_natives,
+                "a load reproduces the saved perception and native bytes (tick " + std::to_string(game.completed_tick()) + ")");
+            branches.push_back({game.completed_tick(), workers, std::move(executor), std::move(restored), observed->runtimes.back(), 0});
+        }
+    };
+    // On a mismatch, name what differs before the check fails: the native components, then the perception rows.
+    const auto report_difference = [&](const Branch& branch, const auto& left, const auto& right) {
+        std::cout << "GCAI-RESTORE-DIFF saved_tick=" << branch.saved_tick << " tick=" << game.completed_tick() << " workers=" << branch.workers << '\n';
+        for (const auto& [name, bytes] : left) {
+            const auto other = right.find(name);
+            if (other == right.end() || other->second != bytes)
+                std::cout << "GCAI-RESTORE-DIFF native=" << name << " control_bytes=" << bytes.size()
+                          << " resumed_bytes=" << (other == right.end() ? 0 : other->second.size()) << '\n';
+        }
+        const auto left_world = view.world.lock(); const auto right_world = branch.runtime.world.lock();
+        if (!left_world || !right_world) return;
+        const auto rows = [](const eawr::script::foc::ai::GalacticPerceptionState& state) {
+            std::map<std::string, std::string> out;
+            for (const auto& row : state.cache) {
+                std::string key = "cache p" + std::to_string(row.key.player) + " planet" + std::to_string(row.key.planet) + " ";
+                for (const auto& token : row.key.tokens) key += token + ".";
+                for (const auto& binding : row.key.bindings) key += " " + binding.parameter;
+                out[key] += " v" + std::to_string(row.value.repr) + " f" + std::to_string(row.frame) + " i" + std::to_string(row.interval.repr) + "|";
+            }
+            for (const auto& row : state.visibility)
+                out["visibility p" + std::to_string(row.player) + " planet" + std::to_string(row.planet) + " mask" + std::to_string(row.mask)]
+                    += " visible" + std::to_string(row.visible) + " observed" + std::to_string(row.last_observed) + "|";
+            for (const auto& row : state.flags) out["flag p" + std::to_string(row.player) + " planet" + std::to_string(row.planet) + " " + row.name] += "set|";
+            for (const auto& row : state.hints) out["hint p" + std::to_string(row.player) + " " + row.planet + " " + row.name] += " v" + std::to_string(row.value.repr) + "|";
+            for (const auto& row : state.space_conflicts)
+                out["conflict p" + std::to_string(row.player) + " planet" + std::to_string(row.planet)] += " f" + std::to_string(row.frame) + "|";
+            return out;
+        };
+        const auto left_rows = rows(left_world->state()); const auto right_rows = rows(right_world->state());
+        std::size_t shown{};
+        for (const auto& [key, value] : left_rows) {
+            const auto other = right_rows.find(key);
+            if (other != right_rows.end() && other->second == value) continue;
+            if (shown++ < 24) std::cout << "GCAI-RESTORE-DIFF " << key << " control=" << value << " resumed=" << (other == right_rows.end() ? "-" : other->second) << '\n';
+        }
+        for (const auto& [key, value] : right_rows)
+            if (!left_rows.contains(key) && shown++ < 32) std::cout << "GCAI-RESTORE-DIFF " << key << " control=- resumed=" << value << '\n';
+        std::cout << "GCAI-RESTORE-DIFF rows control=" << left_rows.size() << " resumed=" << right_rows.size() << " differing=" << shown << std::endl;
+    };
+    constexpr std::uint64_t window_saves = 16;   // the first save tick and every tick of the async window after it
+    constexpr std::uint64_t compared_ticks = 30; // per branch: past the next async publication, where the AI-owned digests surface
+    const std::array<std::size_t, 1> one_worker{1};
+    save_and_load(eawr::platform::determinism_worker_counts());
+    while (!branches.empty()) {
+        const auto control = must(game.step(*setup->executor));
+        const auto control_natives = natives(game);
+        for (auto& branch : branches) {
+            const auto resumed = must(branch.restore.session.step(*branch.executor));
+            const auto where = " (saved " + std::to_string(branch.saved_tick) + ", tick " + std::to_string(game.completed_tick()) + ", "
+                + std::to_string(branch.workers) + " workers)";
+            const auto resumed_natives = natives(branch.restore.session);
+            if (resumed_natives != control_natives || resumed.state_hash.get() != control.state_hash.get())
+                report_difference(branch, control_natives, resumed_natives);
+            galactic_campaign_gate::check(resumed_natives.at("GALACTIC_PERCEPTION") == control_natives.at("GALACTIC_PERCEPTION"),
+                "resumed perception bytes equal the uninterrupted run" + where);
+            galactic_campaign_gate::check(resumed_natives == control_natives, "resumed native components equal the uninterrupted run" + where);
+            galactic_campaign_gate::check(resumed.state_hash.get() == control.state_hash.get(), "resumed state hash equals the uninterrupted run" + where);
+            ++branch.compared;
+        }
+        // The continuation contract is the state hash above (as in the campaign gate). Whole checkpoints are not compared:
+        // the session section also carries the run's own history, which a resumed run does not have. The AI's section must match.
+        const auto retire = [&](Branch& branch) {
+            if (branch.compared < compared_ticks) return false;
+            const auto control_bytes = must(eawr::checkpoint::save_game_checkpoint(game, identities));
+            const auto control_sections = must(eawr::checkpoint::parse_checkpoint(control_bytes));
+            const auto resumed_bytes = must(eawr::checkpoint::save_game_checkpoint(branch.restore.session, identities));
+            const auto resumed_sections = must(eawr::checkpoint::parse_checkpoint(resumed_bytes));
+            bool ai_section_seen = false;
+            for (const auto& section : control_sections.sections) {
+                if (eawr::checkpoint::section_name(section.id) != "galactic-ai") continue;
+                const auto other = std::find_if(resumed_sections.sections.begin(), resumed_sections.sections.end(),
+                    [&](const auto& row) { return row.id == section.id; });
+                ai_section_seen = true;
+                galactic_campaign_gate::check(other != resumed_sections.sections.end() && section.bytes == other->bytes,
+                    "resumed galactic-ai checkpoint section equals the uninterrupted run (saved " + std::to_string(branch.saved_tick) + ", "
+                        + std::to_string(branch.workers) + " workers)");
+            }
+            galactic_campaign_gate::check(ai_section_seen, "the checkpoint carries a galactic-ai section");
+            return true;
+        };
+        for (auto at = branches.begin(); at != branches.end();)
+            if (retire(*at)) { saved_ticks.insert(at->saved_tick); ++finished; at = branches.erase(at); } else ++at;
+        if (game.completed_tick() < first_saved_tick + window_saves) save_and_load(one_worker);
+    }
+    galactic_campaign_gate::check(saved_ticks.size() == window_saves, "every tick of the window was saved and resumed");
+    std::cout << "GCAI-RESTORE-CONNECTIVITY first_saved_tick=" << first_saved_tick << " connectivity_rows=" << first_rows
+              << " saves=" << saved_ticks.size() << " branches=" << finished << " compared_ticks=" << compared_ticks << std::endl;
     return galactic_test::failures == 0 ? 0 : 1;
 }
 }

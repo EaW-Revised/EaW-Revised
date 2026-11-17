@@ -47,4 +47,15 @@ inline constexpr std::string_view line_whitespace = " \t\r";
     return true;
 }
 
+// True when an object's XML element is a member of the SpaceProp family: SpaceProp itself and its variants such as
+// SpaceProp_LowOrbit and SpaceProp_PlanetScape (backdrop planets). The family is named by its prefix, so a variant a
+// mod adds is a space prop as well; one rule keeps the presentation and the simulation from classifying the same
+// planet differently.
+[[nodiscard]] constexpr bool is_space_prop_element(const std::string_view element) noexcept {
+    constexpr std::string_view family = "SpaceProp";
+    if (element.size() < family.size()) return false;
+    if (!iequals(element.substr(0, family.size()), family)) return false;
+    return element.size() == family.size() || element[family.size()] == '_';
+}
+
 } // namespace eawr::core

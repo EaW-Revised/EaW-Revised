@@ -57,6 +57,8 @@ enum class Phase : std::size_t {
     // Hitch hunt (#6933): the live session's own steps around and inside GameSession::step (serial, wall).
     tick_submit_input, tick_autosave_request, tick_stage_battle, tick_process_commands, tick_step_world,
     tick_apply_returns, tick_finish_step, tick_publish,
+    // Inside the scripted galactic step (serial, wall): the galactic object-script service and the admitted History turn.
+    tick_object_scripts, tick_history,
     snap_sorted, snap_observer, snap_menus, snap_economy_input, snap_forecast, snap_corruption, snap_offers, snap_construct,
     // The galactic AI manager's due services (serial, wall): which lifecycle service holds the barrier (#6933).
     svc_perception, svc_goals, svc_planning, svc_execution, svc_learning, svc_templates,
@@ -84,6 +86,7 @@ inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::co
     "tick_actor_delivery", "tick_story_service", "tick_game_step",
     "tick_submit_input", "tick_autosave_request", "tick_stage_battle", "tick_process_commands", "tick_step_world",
     "tick_apply_returns", "tick_finish_step", "tick_publish",
+    "tick_object_scripts", "tick_history",
     "snap_sorted", "snap_observer", "snap_menus", "snap_economy_input", "snap_forecast", "snap_corruption", "snap_offers", "snap_construct",
     "svc_perception", "svc_goals", "svc_planning", "svc_execution", "svc_learning", "svc_templates",
     "goal_propose", "goal_allocate", "goal_time", "goal_fund", "goal_maintain", "goal_attach", "selection_input", "galactic_estimate",

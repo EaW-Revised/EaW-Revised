@@ -166,6 +166,13 @@ class GalacticCorruptionHudRuntime(unittest.TestCase):
         self.assertTrue(controls["corrupt_button_icon_a"]["enabled"])
         self.assertFalse(controls["corrupt_button_icon_b"]["enabled"])
         self.assertFalse(controls["corrupt_button_icon_c"]["enabled"])
+        # #7357, WGCH-122/188: a row the player cannot choose shows grey (button, title, price); a choosable row does not.
+        label_shade = {row["name"]: row["shaded"] for row in hud["labels"]}
+        for slot, grey in (("a", False), ("b", True), ("c", True)):
+            self.assertEqual(controls["corrupt_button_icon_" + slot]["shaded"], grey, slot)
+            self.assertEqual(label_shade["corrupt_title_" + slot], grey, slot)
+            self.assertEqual(label_shade["corrupt_cost_" + slot], grey, slot)
+            self.assertFalse(label_shade["corrupt_text00" + slot], "paragraphs keep their colour")
         labels = {row["name"]: row["text"] for row in hud["labels"]}
         self.assertEqual(labels["corrupt_cost_a"], "$ 250")
         self.assertEqual(labels["corrupt_cost_b"], "$ 2000")
@@ -205,9 +212,26 @@ class GalacticCorruptionHudRuntime(unittest.TestCase):
         self.assertFalse(first["mission_available"])
         controls = {row["name"]: row for row in hud["controls"]}
         self.assertFalse(controls["corrupt_button_icon_a"]["enabled"])
+        self.assertTrue(controls["corrupt_button_icon_a"]["shaded"], "#7357: the unavailable choice must look unavailable")
         clicked = self.click([self.point(initial, "corrupt_button_icon_a")], fixture="corruption-no-mission-service")
         self.assertTrue(clicked["corruption_hud"]["active"])
         self.assertEqual(clicked["corruption_hud"]["choices_accepted"], 0)
+
+    def test_clicks_land_while_the_same_menu_is_republished(self):
+        # #7357: the host republishes an unchanged menu while the dialog is open. The dialog used to be laid out again on
+        # every republication, hiding and disabling its buttons for a moment, so a press and release that straddled one
+        # was lost: Close did nothing and the Defiler stayed held. This fixture republishes the same menu every frame.
+        initial, _ = self.capture("corruption-republish")
+        hud = initial["corruption_hud"]
+        self.assertTrue(hud["active"])
+        closed = self.click([self.point(initial, "corrupt_close")], fixture="corruption-republish")
+        self.assertFalse(closed["corruption_hud"]["active"])
+        self.assertEqual(closed["corruption_hud"]["closes"], 1)
+        self.assertEqual(closed["corruption_hud"]["rebuilds"], hud["rebuilds"], "the same menu is not laid out again")
+        accepted = self.click([self.point(initial, "corrupt_button_icon_a")], fixture="corruption-republish")
+        self.assertFalse(accepted["corruption_hud"]["active"])
+        self.assertEqual(accepted["corruption_hud"]["choices_accepted"], 1)
+        self.assertEqual(accepted["corruption_hud"]["accepted_slot"], 1)
 
     def test_slot_gap_and_tutorial_gate(self):
         gap, _ = self.capture("corruption-gaps")

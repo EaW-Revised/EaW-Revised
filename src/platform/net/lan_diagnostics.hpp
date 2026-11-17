@@ -1,5 +1,6 @@
 #pragma once
 #include "lan_match.hpp"
+#include "eawr/net/lockstep_session.hpp"
 
 #include <array>
 #include <sstream>
@@ -33,6 +34,26 @@ public:
     std::uint64_t tick{};
     // #4043: counts every lockstep wait, however short (stall() above only reports waits of a second or more).
     presentation::ui::NetStallLedger ledger;
+    static void receipts(presentation::ui::NetPeerLink& peer, const net::LockstepSession& session, net::PeerIndex dense) {
+        const auto& stats = session.input_receipts(dense);
+        peer.receipt_samples = stats.samples;
+        peer.receipt_avg_ms = stats.samples ? static_cast<double>(stats.total_us) / static_cast<double>(stats.samples) / 1000.0 : 0.0;
+        peer.receipt_max_ms = static_cast<double>(stats.max_us) / 1000.0;
+    }
+    // Observed input frontier cadence, including stalls and batching, rather than
+    // remote CPU time. One bounded sample per authenticated transport peer.
+    double input_tick_ms(net::PeerIndex peer, std::uint64_t frontier, std::uint64_t now) {
+        auto [at, inserted] = pace_.try_emplace(peer, Pace{frontier, now, 0.0});
+        auto& sample = at->second;
+        if (inserted) return 0.0;
+        if (frontier < sample.frontier || now < sample.at) sample = {frontier, now, 0.0};
+        if (now - sample.at >= 1000) {
+            sample.ms = frontier > sample.frontier ? static_cast<double>(now - sample.at)
+                / static_cast<double>(frontier - sample.frontier) : 0.0;
+            sample.frontier = frontier; sample.at = now;
+        }
+        return sample.ms;
+    }
     void emit(std::string_view event, std::string_view reason, net::PeerIndex peer,
             std::string_view detail = {}) const {
         if (!sink) return;
@@ -121,6 +142,8 @@ public:
         return false;
     }
 private:
+    struct Pace { std::uint64_t frontier{}, at{}; double ms{}; };
+    std::map<net::PeerIndex, Pace> pace_;
     bool due(std::uint64_t now) const { return !last_stall_ || now - *last_stall_ >= 1000; }
     std::map<net::PeerIndex, net::LinkState> links_;
     std::map<net::PeerIndex, presentation::ui::NetRoute> routes_;

@@ -105,7 +105,6 @@ void GalacticMode::State::sync_battle_viewport() {
     }
     ++battle_viewport_syncs;
     battle_viewport_forwarded = size;
-    UtilityFunctions::print("EAWR battle viewport forwarded: ", size);
     if (loading) loading->viewport_changed(size.x, size.y);
     if (tactical) tactical->viewport_changed(size.x, size.y);
 }

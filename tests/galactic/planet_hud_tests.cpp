@@ -518,6 +518,21 @@ int case_galactic_planet_hud_tests() {
         assert(siphon_tooltip_credits(Fixed::from_raw(-(3 * Fixed::scale + Fixed::scale / 2))) == -4);
         assert(siphon_tooltip_credits(Fixed::from_raw(-(3 * Fixed::scale + Fixed::scale / 4))) == -3);
     }
+    {
+        // WGCI-1: the per-type popup reads the three authored lists at the published type minus one.
+        const std::vector<std::string> icons{"ia", "ib", "ic"}, names{"na", "nb", "nc"}, descriptions{"da", "db"};
+        assert(!corruption_icon_encyclopedia(0, icons, names, descriptions));
+        const auto first = corruption_icon_encyclopedia(1, icons, names, descriptions);
+        assert(first && first->icon == "ia" && first->name_key == "na" && first->description_key == "da");
+        // A description list shorter than the names leaves the body out, a shorter icon list the header icon.
+        const auto third = corruption_icon_encyclopedia(3, {"ia", "ib"}, names, descriptions);
+        assert(third && third->icon.empty() && third->name_key == "nc" && third->description_key.empty());
+        // No name for the type: nothing opens.
+        assert(!corruption_icon_encyclopedia(4, icons, names, descriptions));
+        assert(!corruption_icon_encyclopedia(1, icons, {}, descriptions));
+        assert(!corruption_icon_encyclopedia(1, icons, {""}, descriptions));
+        assert(corruption_information_tooltip_key == "TEXT_TOOLTIP_CLICK_FOR_INFO");
+    }
     // #4375 / WGSI-3: hero icons lead the row; the red/green look shows the ally and foreign icons, the other look the
     // faction icons, never both.
     facts.hero_ally = facts.hero_foreign = facts.hero_good = facts.hero_evil = facts.hero_corrupt = true;

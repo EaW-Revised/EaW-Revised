@@ -52,6 +52,8 @@ struct GroundHudState {
     viewer::galactic::ObjectId planet{}, pressed{}, pressed_object{};
     bool control{}, double_release{};
     std::uint64_t rebuilds{}, clicks{}, boxes{}, land_orders{}, rejected{};
+    // Which landing command the last land order sent: the whole fleet (LandFleet) or the dragged units (LandUnits).
+    bool last_land_units{};
     // #2880: the last accepted WGM-13 launch drop (seat command 18), for reports and receipts.
     std::uint64_t launch_orders{};
     // GHUD-S69: the pad a company was last dropped on, per planet. Presentation only: retail writes a

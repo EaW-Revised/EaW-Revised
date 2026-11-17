@@ -5,8 +5,10 @@
 
 #include "eawr/presentation/ui/world_ui.hpp"
 #include "eawr/presentation/ui/settings.hpp"
+#include "eawr/presentation/ui/selection.hpp"
 #include "ui_test_support.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -39,7 +41,7 @@ void owner_names() {
     ui::GameplaySettings settings;
     expect(ui::display_owner(instance, roster, true, ui::hover_owner_names_enabled(settings, true)),
         "hover: multiplayer default reaches resolver");
-    expect(!ui::display_owner(instance, roster, true, ui::hover_owner_names_enabled(settings, false)),
+    expect(ui::display_owner(instance, roster, true, ui::hover_owner_names_enabled(settings, false)),
         "hover: single-player default reaches resolver");
     settings.hover_owner_names = 0;
     expect(!ui::display_owner(instance, roster, true, ui::hover_owner_names_enabled(settings, true)),
@@ -231,6 +233,77 @@ void circles() {
     expect(!ui::selection_circle_side(0.0F, 1.0F), "no Select_Box_Scale, no circle (a squadron container)");
 }
 
+void authored_world_ui() {
+    test::ui::TempTree tree("world-ui-settings");
+    const auto base = tree.root / "base";
+    const auto mod = tree.root / "mod";
+    test::ui::write_text(base / "XML/GameConstants.xml", "<GameConstants>"
+        "<Health_Bar_Scale>1500</Health_Bar_Scale><Min_Health_Bar_Scale>1</Min_Health_Bar_Scale>"
+        "<Health_Bar_Spacing>2</Health_Bar_Spacing><Team_Healthbar_Offset>20</Team_Healthbar_Offset>"
+        "<MinimumDragSelectDistance>100</MinimumDragSelectDistance><MinimumDragDistance>4</MinimumDragDistance>"
+        "</GameConstants>");
+    test::ui::write_text(mod / "XML/GameConstants.xml", "<GameConstants>"
+        "<Health_Bar_Scale>3000</Health_Bar_Scale><Min_Health_Bar_Scale>3.0f</Min_Health_Bar_Scale>"
+        "<Health_Bar_Spacing>7</Health_Bar_Spacing><Team_Healthbar_Offset>91</Team_Healthbar_Offset>"
+        "<MinimumDragSelectDistance>25</MinimumDragSelectDistance><MinimumDragDistance>12</MinimumDragDistance>"
+        "</GameConstants>");
+    const std::array base_mounts{vfs::MountSpec{"base", base, "data", {}}};
+    const std::array mod_mounts{vfs::MountSpec{"mod", mod, "data", {}}, vfs::MountSpec{"base", base, "data", {}}};
+    auto stock = vfs::Vfs::mount(base_mounts);
+    auto override = vfs::Vfs::mount(mod_mounts);
+    expect(stock && override, "world UI mounts");
+    if (!stock || !override) return;
+    const auto a = ui::world_ui_settings(stock.value()), b = ui::world_ui_settings(override.value());
+    expect(a.diagnostics.empty() && b.diagnostics.empty(), "valid world UI constants accepted");
+    expect(a.health_bar_scale == 1500 && b.health_bar_scale == 3000 && b.min_health_bar_scale == 3,
+        "world bar scale and minimum use winning XML");
+    expect(a.health_bar_spacing == 2 && b.health_bar_spacing == 7, "spacing uses winning XML");
+    expect(ui::bar_scale(750, *b.health_bar_scale, *b.min_health_bar_scale) == 4
+        && ui::bar_scale(10000, *b.health_bar_scale, *b.min_health_bar_scale) == 3,
+        "authored scale and floor change bar geometry");
+    expect(ui::bar_anchor_lift({3, 4, 0}, {0, 1, 0}, 0.5F, a.team_offset) == 20
+        && ui::bar_anchor_lift({3, 4, 0}, {0, 1, 0}, 0.5F, b.team_offset) == 91,
+        "team bracket uses XML offset instead of bounds lift");
+    expect(ui::right_release(std::array<float, 2>{0, 0}, {30, 0}, *a.drag_select_distance,
+        *a.drag_click_distance) == ui::RightRelease::compass
+        && ui::right_release(std::array<float, 2>{0, 0}, {30, 0}, *b.drag_select_distance,
+        *b.drag_click_distance) == ui::RightRelease::cancel, "authored selection threshold changes input");
+    expect(ui::right_release(std::array<float, 2>{0, 0}, {10, 0}, *b.drag_select_distance,
+        *b.drag_click_distance) == ui::RightRelease::click, "authored minimum drag changes click band");
+    test::ui::write_text(mod / "XML/GameConstants.xml", "<GameConstants>"
+        "<Team_Healthbar_Offset>-13</Team_Healthbar_Offset><Health_Bar_Spacing>+2</Health_Bar_Spacing>"
+        "</GameConstants>");
+    auto signed_mount = vfs::Vfs::mount(mod_mounts);
+    expect(static_cast<bool>(signed_mount), "signed display constants mount");
+    if (signed_mount) {
+        const auto signed_settings = ui::world_ui_settings(signed_mount.value());
+        expect(signed_settings.team_offset == -13 && signed_settings.health_bar_spacing == 2,
+            "authored signed and explicit-positive display offsets are not stock-value bounded");
+    }
+    for (const auto invalid : {"", "nan", "2junk", "inf"}) {
+        test::ui::write_text(mod / "XML/GameConstants.xml", std::string("<GameConstants><Health_Bar_Scale>")
+            + invalid + "</Health_Bar_Scale></GameConstants>");
+        auto bad_mount = vfs::Vfs::mount(mod_mounts);
+        if (!bad_mount) { expect(false, "invalid settings fixture mounts"); continue; }
+        const auto bad = ui::world_ui_settings(bad_mount.value());
+        expect(!bad.health_bar_scale && bad.diagnostics.size() == 6,
+            "missing and malformed display constants are diagnosed without literal fallbacks");
+        // A missing drag distance never stops input: the stock values apply, with one diagnostic each.
+        expect(bad.drag_select_distance == ui::default_drag_select_distance
+            && bad.drag_click_distance == ui::default_drag_click_distance,
+            "absent drag distances fall back to the stock values");
+        expect(ui::right_release(std::array<float, 2>{0, 0}, {2, 0}, *bad.drag_select_distance,
+            *bad.drag_click_distance) == ui::RightRelease::click
+            && ui::right_release(std::array<float, 2>{0, 0}, {30, 0}, *bad.drag_select_distance,
+            *bad.drag_click_distance) == ui::RightRelease::compass
+            && ui::right_release(std::array<float, 2>{0, 0}, {150, 0}, *bad.drag_select_distance,
+            *bad.drag_click_distance) == ui::RightRelease::cancel, "orders still classify with the stock drag distances");
+        const auto drag_diagnostics = std::count_if(bad.diagnostics.begin(), bad.diagnostics.end(),
+            [](const std::string& line) { return line.find("Drag") != std::string::npos; });
+        expect(drag_diagnostics == 2, "each absent drag distance is diagnosed once");
+    }
+}
+
 void bars() {
     expect(ui::bar_size("fighter", std::nullopt) == ui::BarSize::small, "a fighter has the small bars");
     expect(ui::bar_size("bomber", std::nullopt) == ui::BarSize::small, "a bomber has the small bars");
@@ -242,8 +315,8 @@ void bars() {
     expect(close_to(ui::bar_width(ui::BarSize::large), 102.0F) && close_to(ui::bar_width(ui::BarSize::small), 34.0F),
            "the bar widths are the atlas widths");
 
-    expect(close_to(ui::bar_scale(3000.0F), 1.0F), "far away the bar keeps its size");
-    expect(close_to(ui::bar_scale(750.0F), 2.0F), "at half Health_Bar_Scale it doubles");
+    expect(close_to(ui::bar_scale(3000.0F, 1500.0F, 1.0F), 1.0F), "far away the bar keeps its size");
+    expect(close_to(ui::bar_scale(750.0F, 1500.0F, 1.0F), 2.0F), "at half Health_Bar_Scale it doubles");
 
     expect(ui::bar_level(1.0F) == 10 && ui::bar_level(0.0F) == 0, "full and empty levels");
     expect(ui::bar_level(0.91F) == 10 && ui::bar_level(0.9F) == 9, "the level is the ceiling of ten times the fraction");
@@ -691,15 +764,6 @@ void reticle_xml() {
 } // namespace
 
 void bracket_garrison_flag() {
-    // WU-39a (#6931): flush to the bar's right end, on the bracket point's row, at the flag's own size.
-    const auto flat = ui::bracket_garrison_flag_rect(100.0F, 50.0F, 40.0F, 1.0F, 1.0F);
-    expect(close_to(flat.width, 12.0F) && close_to(flat.height, 14.0F), "WU-39a: flag keeps its 12 x 14 art size");
-    expect(close_to(flat.centre_x, 100.0F + 20.0F + 6.0F) && close_to(flat.centre_y, 50.0F),
-           "WU-39a: centre is half the bar plus half the flag right of the bracket point, on its row");
-    const auto scaled = ui::bracket_garrison_flag_rect(100.0F, 50.0F, 40.0F, 2.0F, 1.5F);
-    expect(close_to(scaled.width, 36.0F) && close_to(scaled.height, 42.0F),
-           "WU-39a: size follows the GUI bounds scale and the UI scale");
-    expect(close_to(scaled.centre_x, 100.0F + 20.0F + 18.0F), "WU-39a: the flag's own scaled half width offsets it");
     expect(ui::bracket_garrison_flag_shown(true, true), "WU-39a: a marked ally shows the flag");
     expect(!ui::bracket_garrison_flag_shown(true, false), "WU-39a: an enemy never shows it");
     expect(!ui::bracket_garrison_flag_shown(false, true), "WU-39a: an unmarked ally shows none");
@@ -738,6 +802,7 @@ int main() {
     group_numbers();
     circles();
     bars();
+    authored_world_ui();
     candidates();
     dogfight_grid();
     stable_icon_grid();

@@ -534,6 +534,18 @@ void online_rows_and_paging() {
     expect(ui::online_failure_text(Failure::wrong_password) == "The password was not accepted.", "the wrong-password text is the typed one");
     expect(ui::online_failure_text(Failure::cooldown) == "Too many password attempts. Wait a minute and try again.",
            "the cooldown text is the typed one");
+    const std::string build_refusal = ui::online_failure_message("EAWR-NET-1503",
+        "Game build identities differ. All players need the same build. Host: foreign-build; yours: local-build.");
+    expect(build_refusal.find("EAWR-NET-1503") != std::string::npos
+               && build_refusal.find("foreign-build") != std::string::npos
+               && build_refusal.find("local-build") != std::string::npos,
+           "the browser join-completion presenter retains a typed build refusal and both identities");
+    expect(ui::online_failure_message("EAWR-NET-1546", "password=private") == ui::online_failure_text(Failure::wrong_password)
+               && ui::online_failure_message("unknown", "backend credentials") == ui::online_failure_text(Failure::other),
+           "other completion failures still hide backend detail behind curated text");
+    expect(ui::online_failure_message("EAWR-NET-1503", std::string(1024, 'x')).size() == std::string_view("EAWR-NET-1503: ").size() + 512
+               && ui::online_failure_message("EAWR-NET-1503", "host\nlocal").find('\n') == std::string::npos,
+           "the typed browser refusal has bounded single-line detail");
     expect(ui::online_failure_keeps_prompt(Failure::wrong_password) && ui::online_failure_keeps_prompt(Failure::cooldown)
                && !ui::online_failure_keeps_prompt(Failure::full) && !ui::online_failure_keeps_prompt(Failure::unavailable),
            "only a wrong password or the cooldown keeps the prompt open");
@@ -647,6 +659,59 @@ void galactic_content_gate_checks() {
         "the count never runs past the total");
 }
 
+// Owner (net-3): the online campaign preparation posted a chat line every second. A status that only counts on reaches
+// chat once when it starts (at most once per 30 s while it is not shown in place); a different line still posts at once.
+std::size_t chat_lines_with(const ui::ChatLog& log, std::string_view text) {
+    return static_cast<std::size_t>(std::count_if(log.lines().begin(), log.lines().end(),
+        [&](const ui::ChatLine& line) { return line.text.find(text) != std::string::npos; }));
+}
+
+void status_chat_throttle() {
+    expect(ui::status_counter_stem("Preparing the campaign (42 s). Gives up after 5 minutes.")
+        == "Preparing the campaign (# s). Gives up after 5 minutes.", "the seconds counter becomes one marker, the bound stays");
+    expect(ui::status_counter_stem("Checking mod files (1200 of 36588)") == "Checking mod files (# of 36588)", "the done count is a counter");
+    expect(ui::status_counter_stem("EAWR-NET-0207: link lost (seat 2, 3 seats)") == "EAWR-NET-0207: link lost (seat 2, 3 seats)",
+        "codes, seat numbers and counts that are not counters stay");
+    {
+        // Owner reports depend on error codes: two errors that differ only in their code both reach chat.
+        ui::StatusChatThrottle errors;
+        expect(errors.note("EAWR-NET-0207: The room connection failed.", 0, false) == ui::StatusChatPost::first
+            && errors.note("EAWR-NET-0208: The room connection failed.", 1000, false) == ui::StatusChatPost::first,
+            "a different error code is a different line");
+        expect(errors.note("Reconnecting seat 1...", 2000, false) == ui::StatusChatPost::first
+            && errors.note("Reconnecting seat 2...", 3000, false) == ui::StatusChatPost::first, "a different seat is a different line");
+    }
+    const auto line = [](std::uint64_t second) {
+        return "Preparing the campaign (" + std::to_string(second) + " s). Gives up after 5 minutes.";
+    };
+    for (const bool in_place : {false, true}) {
+        constexpr std::uint64_t seconds = 300;
+        ui::ChatLog log(1000);
+        ui::StatusChatThrottle throttle;
+        for (std::uint64_t second = 0; second <= seconds; ++second)
+            if (throttle.note(line(second), second * 1000, in_place) != ui::StatusChatPost::none) log.add(ui::ChatKind::notice, line(second));
+        const auto posted = chat_lines_with(log, "Preparing the campaign");
+        expect(posted <= seconds / 30 + 1, "a counting preparation line reaches chat at most once per 30 s, not once per second");
+        expect(posted >= 1 && log.lines().front().text == line(0), "the first preparation line reaches chat at once");
+        if (in_place) expect(posted == 1, "a line the screen shows in place reaches chat once");
+    }
+    ui::StatusChatThrottle throttle;
+    expect(throttle.note(line(1), 1000, true) == ui::StatusChatPost::first, "a new line posts");
+    expect(throttle.note(line(2), 2000, true) == ui::StatusChatPost::none, "its next count does not");
+    expect(throttle.note("Waiting for an earlier campaign preparation to finish (3 s).", 3000, true) == ui::StatusChatPost::first,
+        "a different line posts at once");
+    expect(throttle.note(line(4), 4000, false) == ui::StatusChatPost::first, "switching back is a new line again");
+    expect(throttle.note(line(5), 33'999, false) == ui::StatusChatPost::none, "no repeat inside 30 s");
+    expect(throttle.note(line(6), 34'000, false) == ui::StatusChatPost::repeat, "a repeat after 30 s when not shown in place");
+    expect(throttle.note({}, 35'000, false) == ui::StatusChatPost::none && throttle.note(line(0), 35'500, true) == ui::StatusChatPost::first,
+        "an ended line starts fresh: the next preparation posts again");
+    // The LAN reconnect countdown counts too.
+    ui::StatusChatThrottle grace;
+    expect(grace.note("Reconnecting seat 2...\nInitial grace remaining: 9 s", 0, false) == ui::StatusChatPost::first
+        && grace.note("Reconnecting seat 2...\nInitial grace remaining: 8 s", 1000, false) == ui::StatusChatPost::none,
+        "a countdown in a connection line does not post per second either");
+}
+
 int main() {
     expect(eawr::viewer::campaign_in_tab(false, false) && !eawr::viewer::campaign_in_tab(true, false)
         && eawr::viewer::campaign_in_tab(true, true) && !eawr::viewer::campaign_in_tab(false, true),
@@ -704,6 +769,7 @@ int main() {
     online_password_and_codes();
     online_chat_state();
     lan_menu_chat_acceptance();
+    status_chat_throttle();
     if (eawr::test::ui::failures() != 0) {
         std::cerr << eawr::test::ui::failures() << " LAN lobby contract(s) failed\n";
         return 1;

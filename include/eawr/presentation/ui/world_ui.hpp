@@ -116,16 +116,18 @@ enum class BarSize : std::uint8_t { small, medium, large };
 [[nodiscard]] float bar_width(BarSize size) noexcept;
 inline constexpr float bar_height = 2.0F;
 
-// GameConstants.xml: Health_Bar_Scale, Min_Health_Bar_Scale, Health_Bar_Spacing,
-// Team_Healthbar_Offset.
-inline constexpr float health_bar_scale = 1500.0F;
-inline constexpr float min_health_bar_scale = 1.0F;
-inline constexpr float health_bar_spacing = 2.0F;
-inline constexpr float team_healthbar_offset = 20.0F;
-
-// WU-13: bars grow as the camera closes in: Health_Bar_Scale over the camera's distance to the
-// unit, never below Min_Health_Bar_Scale.
-[[nodiscard]] float bar_scale(float camera_distance) noexcept;
+// WSU-51/53/54 and selection O-1/O-2: validated authored constants. Missing or
+// invalid fields stay absent; callers report diagnostics instead of inventing values.
+// Stock drag distances (cursor pixels), used only when the data omits the tag so input never stops working.
+inline constexpr float default_drag_select_distance = 100.0F;
+inline constexpr float default_drag_click_distance = 4.0F;
+struct WorldUiSettings final {
+    std::optional<float> health_bar_scale, min_health_bar_scale, health_bar_spacing, team_offset;
+    std::optional<float> drag_select_distance{default_drag_select_distance}, drag_click_distance{default_drag_click_distance};
+    std::vector<std::string> diagnostics;
+};
+[[nodiscard]] WorldUiSettings world_ui_settings(const vfs::Vfs& filesystem);
+[[nodiscard]] float bar_scale(float camera_distance, float scale, float minimum) noexcept;
 
 // WU-14: a bar shows level ceil(10 x fraction) of 0..10; its filled part is fraction x width from
 // the left, over a black back, with a one-pixel black outline.
@@ -164,34 +166,16 @@ struct BarVisibility {
 // of the bounds' half extent (any other GUI_Bounds_Scale), times GUI_Bounds_Scale. The shield bar
 // is drawn there; the health bar below it by the shield bar's height x Health_Bar_Spacing.
 [[nodiscard]] float bar_anchor_lift(const std::array<float, 3>& half_extent, const std::array<float, 3>& camera_up,
-                                    float gui_bounds_scale) noexcept;
+                                    float gui_bounds_scale, std::optional<float> team_offset = std::nullopt) noexcept;
 
 // --- Squadron icon (WU-20 to WU-24) --------------------------------------------------------------
 
 // WU-21: the icon's frame (I_BUTTON_UNIT_FRAME_GRIPPER at Scale 0.6) and its health bar (the small
 // bar at Scale 0.8, 16 reference pixels below the frame's centre).
-inline constexpr float squadron_frame_side = 60.0F * 0.6F;
-inline constexpr float squadron_bar_scale = 0.8F;
-inline constexpr float squadron_bar_offset = 16.0F;
-// WU-37 to WU-39 (#632): a hangar-launched squadron's icon carries the flag (I_GARRISON_FLAG, 12 x 14
-// pixels at scale 1.0): its centre 15 reference pixels right of and 15 below the frame's centre.
-inline constexpr float garrison_flag_offset_x = 15.0F;
-inline constexpr float garrison_flag_offset_y = 15.0F;
-inline constexpr float garrison_flag_width = 12.0F;
-inline constexpr float garrison_flag_height = 14.0F;
 
-// WU-39a: a marked ally unit's bracket carries the same flag, drawn flush to the right end of the
-// health-bar row: its centre is half the bar width plus half the flag's width right of the bracket
-// point, on the bracket point's row. The flag is scaled by the type's GUI bounds scale.
+// WU-39a: a marked ally unit's bracket carries a garrison flag, drawn flush to the right end of the
+// health-bar row. Its size comes from the flag art's region.
 struct BracketFlagRect final { float centre_x{}, centre_y{}, width{}, height{}; };
-[[nodiscard]] constexpr BracketFlagRect bracket_garrison_flag_rect(const float bracket_x, const float bracket_y,
-                                                                   const float bar_width_pixels,
-                                                                   const float gui_bounds_scale,
-                                                                   const float ui_scale) noexcept {
-    const float width = garrison_flag_width * gui_bounds_scale * ui_scale;
-    const float height = garrison_flag_height * gui_bounds_scale * ui_scale;
-    return {bracket_x + bar_width_pixels * 0.5F + width * 0.5F, bracket_y, width, height};
-}
 // WU-39a: the bracket shows the flag for a marked unit of the local player's side, never for an enemy.
 [[nodiscard]] constexpr bool bracket_garrison_flag_shown(const bool marked, const bool ally) noexcept {
     return marked && ally;

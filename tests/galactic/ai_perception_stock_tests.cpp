@@ -618,7 +618,10 @@ std::string producer_preparation_contracts(unsigned workers) {
         const auto selected = deferred_input->producers.read(1, 0, requested);
         expect(selected && std::all_of(selected.value().begin(), selected.value().end(), [](const auto& row) { return row.player == 1 && row.type == 100; }),
             "deferred query returns only requested player and types");
-        expect(selected && deferred.producer_demand_offer_checks() - checks_before == selected.value().size(),
+        // A bind that keeps the catalog (no production, credit or frontier change) answers from the catalog's memo: no offer
+        // is examined again. Otherwise the read examines exactly the matching offers.
+        const auto examined = deferred.producer_demand_offer_checks() - checks_before;
+        expect(selected && (examined == 0 || examined == selected.value().size()),
             "requested-type admission examines matching offers only");
         const auto repeated_before = deferred.producer_demand_offer_checks();
         const auto repeated = deferred_input->producers.read(1, 0, requested);
@@ -784,6 +787,20 @@ std::string producer_preparation_contracts(unsigned workers) {
     location.offers.front().price = whole(123); check_case(true);
     auto duplicate = location; duplicate.offers.front().price = whole(456);
     production.planets.push_back(std::move(duplicate)); check_case(true); check_case(true);
+    {
+        // An AI window binds its cut once per virtual tick: the bound snapshot, publication, frame and frontier again keep the
+        // bound input (same object, same rows); a later frame publishes a new input.
+        const auto cut = make_snapshot();
+        const auto publication = std::make_shared<const ai::GalacticConnectivity>();
+        const auto first = deferred.bind_publication(cut, publication, executor, frame, 100);
+        const auto second = deferred.bind_publication(cut, publication, executor, frame, 100);
+        const auto kept = deferred.copy_input();
+        const auto again = deferred.bind_publication(cut, publication, executor, frame, 100);
+        expect(first && second && again && deferred.copy_input() == kept, "a repeated bind of the bound cut keeps the bound input");
+        const auto later = deferred.bind_publication(cut, publication, executor, frame + 1, 100);
+        expect(later && deferred.copy_input() != kept && deferred.copy_input()->clocks.synchronization == frame + 1,
+            "a bind at a later frame publishes a new input");
+    }
     return trace.str();
 }
 
@@ -1072,6 +1089,55 @@ std::string connectivity_record_contracts(unsigned workers) {
     expect(static_cast<bool>(host.world->bind(snapshot, connectivity, executor, 1, 100)), "another connectivity generation with no matching cache rows binds");
     expect(host.world->native_record_encodes() == unchanged_work, "unrelated cache rows stay unencoded on later connectivity revisions");
     return host.world->state_hash().value();
+}
+
+// #7457: a load restores the saved cache rows into a world installed with an empty publication (revision 0). Adopting the
+// restored publication's revision keeps the connectivity rows through the first bind after the load, as the uninterrupted
+// world keeps them; a real connectivity change after the load still drops them.
+std::string restored_connectivity_contracts(unsigned workers) {
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    auto setup = fixture_setup(); setup.cache_intervals["ISCONNECTEDTO"] = real(1);
+    const auto snapshot = fixture(1, 4);
+    ai::GalacticConnectivity saved_publication; saved_publication.revision = 7;
+    QueryHost live(setup, fixture_data());
+    expect(static_cast<bool>(live.world->bind(snapshot, saved_publication, executor, 1, 100)), "the uninterrupted world binds the saved publication");
+    auto state = live.world->state();
+    for (unsigned i = 0; i < 4; ++i) {
+        const bool route = i % 2 == 0;
+        ai::GalacticCacheKey key;
+        key.player = i / 2 + 1; key.planet = 10;
+        key.tokens = {"VARIABLE_TARGET", route ? "ISCONNECTEDTO" : "STRUCTURECOUNT"};
+        key.bindings = {{"PARAMETER_UNUSED", real(i)}};
+        state.cache.push_back({std::move(key), real(i), route ? real(1) : real(-1), 1});
+    }
+    expect(static_cast<bool>(live.world->restore(state)), "the uninterrupted world holds connectivity rows cached on the save frame");
+    const auto saved = live.world->state_hash().value();
+    expect(static_cast<bool>(live.world->bind(snapshot, saved_publication, executor, 1, 100)), "the uninterrupted world binds the same publication again");
+    const auto uninterrupted = live.world->state_hash().value();
+    expect(live.world->state().cache.size() == 4, "an unchanged publication keeps every row in the uninterrupted world");
+    const auto load = [&](QueryHost& host, bool adopt) {
+        expect(static_cast<bool>(host.world->bind(snapshot, ai::GalacticConnectivity{}, executor, 1, 100)), "a load installs the world with an empty publication");
+        expect(static_cast<bool>(host.world->restore(state)) && host.world->state_hash().value() == saved, "a load restores the saved perception bytes");
+        if (adopt) host.world->adopt_restored_connectivity_revision(saved_publication.revision);
+        expect(static_cast<bool>(host.world->bind(snapshot, saved_publication, executor, 1, 100)), "the first bind after the load");
+    };
+    QueryHost unadopted(setup, fixture_data());
+    load(unadopted, false);
+    expect(unadopted.world->state().cache.size() == 2 && unadopted.world->state_hash().value() != uninterrupted,
+        "without adoption the first bind after a load drops the restored connectivity rows (the #7457 gap)");
+    QueryHost resumed(setup, fixture_data());
+    load(resumed, true);
+    expect(resumed.world->state().cache.size() == 4 && resumed.world->state_hash().value() == uninterrupted,
+        "an adopted load keeps the restored rows: perception bytes equal the uninterrupted world");
+    resumed.world->adopt_restored_connectivity_revision(saved_publication.revision);
+    expect(resumed.world->state_hash().value() == uninterrupted, "adopting the bound revision again changes nothing");
+    auto changed = saved_publication; ++changed.revision;
+    expect(static_cast<bool>(resumed.world->bind(snapshot, changed, executor, 1, 100)), "a real connectivity change after the load binds");
+    const auto remaining = resumed.world->state();
+    expect(remaining.cache.size() == 2 && std::none_of(remaining.cache.begin(), remaining.cache.end(), [](const auto& row) {
+        return row.key.tokens.back() == "ISCONNECTEDTO";
+    }), "a real connectivity change after the load still drops the connectivity rows");
+    return uninterrupted + resumed.world->state_hash().value();
 }
 
 std::string contracts(unsigned workers) {
@@ -1584,6 +1650,11 @@ function QueryProof(player, target)
     StockIsEmpire = EvaluatePerception("Is_Empire", player, target)
     StockHome = EvaluatePerception("Is_Home_Planet", player, target)
 end
+-- WGA-496: the stock destination helpers read a missing perception as 'no destination'.
+function WindowProof(player, target)
+    local value = EvaluatePerception("Is_Empire", player, target)
+    StockWindowNoValue = not value
+end
 )")), "query consumer harness mounts");
         auth::SessionConfig config; config.seed = 42; config.galactic_clock = true;
         config.script_directories = {"data/scripts/library/", "data/scripts/freestore/"};
@@ -1611,6 +1682,37 @@ end
             const auto value = scripts.read_global(7, name).value();
             expect(value && std::get_if<ai::Real>(&value->data) && std::get<ai::Real>(value->data) == real(1), "stock equation evaluates through production Lua host");
         }
+        // WGA-496: while the player's free-store startup window is open, its free store's perception has no value. Another player,
+        // another script of the same player (a plan the same barrier attached) and the closed window evaluate as before.
+        // Instance 7 stands for the player's free store here; instance 8 runs the same proof as a plan of that player.
+        const auto plan_instance = scripts.create_instance(8, "EAWR/QUERY_PROOF.LUA");
+        if (!plan_instance) throw std::runtime_error(eawr::core::format_diagnostic(plan_instance.error()));
+        const auto window_proof = [&](std::uint64_t sequence, gc::PlayerId who, std::uint64_t instance) {
+            auth::ScriptEvent proof = query; proof.key.tick = sequence; proof.key.sequence = 0; proof.name = "WindowProof"; // one serviced tick each
+            proof.key.entity = instance; proof.target = instance;
+            proof.arguments.front() = foc::detail::handle(foc::handle_player, who);
+            expect(static_cast<bool>(scripts.submit_event(proof)), "startup-window Lua query admitted");
+            const auto ran = scripts.service(executor);
+            if (!ran) throw std::runtime_error(eawr::core::format_diagnostic(ran.error()));
+            expect(ran.value().diagnostics.empty(), "startup-window query has no Lua faults");
+            const auto value = scripts.read_global(instance, "StockWindowNoValue").value();
+            return value && std::get_if<bool>(&value->data) && std::get<bool>(value->data);
+        };
+        const auto other = std::find_if(setup.players.begin(), setup.players.end(), [&](const auto& p) { return !p.neutral && p.player != empire->player; });
+        if (other == setup.players.end()) throw std::runtime_error("second stock player absent");
+        // The lifecycle owns and saves the window in production; this harness installs the same reader over a local table, with
+        // instance 7 as the Empire's free store.
+        std::map<gc::PlayerId, bool> windows;
+        host.engine.set_startup_perception_reader([&windows](auto player, std::uint64_t instance) { return instance == 7 && windows.contains(player); });
+        windows[empire->player] = false;
+        expect(host.engine.startup_perception_pending(empire->player, 7) && !host.engine.startup_perception_pending(other->player, 7)
+            && !host.engine.startup_perception_pending(empire->player, 8), "the window is per player and per free-store instance");
+        expect(window_proof(2, empire->player, 7), "an open startup window gives the stock free-store helpers no perception value");
+        expect(!window_proof(3, other->player, 7), "another player's perception is unaffected by the window");
+        expect(!window_proof(4, empire->player, 8), "a plan of the same player evaluates perception while the window is open");
+        windows.clear();
+        host.engine.set_startup_perception_reader({});
+        expect(!host.engine.startup_perception_pending(empire->player, 7) && !window_proof(5, empire->player, 7), "after the starting batch ran the AI reads perception again");
         trace << scripts.state_digest();
         const auto controlled_setup = stock_setup(control_plan, control_data, categories);
         QueryHost defence(controlled_setup, equations(stock_equations, converter));
@@ -1680,7 +1782,7 @@ int case_galactic_ai_perception_stock_tests(int argc, char**) {
         else {
             std::string reference;
             for (const auto workers : {1U, 2U, 4U, 8U}) {
-                const auto trace = owner_scope_contracts(workers) + binding_lifetime_contracts(workers) + interned_contracts(workers) + unchanged_record_contracts(workers) + connectivity_record_contracts(workers) + contracts(workers) + force_contracts(workers)
+                const auto trace = owner_scope_contracts(workers) + binding_lifetime_contracts(workers) + interned_contracts(workers) + unchanged_record_contracts(workers) + connectivity_record_contracts(workers) + restored_connectivity_contracts(workers) + contracts(workers) + force_contracts(workers)
                     + story_campaign_contracts(workers) + difficulty_seat_contracts(workers)
                     + producer_preparation_contracts(workers) + path_coefficient_contracts(workers) + path_coefficient_reader_contracts(workers) + supplemental_reader_contracts(workers) + offensive_reader_contracts(workers) + underworld_corruption_readers(workers);
                 const auto target_trace = target_contrast_contracts(workers);

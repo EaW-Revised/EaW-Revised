@@ -34,12 +34,6 @@ namespace eawr::presentation::ui {
     std::span<const sim::EntityId> selected, std::span<const sim::tactical::TacticalInstance> instances,
     const std::optional<sim::tactical::BattleControllerPolicy>& policy);
 
-// GameConstants.xml (FoC): MinimumDragSelectDistance and MinimumDragDistance, in cursor pixels. A
-// left drag whose larger side exceeds the select distance box-selects on release; anything smaller
-// is a click. The box is drawn once the drag passes the select distance, or at once while nothing
-// is selected.
-inline constexpr float minimum_drag_select_distance = 100.0F;
-inline constexpr float minimum_drag_distance = 4.0F;
 // Player.cpp NUM_CONTROL_GROUPS; keys 1..9 and 0 (group 0).
 inline constexpr std::size_t control_group_count = 10;
 // G-3: a second of logical frames, independent of wall time and playback speed.
@@ -152,15 +146,20 @@ struct SquadronIcon {
 // MinimumDragDistance is a click (the order is decided at the release point); past it and below
 // MinimumDragSelectDistance is the compass (a move is ordered at the press point); MinimumDragSelectDistance
 // or more cancels a move (an attack or guard is not affected).
+// GameConstants.xml (FoC): MinimumDragSelectDistance and MinimumDragDistance, in cursor pixels. A
+// left drag whose larger side exceeds the select distance box-selects on release; anything smaller
+// is a click. The box is drawn once the drag passes the select distance, or at once while nothing
+// is selected.
 enum class RightRelease : std::uint8_t { ignored, compass, click, cancel };
 [[nodiscard]] RightRelease right_release(std::optional<std::array<float, 2>> press,
-                                         std::array<float, 2> release) noexcept;
+                                         std::array<float, 2> release, float drag_select_distance,
+                                         float drag_click_distance) noexcept;
 
 // O-6 / MV-40: shared group heading in [0, 360), rounded to a tenth of a degree.
 [[nodiscard]] std::optional<sim::math::Fixed> compass_yaw(const Vec3f& press, const Vec3f& release) noexcept;
 // O-2: the hold gates the authored arrow only; quick flicks still order.
 [[nodiscard]] bool compass_visible(std::optional<std::array<float, 2>> press,
-    std::array<float, 2> cursor, double held_seconds) noexcept;
+    std::array<float, 2> cursor, double held_seconds, float drag_select_distance, float drag_click_distance) noexcept;
 
 // O-2, O-4: the point a facing-only drag turns the selected ships towards: from `press` (the battle
 // plane point of the press) along the direction to `release`, rounded to 0.1 degree like the retail

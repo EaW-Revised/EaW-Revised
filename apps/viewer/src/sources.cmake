@@ -106,6 +106,7 @@ set(EAWR_VIEWER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/particle_workers.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/live_fog_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/land_overlay_view.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/path_line_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/land_deploy_zone_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/live_session_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/live_session_report.hpp"

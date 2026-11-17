@@ -24,8 +24,12 @@
 #include "eawr/net/port_mapping.hpp"
 #include "eawr/net/reconnect.hpp"
 #include "eawr/net/setup.hpp"
+#include "eawr/vfs/vfs.hpp"
+#include "../support/temp_dir.hpp"
+#include <fstream>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <barrier>
 #include <chrono>
 #include <cstddef>
@@ -33,6 +37,7 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -285,19 +290,35 @@ void diagnostic_contract() {
     log.emit("test", "none", 1);
 }
 
-// The product wiring of the input-delay mode (MP-05): only an online (relayed) skirmish gets the host-proposed adaptive
-// delay; TCP LAN keeps the offered fixed delay, and a galactic (co-op campaign) room never gets it here.
+// Production reuses the lobby session in both live drivers: campaign timing must be set here too.
 void input_timing_wiring_contract() {
     stage = "input timing wiring";
+    {
+        viewer::OnlineMatchOptions options; options.build_identity = "local-build";
+        auto online = viewer::make_online_match(options);
+        net::OnlineRoomAdmission admission; admission.room = std::string(32, 'a');
+        admission.build_identity = "foreign-build";
+        online->join_admitted(std::move(admission));
+        const auto state = online->view();
+        expect(state.phase == viewer::LanPhase::ended && state.diagnostic_code == "EAWR-NET-1503"
+            && state.message.find("foreign-build") != std::string::npos && state.message.find("local-build") != std::string::npos,
+            "a mismatching admitted host build is refused before native transport or setup creation");
+    }
+    viewer::LanDiagnostics pace;
+    expect(pace.input_tick_ms(1, 3, 0) == 0.0 && pace.input_tick_ms(1, 33, 1000) == 1000.0 / 30.0,
+        "peer input cadence uses the advancing sealed frontier");
+    expect(pace.input_tick_ms(1, 33, 2000) == 0.0 && pace.input_tick_ms(1, 3, 2100) == 0.0,
+        "stopped or restored frontiers do not display stale cadence");
     using Mode = net::LobbyGameMode;
     struct Row { bool online; Mode mode; bool adaptive; const char* what; };
     for (const Row& row : {Row{true, Mode::skirmish, true, "online skirmish"}, Row{false, Mode::skirmish, false, "TCP LAN skirmish"},
-            Row{true, Mode::galactic, false, "online co-op campaign"}, Row{false, Mode::galactic, false, "LAN co-op campaign"}}) {
+            Row{true, Mode::galactic, true, "online co-op campaign"}, Row{false, Mode::galactic, false, "LAN co-op campaign"}}) {
         net::SessionOptions options;
         viewer::lan_detail::configure_input_timing(options, row.online, row.mode);
         expect(options.adaptive_timing.has_value() == row.adaptive && options.non_lan == row.adaptive,
             std::string(row.what) + (row.adaptive ? " gets adaptive timing and is non-LAN" : " keeps the fixed delay"));
         if (!row.adaptive) continue;
+        expect(options.adaptive_timing->responsive == (row.mode == Mode::galactic), "online campaigns use responsive timing");
         expect(options.adaptive_timing->host == 0 && options.adaptive_timing->broadband && options.adaptive_timing->hold_on_expiry
             && options.adaptive_timing->max_deferrals > 0 && !options.adaptive_timing->rtt_ms,
             "online skirmish: host 0 proposes from the transport's measured RTT with a bounded hold");
@@ -948,6 +969,134 @@ static void long_session_contracts() {
 }
 using namespace viewer_lan_test;
 
+static void deferred_content_start_contract() {
+    stage = "deferred skirmish content recheck handoff";
+    const auto initial = human_setup(2);
+    eawr::skirmish::FixtureOptions selected;
+    selected.map = initial.skirmish->map; selected.match = initial.skirmish->match; selected.seed = initial.seed;
+    selected.slots = std::vector<eawr::skirmish::LobbySlot>{{1, "Rebel", 1, true, {}, 0}, {2, "Empire", 2, true, {}, 1}};
+    eawr::skirmish::SetupMap map; map.path = *selected.map; map.metadata.capacity = 2;
+    map.metadata.new_markers = true; map.metadata.start_positions.emplace(3);
+    map.teams = {{1, {"Rebel"}, 1}, {2, {"Empire"}, 1}};
+    const viewer::LanLobbyBuilder builder = [initial](const auto& options) {
+        auto built = initial; built.seed = options.seed.value_or(initial.seed); built.skirmish->match = *options.match;
+        for (const auto& slot : *options.slots) {
+            built.players[slot.slot - 1].faction_id = eawr::skirmish::faction_id(slot.faction);
+            built.players[slot.slot - 1].team_id = slot.team;
+            built.skirmish->slots[slot.slot - 1].colour_index = slot.colour_index;
+        }
+        return eawr::core::Result<tactical::TacticalSetup>::success(std::move(built));
+    };
+    std::promise<void> release;
+    const auto gate = release.get_future().share();
+    auto reads = std::make_shared<std::atomic<unsigned>>(0);
+    std::promise<void> guest_release;
+    const auto guest_gate = guest_release.get_future().share();
+    auto guest_reads = std::make_shared<std::atomic<unsigned>>(0);
+    eawr::core::PreparedContentIdentity content(sim::identity_domain("admission", "same").digest);
+    content.layers.push_back({"Fixture", sim::identity_domain("layer", "same").digest});
+    auto host = make_match(), guest = make_match();
+    host->configure_skirmish_content([content, reads, gate] {
+        if (reads->fetch_add(1) != 0) gate.wait();
+        return eawr::core::Result<eawr::core::PreparedContentIdentity>::success(content);
+    });
+    guest->configure_skirmish_content([content, guest_reads, guest_gate] {
+        if (guest_reads->fetch_add(1) != 0) guest_gate.wait();
+        return eawr::core::Result<eawr::core::PreparedContentIdentity>::success(content);
+    });
+    host->configure_lobby("Host", 0, {map}, builder); guest->configure_lobby("Guest", 1, {map}, builder);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    const auto pump = [&] { host->pump_setup(selected); guest->pump_setup({}); };
+    const auto wait = [&](const auto& predicate) {
+        while (!predicate()) {
+            expect(std::chrono::steady_clock::now() < deadline, "deferred content Start deadline");
+            pump(); std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    host->host(0); wait([&] { return host->lobby_state().has_value(); });
+    guest->join("127.0.0.1:" + std::to_string(host->view().port));
+    wait([&] { return guest->lobby_state() && host->lobby_state()->snapshot.seats.size() == 2
+        && guest->lobby_state()->snapshot == host->lobby_state()->snapshot && !guest->lobby_state()->identity_pending; });
+    expect(host->lobby_ready(true) && guest->lobby_ready(true), "equal admission content can Ready");
+    wait([&] { return host->view().start_enabled; });
+    host->start(selected);
+    for (unsigned i = 0; i < 10; ++i) {
+        pump();
+        expect(!host->take_start() && host->lobby_state()->snapshot.phase == net::LobbyPhase::staging,
+            "a pending recheck never hands an uncreated setup to the live driver");
+    }
+    {
+        // A skirmish Start waiting on the content check tells the room so, never the campaign text.
+        bool checking = false, campaign = false;
+        for (const auto* peer : {host.get(), guest.get()}) {
+            const auto state = peer->lobby_state();
+            for (const auto& line : state->chat) {
+                checking = checking || line.text.find("Checking mod content before Start.") != std::string::npos;
+                campaign = campaign || line.text.find("preparing the campaign") != std::string::npos;
+            }
+        }
+        expect(checking && !campaign, "a pending skirmish Start posts the content-check text, not the campaign text");
+    }
+    wait([&] { return reads->load() >= 2; });
+    expect(host->lobby_ready(false), "Unready cancels the pending content check attempt");
+    expect(host->lobby_ready(true), "the same choices can Ready after cancellation");
+    wait([&] { return host->view().start_enabled; });
+    host->start(selected);
+    wait([&] { return reads->load() >= 3; });
+    expect(!host->take_start(), "a retry starts a fresh content read instead of reusing the cancelled attempt");
+    release.set_value();
+    std::optional<eawr::skirmish::FixtureOptions> started;
+    wait([&] { started = host->take_start(); return started.has_value(); });
+    expect(host->lobby_state()->snapshot.phase == net::LobbyPhase::starting,
+        "a resumed recheck publishes frozen setup before host handoff");
+    wait([&] { return guest->lobby_state()->snapshot.phase == net::LobbyPhase::starting; });
+    for (unsigned i = 0; i < 10; ++i) {
+        pump();
+        expect(!guest->take_start(), "the guest also waits for its own recheck and setup before handoff");
+    }
+    guest_release.set_value();
+    wait([&] { return guest->take_start().has_value(); });
+    guest->cancel(); host->cancel();
+}
+
+static void admission_content_contracts() {
+    const auto refused = net::lobby_diagnostic(net::LobbyReason::setup_failed,
+        "mod content/order differs at layer 1: Build version mod; host abcdef01 vs you abcdef02; update the Workshop item 123 on both PCs");
+    expect(viewer::online_start_failure_text(refused, viewer::LanReason::refused, false) == refused.message,
+        "online skirmish content refusal retains both values and Workshop hint in player text");
+    const auto root = std::filesystem::temp_directory_path() / ("eawr-room-content-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path root; ~Cleanup() { eawr::testing::remove_temp_directory(root); } } cleanup{root};
+    for (const auto* copy : {"host", "guest"}) {
+        std::filesystem::create_directories(root / copy / "xml");
+        std::filesystem::create_directories(root / copy / "scripts");
+        std::filesystem::create_directories(root / copy / "art/maps");
+        std::ofstream(root / copy / "xml/unit.xml") << "<Unit speed=\"1\"/>";
+        std::ofstream(root / copy / "scripts/test.lua") << "return 1";
+        std::ofstream(root / copy / "art/maps/test.ted") << "map bytes";
+    }
+    eawr::skirmish::SetupMap map; map.path = "data/art/maps/test.ted";
+    const std::array maps{map};
+    const auto identify = [&](const char* copy, const std::string& label) {
+        const std::array specs{eawr::vfs::MountSpec{"local-path-key", root / copy, "data", {}}};
+        auto filesystem = require(eawr::vfs::Vfs::mount(specs));
+        return require(viewer::skirmish_room_content(filesystem, maps, {label}));
+    };
+    const auto host = identify("host", "Fixture (Workshop 123)");
+    const auto same = identify("guest", "A different local profile name");
+    expect(host.digest == same.digest && host.layers[0].digest == same.layers[0].digest,
+        "equal effective bytes have equal identities across locations and diagnostic names");
+    std::ofstream(root / "guest/xml/unit.xml") << "<Unit speed=\"2\"/>";
+    expect(identify("guest", "Fixture").digest != host.digest, "changed XML refuses before the unit/start setup is built");
+    std::ofstream(root / "guest/xml/unit.xml") << "<Unit speed=\"1\"/>";
+    std::ofstream(root / "guest/scripts/test.lua") << "return 2";
+    expect(identify("guest", "Fixture").digest != host.digest, "changed effective Lua is an admission difference");
+    std::ofstream(root / "guest/scripts/test.lua") << "return 1";
+    std::ofstream(root / "guest/art/maps/test.ted") << "changed map";
+    expect(identify("guest", "Fixture").digest != host.digest, "changed lobby map bytes are an admission difference");
+    deferred_content_start_contract();
+}
+
 static void load_transport_pump_contracts() {
     using Clock = std::chrono::steady_clock;
     using namespace std::chrono_literals;
@@ -1071,6 +1220,9 @@ static void load_transport_pump_contracts() {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--room-content") {
+            admission_content_contracts(); viewer::shutdown_lan_drains(); return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--load-pump") {
             load_transport_pump_contracts(); viewer::shutdown_lan_drains(); return 0;
         }
@@ -1091,7 +1243,7 @@ int main(int argc, char** argv) {
             std::cout << "transient-repair loop passed\n";
             return 0;
         }
-        load_transport_pump_contracts();
+        admission_content_contracts(); load_transport_pump_contracts();
         long_session_contracts();
         viewer::LanView measured;
         measured.connected = true; measured.remote_endpoint = "127.0.0.1:47624";
@@ -1118,6 +1270,10 @@ int main(int argc, char** argv) {
         expect(!window.accept(3 + requests * 3 + 3), "the request past the budget is refused");
         expect(!window.accept(3 + window_ticks) && window.accept(4 + window_ticks), "oldest expires strictly after the window");
         expect(!window.accept(4 + window_ticks) && window.accept(7 + window_ticks), "expiry retains the younger accepted requests");
+        // Owner online test 2026-11-17: a full budget never refuses the return to normal speed, and that return
+        // spends nothing.
+        expect(window.accept(8 + window_ticks, true) && window.accept(9 + window_ticks, true), "normal speed is always accepted");
+        expect(!window.accept(9 + window_ticks), "the return to normal spent no budget for a faster request");
         for (std::uint32_t tactical_speed = 0; tactical_speed < 5; ++tactical_speed)
             for (std::uint32_t strategic_speed = 0; strategic_speed < 5; ++strategic_speed) {
                 const eawr::net::MatchOptions options{tactical_speed, strategic_speed};
@@ -1145,7 +1301,7 @@ int main(int argc, char** argv) {
             invalid->view().message.find("hostname") != std::string::npos, "invalid endpoint has clear corrective error text");
         recovery_presentation_contract();
         lan_ai_defaults_follow_authored_constraints(); lan_overflow_human_keeps_its_seat(); lobby_refusal_and_placeholder_contracts(); shared_builder_matches_former_live_encoding(); terminal_lobby_commands_are_inert();
-        close_one_mesh_edge(); editable_staging_team_rules(); advanced_options_three_peers(); ai_difficulty_two_peers(); seat_controls_three_peers(); seat_controls_three_peers(true); authoritative_staging(false); authoritative_staging(true);
+        close_one_mesh_edge(); editable_staging_team_rules(); ready_reaches_host_before_prepare(); advanced_options_three_peers(); ai_difficulty_two_peers(); seat_controls_three_peers(); seat_controls_three_peers(true); authoritative_staging(false); authoritative_staging(true);
         authoritative_staging(true, net::LobbyReason::kicked); authoritative_staging(true, net::LobbyReason::host_closed);
         capacity_does_not_create_players();
         nine_seat_staging({1, 2, 3, 4, 5, 6, 7, 8, 9});

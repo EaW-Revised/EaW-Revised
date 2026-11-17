@@ -11,3 +11,8 @@ foreach(entry Origin Gateways Equal_Footing Heart_Of_The_Maw Rim_Worlds Clusters
     set_tests_properties(galactic_mp_sandbox_start_stock_${entry} PROPERTIES LABELS game-data TIMEOUT 900
         SKIP_REGULAR_EXPRESSION "SKIPPED:")
 endforeach()
+# Every playable faction a human side, only ambient AI seats left: the start runs without a native AI (GCMP-AI-03).
+eawr_add_game_data_test(NAME galactic_mp_sandbox_start_stock_ambient_only
+    COMMAND galactic_mp_sandbox_start_stock_tests Multiplayer_Sandbox_Origin --ambient-only)
+set_tests_properties(galactic_mp_sandbox_start_stock_ambient_only PROPERTIES LABELS game-data TIMEOUT 900
+    SKIP_REGULAR_EXPRESSION "SKIPPED:")

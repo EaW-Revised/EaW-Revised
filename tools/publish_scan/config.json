@@ -230,14 +230,6 @@
       },
       {
         "path": "apps/viewer/src/live_session_frame.cpp",
-        "sha256": "8dc1281319fb6ea999b67d50a14e95aae07c963e2fe11e102aa2851ff9cea3fb",
-        "patterns": [
-          "lan-host"
-        ],
-        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
-      },
-      {
-        "path": "apps/viewer/src/live_session_frame.cpp",
         "sha256": "896cdc5b693cc375804c56d7c61cfcc495cc92062933f7095e5cd44e52ff697f",
         "patterns": [
           "lan-host"
@@ -1211,7 +1203,26 @@
           "private-ipv4"
         ],
         "reason": "Documented RFC 1918 deny range or explanation for coturn, no deployed host; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "cd498bb708755086a32d0b74000625a6b33bfc9b47c4d81f2edc3110a6f8984d",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed C++ LAN option member access, no hostname or address; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_report.cpp",
+        "sha256": "fac18cc1df8f06da096d6de5b5576455738423027c2d7a59c1ccec0525ecfd7f",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed C++ LAN option member access, no hostname or address; exact full line only."
       }
+    ],
+    "public_hosts": [
+      "eaw.ernst.work"
     ]
   },
   "cleanroom": {
@@ -1268,9 +1279,9 @@
       "third_party/lua/etc/lua.xpm": "2efc535d4e7ea430363a9592a6238217c3a24d825994f6546262bac3c83b709e"
     },
     "binary_allowlist": {
-      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "4ce4d93152740ddb41a2e216c15ebf514eefc53f8d2d70f221df0028b8a055b2",
-      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "88c0a33546b88e953131f2e11d76296fd336298cea47cb098c65f87919609ba4",
-      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "b24a2080d8013304b995aeefef2279cc5c0bfb0f34f38c4f6ce789f550df5f16",
+      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "c43ae03dcd074d3936953edc4e731686874919edde6fe1aea10c00b3bfd3a57b",
+      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "544212c4daf0363741a2af75e652d4efef2e3414ab81e2e72ed661305d966c6e",
+      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "00066f39ee31b5f8387be95f34b73a16063919242765e746242b2119d3503a4e",
       "tests/fog/fixtures/fog-stub-v1-one-cell.eawr-fog": "a3f3015681fac46bb56f8fd5270c46bf29e7f090559a6d6d2f8e7c29246f9b27",
       "tests/fog/fixtures/fog-stub-v1-zero-tick.eawr-fog": "34a86fcc4b9bc2a39556d8aa249355c5df37e9955a3bda7e983c10bb5e53664b",
       "tests/fog/fixtures/fog-stub-v1.eawr-fog": "259541928e1855e91b084d6743fbde1f579851cd41b81199f440f1881c0a9c58",
@@ -1341,7 +1352,7 @@
       "tests/replay/fixtures/tactical-visibility-frame-6.eawr-replay": "8bc3d6aa2d789702fde9af586071cb36a06ff28f0d679907b3eba9219f85668a",
       "tests/replay/fixtures/tactical-visibility-frame-7.eawr-replay": "74a4215f28f015cae40e791baf58d3be76efb3ba2125ac588e57126d24d7c9c4",
       "tests/replay/fixtures/zero-tick-v1.eawr-replay": "f92cda7a6f86d6a321a1f0a8858b35318959d54b6f35a6457f353d0dbeab9345",
-      "tests/skirmish/fixtures/m2-start.eawr-replay": "3a1f2c32c62aa2c323a79816b21d69493d8a07210745b3d5901b3ec95983ed4b",
+      "tests/skirmish/fixtures/m2-start.eawr-replay": "7c9979cd72ab13b8b1717a1e5fb23575b94fc8298f78d59ad4fa60b5578ab6ac",
       "tests/skirmish/fixtures/saves/tactical-v2-host.eawr-ckp": "d82d07f808b9f9480e3e322898d2d75c180168a61a30a61983c0c62de94adbbf",
       "third_party/lua/test/life.lua": "8b6d100472572d4baf4ff06901077aad24d98336cdf7500871f07a486c7a25d2",
       "tests/galactic/fixtures/control-corpus/political-conquest.eawr-gcreplay": "17b8132b81ba1dfcab9c6ca4f5b2f7a954087c1332c6997a267ee0985abf3ac1",
@@ -1356,10 +1367,10 @@
       "tests/galactic/fixtures/production-corpus/queues-basic.eawr-gcreplay": "5836aa46aa6e157e190f2b194f0181377519f48796777b72b33c9790b605415f",
       "tests/galactic/fixtures/production-corpus/queues-orbit.eawr-gcreplay": "9896d98a81e39f4ad0a02ed6392d7ca3353b0cc9948087e8dc89c75ee30fa982",
       "tests/galactic/fixtures/production-corpus/queues-paygo.eawr-gcreplay": "a0b393c9de85ee430fc09bdea8275e44448d9de47b3c173362fe345703f4044b",
-      "tests/skirmish/fixtures/installed/banked-hardpoints.eawr-replay": "409e212ca189f3a16e2e7b47b5fbc33862555da0e27e13c2013ffb0b71b84ead",
-      "tests/skirmish/fixtures/installed/carrier-waypoints.eawr-replay": "dcbec633230ecfd7c437f5b1bc3e201552493d7f2f36f974c9731e2a238c8ac2",
-      "tests/skirmish/fixtures/installed/leech-shields.eawr-replay": "82894dfbc4f0ad81dbef7444a5fb9468e846482280e6c43e2b5d50dd12fbb173",
-      "tests/skirmish/fixtures/installed/special-blast.eawr-replay": "0ef0f51176cabd5785169061b236cd08a26b098a9be200210b8dc439e6918fc1"
+      "tests/skirmish/fixtures/installed/banked-hardpoints.eawr-replay": "02112d0bdb81bb37723f34deb9bbcaa279c83d90e84fa5a3789e61c0277c30e0",
+      "tests/skirmish/fixtures/installed/carrier-waypoints.eawr-replay": "7cb49c8c0af45e242717bcff88db6af4addfe96e8c992f57d658b9964f5f4c9d",
+      "tests/skirmish/fixtures/installed/leech-shields.eawr-replay": "e363985e086aa5a8264208324e0704bfe4182a06040ff65ea3d0f432c4dc16a5",
+      "tests/skirmish/fixtures/installed/special-blast.eawr-replay": "3f2e6c2b8324185fbbcbdd0b297ef17aa1c06b0e9e1f98c0bb7f32fed07a7513"
     },
     "image_allowlist_origins": {
       "third_party/lua/doc/logo.gif": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT).",

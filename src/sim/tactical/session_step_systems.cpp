@@ -822,8 +822,26 @@ core::Result<void> session_detail::Tick::systems() {
     mark("systems_setup", false);
     // WSL-38/41: gather only active repair work inside the existing partitioned entity phase.
     std::array<std::vector<std::size_t>, tick_partition_count> repair_units;
+    if (impl_->prediction_paths) {
+        for (std::size_t partition = 0; partition < tick_partition_count; ++partition) {
+            auto& rows = impl_->prediction_scratch[partition];
+            rows.clear();
+            const auto range = partition_range(partition, inputs.size());
+            rows.reserve(range.end - range.begin);
+        }
+    }
     const auto executed = executor.execute_phase("unit-systems", tick_partition_count, [&](const std::size_t partition) {
         service_systems_partition(partition, inputs, proxy_live, serviced, capture_jobs, transfer_categories, transfer_containers, construction, damage_rules, errors, arrivals, asteroid_queries, asteroid_scratch, field_index, field_reach, fields, asteroid_candidates, repair_units, instances, craft_states, squadron_states);
+        // PL-01: one opt-in branch per partition; reuse this phase's barrier and staging capacity.
+        if (impl_->prediction_paths) {
+            auto& rows = impl_->prediction_scratch[partition];
+            const auto range = partition_range(partition, inputs.size());
+            for (auto index = range.begin; index < range.end; ++index) {
+                const auto& unit = inputs[index];
+                if (errors[index] || serviced[index].unit_destroyed || !impl_->flies_plan(unit)) continue;
+                rows.push_back({index, {unit.state.entity_id, {impl_->cached_plan(unit)}}});
+            }
+        }
     });
     if (!executed) {
         return core::Result<void>::failure(executed.error());
@@ -834,6 +852,19 @@ core::Result<void> session_detail::Tick::systems() {
         }
     }
 
+    // PL-01: stock performs no per-unit publication work. Serial cache writes follow all readers.
+    if (impl_->prediction_paths) {
+        impl_->predicted_path_visits += inputs.size();
+        auto& paths = systems_->predicted_paths;
+        std::size_t count = 0;
+        for (const auto& rows : impl_->prediction_scratch) count += rows.size();
+        paths.reserve(count); // immutable snapshot storage, sized only for moving ships
+        for (auto& rows : impl_->prediction_scratch) for (auto& [index, row] : rows) {
+            if (!row.plan) row.plan.path = impl_->remember_plan(inputs[index]);
+            paths.push_back(std::move(row));
+        }
+        if (tick % 128 == 0) impl_->sweep_plans();
+    }
     if (auto result = commit_environmental_hits(inputs, serviced, damage_rules, asteroid_impacts, asteroid_scratch, instances); !result) return result;
     if (auto result = service_hardpoint_repairs(inputs, serviced, repair_units, instances, errors); !result) return result;
     return core::Result<void>::success();

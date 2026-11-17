@@ -7,6 +7,7 @@
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/core/gc_profile.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/core/degradation_ledger.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 
 #include <algorithm>
@@ -1047,6 +1048,32 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
             auto& last = impl.last[recorded.key.seat];
             last = std::max(last, std::pair(recorded.key.tick, recorded.key.sequence));
         }
+        // Hosted AI faults used to be dropped while story and object faults were
+        // forwarded. These are observer diagnostics, not native inputs.
+        if (hosted.value().ai) {
+            for (const auto& row : hosted.value().ai->diagnostics) {
+                core::Diagnostic note; note.code = row.code;
+                note.severity = row.code == "EAWR-SCRIPT-0216" || row.code == "EAWR-SCRIPT-0217"
+                    ? core::Severity::warning : core::Severity::error;
+                note.message = "AI script instance " + std::to_string(row.instance) + " at tick " + std::to_string(row.tick) + ": " + row.message;
+                note.source_id = core::degradation::campaign_source();
+                out.diagnostics.push_back(std::move(note));
+            }
+            for (const auto& notice : hosted.value().ai->observer_notices) {
+                out.diagnostics.push_back(notice.diagnostic);
+                // Use only the existing presentation feed. Native story_notice
+                // also notifies the plot engine and marks world output published.
+                std::set<galactic::PlayerId> recipients;
+                for (const auto& seat : hosted.value().world.snapshot->seats())
+                    if (seat.active && seat.kind == galactic::SeatKind::human && seat.player) recipients.insert(seat.player);
+                for (const auto player : recipients) {
+                    galactic::story::ConsumerRequest text;
+                    text.consumer = galactic::story::Consumer::text; text.reward_name = "SCREEN_TEXT";
+                    text.parameters = {notice.text, "15"};
+                    impl.story_presentation.push_back({player, std::move(text)});
+                }
+            }
+        }
         // WST-53: what a sub-plot script ran into (an unbound engine function, a refusal, a script error) is published
         // with the step, named by its sub-plot.
         for (const auto& row : hosted.value().story.diagnostics) {
@@ -1058,6 +1085,8 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
                 if (found != entries.end()) { owner = found->subplot; module = found->module; }
             }
             core::Diagnostic note; note.code = row.code; note.message = "story script " + owner + " at tick " + std::to_string(row.tick) + ": " + row.message;
+            note.severity = row.code == "EAWR-SCRIPT-0216" || row.code == "EAWR-SCRIPT-0217"
+                ? core::Severity::warning : core::Severity::error;
             // The script's logical module path: the degradation ledger names the layer it came from (observation only).
             if (!module.empty()) note.logical_path = std::move(module);
             out.diagnostics.push_back(std::move(note));
@@ -1069,6 +1098,8 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
             for (const auto& row : hosted.value().objects->diagnostics) ++counted[{row.code, row.message}];
             for (const auto& [text, count] : counted) {
                 core::Diagnostic note; note.code = text.first;
+                note.severity = text.first == "EAWR-SCRIPT-0216" || text.first == "EAWR-SCRIPT-0217"
+                    ? core::Severity::warning : core::Severity::error;
                 note.message = "object script: " + text.second + (count > 1 ? " (" + std::to_string(count) + " instances)" : std::string{});
                 out.diagnostics.push_back(std::move(note));
             }
@@ -1077,7 +1108,12 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
         hosted.value().world.state_sha256 = impl.hasher ? std::string{} : hosted.value().state_hash.get();
         return core::Result<galactic::GalacticTick>::success(std::move(hosted).value().world);
     }();
-    if (!stepped) { impl.failure = stepped.error(); return core::Result<void>::failure(*impl.failure); }
+    if (!stepped) {
+        // Even a fatal internal AI/script Result must leave an error-class
+        // observation; there is no successful GameTick for the live adapter.
+        core::degradation::record_runtime_line(core::format_diagnostic(stepped.error()), core::degradation::campaign_source());
+        impl.failure = stepped.error(); return core::Result<void>::failure(*impl.failure);
+    }
     out.galaxy_work = stepped.value().work;
     out.state_sha256 = std::move(stepped.value().state_sha256);
     out.state_hash = std::move(stepped.value().state_hash);

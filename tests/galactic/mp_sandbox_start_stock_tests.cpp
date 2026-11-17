@@ -28,8 +28,11 @@ using galactic_test::expect;
 using eawr::testing::result_diagnostic::take;
 using namespace std::chrono_literals;
 
+// `ambient_only`: every playable faction is a human side, so the only AI seats left are ambient factions. A multiplayer
+// entry that pairs none of them (the stock entries author no AI_Player_Control) starts without a native AI, as an online
+// versus room whose humans hold every playable faction does (GCMP-AI-03), instead of refusing 'selected stock players'.
 void start_entry(const std::shared_ptr<const eawr::vfs::Vfs>& filesystem, const eawr::data::Catalog& catalog,
-    const eawr::data::galactic::GalacticData& data, std::string_view name) {
+    const eawr::data::galactic::GalacticData& data, std::string_view name, bool ambient_only) {
     const auto* source = data.campaign(name);
     if (!source) throw std::runtime_error("missing stock campaign " + std::string(name));
     expect(source->is_multiplayer.value_or(false) && source->starting_active_player.empty(),
@@ -41,13 +44,22 @@ void start_entry(const std::shared_ptr<const eawr::vfs::Vfs>& filesystem, const 
     options.rules_flavour = cp::campaign_rules_flavour(*source);
     const auto human_faction = cp::local_start_faction(data, *source);
     expect(!human_faction.empty(), std::string(name) + " offers a faction for the local human");
+    bool paired_ambient = false;
+    std::size_t humans{};
     for (const auto& faction : data.factions) {
         const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
         options.players.push_back({{id, id, 0}, faction.name, true});
-        const bool human = faction.name == human_faction;
-        if (human) options.solo_reference_human = id;
+        const bool playable = faction.is_playable.value_or(false) && !faction.is_neutral.value_or(false);
+        const bool human = ambient_only ? playable : faction.name == human_faction;
+        // Several humans have no solo reference: the observer roster holds every human side, as in a networked room.
+        if (!ambient_only && human) options.solo_reference_human = id;
+        if (!playable && !faction.is_neutral.value_or(false))
+            paired_ambient = paired_ambient || std::any_of(source->ai_player_control.begin(), source->ai_player_control.end(),
+                [&](const auto& pair) { return pair.faction == faction.name; });
+        // A galaxy has at most two human sides: in the ambient-only layout the first human holds side 1, the rest side 2.
+        const gc::HumanSideId side = !human ? 0U : !ambient_only ? static_cast<gc::HumanSideId>(id) : humans++ == 0 ? 1U : 2U;
         if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
-            human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, human ? id : 0});
+            human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, side});
     }
     std::vector<std::string> originals;
     for (const auto& type : types.types) originals.push_back(type.name);
@@ -56,7 +68,9 @@ void start_entry(const std::shared_ptr<const eawr::vfs::Vfs>& filesystem, const 
 
     auto prepared = take(eawr::platform::PreparedLiveCampaign::create(filesystem, catalog, data, types, name, options,
         "Normal_Default", true));
-    expect(prepared->native_ai_installed(), std::string(name) + " installs the native AI");
+    if (ambient_only) expect(prepared->native_ai_installed() == paired_ambient, std::string(name)
+        + (paired_ambient ? " installs the native AI of its paired ambient factions" : " starts its ambient-only AI seats without a native AI"));
+    else expect(prepared->native_ai_installed(), std::string(name) + " installs the native AI");
     eawr::platform::LiveGameSession::Options live_options;
     live_options.workers = 1; live_options.pacing = eawr::platform::LiveGameSession::Pacing::driven;
     auto live = take(eawr::platform::LiveGameSession::start(std::move(prepared), live_options));
@@ -75,14 +89,15 @@ int main(int argc, char** argv) {
     try {
         const auto root = eawr::testing::game_root();
         if (!root) return eawr::testing::skip_installed("SKIPPED: the stock multiplayer start requires EAWR_EAW_GAME_ROOT\n", 0, std::cout);
-        if (argc != 2) throw std::runtime_error("usage: galactic_mp_sandbox_start_stock_tests <campaign>");
+        const bool ambient_only = argc == 3 && std::string_view(argv[2]) == "--ambient-only";
+        if (argc != 2 && !ambient_only) throw std::runtime_error("usage: galactic_mp_sandbox_start_stock_tests <campaign> [--ambient-only]");
         std::vector<eawr::vfs::MountSpec> mounts;
         for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
             mounts.push_back(take(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data")).mount);
         const auto filesystem = std::make_shared<const eawr::vfs::Vfs>(take(eawr::vfs::Vfs::mount(mounts)));
         const auto loaded = take(eawr::data::load_catalog(*filesystem, eawr::data::Profile::foc));
         const auto data = take(eawr::data::galactic::load_galactic_data(*filesystem, loaded.catalog));
-        start_entry(filesystem, loaded.catalog, data, argv[1]);
+        start_entry(filesystem, loaded.catalog, data, argv[1], ambient_only);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

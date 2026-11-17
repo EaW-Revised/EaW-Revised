@@ -74,7 +74,7 @@ struct TourGates final {
     return gates.map_showing && !gates.paused && !gates.prompt_up;
 }
 
-// DEV-13 (#6291 follow-up): the Space binding, the player's Options > Tweaks choice ("Space pauses the galactic game", off by
+// DEV-13 (#6291 follow-up): the Space binding, the player's Options > Tweaks choice ("Space pauses the galactic game", on by
 // default). Off is the original's: Space starts the tour on its release and never pauses. On: Space only pauses (on its press)
 // and never starts the tour; the tour stays on the camera button. Exactly one of the two, whatever the setting.
 struct SpaceKey final {

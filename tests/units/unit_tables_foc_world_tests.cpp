@@ -526,6 +526,22 @@ void foc_asteroid_contacts(const eawr::units::UnitTables& tables,
 
 // Read-only load of the pinned FoC fleet (#64 unit table, SK-20 to SK-24).
 void foc_hazard_maps(eawr::units::LoadInput input) {
+    {
+        auto stock = input;
+        stock.space_map.clear();
+        stock.obstacles = {"Death_Star_Chunks"};
+        const auto loaded = eawr::units::load_unit_tables(stock);
+        expect(static_cast<bool>(loaded), "FD-10: stock shapeless solid-prop control loads");
+        if (loaded) {
+            const auto combat = eawr::units::combat_table(loaded.value());
+            const auto* shape = combat ? combat.value().find_avoidance_type(eawr::assets::object_type_crc("Death_Star_Chunks")) : nullptr;
+            expect(shape && !shape->model_collision_box && shape->meshes.empty(),
+                "FD-10: the stock render-only solid prop keeps the warned footprint fallback");
+            expect(std::count_if(loaded.value().notes.begin(), loaded.value().notes.end(), [](const auto& note) {
+                return note.owner == "Death_Star_Chunks" && note.reason.find("footprint sphere") != std::string::npos;
+            }) == 1, "FD-10: the stock shapeless solid prop reports its fallback once");
+        }
+    }
     for (const auto& [name, fields, solids, nebulas, storms] : {
             std::tuple{"bespin", 5U, 0U, 0U, 0U}, std::tuple{"endor", 5U, 0U, 3U, 3U},
             std::tuple{"geonosis", 15U, 3U, 1U, 0U}, std::tuple{"kessel", 7U, 0U, 0U, 0U},
@@ -534,6 +550,16 @@ void foc_hazard_maps(eawr::units::LoadInput input) {
         auto loaded = eawr::units::load_unit_tables(input);
         expect(static_cast<bool>(loaded), "WHZ-01: selected-map hazard profiles load");
         if (!loaded) continue;
+        const auto combat = eawr::units::combat_table(loaded.value());
+        expect(static_cast<bool>(combat), "FD-10/WHZ-08: selected-map solid asteroid geometry binds");
+        for (const auto& obstacle : loaded.value().obstacles) {
+            if (!obstacle.footprint.hazard.impassable_asteroid) continue;
+            const auto* shape = combat ? combat.value().find_avoidance_type(eawr::assets::object_type_crc(obstacle.id)) : nullptr;
+            expect(shape != nullptr, "FD-10/WHZ-08: every stock solid asteroid has an avoidance profile");
+            expect(shape && (shape->model_collision_box || std::any_of(shape->meshes.begin(), shape->meshes.end(),
+                [](const auto& mesh) { return mesh.pose_visible && !mesh.shield; })),
+                "FD-10/WHZ-08: stock solid asteroids use authored geometry rather than the footprint fallback");
+        }
         const auto motion = eawr::units::motion_table(loaded.value());
         const auto durability = eawr::units::durability_table(loaded.value());
         expect(durability && durability.value().damage && durability.value().damage->ion_storm_disable_seconds == Fixed::from_raw(5 * Fixed::scale),

@@ -50,6 +50,8 @@ struct DepartureMatch {
             transports.push_back(std::make_unique<FakeTransport>(network, peer));
             if (monitored) {
                 net::DesyncOptions monitor_options; monitor_options.exchange_every = monitor_every; monitor_options.input_delay = options.input_delay;
+                // Shared default where valid; intervals not above the delay pin the barrier.
+                monitor_options.deferred_compare = net::default_deferred_compare && monitor_options.input_delay < monitor_every;
                 monitors.push_back(std::make_unique<net::DesyncMonitor>(*transports.back(), monitor_options));
             }
             sessions.push_back(require(net::TacticalLockstepSession::create(initial, {}, *transports.back(), executor, roster,

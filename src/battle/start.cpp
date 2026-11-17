@@ -76,7 +76,7 @@ core::Result<std::optional<std::uint32_t>> destroyed_backdrop_record(const std::
     std::optional<std::uint32_t> record;
     Fixed nearest{};
     for (const auto& placement : placements) {
-        if (!placement.tactical_super_weapon_target || !placement.position || !detail::iequals(placement.element, "SpaceProp")) continue;
+        if (!placement.tactical_super_weapon_target || !placement.position || !core::is_space_prop_element(placement.element)) continue;
         const auto distance = sim::math::length(*placement.position);
         if (!distance) return RecordResult::failure(distance.error());
         if (!record || distance.value() < nearest) { record = placement.record; nearest = distance.value(); }

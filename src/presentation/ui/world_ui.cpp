@@ -107,7 +107,47 @@ float bar_width(const BarSize size) noexcept {
     return 34.0F;
 }
 
-float bar_scale(const float camera_distance) noexcept {
+WorldUiSettings world_ui_settings(const vfs::Vfs& filesystem) {
+    WorldUiSettings result;
+    const auto document = data::load_document(filesystem, "data/xml/gameconstants.xml");
+    if (!document) {
+        result.diagnostics.push_back(core::format_diagnostic(document.error()));
+        return result;
+    }
+    for (const auto& [tag, destination] : std::array{
+        std::pair{"Health_Bar_Scale", &result.health_bar_scale},
+        std::pair{"Min_Health_Bar_Scale", &result.min_health_bar_scale},
+        std::pair{"Health_Bar_Spacing", &result.health_bar_spacing},
+        std::pair{"Team_Healthbar_Offset", &result.team_offset},
+        std::pair{"MinimumDragSelectDistance", &result.drag_select_distance},
+        std::pair{"MinimumDragDistance", &result.drag_click_distance}}) {
+        const bool is_drag = destination == &result.drag_select_distance || destination == &result.drag_click_distance;
+        if (is_drag) destination->reset();  // defaults apply only when the data omits or breaks the tag
+        const data::XmlNode* found{};
+        for (const auto& node : document.value().root.children)
+            if (core::iequals(node.name, tag)) found = &node;
+        if (found) {
+            data::tag_trace::used(*found);
+            auto raw = core::trim_view(found->raw_text, core::xml_whitespace);
+            if (!raw.empty() && (raw.back() == 'f' || raw.back() == 'F')) raw.remove_suffix(1);
+            if (!raw.empty() && raw.front() == '+') raw.remove_prefix(1);
+            float value{};
+            const auto [end, error] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+            if (!raw.empty() && error == std::errc{} && end == raw.data() + raw.size()
+                && std::isfinite(value)) *destination = value;
+        }
+        if (!*destination) {
+            // Input must keep working when a mod omits a drag distance: use the stock values (100 / 4), with one diagnostic.
+            if (is_drag) {
+                *destination = destination == &result.drag_select_distance ? default_drag_select_distance : default_drag_click_distance;
+                result.diagnostics.push_back(std::string(tag) + ": missing or invalid finite number; stock default used so input keeps working");
+            } else result.diagnostics.push_back(std::string(tag) + ": missing or invalid finite number");
+        }
+    }
+    return result;
+}
+
+float bar_scale(const float camera_distance, const float health_bar_scale, const float min_health_bar_scale) noexcept {
     if (!(camera_distance > 0.0F) || !std::isfinite(camera_distance)) return min_health_bar_scale;
     return std::max(min_health_bar_scale, health_bar_scale / camera_distance);
 }
@@ -145,7 +185,8 @@ bool bar_candidate(const bool hovered, const bool selected) noexcept {
 }
 
 float bar_anchor_lift(const std::array<float, 3>& half_extent, const std::array<float, 3>& camera_up,
-                      const float gui_bounds_scale) noexcept {
+                      const float gui_bounds_scale, const std::optional<float> team_offset) noexcept {
+    if (team_offset) return *team_offset;
     float lift = 0.0F;
     if (std::abs(gui_bounds_scale - 1.0F) <= 0.01F) {
         for (int corner = 0; corner < 8; ++corner) {

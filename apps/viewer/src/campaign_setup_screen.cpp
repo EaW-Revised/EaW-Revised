@@ -323,6 +323,12 @@ bool CampaignSetupScreen::visible() const noexcept { return opened_ && built_; }
 void CampaignSetupScreen::refresh() {
     auto* list = Object::cast_to<ItemList>(list_);
     auto* combo = Object::cast_to<OptionButton>(faction_combo_);
+    // DEV-26: campaign changes replace the choices; their indices belong to this list only.
+    const int model_row = model_->selected_row() ? static_cast<int>(*model_->selected_row()) : -1;
+    if (model_row != shown_row_) {
+        combo->clear();
+        for (const auto& faction : model_->factions()) combo->add_item(text(faction.title));
+    }
     if (model_->selected_row()) list->select(static_cast<int32_t>(*model_->selected_row()));
     else list->deselect_all();
     if (model_->selected_faction()) combo->select(static_cast<int32_t>(*model_->selected_faction()));
@@ -432,7 +438,7 @@ CampaignSetupScreen::Action CampaignSetupScreen::poll() {
         changed = true;
     }
     const int faction = static_cast<int>(combo->get_selected());
-    if (faction != shown_faction_ && faction >= 0) {
+    if (row == shown_row_ && faction != shown_faction_ && faction >= 0) {
         model_->select_faction(static_cast<std::size_t>(faction));
         changed = true;
     }

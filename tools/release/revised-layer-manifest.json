@@ -133,6 +133,10 @@
       "size": 56044,
       "sha256": "147a0be49f666bf1f0c4602fb6aefc8f48a5befecc7f0aeea50274a7d6b5eb86"
     },
+    "Data/XML/RevisedPlanetSearch.xml": {
+      "size": 985,
+      "sha256": "809ffab5a9d901a7cc31ae4a3a946a239d9efe940c00627253d264905316becb"
+    },
     "Data/XML/RevisedSelectionSFX.xml": {
       "size": 3476,
       "sha256": "adcb7e3bc82647a4c7e825bd96398e252bc1aa5727e1aedecd79d3b9727990f1"

@@ -3,9 +3,22 @@
 #include "eawr/core/result.hpp"
 #include <cstdint>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace eawr::net {
+// Directory admission uses the same portable identity as the native hello.
+// This early UI refusal precedes transport/setup creation; the native hello
+// independently verifies the peer instead of trusting directory metadata.
+inline core::Result<void> validate_online_build(std::string_view host, std::string_view local) {
+    if (host == local) return core::Result<void>::success();
+    core::Diagnostic error;
+    error.code = "EAWR-NET-1503";
+    error.message = "Game build identities differ. All players need the same build. Host: "
+        + std::string(host.substr(0, 128)) + "; yours: " + std::string(local.substr(0, 128)) + ".";
+    return core::Result<void>::failure(std::move(error));
+}
 // Display metadata only. None of these fields authorize room mutations or peers.
 struct OnlineRoomMetadata {
     std::string name, host_name, build, protocol, content, mod, mode, map;
@@ -30,6 +43,9 @@ struct OnlineRoomAdmission {
     // only when the host has opened the room's signalling scope. The capability is a secret like the invitation.
     std::uint32_t slot{};
     std::string member_capability{};
+    // Local directory observation, never a wire capability or proof of peer identity.
+    // Rechecked before setup freeze; the native hello remains authoritative.
+    std::string build_identity{};
 };
 struct OnlineChatLine {
     std::uint32_t sequence{}, seat{};

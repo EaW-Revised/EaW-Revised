@@ -237,6 +237,7 @@ struct CollisionMesh {
     std::uint32_t hardpoint{no_hardpoint};
     std::uint32_t source_hardpoint{no_hardpoint};
     bool shield{};
+    bool pose_visible{true}; // FD-10: authored reference-pose eligibility; projectile policy is separate
     std::uint8_t grid_exponent{}; // DG-36: derived from root bounds; never serialized or hashed
     CollisionBuffer<CollisionTriangle> triangles{}; // in tree order
     CollisionBuffer<CollisionNode> nodes{};         // nodes[0] is the root
@@ -275,6 +276,24 @@ struct MeshCollisionWork {
     const std::function<bool(std::size_t)>& enabled, const math::Mat3x4& transform, const math::Vec3& from,
     const math::Vec3& to, MeshCollisionWork* work = nullptr);
 
+// FD-10/WSQ-35: explicit model boxes report contained starts (boundary included).
+// Meshes are two-sided surfaces: positive interior segment fractions only, with no volume
+// containment inference. Queries borrow immutable trees and allocate no traversal storage.
+struct ModelCollisionHit {
+    bool starts_inside{};
+};
+struct ModelCollisionFilter {
+    const void* context{};
+    bool (*enabled)(const void*, std::size_t){};
+    [[nodiscard]] bool operator()(const std::size_t index) const {
+        return enabled == nullptr || enabled(context, index);
+    }
+};
+[[nodiscard]] core::Result<std::optional<ModelCollisionHit>> segment_hits_model(
+    const CollisionBox* box, std::span<const CollisionMesh> meshes,
+    ModelCollisionFilter enabled, const math::Mat3x4& transform,
+    const math::Vec3& from, const math::Vec3& to, MeshCollisionWork* work = nullptr);
+
 // One unit type's combat content (for M2 the #65 unit tables, units::combat_table): neither
 // replay data nor state. A type without a profile (a squadron container, #271) never targets,
 // fires or is a target.
@@ -306,6 +325,8 @@ struct CombatProfile {
     // (together with `mesh_bounds`, the box around every mesh); without, the box itself is hit.
     std::vector<CollisionMesh> meshes{};
     std::optional<CollisionBox> mesh_bounds{};
+    std::optional<CollisionBox> model_collision_box{}; // FD-10: distinct from the aggregate projectile bounds
+    math::Fixed model_collision_radius{}; // conservative, rotation-independent load-time broad phase
     // #669 (DG-39): with meshes, per HardPoints index, the hardpoint a shot aimed at that
     // hardpoint damages when it hits this unit: the first hardpoint whose Collision_Mesh names
     // the aimed hardpoint's Collision_Mesh, else no_hardpoint (the hull).
@@ -382,11 +403,14 @@ struct CombatTable {
     [[nodiscard]] const CombatProfile* find(TypeId type_id) const noexcept;
     // WTA-29/WCC-25: target identity survives subsequent scans without company weapons.
     [[nodiscard]] const CombatProfile* find_target_type(TypeId type_id) const noexcept;
+    // FD-10: geometry-only map solids never acquire weapons, combat state or target admission.
+    [[nodiscard]] const CombatProfile* find_avoidance_type(TypeId type_id) const noexcept;
     std::vector<TargetFootprint> footprints{}; // strictly increasing type_id; independent of combat eligibility
     math::Fixed melee_cutoff{}; // WWP-27: Melee_Cutoff_Range, compared with the shooter's attack distance
     // A-05: Auto_Rotate_For_Space_Targeting; set, a unit with hardpoints turns for a scanned target too.
     bool auto_rotate_for_targeting{};
     [[nodiscard]] const TargetFootprint* footprint(TypeId type_id) const noexcept;
+    std::vector<CombatProfile> avoidance_obstacles{}; // FD-10: geometry-only, strictly increasing type_id
     friend bool operator==(const CombatTable&, const CombatTable&) = default;
 };
 

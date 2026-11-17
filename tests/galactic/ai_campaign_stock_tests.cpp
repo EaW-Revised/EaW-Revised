@@ -1037,6 +1037,9 @@ int exchange_encode(const std::uint64_t ticks) {
 std::string workshop_mod_folder(const std::string& id) {
     std::vector<std::filesystem::path> roots;
     if (const auto configured = environment_or("EAWR_WORKSHOP_ROOT", ""); !configured.empty()) roots.emplace_back(configured);
+    // A pool mod host names one workshop item folder (EAWR_REMAKE_MOD_ROOT); its siblings are the other items it holds.
+    if (const auto mod_root = environment_or("EAWR_REMAKE_MOD_ROOT", ""); !mod_root.empty())
+        roots.push_back(std::filesystem::path(mod_root).parent_path());
     const auto installed_root = game_root();
     roots.push_back(installed_root.parent_path().parent_path() / "workshop" / "content" / "32470");
     roots.push_back(installed_root.parent_path() / "workshop" / "content" / "32470");
@@ -1515,7 +1518,7 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::stri
 }
 // Async-AI quality sweep (tools/gc_quality): one seed of one arm, compact NDJSON decision log
 // (ai_quality_run.hpp). --quality-run <dir|-> <ticks> <seed> <arm> <probe> <profile> [workshop ids, ';' chain | -] [campaign | -].
-// Workshop ids resolve through EAWR_WORKSHOP_ROOT or the Steam layout beside the game root; a missing
+// Workshop ids resolve through workshop_mod_folder; a missing
 // mod folder skips the case (exit 77) so a host without the mod never reports a failure.
 int quality_run(int argc, char** argv) {
     if (argc < 8) throw std::runtime_error("--quality-run <dir|-> <ticks> <seed> <arm> <probe> <profile> [mod ids|-] [campaign|-]");
@@ -1529,27 +1532,17 @@ int quality_run(int argc, char** argv) {
     std::string chain;
     const std::string mods = argc > 8 && std::string_view(argv[8]) != "-" ? argv[8] : "";
     std::string campaign = argc > 9 && std::string_view(argv[9]) != "-" ? argv[9] : "Sandbox_Equal_Footing_Underworld";
-    // Workshop folders: EAWR_WORKSHOP_ROOT, beside a Steam game root, beside a mirrored game root, or in a mods folder beside the mirror.
-    std::vector<std::filesystem::path> workshop_roots;
-    if (const auto configured = environment_or("EAWR_WORKSHOP_ROOT", ""); !configured.empty()) workshop_roots.emplace_back(configured);
-    const auto installed_root = game_root();
-    workshop_roots.push_back(installed_root.parent_path().parent_path() / "workshop" / "content" / "32470");
-    workshop_roots.push_back(installed_root.parent_path() / "workshop" / "content" / "32470");
-    workshop_roots.push_back(installed_root.parent_path().parent_path() / "mods" / "workshop" / "content" / "32470");
+    // Workshop folders: workshop_mod_folder (EAWR_WORKSHOP_ROOT, the pool host's mod root, or beside the game root).
     std::size_t begin = 0;
     while (!mods.empty() && begin <= mods.size()) {
         const auto end = mods.find(';', begin);
         const auto id = mods.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
-        std::filesystem::path folder;
-        for (const auto& base : workshop_roots) {
-            std::error_code unreadable; // a folder the host may not read counts as absent
-            if (std::filesystem::is_directory(base / id, unreadable) && !unreadable) { folder = base / id; break; }
-        }
+        const auto folder = workshop_mod_folder(id);
         if (folder.empty()) {
             std::cout << "SKIPPED: workshop mod " << id << " is not installed on this host" << std::endl;
             return 77;
         }
-        chain += (chain.empty() ? "" : ";") + folder.string();
+        chain += (chain.empty() ? "" : ";") + folder;
         if (end == std::string::npos) break;
         begin = end + 1;
     }

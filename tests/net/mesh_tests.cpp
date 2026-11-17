@@ -408,7 +408,7 @@ std::vector<std::string> battle(std::uint32_t count, std::size_t configuration, 
     net::SetupOptions options; options.session.final_tick_count = selected.final_tick_count;
     for (net::PeerIndex peer = 0; peer < count; ++peer) {
         executors.push_back(std::make_unique<eawr::platform::ThreadWorkerAdapter>(workers[(configuration + peer) % workers.size()]));
-        net::DesyncOptions monitor_options; monitor_options.exchange_every = 2;
+        net::DesyncOptions monitor_options; monitor_options.exchange_every = 2; monitor_options.deferred_compare = false; // interval <= delay: barrier
         monitors.push_back(std::make_unique<net::DesyncMonitor>(*mesh.peers[peer], monitor_options));
         auto provider = providers(*monitors[peer], *executors[peer]);
         setup_sessions.push_back(peer == 0

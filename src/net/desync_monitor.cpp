@@ -64,8 +64,11 @@ struct Reader {
 
 DesyncMonitor::DesyncMonitor(MessageTransport& transport, DesyncOptions options)
     : transport_(transport), options_(std::move(options)) {
+    comparison_input_delay_ = options_.input_delay;
     valid_ = options_.exchange_every > 0 && options_.exchange_every <= max_window
         && options_.input_delay <= max_window
+        && (!options_.deferred_compare || options_.input_delay < options_.exchange_every)
+        && (!options_.final_tick || *options_.final_tick >= options_.initial_tick)
         && options_.keep_exchange_points > 0 && options_.keep_exchange_points <= 64
         && options_.max_retained_bytes > 0 && options_.max_retained_bytes <= 256 * 1024 * 1024
         && transport_.peer_count() >= 2 && transport_.peer_count() <= max_match_seats
@@ -117,7 +120,7 @@ core::Result<void> DesyncMonitor::record(std::uint64_t tick, std::string_view ha
     // LAN-6 notifies a local sealed quit before recording its completed frame.
     // This peer has left hash agreement; that final hook call is a harmless tail.
     if (!active_peers_[transport_.self()]) return core::Result<void>::success();
-    if (failed_ || frozen_ || ended_ || waiting_) return fail("cannot record while the monitor gates advancement");
+    if (failed_ || frozen_ || ended_ || waiting()) return fail("cannot record while the monitor gates advancement");
     if ((!started_ && tick != options_.initial_tick) || (started_ && (completed_ == std::numeric_limits<std::uint64_t>::max()
         || tick != completed_ + 1))) return fail("completed ticks must start at the agreed boundary and be contiguous");
     if (!valid_hash(hash)) return fail("state hash must be a canonical SHA-256 hex digest");
@@ -130,6 +133,7 @@ core::Result<void> DesyncMonitor::record(std::uint64_t tick, std::string_view ha
     if (input.size() > options_.max_retained_bytes - retained_bytes_) return fail("canonical input window exceeds diagnostic budget");
     started_ = true;
     completed_ = tick;
+    if (freeze_at_ && completed_ >= *freeze_at_) frozen_ = true;
     rows_.push_back({tick, std::string(hash), core::sha256_hex(input)});
     inputs_[tick] = {input.begin(), input.end()};
     retained_bytes_ += input.size();
@@ -141,7 +145,13 @@ core::Result<void> DesyncMonitor::finish(std::span<const std::uint8_t> encoding,
     if (valid_ && !active_peers_[transport_.self()]) return core::Result<void>::success();
     if (!valid_ || !started_ || frozen_ || failed_) return fail("cannot finish an inactive or failed monitor");
     if (ended_) return core::Result<void>::success();
-    if (waiting_) return fail("finish must wait for the pending exchange to agree");
+    if (waiting_ && !pending_end_) return fail("finish must wait for the pending exchange to agree");
+    if (inflight_ && rows_.empty()) {
+        // An exact exchange boundary has no partial end window, but its
+        // outstanding agreement still belongs to the synchronous finish.
+        pending_end_ = true; waiting_ = true; ended_ = true;
+        return evaluate_inflight();
+    }
     // An exact exchange boundary has already been compared; there is no new row.
     if (rows_.empty()) { ended_ = true; return core::Result<void>::success(); }
     if (!full_state_hash.empty()) {
@@ -152,6 +162,8 @@ core::Result<void> DesyncMonitor::finish(std::span<const std::uint8_t> encoding,
 }
 
 bool DesyncMonitor::ready_for_resync() const {
+    if (inflight_) return valid_ && !failed_ && frozen_ && report_ && !report_->diagnostic_only
+        && inflight_->summaries.size() >= active_remote_count() && waiting_for_peers().empty();
     return valid_ && !failed_ && frozen_ && report_ && !report_->diagnostic_only
         && local_summary_ && summaries_.size() >= active_remote_count()
         && waiting_for_peers().empty();
@@ -187,6 +199,7 @@ std::optional<PeerIndex> DesyncMonitor::checkpoint_recovery_source() const {
         return {};
     };
     if (previous_frozen_ && previous_) return choose(previous_->local, previous_->summaries);
+    if (inflight_) return choose(inflight_->local, inflight_->summaries);
     return local_summary_ ? choose(*local_summary_, summaries_) : std::nullopt;
 }
 
@@ -210,6 +223,7 @@ core::Result<void> DesyncMonitor::on_reconnect(std::uint64_t tick, std::string_v
     rows_.clear(); inputs_.clear(); checkpoints_.clear(); retained_bytes_ = 0;
     summaries_.clear(); remote_rows_.clear(); future_frames_.clear();
     local_summary_.reset(); previous_.reset(); retired_summaries_.clear(); previous_frozen_ = false;
+    inflight_.reset(); freeze_at_.reset(); deadline_ = 0; pending_end_ = false;
     next_first_ = tick + 1;
     reconnect_floor_ = tick;
     return core::Result<void>::success();
@@ -222,10 +236,16 @@ std::size_t DesyncMonitor::active_remote_count() const noexcept {
 
 std::vector<PeerIndex> DesyncMonitor::waiting_for_peers() const {
     std::vector<PeerIndex> peers;
-    if (!valid_ || !waiting_ || failed_) return peers;
+    if (!valid_ || (!waiting_ && !inflight_) || failed_) return peers;
+    // Session liveness and wait accounting consult this even after a successful
+    // step. An unchecked window is not a hash wait until its deadline (or end).
+    if (inflight_ && !waiting_ && completed_ < deadline_) return peers;
+    const auto& summaries = inflight_ ? inflight_->summaries : summaries_;
+    const auto& remote = inflight_ ? inflight_->remote : remote_rows_;
+    const bool details = inflight_ ? inflight_->rows_sent : rows_sent_;
     for (PeerIndex peer = 0; peer < active_peers_.size(); ++peer) {
         if (peer == transport_.self() || !active_peers_[peer]) continue;
-        if (!summaries_.contains(peer) || (rows_sent_ && !remote_rows_.contains(peer))) peers.push_back(peer);
+        if (!summaries.contains(peer) || (details && !remote.contains(peer))) peers.push_back(peer);
     }
     return peers;
 }
@@ -238,6 +258,17 @@ core::Result<void> DesyncMonitor::on_input_delay(std::uint64_t delay, std::uint6
         return fail("invalid agreed input delay");
     options_.input_delay = delay;
     retained_input_delay_ = retained_delay;
+    // Direct monitor users report the active delay here. A session separately
+    // supplies activated retention; the larger horizon may be a pending proposal.
+    comparison_input_delay_ = delay;
+    return core::Result<void>::success();
+}
+
+core::Result<void> DesyncMonitor::on_activated_input_delay(std::uint64_t delay, std::uint64_t retained_delay) {
+    if (!options_.deferred_compare || failed_) return core::Result<void>::success();
+    if (!valid_ || delay == 0 || retained_delay < delay || retained_delay > max_window)
+        return fail("invalid activated input delay");
+    comparison_input_delay_ = retained_delay;
     return core::Result<void>::success();
 }
 
@@ -261,7 +292,8 @@ core::Result<void> DesyncMonitor::on_departure(PeerIndex peer, std::uint64_t tic
     }
     if (report_ && report_->remote_peer == peer) {
         report_->diagnostic_only = true;
-        if (local_summary_) build_bundle();
+        if (inflight_) build_bundle();
+        else if (local_summary_) build_bundle();
         else if (previous_) build_bundle();
     }
     frozen_ = false;
@@ -286,6 +318,10 @@ core::Result<void> DesyncMonitor::on_link_repair(PeerIndex peer, std::function<b
         auto sent = send(previous_->local, previous_->rows, previous_->rows_sent);
         if (!sent) return sent;
     }
+    if (inflight_) {
+        auto sent = send(inflight_->local, inflight_->rows, inflight_->rows_sent);
+        if (!sent) return sent;
+    }
     if (local_summary_) return send(*local_summary_, rows_, rows_sent_);
     return core::Result<void>::success();
 }
@@ -308,6 +344,12 @@ core::Result<void> DesyncMonitor::broadcast(std::span<const std::uint8_t> frame)
 
 core::Result<void> DesyncMonitor::exchange(bool end, std::span<const std::uint8_t> encoding) {
     keep_encoding(completed_, encoding);
+    if (inflight_) {
+        if (!end) return fail("overlapping deferred desync windows");
+        // Preserve the final partial rows until the older sealed window agrees.
+        pending_end_ = true; waiting_ = true; ended_ = true;
+        return evaluate_inflight();
+    }
     std::vector<std::uint8_t> history;
     const std::string domain = "eawr-net-desync-v1";
     history.insert(history.end(), domain.begin(), domain.end());
@@ -324,6 +366,19 @@ core::Result<void> DesyncMonitor::exchange(bool end, std::span<const std::uint8_
     append_u64(frame, completed_);
     append_hash(frame, local_summary_->hash);
     frame.push_back(end ? 1 : 0);
+    // A runtime activated lead may outgrow a short test/custom interval. Use
+    // the unchanged synchronous exchange for that window rather than overlap.
+    if (options_.deferred_compare && setup_agreed_ && !end && comparison_input_delay_ < options_.exchange_every) {
+        const auto delay = comparison_input_delay_;
+        if (completed_ > std::numeric_limits<std::uint64_t>::max() - delay)
+            return fail("deferred desync deadline overflows completed ticks");
+        deadline_ = completed_ + delay;
+        if (options_.final_tick) deadline_ = std::min(deadline_, *options_.final_tick);
+        inflight_ = AgreedWindow{*local_summary_, std::move(rows_), std::move(summaries_), std::move(remote_rows_), rows_sent_};
+        next_first_ = completed_ + 1;
+        local_summary_.reset(); rows_.clear(); summaries_.clear(); remote_rows_.clear(); rows_sent_ = false;
+        waiting_ = false;
+    }
     if (auto sent = broadcast(frame); !sent) return sent;
     return evaluate();
 }
@@ -364,10 +419,11 @@ core::Result<void> DesyncMonitor::receive(std::uint32_t from, std::span<const st
     // Even an ignored in-flight tail must be structurally valid.
     if (reconnect_floor_ && summary.last <= *reconnect_floor_) return core::Result<void>::success();
     if (!active_peers_[transport_.self()]) return core::Result<void>::success();
-    const bool previous = previous_ && summary.first == previous_->local.first;
-    if (!active_peers_[from] && !previous && summary.first != next_first_)
+    const bool inflight = inflight_ && summary.first == inflight_->local.first;
+    const bool previous = !inflight && previous_ && summary.first == previous_->local.first;
+    if (!active_peers_[from] && !inflight && !previous && summary.first != next_first_)
         return core::Result<void>::success();
-    if (repair_enabled_ && !previous && summary.first != next_first_) {
+    if (repair_enabled_ && !inflight && !previous && summary.first != next_first_) {
         const auto retired = retired_summaries_.find(from);
         if (retired != retired_summaries_.end() && summary.first == retired->second.first) {
             if (summary.last != retired->second.last || summary.hash != retired->second.hash
@@ -376,7 +432,7 @@ core::Result<void> DesyncMonitor::receive(std::uint32_t from, std::span<const st
             return core::Result<void>::success();
         }
     }
-    if (!previous && summary.first != next_first_ && local_summary_
+    if (!inflight && !previous && summary.first != next_first_ && local_summary_
         && local_summary_->last != std::numeric_limits<std::uint64_t>::max()
         && summary.first == local_summary_->last + 1) {
         auto& queued = future_frames_[from];
@@ -387,12 +443,12 @@ core::Result<void> DesyncMonitor::receive(std::uint32_t from, std::span<const st
         queued.emplace_back(frame.begin(), frame.end());
         return core::Result<void>::success();
     }
-    if (!previous && summary.first != next_first_) return fail("out-of-window desync frame: peer=" + std::to_string(from)
+    if (!inflight && !previous && summary.first != next_first_) return fail("out-of-window desync frame: peer=" + std::to_string(from)
         + " received=" + std::to_string(summary.first) + ".." + std::to_string(summary.last)
         + " next=" + std::to_string(next_first_) + " previous="
         + (previous_ ? std::to_string(previous_->local.first) + ".." + std::to_string(previous_->local.last) : "none"));
-    auto& summaries = previous ? previous_->summaries : summaries_;
-    auto& remote = previous ? previous_->remote : remote_rows_;
+    auto& summaries = inflight ? inflight_->summaries : (previous ? previous_->summaries : summaries_);
+    auto& remote = inflight ? inflight_->remote : (previous ? previous_->remote : remote_rows_);
     if (frame[0] == desync_combined_kind) {
         const auto prior = summaries.find(from);
         if (prior != summaries.end()) {
@@ -418,10 +474,15 @@ core::Result<void> DesyncMonitor::receive(std::uint32_t from, std::span<const st
         remote.emplace(from, std::move(decoded));
     }
     if (previous) return evaluate_previous();
+    if (inflight) return evaluate_inflight();
     return evaluate();
 }
 
 core::Result<void> DesyncMonitor::evaluate() {
+    if (inflight_) {
+        if (auto result = evaluate_inflight(); !result) return result;
+        if (inflight_) return core::Result<void>::success();
+    }
     if (!local_summary_) return core::Result<void>::success();
     bool mismatch = false;
     for (const auto& [peer, summary] : summaries_) {
@@ -483,6 +544,65 @@ core::Result<void> DesyncMonitor::evaluate() {
     }
     if (report_ && !report_->diagnostic_only) return core::Result<void>::success();
     return fail("combined hash mismatch without a divergent row");
+}
+
+core::Result<void> DesyncMonitor::evaluate_inflight() {
+    if (!inflight_) return core::Result<void>::success();
+    auto& window = *inflight_;
+    bool mismatch = false;
+    for (const auto& [peer, summary] : window.summaries) {
+        if (!active_peers_[peer]) continue;
+        if (summary.first != window.local.first || summary.last != window.local.last || summary.end != window.local.end)
+            return fail("peers disagree on the desync exchange frontier or match end");
+        mismatch = mismatch || summary.hash != window.local.hash;
+    }
+    const auto active_count = [&](const auto& entries) {
+        return static_cast<std::size_t>(std::count_if(entries.begin(), entries.end(),
+            [&](const auto& entry) { return active_peers_[entry.first]; }));
+    };
+    const bool notice = active_count(window.remote) != 0;
+    if (mismatch || notice) {
+        freeze_at_ = pending_end_ ? std::min(deadline_, completed_) : deadline_;
+        if (!window.rows_sent) {
+            window.rows_sent = true;
+            std::vector<std::uint8_t> frame{desync_rows_kind};
+            append_u64(frame, window.local.first); append_u64(frame, window.local.last);
+            for (const auto& row : window.rows) { append_hash(frame, row.state); append_hash(frame, row.input); }
+            if (auto sent = broadcast(frame); !sent) return sent;
+        }
+    } else freeze_at_.reset();
+    frozen_ = previous_frozen_ || (freeze_at_ && completed_ >= *freeze_at_);
+    // Diagnosis and evidence always refer to the sealed window, even as rows_
+    // grows toward the common recovery frontier.
+    diagnose(window.rows, window.remote);
+    if (active_count(window.summaries) != active_remote_count()) return core::Result<void>::success();
+    if (mismatch) {
+        if (active_count(window.remote) != active_remote_count()) return core::Result<void>::success();
+        if (report_ && !report_->diagnostic_only) {
+            if (options_.share_evidence) send_evidence(window.rows, window.remote);
+            build_bundle();
+        }
+        if (report_ && !report_->diagnostic_only) return core::Result<void>::success();
+        return fail("combined hash mismatch without a divergent row");
+    }
+    freeze_at_.reset(); frozen_ = previous_frozen_;
+    if (frozen_) return core::Result<void>::success();
+    retired_summaries_.clear();
+    if (repair_enabled_ && previous_) retired_summaries_ = std::move(previous_->summaries);
+    previous_ = std::move(inflight_);
+    inflight_.reset();
+    // Late authenticated detail can still diagnose this sealed window. Keep
+    // its input batches, two preceding context batches and all unchecked rows.
+    const auto keep_from = previous_->local.first > 2 ? previous_->local.first - 2 : 0;
+    while (!inputs_.empty() && inputs_.begin()->first < keep_from) {
+        retained_bytes_ -= inputs_.begin()->second.size(); inputs_.erase(inputs_.begin());
+    }
+    if (pending_end_) {
+        pending_end_ = false; waiting_ = false;
+        if (rows_.empty()) return core::Result<void>::success();
+        return exchange(true, {});
+    }
+    return core::Result<void>::success();
 }
 
 core::Result<void> DesyncMonitor::evaluate_previous() {
@@ -552,7 +672,9 @@ void DesyncMonitor::diagnose(const std::vector<Row>& rows, const std::map<std::u
                 if (departure_ticks_[departed]) report.departures.push_back({departed, *departure_ticks_[departed]});
             const bool active_report = !report.diagnostic_only;
             report_ = std::move(report);
-            if (active_report && options_.share_evidence) send_evidence(rows, remotes);
+            // Deferred peers can diagnose from the first row reply. Wait for
+            // the full active set before shipping the once-only input evidence.
+            if (active_report && options_.share_evidence && !inflight_) send_evidence(rows, remotes);
             build_bundle();
             return;
         }
@@ -605,7 +727,9 @@ core::Result<void> DesyncMonitor::receive_evidence(std::uint32_t from, std::span
     if (!active_peers_[from] || !active_peers_[transport_.self()]) return core::Result<void>::success();
     // The window the evidence belongs to: the current one, else the retired one an incident can still name.
     const std::vector<Row>* remote_rows = nullptr;
-    if (local_summary_ && first == local_summary_->first) {
+    if (inflight_ && first == inflight_->local.first) {
+        if (const auto found = inflight_->remote.find(from); found != inflight_->remote.end()) remote_rows = &found->second;
+    } else if (local_summary_ && first == local_summary_->first) {
         if (const auto found = remote_rows_.find(from); found != remote_rows_.end()) remote_rows = &found->second;
     } else if (previous_ && first == previous_->local.first) {
         if (const auto found = previous_->remote.find(from); found != previous_->remote.end()) remote_rows = &found->second;
@@ -647,11 +771,12 @@ void DesyncMonitor::build_bundle() {
         return !rows.empty() && rows.front().tick <= report_->first_divergent_tick
             && report_->first_divergent_tick <= rows.back().tick;
     };
-    const bool current = contains(rows_);
-    const bool previous = !current && previous_ && contains(previous_->rows);
-    const bool available = current || previous;
-    const auto& local_rows = current ? rows_ : (previous ? previous_->rows : rows_);
-    const auto& remote_rows = current ? remote_rows_ : (previous ? previous_->remote : remote_rows_);
+    const bool inflight = inflight_ && contains(inflight_->rows);
+    const bool current = !inflight && contains(rows_);
+    const bool previous = !inflight && !current && previous_ && contains(previous_->rows);
+    const bool available = inflight || current || previous;
+    const auto& local_rows = inflight ? inflight_->rows : (current ? rows_ : (previous ? previous_->rows : rows_));
+    const auto& remote_rows = inflight ? inflight_->remote : (current ? remote_rows_ : (previous ? previous_->remote : remote_rows_));
     auto& report = *report_;
     if (available) report.bundle = {};
     report.bundle_location.clear();

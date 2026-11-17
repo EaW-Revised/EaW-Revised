@@ -98,7 +98,8 @@ struct FleetDisplayVisibility {
     std::size_t group_capacity, std::span<const FleetDisplayVisibility> visibility = {},
     const std::function<std::optional<std::uint32_t>(TypeId)>& icon_rank = {},
     std::span<const std::pair<EntityId, std::int64_t>> presentation_indices = {},
-    const std::function<std::optional<std::int64_t>(TypeId)>& hero_rank = {});
+    const std::function<std::optional<std::int64_t>(TypeId)>& hero_rank = {},
+    std::span<const EntityId> departing_transports = {}); // GGS-12: sorted presentation-only exclusions
 
 // #4375 / WGSI-1..4: which named heroes the local player sees at a planet, for the overview's hero icons. A planet row
 // is listed only when a hero qualifies. `ally` is set by an allied hero, `foreign` by a foreign hero the player's

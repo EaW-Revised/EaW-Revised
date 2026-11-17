@@ -295,12 +295,12 @@ using battle::ReplacementProp;
 using battle::tactical_super_weapon_setup;
 
 // True when a TED placement can become a map-object unit (add_map_objects): it names a catalog
-// type, is not a designer marker, and is not a SpaceProp decoration. Map-object units are not in
+// type, is not a designer marker, and is not a SpaceProp-family decoration (SpaceProp, SpaceProp_*). Map-object units are not in
 // the unit tables, so this is also how a replay resolves their type_id back to a name (#501).
 [[nodiscard]] bool is_map_object_placement(const MapPlacement& placement) noexcept;
 
 // MAT-08: the types a demo map's start tries to make units of: every map-object placement that
-// is not a space hazard and not a SpaceProp, minus the types the roster gate disables, sorted and
+// is not a space hazard and not a SpaceProp-family element, minus the types the roster gate disables, sorted and
 // without duplicates. The caller loads them into the unit tables before build_start.
 [[nodiscard]] std::vector<std::string> placed_force_types(const std::vector<MapPlacement>& placements);
 

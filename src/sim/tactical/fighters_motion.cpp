@@ -2,6 +2,7 @@
 
 #include "eawr/sim/math/math.hpp"
 #include "eawr/sim/tactical/combat.hpp"
+#include "eawr/sim/tactical/damage.hpp"
 #include "eawr/sim/tactical/motion.hpp"
 #include "../math/wide.hpp"
 #include "fighters_internal.hpp"
@@ -56,6 +57,7 @@ public:
             position_ = {calc_.add(position_.x, state_.velocity.x), calc_.add(position_.y, state_.velocity.y),
                 calc_.add(position_.z, state_.velocity.z)};
         }
+        if (collision_error_) return core::Result<CraftStep>::failure(*collision_error_);
         if (!calc_.ok()) {
             return core::Result<CraftStep>::failure(calc_.error("craft " + std::to_string(self_.id)));
         }
@@ -317,7 +319,6 @@ private:
                 const auto dot = [&](const Vec3& a, const Vec3& b) {
                     return calc_.add(calc_.add(calc_.mul(a.x, b.x), calc_.mul(a.y, b.y)), calc_.mul(a.z, b.z));
                 };
-                if (dot(offset, offset) < radius_squared) continue; // it starts inside the ship
                 Fixed share{};
                 if (math::detail::compare(look_squared, math::detail::from_u64(0)) > 0) {
                     const Calc::Site share_site(calc_, "FD-10 look-ahead share");
@@ -328,6 +329,33 @@ private:
                 }
                 const Vec3 nearest = add(offset, scale(look, share));
                 if (dot(nearest, nearest) > radius_squared) continue;
+                if (obstacle.footprint_sphere) {
+                    // A solid map prop without authored collision geometry retains its footprint shape.
+                    if (dot(offset, offset) < radius_squared) continue;
+                } else {
+                    if (obstacle.geometry == nullptr) continue;
+                    const ModelCollisionFilter enabled{&obstacle, [](const void* context, const std::size_t index) {
+                        const auto* query = static_cast<const CraftObstacle*>(context);
+                        const auto& mesh = query->geometry->meshes[index];
+                        // FD-10: ordinary model collision excludes the shield-only mask, even when up.
+                        if (mesh.shield || !mesh.pose_visible) return false;
+                        const auto source = mesh.source_hardpoint;
+                        return source == no_hardpoint || query->durability == nullptr || query->durability_profile == nullptr
+                            || source >= query->durability->hardpoints.size()
+                            || source >= query->durability_profile->hardpoints.size()
+                            || query->durability_profile->hardpoints[source].max_health.raw() <= 0
+                            || query->durability->hardpoints[source].raw() > 0;
+                    }};
+                    const auto& geometry = *obstacle.geometry;
+                    MeshCollisionWork work;
+                    if (frame_.avoidance_work) ++frame_.avoidance_work->queries;
+                    auto contact = segment_hits_model(geometry.model_collision_box ? &*geometry.model_collision_box : nullptr,
+                        geometry.meshes, enabled, obstacle.transform, position_, add(position_, look),
+                        frame_.avoidance_work ? &work : nullptr);
+                    if (frame_.avoidance_work) frame_.avoidance_work->triangles += work.triangles;
+                    if (!contact) { collision_error_ = contact.error(); return false; }
+                    if (!contact.value() || contact.value()->starts_inside) continue;
+                }
                 Vec3 away = offset;
                 if (away.x.raw() == 0 && away.y.raw() == 0 && away.z.raw() == 0) away = {whole(1), Fixed{}, Fixed{}};
                 head_for(add(position_, away), profile_.min_speed, limits, idle_state);
@@ -518,6 +546,7 @@ private:
     std::optional<Vec3> slot_;
     math::TrigCache local_trig_;
     Calc calc_;
+    std::optional<core::Diagnostic> collision_error_;
 };
 
 } // namespace

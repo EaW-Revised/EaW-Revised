@@ -118,6 +118,8 @@ struct MotionTable {
     // WHZ-20: craft participate without joining the ship tracking layers.
     std::vector<TypeId> nebula_service_types{}; // ascending, behavior opt-ins
     math::Fixed nebula_disable_seconds{}; // Nebula_Ability_Disable_Time
+    // PL-01: immutable content opt-in for presentation, never simulation state.
+    bool prediction_paths{};
     [[nodiscard]] const MotionProfile* find(TypeId type_id) const noexcept;
     [[nodiscard]] const Footprint* footprint(TypeId type_id) const noexcept;
     friend bool operator==(const MotionTable&, const MotionTable&) = default;

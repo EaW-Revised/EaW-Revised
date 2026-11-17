@@ -397,6 +397,7 @@ std::string_view to_string(const GalacticRejectReason reason) noexcept {
     case GalacticRejectReason::neutralize_no_hero: return "neutralize_no_hero";
     case GalacticRejectReason::neutralize_allied_hero: return "neutralize_allied_hero";
     case GalacticRejectReason::neutralize_not_targetable: return "neutralize_not_targetable";
+    case GalacticRejectReason::ability_target_undiscovered: return "ability_target_undiscovered";
     case GalacticRejectReason::insufficient_credits: return "insufficient_credits";
     case GalacticRejectReason::production_admission: return "production_admission";
     }

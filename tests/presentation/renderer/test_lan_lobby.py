@@ -308,10 +308,14 @@ class LanLobbyStructure(unittest.TestCase):
         screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         mode = (SRC / "lan_lobby_mode.cpp").read_text(encoding="utf-8")
         failure = (SRC / "lan_lobby_screen_list.cpp").read_text(encoding="utf-8").split("void EawrLanLobby::online_failure(", 1)[1].split("// One frame of the online half", 1)[0]
-        self.assertIn("online_failure_text(model::classify_online_failure(diagnostic.code))", failure)
-        self.assertNotIn("diagnostic.message", failure)
+        # Every code shows its curated text; only the typed build refusal (1503) keeps its bounded, cleaned detail (#7461).
+        self.assertIn("model::online_failure_message(diagnostic.code, diagnostic.message)", failure)
+        curated = (ROOT / "src/presentation/ui/lan_lobby.cpp").read_text(encoding="utf-8").split("std::string online_failure_message(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('if (code != "EAWR-NET-1503") return std::string(online_failure_text(classify_online_failure(code)));', curated)
+        self.assertIn("detail.substr(0, 512)", curated)
         pump = (SRC / "lan_lobby_screen_list.cpp").read_text(encoding="utf-8").split("void EawrLanLobby::pump_online()", 1)[1].split("// ---- Host options", 1)[0]
-        self.assertNotIn("refusal->message", pump)
+        # A refusal's own message reaches the player only through the curated online_failure_message.
+        self.assertNotIn("refusal->message", pump.replace("model::online_failure_message(result.refusal->code, result.refusal->message)", ""))
         self.assertNotIn("format_diagnostic", pump)
         submit = (SRC / "lan_lobby_screen_list.cpp").read_text(encoding="utf-8").split("void EawrLanLobby::submit_password(", 1)[1].split("// A refused service call", 1)[0]
         self.assertNotIn("note_chat(model::ChatKind::normal, password", submit)
@@ -530,9 +534,9 @@ class LanLobbyGraphical(unittest.TestCase):
                     closed.bind(("127.0.0.1", 0))
                     port = closed.getsockname()[1]
                 settings.write_text("eawr-settings 1\nnetwork.online_host=127.0.0.1\n"
-                                    f"network.online_port={port}\nnetwork.online_pin=" + "a" * 64 + "\n", encoding="utf-8")
+                                    f"network.online_port={port}\nnetwork.online_trust=pin\nnetwork.online_pin=" + "a" * 64 + "\n", encoding="utf-8")
             else:
-                settings.unlink(missing_ok=True)
+                settings.write_text("eawr-settings 1\nnetwork.online_host=\nnetwork.online_unconfigured=1\n", encoding="utf-8")
             picture = self.pictures / (name + ".png")
             args = command(self.cache, name, self.directory, picture,
                            "--eawr-settings-file", str(settings), "--eawr-lan-do", "source:online",

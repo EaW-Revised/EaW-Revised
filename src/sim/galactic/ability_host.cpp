@@ -506,6 +506,16 @@ void GalacticSession::Impl::execute_ability(const GameCommand& command, std::uin
         ? !profile->neutralize || !service->neutralize_enabled || service->neutralize_cancelled
         : kind != AbilityKind::black_market || !profile->has_market || !service->enabled || service->cancelled))
         return reject(GalacticRejectReason::unknown_value);
+    // #7426: a human player's corruption and hero action menus are published only for a planet that player has discovered
+    // (WGUI-99). A lone stealth hero does not discover the planet it orbits (WGUI-01), so a menu prepared there stayed open
+    // with nothing shown to choose from or cancel. Refuse it with a reason the seat is told instead; the viewer's route gate
+    // already refuses a move to an unrevealed planet. AI players choose without a published menu and are not gated.
+    if (prepare && (kind == AbilityKind::corruption || kind == AbilityKind::superweapon_hack || kind == AbilityKind::structure_sabotage
+            || kind == AbilityKind::hero_neutralization || kind == AbilityKind::technology_theft)
+        && observer && std::binary_search(observer->human_observers.begin(), observer->human_observers.end(), actor_value.owner)
+        && std::none_of(observer->records.begin(), observer->records.end(), [&](const auto& row) {
+            return row.player == actor_value.owner && row.planet == prepare->planet && row.discovered; }))
+        return reject(GalacticRejectReason::ability_target_undiscovered);
     if (prepare || old_prepare) ++ability_work.preparations;
     else ++ability_work.executions;
     if (prepare && kind == AbilityKind::corruption) {

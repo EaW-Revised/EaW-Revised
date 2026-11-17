@@ -162,6 +162,18 @@ public:
     [[nodiscard]] core::Result<script::foc::PreparedAiSession> prepare_ai(const ConflictRecord&, GalacticParentQuery = {},
         std::shared_ptr<script::foc::AiJournal> journal = {}) const;
     [[nodiscard]] core::Result<void> bind_game(GameSession&) const;
+    // WGCH-126 / WGP-168 (#7357): the queued space battle of an accepted solo space corruption mission, on the choice's
+    // own map with that map's placed units. The actor's owner invades, the planet's owner defends, no galactic force
+    // enters (no persistence) and the route is forced tactical. Nullopt (the mission is refused, nothing changes) when the
+    // choice is not a space mission or its map was not prepared. The choice's tactical plot is carried in story_plot
+    // but not run: there is no tactical story-plot runtime yet (WGCH-197).
+    [[nodiscard]] core::Result<std::optional<RecordedAdmission>> corruption_mission(const sim::galactic::GalacticSnapshot&,
+        const sim::galactic::LiveCorruptionMission&, const sim::galactic::CorruptionChoice&, sim::EntityId first_free) const;
+    // WGCH-197: the pure readiness check behind the corruption menu and the pre-debit probe. True when corruption_mission
+    // can build the battle for this choice, invader and defender: a space choice whose map was prepared without a
+    // refusal, and both factions have tactical caps. No snapshot, no state.
+    [[nodiscard]] bool corruption_mission_ready(const sim::galactic::CorruptionChoice&, sim::galactic::PlayerId invader,
+        sim::galactic::PlayerId defender) const;
     // Frozen map/cap/type closure diagnostics. Snapshot-dependent placement and
     // current station/passenger checks remain authoritative in resolve().
     [[nodiscard]] core::Result<void> availability(const ConflictRecord&) const;

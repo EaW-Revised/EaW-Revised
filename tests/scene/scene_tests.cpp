@@ -191,6 +191,11 @@ void write_catalog(const std::filesystem::path& root) {
   <Model_Name>eawr_scene_plain.alo</Model_Name>
   <Layer_Z_Adjust>-2500</Layer_Z_Adjust>
 </SpaceProp>
+<SpaceProp_LowOrbit Name="EAWR_SCENE_LOW_ORBIT">
+  <Model_Name>eawr_scene_plain.alo</Model_Name>
+  <Scale_Factor>2</Scale_Factor>
+  <Layer_Z_Adjust>-2500</Layer_Z_Adjust>
+</SpaceProp_LowOrbit>
 <SpaceProp Name="EAWR_SCENE_BAD_HEIGHT">
   <Model_Name>eawr_scene_plain.alo</Model_Name>
   <Layer_Z_Adjust>invalid</Layer_Z_Adjust>

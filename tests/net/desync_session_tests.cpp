@@ -227,6 +227,7 @@ std::string run_case(const std::filesystem::path& directory, std::uint64_t final
         options.match_identity = "scripted-battle";
         options.match_setup = require(tactical::write_replay({initial, 0, {}}));
         options.build_identity = "contract-test-build";
+        options.deferred_compare = false; // Freezes exactly at the exchange point: the barrier contract.
         monitors[peer] = std::make_unique<net::DesyncMonitor>(*transports[peer], std::move(options));
         adapters.push_back(std::make_unique<TestAdapter>(initial, content(), executor, roster, peer == 1 ? fault_tick : std::nullopt));
         sessions.push_back(require(net::LockstepSession::create(*adapters.back(), *transports[peer],
@@ -287,7 +288,8 @@ std::string run_case(const std::filesystem::path& directory, std::uint64_t final
         expect(!monitors[0]->report() && !monitors[1]->report(), "false positive in scripted battle");
         return adapters[0]->state_hash();
     }
-    const auto detected = std::min(final_tick, ((*fault_tick + 29) / 30) * 30);
+    constexpr auto every = net::default_hash_exchange_every;
+    const auto detected = std::min(final_tick, ((*fault_tick + every - 1) / every) * every);
     for (net::PeerIndex peer = 0; peer < 2; ++peer) {
         const auto& monitor = *monitors[peer];
         const auto& report = *monitor.report();
@@ -339,8 +341,11 @@ std::string run_case(const std::filesystem::path& directory, std::uint64_t final
 struct ResyncMatch {
     ResyncMatch(std::size_t workers, std::uint32_t peers, std::optional<std::uint64_t> fault,
         net::PeerIndex minority, bool persistent = false, bool conflicting_log = false,
-        std::optional<bool> adaptive_decrease = {}, bool allow_rejoin = true)
+        std::optional<bool> adaptive_decrease = {}, bool allow_rejoin = true, std::optional<bool> deferred_flag = false,
+        std::uint64_t higher_rtt_at = 0)
         : network(peers), executor(workers), bad_peer(minority) {
+        // An empty flag leaves DesyncOptions at the shared production default.
+        const bool deferred = deferred_flag.value_or(net::default_deferred_compare);
         for (net::PeerIndex peer = 0; peer < peers; ++peer) {
             roster.push_back({sim::SeatId{peer + 1}, peer % 2 + 1, true, false});
             seats.push_back({sim::SeatId{peer + 1}, true});
@@ -348,7 +353,10 @@ struct ResyncMatch {
         }
         for (net::PeerIndex peer = 0; peer < peers; ++peer) {
             transports.push_back(std::make_unique<eawr::testing::FakeTransport>(network, peer));
-            net::DesyncOptions diagnostic; diagnostic.exchange_every = 5;
+            net::DesyncOptions diagnostic; diagnostic.exchange_every = deferred && adaptive_decrease.has_value() ? 30U : 5U;
+            if (deferred_flag) diagnostic.deferred_compare = *deferred_flag;
+            expect(diagnostic.deferred_compare == deferred, "fixture flag differs from the monitor option");
+            diagnostic.final_tick = adaptive_decrease ? 360U : 90U;
             monitors.push_back(std::make_unique<net::DesyncMonitor>(*transports.back(), diagnostic));
             adapters.push_back(std::make_unique<TestAdapter>(setup(), content(), executor, roster, peer == minority ? fault : std::nullopt));
             net::SessionOptions options; options.final_tick_count = adaptive_decrease ? 360U : 90U;
@@ -356,16 +364,19 @@ struct ResyncMatch {
             if (adaptive_decrease) {
                 options.input_delay = *adaptive_decrease ? 8U : 4U;
                 options.non_lan = true;
-                options.adaptive_timing = net::AdaptiveTiming{0, true, [decrease = *adaptive_decrease](auto) {
+                options.adaptive_timing = net::AdaptiveTiming{0, true, [this, peer, higher_rtt_at, decrease = *adaptive_decrease](auto) {
+                    if (!decrease && sessions[peer].active_adapter().completed_tick() < higher_rtt_at)
+                        return std::optional<std::uint64_t>{0};
                     return std::optional<std::uint64_t>{decrease ? 0U : 330U};
                 }};
+                options.adaptive_timing->responsive = higher_rtt_at != 0;
             }
             options.reconnect = net::ReconnectOptions{};
             options.reconnect->match_identity.fill(42); options.reconnect->setup = require(tactical::write_replay({setup(), 0, {}}));
             options.reconnect->allow_rejoin = allow_rejoin;
             if (allow_rejoin) options.reconnect->seat_tokens = setup_test::pair_keys(peer, peers);
             options.reconnect->replay_control = [](auto) { return eawr::core::Result<void>::success(); };
-            options.resync = net::ResyncOptions{}; options.resync->timeout_ms = 100;
+            options.resync = net::ResyncOptions{}; options.resync->timeout_ms = deferred ? 10'000 : 100;
             options.resync->rebuild = [this, persistent, fault](auto bytes) {
                 expect(Bytes(bytes.begin(), bytes.end()) == require(tactical::write_replay({setup(), 0, {}})), "factory received unverified setup");
                 ++rebuilds;
@@ -588,6 +599,144 @@ void resync_hold_overlap() {
         && match.rebuilds == 0, "reconnect/departure overlap attempted resync");
 }
 
+void deferred_lagging_vote() {
+    ResyncMatch match(2, 2, 7, 1, false, false, {}, true, true);
+    for (unsigned round = 0; round < 1000 && match.sessions[1].active_adapter().completed_tick() < 12; ++round) match.pump();
+    expect(match.errors.empty() && match.sessions[1].active_adapter().completed_tick() == 12,
+        "lagging fixture must stop peer 1 at T-1");
+    bool voted = false;
+    match.network.before_send = [&](auto from, auto, auto bytes) {
+        if (from == 0 && bytes.front() == net::resync_vote_kind) {
+            expect(match.sessions[0].active_adapter().completed_tick() == 13, "fast peer voted at the wrong frontier");
+            voted = true;
+        }
+    };
+    for (unsigned round = 0; round < 1000 && !voted; ++round) {
+        match.network.round = match.now;
+        require(match.sessions[0].pump(match.now++));
+    }
+    expect(voted && match.sessions[1].active_adapter().completed_tick() == 12, "peer 1 did not lag behind the fast vote");
+    for (unsigned round = 0; round < 2000 && !match.ended() && match.errors.empty(); ++round) match.pump();
+    expect(match.errors.empty() && match.ended() && match.rebuilds == 1, "early vote refused a peer that could reach the recovery frontier");
+    expect(match.sessions[0].active_adapter().state_hash() == match.sessions[1].active_adapter().state_hash(),
+        "lagging-vote recovery did not converge");
+}
+
+void deferred_vote_timeout() {
+    ResyncMatch match(2, 2, 7, 1, false, false, {}, true, true);
+    match.network.fault = [](auto from, auto to, auto bytes) {
+        eawr::testing::FakeDelivery delivery;
+        if (from == 0 && to == 1 && bytes.front() == net::sealed_batch_kind) {
+            const auto batch = require(net::decode_batch(bytes));
+            delivery.drop = batch.tick == 11;
+        }
+        return delivery;
+    };
+    for (unsigned round = 0; round < 15'000 && !match.failed(); ++round) match.pump();
+    expect(match.failed() && std::find(match.errors.begin(), match.errors.end(), net::resync_errors::timeout) != match.errors.end(),
+        "an early vote held behind an unreachable frontier must expire through recovery timeout");
+    expect(match.rebuilds == 0, "unreachable early vote published recovery state");
+}
+
+void deferred_pending_timing_proposal() {
+    ResyncMatch match(2, 2, 89, 1, false, false, false, true, true, 88);
+    match.network.fault = [](auto from, auto to, auto bytes) {
+        eawr::testing::FakeDelivery delivery;
+        if (from == 0 && to == 1 && bytes.front() == net::timing_proposal_kind) delivery.ordered_delay = 12;
+        return delivery;
+    };
+    std::array<std::optional<std::uint64_t>, 2> frontier;
+    bool proposal_crossed_exchange{};
+    match.network.before_send = [&](auto from, auto, auto bytes) {
+        if (bytes.front() == net::resync_vote_kind) frontier[from] = match.sessions[from].active_adapter().completed_tick();
+    };
+    for (unsigned round = 0; round < 100'000 && !match.ended() && match.errors.empty(); ++round) {
+        match.pump();
+        if (match.sessions[1].active_adapter().completed_tick() == 90)
+            for (const auto& pending : match.network.inbox[1])
+                if (pending.received.frame.front() == net::timing_proposal_kind && pending.due > match.now)
+                    proposal_crossed_exchange = true;
+    }
+    expect(proposal_crossed_exchange, "timing proposal did not remain in flight across the client's exchange");
+    expect(match.errors.empty() && match.ended(), "asymmetric pending proposal split the recovery frontier");
+    for (const auto& value : frontier) expect(value == 94, "pending proposal changed N+active-delay recovery tick");
+    expect(match.sessions[0].active_adapter().state_hash() == match.sessions[1].active_adapter().state_hash(),
+        "pending-proposal recovery did not converge");
+}
+
+void deferred_tactical_matrix() {
+    std::vector<std::string> baseline_hashes;
+    Bytes baseline_commands;
+    for (const auto workers : {1U, 2U, 4U, 8U}) for (const bool deferred : {false, true}) {
+        ResyncMatch match(workers, 2, {}, 1, false, false, {}, true, deferred);
+        std::array<std::vector<std::string>, 2> hashes;
+        for (net::PeerIndex peer = 0; peer < 2; ++peer)
+            match.sessions[peer].set_commit_observer([&, peer](auto, auto, const net::CompletedTick& tick) {
+                hashes[peer].push_back(tick.state_sha256);
+            });
+        match.network.emulate(eawr::testing::wan_profiles[1]);
+        for (unsigned round = 0; round < 100'000 && !match.ended() && match.errors.empty(); ++round) match.pump();
+        expect(match.errors.empty() && match.ended(), "deferred tactical identity arm did not reach end");
+        const auto& adapter = static_cast<const TestAdapter&>(match.sessions[0].active_adapter());
+        const auto commands = require(tactical::write_replay(adapter.simulation().record()));
+        expect(hashes[0].size() == 90 && hashes[0] == hashes[1], "tactical peers disagree on per-tick hashes");
+        // Repeated exchange queries must not alter simulation state or replay inputs.
+        const auto state = adapter.canonical_state(); const auto hash = adapter.state_hash();
+        expect(adapter.canonical_state() == state && adapter.state_hash() == hash
+            && require(tactical::write_replay(adapter.simulation().record())) == commands, "exchange query has side effects");
+        if (baseline_hashes.empty()) { baseline_hashes = hashes[0]; baseline_commands = commands; }
+        expect(hashes[0] == baseline_hashes && commands == baseline_commands, "flag or worker count changed canonical hashes/commands");
+        std::cout << "deferred identity workers=" << workers << " flag=" << deferred
+            << " ticks=" << hashes[0].size() << " state=" << hash << '\n';
+    }
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        ResyncMatch match(workers, 2, 7, 1, false, false, {}, true, true);
+        match.network.emulate(eawr::testing::wan_profiles[1]);
+        std::array<std::optional<std::uint64_t>, 2> frontier;
+        match.network.before_send = [&](auto from, auto, auto bytes) {
+            if (bytes.front() == net::resync_vote_kind) frontier[from] = match.sessions[from].active_adapter().completed_tick();
+        };
+        // WAN recovery needs its normal generous completeness budget rather than
+        // the 100 ms refusal fixture's deliberately short incident deadline.
+        for (unsigned round = 0; round < 100'000 && !match.ended() && match.errors.empty(); ++round) match.pump();
+        expect(match.errors.empty() && match.ended(), "deferred lossy-loopback resync failed");
+        for (net::PeerIndex peer = 0; peer < 2; ++peer) {
+            expect(frontier[peer] == 13, "tactical recovery voted before the common N+K frontier");
+            expect(match.monitors[peer]->recovered_report()
+                && match.monitors[peer]->recovered_report()->first_divergent_tick == 7, "deferred recovery lost exact diagnosis");
+        }
+        expect(match.sessions[0].active_adapter().state_hash() == match.sessions[1].active_adapter().state_hash(),
+            "deferred resync did not converge");
+    }
+}
+
+// Stage 4: tactical (skirmish) online uses the default DesyncOptions, so the
+// asynchronous check is on. An injected desync must still diagnose the exact
+// tick, vote at the common N+K frontier, rebuild the minority once and converge.
+void default_on_tactical_recovery() {
+    expect(net::default_deferred_compare && net::DesyncOptions{}.deferred_compare, "asynchronous desync check is not the default");
+    for (const auto peers : {2U, 4U, 8U}) {
+        ResyncMatch match(2, peers, 7, 1, false, false, {}, true, std::nullopt);
+        std::vector<std::optional<std::uint64_t>> frontier(peers);
+        match.network.before_send = [&](auto from, auto, auto bytes) {
+            if (bytes.front() == net::resync_vote_kind && !frontier[from])
+                frontier[from] = match.sessions[from].active_adapter().completed_tick();
+        };
+        for (unsigned round = 0; round < 100'000 && !match.ended() && match.errors.empty(); ++round) match.pump();
+        expect(match.errors.empty() && match.ended(), "default-on tactical recovery did not reach the final barrier");
+        expect(match.rebuilds == 1, "default-on tactical recovery did not rebuild the diverged seat exactly once");
+        for (net::PeerIndex peer = 0; peer < peers; ++peer) {
+            expect(frontier[peer] == 13, "default-on tactical recovery voted before the common N+K frontier");
+            expect(match.monitors[peer]->recovered_report()
+                && match.monitors[peer]->recovered_report()->first_divergent_tick == 7, "default-on recovery lost exact diagnosis");
+            expect(match.sessions[peer].active_adapter().state_hash() == match.sessions[0].active_adapter().state_hash(),
+                "default-on tactical recovery did not converge");
+        }
+        std::cout << "default-on tactical recovery peers=" << peers << " frontier=13 state="
+            << match.sessions[0].active_adapter().state_hash() << std::endl;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -601,10 +750,16 @@ int main(int argc, char** argv) {
 #endif
         expect(argc == 2, "usage: desync_session_tests artifact-directory");
         monitor_frame_identity();
+        deferred_lagging_vote();
+        deferred_vote_timeout();
+        deferred_pending_timing_proposal();
+        deferred_tactical_matrix();
+        default_on_tactical_recovery();
         [[maybe_unused]] const auto baseline = run_case(argv[1], 2000);
         run_case(argv[1], 90, 48);
         run_case(argv[1], 90, 0);
         run_case(argv[1], 55, 48);
+        for (const auto tick : {149U, 150U, 151U}) run_case(argv[1], 310, tick);
         std::string recovered_hash;
         for (const auto workers : {1U, 2U, 4U, 8U}) for (const auto tick : {1U, 7U, 29U, 31U}) {
             const auto hash = resync_success(workers, tick);

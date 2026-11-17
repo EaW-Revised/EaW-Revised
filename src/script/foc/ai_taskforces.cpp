@@ -877,7 +877,7 @@ void Engine::service_blocks() {
             continue;
         }
         if (block.finished || block.kind == Block::Kind::produce || block.kind == Block::Kind::reinforce
-            || block.kind == Block::Kind::galactic_starbase) continue;
+            || block.kind == Block::Kind::galactic_starbase || block.kind == Block::Kind::galactic_desire) continue;
         native_record_changed(native_all_players, 23, id);
         if (block.kind == Block::Kind::ambush) {
             const auto tf = taskforces_.find(block.taskforce);

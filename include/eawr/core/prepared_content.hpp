@@ -18,6 +18,7 @@ struct PreparedContentIdentity {
     std::vector<ContentLayerIdentity> layers;
     PreparedContentIdentity() = default;
     PreparedContentIdentity(std::array<std::uint8_t, 32> value) : digest(value) {}
+    friend bool operator==(const PreparedContentIdentity&, const PreparedContentIdentity&) = default;
 };
 
 // Receipts use the bytes actually consumed by preparation. Mount keys only group local receipts;

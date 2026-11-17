@@ -71,7 +71,7 @@ void EawrLanLobby::refresh_staging_connections(Impl& impl, const LanView& view, 
 void EawrLanLobby::refresh_staging_status(Impl& impl, PageState& state, Resources& resources,
                                           const LanView& view, bool online,
                                           const std::optional<LanLobbyState>& room) {
-    // The status line is one notice per change, like a chat line.
+    // A new status line becomes a chat notice; a line that only counts on (seconds, files) does not add one per change.
     if (auto* options = EAWR_CONTROL(EawrUiButton, "IDC_SELECT_OPTIONS"))
         options->set_disabled(!impl.host || state.options_panel == nullptr
                               || (room && room->snapshot.phase != net::LobbyPhase::staging));
@@ -85,7 +85,8 @@ void EawrLanLobby::refresh_staging_status(Impl& impl, PageState& state, Resource
         status += "Reconnect: disabled. " + view.reconnect_unavailable;
     }
     if (room && (room->preparing || room->snapshot.phase == net::LobbyPhase::starting)) status = utf8(resolved(resources.text, "TEXT_WAITING"));
-    // #6045: a campaign derivation runs on a worker; say what the room waits for and how long it has taken (one line a minute).
+    // #6045: a campaign derivation runs on a worker; say what the room waits for and how long it has taken. The counter
+    // ticks in place (the header line); chat gets the line once when it starts.
     if (room && !room->prepare_status.empty()) status = room->prepare_status;
     if (online && impl.host && room && room->connections_pending && room->ready_reason.empty() && view.phase == LanPhase::setup)
         status = room->start_reason;
@@ -94,14 +95,28 @@ void EawrLanLobby::refresh_staging_status(Impl& impl, PageState& state, Resource
         status = progress.files_total == 0 ? "Reading mod folders" :
             "Checking mod files (" + std::to_string(progress.files_done) + " of " + std::to_string(progress.files_total) + ")";
     }
-    if (auto* progress = EAWR_CONTROL(EawrUiLabel, "EAWR_MOD_REVIEW_STATUS")) {
-        progress->set_visible(checking_mods);
+    // The header's progress line shows the mod check and the campaign preparation with their live counters.
+    const bool preparing = !checking_mods && room && !room->prepare_status.empty();
+    auto* progress = EAWR_CONTROL(EawrUiLabel, "EAWR_MOD_REVIEW_STATUS");
+    if (progress) {
+        progress->set_visible(checking_mods || preparing);
         if (checking_mods) progress->set_text(text(status));
+        else if (preparing) progress->set_text(text(room->prepare_status));
     }
-    if (auto* title = EAWR_CONTROL(EawrUiLabel, "IDC_INTERNET_DIALOG_HEADER")) title->set_visible(!checking_mods);
+    if (auto* title = EAWR_CONTROL(EawrUiLabel, "IDC_INTERNET_DIALOG_HEADER")) title->set_visible(!checking_mods && !(preparing && progress));
     if (status != impl.status) {
         impl.status = status;
-        if (!checking_mods && !status.empty()) note_chat(model::ChatKind::notice, status);
+        if (!checking_mods) {
+            const bool in_place = preparing && progress && status == room->prepare_status;
+            const auto post = impl.status_chat.note(status, Time::get_singleton()->get_ticks_msec(), in_place);
+            if (post != model::StatusChatPost::none) {
+                std::string line = status;
+                // The host's first preparation line says once that the room is locked; the counter never repeats it.
+                if (post == model::StatusChatPost::first && preparing && room->start_preparing && status == room->prepare_status)
+                    line += " " + std::string(net::galactic_prepare_locked_note);
+                note_chat(model::ChatKind::notice, line);
+            }
+        }
     }
 }
 

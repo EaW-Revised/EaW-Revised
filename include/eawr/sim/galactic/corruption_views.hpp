@@ -9,8 +9,8 @@ struct ObservedCorruptionChoice {
     unsigned slot{}; // authored slot 1..3, including gaps
     corruption_actions::Prepared prepared;
     bool affordable{}, units_satisfied{}, missions_satisfied{}, planets_satisfied{};
-    // Remake route availability, not a retail requirement: false when the choice needs a mission battle that this
-    // host cannot start, so it is offered unavailable instead of refused after the debit.
+    // Always true on a live host since WGCH-199: a choice whose mission battle can't be built takes the direct route, so
+    // every row has a route. Kept only for the presentation fixtures that still draw a greyed row (#7466).
     bool mission_available{true};
     std::optional<PreparedAbility> live_prepared{};
     std::optional<CorruptionChoice> live_choice{};

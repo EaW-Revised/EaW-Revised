@@ -45,9 +45,11 @@ public:
             else ++at;
         }
     }
-    // Called only at the executing sealed tick, in canonical command order.
-    [[nodiscard]] bool admit_speed(sim::SeatId seat, std::uint64_t tick) {
-        if (policy_ == GalacticClockPolicy::unrestricted) return true;
+    // Called only at the executing sealed tick, in canonical command order. A change back to normal (1x) is always
+    // admitted and not counted: the budget limits leaving normal speed, never returning to it, so the seat that asked
+    // for 2x can always end it (owner online test 2026-11-17).
+    [[nodiscard]] bool admit_speed(sim::SeatId seat, std::uint64_t tick, bool to_normal = false) {
+        if (policy_ == GalacticClockPolicy::unrestricted || to_normal) return true;
         expire(tick);
         auto& changes = history_[seat];
         if (changes.size() >= changes_per_window) return false;

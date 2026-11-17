@@ -1701,6 +1701,14 @@ void child_and_strategic_clock_share_one_limit(const std::array<std::size_t, 2> 
         expect(view.clock_refusals.size() == 1 && view.clock_refusals.front().seat == pair.humans[0],
             "HUD keeps a per-seat clock refusal receipt across skipped frames");
     }
+    // Owner online test 2026-11-17: the change back to 1x is never refused, even with this seat's budget spent, so the
+    // seat that asked for fast forward can always end it. It is agreed state, equal on both peers.
+    feeds[0]->set_target_rate(30);
+    at += 10;
+    expect(pair.run_to(at), "the 1x change keeps the session running");
+    for (net::PeerIndex peer = 0; peer < 2; ++peer)
+        expect(pair.lives[peer]->frame().latest->clock().tactical_speed == math::Fixed::from_raw(math::Fixed::scale),
+            "the requester's 1x applies on both peers inside its spent speed window");
     expect(pair.run_to(1400), "the shared clock window expires while session ticks continue");
     feeds[0]->set_target_rate(20);
     expect(pair.run_to(1410), "the expired window admits another speed change");
@@ -2706,7 +2714,7 @@ void multiplayer_ai_vote_human_leaves() {
 struct RecoveryPeers {
     RecoveryPeers(std::uint32_t count, std::size_t workers, std::size_t log_limit = 8U * 1024U * 1024U,
         std::uint64_t timeout = 30'000, bool loading_barrier = true,
-        std::optional<std::uint64_t> returning_timeout = {}, bool adaptive = false)
+        std::optional<std::uint64_t> returning_timeout = {}, bool adaptive = false, std::uint64_t every = 10, bool deferred = false)
         : setup(policy_setup()), pipes(count) {
         setup.seats.clear();
         for (std::uint32_t seat = 1; seat <= count; ++seat)
@@ -2746,7 +2754,8 @@ struct RecoveryPeers {
         const auto bytes = captured.initial_checkpoint;
         for (std::uint32_t peer = 0; peer < count; ++peer) {
             viewer::GalacticLanOptions options; options.input_delay = offer.input_delay;
-            options.exchange_every = 10;
+            options.exchange_every = every;
+            options.deferred_compare = deferred;
             if (loading_barrier) options.initial_checkpoint = bytes;
             else {
                 viewer::prepare_galactic_recovery_base(options, *games[peer], nullptr, 0);
@@ -2833,6 +2842,26 @@ struct RecoveryPeers {
     std::vector<std::string> logs; // diagnostic lines of every peer, in step order (one thread)
     std::uint64_t now{};
 };
+void default_hash_window_contracts() {
+    expect(viewer::GalacticLanOptions{}.exchange_every == 150, "GC driver uses the shared five-second cadence");
+    expect(viewer::GalacticLanOptions{}.deferred_compare == net::default_deferred_compare && net::default_deferred_compare,
+        "GC driver takes the shared asynchronous desync default");
+    // The shared default (asynchronous) and the explicit barrier both keep the recovery contract.
+    for (const bool deferred : {net::default_deferred_compare, false}) for (const auto workers : {1U, 8U}) {
+        RecoveryPeers rig(3, workers, 8U * 1024U * 1024U, 30'000, true, {}, false,
+            net::default_hash_exchange_every, deferred);
+        rig.run(75);
+        rig.pipes.open_[2] = false; rig.run(149, false); rig.pipes.open_[2] = true;
+        expect(rig.recover(0, 250) == net::GalacticRecoveryRefusal::none,
+            "departure and checkpoint recovery inside the larger hash window succeed");
+        rig.run(310);
+        expect(rig.publications[2] == 1, "returning GC owner is published once");
+        for (const auto& game : rig.games)
+            expect(game->state_sha256() == rig.games.front()->state_sha256(),
+                "recovered GC peers agree beyond the next 150-tick exchange");
+    }
+}
+
 void recovery_release_interleaving_contracts() {
     for (const auto count : {2U, 3U}) for (const auto workers : {1U, 2U, 4U, 8U}) {
         RecoveryPeers rig(count, workers); rig.run(20); rig.pipes.trace = true;
@@ -2987,7 +3016,7 @@ void adaptive_coop_proposals_are_rare() {
 // finish; the retry waits for the agreement to settle instead of spending a fixed number of tries on its ticks.
 void adaptive_coop_save_retries_over_a_proposal() {
     struct Case { std::uint64_t rtt, earliest, until; };
-    for (const auto& row : {Case{330, 100, 160}, Case{2640, 320, 760}}) {
+    for (const auto& row : {Case{330, 44, 160}, Case{2640, 264, 760}}) {
         auto setup = versus_setup();
         const auto rtt = row.rtt;
         Pair pair(setup, {1, 1}, LiveGameSession::Pacing::driven, 3000, 0, net::max_session_ticks,
@@ -3000,8 +3029,8 @@ void adaptive_coop_save_retries_over_a_proposal() {
         std::filesystem::create_directories(directory);
         pair.start(0, [&](auto& options) { options.saves.directory = directory.string(); });
         pair.start(1, [&](auto& options) { options.saves.directory = (directory / "joiner").string(); });
-        // The host proposes at tick 64 (first policy tick for the offered delay); the change applies later.
-        expect(pair.run_to(66), "the fixture reaches the proposal window");
+        // The responsive campaign host proposes at tick 8; activation still waits for the agreed boundary.
+        expect(pair.run_to(10), "the fixture reaches the proposal window");
         eawr::platform::LiveSaveRequest request; request.seat = pair.humans[0]; request.name = "inside-proposal";
         const auto token = pair.lives[0]->request_save(request);
         expect(token != 0, "the host admits the save");
@@ -3025,6 +3054,37 @@ void adaptive_coop_save_retries_over_a_proposal() {
         expect(pair.lives[0]->tick_hashes() == pair.lives[1]->tick_hashes(), "the retried save keeps both peers equal");
         for (auto& live : pair.lives) live->stop();
         std::filesystem::remove_all(directory);
+    }
+}
+
+void deferred_gc_recovery_contracts() {
+    for (const auto peers : {2U, 3U}) {
+        RecoveryPeers rig(peers, 2, 8U * 1024U * 1024U, 30'000, true, {}, false, 10, true);
+        rig.run(20);
+        net::GalacticAdapterOptions query_options; query_options.clock_policy = net::GalacticClockPolicy::limited;
+        net::GalacticSessionAdapter query(*rig.games[0], *rig.pools[0], query_options);
+        const auto state_before = rig.games[0]->state_sha256();
+        const auto encoding = query.canonical_state(); const auto hash = query.state_hash();
+        expect(query.canonical_state() == encoding && query.state_hash() == hash && rig.games[0]->state_sha256() == state_before,
+            "GC exchange queries preserve canonical simulation state");
+        const auto outlier = peers - 1;
+        require(rig.games[outlier]->submit({{20, {1}, 999}, galactic::DebugSetPlanetOwner{rig.setup.planets.front().id, 3}}));
+        std::optional<std::uint64_t> publication_tick;
+        for (unsigned round = 0; round < 20'000; ++round) {
+            for (std::uint32_t peer = 0; peer < peers; ++peer) rig.step(peer, rig.games[peer]->completed_tick() < 60);
+            if (rig.publications[outlier] && !publication_tick) publication_tick = rig.games[outlier]->completed_tick();
+            if (peers == 2 && std::all_of(rig.games.begin(), rig.games.end(), [](const auto& game) { return game->completed_tick() == 33; })) break;
+            if (publication_tick && std::all_of(rig.games.begin(), rig.games.end(), [](const auto& game) { return game->completed_tick() == 60; })) break;
+            if (peers == 3) std::this_thread::sleep_for(1ms);
+        }
+        if (peers == 2) {
+            expect(!publication_tick && rig.games[0]->completed_tick() == 33 && rig.games[1]->completed_tick() == 33,
+                "two-peer GC keeps divergence frozen at N+K without majority recovery");
+        } else {
+            expect(publication_tick == 33 && rig.publications[outlier] == 1, "GC minority recovery fence must be frozen tick N+K");
+            expect(rig.games[0]->completed_tick() == 60 && rig.games[0]->state_sha256() == rig.games[2]->state_sha256(),
+                "deferred GC recovery did not resume with equal hashes");
+        }
     }
 }
 
@@ -3162,6 +3222,9 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--save-barrier") {
             saves_are_agreed(); return galactic_test::checker.finish();
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--deferred") {
+            deferred_gc_recovery_contracts(); return galactic_test::checker.finish();
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--arbitration") {
             multiplayer_arbitration();
             multiplayer_vote_departure();
@@ -3191,6 +3254,7 @@ int main(int argc, char** argv) {
             raid_commands_and_digests();
             return galactic_test::checker.finish();
         }
+        default_hash_window_contracts();
         live_recovery_protocol_contracts();
         controller_wire_and_peer_gates();
         raid_commands_and_digests();

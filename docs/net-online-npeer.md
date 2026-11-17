@@ -194,8 +194,24 @@ closes the room for everyone (owner decision 4).
 ### Room frame version and the host mod refresh
 
 Every room frame (snapshot, request, chat, setup envelope, preparation, notice) carries the room wire version after its kind
-byte. **Version 4** adds one frame, kind 102, the host mod refresh: `room:text, description:blob`, where the blob is a valid
-non-empty mod description of at most 64 KiB. A build on another version refuses the frame with a message naming version 4.
+byte. **Version 5** appends optional skirmish content admission data to snapshots: a presence byte, the effective-content
+SHA-256 and ordered layer checksums with diagnostic labels. The initial snapshot is checked before Ready or battle setup,
+and the same comparison runs before freeze. Effective XML/Lua bytes and available lobby maps supply the receipts; local
+profile names, paths, timestamps and whole-folder checksums do not supply agreement data. Content is read on a worker and
+reread before Start. A mismatch uses the existing named layer refusal, with host and local checksum prefixes and a Workshop
+update hint when an item ID is known. Equal bytes remain equal across different install paths and diagnostic labels.
+A build on another version refuses the frame with a message naming version 5.
+The introduction server does not parse this format: GNS carries room frames, and the service forwards signalling blobs
+opaquely. No relay-server deployment is required for this room-frame change. Build identity admission precedes room decoding.
+The guest reports a content refusal back to the host before closing; the host keeps the named reason and releases only that
+seat. `EAWR-NET-1609` is the existing setup-failed category, not a fixed player sentence; both views retain the content message.
+
+Version 4 introduced kind 102, the host mod refresh: `room:text, description:blob`, where the blob is a valid non-empty mod
+description of at most 64 KiB. That display-only description remains separate from skirmish content admission.
+
+An offer mismatch also logs the expected snapshot revision/map/digests and both complete offer field summaries. The local
+failure replay has a `.failure.json` companion containing that untruncated evidence; bounded wire refusal text is independent
+of this local record. These summaries carry no invitation, ownership capability or reconnect credential.
 
 The host opens its room with whatever mod description it has at that moment. When its mod content digests are not ready yet,
 that description has no digest for those mods, so a same-size content edit cannot be told apart from the guest's copy. Once

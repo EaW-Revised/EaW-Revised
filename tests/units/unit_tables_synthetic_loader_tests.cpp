@@ -21,6 +21,219 @@
 
 namespace unit_tables_test_support {
 void synthetic_tables() {
+    // PL-01: optional immutable presentation input, with the viewer's existing boolean tokens.
+    for (const std::string_view value : {"", "false", "true", "YES", "1", "0"}) {
+        TempTree tree;
+        write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
+        const auto path = tree.root / "XML" / "GameConstants.xml";
+        std::ifstream input(path);
+        std::string constants{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        input.close();
+        if (!value.empty()) constants.insert(constants.find("</GameConstants>"),
+            "<ShouldDisplayPredictionPaths>" + std::string(value) + "</ShouldDisplayPredictionPaths>");
+        write(path, constants);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "PL-01: presentation constant fixture loads");
+        if (!loaded.tables) continue;
+        const auto bound = eawr::units::motion_table(*loaded.tables);
+        const bool enabled = value == "true" || value == "YES" || value == "1";
+        expect(bound && bound.value().prediction_paths == enabled,
+            "PL-01: absent/false skips predictions and authored true enables them");
+        auto toggled = *loaded.tables;
+        toggled.constants.prediction_paths = !enabled;
+        expect(eawr::units::content_identity(toggled) == eawr::units::content_identity(*loaded.tables),
+            "PL-01: presentation opt-in does not alter simulation content identity");
+    }
+    {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        xml.replace(xml.rfind("</Objects>"), 10, R"xml(
+<SpaceProp Name="Test_Solid_Asteroid">
+  <Space_Model_Name>test_frigate.alo</Space_Model_Name>
+  <Behavior>SPACE_OBSTACLE</Behavior><Is_Impassable_Asteroid>Yes</Is_Impassable_Asteroid>
+  <Space_Layer>StaticObject</Space_Layer><Space_Obstacle_Radius>150</Space_Obstacle_Radius>
+</SpaceProp>
+<SpaceProp Name="Test_Shapeless_Asteroid">
+  <Behavior>SPACE_OBSTACLE</Behavior><Is_Impassable_Asteroid>Yes</Is_Impassable_Asteroid>
+  <Space_Layer>StaticObject</Space_Layer><Space_Obstacle_Radius>150</Space_Obstacle_Radius>
+</SpaceProp>
+</Objects>)xml");
+        write_fixture(tree.root, xml);
+        auto assets = models(-40.0F);
+        auto& model = assets.at("data/art/models/test_frigate.alo");
+        eawr::assets::Mesh box;
+        box.name = "COLLISIONBOX"; box.bone = 0;
+        box.bounds_min = {-75, -75, -75}; box.bounds_max = {75, 75, 75};
+        model.meshes.push_back(box);
+        const std::array mounts{eawr::vfs::MountSpec{"base", tree.root, "data", {}}};
+        auto filesystem = eawr::vfs::Vfs::mount(mounts);
+        expect(static_cast<bool>(filesystem), "FD-10: solid-prop fixture mounts");
+        if (!filesystem) return;
+        auto catalog = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
+        expect(static_cast<bool>(catalog), "FD-10: solid-prop fixture catalog loads");
+        if (!catalog) return;
+        eawr::units::LoadInput input;
+        input.catalog = &catalog.value().catalog; input.filesystem = &filesystem.value();
+        input.types = {"Test_Frigate"};
+        input.obstacles = {"Test_Solid_Asteroid", "Test_Shapeless_Asteroid"};
+        input.model = [&](const std::string_view path) -> const eawr::assets::Model* {
+            const auto found = assets.find(std::string(path));
+            return found == assets.end() ? nullptr : &found->second;
+        };
+        const auto loaded = eawr::units::load_unit_tables(input);
+        expect(static_cast<bool>(loaded), "FD-10/WHZ-08: solid map props load through the obstacle path");
+        if (loaded) {
+            std::vector<eawr::core::Diagnostic> diagnostics;
+            const auto combat = eawr::units::combat_table(loaded.value(), eawr::units::ContentErrors::strict, &diagnostics);
+            const auto solid_id = eawr::assets::object_type_crc("Test_Solid_Asteroid");
+            const auto empty_id = eawr::assets::object_type_crc("Test_Shapeless_Asteroid");
+            const auto* solid = combat ? combat.value().find_avoidance_type(solid_id) : nullptr;
+            const auto* empty = combat ? combat.value().find_avoidance_type(empty_id) : nullptr;
+            expect(solid && solid->model_collision_box && solid->model_collision_radius.raw() > 0
+                && !combat.value().find_target_type(solid_id),
+                "FD-10: solid prop model geometry binds without adding combat target admission");
+            expect(empty && !empty->model_collision_box && empty->meshes.empty(),
+                "FD-10: a shapeless solid prop retains the footprint fallback admission");
+            expect(std::count_if(diagnostics.begin(), diagnostics.end(), [](const auto& note) {
+                return note.severity == eawr::core::Severity::warning
+                    && note.message.find("Test_Shapeless_Asteroid") != std::string::npos
+                    && note.message.find("footprint sphere") != std::string::npos;
+            }) == 0, "FD-10: combat binding does not repeat the shapeless solid prop's loader note");
+            expect(std::count_if(loaded.value().notes.begin(), loaded.value().notes.end(), [](const auto& note) {
+                return note.owner == "Test_Shapeless_Asteroid" && note.reason.find("footprint sphere") != std::string::npos;
+            }) == 1, "FD-10: the shapeless solid prop emits one fallback note at load");
+            // Hidden-only and shield-only models have no ordinary avoidance surface.
+            // Failed placement and failed mesh validation must keep the same fallback profile.
+            for (const int mode : {0, 1, 2, 3, 4}) {
+                auto altered = loaded.value();
+                auto& obstacle = *std::find_if(altered.obstacles.begin(), altered.obstacles.end(), [](const auto& value) {
+                    return value.id == "Test_Solid_Asteroid";
+                });
+                obstacle.model_collision_box.reset();
+                obstacle.scale_factor = Fixed::from_raw(Fixed::scale);
+                obstacle.collision = eawr::units::CollisionBounds{
+                    point(raw(-5), raw(-5), raw(-5)), point(raw(5), raw(5), raw(5))};
+                eawr::units::CollisionMesh surface;
+                surface.name = mode == 1 ? "shield" : "hull";
+                surface.pose_visible = mode != 0;
+                if (mode != 3) surface.triangles = eawr::units::IndexedCollisionTriangles(
+                    {point(raw(-5), 0, 0), point(raw(5), 0, 0), point(0, raw(5), 0)}, {{0, 1, 2}});
+                obstacle.collision_meshes = {std::move(surface)};
+                if (mode == 2) {
+                    obstacle.scale_factor = Fixed::from_raw(2 * Fixed::scale);
+                    obstacle.model_collision_box = eawr::units::CollisionBounds{
+                        point(0, 0, 0), point(std::numeric_limits<std::int64_t>::max(), 0, 0)};
+                }
+                const bool broken = mode == 2 || mode == 3;
+                expect(static_cast<bool>(eawr::units::combat_table(altered)) != broken,
+                    "FD-10: strict solid-prop binding refuses malformed geometry but accepts hidden and shield meshes");
+                diagnostics.clear();
+                const auto bound = eawr::units::combat_table(altered, eawr::units::ContentErrors::skip_object, &diagnostics);
+                const auto* prop = bound ? bound.value().find_avoidance_type(solid_id) : nullptr;
+                expect(prop && !bound.value().find_target_type(solid_id)
+                    && !prop->model_collision_box && (prop->meshes.empty() == (mode != 4))
+                    && (mode == 4 || (!prop->collision && !prop->mesh_bounds && prop->model_collision_radius.raw() == 0)),
+                    "FD-10: unusable or failed solid geometry keeps the shapeless fallback; visible hulls retain their shape");
+                expect(std::count_if(diagnostics.begin(), diagnostics.end(), [](const auto& note) {
+                    return note.severity == eawr::core::Severity::warning
+                        && note.message.find("Test_Solid_Asteroid") != std::string::npos
+                        && note.message.find("footprint sphere") != std::string::npos;
+                }) == (mode == 4 ? 0 : 1), "FD-10: each unusable solid-prop shape reports its footprint fallback");
+            }
+        }
+    }
+    {
+        // FD-10: explicit model boxes are independent of collision masks and visibility;
+        // ordinary mesh eligibility retains both its mask and reference-pose visibility.
+        TempTree tree;
+        write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
+        auto assets = models(-40.0F);
+        auto& model = assets.at("data/art/models/test_frigate.alo");
+        eawr::assets::Mesh box;
+        box.name = "collisionbox"; box.bone = 0; box.visible = false;
+        box.bounds_min = {-2, -3, -4}; box.bounds_max = {5, 6, 7};
+        model.meshes.push_back(box);
+        eawr::assets::Mesh hull;
+        hull.name = "hull"; hull.bone = 0; hull.collidable = true; hull.visible = false;
+        hull.bounds_min = {-10, -10, -10}; hull.bounds_max = {10, 10, 10};
+        eawr::assets::Submesh surface;
+        surface.vertices.resize(3);
+        surface.vertices[0].position = {-1, -1, 0};
+        surface.vertices[1].position = {1, -1, 0};
+        surface.vertices[2].position = {0, 1, 0};
+        surface.indices = {0, 1, 2}; hull.submeshes.push_back(surface);
+        model.meshes.push_back(hull);
+        model.bones.push_back(bone("Hidden_Collision", 0, {0, 0, 0}));
+        model.bones.back().visible = false;
+        hull.name = "hidden-hull"; hull.visible = true;
+        hull.bone = static_cast<std::int32_t>(model.bones.size() - 1); model.meshes.push_back(hull);
+        hull.name = "non-collider"; hull.collidable = false; model.meshes.push_back(hull);
+        const auto loaded = load(tree.root, assets);
+        expect(loaded.tables.has_value(), "FD-10: authored collision model loads");
+        if (loaded.tables) {
+            const auto* unit = loaded.tables->find("Test_Frigate");
+            expect(unit && unit->model_collision_box && unit->model_collision_box->min == point(raw(-2), raw(-3), raw(-4))
+                && unit->model_collision_box->max == point(raw(5), raw(6), raw(7)),
+                "FD-10: the first named model box survives despite its disabled renderable");
+            expect(unit && unit->collision_meshes.size() == 2 && unit->collision_meshes[0].pose_visible
+                && !unit->collision_meshes[1].pose_visible,
+                "FD-10: a draw-hidden collision proxy remains eligible, but a hidden pose does not");
+            const auto combat = eawr::units::combat_table(*loaded.tables);
+            const auto* profile = combat ? combat.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+            expect(profile && profile->model_collision_box && profile->model_collision_radius.raw() > 0,
+                "FD-10: model shape and conservative broad radius bind");
+            if (profile && profile->model_collision_box) {
+                const auto scale = unit->scale_factor.value();
+                const auto scaled = [&](const int value) { return eawr::sim::math::multiply(Fixed::from_raw(raw(value)), scale).value(); };
+                expect(profile->model_collision_box->min == Vec3{scaled(-6), scaled(-2), scaled(-4)}
+                    && profile->model_collision_box->max == Vec3{scaled(3), scaled(5), scaled(7)},
+                    "FD-10: authored type scale and the model-axis turn apply to the model box");
+                expect(profile->meshes.size() == 2 && profile->meshes[0].pose_visible && !profile->meshes[1].pose_visible,
+                    "FD-10: immutable placed geometry retains hidden mesh eligibility");
+            }
+            auto changed = *loaded.tables;
+            auto* edit = const_cast<eawr::units::UnitType*>(changed.find("Test_Frigate"));
+            edit->collision_meshes[1].pose_visible = true;
+            expect(eawr::units::content_identity(changed) != eawr::units::content_identity(*loaded.tables),
+                "FD-10: collision visibility participates in content identity");
+            changed = *loaded.tables;
+            edit = const_cast<eawr::units::UnitType*>(changed.find("Test_Frigate"));
+            edit->model_collision_box.reset();
+            expect(eawr::units::content_identity(changed) != eawr::units::content_identity(*loaded.tables),
+                "FD-10: explicit model boxes participate in content identity");
+        }
+    }
+    // #5704 / FD-10: oversized named boxes must not drop a type during a lenient load,
+    // including a box-only model with no collidable mesh.
+    for (const bool collidable : {false, true}) {
+        TempTree tree;
+        write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
+        auto assets = models(-40.0F);
+        auto& model = assets.at("data/art/models/test_frigate.alo");
+        model.meshes.clear();
+        eawr::assets::Mesh box;
+        box.name = "COLLISIONBOX"; box.bone = 0; box.collidable = collidable;
+        box.bounds_min = {-500000, -500000, -500000};
+        box.bounds_max = {500000, 500000, 500000};
+        model.meshes.push_back(box);
+        const auto loaded = load(tree.root, assets);
+        expect(loaded.tables.has_value(), "FD-10: oversized model box loads into the source unit tables");
+        if (!loaded.tables) continue;
+        const auto* unit = loaded.tables->find("Test_Frigate");
+        expect(unit && unit->model_collision_box && unit->collision.has_value() == collidable,
+            "FD-10: the oversized named-box control covers both box-only and collidable models");
+        expect(!eawr::units::combat_table(*loaded.tables), "FD-10: strict loading refuses an oversized named box");
+        std::vector<eawr::core::Diagnostic> notes;
+        const auto combat = eawr::units::combat_table(*loaded.tables, eawr::units::ContentErrors::skip_object, &notes);
+        const auto* profile = combat ? combat.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+        expect(profile && !profile->collision && !profile->model_collision_box && profile->model_collision_radius.raw() == 0
+            && profile->meshes.empty() && !profile->mesh_bounds,
+            "FD-10: lenient loading keeps the type while clearing every oversized collision shape");
+        expect(std::any_of(notes.begin(), notes.end(), [](const auto& note) {
+            return note.severity == eawr::core::Severity::warning
+                && note.message.find("collision box exceeds the supported combat domain") != std::string::npos;
+        }), "FD-10: oversized named boxes retain the existing collision warning");
+    }
     // WCC-41: vary the authored scalar and behavior through the real XML loader.
     for (const std::string_view authored : {"2", "3.5", "0", "-1", "300", "", "invalid"}) {
         TempTree tree;

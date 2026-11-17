@@ -104,6 +104,12 @@ void WorldUiView::write_report(std::ostream& output) const {
            << ", \"waypoint_stubs_omitted\": " << waypoint_stubs_omitted_
            << ", \"max_waypoint_paths\": " << max_waypoint_paths_ << ", \"max_waypoint_flags\": " << max_waypoint_flags_
            << ", \"waypoint_surfaces\": " << waypoint_assets_.size()
+           << ", \"path_lines\": " << (path_lines_ ? "true" : "false")
+           << ", \"path_line_ships\": " << (path_lines_ ? path_lines_->stats().ships : 0U)
+           << ", \"path_line_segments\": " << (path_lines_ ? path_lines_->drawn_segments() : 0U)
+           << ", \"path_line_rebuilds\": " << (path_lines_ ? path_lines_->stats().rebuilds : 0U)
+           << ", \"path_line_uploads\": " << (path_lines_ ? path_lines_->uploads() : 0U)
+           << ", \"path_line_usable\": " << (!path_lines_ || path_lines_->usable() ? "true" : "false")
            << ", \"healing_blobs\": " << healing_blobs_drawn_
            << ", \"healing_blob_art\": [";
     for (std::size_t i = 0; i < healing_blobs_last_.size(); ++i) {
@@ -143,6 +149,21 @@ void WorldUiView::write_report(std::ostream& output) const {
     list(bar_rows_);
     output << ", \"icon_rows\": ";
     list(icon_rows_);
+    output << ", \"identity_art\": [";
+    for (std::size_t i = 0; i < identity_quads_.size(); ++i) {
+        const auto& quad = identity_quads_[i];
+        output << (i ? "," : "") << "{\"role\":" << eawr::viewer::camera_input::json_string_literal(quad.role)
+            << ",\"texture\":" << eawr::viewer::camera_input::json_string_literal(quad.texture) << ",\"rect\":["
+            << quad.rect[0] << ',' << quad.rect[1] << ',' << quad.rect[2] << ',' << quad.rect[3] << "]}";
+    }
+    output << "], \"bar_geometry\": [";
+    for (std::size_t i = 0; i < bar_geometry_.size(); ++i) {
+        const auto& bar = bar_geometry_[i];
+        output << (i ? "," : "") << "{\"entity\":" << bar.entity << ",\"rect\":["
+            << bar.x << ',' << bar.y << ',' << bar.width << ',' << bar.height << "],\"lift\":" << bar.lift
+            << ",\"spacing\":" << bar.spacing << "}";
+    }
+    output << "]";
     output << ", \"identity_geometry\": [";
     for (std::size_t index = 0; index < identity_geometry_.size(); ++index) {
         const auto& geometry = identity_geometry_[index];

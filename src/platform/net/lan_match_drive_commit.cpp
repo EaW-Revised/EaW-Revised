@@ -11,7 +11,9 @@ std::optional<DriverResult> TcpLanMatch::drive_commit(const tactical::TacticalSe
                 io_->monitor.reset(); gate_.reset(); lobby_stream_ = nullptr;
                 const auto reason = lobby_->notice() ? lobby_->notice()->reason : net::LobbyReason::setup_failed;
                 const auto message = reason == net::LobbyReason::kicked ? "TEXT_INTERNET_PLAYER_KICKED"
-                    : reason == net::LobbyReason::host_closed ? "TEXT_HOST_LEFT_GAME" : "The room ended before Start was committed.";
+                    : reason == net::LobbyReason::host_closed ? "TEXT_HOST_LEFT_GAME"
+                    : lobby_->notice() && !lobby_->notice()->message.empty() ? lobby_->notice()->message
+                    : "The room ended before Start was committed.";
                 return lobby_fail<bool>(reason, message);
             }
             if (!pumped) return DriverResult::failure(pumped.error());

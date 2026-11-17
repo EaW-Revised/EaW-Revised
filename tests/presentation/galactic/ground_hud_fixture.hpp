@@ -21,7 +21,12 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
     // The hidden-structures variant is the opponent's planet: a local owner always knows its structures.
     // "ground-unseen" is an opponent planet whose ground force size is not known to the local player (UNKNOWN line).
     const bool unseen = name == "ground-unseen";
-    const auto owner = (name == "ground-count" || representative) || name == "ground-foreign" || name == "ground-structures-hidden" || unseen ? enemy : local;
+    // "ground-invasion": the opponent's planet held by its landed companies, fully observed, under the local fleet
+    // 601: a drop on its ground is an invasion (WGM-39/42). "ground-invasion-base": the same planet held only by its
+    // ground base, its ground force unknown to the local player (no ground cards drawn).
+    const bool invasion_base = name == "ground-invasion-base";
+    const auto owner = (name == "ground-count" || representative) || name == "ground-foreign" || name == "ground-structures-hidden"
+        || unseen || name.starts_with("ground-invasion") ? enemy : local;
     std::erase_if(setup.fleets, [local](const auto& row) { return row.owner != local; });
     // "ground-no-lander": the same accessible surface, but no fleet type carries ground forces, so nothing can land (GPD-29).
     setup.fleet_control->types[0].transport = name != "ground-no-lander";
@@ -73,6 +78,10 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
         planet.allegiance = planet.target_owner = planet.ground_owner = planet.space_owner = owner;
         planet.current_owner = planet.current_controller = owner;
         planet.landed_transports = {{8001,owner,false,false},{8002,owner,false,false},{8003,owner,true,false}};
+    }
+    if (invasion_base) {
+        for (auto& planet : control.planets) if (planet.planet == 101) { planet.landed.clear(); planet.ground_base = {owner, 1}; }
+        for (auto& planet : setup.observer->planets) if (planet.planet == 101) planet.landed_transports.clear();
     }
     if (name == "ground-transfer") for (auto& planet : setup.observer->planets) if (planet.planet == 102) {
         planet.allegiance = planet.target_owner = planet.ground_owner = planet.space_owner = owner;
@@ -155,9 +164,9 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
         std::sort(setup.movement->contents.begin(), setup.movement->contents.end(),
             [](const auto& a, const auto& b) { return a.container < b.container; });
     }
-    const auto mask = (unseen ? 0U : g::bit(g::Intelligence::ground_count)) | g::bit(g::Intelligence::ownership)
+    const auto mask = (unseen || invasion_base ? 0U : g::bit(g::Intelligence::ground_count)) | g::bit(g::Intelligence::ownership)
         | g::bit(g::Intelligence::fleet_presence) | g::bit(g::Intelligence::fleet_count)
-        | ((name == "ground-count" || representative || unseen) ? 0U : g::bit(g::Intelligence::ground_contents))
+        | ((name == "ground-count" || representative || unseen || invasion_base) ? 0U : g::bit(g::Intelligence::ground_contents))
         | (structures && name != "ground-structures-hidden" ? g::bit(g::Intelligence::structures) : 0U);
     for (auto& player : setup.observer->players) player.default_intelligence = mask;
     for (auto& row : setup.observer->records) row.mask = mask;

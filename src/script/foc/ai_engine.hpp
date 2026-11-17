@@ -430,9 +430,18 @@ struct BuildTask {
     std::uint64_t galactic_stage_tick{};
 };
 
+// WGA-497..502: a proposal-search request, not a persistent modifier.
+struct DesireRequest {
+    tactical::PlayerId player{};
+    std::string goal_type;
+    std::uint64_t target{};
+    Real bonus{};
+    std::int64_t expiry{};
+};
+
 // A blocking object a plan script waits on (EX-20).
 struct Block {
-    enum class Kind : std::uint8_t { produce, move, ambush, reinforce, galactic_land, galactic_launch, galactic_form, galactic_invade, galactic_starbase } kind{Kind::move};
+    enum class Kind : std::uint8_t { produce, move, ambush, reinforce, galactic_land, galactic_launch, galactic_form, galactic_invade, galactic_starbase, galactic_desire } kind{Kind::move};
     std::uint64_t id{};
     std::uint64_t instance{};
     std::uint64_t taskforce{};
@@ -464,6 +473,7 @@ struct Block {
     // every mover; such a block waits until the TaskForce empties, the destination dies or its new
     // owner is no enemy.
     std::int64_t held_owner{-1};
+    std::optional<DesireRequest> desire_request;
 };
 
 struct TaskForce {
@@ -899,6 +909,9 @@ public:
     // synchronized weighted draw, then retains an unselected potential plan.
     [[nodiscard]] core::Result<std::optional<GalacticGoalIdentity>> allocate_galactic_goal(
         tactical::PlayerId, std::size_t function, std::uint64_t target);
+    [[nodiscard]] core::Result<DesireRequest> make_desire_request(tactical::PlayerId, std::string, std::uint64_t, Real bonus, Real seconds) const;
+    [[nodiscard]] const Goal* proposed_desire_goal(const DesireRequest&) const;
+    [[nodiscard]] core::Result<void> apply_desire_bonus(const DesireRequest&, std::uint64_t expected_goal);
     [[nodiscard]] std::optional<GalacticGoalIdentity> galactic_goal(tactical::PlayerId, std::uint64_t goal) const;
     [[nodiscard]] std::optional<std::uint64_t> galactic_goal_for_plan(tactical::PlayerId, std::uint64_t plan) const;
     [[nodiscard]] bool galactic_reservation_valid(tactical::PlayerId, sim::EntityId, std::uint64_t potential_plan) const;
@@ -972,6 +985,15 @@ public:
     [[nodiscard]] bool native_provider_threw() const noexcept { return native_provider_threw_; }
     void set_galactic_retirement_reader(std::function<bool(tactical::PlayerId)> reader) { galactic_retired_ = std::move(reader); }
     [[nodiscard]] bool galactic_provider_retired(tactical::PlayerId player) const { return galactic_retired_ && galactic_retired_(player); }
+    // Free-store startup window (WGA-496): a fresh galactic free store receives the player's starting units before that player's
+    // AI is initialized, so perception has no value for them. The galactic lifecycle owns and saves the window; only the galactic
+    // runtime installs this reader, so a tactical engine never has an open window. The window is the free store's alone: the
+    // reader answers for the calling script instance, and only the player's own free-store instance sees it (in the original no
+    // plan of that player exists yet; here goals and plans of the same barrier read perception as usual).
+    void set_startup_perception_reader(std::function<bool(tactical::PlayerId, std::uint64_t)> reader) { startup_perception_ = std::move(reader); }
+    [[nodiscard]] bool startup_perception_pending(tactical::PlayerId player, std::uint64_t instance) const {
+        return startup_perception_ && startup_perception_(player, instance);
+    }
     [[nodiscard]] std::uint64_t galactic_chain_owner(std::uint64_t instance) const;
     [[nodiscard]] core::Result<void> retire_galactic_provider(tactical::PlayerId, authoritative::ScriptScheduler&);
 
@@ -1383,6 +1405,7 @@ private:
     std::optional<tactical::PlayerId> native_fault_candidate_;
     bool native_provider_threw_{};
     std::function<bool(tactical::PlayerId)> galactic_retired_;
+    std::function<bool(tactical::PlayerId, std::uint64_t)> startup_perception_;
     bool native_phase_abandoned_{};
     void enable_native_records();
     void refresh_native_records() noexcept;

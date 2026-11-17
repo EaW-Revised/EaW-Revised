@@ -4,9 +4,11 @@ import json
 import os
 from pathlib import Path
 import re
+import struct
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
@@ -14,6 +16,184 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_front_end as front  # noqa: E402
 
 RADIOS = ("IDC_RADIO_CUSTOM_EASY", "IDC_RADIO_CUSTOM_MEDIUM", "IDC_RADIO_CUSTOM_HARD")
+
+
+def campaign_side_expectations(game_root, mod_root=None):
+    """Independently read campaign variants and captions from the effective installed data."""
+    from tools.inventory.corpus import Corpus
+    corpus = Corpus(game_root, mod_root)
+    profile = "remake" if mod_root else "foc"
+
+    def read(path):
+        source = corpus.read_effective(profile, path)
+        if source is None:
+            raise AssertionError("missing effective file: " + path)
+        return source.data
+
+    def definitions(manifest):
+        for file in ET.fromstring(read("Data/XML/" + manifest)).iter("File"):
+            yield from ET.fromstring(read("Data/XML/" + file.text.strip()))
+
+    def value(node, tag, default=""):
+        return (node.findtext(tag) or default).strip()
+
+    data = read("Data/Text/MasterTextFile_English.dat")
+    count, = struct.unpack_from("<I", data)
+    headers = [struct.unpack_from("<III", data, 4 + i * 12) for i in range(count)]
+    offset = 4 + count * 12
+    strings = []
+    for _, size, _ in headers:
+        strings.append(data[offset:offset + size * 2].decode("utf-16-le"))
+        offset += size * 2
+    text = {}
+    for (_, _, size), caption in zip(headers, strings):
+        text.setdefault(data[offset:offset + size].decode("ascii"), caption)
+        offset += size
+    factions = [(value(row, "Name", row.attrib.get("Name", "")), text.get(value(row, "Text_ID"), ""))
+                for row in definitions("FactionFiles.xml")
+                if value(row, "Is_Playable").casefold() in ("true", "yes", "1")]
+    factions.sort(key=lambda row: not bool(row[1].strip()))
+    campaigns = list(definitions("CampaignFiles.xml"))
+    rows = []
+    seen = set()
+    for row in campaigns:
+        key = value(row, "Campaign_Set", row.attrib["Name"]).casefold()
+        if key in seen or value(row, "Is_Listed", "true").casefold() in ("false", "no", "0"):
+            continue
+        if any(value(row, tag).casefold() in ("true", "yes", "1") for tag in ("Is_Multiplayer", "Tutorial")):
+            continue
+        seen.add(key)
+        players = {value(other, "Starting_Active_Player").casefold() for other in campaigns
+                   if value(other, "Campaign_Set", other.attrib["Name"]).casefold() == key}
+        sides = [dict(name=name, title=title) for name, title in factions if name.casefold() in players]
+        if sides:
+            rows.append(dict(title=text.get(value(row, "Text_ID"), row.attrib["Name"]), sides=sides,
+                             variants=[other.attrib["Name"] for other in campaigns
+                                       if value(other, "Campaign_Set", other.attrib["Name"]).casefold() == key]))
+    # Prefer a restricted campaign so a global-table implementation fails the contract.
+    return min(rows, key=lambda row: len(row["sides"]))
+
+
+SIDE_DRIVER = r'''extends SceneTree
+func _initialize():
+    root.size = Vector2i(1280, 720)
+    call_deferred("run")
+func frames(count = 4):
+    for i in range(count): await process_frame
+func fail(reason):
+    print("SIDE FAILURE ", reason)
+    root.get_texture().get_image().save_png(SHOT.get_basename() + "-failure.png")
+    quit(3)
+func control(id):
+    for i in range(2400):
+        for node in root.find_children(id, "Control", true, false):
+            if node.is_visible_in_tree(): return node
+        await process_frame
+    fail("missing " + id)
+    return null
+func click(point):
+    var motion = InputEventMouseMotion.new()
+    motion.position = point
+    motion.global_position = point
+    Input.parse_input_event(motion)
+    for pressed in [true, false]:
+        var event = InputEventMouseButton.new()
+        event.position = point
+        event.global_position = point
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.pressed = pressed
+        Input.parse_input_event(event)
+        await frames(2)
+    await frames()
+func run():
+    var scene = load("res://main.tscn").instantiate()
+    root.add_child(scene)
+    current_scene = scene
+    for id in ["IDC_MAIN_MENU_SINGLE_PLAYER_GAMES", "IDC_CUSTOM_CAMPAIGN_BUTTON"]:
+        var button = await control(id)
+        if button == null: return
+        await click(button.get_global_rect().get_center())
+    var list = await control("IDC_STAGING_MAP_LIST")
+    if list == null: return
+    await create_timer(2.1).timeout
+    var expected = EXPECTED
+    var chosen = -1
+    for i in range(list.item_count):
+        if list.get_item_text(i) == expected.title:
+            chosen = i
+            break
+    if chosen < 0:
+        fail("campaign title absent: " + expected.title)
+        return
+    list.ensure_current_is_visible()
+    # Scroll to the chosen row without selecting it, then click its actual row rectangle.
+    var rect = list.get_item_rect(chosen)
+    list.get_v_scroll_bar().value = rect.position.y
+    await frames()
+    rect = list.get_item_rect(chosen)
+    await click(list.global_position + rect.get_center() - Vector2(0, list.get_v_scroll_bar().value))
+    var combo = await control("IDC_FACTION_COMBO")
+    var actual = []
+    for i in range(combo.item_count): actual.append(combo.get_item_text(i))
+    var wanted = []
+    for side in expected.sides: wanted.append(side.title)
+    if actual != wanted:
+        fail("side captions expected " + str(wanted) + " got " + str(actual))
+        return
+    await click(combo.get_global_rect().get_center())
+    await frames()
+    await RenderingServer.frame_post_draw
+    root.get_texture().get_image().save_png(SHOT)
+    var popup = combo.get_popup()
+    # Real mouse input chooses the first visible side through the popup.
+    var line_height = popup.get_theme_font("font").get_height(popup.get_theme_font_size("font_size"))
+    var border = popup.get_theme_stylebox("panel").get_content_margin(SIDE_TOP)
+    await click(Vector2(popup.position) + Vector2(30, border + line_height / 2.0))
+    await frames()
+    if combo.selected != 0:
+        fail("mouse did not choose the first side")
+        return
+    var start = await control("IDC_PLAY_BUTTON")
+    if start.disabled:
+        fail("filtered side cannot start")
+        return
+    print("SIDE RESULT ", JSON.stringify({"campaign": expected.title, "captions": actual, "side": expected.sides[0].name}))
+    await click(start.get_global_rect().get_center())
+    await frames(120)
+    current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+    quit(0)
+'''
+
+
+@unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT")
+                     and os.environ.get("EAWR_REMAKE_MOD_ROOT"), "requires GPU viewer, installed game and mod library")
+class CampaignSidesRuntime(unittest.TestCase):
+    def test_stock_raw_bfc_playable_sides_start_with_mouse(self):
+        workshop = Path(os.environ["EAWR_REMAKE_MOD_ROOT"]).parent
+        for name, mod in (("stock", None), ("raw", workshop / "1129810972"), ("bfc", workshop / "2712013423")):
+            with self.subTest(profile=name):
+                if mod is not None:
+                    self.assertTrue(mod.is_dir(), "required mod missing: " + str(mod))
+                expected = campaign_side_expectations(os.environ["EAWR_EAW_GAME_ROOT"], mod)
+                output = Path(tempfile.mkdtemp(prefix="campaign-sides-" + name)).resolve()
+                (output / "expected.json").write_text(json.dumps(expected, indent=2), encoding="utf-8")
+                shot, report, driver = output / "sides.png", output / "viewer.json", output / "driver.gd"
+                driver.write_text(SIDE_DRIVER.replace("EXPECTED", json.dumps(expected)).replace("SHOT", json.dumps(str(shot))), encoding="utf-8")
+                extra = ("--eawr-mod-root", str(mod)) if mod else ()
+                result, _ = front.run_front_end(output, name, (
+                    "--eawr-attract", "off", "--eawr-audio", "off", "--eawr-galactic-paused", "yes",
+                    "--eawr-lighting", "sh", "--eawr-report", str(report),
+                    "--eawr-save-dir", str(output / "saves"), *extra),
+                    engine=("--render-thread", "separate", "--script", str(driver)), scripted=False, with_capture=False)
+                self.assertEqual(result.returncode, 0, result.stdout[-8000:])
+                self.assertIn("SIDE RESULT ", result.stdout)
+                started = re.search(r"EAWR front end campaign started: ([^;]+);", result.stdout)
+                self.assertIsNotNone(started, result.stdout[-8000:])
+                self.assertIn(started[1], expected["variants"])
+                data = json.loads(report.read_text(encoding="utf-8"))
+                self.assertEqual(data["mode"], "galactic")
+                self.assertEqual(data["failure"], "")
+                self.assertGreater(shot.stat().st_size, 10000)
 
 
 def horizontal_fixture(script):

@@ -84,7 +84,7 @@ OWNER_EXCLUSIONS = {
     },
     "eawr::campaign::GameSession::Impl": {
         "serialized separately by world, script, child and return owner codecs": "galaxy scripts child staged return_state live_hero_returns native_ai story_engine story_goals",
-        "runtime callbacks rebound by the caller": "auto_progress auto_resolver auto_state_reader auto_state_writer auto_withdraw child_tech conflict_gate control_observer corruption_mission_service hasher hero_placement hero_resolver hero_structures layers outcome_services pending_alert story_handler story_rewards ai_control_switch technology_handler vote_progress",
+        "runtime callbacks rebound by the caller": "auto_progress auto_resolver auto_state_reader auto_state_writer auto_withdraw child_tech conflict_gate control_observer corruption_mission_readiness corruption_mission_service hasher hero_placement hero_resolver hero_structures layers outcome_services pending_alert story_handler story_rewards ai_control_switch technology_handler vote_progress",
         "immutable content lookup tables rebound on load": "story_factions story_heroes story_planets story_scripts story_types",
         "transient story-script failure set: filled by a tick's story service with the plots whose script had a thread fail, consumed and cleared by that tick's control-lock release, never saved": "failed_story_plots",
         "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index entry_notes story_notes story_notices story_reported story_locks story_triggers story_presentation gui_click_tick gui_clicks_this_tick",

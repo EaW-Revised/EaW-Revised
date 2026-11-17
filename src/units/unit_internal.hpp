@@ -111,7 +111,7 @@ struct Object final {
 // The union of the model's collidable meshes, each placed by its bone's bind frame; nothing when
 // the model has no collidable mesh (#74).
 [[nodiscard]] std::optional<CollisionBounds> collision_bounds(
-    const assets::Model& model, const std::vector<sim::math::Mat3x4>& frames);
+    const assets::Model& model, const std::vector<sim::math::Mat3x4>& frames, bool model_box = false);
 // #536: the model's collidable meshes with their triangles, each vertex placed by its bone's bind
 // frame and then by `base` (the owner's attachment frame for a hardpoint's model), appended in
 // mesh order; `hardpoint` tags the meshes of a hardpoint's attached model.

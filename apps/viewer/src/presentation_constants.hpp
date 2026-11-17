@@ -7,7 +7,9 @@
 #include <array>
 #include <charconv>
 #include <cctype>
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -110,6 +112,34 @@ inline Flash load_flash(const vfs::Vfs& filesystem) {
     const auto* root = document ? &document.value() : nullptr;
     return {read<3>(root, "Shield_Flash_Scale", {1.0F, 1.1F, 1.25F}), // xml-fallback: Shield_Flash_Scale; load: apps/viewer/src/presentation_constants.hpp#load_flash
             read<1, double>(root, "Shield_Flash_Duration", {0.1})[0]}; // xml-fallback: Shield_Flash_Duration; load: apps/viewer/src/presentation_constants.hpp#load_flash
+}
+
+// WU-60: the flash an attack order puts on its target (the rapid multi-flash: three pulses).
+struct OrderFlash {
+    float level{3.0F};
+    double pulse_seconds{0.1};
+    static constexpr int pulses = 3; // WU-60: the pulse count is fixed by the game, not authored
+};
+inline OrderFlash load_order_flash(const vfs::Vfs& filesystem) {
+    auto document = data::load_document(filesystem, "data/xml/gameconstants.xml");
+    if (!document) diagnostic("gameconstants.xml", core::format_diagnostic(document.error()));
+    const auto* root = document ? &document.value() : nullptr;
+    return {read<1>(root, "GUI_Flash_Level", {3.0F})[0], // xml-fallback: GUI_Flash_Level; load: apps/viewer/src/presentation_constants.hpp#load_order_flash
+            read<1, double>(root, "GUI_Rapid_Flash_Duration", {0.1})[0]}; // xml-fallback: GUI_Rapid_Flash_Duration; load: apps/viewer/src/presentation_constants.hpp#load_order_flash
+}
+// WU-60: the light-scale multiplier of RGB `elapsed` seconds after the order. The game's clock moves in whole
+// logical frames and a pulse ends once the elapsed time is strictly past its length, so a pulse lasts the whole
+// frames that cover `pulse_seconds` (4 frames for the stock 0.1 s at 30 per second); it starts at 1 + level and falls
+// linearly to 1 on its last frame, then restarts; none after the third. Empty once the flash is over.
+inline std::optional<float> order_flash_multiplier(const OrderFlash& flash, const double elapsed) {
+    constexpr double frames_per_second = static_cast<double>(sim::tactical::logical_frames_per_second);
+    if (!(flash.pulse_seconds > 0.0) || elapsed < 0.0) return {};
+    const auto frame = static_cast<std::int64_t>(std::floor(elapsed * frames_per_second + 1.0e-9));
+    const auto pulse_frames = static_cast<std::int64_t>(std::floor(flash.pulse_seconds * frames_per_second + 1.0e-9)) + 1;
+    if (frame >= pulse_frames * OrderFlash::pulses) return {};
+    const double remaining = std::max(0.0, flash.pulse_seconds - static_cast<double>(frame % pulse_frames) / frames_per_second)
+        / flash.pulse_seconds;
+    return static_cast<float>(1.0 + static_cast<double>(flash.level) * remaining);
 }
 
 } // namespace eawr::presentation::godot_backend::presentation_constants

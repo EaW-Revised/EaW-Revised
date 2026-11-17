@@ -4,6 +4,7 @@
 #include "gns_frame_codec.hpp"
 #include "gns_link_stats.hpp"
 #include "gns_link_watchdog.hpp"
+#include "gns_packet_delivery.hpp"
 
 #include <array>
 #include <deque>
@@ -37,6 +38,7 @@ struct GnsTransport::Impl {
     GnsLinkStatsSampler stats;
     Impl(bool host, GnsOptions config);
     GnsFrameDecoder decoder;
+    GnsPacketDelivery delivery;
     // Roster positions of this connection's two ends. The two-peer defaults are listener 0 and dialer 1.
     PeerIndex local_slot{hosting ? 0U : 1U}, peer_slot{hosting ? 1U : 0U};
     PeerIndex remote() const;
@@ -75,7 +77,7 @@ struct GnsTransport::Impl {
     struct Outbound { Bytes bytes; bool data{}; std::size_t offset{}; };
     HSteamListenSocket listener{k_HSteamListenSocket_Invalid};
     HSteamNetConnection stream{k_HSteamNetConnection_Invalid};
-    bool ready{}, hello_sent{}, hello_seen{}, peer_close{}, ended{}, close_ack_flushed{};
+    bool ready{}, hello_sent{}, hello_seen{}, peer_close{}, ended{}, close_ack_flushed{}, lanes_configured{};
     unsigned end_error{};
     bool refusing{};
     unsigned refusal_reason{};
@@ -106,9 +108,10 @@ struct GnsTransport::Impl {
     Bytes pair_message() const;
     void queue_proof(Bytes bytes);
     void hello();
-    void message(std::span<const std::uint8_t> bytes, bool reliable);
+    void message(std::span<const std::uint8_t> bytes, bool reliable, std::optional<Clock::time_point> received_at = {});
     bool receive();
     void flush();
+    void flush_redundancy();
     void pump_signals();
     void settle_service_closure();
     void pump();

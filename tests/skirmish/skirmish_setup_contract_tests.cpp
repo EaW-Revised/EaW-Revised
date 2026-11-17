@@ -270,7 +270,12 @@ void setup_contract(const std::filesystem::path& fixtures) {
                     if (!maps) continue;
                     for (const auto& map:maps.value()) {
                         const auto row=golden.find(map.path);
-                        expect(row!=golden.end() && setup_map_golden::row(map,fs.value(),selected)==row->second,
+                        const auto actual=setup_map_golden::row(map,fs.value(),selected);
+                        if (row==golden.end() || actual!=row->second) {
+                            std::cerr << "SETUP_MAP_ACTUAL " << map.path << ' ' << actual.map << ' '
+                                      << actual.fixture << ' ' << actual.inputs << '\n';
+                        }
+                        expect(row!=golden.end() && actual==row->second,
                             "synthetic chosen fixture, full inputs and diagnostic bytes match frozen pre-change hashes");
                         if (populated) expect(map.unavailable.empty() && map.teams.size()==2
                             && map.teams[0].spawn_capacity==1U && map.teams[1].spawn_capacity==1U
@@ -435,6 +440,15 @@ void setup_contract(const std::filesystem::path& fixtures) {
                     prop.element = "SpaceProp";
                     prop.marker = false;
                     expect(!skirmish::is_map_object_placement(prop), "unit-only SpaceProp remains dropped");
+                    // The backdrop planets are SpaceProp variants (SpaceProp_LowOrbit, SpaceProp_PlanetScape): the
+                    // view draws them, so the simulation must not also spawn them as map objects (a flat second
+                    // planet in the battle plane beside the tilted one).
+                    for (const char* variant : {"SpaceProp_LowOrbit", "SpaceProp_PlanetScape", "spaceprop_lowOrbit"}) {
+                        prop.element = variant;
+                        expect(!skirmish::is_map_object_placement(prop), "a SpaceProp variant remains view-only");
+                    }
+                    prop.element = "SpacePropeller";
+                    expect(skirmish::is_map_object_placement(prop), "only the SpaceProp family is view-only");
                 }
                 eawr::units::ObstacleType obstacle;
                 obstacle.id = unit.id;

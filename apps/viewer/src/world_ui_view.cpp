@@ -60,9 +60,12 @@ WorldUiView::~WorldUiView() {
 }
 
 void WorldUiView::draw(const Frame& frame, const RID canvas_item) {
+    bar_geometry_.clear();
+    identity_quads_.clear();
     area_preview_side_drawn_.reset();
     draw_owner_name(frame);
     draw_waypoints(frame, canvas_item);
+    if (path_lines_) draw_path_lines(frame);
     if (!frame.visible) {
         if (auto* rendering = RenderingServer::get_singleton()) {
             for (const RID& circle : circles_) rendering->instance_set_visible(circle, false);
@@ -166,6 +169,26 @@ void WorldUiView::draw_owner_name(const Frame& frame) {
     line->draw(owner_canvas_, origin, colour(owner->colour));
     owner_shown_ = owner;
     owner_entity_ = entity;
+}
+
+// PL-02, PL-04: the local player's selected ships that fly a plan, in selection order. Fighters and
+// squadron members publish no plan, so they never appear.
+void WorldUiView::draw_path_lines(const Frame& frame) {
+    path_line_ships_.clear();
+    const bool enabled = frame.visible && frame.live && frame.selection;
+    if (enabled) {
+        const auto& index = frame.live->snapshot_index();
+        const auto local = frame.live->local_player();
+        const auto& snapshot = frame.live->battle_frame().latest;
+        for (const auto id : frame.selection->units()) {
+            const auto* instance = index.instance(id);
+            if (instance && instance->owner == local) {
+                const auto* plan = snapshot ? snapshot->predicted_path(id) : nullptr;
+                if (plan) path_line_ships_.push_back({id, plan->path});
+            }
+        }
+    }
+    path_lines_->frame(enabled, path_line_ships_, frame.live ? frame.live->presented_tick() : 0.0);
 }
 
 void WorldUiView::follow_waypoint_lighting(const GodotRenderer& renderer) {

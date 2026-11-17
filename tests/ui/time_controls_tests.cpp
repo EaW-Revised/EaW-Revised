@@ -169,7 +169,8 @@ void test_shared_fast_forward() {
     ui::SharedSpeedRequest request;
     expect(!request.begin(60, 60, 5), "the agreed rate is not a request");
     expect(request.begin(30, 60, 10) && request.target() == 60u, "a press requests 2x");
-    expect(!request.begin(30, 60, 11) && !request.begin(30, 30, 11), "a second press waits for the agreed answer");
+    expect(request.shown(30) == 60u, "the button shows the request in flight");
+    expect(!request.begin(30, 60, 11), "a second 2x press waits for the agreed answer");
     request.observe(30, 12);
     expect(request.target() == 60u, "no agreed answer yet");
     request.observe(60, 14);
@@ -185,6 +186,24 @@ void test_shared_fast_forward() {
     expect(request.begin(30, 60, 4), "pressable in the new battle");
     request.reset();
     expect(!request.target(), "reset clears it");
+
+    // Owner online test 2026-11-17: the seat that asked for 2x must always be able to end it with its own button.
+    ui::SharedSpeedRequest requester;
+    expect(requester.begin(30, 60, 100), "the requester asks for 2x");
+    // Pressing the lit button while its own 2x is still in flight asks for 1x at once instead of being ignored.
+    const auto off = ui::shared_fast_forward_target(requester.shown(30));
+    expect(off == 30u && requester.begin(30, off, 101) && requester.target() == 30u, "1x replaces the 2x in flight");
+    expect(!requester.begin(30, 30, 102), "the same 1x is not sent twice");
+    expect(requester.shown(60) == 30u, "the button stays dark while the 1x is in flight, even if the 2x lands first");
+    requester.observe(60, 104);
+    expect(requester.target() == 30u, "the earlier 2x landing does not answer the 1x request");
+    requester.observe(30, 105);
+    expect(!requester.target(), "the agreed 1x answers it");
+    // 2x agreed, then a 1x and a later 2x press: the 2x press waits behind the 1x, the 1x is never held behind a 2x.
+    expect(requester.begin(30, 60, 200) && (requester.observe(60, 204), !requester.target()), "2x agreed");
+    expect(requester.begin(60, ui::shared_fast_forward_target(requester.shown(60)), 210) && requester.target() == 30u,
+        "the requester's own press on the agreed 2x asks for 1x");
+    expect(!requester.begin(60, ui::shared_fast_forward_target(requester.shown(60)), 211), "a 2x press waits behind the 1x");
 }
 
 // #5355 (TP-MP06): the shared battle speed line says what really runs.

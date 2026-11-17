@@ -515,10 +515,11 @@ std::optional<std::size_t> bone_index(const assets::Model& model, const std::str
 }
 
 std::optional<CollisionBounds> collision_bounds(
-    const assets::Model& model, const std::vector<sim::math::Mat3x4>& frames) {
+    const assets::Model& model, const std::vector<sim::math::Mat3x4>& frames, const bool model_box) {
     std::optional<CollisionBounds> result;
     for (const auto& mesh : model.meshes) {
-        if (!mesh.collidable) continue;
+        // FD-10: an authored model box wins over triangle collision, independently of its mask.
+        if (model_box ? !iequals(mesh.name, "COLLISIONBOX") : !mesh.collidable) continue;
         const auto low = scene::fixed_from_binary32(mesh.bounds_min.x);
         const auto low_y = scene::fixed_from_binary32(mesh.bounds_min.y);
         const auto low_z = scene::fixed_from_binary32(mesh.bounds_min.z);
@@ -542,6 +543,7 @@ std::optional<CollisionBounds> collision_bounds(
             result->min = {std::min(result->min.x, point.x), std::min(result->min.y, point.y), std::min(result->min.z, point.z)};
             result->max = {std::max(result->max.x, point.x), std::max(result->max.y, point.y), std::max(result->max.z, point.z)};
         }
+        if (model_box) break; // FD-10: the first authored named sub-object supplies the box
     }
     return result;
 }
@@ -553,6 +555,16 @@ void append_collision_meshes(const assets::Model& model, const std::vector<sim::
         CollisionMesh entry;
         entry.name = mesh.name;
         entry.hardpoint = hardpoint;
+        // FD-10: code-hidden collision proxies still collide; only pose hiding gates the query.
+        entry.pose_visible = true;
+        // FD-10: a hidden reference-pose ancestor hides this renderable as well.
+        auto bone = mesh.bone;
+        for (std::size_t visited = 0; visited < model.bones.size() && bone >= 0
+            && static_cast<std::size_t>(bone) < model.bones.size(); ++visited) {
+            const auto& parent = model.bones[static_cast<std::size_t>(bone)];
+            entry.pose_visible = entry.pose_visible && parent.visible;
+            bone = parent.parent;
+        }
         std::vector<Vec3> vertices;
         std::vector<IndexedCollisionTriangles::Indices> triangles;
         struct PointHash final {
@@ -719,6 +731,10 @@ void load_constants(const vfs::Vfs& filesystem, const std::set<std::string>& dam
     record(report, document.value());
     const auto& root = document.value().root;
     data::tag_trace::document(root);
+    if (const auto* node = last_child(root, "ShouldDisplayPredictionPaths")) {
+        const auto text = lower(trim(node->raw_text));
+        tables.constants.prediction_paths = text == "yes" || text == "true" || text == "1";
+    }
     for (const auto space_tag : combat_scalars) {
         if (space_tag == "Under_Construction_Damage_Multiplier"
             && (tables.domain != sim::tactical::BattleDomain::space

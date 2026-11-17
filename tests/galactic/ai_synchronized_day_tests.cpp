@@ -363,6 +363,15 @@ DayResult run_day(std::size_t workers) {
         std::cout << "GCAI-ASYNC-READS workers=" << workers << " live_hash_fallbacks=" << tally->live_hash_fallbacks
             << " after_bootstrap=" << tally->live_hash_fallbacks_after_bootstrap << " admission_reads=" << tally->admission_reads
             << " admission_non_default=" << tally->admission_non_default << std::endl;
+        // Async step 3 (a): the window body reads the world through its window input only (no live-session read bypasses it), and with
+        // the observation oracle on every input read equals the live session's read at that moment (the body still runs inline). The
+        // session calls the lane barrier still makes on the world (overlay, identity reservation, barrier, output phase) are printed.
+        std::cout << "GCAI-ASYNC-INPUT workers=" << workers << " window_input_reads=" << tally->window_input_reads
+            << " mismatches=" << tally->window_input_mismatches << " body_live_reads=" << tally->body_live_reads
+            << " lane_session_calls=" << tally->lane_session_calls << std::endl;
+        galactic_campaign_gate::check(tally->window_input_reads > 0, "the AI window body reads the world through its window input");
+        galactic_campaign_gate::check(!tally->body_live_reads, "no AI window body read of the live session bypasses the window input");
+        galactic_campaign_gate::check(!tally->window_input_mismatches, "every window input read equals the live session's read (inline body)");
         // No AI player is retired by a script or native fault over the day (a retired AI stops for the rest of the campaign).
         const auto retirements = cp::galactic_ai_provider_retirements(observed->runtimes.front());
         std::cout << "GCAI-RETIREMENTS workers=" << workers << " provider_retirements=" << retirements << std::endl;
@@ -427,8 +436,6 @@ DayResult run_day(std::size_t workers) {
         std::cout << "SYNC_DAY player=" << names[player] << " seed=1 workers=" << workers << " ticks=6000 started=" << count.started
             << " released=" << count.released << " expired=" << count.expired << " hostile_moves=" << count.hostile
             << " first_hostile_tick=" << count.first << " conflicts=" << progress.attacks << std::endl;
-        if (names[player] == "Empire" || names[player] == "Rebel")
-            result.opponents = result.opponents && count.hostile && count.first && progress.attacks;
         if (async) observed_floors.emplace(names[player], std::array<std::uint64_t, 3>{count.hostile, count.first, progress.attacks});
     }
     // W1 floors A (owner, 11-07) against the stored base: main after #6336 (head 050b1ef37), async, seed 1, 6000 ticks, the same on
@@ -452,6 +459,40 @@ DayResult run_day(std::size_t workers) {
     }
     std::cout << "GCAI-REFUSAL-RUN workers=" << workers << " end refusal_floor=" << result.refusal_floor
         << " strategic_floor=" << result.strategic_floor << std::endl;
+    // Hostile movement and conflicts of both stock opponents: past the original's first AI-vs-AI goal. In the original (debug-build
+    // AI log, stock Equal Footing, both AIs Normal) the first conquest goal against the other AI fires at 334.6 game s and the first
+    // AI-vs-AI capture lands at 862 s: the starting forces stay put (WGA-496), so neither AI has an exposed AI planet to go for
+    // earlier. The check therefore reads the day continued to 12000 ticks (400 game s), on the 4-worker day only (the worker counts
+    // already compared equal at 6000); every other check above keeps its 6000-tick bound.
+    if (workers == 4) {
+        constexpr std::uint64_t opponents_horizon = 12000;
+        for (std::uint64_t tick = 6001; tick <= opponents_horizon; ++tick) {
+            // A battle against the idle human seat gets the ordinary unattended answer, as in the campaign gate.
+            static_cast<void>(galactic_campaign_gate::unattended_human_input(*root_owner.game()));
+            const auto state = must(root_owner.game()->step(*setup->executor));
+            for (const auto& fleet : state.galaxy->fleets()) fleet_owners[fleet.id] = fleet.owner;
+            for (const auto& event : state.galaxy->events()) {
+                if (event.kind != gc::GalacticEventKind::movement_begin || !moves.emplace(event.tick, event.subject, event.value).second) continue;
+                const auto planet = std::find_if(state.galaxy->planets().begin(), state.galaxy->planets().end(),
+                    [&](const auto& row) { return row.id == event.value; });
+                const auto player = fleet_owners.find(event.subject);
+                if (player == fleet_owners.end() || planet == state.galaxy->planets().end()) throw std::runtime_error("day-run movement attribution missing");
+                if (planet->owner != player->second) {
+                    auto& count = counts[player->second]; ++count.hostile;
+                    if (!count.first) count.first = event.tick;
+                }
+            }
+            if (tick % 600 == 0) std::cout << "synchronized-day opponents progress tick=" << state.completed_tick << std::endl;
+        }
+        galactic_campaign_gate::check(root_owner.game()->completed_tick() == opponents_horizon, "the opponents day reaches its exact tick limit");
+        for (const auto& [player, progress] : observed->players) {
+            const auto& count = counts[player];
+            std::cout << "SYNC_DAY_OPPONENTS player=" << names[player] << " ticks=" << opponents_horizon << " hostile_moves=" << count.hostile
+                << " first_hostile_tick=" << count.first << " conflicts=" << progress.attacks << std::endl;
+            if (names[player] == "Empire" || names[player] == "Rebel")
+                result.opponents = result.opponents && count.hostile && count.first && progress.attacks;
+        }
+    }
     return result;
 }
 int run() {
@@ -476,7 +517,7 @@ int run() {
         strategic_floor = strategic_floor && day.strategic_floor;
     }
     std::cout << "GCAI-ASYNC-WORKERS 4,1,2,8 final_hash_equal=true tally_equal=true" << std::endl;
-    galactic_campaign_gate::check(opponents, "both stock opponents produce attributed hostile movement and conflicts by tick6000");
+    galactic_campaign_gate::check(opponents, "both stock opponents produce attributed hostile movement and conflicts by tick 12000 (400 game s)");
     // Keep the stored allowances strict, but print every worker's strategic evidence before a floor failure.
     galactic_campaign_gate::check(refusal_floor, "W1 floors A: no apply-time refusals beyond the stored base");
     galactic_campaign_gate::check(strategic_floor, "W1 floors A: the async stock day stays within the floors of the stored base");

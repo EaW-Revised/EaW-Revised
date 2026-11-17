@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <map>
 #include <thread>
 #include <functional>
 
@@ -72,13 +73,14 @@ struct OnlineLobbyGameSource::Impl {
     std::string bridge_invitation, bridge_owner;
     bool require_bridge{};
     bool presence_changed{}, changed{};
-    struct Join { LobbyAttemptId attempt; std::string room, password, name; std::uint64_t generation{}; };
+    struct Join { LobbyAttemptId attempt; std::string room, password, name; std::uint64_t generation{}; std::string build; };
     std::optional<Join> pending_join;
     std::atomic<std::uint64_t> generation{};
     std::optional<LobbyAttemptId> current_attempt;
     bool leave_requested{}, refresh_requested{};
     std::deque<std::string> sends;
     std::vector<LobbyGame> games;
+    std::map<std::string, std::string> room_builds;
     std::vector<LobbyPlayer> players;
     // Menu channel (#3758): the players in the online browser and the lines the player queued for it.
     std::vector<LobbyPlayer> menu_players;
@@ -121,6 +123,7 @@ struct OnlineLobbyGameSource::Impl {
         auto last_list = Clock::time_point{};
         std::string cursor;
         std::vector<LobbyGame> page_games;
+        std::map<std::string, std::string> page_builds;
         auto clear_admission = [&] {
             admitted = false; chat_sequence = 0;
             std::lock_guard lock(mutex); active_name.clear(); players.clear(); incoming.clear(); sends.clear(); changed = true;
@@ -280,6 +283,7 @@ struct OnlineLobbyGameSource::Impl {
                         OnlineLobbyJoinCompletion completion; completion.attempt = join->attempt;
                         if (result) {
                             completion.admission = std::move(result).value(); admitted = true; chat_sequence = 0;
+                            completion.admission->build_identity = join->build;
                             const auto row = std::find_if(games.begin(), games.end(), [&](const auto& game) { return game.address == join->room; });
                             active_name = row == games.end() ? "Online game" : row->name;
                         } else { completion.refusal = result.error(); current_attempt.reset(); }
@@ -292,7 +296,7 @@ struct OnlineLobbyGameSource::Impl {
                 auto result = service->send_chat(std::move(text)); if (!result) chat_error(result.error()); else success();
             }
             // A refresh never lists inside the directory's one-second spacing; it keeps the current rooms meanwhile.
-            if (refreshing) { next_list = std::max(Clock::now(), last_list + std::chrono::seconds(1)); cursor.clear(); page_games.clear(); }
+            if (refreshing) { next_list = std::max(Clock::now(), last_list + std::chrono::seconds(1)); cursor.clear(); page_games.clear(); page_builds.clear(); }
             const auto now = Clock::now();
             if (publication && now >= next_heartbeat) heartbeat();
             if (now >= next_list) {
@@ -300,16 +304,19 @@ struct OnlineLobbyGameSource::Impl {
                 auto result = service->list(cursor);
                 if (!result && result.error().code == "EAWR-NET-1542") {
                     // Too soon after the last list: keep the rooms on show and ask again after the spacing.
-                    cursor.clear(); page_games.clear();
+                    cursor.clear(); page_games.clear(); page_builds.clear();
                 } else if (!result) {
-                    error(result.error()); cursor.clear(); page_games.clear();
-                    std::lock_guard lock(mutex); games.clear(); changed = true;
+                    error(result.error()); cursor.clear(); page_games.clear(); page_builds.clear();
+                    std::lock_guard lock(mutex); games.clear(); room_builds.clear(); changed = true;
                 } else {
                     success();
-                    for (const auto& row : result.value().rooms) if (page_games.size() < 2048) page_games.push_back(game_row(row, &tags));
+                    for (const auto& row : result.value().rooms) if (page_games.size() < 2048) {
+                        page_games.push_back(game_row(row, &tags)); page_builds[row.room] = row.metadata.build;
+                    }
                     cursor = result.value().next;
                     if (cursor.empty() || page_games.size() >= 2048) {
-                        std::lock_guard lock(mutex); games = std::move(page_games); page_games.clear(); cursor.clear(); changed = true;
+                        std::lock_guard lock(mutex); games = std::move(page_games); room_builds = std::move(page_builds);
+                        page_games.clear(); page_builds.clear(); cursor.clear(); changed = true;
                     }
                 }
                 next_list = Clock::now() + std::chrono::seconds(1);
@@ -389,8 +396,15 @@ void OnlineLobbyGameSource::begin_join(LobbyAttemptId attempt, std::string room,
         if (impl_->results.size() == 64) impl_->results.erase(impl_->results.begin());
         impl_->results.push_back({attempt, {}, relay::error(1543, "An online join is already active")}); return;
     }
+    const auto row = impl_->room_builds.find(room);
+    const auto build = row == impl_->room_builds.end() ? std::string{} : row->second;
+    if (!build.empty()) if (auto compatible = validate_online_build(build, impl_->tags.build); !compatible) {
+        impl_->failure = compatible.error();
+        if (impl_->results.size() == 64) impl_->results.erase(impl_->results.begin());
+        impl_->results.push_back({attempt, {}, compatible.error()}); return;
+    }
     impl_->current_attempt = attempt;
-    impl_->pending_join = Impl::Join{attempt, std::move(room), std::move(password), std::move(name), ++impl_->generation};
+    impl_->pending_join = Impl::Join{attempt, std::move(room), std::move(password), std::move(name), ++impl_->generation, build};
     impl_->condition.notify_all();
 }
 void OnlineLobbyGameSource::cancel(LobbyAttemptId attempt) {

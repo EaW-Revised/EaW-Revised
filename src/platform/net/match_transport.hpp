@@ -39,6 +39,10 @@ public:
     net::PeerIndex self() const override { const std::lock_guard lock(net::checkpoint_io_mutex()); return stream().self(); }
     std::uint32_t peer_count() const override { const std::lock_guard lock(net::checkpoint_io_mutex()); return stream().peer_count(); }
     std::optional<net::LinkStats> link_stats(net::PeerIndex peer) const override { const std::lock_guard lock(net::checkpoint_io_mutex()); return stream().link_stats(peer); }
+    std::size_t queued_received(net::PeerIndex peer) const override {
+        const std::lock_guard lock(net::checkpoint_io_mutex());
+        return stream().queued_received(peer) + (checkpoint_ && checkpoint_->pending_from(peer) ? 1U : 0U);
+    }
     std::uint16_t port() const { const std::lock_guard lock(net::checkpoint_io_mutex()); return tcp_ ? tcp_->port() : gns_->port(); }
     std::optional<core::Diagnostic> diagnostic() const {
         if (checkpoint_) if (auto error = checkpoint_->failure()) return error;

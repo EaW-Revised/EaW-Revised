@@ -166,8 +166,8 @@ void stable_json_and_session() {
     const std::string expected = "{\"schema_version\":1,\"session_id\":\"s-1\",\"mode\":\"skirmish\",\"run\":\"map-1\",\"build\":\"0.3.4+" + fortyx('a')
         + "+dirty\",\"commit\":\"" + fortyx('a') + "\",\"chain_fingerprint\":\"abc\",\"mods\":[\"1125571106\"],\"ended\":\"failed\","
         "\"written_at\":\"2026-11-13T00:00:00Z\",\"totals\":{\"items\":2,\"classes\":2,\"unattributed\":0},\"classes\":["
-        "{\"code\":\"EAWR-A-0001\",\"source\":\"1125571106\",\"objects\":1,\"occurrences\":2,\"first_example\":{\"object\":\"alpha\",\"detail\":\"d1\"}},"
-        "{\"code\":\"EAWR-B-0001\",\"source\":\"stock\",\"objects\":1,\"occurrences\":1,\"first_example\":{\"object\":\"beta\",\"detail\":\"x\"}}]}\n";
+        "{\"code\":\"EAWR-A-0001\",\"source\":\"1125571106\",\"severity\":\"warning\",\"objects\":1,\"occurrences\":2,\"first_example\":{\"object\":\"alpha\",\"detail\":\"d1\"}},"
+        "{\"code\":\"EAWR-B-0001\",\"source\":\"stock\",\"severity\":\"warning\",\"objects\":1,\"occurrences\":1,\"first_example\":{\"object\":\"beta\",\"detail\":\"x\"}}]}\n";
     check(deg::summary_json(snapshot) == expected, "the summary JSON is stable (golden)");
     check(deg::summary_line(snapshot) == "EAWR-DEGRADE-0001 2 items degraded in 2 classes (see degradation-summary.json)",
           "the one log line");
@@ -517,13 +517,43 @@ eawr::core::Diagnostic fault(const std::string_view code, const std::string_view
     return result;
 }
 
+void error_severity_and_order() {
+    const auto observe = [](bool reverse) {
+        deg::reset_for_tests();
+        const auto warning = [] { deg::record("EAWR-MIXED-0001", "stock", "a", "warning", eawr::core::Severity::warning); };
+        const auto error = [] { deg::record("EAWR-MIXED-0001", "stock", "z", "internal failure", eawr::core::Severity::error); };
+        if (reverse) { error(); warning(); } else { warning(); error(); }
+        return deg::snapshot();
+    };
+    const auto forward = observe(false), reverse = observe(true);
+    check(forward.classes == reverse.classes && forward.classes.size() == 1,
+        "class severity and its highest-severity example are independent of arrival order");
+    if (!forward.classes.empty()) check(forward.classes[0].severity == eawr::core::Severity::error
+        && forward.classes[0].objects == 2 && forward.classes[0].example_object == "z",
+        "a warning cannot hide the internal error example");
+    check(deg::summary_json(forward).find("\"severity\":\"error\"") != std::string::npos,
+        "the summary publishes ERROR severity");
+    deg::reset_for_tests();
+    auto internal = fault("EAWR-SCRIPT-0209", "AI player=2 faction=Rebel tick=5820 reason=deterministic-exception diagnostic=EAWR-SCRIPT-0209: broken owner");
+    internal.severity = eawr::core::Severity::warning;
+    deg::record_script_fault(internal, "stock");
+    deg::record_script_fault(fault("EAWR-SCRIPT-0217", "nonfatal warning"), "stock");
+    const auto snapshot = deg::snapshot();
+    const auto* exception = find_class(snapshot, "EAWR-SCRIPT-0209", "stock");
+    const auto* warning = find_class(snapshot, "EAWR-SCRIPT-0217", "stock");
+    check(exception && exception->severity == eawr::core::Severity::error
+        && warning && warning->severity == eawr::core::Severity::warning,
+        "internal script exceptions are errors even when supplied as warnings; sourced warnings remain warnings");
+}
+
 // Design rows 9 and 10: the script faults of the galactic side and the native AI's runtime lines.
 void script_fault_adapters() {
     deg::reset_for_tests();
     check(deg::is_script_fault_code("EAWR-SCRIPT-0211") && deg::is_script_fault_code("EAWR-SCRIPT-0215")
         && deg::is_script_fault_code("EAWR-SCRIPT-0216") && deg::is_script_fault_code("EAWR-SCRIPT-0217")
-        && !deg::is_script_fault_code("EAWR-SCRIPT-0212") && !deg::is_script_fault_code("EAWR-LOAD-1400") && !deg::is_script_fault_code(""),
-        "the four script-fault codes are counted, nothing else is");
+        && deg::is_script_fault_code("EAWR-SCRIPT-0209") && deg::is_script_fault_code("EAWR-SCRIPT-0212")
+        && !deg::is_script_fault_code("EAWR-SCRIPT-0218") && !deg::is_script_fault_code("EAWR-LOAD-1400") && !deg::is_script_fault_code(""),
+        "internal script failures are counted, print output and unrelated codes are not");
     check(!deg::record_script_fault(fault("EAWR-LOAD-0001", "not a fault"), "modA") && deg::snapshot().classes.empty(),
         "a diagnostic that is not a script fault records nothing");
     // The same fault on many ticks is one object; a different text is another.
@@ -566,7 +596,14 @@ void script_fault_adapters() {
     retired.tag = "native-provider-retirement";
     const std::vector<LoadNote> notes{retired};
     check(deg::record_load_notes(notes) == 1, "a provider retirement is a runtime degradation");
-    check(find_class(deg::snapshot(), "EAWR-GCAI-PROVIDER-0001", "1125571106") != nullptr, "a retirement counts against the one mounted mod");
+    const auto retired_snapshot = deg::snapshot();
+    const auto* retirement = find_class(retired_snapshot, "EAWR-GCAI-PROVIDER-0001", "1125571106");
+    check(retirement && retirement->severity == eawr::core::Severity::error, "a retirement counts as ERROR against the one mounted mod");
+    retired.layer.mod_id = "stock"; // a native LoadNote's default, not an authored source
+    deg::record_load_notes(std::vector<LoadNote>{retired});
+    const auto default_layer = deg::snapshot();
+    check(default_layer.classes.size() == 1 && default_layer.classes[0].source == "1125571106",
+        "the native note's default stock layer does not split one provider into an extra class");
     deg::SessionInfo two;
     two.mods = {"m1", "m2"};
     two.mod_layers = {"mod", "mod-parent-1"};
@@ -648,6 +685,7 @@ int main(const int argc, char** argv) {
     load_notes_are_per_session(root / "user");
     layer_ids_map_to_mod_ids();
     script_fault_adapters();
+    error_severity_and_order();
     overlay_line_text();
     script_faults_by_layer(root / "fault-layers");
     objects_are_counted_exactly();

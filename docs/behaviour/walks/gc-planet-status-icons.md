@@ -46,3 +46,23 @@ The tooltip waits the standard pointer-tooltip delay (the same delay as the cons
 UNVERIFIED: whether the faction icons carry a faction tint (the hero icon takes the faction as a parameter); the
 retail frame shows the Empire icon with a purple disc. The red/green option's default in a fresh profile is off in the
 retail frame above.
+
+## Corruption icon popups
+
+One headless Ghidra pass over the debug build's hover paths for the corruption component
+(`g_corruption_icon`): the pointer tooltip builder, the timed encyclopedia builder and the
+GameConstants getters of the three planet-icon lists. The decompiles stay in private research
+(`out/research/walk-corr-icons`, outside the committed tree). The owner's screenshot circles three
+icons: the red-and-black figure beside an Empire planet and the yellow coin stack with a sheet of paper beside two
+Underworld planets are per-type corruption icons (atlas entries `i_button_corruption_assassination_g`, the Intimidation
+type, and `i_button_corruption_racketeering_g`, compared tile by tile against the command-bar atlas); the hammer next to
+the coin stack is the ordinary build icon (`g_build`), not a corruption icon. The number under the name is the planet's income.
+
+| ID | Rule |
+|---|---|
+| WGCI-1 | Hovering a corrupted planet's per-type icon (shown only while the corruption filter bit is on, GHUDL-15) opens, after the ordinary encyclopedia delay, the shared encyclopedia popup at the advisor point: header icon = the type's entry of `Corruption_Mission_Requirement_Icon_Name` (the `_b` art of the same type), title = the localized text named by the type's entry of `Corruption_Planet_Icon_Encyclopedia_Name`, then one body line = the text named by its entry of `Corruption_Planet_Icon_Encyclopedia_Desc` when that list has an entry. All three lists are indexed by the type exactly as `Corruption_Planet_Icon` is (the eight authored types in order, no entry for none). A list too short for the type drops that part; no name entry means the title text is not requested and the debug build was not observed with that shape (we open nothing). Stock text: the title is the mission name (for example Bribery, Piracy (Space Tactical Combat)) and the body the mission blurb ("This mission requires a Defiler to ..."). No income, duration, level, owner colour or number is part of it. |
+| WGCI-2 | The information icon (an uncorrupted planet while the local faction benefits from corruption) carries the plain pointer tooltip line `TEXT_TOOLTIP_CLICK_FOR_INFO` (stock "Click for information on corruption choices for this planet"), a literal of the debug build; the per-type icon has no plain tooltip line (its component carries no authored `Tooltip_Text`). |
+| WGCI-3 | Not implemented yet, open follow-up: the information icon's own popup (stock title `TEXT_CORRUPTION_ENCYCLOPEDIA_TITLE`, "Corruption Information", with the planet's list of corruption choices and requirements), and the click on that icon that opens the information dialog (GHUD-R30). Both wait on the live corruption menu producer. |
+
+UNVERIFIED: the popup's exact pixel placement against a retail frame; it uses the same advisor-point anchor as
+the weather and bonus popups, as the debug build's single encyclopedia builder does.

@@ -23,6 +23,7 @@
 #include "eawr/core/sync_digest.hpp"
 #include "eawr/sim/world.hpp"
 
+#include <atomic>
 #include <set>
 #include <algorithm>
 #include <exception>
@@ -98,6 +99,82 @@ private:
     std::shared_ptr<ComposedGalacticAiState> owner_;
     std::shared_ptr<GalacticAiDigestWork> work_;
 };
+// Async step 3 (a): the window's input. Outside an AI window it reads the live session as it stands. At the window cut (sim thread,
+// after the due slices applied and before the inbox drain) it copies what the window body reads of the world: the galactic frame,
+// the completed tick, the graph, the setup, the snapshot and the identity frontiers. Until the phase ends the body reads those
+// copies, or, while the window's lane barrier is open on the reading thread, that barrier's own view (the world plus what the
+// window decided so far, which is what the session itself returns then). The window's identity reservation advances the copied
+// frontiers with the world's. With the observation oracle on, every read is compared with the live session's read.
+class WindowInput final : public GalacticAiWorldReader {
+public:
+    using Session = ga::gc::GalacticSession;
+    WindowInput(Session* const& live, const std::unique_ptr<Session::NativeActionBarrier>& barrier) noexcept : live_(live), barrier_(barrier) {}
+    WindowInput(const WindowInput&) = delete;
+    WindowInput& operator=(const WindowInput&) = delete;
+    void open(const Session& session, bool verify) {
+        cut_.emplace(Cut{session.snapshot(), session.graph(), &session.setup(), session.completed_tick(), session.clock().galactic_frame,
+            session.next_entity_id(), session.next_native_invasion_id()});
+        verify_ = verify;
+    }
+    void close() noexcept { cut_.reset(); }
+    [[nodiscard]] bool is_open() const noexcept { return cut_.has_value(); }
+    // The window reserved its identity blocks: the world's counters moved to these ends.
+    void reserved(sim::EntityId next, std::uint64_t next_invasion) noexcept {
+        if (cut_) { cut_->next_entity_id = next; cut_->next_invasion_id = next_invasion; }
+    }
+    [[nodiscard]] std::shared_ptr<const ga::gc::GalacticSnapshot> snapshot() const override {
+        if (!cut_) return live_->snapshot();
+        const auto* view = barrier_view();
+        return note(view ? view->snapshot() : cut_->snapshot, [&] { return live_->snapshot(); });
+    }
+    [[nodiscard]] const ga::gc::PlanetGraph* graph() const override {
+        return cut_ ? note(cut_->graph, [&] { return live_->graph(); }) : live_->graph();
+    }
+    [[nodiscard]] std::uint64_t completed_tick() const override {
+        return cut_ ? note(cut_->completed_tick, [&] { return live_->completed_tick(); }) : live_->completed_tick();
+    }
+    [[nodiscard]] sim::EntityId next_entity_id() const override {
+        if (!cut_) return live_->next_entity_id();
+        const auto* view = barrier_view();
+        return note(view ? view->next_entity_id() : cut_->next_entity_id, [&] { return live_->next_entity_id(); });
+    }
+    [[nodiscard]] std::uint64_t next_native_invasion_id() const {
+        if (!cut_) return live_->next_native_invasion_id();
+        const auto* view = barrier_view();
+        return note(view ? view->next_native_invasion_id() : cut_->next_invasion_id, [&] { return live_->next_native_invasion_id(); });
+    }
+    [[nodiscard]] std::uint64_t galactic_frame() const {
+        return cut_ ? note(cut_->galactic_frame, [&] { return live_->clock().galactic_frame; }) : live_->clock().galactic_frame;
+    }
+    // The campaign setup is immutable; its address is part of the cut.
+    [[nodiscard]] const ga::gc::GalacticSetup& setup() const {
+        return cut_ ? *note(cut_->setup, [&] { return &live_->setup(); }) : live_->setup();
+    }
+    void drain(GalacticAiApplyTally& tally) noexcept {
+        tally.window_input_reads += reads_.exchange(0, std::memory_order_relaxed);
+        tally.window_input_mismatches += mismatches_.exchange(0, std::memory_order_relaxed);
+    }
+private:
+    struct Cut {
+        std::shared_ptr<const ga::gc::GalacticSnapshot> snapshot;
+        const ga::gc::PlanetGraph* graph{};
+        const ga::gc::GalacticSetup* setup{};
+        std::uint64_t completed_tick{}, galactic_frame{};
+        sim::EntityId next_entity_id{};
+        std::uint64_t next_invasion_id{};
+    };
+    [[nodiscard]] const Session::NativeActionShadow* barrier_view() const noexcept { return barrier_ ? barrier_->view() : nullptr; }
+    template<class T, class Live> T note(T value, const Live& live) const {
+        reads_.fetch_add(1, std::memory_order_relaxed);
+        if (verify_ && !(value == live())) mismatches_.fetch_add(1, std::memory_order_relaxed);
+        return value;
+    }
+    Session* const& live_;
+    const std::unique_ptr<Session::NativeActionBarrier>& barrier_;
+    std::optional<Cut> cut_;
+    bool verify_{};
+    mutable std::atomic<std::uint64_t> reads_{}, mismatches_{};
+};
 class Runtime final : public ga::Services, public std::enable_shared_from_this<Runtime> {
 public:
     std::shared_ptr<const GalacticAiRuntimeSetup> setup;
@@ -128,7 +205,7 @@ public:
     std::uint32_t virtual_offset{}; // 0-based virtual tick being served
     // The frame the AI lives in during the current virtual tick (monotone even while the galaxy's frame is paused).
     [[nodiscard]] std::uint64_t virtual_frame() const {
-        const auto real = galaxy->clock().galactic_frame;
+        const auto real = window_input.galactic_frame();
         const auto lifecycle = manager.lock();
         return lifecycle ? lifecycle->virtual_mode(real) : real + virtual_offset;
     }
@@ -432,11 +509,11 @@ public:
         std::vector<ga::gc::GalacticSession::NativeOverlayRecord> records;
         for (const auto& slice : outbox.pending_slices())
             for (const auto& step : ga::plan_slice(slice.intents)) {
-                if (ga::slice_step_stale(*galaxy, step.intent->record, options)) continue;
+                if (ga::slice_step_stale(lane_session(), step.intent->record, options)) continue;
                 records.push_back({step.intent->player, &step.intent->record});
             }
         const auto refused_before = overlay_counters.work.refused;
-        auto built = galaxy->build_native_overlay(players.front(), records, executor, overlay_counters.work);
+        auto built = lane_session().build_native_overlay(players.front(), records, executor, overlay_counters.work);
         if (!built) return core::Result<void>::failure(built.error());
         ++overlay_counters.builds;
         apply_tally->overlay_refused += overlay_counters.work.refused - refused_before;
@@ -453,7 +530,7 @@ public:
         }
         if (native_actions_barrier) return absent<void>("completed preceding native action barrier");
         const auto players = lane_players();
-        const auto start = outbox.begin_batch(ai_index, {galaxy->next_entity_id(), galaxy->next_native_invasion_id()});
+        const auto start = outbox.begin_batch(ai_index, {window_input.next_entity_id(), window_input.next_native_invasion_id()});
         stage_losses.begin_batch();
         ga::gc::GalacticSession::NativeBarrierOptions options;
         options.first_id = start.id; options.first_invasion = start.invasion; options.intent_sink = outbox.sink(); options.lane = true;
@@ -467,12 +544,13 @@ public:
             // window ends up using; each slice is then readmitted with the world counter rewound to its own first identity
             // (GalacticSession::readmit_native_*). The barrier accepts a first identity inside the block it was told is reserved.
             // The invasion counter's block is reserved in the same step.
-            if (auto reserved = galaxy->reserve_native_frontiers(galaxy->next_entity_id(), options.id_end,
-                    galaxy->next_native_invasion_id(), options.invasion_end); !reserved) {
+            if (auto reserved = lane_session().reserve_native_frontiers(window_input.next_entity_id(), options.id_end,
+                    window_input.next_native_invasion_id(), options.invasion_end); !reserved) {
                 outbox.abandon_batch(); stage_losses.abandon_batch(); return reserved;
             }
+            window_input.reserved(options.id_end, options.invasion_end);
         }
-        auto begun = galaxy->begin_native_barrier(players, ga::gc::galactic_max_commands, std::move(options));
+        auto begun = lane_session().begin_native_barrier(players, ga::gc::galactic_max_commands, std::move(options));
         if (!begun) { outbox.abandon_batch(); stage_losses.abandon_batch(); return core::Result<void>::failure(begun.error()); }
         native_actions_barrier = std::move(begun).value();
         outbox.begin_virtual_tick(1);
@@ -499,10 +577,10 @@ public:
         auto due = outbox.take_due(ai_index);
         // The lane took these effects' notifications when it decided them; the readmission must not deliver them again.
         std::optional<ga::gc::GalacticSession::PreparedNotifications> prepared;
-        if (!due.empty()) prepared.emplace(*galaxy);
+        if (!due.empty()) prepared.emplace(live());
         for (auto& slice : due) {
             if (!slice.intents.empty()) {
-                auto committed = ga::commit_ordered_intents(*galaxy, std::move(slice.intents), executor, options);
+                auto committed = ga::commit_ordered_intents(live(), std::move(slice.intents), executor, options);
                 if (!committed) return core::Result<void>::failure(committed.error());
                 apply_tally->stale += committed.value().stale;
                 for (const auto& outcome : committed.value().outcomes)
@@ -538,7 +616,22 @@ public:
     ga::ExecutionRetainedState retained;
     std::map<ga::gc::PlayerId, ga::ExecutionRoutes> routes;
     ai::AiData data;
-    ga::gc::GalacticSession* galaxy{};
+    ga::gc::GalacticSession* galaxy_{};
+    // Async step 3 (a): what the window body reads of the world (see WindowInput).
+    WindowInput window_input{galaxy_, native_actions_barrier};
+    // The live session for the runtime's own reads outside the window body (install, restore, the world's apply of due slices, the
+    // world-side billing). A read here while a window input is open, outside the apply, is a body read that bypasses the input:
+    // counted (body_live_reads), must stay 0.
+    ga::gc::GalacticSession& live() {
+        if (window_input.is_open() && !applying_slices) ++apply_tally->body_live_reads;
+        return *galaxy_;
+    }
+    // The window's named calls on the session: the overlay build, the identity reservation, the lane barrier and the output phase.
+    // They stay on the session in step 3a and move to the lane in step 3c (counted while a window input is open).
+    ga::gc::GalacticSession& lane_session() {
+        if (window_input.is_open()) ++apply_tally->lane_session_calls;
+        return *galaxy_;
+    }
     std::uint64_t sequence{};
     auth::ScriptScheduler* active_scripts{};
     // Borrowed from the installed GameSession parent. Native listeners die with
@@ -616,7 +709,7 @@ public:
 
     core::Result<std::shared_ptr<const ai::GalacticEconomyRuntime>> copy_economy() {
         using Result = core::Result<std::shared_ptr<const ai::GalacticEconomyRuntime>>;
-        if (!galaxy || !world->available()) return absent<std::shared_ptr<const ai::GalacticEconomyRuntime>>("completed economy world");
+        if (!galaxy_ || !world->available()) return absent<std::shared_ptr<const ai::GalacticEconomyRuntime>>("completed economy world");
         auto& memo = player_runtime.at(decision_owner_ == this ? decision_player_ : 0).economy.at(engine->build_budget_reader());
         auto& economy_mutex = memo.economy_mutex;
         auto& budget_players = memo.budget_players;
@@ -653,9 +746,10 @@ public:
         const auto& saved = funding->state();
         next->completed_tick = tick; next->timeline = saved.timeline;
         next->base_credits.clear();
-        const auto& fiscal = galaxy->setup().fiscal;
-        const auto& abilities = galaxy->setup().ability_host;
-        const auto* control = galaxy->snapshot()->control();
+        const auto& fiscal = window_input.setup().fiscal;
+        const auto& abilities = window_input.setup().ability_host;
+        const auto economy_snapshot = window_input.snapshot();
+        const auto* control = economy_snapshot->control();
         if (fiscal) for (const auto& at : fiscal->planets) {
             auto credits = at.credits;
             if (control && abilities) {
@@ -715,7 +809,7 @@ public:
 
     core::Result<void> publish_freestore() {
         return providers.publish_freestore
-            ? providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), workers()) : core::Result<void>::success();
+            ? providers.publish_freestore(*actions, *pool, *window_input.snapshot(), workers()) : core::Result<void>::success();
     }
 
     // The execution copy is archival. Readers use their player's native pool and
@@ -746,7 +840,7 @@ public:
             copied->reservations = std::move(reservations); pool->pool = std::move(copied);
         }
         return providers.publish_freestore
-            ? providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), workers()) : core::Result<void>::success();
+            ? providers.publish_freestore(*actions, *pool, *window_input.snapshot(), workers()) : core::Result<void>::success();
     }
 
     std::shared_ptr<const ai::GalacticConnectivity> route_publication() {
@@ -765,9 +859,13 @@ public:
         auto published = std::make_shared<ai::GalacticConnectivity>(*connectivity);
         published->execution_routes.clear(); published->player_routes.clear();
         published->execution_available = !routes.empty();
+        // The publication keeps the base connectivity revision: route generations do not enter it. It is the key on which the
+        // world drops its cached connectivity rows (bind_connectivity), and those rows read only the base publication (trade
+        // and radius neighbourhood, island paths), never execution routes. On the async schedule a route refresh lands in a
+        // player frontier only; folding it in made the root drop at the next window start, which the reference schedule never
+        // does and a load cannot reproduce.
         for (const auto& [player, route] : routes) {
             published->execution_available = published->execution_available && route.available;
-            published->revision += route.revision;
             published->player_routes.emplace(player, route_publications.at(player).rows);
         }
         route_source = connectivity; combined_routes = std::move(published);
@@ -777,8 +875,8 @@ public:
         gc_profile::Scope profile_scope(gc_profile::Phase::publish_routes);
         const auto lifecycle = manager.lock();
         if (lifecycle) world->set_perception_period(lifecycle->service_periods()[static_cast<std::size_t>(ga::Service::perception)]);
-        auto bound = world->bind_publication(galaxy->snapshot(), route_publication(), executor, galaxy->completed_tick(), galaxy->next_entity_id(),
-            lifecycle && lifecycle->perception_due(galaxy->completed_tick() + virtual_offset));
+        auto bound = world->bind_publication(window_input.snapshot(), route_publication(), executor, window_input.completed_tick(), window_input.next_entity_id(),
+            lifecycle && lifecycle->perception_due(window_input.completed_tick() + virtual_offset));
         for (auto& note : world->take_path_coefficient_diagnostics()) note_diagnostic(std::move(note));
         return bound;
     }
@@ -790,8 +888,9 @@ public:
         for (auto& note : world->take_path_coefficient_diagnostics()) note_diagnostic(std::move(note));
         return coefficients;
     }
+    // The reader must outlive the provider's use of it (the provider keeps it for its phase reads): the runtime passes its input.
     core::Result<std::shared_ptr<const ai::GalacticConnectivity>> prepare_connectivity(
-        const ga::gc::GalacticSession& parent, const sim::PartitionExecutor& executor) {
+        const GalacticAiWorldReader& parent, const sim::PartitionExecutor& executor) {
         if (providers.prepare_connectivity_publication)
             return providers.prepare_connectivity_publication(parent, *world, *engine, executor);
         auto prepared = providers.prepare_connectivity(parent, *world, *engine, executor);
@@ -814,8 +913,9 @@ public:
     // `read_only` reads the same facts without writing the perception cache or visibility rows (the prepass and
     // the diagnostic reads; only the player's own refresh in its chain may write them, in its sequential order).
     core::Result<ga::ExecutionRouteInput> refresh_input(ga::gc::PlayerId player, const ga::ExecutionRetainedPlayer& row, bool read_only) {
-        auto source = read_only ? providers.execution_input_read_only(player, *galaxy->snapshot(), *world, *engine)
-            : providers.execution_input(player, *galaxy->snapshot(), *world, *engine, nullptr);
+        const auto snapshot = window_input.snapshot();
+        auto source = read_only ? providers.execution_input_read_only(player, *snapshot, *world, *engine)
+            : providers.execution_input(player, *snapshot, *world, *engine, nullptr);
         if (!source) return core::Result<ga::ExecutionRouteInput>::failure(source.error());
         auto input = std::move(source).value();
         if (input.player != player) return absent<ga::ExecutionRouteInput>("execution input player identity");
@@ -849,12 +949,10 @@ public:
     // on the prepass. A player whose perception service runs in the same barrier is left to its own chain (that
     // service refreshes the cache the table reads). A refusal here is left to the player's own service, which
     // reports it at the same point as before.
-    core::Result<void> prepare_path_tables(const sim::PartitionExecutor& executor, const ga::gc::GalacticSession& parent,
-        const ga::gc::GalacticTick& tick) {
+    core::Result<void> prepare_path_tables(const sim::PartitionExecutor& executor, const ga::gc::GalacticTick& tick) {
         clear_path_tables();
         const auto lifecycle = manager.lock();
         if (!lifecycle || !providers.execution_input_read_only) return core::Result<void>::success();
-        static_cast<void>(parent); // the frozen world is the runtime's own snapshot; only the AI's frame is virtual
         const auto frame = virtual_frame();
         const auto sync = tick.completed_tick + virtual_offset;
         for (const auto& [player, route] : routes) {
@@ -879,7 +977,7 @@ public:
         auto state = retained;
         auto& row = state[player];
         const auto prepared = initialize ? path_tables.end() : path_tables.find(player);
-        auto source = providers.execution_input(player, *galaxy->snapshot(), *world, *engine, nullptr);
+        auto source = providers.execution_input(player, *window_input.snapshot(), *world, *engine, nullptr);
         if (!source) return core::Result<void>::failure(source.error());
         auto input = std::move(source).value();
         if (input.player != player) return absent<void>("execution input player identity");
@@ -993,11 +1091,12 @@ public:
                     if (!syntax_error) return created;
                     note_diagnostic("galactic freestore disabled for player " + std::to_string(player) + ": " + created.error().message);
                 } else if (auto attached = ga::attach_freestore(*active_scripts, {player, player}, true); !attached) return attached;
+                else if (!retyped) lifecycle->open_startup_window(player); // WGA-496: the starting units arrive before the AI is initialized
             }
             if (providers.initialize_freestore && !retyped) {
-                if (auto initialized = providers.initialize_freestore(player, *actions, *galaxy->snapshot(), *current_executor()); !initialized) return initialized;
+                if (auto initialized = providers.initialize_freestore(player, *actions, *window_input.snapshot(), *current_executor()); !initialized) return initialized;
                 if (providers.publish_freestore)
-                    if (auto published = providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *current_executor()); !published) return published;
+                    if (auto published = providers.publish_freestore(*actions, *pool, *window_input.snapshot(), *current_executor()); !published) return published;
             }
         }
         return result;
@@ -1053,16 +1152,17 @@ public:
                         if (auto cleaned = actions->service_freestore_movement(input.player, actor.id); !cleaned) return cleaned;
                     }
                     if (providers.publish_freestore)
-                        if (auto published = providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *current_executor()); !published) return published;
+                        if (auto published = providers.publish_freestore(*actions, *pool, *window_input.snapshot(), *current_executor()); !published) return published;
                     if (auto landed = actions->service_freestore_landing(input.player, *pool->pool, *current_executor()); !landed) return landed;
                     if (providers.publish_freestore)
-                        if (auto published = providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *current_executor()); !published) return published;
+                        if (auto published = providers.publish_freestore(*actions, *pool, *window_input.snapshot(), *current_executor()); !published) return published;
                 }
                 const auto instances = scripts.instances();
                 if (std::find(instances.begin(), instances.end(), input.player) != instances.end()) {
                     auto serviced = ga::service_freestore(scripts, {input.player, input.player}, *pool->pool, input.clocks.mode,
                         pool->pool->qualified ? &actions->qualified_freestore() : nullptr);
                     if (!serviced) return serviced;
+                    lifecycle->deliver_startup_window(input.player); // the starting units' added hooks are in this batch
                 }
             }
         }
@@ -1083,6 +1183,7 @@ public:
         if (native_actions_barrier) if (auto tail = native_actions_barrier->begin_tail(); !tail) return tail;
         const auto reads = world->owner_reads();
         if (auto serviced = engine->after_service(report); !serviced) return serviced;
+        if (const auto lifecycle = manager.lock()) lifecycle->close_delivered_startup_windows(); // the scripts ran the starting batch
         std::vector<auth::ScriptCommand> kept;
         kept.reserve(report.commands.size());
         for (auto& command : report.commands) {
@@ -1100,7 +1201,7 @@ public:
             if (auto finished = finish_native_lane(); !finished) return finished;
         return core::Result<void>::success();
     }
-    core::Result<void> prepare(const sim::PartitionExecutor& executor, const ga::gc::GalacticSession& parent, const ga::gc::GalacticTick& tick) {
+    core::Result<void> prepare(const sim::PartitionExecutor& executor, const ga::gc::GalacticTick& tick) {
         const auto reads = world->owner_reads();
         // Later virtual ticks of a batch read the same frozen world: the connectivity and the freestore copy are the
         // batch's. Only the publication is bound again (perception may fall due inside the batch).
@@ -1109,7 +1210,8 @@ public:
         {
             gc_profile::Scope freestore_scope(gc_profile::Phase::prepare_freestore);
             // The freestore pool a window validates against is the overlaid world's (the lane's pending slices included).
-            const auto& base = window_snapshot ? *window_snapshot : *parent.snapshot();
+            const auto live_base = window_snapshot ? nullptr : window_input.snapshot();
+            const auto& base = window_snapshot ? *window_snapshot : *live_base;
             if (providers.publish_freestore) {
                 if (auto published = providers.publish_freestore(*actions, *pool, base, executor); !published) return published;
             } else {
@@ -1120,7 +1222,7 @@ public:
         }
         auto prepared = [&] {
             gc_profile::Scope connectivity_scope(gc_profile::Phase::prepare_connectivity);
-            return prepare_connectivity(parent, executor);
+            return prepare_connectivity(window_input, executor);
         }();
         if (!prepared) return core::Result<void>::failure(prepared.error());
         connectivity = std::move(prepared).value();
@@ -1267,7 +1369,7 @@ struct NativePhaseAttempt {
             if (!begun) return core::Result<void>::failure(begun.error());
             token = std::move(begun).value(); return core::Result<void>::success();
         };
-        if (auto result = enlist(output, owner.galaxy->begin_native_output_phase()); !result) return result;
+        if (auto result = enlist(output, owner.lane_session().begin_native_output_phase()); !result) return result;
         if (auto result = enlist(scripts, scheduler.begin_phase(executor)); !result) return result;
         if (auto result = enlist(lifecycle, manager->begin_phase()); !result) return result;
         if (auto result = enlist(perception, owner.world->begin_phase(executor)); !result) return result;
@@ -1361,7 +1463,7 @@ public:
         : owner_(std::move(owner)), manager_(std::move(manager)) {}
     bool uses_sync_hash() const noexcept override { return true; }
     std::uint64_t frame_offset() const noexcept override {
-        const auto real = owner_->galaxy->clock().galactic_frame;
+        const auto real = owner_->window_input.galactic_frame();
         return manager_->virtual_mode(real) - real;
     }
     bool verifies_sync_hash() const noexcept override {
@@ -1398,7 +1500,8 @@ public:
         ga::gc::GalacticSession& parent, const ga::gc::GalacticTick&, auth::ScriptScheduler& scripts,
         const std::function<core::Result<auth::ServiceReport>()>& run) override {
         using Result = core::Result<auth::ServiceReport>;
-        if (owner_->phase_active || owner_->galaxy != &parent) return absent<auth::ServiceReport>("idle native service phase owner");
+        const auto service = [&]() -> Result {
+        if (owner_->phase_active || owner_->galaxy_ != &parent) return absent<auth::ServiceReport>("idle native service phase owner");
         // Admitted AI tick `ai_index`. A deferred schedule applies what is due first, so the batch snapshot sees it; the
         // synchronous reference applies its own batch at the end of this phase. Held ticks never reach this point.
         const auto& schedule = owner_->outbox.schedule();
@@ -1441,6 +1544,13 @@ public:
             owner_->note_billing_time(begin);
         }
         std::optional<Runtime::ProbeBody> body_scope; // the window body: from the inbox cut to the end of the phase
+        // Async step 3 (a): from the cut to the end of the phase the body reads the world through its window input.
+        struct InputScope {
+            Runtime& owner; bool open{};
+            explicit InputScope(Runtime& value) : owner(value) {}
+            ~InputScope() { if (open) { owner.window_input.close(); owner.window_input.drain(*owner.apply_tally); } }
+            InputScope(const InputScope&) = delete; InputScope& operator=(const InputScope&) = delete;
+        } input_scope(*owner_);
         owner_->write_probe->arm(schedule.apply_delay != 0);
         if (schedule.apply_delay != 0) {
             auto applied = owner_->apply_due_slices();
@@ -1466,6 +1576,7 @@ public:
             if (schedule.apply_delay != 0)
                 if (auto noted = owner_->pre_cut_type_switches(); !noted) { owner_->active_executor = nullptr; return Result::failure(noted.error()); }
             body_scope.emplace(*owner_->write_probe, true);
+            owner_->window_input.open(parent, static_cast<bool>(owner_->providers.observe)); input_scope.open = true;
             // Async step 2: the cut comes AFTER the due slices applied, so what the world delivered while they applied (queued, in arrival
             // order after the notices of the steps before) is in this window's cut, the order the AI saw them in when they applied at once.
             owner_->active_executor = &executor;
@@ -1509,6 +1620,7 @@ public:
                     total.tick = one.tick;
                     const auto append = [](auto& to, auto& from) { to.insert(to.end(), std::make_move_iterator(from.begin()), std::make_move_iterator(from.end())); };
                     append(total.commands, one.commands); append(total.diagnostics, one.diagnostics);
+                    append(total.observer_notices, one.observer_notices);
                     append(total.removed_instances, one.removed_instances); append(total.loads, one.loads);
                     append(total.managed_releases, one.managed_releases); append(total.load_notes, one.load_notes);
                     total.managed_handles.objects += one.managed_handles.objects; total.managed_handles.edges += one.managed_handles.edges;
@@ -1531,6 +1643,9 @@ public:
             owner_->virtual_offset = 0; manager_->set_virtual_tick(1);
             if (result) {
                 if (auto committed = attempt.commit(); !committed) { attempt.output->record_fault(); return Result::failure(committed.error()); }
+                // A later virtual tick can discard every report in an attempt.
+                // Publish retirements only into the report of the committed window.
+                owner_->retirement_log->flush(result.value());
                 result.value().load_notes.insert(result.value().load_notes.end(), notes.begin(), notes.end());
                 if (schedule.apply_delay != 0) {
                     // W1 S6 (review #6425): the window's own load notes (its scripts' notes, native provider retirements) reach the
@@ -1572,19 +1687,27 @@ public:
             for (auto& note : manager_->retirement_notes())
                 if (note.object == "native galactic player " + std::to_string(*faulted)) notes.push_back(std::move(note));
             {
-                // #6338: record the line (no output here: the window is the AI's own work); after_service writes it. The retirement
+                // #6338: record the line (no output here: the window is the AI's own work); the successful window commit writes it. The retirement
                 // itself (retire, not recover) is unchanged.
                 std::string faction;
-                for (const auto& selected : owner_->setup->lifecycle.players) if (selected.player == *faulted) faction = selected.player_type;
-                owner_->retirement_log->record(*faulted, "EAWR-GCAI-PROVIDER-0001 [warning]: galactic AI provider retired for the rest of the campaign: player="
-                    + std::to_string(*faulted) + " faction=" + faction + " tick=" + std::to_string(scripts.completed_tick())
-                    + " reason=" + (reason == ga::NativeProviderFault::result ? "result" : "deterministic-exception")
-                    + " diagnostic=" + diagnostic.code + ": " + diagnostic.message);
+                for (const auto& selected : owner_->setup->perception.players) if (selected.player == *faulted) faction = selected.faction;
+                owner_->retirement_log->record(*faulted, faction, scripts.completed_tick(),
+                    reason == ga::NativeProviderFault::result ? "result" : "deterministic-exception", diagnostic);
             }
             // The completed attempt goes out of scope before any participant
             // begins again. Successful siblings recompute from the same root.
         }
         return absent<auth::ServiceReport>("bounded native provider retirement progress");
+        };
+        try {
+            auto result = service();
+            if (!result) report_failure(result.error(), scripts.completed_tick(), "unrecoverable-result");
+            return result;
+        } catch (const std::exception& error) {
+            core::Diagnostic diagnostic; diagnostic.code = auth::codes::session_abort; diagnostic.message = error.what();
+            report_failure(diagnostic, scripts.completed_tick(), "exception");
+            throw; // observation never changes exception classification or recovery
+        }
     }
     core::Result<auth::ServiceOptions> before_service(const sim::PartitionExecutor& executor,
         const ga::gc::GalacticSession& parent, const ga::gc::GalacticTick& tick, auth::ScriptScheduler& scripts) override {
@@ -1595,7 +1718,8 @@ public:
         owner_->actions->set_executor(&executor);
         if (auto overlaid = owner_->checked_native(owner_->build_window_overlay(executor)); !overlaid)
             return core::Result<auth::ServiceOptions>::failure(overlaid.error());
-        if (auto prepared = owner_->prepare(executor, parent, tick); !prepared) return core::Result<auth::ServiceOptions>::failure(prepared.error());
+        static_cast<void>(parent); // async step 3 (a): the window body reads the world through owner_->window_input
+        if (auto prepared = owner_->prepare(executor, tick); !prepared) return core::Result<auth::ServiceOptions>::failure(prepared.error());
         const ga::Clocks clocks{tick.completed_tick + owner_->virtual_offset, owner_->virtual_frame()};
         if (auto begun = owner_->checked_native(owner_->begin_native_actions_barrier()); !begun)
             return core::Result<auth::ServiceOptions>::failure(begun.error());
@@ -1612,14 +1736,14 @@ public:
         }
         owner_->engine->set_galactic_funding(owner_->funding);
         owner_->engine->defer_galactic_effects(true); // S9a: the players' engine effects commit once, at finish_barrier
-        if (auto tables = owner_->prepare_path_tables(executor, parent, tick); !tables)
+        if (auto tables = owner_->prepare_path_tables(executor, tick); !tables)
             return core::Result<auth::ServiceOptions>::failure(tables.error());
         if (owner_->native_actions_barrier) {
             auto started = owner_->checked_native(owner_->native_actions_barrier->begin_players());
             if (!started) return core::Result<auth::ServiceOptions>::failure(started.error());
         }
         owner_->active_scripts = &scripts;
-        auto options = owner_->checked_native(manager_->before_service(executor, parent, tick, scripts));
+        auto options = owner_->checked_native(manager_->before_window_service(executor, owner_->window_input.galactic_frame(), tick, scripts));
         if (!options) return options;
         // The bridge can return on scheduler refusal without after_service.
         // Its local options retain this cleanup through both hooks and unwind.
@@ -1635,7 +1759,13 @@ public:
     core::Result<void> after_service(auth::ServiceReport& report) override {
         const auto native_record_write = owner_->engine->native_record_scope();
         auto result = owner_->checked_native(manager_->after_service(report));
-        owner_->retirement_log->flush(); // #6338: the serial side of the tick writes the retirement lines the window recorded
+        for (auto& row : report.diagnostics) {
+            const auto player = owner_->engine->galactic_chain_owner(row.instance);
+            std::string faction = "unknown";
+            for (const auto& selected : owner_->setup->perception.players) if (selected.player == player) faction = selected.faction;
+            row.message = "player=" + std::to_string(player) + " faction=" + faction + " tick=" + std::to_string(row.tick)
+                + " reason=script diagnostic=" + row.code + ": " + row.message;
+        }
         owner_->drain_degradation_ledger();
         if (!owner_->phase_active) {
             owner_->clear_path_tables();
@@ -1644,6 +1774,18 @@ public:
         return result;
     }
 private:
+    void report_failure(const core::Diagnostic& fault, std::uint64_t tick, std::string_view reason) const {
+        const auto player = manager_->faulted_provider().value_or(
+            owner_->engine->native_fault_provider().value_or(owner_->tail_fault_provider.value_or(0)));
+        std::string faction = "unknown";
+        for (const auto& selected : owner_->setup->perception.players) if (selected.player == player) faction = selected.faction;
+        core::Diagnostic failure; failure.code = "EAWR-GCAI-INTERNAL-0001";
+        failure.message = "AI internal error; player=" + std::to_string(player) + " faction=" + faction
+            + " tick=" + std::to_string(tick) + " reason=" + std::string(reason) + " diagnostic=" + fault.code + ": " + fault.message;
+        core::degradation::record(failure.code, core::degradation::campaign_source(),
+            "native galactic player " + std::to_string(player), failure.message, core::Severity::error);
+        std::fprintf(stderr, "%s\n", core::format_diagnostic(failure).c_str());
+    }
     struct NativeBarrierCleanup {
         std::shared_ptr<Runtime> owner;
         const ga::gc::GalacticSession::NativeActionBarrier* barrier{};
@@ -1721,6 +1863,48 @@ bool story_player_human(const CampaignSetupPlan& plan, sim::galactic::PlayerId p
     });
 }
 
+namespace {
+bool active_seat(const CampaignSetupPlan& plan, sim::galactic::PlayerId id, sim::galactic::SeatKind kind) {
+    return std::any_of(plan.galaxy().seats.begin(), plan.galaxy().seats.end(), [&](const auto& seat) {
+        return seat.active && seat.player == id && seat.kind == kind;
+    });
+}
+// A binding the AI selection considers: active, held by an active AI seat, and by no human seat.
+bool ai_seated(const CampaignSetupPlan& plan, const CampaignPlayerBinding& binding) {
+    const auto id = binding.player.player_id;
+    return binding.active && active_seat(plan, id, sim::galactic::SeatKind::ai) && !active_seat(plan, id, sim::galactic::SeatKind::human);
+}
+// The controller type an AI-seated faction acquires (WGA-02 / WGS-08 under single-player rules; GCMP-AI-01/03 under
+// multiplayer rules), or empty when it acquires none. Neutral seat metadata does not create a galactic goal owner (the
+// native goal checkpoint contract excludes neutral players), and an ambient faction retains the campaign's authored
+// assignment or its absence. Refuses an unknown faction and a playable multiplayer faction without Basic_AI.
+core::Result<std::string_view> galactic_ai_controller_type(const data::galactic::GalacticData& data,
+    const data::galactic::Campaign& campaign, const CampaignSetupPlan& plan, std::string_view faction_name) {
+    const auto* faction = data.faction(faction_name);
+    if (!faction) return absent<std::string_view>("AI faction relations");
+    if (faction->is_neutral.value_or(false)) return core::Result<std::string_view>::success({});
+    if (plan.rules_flavour() == CampaignRulesFlavour::multiplayer && faction->is_playable.value_or(false)) {
+        if (faction->basic_ai.empty()) return absent<std::string_view>("multiplayer playable faction Basic_AI");
+        return core::Result<std::string_view>::success(faction->basic_ai);
+    }
+    const auto assignment = std::find_if(campaign.ai_player_control.begin(), campaign.ai_player_control.end(),
+        [&](const auto& row) { return ai::upper_case(row.faction) == ai::upper_case(faction_name); });
+    if (assignment == campaign.ai_player_control.end()) return core::Result<std::string_view>::success({});
+    return core::Result<std::string_view>::success(assignment->name);
+}
+} // namespace
+
+bool galactic_ai_selects_any_player(const data::galactic::GalacticData& data, const CampaignSetupPlan& plan) {
+    const auto* campaign = data.campaign(plan.campaign_name());
+    for (const auto& binding : plan.player_bindings()) {
+        if (!ai_seated(plan, binding)) continue;
+        if (!campaign) return true; // the selection refuses the missing campaign
+        const auto type = galactic_ai_controller_type(data, *campaign, plan, binding.faction);
+        if (!type || !type.value().empty()) return true;
+    }
+    return false;
+}
+
 core::Result<std::vector<ga::PlayerSelection>> select_live_galactic_ai_players(
     const data::galactic::GalacticData& data, const CampaignSetupPlan& plan, const ai::AiData& loaded,
     std::string_view authored_difficulty) {
@@ -1733,37 +1917,18 @@ core::Result<std::vector<ga::PlayerSelection>> select_live_galactic_ai_players(
     std::string level;
     bool ambiguous = false;
     const auto authored_adjustment = ai::upper_case(authored_difficulty);
-    const auto human = [&](sim::galactic::PlayerId id) {
-        return std::any_of(plan.galaxy().seats.begin(), plan.galaxy().seats.end(), [&](const auto& seat) {
-            return seat.active && seat.player == id && seat.kind == sim::galactic::SeatKind::human;
-        });
-    };
+    const auto human = [&](sim::galactic::PlayerId id) { return active_seat(plan, id, sim::galactic::SeatKind::human); };
     std::optional<sim::galactic::PlayerId> human_player;
     for (const auto& binding : plan.player_bindings())
         if (binding.active && human(binding.player.player_id)) { human_player = binding.player.player_id; break; }
     for (const auto& binding : plan.player_bindings()) {
         const auto id = binding.player.player_id;
-        const bool controlled = std::any_of(plan.galaxy().seats.begin(), plan.galaxy().seats.end(), [&](const auto& seat) {
-            return seat.active && seat.player == id && seat.kind == sim::galactic::SeatKind::ai;
-        });
-        if (!binding.active || !controlled || human(id)) continue;
+        if (!ai_seated(plan, binding)) continue;
+        auto controller = galactic_ai_controller_type(data, *campaign, plan, binding.faction);
+        if (!controller) return core::Result<std::vector<ga::PlayerSelection>>::failure(controller.error());
+        const std::string_view player_type = controller.value();
+        if (player_type.empty()) continue;
         const auto* faction = data.faction(binding.faction);
-        if (!faction) return absent<std::vector<ga::PlayerSelection>>("AI faction relations");
-        // Neutral seat metadata does not create a galactic goal owner; the
-        // existing native goal checkpoint contract excludes neutral players.
-        if (faction->is_neutral.value_or(false)) continue;
-        std::string_view player_type;
-        if (plan.rules_flavour() == CampaignRulesFlavour::multiplayer && faction->is_playable.value_or(false)) {
-            player_type = faction->basic_ai;
-            if (player_type.empty()) return absent<std::vector<ga::PlayerSelection>>("multiplayer playable faction Basic_AI");
-        } else {
-            // Ambient factions retain the authored selection/absence they had before
-            // the extension. Neutral remains outside native goal ownership above.
-            const auto assignment = std::find_if(campaign->ai_player_control.begin(), campaign->ai_player_control.end(),
-                [&](const auto& row) { return ai::upper_case(row.faction) == ai::upper_case(binding.faction); });
-            if (assignment == campaign->ai_player_control.end()) continue;
-            player_type = assignment->name;
-        }
         const auto type = loaded.players.find(ai::upper_case(player_type));
         if (type == loaded.players.end()) return absent<std::vector<ga::PlayerSelection>>("authored AI player type");
         for (const auto& [candidate, adjustment] : type->second.difficulty) if (adjustment == authored_adjustment) {
@@ -2157,7 +2322,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
             runtime->setup->multiplayer, runtime->setup->story_players,
             [weak = std::weak_ptr<Runtime>(runtime)]() -> std::shared_ptr<const ga::gc::GalacticSnapshot> {
                 const auto owner = weak.lock();
-                return owner && owner->galaxy ? owner->galaxy->snapshot() : nullptr;
+                return owner && owner->galaxy_ ? owner->live().snapshot() : nullptr;
             }, [weak = std::weak_ptr<Runtime>(runtime)](const std::string& key) -> std::optional<auth::Value> {
                 const auto owner = weak.lock();
                 if (!owner) return std::nullopt;
@@ -2198,7 +2363,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
             runtime->active_scripts = &game.galactic_scripts()->ai_scheduler();
             runtime->retained_scripts = runtime->active_scripts;
             // Story chunks may query live objects before their main thread starts.
-            runtime->galaxy = &game.galactic_scripts()->parent_world();
+            runtime->galaxy_ = &game.galactic_scripts()->parent_world();
             if (game.galactic_scripts()->object_scheduler()) {
                 auto engine = make_galactic_object_engine(runtime->setup->object_scripts,
                     [weak = std::weak_ptr<Runtime>(runtime), catalog = runtime->setup->object_query_catalog,
@@ -2251,7 +2416,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                 return core::Result<std::shared_ptr<ga::StateContributor>>::success(std::make_shared<MeasuredState>(std::move(state), digest_work));
             };
             auto installed = install_composed_galactic_ai(game, [runtime, weak, &game, birth](auto& galaxy) -> core::Result<GalacticAiContributors> {
-                runtime->galaxy = &galaxy;
+                runtime->galaxy_ = &galaxy;
                 if (!runtime->providers.publish_freestore) {
                     auto pool = ga::copy_freestore(*galaxy.snapshot(), runtime->providers.freestore_types, *runtime->setup->executor);
                     if (!pool) return core::Result<GalacticAiContributors>::failure(pool.error());
@@ -2269,8 +2434,8 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                 if (auto published = runtime->publish_economy(); !published) return core::Result<GalacticAiContributors>::failure(published.error());
                 runtime->execution = std::make_shared<ga::LiveExecutionStateContributor>(runtime->retained, runtime->routes, runtime->pool,
                     [weak](auto player, const ai::DerivedExecutionRestore* reconstruction) -> core::Result<ga::ExecutionRouteInput> {
-                        auto owner = weak.lock(); if (!owner || !owner->galaxy) return absent<ga::ExecutionRouteInput>("retained parent");
-                        return owner->providers.execution_input(player, *owner->galaxy->snapshot(), *owner->world, *owner->engine, reconstruction);
+                        auto owner = weak.lock(); if (!owner || !owner->galaxy_) return absent<ga::ExecutionRouteInput>("retained parent");
+                        return owner->providers.execution_input(player, *owner->live().snapshot(), *owner->world, *owner->engine, reconstruction);
                     }, [weak](const auto& state) -> core::Result<void> {
                         auto owner = weak.lock(); if (!owner) return absent<void>("execution native owner");
                         for (const auto& [player, row] : state) {
@@ -2361,7 +2526,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                         // runs inside the window; one noticed here would be the world writing the AI budget. Counted, must stay 0.
                         if (notice.kind == Kind::marked) { ++owner->apply_tally->marks_outside_window; return std::nullopt; }
                         const auto begin = std::chrono::steady_clock::now();
-                        const auto snapshot = owner->galaxy->snapshot();
+                        const auto snapshot = owner->live().snapshot();
                         const auto& production = snapshot->production();
                         auto decided = owner->billing_view.active() && production
                             ? owner->billing_view.bill(notice, production->players) : std::nullopt;
@@ -2491,7 +2656,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                 });
                 if (runtime->providers.prepare_freestore_selection) {
                     auto selector = runtime->providers.prepare_freestore_selection(runtime->pool, runtime->world, runtime->engine,
-                        [weak] { auto owner = weak.lock(); return owner && owner->galaxy ? owner->galaxy->snapshot() : nullptr; });
+                        [weak] { auto owner = weak.lock(); return owner && owner->galaxy_ ? owner->window_input.snapshot() : nullptr; });
                     if (!selector) return core::Result<GalacticAiContributors>::failure(selector.error());
                     runtime->freestore_selection = std::move(selector).value();
                     if (!runtime->freestore_selection) return absent<GalacticAiContributors>("qualified freestore selector");
@@ -2499,7 +2664,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                 runtime->engine->set_galactic_selection([weak](auto player, auto planet, const auto& goal, const auto& plan) -> core::Result<std::shared_ptr<const ai::GalacticSelectionInput>> {
                     auto owner = weak.lock(); if (!owner) return absent<std::shared_ptr<const ai::GalacticSelectionInput>>("selector owner");
                     auto provider = ai::stock_selection_provider(owner->setup->content, owner->plans, owner->world, owner->engine,
-                        [weak] { auto active = weak.lock(); return active && active->galaxy ? active->galaxy->snapshot() : nullptr; }, owner->providers.heroes, owner->freestore_selection, owner->selection_cache);
+                        [weak] { auto active = weak.lock(); return active && active->galaxy_ ? active->window_input.snapshot() : nullptr; }, owner->providers.heroes, owner->freestore_selection, owner->selection_cache);
                     return provider(player, planet, goal, plan);
                 });
                 // The execution service reads only the free store of that input: ask for just that (the same rule as the input's own).
@@ -2537,6 +2702,13 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                     const auto owner = weak.lock(); const auto lifecycle_owner = owner ? owner->manager.lock() : nullptr;
                     return lifecycle_owner && lifecycle_owner->provider_retired(player);
                 });
+                // WGA-496: the window answers only to the player's own free-store instance, which initialize() creates with the
+                // player's identity as its instance id (free-store instances occupy the player identity domain).
+                runtime->engine->set_startup_perception_reader([weak](auto player, std::uint64_t instance) {
+                    if (instance != static_cast<std::uint64_t>(player)) return false;
+                    const auto owner = weak.lock(); const auto lifecycle_owner = owner ? owner->manager.lock() : nullptr;
+                    return lifecycle_owner && lifecycle_owner->startup_window_open(player);
+                });
                 const auto goals = runtime->goals;
                 auto external = runtime->providers.external;
                 external.emplace(std::string(AsyncLaneState::component), std::make_shared<AsyncLaneState>(weak));
@@ -2559,18 +2731,22 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                         if (const auto manager = owner->manager.lock())
                             owner->world->set_perception_period(manager->service_periods()[static_cast<std::size_t>(ga::Service::perception)]);
                         owner->build_tasks_ready = true;
-                        if (const auto manager = owner->manager.lock()) owner->galaxy->add_runtime_load_notes(manager->retirement_notes());
+                        if (const auto manager = owner->manager.lock()) owner->live().add_runtime_load_notes(manager->retirement_notes());
                         if (auto published = owner->publish_economy(); !published) return published;
                         if (owner->providers.publish_freestore)
-                            if (auto published = owner->providers.publish_freestore(*owner->actions, *owner->pool, *owner->galaxy->snapshot(), *owner->setup->executor); !published)
+                            if (auto published = owner->providers.publish_freestore(*owner->actions, *owner->pool, *owner->live().snapshot(), *owner->setup->executor); !published)
                                 return published;
                         // B-U05: a load rebuilds the retained derived connectivity once, at this barrier,
                         // from archived rows. The next admitted service then runs its own producer cadence
                         // instead of spending it on the rebuild.
-                        if (!owner->providers.prepare_connectivity && !owner->providers.prepare_connectivity_publication) return core::Result<void>::success();
-                        auto rebuilt = owner->prepare_connectivity(*owner->galaxy, *owner->setup->executor);
-                        if (!rebuilt) return core::Result<void>::failure(rebuilt.error());
-                        owner->connectivity = std::move(rebuilt).value();
+                        if (owner->providers.prepare_connectivity || owner->providers.prepare_connectivity_publication) {
+                            auto rebuilt = owner->prepare_connectivity(owner->window_input, *owner->setup->executor);
+                            if (!rebuilt) return core::Result<void>::failure(rebuilt.error());
+                            owner->connectivity = std::move(rebuilt).value();
+                        }
+                        // #7457: the restored cache rows belong to the saved publication (its base revision is restored);
+                        // the world adopts that revision so the next bind does not drop them as a change.
+                        owner->world->adopt_restored_connectivity_revision(owner->route_publication()->revision);
                         return core::Result<void>::success();
                     }});
             }, [runtime](const auto& notice) {

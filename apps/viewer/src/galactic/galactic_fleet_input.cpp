@@ -396,7 +396,8 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
             if (name == "b_underground") return false; // Ability/raid provider seam, #2263/#1156.
             // GHUD-S68: the structure slots bind a click only (no receive logic): a drop there is rejected.
             if (name.starts_with("Planet_structure_")) return false;
-            // #7178: a dragged unit cell lands that unit only; a whole card or stack icon keeps the fleet landing.
+            // #7178: a dragged unit cell lands that unit only (over a defended enemy surface: invades with it alone,
+            // GGS-10); a whole card or stack icon keeps the fleet landing.
             const bool accepted = dragged_members.empty() ? request_ground_land(submit, id)
                 : request_ground_land_members(submit, dragged_members);
             if (accepted && submit) {
@@ -537,11 +538,12 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
                 if (!badge.shown || !badge.button->is_visible_in_tree()
                     || !badge.button->get_global_rect().has_point(point)) continue;
                 if (badge.ground_planet) {
-                    // GGS-05: only the existing same-planet landing command is expressible here.
+                    // GGS-05: only the existing same-planet landing command is expressible here. On a non-allied
+                    // surface that landing is the invasion (WGM-39/42); the ground control is its target too.
                     if (key.first != source->orbit || !pause_allows(presentation::GalacticPausedAction::surface_deploy)) return false;
                     if (dragged_stack.size() > 1 && !pause_allows(presentation::GalacticPausedAction::fleet_management)) return false;
                     const auto* roster = command_roster(key.first);
-                    if (!roster || !roster->accessible || !roster->allied
+                    if (!roster || !roster->accessible
                         || (dragged_members.empty()
                             ? !galactic_view::fleet_can_land(*published_snapshot, galaxy->local.player, id, dragged_stack)
                             : !galactic_view::dragged_units_landing(*published_snapshot, galaxy->local.player, key.first, dragged_members)))

@@ -26,6 +26,10 @@ struct MpLobbyFaction {
     std::string name;     // authored faction name; any faction the data declares
     bool playable{};      // Is_Playable: a human may hold it
     bool neutral{};       // Is_Neutral: never gets an AI seat
+    // An AI seat on this row runs a native AI controller: a playable faction's Basic_AI on a multiplayer entry, or the
+    // entry's AI_Player_Control pair (GCMP-AI-01/03). False for Neutral and for an ambient faction the entry assigns
+    // nothing: its seat stays passive, as in the original's multiplayer campaigns, which author no pairs.
+    bool ai_controller{};
     friend bool operator==(const MpLobbyFaction&, const MpLobbyFaction&) = default;
 };
 

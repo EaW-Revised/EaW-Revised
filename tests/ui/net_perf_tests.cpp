@@ -30,6 +30,20 @@ void test_subsecond_waits_count() {
     expect(now.longest_ms_10s == 60, "the 10 s longest agrees");
 }
 
+void test_wait_classes() {
+    ui::NetStallLedger ledger;
+    ledger.observe(100, true, 1, ui::NetWaitKind::batch);
+    ledger.observe(140, true, 1, ui::NetWaitKind::queued);
+    ledger.observe(150, true, 1, ui::NetWaitKind::hash);
+    ledger.observe(210, true, 0, ui::NetWaitKind::timing);
+    ledger.observe(230, true, 0, ui::NetWaitKind::other);
+    ledger.observe(240, false, 0);
+    const auto sample = ledger.snapshot(250);
+    expect(sample.stalls_by_kind == std::array<std::uint32_t, 5>{1, 1, 1, 1, 1}, "each changed wait cause is attributed");
+    expect(sample.ms_by_kind == std::array<std::uint64_t, 5>{40, 10, 60, 20, 10} && sample.stalled_ms_last_second == 140,
+        "wait classes partition elapsed waiting time without double counting");
+}
+
 void test_per_second_window_and_history() {
     ui::NetStallLedger ledger;
     ledger.observe(0, true, 1);
@@ -102,18 +116,29 @@ void test_summary_line_is_stable() {
     report.peers.push_back({2, false, 0.0, 0.0, 0.0, ui::NetRoute::unknown});
     const std::string expected = "EAWR net summary seat=0 verdict=network wait_peer=1 wait_ms=640 stalls_per_s=3 "
                                  "stalled_ms_1s=700 longest_ms_10s=900 frame_ms=48.0 sim_ms=31.0 "
+                                 "wait_batch_s=0 wait_batch_ms=0 wait_queued_s=0 wait_queued_ms=0 wait_hash_s=0 wait_hash_ms=0 "
+                                 "wait_timing_s=0 wait_timing_ms=0 wait_other_s=0 wait_other_ms=0 poll_gap_max_ms=0.0 "
                                  "peers=1:route=relay-own,rtt_ms=80,jitter_ms=5,loss_pct=1.3;2:route=unknown,unmeasured";
     expect(ui::net_summary_line(report) == expected, "the summary line keeps its format: " + ui::net_summary_line(report));
 
     const ui::NetPerfReport idle;
     expect(ui::net_summary_line(idle) == "EAWR net summary seat=0 verdict=ok wait_peer=- wait_ms=0 stalls_per_s=0 "
-                                         "stalled_ms_1s=0 longest_ms_10s=0 frame_ms=0.0 sim_ms=0.0 peers=-",
+                                         "stalled_ms_1s=0 longest_ms_10s=0 frame_ms=0.0 sim_ms=0.0 "
+                                         "wait_batch_s=0 wait_batch_ms=0 wait_queued_s=0 wait_queued_ms=0 wait_hash_s=0 wait_hash_ms=0 "
+                                         "wait_timing_s=0 wait_timing_ms=0 wait_other_s=0 wait_other_ms=0 poll_gap_max_ms=0.0 peers=-",
            "an idle report prints dashes");
     const std::string json = ui::net_report_json(report);
     expect(json.find("\"verdict\": \"network\"") != std::string::npos && json.find("\"wait_peer\": 1") != std::string::npos
                && json.find("\"measured\": false") != std::string::npos
                && json.find("\"route\": \"relay-own\"") != std::string::npos,
            "the report object carries the verdict, the gate peer and unmeasured links");
+    report.input_delay_ticks = 4; report.lead_ticks = 4; report.local_tick_ms = 33.3;
+    report.peers.front().input_tick_ms = 45.0;
+    const auto timed = ui::net_summary_line(report);
+    expect(timed.find("lead_ticks=4 input_delay_ms=133.3 local_tick_ms=33.3") != std::string::npos
+        && timed.find("input_tick_ms=45.0") != std::string::npos, "summary exposes actual lead, delay and input cadence");
+    expect(ui::net_report_json(report).find("\"input_tick_ms\": 45.000") != std::string::npos,
+        "structured diagnostics preserve peer cadence");
 }
 
 // The degraded-route hint (observation only): named for the lossiest flagged relayed link, empty when none is flagged.
@@ -138,6 +163,7 @@ void test_degraded_route_hint() {
 
 int main() {
     test_subsecond_waits_count();
+    test_wait_classes();
     test_per_second_window_and_history();
     test_running_wait();
     test_verdict();

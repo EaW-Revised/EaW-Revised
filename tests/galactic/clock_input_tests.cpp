@@ -69,7 +69,8 @@ int main() {
         auto& event = answer.front();
         assert(!speed.begin(one, one, 10)); // the current speed is not a request
         assert(speed.begin(one, two, 10) && speed.target() == two);
-        assert(!speed.begin(one, two, 11) && !speed.begin(one, one, 11)); // a second press waits, either direction
+        assert(!speed.begin(one, two, 11)); // a second fast-forward press waits
+        assert(speed.shown(one) == two); // the button shows the request in flight
         speed.observe(one, local, {}, 12);
         assert(speed.target() == two); // the agreed snapshot has not answered yet
         event.kind = Kind::speed_changed; event.producer = local; event.subject = 0U; event.tick = 9;
@@ -98,5 +99,17 @@ int main() {
         assert(speed.target() == one);
         speed.observe(two, local, {}, 31 + viewer::galactic::SpeedToggleGuard::release_ticks);
         assert(!speed.target()); // never stuck: one speed window of session ticks releases it
+
+        // Owner online test 2026-11-17: the seat that asked for fast forward can always end it with its own button.
+        viewer::galactic::SpeedToggleGuard requester;
+        static_assert(viewer::galactic::SpeedToggleGuard::normal == one);
+        assert(requester.begin(one, two, 100) && requester.shown(one) == two);
+        assert(requester.begin(one, one, 101) && requester.target() == one); // 1x replaces the 2x still in flight
+        assert(!requester.begin(one, one, 102)); // the same 1x is not sent twice
+        assert(!requester.begin(one, two, 103)); // a fast-forward press waits behind the 1x
+        requester.observe(two, local, {}, 104);
+        assert(requester.target() == one); // the earlier 2x landing does not answer the 1x
+        requester.observe(one, local, {}, 106);
+        assert(!requester.target());
     }
 }

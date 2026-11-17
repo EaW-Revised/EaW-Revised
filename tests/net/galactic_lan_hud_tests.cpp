@@ -97,6 +97,10 @@ void clock_policy() {
     expect(clock.speed_wait_seconds({2}, 309) == 1, "a partial second rounds up");
     expect(clock.admit_speed({2}, 310), "oldest slot expires exactly at 10 session seconds");
     expect(!clock.admit_speed({2}, 310), "rolling window retains the other slot");
+    // Owner online test 2026-11-17: the change back to 1x is never refused and spends nothing, so the seat that asked
+    // for fast forward can always end it.
+    expect(clock.admit_speed({2}, 310, true) && clock.admit_speed({2}, 310, true), "a full budget still admits 1x");
+    expect(!clock.admit_speed({2}, 310) && clock.speed_wait_seconds({2}, 310) == 1, "the 1x changes spent no budget");
     // Pause and resume never spend the speed budget; only a debounce against double clicks applies.
     GalacticClockLimiter toggles(GalacticClockPolicy::limited);
     for (std::uint64_t tick = 0; tick < 100 * 40; tick += 40) {

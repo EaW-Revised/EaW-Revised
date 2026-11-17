@@ -5,6 +5,193 @@
       "example": {
         "column": 1,
         "line": 1,
+        "logical_path": "data/xml/revisedplanetsearch.xml",
+        "source_id": "synthetic:tools/revised_planet_search/RevisedPlanetSearch.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Planet_Search",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Size",
+      "tag_path": "Planet_Search/Size",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedplanetsearch.xml",
+        "source_id": "synthetic:tools/revised_planet_search/RevisedPlanetSearch.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Planet_Search",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Offset",
+      "tag_path": "Planet_Search/Offset",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedplanetsearch.xml",
+        "source_id": "synthetic:tools/revised_planet_search/RevisedPlanetSearch.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Planet_Search",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Planet_Picture",
+      "tag_path": "Planet_Search/Planet_Picture",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedplanetsearch.xml",
+        "source_id": "synthetic:tools/revised_planet_search/RevisedPlanetSearch.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Planet_Search",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Owner_Emblem",
+      "tag_path": "Planet_Search/Owner_Emblem",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedplanetsearch.xml",
+        "source_id": "synthetic:tools/revised_planet_search/RevisedPlanetSearch.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Planet_Search",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Row_Scale",
+      "tag_path": "Planet_Search/Row_Scale",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedplanetsearch.xml",
+        "source_id": "synthetic:tools/revised_planet_search/RevisedPlanetSearch.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Planet_Search",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Control",
+      "tag_path": "Planet_Search/Control",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedplanetsearch.xml",
+        "source_id": "synthetic:tools/revised_planet_search/RevisedPlanetSearch.xml"
+      },
+      "file_count": 1,
+      "node_kind": "attribute",
+      "object_type": "Planet_Search",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Name",
+      "tag_path": "Planet_Search/Control/@Name",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedplanetsearch.xml",
+        "source_id": "synthetic:tools/revised_planet_search/RevisedPlanetSearch.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Planet_Search",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Type",
+      "tag_path": "Planet_Search/Control/Type",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedplanetsearch.xml",
+        "source_id": "synthetic:tools/revised_planet_search/RevisedPlanetSearch.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Planet_Search",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Offset",
+      "tag_path": "Planet_Search/Control/Offset",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedplanetsearch.xml",
+        "source_id": "synthetic:tools/revised_planet_search/RevisedPlanetSearch.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Planet_Search",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Size",
+      "tag_path": "Planet_Search/Control/Size",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedplanetsearch.xml",
+        "source_id": "synthetic:tools/revised_planet_search/RevisedPlanetSearch.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Planet_Search",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Caption",
+      "tag_path": "Planet_Search/Control/Caption",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
         "logical_path": "data/xml/eawrhud.xml",
         "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
       },

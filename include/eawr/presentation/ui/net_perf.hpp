@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <deque>
 #include <string>
 #include <vector>
@@ -43,6 +44,9 @@ struct NetPeerLink final {
     double loss_pct{};      // packets lost in the recent window, 0 when the transport cannot tell
     NetRoute route{NetRoute::unknown};
     bool route_lossy{};     // a relayed link whose receive loss stayed high for a while (transport observation only)
+    double input_tick_ms{}; // observed sealed-input cadence; zero until measured, never remote CPU time
+    std::uint64_t receipt_samples{};
+    double receipt_avg_ms{}, receipt_max_ms{};
 };
 
 // What the transport says about one peer's route: how it is carried and whether it has been lossy for a while.
@@ -52,7 +56,10 @@ struct NetRouteInfo final {
 };
 
 // What the ledger knows at one instant.
+enum class NetWaitKind : std::uint8_t { batch, queued, hash, timing, other };
 struct NetStallSnapshot final {
+    std::array<std::uint32_t, 5> stalls_by_kind{};
+    std::array<std::uint64_t, 5> ms_by_kind{};
     bool waiting{};
     std::uint32_t wait_peer{};           // the first seat the simulation waits for (valid while waiting)
     std::uint64_t wait_ms{};             // how long this wait has lasted so far
@@ -69,7 +76,7 @@ class NetStallLedger final {
 public:
     // Called once per driver poll with the monotonic clock in milliseconds. `peer` is the seat
     // the simulation waits for first and is ignored while `waiting` is false.
-    void observe(std::uint64_t now_ms, bool waiting, std::uint32_t peer);
+    void observe(std::uint64_t now_ms, bool waiting, std::uint32_t peer, NetWaitKind kind = NetWaitKind::batch);
     [[nodiscard]] NetStallSnapshot snapshot(std::uint64_t now_ms) const;
     void reset();
 
@@ -78,12 +85,16 @@ private:
         std::uint64_t start{};
         std::uint64_t end{};
         std::uint32_t peer{};
+        NetWaitKind kind{NetWaitKind::batch};
     };
     void trim(std::uint64_t now_ms);
     std::deque<Episode> episodes_;
+    std::deque<Episode> classified_;
     bool waiting_{};
     std::uint64_t since_{};
     std::uint32_t peer_{};
+    NetWaitKind kind_{NetWaitKind::batch};
+    std::uint64_t class_since_{};
 };
 
 struct NetPerfReport final {
@@ -92,6 +103,9 @@ struct NetPerfReport final {
     NetStallSnapshot stall;
     double frame_ms{};  // the overlay's frame time (window average)
     double sim_ms{};    // the simulation's cost per tick (window average)
+    std::uint64_t input_delay_ticks{}, lead_ticks{};
+    double local_tick_ms{}; // observed completed-tick cadence, stalls included
+    double max_poll_gap_ms{};
 };
 
 enum class NetBlame { ok, network, game };

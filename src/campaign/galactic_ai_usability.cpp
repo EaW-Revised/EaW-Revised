@@ -209,7 +209,7 @@ struct GalacticAiUsabilityProvider::PhaseSavepoint::Saved {
     std::map<gc::PlayerId, PreparedInput> prepared;
     ConnectivityPublication published;
     std::vector<std::pair<gc::PlayerId, std::uint64_t>> versions;
-    const gc::GalacticSession* session{};
+    const GalacticAiWorldReader* reader{};
     const World* world{};
     std::uint64_t revision{}, epoch{};
     bool live_stealth{}, story_path{}, incremental{}, reconstructed{}, settled{};
@@ -229,7 +229,7 @@ core::Result<std::unique_ptr<GalacticAiUsabilityProvider::PhaseSavepoint>> Galac
     // Only mod/player coordination headers, never the retained planet domain.
     for (const auto& [player, prepared] : prepared_through_) saved->prepared.emplace(player, effective_prepared(player, prepared));
     saved->published = published_; saved->versions = published_versions_;
-    saved->session = observed_session_; saved->world = observed_world_;
+    saved->reader = observed_reader_; saved->world = observed_world_;
     saved->revision = publication_revision_; saved->epoch = output_epoch_;
     saved->reconstructed = reconstructed_;
     saved->live_stealth = live_stealth_unavailable_; saved->story_path = story_path_unavailable_; saved->incremental = incremental_;
@@ -254,8 +254,8 @@ core::Result<void> GalacticAiUsabilityProvider::PhaseSavepoint::rollback() {
         else owner.retained_.erase(key);
     }
     owner.prepared_through_ = std::move(saved_->prepared); owner.restored_prepared_ = owner.prepared_through_;
-    owner.observed_session_ = saved_->session; owner.observed_world_ = saved_->world;
-    const auto snapshot = owner.observed_session_ ? owner.observed_session_->snapshot() : nullptr;
+    owner.observed_reader_ = saved_->reader; owner.observed_world_ = saved_->world;
+    const auto snapshot = owner.observed_reader_ ? owner.observed_reader_->snapshot() : nullptr;
     owner.restored_observer_ = snapshot ? snapshot->observer_input_generation() : 0;
     owner.restored_access_ = snapshot && snapshot->planet_access() ? snapshot->planet_access()->generation : 0;
     owner.restored_perception_ = owner.observed_world_ ? owner.observed_world_->movement_input_revision() : 0;
@@ -265,7 +265,7 @@ core::Result<void> GalacticAiUsabilityProvider::PhaseSavepoint::rollback() {
     owner.live_stealth_unavailable_ = saved_->live_stealth; owner.story_path_unavailable_ = saved_->story_path; owner.incremental_ = saved_->incremental;
     owner.stealth_generation_.reset(); owner.stealth_fleets_.clear();
     owner.records_ = owner.rebuild_records(); // Only fault recovery scans retained rows.
-    owner.fault_rebuild_ = owner.reconstructed_ && owner.observed_session_ && owner.observed_world_;
+    owner.fault_rebuild_ = owner.reconstructed_ && owner.observed_reader_ && owner.observed_world_;
     // Canonical world rollback is already complete. Rehydrating here could
     // rebind that world to the session's newer snapshot outside a transaction.
     // The next attempt enlists all owners first, then rebuilds derived inputs.
@@ -274,15 +274,15 @@ core::Result<void> GalacticAiUsabilityProvider::PhaseSavepoint::rollback() {
 }
 core::Result<void> GalacticAiUsabilityProvider::rebuild_phase_inputs(const Engine& engine, const sim::PartitionExecutor& executor) {
     if (!fault_rebuild_) return core::Result<void>::success();
-    if (!phase_ || phase_abandoned_ || !observed_session_ || !observed_world_)
+    if (!phase_ || phase_abandoned_ || !observed_reader_ || !observed_world_)
         return refuse<void>("fault input rebuild requires its newly enlisted usability phase");
-    auto rebuilt = connectivity_publication(*observed_session_, *const_cast<World*>(observed_world_), engine, executor);
+    auto rebuilt = connectivity_publication(*observed_reader_, *const_cast<World*>(observed_world_), engine, executor);
     if (!rebuilt) return core::Result<void>::failure(rebuilt.error());
     fault_rebuild_ = false;
     return core::Result<void>::success();
 }
 GalacticAiUsabilityProvider::PreparedInput GalacticAiUsabilityProvider::effective_prepared(gc::PlayerId player, PreparedInput prepared) const {
-    const auto current = observed_session_ ? observed_session_->snapshot() : nullptr;
+    const auto current = observed_reader_ ? observed_reader_->snapshot() : nullptr;
     const auto perception = observed_world_ ? observed_world_->movement_input_revision() : 0;
     if (const auto at = restored_prepared_.find(player); at != restored_prepared_.end()) {
         prepared = at->second;
@@ -326,7 +326,7 @@ core::Result<void> GalacticAiUsabilityProvider::prepare_decision_frontiers(const
     auto prepared = executor.execute_phase("galactic-ai-usability-frontiers", blocks.size(), [&](std::size_t index) {
         auto& block = *blocks[index];
         block.frozen_provider_ = this;
-        block.observed_session_ = observed_session_; block.observed_world_ = observed_world_;
+        block.observed_reader_ = observed_reader_; block.observed_world_ = observed_world_;
         block.stealth_generation_ = stealth_generation_; block.stealth_fleets_ = stealth_fleets_;
         block.publication_revision_ = publication_revision_; block.output_epoch_ = output_epoch_;
         block.live_stealth_unavailable_ = live_stealth_unavailable_;
@@ -1029,17 +1029,27 @@ core::Result<GalacticAiUsabilityProvider::MovementInput> GalacticAiUsabilityProv
 }
 
 core::Result<ai::GalacticConnectivity> GalacticAiUsabilityProvider::connectivity(
-    const gc::GalacticSession& session, World& world, const Engine& engine, const sim::PartitionExecutor& executor) {
-    auto result = connectivity_publication(session, world, engine, executor);
+    const GalacticAiWorldReader& reader, World& world, const Engine& engine, const sim::PartitionExecutor& executor) {
+    auto result = connectivity_publication(reader, world, engine, executor);
     return result ? core::Result<ai::GalacticConnectivity>::success(*result.value())
         : core::Result<ai::GalacticConnectivity>::failure(result.error());
 }
+core::Result<ai::GalacticConnectivity> GalacticAiUsabilityProvider::connectivity(
+    const gc::GalacticSession& session, World& world, const Engine& engine, const sim::PartitionExecutor& executor) {
+    session_reader_.emplace(session);
+    return connectivity(*session_reader_, world, engine, executor);
+}
 core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsabilityProvider::connectivity_publication(
     const gc::GalacticSession& session, World& world, const Engine& engine, const sim::PartitionExecutor& executor) {
+    session_reader_.emplace(session);
+    return connectivity_publication(*session_reader_, world, engine, executor);
+}
+core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsabilityProvider::connectivity_publication(
+    const GalacticAiWorldReader& reader, World& world, const Engine& engine, const sim::PartitionExecutor& executor) {
     if (phase_abandoned_ || frozen_provider_ || !decision_frontiers_.empty() || selected_frontier())
         return refuse<ConnectivityPublication>("connectivity publication requires the joined barrier owner");
-    observed_session_ = &session; observed_world_ = &world;
-    const auto snapshot = session.snapshot(); const auto* graph = session.graph();
+    observed_reader_ = &reader; observed_world_ = &world;
+    const auto snapshot = reader.snapshot(); const auto* graph = reader.graph();
     if (!graph || !snapshot->observer() || !snapshot->planet_access())
         return refuse<ConnectivityPublication>("B complete live graph/observer/access owners are required");
     if (auto prepared = [&] { gc_profile::Scope scope(gc_profile::Phase::conn_stealth); return prepare_stealth(*snapshot); }(); !prepared)
@@ -1048,10 +1058,10 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
     // any selected-player tokens; strength and observation masks keep their owners.
     if (gc_profile::Scope rebind_scope(gc_profile::Phase::conn_rebind);
         !world.available() || world.observer_input_generation() != snapshot->observer_input_generation()
-        || (!reconstructed_ && world.needs_observation_refresh(session.completed_tick()))
+        || (!reconstructed_ && world.needs_observation_refresh(reader.completed_tick()))
         || world.stealth_fleets() != stealth_fleets_) {
         auto inputs = std::make_shared<ai::GalacticConnectivity>(*published_); inputs->stealth_fleets = stealth_fleets_;
-        auto rebound = world.bind_publication(snapshot, std::move(inputs), executor, session.completed_tick(), session.next_entity_id());
+        auto rebound = world.bind_publication(snapshot, std::move(inputs), executor, reader.completed_tick(), reader.next_entity_id());
         if (!rebound) return core::Result<ConnectivityPublication>::failure(rebound.error());
     }
     if (reconstructed_) {
@@ -1106,10 +1116,10 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
         published_versions_.clear();
         return core::Result<ConnectivityPublication>::success(published_);
     }
-    world.set_synchronized_frame(session.completed_tick());
+    world.set_synchronized_frame(reader.completed_tick());
     if (gc_profile::Scope rebind_scope(gc_profile::Phase::conn_rebind);
         !world.available() || world.observer_input_generation() != snapshot->observer_input_generation()) {
-        auto rebound = world.bind_publication(snapshot, published_, executor, session.completed_tick(), session.next_entity_id());
+        auto rebound = world.bind_publication(snapshot, published_, executor, reader.completed_tick(), reader.next_entity_id());
         if (!rebound) return core::Result<ConnectivityPublication>::failure(rebound.error());
     }
     // This is the synchronization owner clock, not a camera or elapsed wall clock.
@@ -1680,7 +1690,7 @@ core::Result<void> GalacticAiUsabilityProvider::restore(const ga::NativeState& s
     publication_revision_ = revision; fault_rebuild_ = false; restored_prepared_.clear(); caches_.clear(); published_ = std::make_shared<const ai::GalacticConnectivity>();
     published_versions_.clear();
     stealth_generation_.reset(); stealth_fleets_.clear();
-    observed_session_ = nullptr; observed_world_ = nullptr;
+    observed_reader_ = nullptr; observed_world_ = nullptr;
     reconstructed_ = true; mark_state_changed();
     return core::Result<void>::success();
 }

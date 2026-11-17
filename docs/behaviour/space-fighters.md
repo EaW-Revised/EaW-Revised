@@ -463,15 +463,38 @@ publishes each squadron's cell in the snapshot; the world UI draws the icons fro
   When the target dies, the squadron attacks the first enemy squadron joined in its recorded
   cell; with none, combat ends: the squadron leaves its cell and, idle, holds where its leader
   will be next frame at its layer height. A target lost from sight ends combat as well.
-- **FD-10** (debug build: the collision-avoidance step and its callers; research E457-07) A craft
+- **FD-10** (debug build: the collision-avoidance step and its callers; research E457-07,
+  model collision dispatch and primitives E6234-FD01) A craft
   steers around ships and static objects (units with a space layer; asteroid fields, ion storms and
   nebulae excepted) while forming up, idling, closing, on a run and heading for a chased craft it
   cannot follow; never while it follows (FD-05). When its look-ahead segment (its velocity times
   two over its turn rate in radians, twice that for the leader) hits a ship and it is inside the
   ship's box grown by its speed, and did not start inside the ship, it heads away from the ship's
-  centre at its minimum speed and then flies straight on for 15 frames. The remake tests the
-  ship as a sphere of its soft radius; FoC tests the hull's collision shape (project).
-  Its segment test never divides; the remake's nearest point on the look-ahead does, by the
+  centre at its minimum speed and then flies straight on for 15 frames. The collision shape is
+  the transformed bounds of the model's first `COLLISIONBOX` sub-object when supplied, even
+  when that sub-object is hidden or not marked collidable; otherwise it is the model's
+  eligible collidable meshes. Type scale, model/bone placement and unit rotation apply.
+  A rotated `COLLISIONBOX` bone uses the axis-aligned bounds of its transformed corners in
+  model space, conservatively enlarging the box before the unit's world rotation applies.
+  A box reports a start contained in it, including its boundary, and avoidance skips that hit.
+  Meshes are two-sided surfaces: only contacts strictly between the segment endpoints count,
+  and they do not report volume containment. A mesh exit therefore remains a surface hit;
+  its enclosing bounds must not supply the starts-inside flag. Pose-hidden meshes and destroyed
+  attachments are excluded. Draw-hidden collision proxies remain collidable; draw visibility
+  is separate from pose hiding. The ordinary collision mask used by avoidance excludes shield
+  surfaces even while shields are up (E6234-FD02, debug-build shield collision setup).
+  The remake borrows immutable loaded geometry behind a conservative sphere and traverses
+  its trees without allocation. Animation-driven visibility beyond the reference pose remains
+  outside the simulation's current model geometry, as for projectile collision.
+  The obstacle centre is the unit position, rather than the tracking leaf's offset centre;
+  it anchors both the conservative sphere and the turn-away direction. A zero-radius
+  footprint with model geometry remains an obstacle through the derived model radius.
+  Solid impassable map props use the same model geometry without gaining combat target
+  admission. Only a solid prop with no authored box or eligible mesh falls back to its
+  footprint sphere, including models whose meshes are all pose-hidden or shield-only.
+  A lenient geometry-build or validation failure also retains this warned footprint
+  fallback rather than dropping the solid prop's avoidance profile.
+  The remake's nearest point on the broad-phase look-ahead divides by the
   look-ahead's square. When a craft all but stopped has a look-ahead whose Q24 square rounds to
   zero, the share comes from the exact raw products, clamped to [0, 1], as the float division by
   the tiny square gives it (fighter fixed-point division correction, project).
@@ -953,7 +976,7 @@ fixture's exact starting slots.
 
 - FD-06: the remake commits chase pairs in ascending craft ID after a partitioned scan of the
   frame's start; FoC services craft one by one, each seeing the flight of those before it.
-- FD-10: ships are spheres of their soft radius for the avoidance test, not their hulls.
+- FD-10: animation-driven collision visibility beyond the loaded reference pose is not modelled.
 - FD-12: after correcting survivor slots (WSQ-51), S-97's 90 % height band is 137.36 units
   and its extreme is 257.45, against recorded 100 and 173.1. The unchanged limits are 150
   and 320. Keeping launch slots instead gives a failing band of 152.00.

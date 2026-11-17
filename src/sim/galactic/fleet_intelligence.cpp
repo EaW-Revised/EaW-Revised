@@ -63,8 +63,12 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
     const std::size_t group_capacity, const std::span<const FleetDisplayVisibility> visibility,
     const std::function<std::optional<std::uint32_t>(TypeId)>& icon_rank,
     const std::span<const std::pair<EntityId, std::int64_t>> presentation_indices,
-    const std::function<std::optional<std::int64_t>(TypeId)>& hero_rank) {
+    const std::function<std::optional<std::int64_t>(TypeId)>& hero_rank,
+    const std::span<const EntityId> departing_transports) {
     FleetIntelligence output;
+    const auto departing = [&](const FleetMember& member) {
+        return std::binary_search(departing_transports.begin(), departing_transports.end(), member.id);
+    };
     if (!snapshot.observer() || !local_player || (snapshot.view_player() && snapshot.view_player() != local_player)) return output;
     const auto& observer = *snapshot.observer();
     const auto* player = observer_detail::find(observer.players, local_player, [](const auto& row) { return row.player; });
@@ -136,6 +140,7 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
         };
         if (hero_rank)
             for (const auto& member : fleet.members) {
+                if (departing(member)) continue;
                 auto candidate = named_hero(member, 0);
                 if (!candidate && hero_rank(true_type(snapshot, member))) candidate = true_type(snapshot, member);
                 if (!candidate) continue;
@@ -144,8 +149,9 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
                 const auto held = card.overview_hero_type ? hero_rank(*card.overview_hero_type) : std::nullopt;
                 if (!held || *hero < *held) card.overview_hero_type = *candidate;
             }
-        for (const auto& member : fleet.members) image(image, member, 0);
+        for (const auto& member : fleet.members) if (!departing(member)) image(image, member, 0);
         for (const auto& member : fleet.members) {
+            if (departing(member)) continue;
             if (scan.full) return;
             const auto type = true_type(snapshot, member);
             // GHUD-S87: an individually positioned unit may split from its type
@@ -169,6 +175,10 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
     for (const auto& fleet : snapshot.fleets()) {
         ++output.fleets_examined;
         if (fleet.motion.transit || !fleet.id) continue;
+        const auto count = departing_transports.empty() ? fleet.members.size()
+            : static_cast<std::size_t>(std::count_if(fleet.members.begin(), fleet.members.end(),
+                [&](const auto& member) { return !departing(member); }));
+        if (!count) continue;
         const auto planet = flat_find(planets, fleet.orbit);
         if (planet == planets.end()) continue;
         const auto& knowledge = planet->second->knowledge;
@@ -189,9 +199,9 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
             if (!type) { resolved = false; return; }
             nonstealth |= !type->stealth_object && !type->stealth_hero;
         };
-        if (snapshot.actor_records().empty()) {
+        if (snapshot.actor_records().empty() || count != fleet.members.size()) {
             // Standalone fixtures supply explicit observer facts without an actor owner.
-            for (const auto& member : fleet.members) visit(visit, member, 0);
+            for (const auto& member : fleet.members) if (!departing(member)) visit(visit, member, 0);
         } else {
             const auto skip = snapshot.fleet_combat_skip(fleet.id);
             resolved = bool(skip); nonstealth = skip && !skip.value();
@@ -209,13 +219,13 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
         if (merged != slots.end()) {
             auto& scan = scans[merged->second];
             auto& card = output.cards[scan.card];
-            card.count += fleet.members.size();
+            card.count += count;
             card.all_stealth = card.all_stealth && fleet_stealth;
             scan_members(card, scan, fleet);
             continue;
         }
         ObservedFleet card{fleet.id, fleet.orbit, fleet.owner, fleet.orbit_slot,
-            local, fleet.members.size(), {}, {}, fleet_stealth};
+            local, count, {}, {}, fleet_stealth};
         // WGUI-29/42: count awareness alone publishes no fleet identity/slot.
         if (!allied && !knowledge.fleet_contents) { card.fleet.reset(); card.orbit_slot.reset(); }
         scans.push_back({output.cards.size(), allied, &knowledge, {}, false});

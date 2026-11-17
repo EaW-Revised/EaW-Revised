@@ -714,24 +714,33 @@ core::Result<void> session_detail::Tick::movement() {
     const auto& squadron_frames = craft_prep_.value().squadron_frames.value();
     const auto& craft_squadron = craft_prep_.value().craft_squadron.value();
     // FD-10: the ships and static objects craft steer around, ascending ID, at the start of the frame.
-    std::vector<CraftObstacle> obstacles;
+    auto& obstacles = impl_->craft_obstacles;
+    obstacles.clear();
+    std::array<CraftAvoidanceWork, tick_partition_count> avoidance_work{};
     if (!craft_views.empty()) {
+        obstacles.reserve(moving.size());
         for (const auto& unit : moving) {
             const auto* footprint = impl_->motion.footprint(unit.state.type_id);
-            if (footprint == nullptr || footprint->layer == SpaceLayer::none || footprint->radius.raw() <= 0
+            if (footprint == nullptr || footprint->layer == SpaceLayer::none
                 || craft_view(unit.state.entity_id) != nullptr || squadron_frames.contains(unit.state.entity_id)) {
                 continue;
             }
             // WHZ-08: fighters avoid ordinary objects and solid asteroids, excluding volumes.
             const auto category = tracking_category(*footprint, false);
             if ((category & (collision_field | collision_storm | collision_nebula)) != 0) continue;
-            const auto yaw = yaw_degrees(unit.state.rotation);
-            if (!yaw) return core::Result<void>::failure(yaw.error());
-            const Prediction still{unit.state.position, yaw.value()};
-            const auto leaf = tracking_leaf(unit.state.entity_id, *footprint, still, still);
-            if (!leaf) return core::Result<void>::failure(leaf.error());
-            obstacles.push_back({unit.state.entity_id, {leaf.value().start.x, leaf.value().start.y, unit.state.position.z},
-                footprint->radius});
+            const auto* geometry = impl_->combat.find_avoidance_type(unit.state.type_id);
+            if (geometry == nullptr) continue;
+            const bool footprint_sphere = footprint->impassable_asteroid
+                && !geometry->model_collision_box && geometry->meshes.empty();
+            if (!footprint_sphere && !geometry->model_collision_box && geometry->meshes.empty()) continue;
+            const auto radius = std::max(footprint->radius, geometry->model_collision_radius);
+            if (radius.raw() <= 0) continue;
+            const auto transform = unit_transform(unit);
+            if (!transform) return core::Result<void>::failure(transform.error());
+            const auto* health = unit.durability ? &*unit.durability : nullptr;
+            obstacles.push_back({unit.state.entity_id, unit.state.position,
+                radius, geometry, transform.value(),
+                impl_->health_profile(unit), health, footprint_sphere});
         }
     }
 
@@ -801,6 +810,7 @@ core::Result<void> session_detail::Tick::movement() {
                 inputs.box = impl_->map_box;
                 if (inputs.self->state.chase_until != 0) inputs.chase = craft_view(inputs.self->state.chase);
                 inputs.obstacles = obstacles;
+                inputs.avoidance_work = &avoidance_work[partition];
                 inputs.trig_cache = inputs.self->trig_cache;
                 auto stepped = step_craft(inputs);
                 if (!stepped) {
@@ -850,6 +860,10 @@ core::Result<void> session_detail::Tick::movement() {
         }
     }
     for (const auto builds : movement_builds) tick_work.level_matrix_builds += builds;
+    for (const auto& work : avoidance_work) {
+        tick_work.avoidance_queries += work.queries;
+        tick_work.avoidance_triangles += work.triangles;
+    }
     return core::Result<void>::success();
 }
 

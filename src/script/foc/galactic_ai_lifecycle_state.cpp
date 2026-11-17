@@ -47,6 +47,11 @@ std::string encoded(const LifecycleState& state) {
         text(bytes, "native-provider-retirement-v1"); word(bytes, state.retired_providers.size());
         for (const auto& [player, reason] : state.retired_providers) { word(bytes, player); word(bytes, static_cast<std::uint64_t>(reason)); }
     }
+    // WGA-496: only while a free-store startup window is open (a save inside it); otherwise the bytes are unchanged.
+    if (!state.startup_windows.empty()) {
+        text(bytes, "freestore-startup-window-v1"); word(bytes, state.startup_windows.size());
+        for (const auto& [player, delivered] : state.startup_windows) { word(bytes, player); word(bytes, delivered); }
+    }
     return bytes;
 }
 std::string digest(std::string_view bytes) {
@@ -125,8 +130,8 @@ core::Result<LifecycleState> decoded(Reader& in) {
         player.policy.plan_categories = in.settings<bool>(); player.policy.plan_types = in.settings<bool>(); player.policy.plan_names = in.settings<bool>();
         state.players.push_back(std::move(player));
     }
-    if (!in.bad && !in.bytes.empty()) {
-        if (in.text() != "native-provider-retirement-v1") return Result::failure(lifecycle_error("unknown lifecycle retirement tail"));
+    auto tail = !in.bad && !in.bytes.empty() ? in.text() : std::string{};
+    if (tail == "native-provider-retirement-v1") {
         const auto retired = in.count(16);
         if (!retired || retired > state.players.size()) return Result::failure(lifecycle_error("invalid lifecycle retirement count"));
         gc::PlayerId previous{};
@@ -137,7 +142,22 @@ core::Result<LifecycleState> decoded(Reader& in) {
                 return Result::failure(lifecycle_error("invalid lifecycle retirement identity or reason"));
             previous = player; state.retired_providers.emplace(player, static_cast<NativeProviderFault>(reason));
         }
+        tail = !in.bad && !in.bytes.empty() ? in.text() : std::string{};
     }
+    if (tail == "freestore-startup-window-v1") {
+        const auto open = in.count(16);
+        if (!open || open > state.players.size()) return Result::failure(lifecycle_error("invalid free-store startup window count"));
+        gc::PlayerId previous{};
+        for (std::size_t index = 0; index < open && !in.bad; ++index) {
+            const auto player = in.identity(); const auto delivered = in.word();
+            if (!player || player <= previous || delivered > 1
+                || std::none_of(state.players.begin(), state.players.end(), [&](const auto& row) { return row.selected.player == player; }))
+                return Result::failure(lifecycle_error("invalid free-store startup window identity or state"));
+            previous = player; state.startup_windows.emplace(player, delivered == 1);
+        }
+        tail.clear();
+    }
+    if (!tail.empty()) return Result::failure(lifecycle_error("unknown lifecycle tail"));
     if (in.bad || !in.bytes.empty()) return Result::failure(lifecycle_error("malformed or trailing lifecycle component bytes"));
     return Result::success(std::move(state));
 }
@@ -149,7 +169,8 @@ std::vector<std::uint8_t> lifecycle_record(const LifecycleState& state, std::str
     std::string bytes;
     if (!player) {
         record.version = state.version; record.clocks = state.clocks; record.admission = state.admission;
-        record.service_periods = state.service_periods; record.retired_providers = state.retired_providers; text(bytes, configuration);
+        record.service_periods = state.service_periods; record.retired_providers = state.retired_providers;
+        record.startup_windows = state.startup_windows; text(bytes, configuration);
     } else {
         for (const auto& row : state.players) if (row.selected.player == player) { record.players.push_back(row); break; }
     }

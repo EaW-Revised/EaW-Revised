@@ -20,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -294,6 +295,8 @@ public:
     // instance, so a command's sequence can name what the command creates (#449).
     [[nodiscard]] virtual std::uint64_t command_sequence() const noexcept = 0;
     virtual void issue_command(std::string verb, ValueList arguments) = 0;
+    // Read-only, calling-instance transaction only; invalidated by issue_command.
+    [[nodiscard]] virtual std::span<const ScriptCommand> staged_commands() const noexcept { return {}; }
     // The calling instance's own newest staged GlobalValue.Set of `name` in its current transaction: outer empty when it has
     // staged none, inner empty when the newest one deletes the name. Retail writes the registry at once, so a script that sets a
     // name and reads it back in the same call sees its own write; the registry itself stays committed once per service, after
@@ -343,10 +346,17 @@ struct InstanceLoad {
     std::int64_t instructions{};
 };
 
+// Completed-service observer output. Never part of scheduler state, saves, hashes,
+// replay commands or script inputs. Native hosts may attach a diagnostic and UI text.
+struct ServiceObserverNotice {
+    core::Diagnostic diagnostic;
+    std::string text;
+};
 struct ServiceReport {
     std::uint64_t tick{};
     std::vector<ScriptCommand> commands;
     std::vector<ScriptDiagnostic> diagnostics; // ordered by instance, then occurrence
+    std::vector<ServiceObserverNotice> observer_notices{};
     // `print` output (code script_log), ordered by instance, then occurrence. Rate limited per instance, dropped with a
     // rolled-back call or a faulted instance. Outside authoritative state: never saved, hashed or replayed.
     std::vector<ScriptDiagnostic> log;

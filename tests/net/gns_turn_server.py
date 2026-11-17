@@ -73,6 +73,9 @@ class Allocation:
         self.expires = time.monotonic() + lifetime
         self.permissions = {}  # peer ip -> expiry
         self.permission_requests = 0
+        self.permission_successes = {}  # successful requests per peer IP
+        self.permission_denials = 0
+        self.max_permission_peers = 0
         self.refreshes = 0
         self.dropped_without_permission = 0
         self.relayed = 0
@@ -81,7 +84,7 @@ class Allocation:
 class TurnServer(threading.Thread):
     def __init__(self, host, allocation_lifetime=6, permission_lifetime=6, username="eawr-turn-test",
                  password="eawr-turn-secret", realm="eawr.test", blackhole_after=None, nonce_lifetime=None,
-                 loss_pct=0.0, seed=1):
+                 loss_pct=0.0, seed=1, denied_peers=()):
         super().__init__(daemon=True)
         # Loss knob (relay-switch tests): the share of relayed packets, in each direction, the server silently drops; can be
         # changed while the server runs (set_loss), so a test can degrade a "provider" in the middle of a session. Seeded, so a
@@ -95,6 +98,7 @@ class TurnServer(threading.Thread):
         self.nonce_lifetime = nonce_lifetime  # seconds between nonce rotations; None = one nonce for ever
         self.started = time.monotonic()
         self.stale_nonce_replies = 0
+        self.denied_peers = set(denied_peers)
         self.key = hashlib.md5(f"{username}:{realm}:{password}".encode()).digest()
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind((host, 0))
@@ -126,6 +130,8 @@ class TurnServer(threading.Thread):
     def statistics(self):
         with self.lock:
             return [{"client": a.client, "relay_port": a.relay.getsockname()[1], "permission_requests": a.permission_requests,
+                     "permission_successes": dict(a.permission_successes), "permission_denials": a.permission_denials,
+                     "max_permission_peers": a.max_permission_peers,
                      "refreshes": a.refreshes, "dropped": a.dropped_without_permission, "relayed": a.relayed}
                     for a in self.allocations.values()]
 
@@ -190,9 +196,15 @@ class TurnServer(threading.Thread):
         allocation = self.allocations.get(client)
         if allocation is None or allocation.expires <= time.monotonic():
             return self._error(PERMISSION_ERROR, transaction, client, 437, b"No Allocation")
-        for kind, body, _ in attributes:
-            if kind == XOR_PEER and (peer := _decode_xor_address(body)):
-                allocation.permissions[peer[0]] = time.monotonic() + self.permission_lifetime
+        peers = [peer for kind, body, _ in attributes if kind == XOR_PEER and (peer := _decode_xor_address(body))]
+        allocation.max_permission_peers = max(allocation.max_permission_peers, len(peers))
+        # coturn rejects the ENTIRE request when any peer is denied. Do not install even the allowed peers first.
+        if any(peer[0] in self.denied_peers for peer in peers):
+            allocation.permission_denials += 1
+            return self._error(PERMISSION_ERROR, transaction, client, 403, b"Forbidden IP")
+        for peer in peers:
+            allocation.permissions[peer[0]] = time.monotonic() + self.permission_lifetime
+            allocation.permission_successes[peer[0]] = allocation.permission_successes.get(peer[0], 0) + 1
         allocation.permission_requests += 1
         self.socket.sendto(_message(PERMISSION_SUCCESS, transaction), client)
 

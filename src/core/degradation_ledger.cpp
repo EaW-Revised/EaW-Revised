@@ -22,6 +22,7 @@ struct Tally {
     std::string example_object;
     std::string example_detail;
     bool has_example{};
+    Severity severity{Severity::info};
 };
 
 void fill_defaults(SessionInfo& info);
@@ -173,7 +174,7 @@ std::string commit_of_build(const std::string_view build) {
 }
 
 void record(const std::string_view code, const std::string_view source, const std::string_view object,
-            const std::string_view detail) {
+            const std::string_view detail, const Severity severity) {
     if (code.empty()) return;
     auto key_code = bounded(code, code_limit);
     auto key_source = source.empty() ? std::string(unknown_source) : bounded(source, source_limit);
@@ -185,12 +186,14 @@ void record(const std::string_view code, const std::string_view source, const st
     auto& tally = s.tallies[{std::move(key_code), std::move(key_source)}];
     ++tally.occurrences;
     tally.object_hashes.insert(hash);
-    if (!tally.has_example || std::pair<std::string_view, std::string_view>(key_object, key_detail)
-            < std::pair<std::string_view, std::string_view>(tally.example_object, tally.example_detail)) {
+    if (!tally.has_example || severity > tally.severity || (severity == tally.severity
+        && std::pair<std::string_view, std::string_view>(key_object, key_detail)
+            < std::pair<std::string_view, std::string_view>(tally.example_object, tally.example_detail))) {
         tally.example_object = key_object;
         tally.example_detail = key_detail;
         tally.has_example = true;
     }
+    tally.severity = std::max(tally.severity, severity);
 }
 
 std::string source_for_layer(const std::string_view layer_id) {
@@ -219,9 +222,9 @@ std::size_t record_load_notes(const std::span<const LoadNote> notes) {
             : !note.file.empty() ? std::string_view(note.file) : std::string_view(note.tag);
         std::string detail = note.message;
         if (detail.empty()) detail = note.tag + " " + note.authored_value + " -> " + note.effective_value;
-        const std::string source = note.layer.mod_id.empty() && note.tag == "native-provider-retirement"
+        const std::string source = note.tag == "native-provider-retirement"
             ? campaign_source() : mapped_layer_source(layers, mods, note.layer.mod_id);
-        record(note.code, source, object, detail);
+        record(note.code, source, object, detail, note.tag == "native-provider-retirement" ? Severity::error : Severity::warning);
         ++recorded;
     }
     return recorded;
@@ -248,12 +251,14 @@ std::string campaign_source() {
 }
 
 bool is_script_fault_code(const std::string_view code) noexcept {
-    return code == "EAWR-SCRIPT-0211" || code == "EAWR-SCRIPT-0215" || code == "EAWR-SCRIPT-0216" || code == "EAWR-SCRIPT-0217";
+    return code.starts_with("EAWR-SCRIPT-") && code != "EAWR-SCRIPT-0218";
 }
 
 bool record_script_fault(const Diagnostic& fault, const std::string_view source) {
     if (!is_script_fault_code(fault.code)) return false;
-    record(fault.code, source, without_ticks(fault.message), fault.message);
+    const auto severity = fault.code == "EAWR-SCRIPT-0216" || fault.code == "EAWR-SCRIPT-0217"
+        ? Severity::warning : Severity::error;
+    record(fault.code, source, without_ticks(fault.message), fault.message, severity);
     return true;
 }
 
@@ -264,7 +269,9 @@ bool record_runtime_line(const std::string_view line, const std::string_view sou
     auto text = line.substr(code.size());
     if (const auto close = text.find("]: "); text.starts_with(" [") && close != std::string_view::npos) text.remove_prefix(close + 3);
     else if (text.starts_with(": ")) text.remove_prefix(2);
-    record(code, source, without_ticks(text), line);
+    const auto severity = code == "EAWR-SCRIPT-0216" || code == "EAWR-SCRIPT-0217"
+        ? Severity::warning : Severity::error;
+    record(code, source, without_ticks(text), line, severity);
     return true;
 }
 
@@ -310,7 +317,7 @@ LedgerSnapshot snapshot() {
     result.classes.reserve(s.tallies.size());
     for (const auto& [key, tally] : s.tallies) {
         result.classes.push_back({key.first, key.second, tally.object_hashes.size(), tally.occurrences,
-                                  tally.example_object, tally.example_detail});
+                                  tally.example_object, tally.example_detail, tally.severity});
     }
     return result;
 }
@@ -341,6 +348,7 @@ std::string summary_json(const LedgerSnapshot& snap) {
         const auto& entry = snap.classes[i];
         if (i) out += ',';
         out += "{\"code\":" + json_quote(entry.code) + ",\"source\":" + json_quote(entry.source)
+            + ",\"severity\":" + json_quote(core::to_string(entry.severity))
             + ",\"objects\":" + std::to_string(entry.objects) + ",\"occurrences\":" + std::to_string(entry.occurrences)
             + ",\"first_example\":{\"object\":" + json_quote(entry.example_object)
             + ",\"detail\":" + json_quote(entry.example_detail) + "}}";

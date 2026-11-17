@@ -49,8 +49,8 @@ struct SessionInfo {
 };
 
 // One (code, source) class. `objects` counts distinct objects (the gate compares this); `occurrences` counts every
-// record call and can differ with frame rate. The example is the lexically smallest (object, detail) pair seen, so it
-// does not depend on the order the records arrived in.
+// record call and can differ with frame rate. The example is the lexically smallest (object, detail) pair at the highest
+// severity seen, so a warning cannot hide an error and arrival order does not affect it.
 struct ClassEntry {
     std::string code;
     std::string source;
@@ -58,6 +58,7 @@ struct ClassEntry {
     std::uint64_t occurrences{};
     std::string example_object;
     std::string example_detail;
+    Severity severity{Severity::warning}; // highest severity observed in this class
     friend bool operator==(const ClassEntry&, const ClassEntry&) = default;
 };
 
@@ -73,7 +74,8 @@ struct LedgerSnapshot {
 // Records one degraded object. Thread safe (one short mutex); never call it from a sim worker's tick: sim/partition code
 // keeps using LoadNoteBuffer and the owner records at the merge/publish point. `source` is the mod id or chain layer
 // ("stock" for retail data, "unknown" when the site cannot tell). An empty code is ignored.
-void record(std::string_view code, std::string_view source, std::string_view object, std::string_view detail);
+void record(std::string_view code, std::string_view source, std::string_view object, std::string_view detail,
+    Severity severity = Severity::warning);
 
 // Load-note adapter: records every note that is a degradation (class C, or a skipped object/placement or runtime
 // degradation that is not a refusal). Call it where notes are published, once the layer ids are final. Layers
@@ -89,8 +91,7 @@ std::size_t record_load_notes(std::span<const LoadNote> notes);
 // (the site cannot say which one authored the thing that failed). Counted, never guessed.
 [[nodiscard]] std::string campaign_source();
 
-// True for the story-script fault codes the ledger counts: EAWR-SCRIPT-0211 (error), -0215 (missing engine function),
-// -0216 (stand-in result) and -0217 (warning).
+// Script faults, including internal exceptions/refusals. SCRIPT-0218 is print output, not a fault.
 [[nodiscard]] bool is_script_fault_code(std::string_view code) noexcept;
 
 // Script-fault adapter (design rows 9 and 10). Records one fault the scripts ran into and the session carried on from.

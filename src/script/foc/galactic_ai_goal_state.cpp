@@ -204,7 +204,11 @@ struct Archive {
         if (galactic_tasks) fields(v.galactic_assembly, v.galactic_assembly_request, v.galactic_stage_seconds, v.galactic_stage_remaining, v.galactic_stage_tick);
         else check(v.galactic_assembly == BuildTask::GalacticAssembly::none && !v.galactic_assembly_request);
     }
-    void item(Block& v) { fields(v.kind, v.id, v.instance, v.taskforce, v.order, v.attack, v.destination_object, v.destination, v.movers, v.ordered_tick, v.side, v.distance, v.tolerance, v.last_update, v.ready, v.finished, v.result, v.reinforcing, v.entity_floor, v.issued, v.reinforcement_attempt, v.pool_token, v.waiting_on, v.galactic_request, v.galactic_actor, v.held_owner); }
+    void item(DesireRequest& v) { fields(v.player, v.goal_type, v.target, v.bonus, v.expiry); }
+    void item(Block& v) { fields(v.kind, v.id, v.instance, v.taskforce, v.order, v.attack, v.destination_object, v.destination, v.movers, v.ordered_tick, v.side, v.distance, v.tolerance, v.last_update, v.ready, v.finished, v.result, v.reinforcing, v.entity_floor, v.issued, v.reinforcement_attempt, v.pool_token, v.waiting_on, v.galactic_request, v.galactic_actor, v.held_owner);
+        if (galactic_tasks) item(v.desire_request);
+        else check(!v.desire_request);
+    }
     void item(TaskForce::Purchase& v) { fields(v.type, v.token); }
     void item(TaskForce& v) { fields(v.id, v.plan, v.definition, v.name, v.units, v.types, v.sources, v.producers, v.pooled, v.pool_tokens, v.thread, v.had_units, v.damaged_pending, v.last_target, v.galactic_stage, v.galactic_fleet); }
     void item(Plan& v) { fields(v.id, v.instance, v.definition, v.goal, v.player, v.target, v.target_object, v.target_destroyed_signalled, v.taskforces, v.result, v.removable, v.exited, v.purge, v.start_tick, v.requires_production, v.reserved_pads); }
@@ -1180,11 +1184,19 @@ core::Result<void> GoalStateContributor::validate(const Engine& e, const detail:
             const auto& b = *entry;
             check((!b.galactic_request || (galactic && (b.kind == Block::Kind::move || b.kind == Block::Kind::galactic_invade)))
             && (galactic || b.kind <= Block::Kind::reinforce)
-            && (!b.galactic_actor || (galactic && b.galactic_actor < object_limit)) && id && id == b.id && b.kind <= Block::Kind::galactic_starbase && b.order <= Block::Order::guard
+            && (!b.galactic_actor || (galactic && b.galactic_actor < object_limit)) && id && id == b.id && b.kind <= Block::Kind::galactic_desire && b.order <= Block::Order::guard
             && instances.contains(b.instance)
-            && (b.kind == Block::Kind::galactic_starbase ? (!b.taskforce && b.destination_object && b.side >= 0 && b.side <= 5)
+            && (b.kind == Block::Kind::galactic_desire ? (!b.taskforce && b.desire_request.has_value())
+                : b.kind == Block::Kind::galactic_starbase ? (!b.taskforce && b.destination_object && b.side >= 0 && b.side <= 5)
                 : (taskforces.contains(b.taskforce) && instances.at(b.instance) == taskforces.at(b.taskforce)->plan))
             && (!b.waiting_on || (b.waiting_on != id && blocks.contains(b.waiting_on) && !blocks.at(b.waiting_on)->waiting_on)));
+            check((b.kind == Block::Kind::galactic_desire) == b.desire_request.has_value());
+            if (b.desire_request) {
+                const auto& request = *b.desire_request;
+                const auto* owner = e.player_ai(request.player);
+                check(owner && owner->galactic && e.data_.goals.contains(request.goal_type)
+                    && e.target(request.target) && request.bonus.repr == to_single(request.bonus).repr);
+            }
             if (b.kind == Block::Kind::galactic_invade && b.galactic_request) {
                 const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(e.host_->galactic_execution.get());
                 const auto* invasion = actions ? actions->invasion_status(b.galactic_request) : nullptr;
@@ -1263,7 +1275,7 @@ core::Result<Bytes> GoalStateContributor::encode(Engine& engine) const {
         Archive ar; ar.galactic_tasks = true;
         // The saved identity is the digest, then (when this load knows them) the digests of the groups it is made of, so a
         // later load that refuses can say which group changed. Only the digest decides; the groups only word the refusal.
-        std::string tag(domain), identity(content_identity_ + (identity_detail_.empty() ? std::string() : " " + identity_detail_)), configuration = GoalStateCodec::configuration(engine); std::uint32_t version{18};
+        std::string tag(domain), identity(content_identity_ + (identity_detail_.empty() ? std::string() : " " + identity_detail_)), configuration = GoalStateCodec::configuration(engine); std::uint32_t version{19};
         ar.fields(tag, version, identity, configuration);
         auto credits = engine.host_->credit_changes;
         GoalStateCodec::runtime(ar, engine, credits);
@@ -1296,7 +1308,7 @@ core::Result<void> GoalStateContributor::restore(const galactic_ai::NativeState&
         std::string tag, identity, configuration; std::uint32_t version{};
         ar.fields(tag, version, identity, configuration);
         // Four separate causes, each named: they used to share one check that reported only an encoding line number.
-        if (tag != domain || version != 18)
+        if (tag != domain || version != 19)
             return fail<void>("the saved AI goal state is a different record (tag or version " + std::to_string(version)
                 + "): it was written by another EAWR version than the one that loads it");
         const auto split = identity.find(' ');

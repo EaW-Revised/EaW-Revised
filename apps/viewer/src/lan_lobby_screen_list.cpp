@@ -512,6 +512,7 @@ void EawrLanLobby::select_source(const model::LobbySourceKind source) {
     impl_->entered_code.clear();
     impl_->last_message.clear();
     impl_->status.clear();
+    impl_->status_chat.reset();
     open_lobby();
     if (source == model::LobbySourceKind::online && !impl_->online_rooms) {
         if (const auto error = model::validate_online_settings(*options_.online_settings, true)) {
@@ -696,9 +697,9 @@ void EawrLanLobby::submit_password(const std::string& typed) {
     note_chat(model::ChatKind::notice, "Finding game…");
 }
 
-// A refused service call: the curated text, never the diagnostic's own words.
+// Service failures use curated text; typed build refusals retain both bounded identities.
 void EawrLanLobby::online_failure(const core::Diagnostic& diagnostic) {
-    const std::string message(model::online_failure_text(model::classify_online_failure(diagnostic.code)));
+    const std::string message = model::online_failure_message(diagnostic.code, diagnostic.message);
     if (message == impl_->last_online_notice) return;
     impl_->last_online_notice = message;
     note_chat(model::ChatKind::error, message);
@@ -729,7 +730,8 @@ void EawrLanLobby::pump_online() {
         }
         const model::OnlineFailure failure = result.refusal ? model::classify_online_failure(result.refusal->code)
                                                             : model::OnlineFailure::other;
-        const std::string message(model::online_failure_text(failure));
+        const std::string message = result.refusal ? model::online_failure_message(result.refusal->code, result.refusal->message)
+                                                  : std::string(model::online_failure_text(failure));
         if (impl.prompt && model::online_failure_keeps_prompt(failure)) {
             impl.prompt->waiting = false;
             impl.prompt->error = message;

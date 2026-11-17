@@ -25,8 +25,11 @@ namespace eawr::net {
 
 inline constexpr std::string_view galactic_lobby_options_tag = "gc";
 // The line a room shows while a campaign is being prepared (#7198): the bound it names is preparation_timeout_minutes, the same
-// value the deadline uses. `so_far` is the elapsed text ("under 1 min so far"); the host's line adds the locked-room note.
-[[nodiscard]] std::string galactic_prepare_wait_text(bool host_waits, const std::string& so_far);
+// value the deadline uses. The elapsed time is shown in whole seconds. The lines stay short: the lobby shows the counter in place
+// and puts it in chat only when the line is new (presentation::ui::StatusChatThrottle).
+[[nodiscard]] std::string galactic_prepare_wait_text(bool host_waits, std::uint64_t elapsed_seconds);
+// Added once, to the host's first preparation line in chat: the room refuses changes until preparation ends.
+inline constexpr std::string_view galactic_prepare_locked_note = "Room locked while preparing.";
 inline constexpr unsigned galactic_lobby_options_version = 2;
 // Stock MP_Default_Allow_Auto_Resolve (WAR-01): 0 always, 1 never, 2 ask, 3 overwhelming odds.
 inline constexpr std::uint32_t galactic_lobby_default_auto_resolve = 2;

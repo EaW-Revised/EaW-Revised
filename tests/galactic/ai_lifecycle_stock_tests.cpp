@@ -531,6 +531,62 @@ void native_retirement_state() {
         malformed(tag, 1, {}); malformed(tag, 1, {{2, 1}}, true);
     }
 }
+// WGA-496: the free-store startup window is lifecycle state. It survives a save and reload made inside it, closes after its
+// starting batch even when that batch is empty, writes no tail once closed (bytes unchanged) and is refused when malformed.
+void startup_window_state() {
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter executor(workers);
+        auto setup = fixture(); auto next = setup.players.front(); next.player = 3; setup.players.push_back(next);
+        Rig owner(setup); owner.step(0, 0);
+        const auto legacy = must(owner.manager->capture()); const auto legacy_hash = must(owner.manager->state_hash());
+        expect(!owner.manager->startup_window_open(2) && !owner.manager->startup_window_open(3), "no window before a fresh attach");
+        // Open for both players; the window state is part of the saved lifecycle and of the native hash.
+        owner.manager->open_startup_window(2); owner.manager->open_startup_window(3);
+        owner.manager->close_delivered_startup_windows();
+        expect(owner.manager->startup_window_open(2) && owner.manager->startup_window_open(3), "an undelivered window stays open");
+        owner.manager->deliver_startup_window(2); // player 2's starting batch submitted (the batch may be empty)
+        const auto inside = must(owner.manager->capture()); const auto inside_hash = must(owner.manager->state_hash());
+        expect(inside.components != legacy.components && inside_hash != legacy_hash
+            && must(owner.manager->record_sync_hash()) == must(owner.manager->record_sync_hash(true)), "an open window is saved state");
+        // Save and reload inside the window: both windows survive, with player 2 already delivered.
+        Rig loaded(setup); must(loaded.manager->restore(must(a::decode_native_state(must(a::encode_native_state(inside))))));
+        expect(loaded.manager->startup_window_open(2) && loaded.manager->startup_window_open(3)
+            && must(loaded.manager->capture()).components == inside.components && must(loaded.manager->state_hash()) == inside_hash,
+            "a save inside the window restores it exactly");
+        // After the scripts ran: the delivered window closes, the undelivered one stays; then it closes after its own batch.
+        for (auto* rig : {&owner, &loaded}) {
+            rig->manager->close_delivered_startup_windows();
+            expect(!rig->manager->startup_window_open(2) && rig->manager->startup_window_open(3), "only the delivered window closes");
+            rig->manager->deliver_startup_window(3); rig->manager->close_delivered_startup_windows();
+            expect(!rig->manager->startup_window_open(3), "an empty or later starting batch still closes its window");
+            rig->manager->deliver_startup_window(3); rig->manager->close_delivered_startup_windows();
+            expect(!rig->manager->startup_window_open(3), "delivering without an open window opens nothing");
+            expect(must(rig->manager->capture()).components == legacy.components && must(rig->manager->state_hash()) == legacy_hash,
+                "a save after the windows closed writes no tail: bytes equal the never-opened lifecycle");
+        }
+        const auto digest = legacy_hash + inside_hash + must(loaded.manager->state_hash());
+        if (reference.empty()) reference = digest; else expect(digest == reference, "startup window state equals on 1/2/4/8 workers");
+        const auto malformed = [&](std::uint64_t count, std::initializer_list<std::pair<std::uint64_t, std::uint64_t>> rows, bool trailing = false) {
+            auto state = legacy; auto& bytes = state.components.begin()->second;
+            const auto word = [&](std::uint64_t value) { for (unsigned i = 0; i < 8; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (8U * i))); };
+            constexpr std::string_view tag = "freestore-startup-window-v1";
+            word(tag.size()); bytes.insert(bytes.end(), tag.begin(), tag.end()); word(count);
+            for (const auto& [player, delivered] : rows) { word(player); word(delivered); }
+            if (trailing) bytes.push_back(0);
+            Rig refused(setup);
+            expect(!refused.manager->restore(state), "malformed startup window tail is a normal load refusal");
+        };
+        malformed(0, {}); malformed(3, {}); malformed(1, {{99, 0}}); malformed(1, {{2, 2}});
+        malformed(2, {{2, 0}, {2, 1}}); malformed(2, {{3, 0}, {2, 0}}); malformed(1, {}); malformed(1, {{2, 0}}, true);
+        // A well-formed tail after the retirement tail restores both.
+        must(owner.manager->retire_provider(3, a::NativeProviderFault::result)); owner.manager->open_startup_window(2);
+        const auto both = must(owner.manager->capture());
+        Rig both_loaded(setup); must(both_loaded.manager->restore(both));
+        expect(both_loaded.manager->provider_retired(3) && both_loaded.manager->startup_window_open(2)
+            && must(both_loaded.manager->capture()).components == both.components, "retirement and startup window tails restore together");
+    }
+}
 void configured_cadence() {
     auto setup = fixture();
     setup.service_periods = {300, 3, 10, 10, 300, 5};
@@ -1022,7 +1078,7 @@ void player_type_replacement() {
     }
 }
 int main(int argc, char** argv) {
-    try { if (argc > 1 && std::string_view(argv[1]) == "--bounded") bounded_diagnostics(argc > 2 ? static_cast<std::size_t>(std::stoul(argv[2])) : 1); else if (argc > 1 && std::string_view(argv[1]) == "--state") contributor_state(); else if (argc > 1) installed_loading(); else { mounted_equation_files(); mounted_space_equation_and_unresolved_entries(); mounted_properties_equation(); mounted_template_files(); sparse_difficulty_levels(); mounted_validation_work(); category_width(); cadence(); virtual_window(); phase_rollback(); native_retirement_state(); configured_cadence(); templates(); template_failure_consumers(); restore(); reversal_funding(); equal_funding_write(); worker_equality(); player_type_replacement(); } }
+    try { if (argc > 1 && std::string_view(argv[1]) == "--bounded") bounded_diagnostics(argc > 2 ? static_cast<std::size_t>(std::stoul(argv[2])) : 1); else if (argc > 1 && std::string_view(argv[1]) == "--state") contributor_state(); else if (argc > 1) installed_loading(); else { mounted_equation_files(); mounted_space_equation_and_unresolved_entries(); mounted_properties_equation(); mounted_template_files(); sparse_difficulty_levels(); mounted_validation_work(); category_width(); cadence(); virtual_window(); phase_rollback(); native_retirement_state(); startup_window_state(); configured_cadence(); templates(); template_failure_consumers(); restore(); reversal_funding(); equal_funding_write(); worker_equality(); player_type_replacement(); } }
     catch (const std::exception& error) { ++failures; std::cerr << error.what() << '\n'; }
     return failures ? 1 : 0;
 }

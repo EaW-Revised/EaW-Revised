@@ -4,6 +4,7 @@
 #include "save_input.hpp"
 #include "options_screen.hpp"
 #include "galactic_mode_internal.hpp"
+#include "galactic_error_log.hpp"
 #include "ui/kit.hpp"
 #include "ui/battle_overlay.hpp"
 #include "viewer_path.hpp"
@@ -226,6 +227,7 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     })) return refuse_load("The selected seat is unavailable in this save.", at_start);
     const auto restored_hash = prepared->state_sha256();
     platform::LiveGameSession::Options options; options.workers = state_.game->worker_count();
+    configure_galactic_error_logging(options);
     const auto hints = view_hints(prepared->presentation_hints());
     std::shared_ptr<const platform::LiveAutoResolveOutcome> saved_summary;
     if (!hints.automatic_summary.empty()) {

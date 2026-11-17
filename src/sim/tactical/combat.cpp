@@ -68,6 +68,13 @@ const TargetFootprint* CombatTable::footprint(const TypeId type_id) const noexce
     return found != footprints.end() && found->type_id == type_id ? &*found : nullptr;
 }
 
+const CombatProfile* CombatTable::find_avoidance_type(const TypeId type_id) const noexcept {
+    const auto found = std::lower_bound(avoidance_obstacles.begin(), avoidance_obstacles.end(), type_id,
+        [](const CombatProfile& profile, const TypeId id) { return profile.type_id < id; });
+    if (found != avoidance_obstacles.end() && found->type_id == type_id) return &*found;
+    return find_target_type(type_id);
+}
+
 core::Result<void> validate_combat(const CombatTable& table) {
     const auto invalid = [](const std::string& message) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "combat table: " + message));
@@ -127,14 +134,15 @@ core::Result<void> validate_combat(const CombatTable& table) {
             }
         }
     }
-    for (std::size_t index = 0; index < table.profiles.size(); ++index) {
-        const auto& profile = table.profiles[index];
+    for (const auto* profiles : {&table.profiles, &table.avoidance_obstacles})
+    for (std::size_t index = 0; index < profiles->size(); ++index) {
+        const auto& profile = (*profiles)[index];
         const auto name = "type " + std::to_string(profile.type_id) + ": ";
         if (!distance_ok(profile.passive_missile_shield_radius)
             || std::llabs(profile.ranged_target_z_adjust.raw()) > max_combat_distance * one_raw) {
             return invalid(name + "projectile defence radius or height out of range");
         }
-        if (index != 0 && table.profiles[index - 1].type_id >= profile.type_id) {
+        if (index != 0 && (*profiles)[index - 1].type_id >= profile.type_id) {
             return invalid("type IDs must strictly increase");
         }
         if (profile.priority_set && *profile.priority_set >= table.priority_sets.size()) {
@@ -253,8 +261,9 @@ core::Result<void> validate_combat(const CombatTable& table) {
                 }
             }
         }
-        if (profile.collision) {
-            const auto& box = *profile.collision;
+        for (const auto* authored_box : {&profile.collision, &profile.model_collision_box}) {
+            if (!*authored_box) continue;
+            const auto& box = **authored_box;
             if (!point_in_bounds(box.min) || !point_in_bounds(box.max) || box.max.x < box.min.x
                 || box.max.y < box.min.y || box.max.z < box.min.z) {
                 return invalid(name + "invalid collision box");

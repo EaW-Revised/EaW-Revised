@@ -77,6 +77,15 @@ struct GalacticWorld::PreparedProducerOffers {
     sim::EntityId next_id{};
     std::size_t live_objects{};
     mutable std::atomic<std::uint64_t> queried_offers{};
+    // Demand reads of this catalog. The rows are a pure function of the published catalog and the key, so every world input
+    // bound to the same catalog shares one evaluation: an AI window binds a new input for each virtual tick and player view,
+    // while the catalog is replaced only when production, credits or the frontier change. Derived data, never saved or hashed.
+    struct ReadMemo {
+        using Key = std::tuple<tactical::PlayerId, galactic::PlanetId, std::vector<galactic::TypeId>, bool>;
+        std::mutex mutex;
+        std::map<Key, core::Result<std::vector<galactic_ai::ProducerInput>>> rows;
+    };
+    mutable ReadMemo read_memo;
 };
 
 // Diagnostic only; caller holds the driven-session tick barrier.
@@ -365,29 +374,25 @@ core::Result<void> GalacticWorld::refresh_live_producers(
 
 galactic_ai::ProducerInputs::Query GalacticWorld::producer_query() const {
     using Result = core::Result<galactic_ai::ProducerInputs::Rows>;
-    // This memo belongs to one immutable completed input. A subsequent bind,
-    // including a clock-only delta, publishes a fresh memo; retained inputs
-    // keep their own source and results. No memo data is authoritative.
-    struct Memo {
-        using Key = std::tuple<tactical::PlayerId, galactic::PlanetId, std::vector<galactic::TypeId>, bool>;
-        std::mutex mutex;
-        std::map<Key, Result> rows;
-    };
-    return [memo = std::make_shared<Memo>(), catalog = bound().prepared_producer_offers_, fps = setup_.logical_fps,
+    // The memo belongs to the immutable catalog the input was bound with (PreparedProducerOffers::read_memo): a later bind
+    // that keeps the catalog (a clock-only delta, another virtual tick or player view of an AI window) reuses its rows, and a
+    // refresh publishes a new catalog with an empty memo. Retained inputs keep their own catalog. No memo data is authoritative.
+    return [catalog = bound().prepared_producer_offers_, fps = setup_.logical_fps,
         workers = read_workers_, supplier = producer_executor_](auto owner, auto planet, auto types, bool first_allowed) -> Result {
         std::vector<galactic::TypeId> requested(types.begin(), types.end());
         std::sort(requested.begin(), requested.end());
         requested.erase(std::unique(requested.begin(), requested.end()), requested.end());
-        const Memo::Key key{owner, planet, std::move(requested), first_allowed};
+        auto& memo = catalog->read_memo;
+        const PreparedProducerOffers::ReadMemo::Key key{owner, planet, std::move(requested), first_allowed};
         // Admission performs no recursive producer reads. Serializing publication
         // guarantees one evaluation even when service partitions share a key.
-        std::scoped_lock lock(memo->mutex);
-        if (const auto found = memo->rows.find(key); found != memo->rows.end()) return found->second;
+        std::scoped_lock lock(memo.mutex);
+        if (const auto found = memo.rows.find(key); found != memo.rows.end()) return found->second;
         static const sim::InlineExecutor inline_executor;
         const auto* active = supplier ? supplier() : nullptr;
         auto result = read_producers(*catalog, fps, owner, planet, std::get<2>(key), first_allowed,
             active ? *active : workers ? *workers : inline_executor);
-        return memo->rows.emplace(key, std::move(result)).first->second;
+        return memo.rows.emplace(key, std::move(result)).first->second;
     };
 }
 
@@ -703,6 +708,15 @@ core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const ga
         && snapshot->observer_input_generation() != 0
         && snapshot->observer_input_generation() == bound().bound_source_->observer_input_generation()))
         && next_entity_id == bound().next_id_ && connectivity.stealth_fleets == bound().connectivity_->stealth_fleets) {
+        // The bound publication again: an AI window binds once per virtual tick against its cut, so the snapshot, publication,
+        // frame and frontier are the ones already bound and nothing economic moved. This path would copy the bound view and
+        // input unchanged (same positions, clocks and producer rows); keep them instead and do only its per-bind bookkeeping.
+        if (snapshot == bound().snapshot_ && publication == bound().connectivity_ && synchronized_frame == bound().synchronized_frame_
+            && !queues_changed && !credits_changed && bound().input_) {
+            bound().work_ = {};
+            gc_profile::Scope catalog_scope(gc_profile::Phase::world_catalog);
+            return prepare_catalog_slice(executor, synchronized_frame);
+        }
         std::optional<gc_profile::Scope> copy_scope;
         copy_scope.emplace(gc_profile::Phase::world_view);
         // The spare buffer is two publications old: when it has the same roster only positions can differ.
@@ -1224,6 +1238,12 @@ void GalacticWorld::bind_connectivity(std::shared_ptr<const GalacticConnectivity
     if (!(connectivity->goal_reach == bound().connectivity_->goal_reach))
         bound().goal_reach_index_ = std::make_shared<const GalacticGoalReachIndex>(GalacticGoalReachIndex::build(connectivity->goal_reach));
     bound().connectivity_ = std::move(connectivity);
+}
+void GalacticWorld::adopt_restored_connectivity_revision(std::uint64_t revision) {
+    if (bound().connectivity_->revision == revision) return;
+    auto adopted = std::make_shared<GalacticConnectivity>(*bound().connectivity_);
+    adopted->revision = revision;
+    bound().connectivity_ = std::move(adopted);
 }
 
 std::shared_ptr<const galactic_ai::WorldInput> GalacticWorld::copy_input() const { return bound().input_; }

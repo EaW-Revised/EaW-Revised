@@ -19,8 +19,10 @@
 #include "ui/input_routing.hpp"
 #include "ui/build_queue_dial.hpp"
 
+#include <godot_cpp/classes/canvas_item_material.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/os.hpp>
+#include <godot_cpp/classes/polygon2d.hpp>
 #include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
@@ -171,6 +173,7 @@ void GalacticMode::State::update_hud() {
     // The live story-to-HUD publication remains #2042.
     if (options.hud_provider) options.hud_provider->update_hud(*this);
     { const auto measured = measure_frame(FramePhase::hud_facts); refresh_hud_facts(); }
+    if (planet_search) planet_search->service(*this);
     if (departure_hint && displayed_snapshot && galaxy) {
         const auto fleets = displayed_snapshot->fleets();
         const bool ready = std::any_of(fleets.begin(), fleets.end(), [this](const auto& fleet) {
@@ -1127,9 +1130,19 @@ void GalacticMode::State::update_planet_status_icons(const galactic_view::Object
             slot = memnew(TextureRect);
             slot->set_mouse_filter(build ? Control::MOUSE_FILTER_STOP : Control::MOUSE_FILTER_IGNORE);
             if (build) slot->set_name(String::utf8(("production_activity_" + std::to_string(id)).c_str()));
+            if (!build && !effect) slot->set_name(String::utf8(("planet_corruption_icon_" + std::to_string(id)).c_str()));
             if (effect) slot->set_name(String::utf8(("planet_status_" + std::to_string(id) + "_"
                 + std::to_string(static_cast<unsigned>(kind))).c_str()));
             slot->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE); world_overlays->add_child(slot);
+        }
+        if (!build && !effect) {
+            // WGCI-1/2: both corruption icons answer the pointer; the information icon carries the authored plain tooltip
+            // line, the per-type icon none (its popup is service_encyclopedia's).
+            slot->set_mouse_filter(Control::MOUSE_FILTER_STOP);
+            String text;
+            if (kind == galactic_view::PlanetStatusIcon::corruption_info && battle_text)
+                text = String::utf8(battle_text(galactic_view::corruption_information_tooltip_key).c_str());
+            if (slot->get_tooltip_text() != text) slot->set_tooltip_text(text);
         }
         if (build) slot->set_meta("production_texture", String::utf8(name.c_str()));
         if (effect) {
@@ -1226,6 +1239,17 @@ bool GalacticMode::State::configure_command_bar_constants(const pugi::xml_docume
         std::istringstream names(icons);
         corruption_planet_icons.clear();
         for (std::string icon; names >> icon;) corruption_planet_icons.push_back(icon);
+        // WGCI-1: the per-type icon's popup reads three more authored lists, each by the same type index.
+        const auto read_list = [&](const char* tag, std::vector<std::string>& out) {
+            std::string text = document.document_element().child(tag).text().as_string();
+            std::replace(text.begin(), text.end(), ',', ' ');
+            std::istringstream stream(text);
+            out.clear();
+            for (std::string token; stream >> token;) out.push_back(token);
+        };
+        read_list("Corruption_Mission_Requirement_Icon_Name", corruption_requirement_icons);
+        read_list("Corruption_Planet_Icon_Encyclopedia_Name", corruption_icon_names);
+        read_list("Corruption_Planet_Icon_Encyclopedia_Desc", corruption_icon_descriptions);
     }
     return true;
 }
@@ -1328,26 +1352,40 @@ void GalacticMode::State::build_command_bar_tooltip() {
 }
 
 void GalacticMode::State::build_command_bar_advisor(const data::ui::TextDatabase* text) {
-    // #7196: the popup's back sits behind its text, in the authored help back's textures; no back when the data has none.
+    // #7196/#7444: the popup's back sits behind its text, in the authored help back's textures; no back when the data has none.
+    // It is the encyclopedia back's construction (CARD-19, WGUI-69): glow, edge and backdrop, then the connector, in this order.
     if (const auto* back = command_catalog.find("help_back")) {
-        approach_back = memnew(TextureRect);
-        approach_back->set_name("GalacticAdvisorBack");
+        approach_glow = memnew(TextureRect);
+        approach_glow->set_name("GalacticAdvisorGlow");
         approach_frame = memnew(TextureRect);
         approach_frame->set_name("GalacticAdvisorFrame");
-        for (auto* image : {approach_back, approach_frame}) {
+        approach_back = memnew(TextureRect);
+        approach_back->set_name("GalacticAdvisorBack");
+        for (auto* image : {approach_glow, approach_frame, approach_back}) {
             image->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
             image->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
             image->set_z_index(10);
             hud->add_child(image);
             image->hide();
         }
+        Ref<CanvasItemMaterial> additive;
+        additive.instantiate();
+        additive->set_blend_mode(CanvasItemMaterial::BLEND_MODE_ADD);
+        approach_glow->set_material(additive);
         const auto backs = back->list(data::ui::Field::blank_texture_name);
         const auto frames = back->list(data::ui::Field::icon_alternate_texture_name);
         if (!backs.empty()) approach_back->set_texture(command_texture(backs.front()));
-        // As the pointer tooltip: the first alternate frame for every side (no per-side rule is sourced).
-        if (!frames.empty()) approach_frame->set_texture(command_texture(frames.front()));
+        // CARD-19: the two alternate textures are the edge and the enlarged glow, for either faction.
+        if (!frames.empty()) approach_frame->set_texture(command_texture(frames[0]));
+        if (frames.size() > 1) approach_glow->set_texture(command_texture(frames[1]));
         approach_back_width_units = static_cast<float>(back->vec2(data::ui::Field::size).value_or(data::ui::Vec2{}).x);
-        if (const auto tint = back->color(data::ui::Field::color)) approach_back_alpha = static_cast<float>(tint->a) / 255.0F;
+        const auto offset = back->vec2(data::ui::Field::offset).value_or(data::ui::Vec2{});
+        approach_text_offset_units = Vector2(static_cast<float>(offset.x), static_cast<float>(offset.y));
+        approach_connector = memnew(Polygon2D);
+        approach_connector->set_name("GalacticAdvisorConnector");
+        approach_connector->set_z_index(10);
+        hud->add_child(approach_connector);
+        approach_connector->hide();
     }
     approach_label = memnew(Label);
     approach_label->set_name("GalacticApproachAdvisor");
@@ -1355,17 +1393,25 @@ void GalacticMode::State::build_command_bar_advisor(const data::ui::TextDatabase
     approach_label->set_z_index(10);
     approach_label->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
     // #7196: the advisor text is the authored help text style (the shell's galactic help text); the tooltip text style it used
-    // before stays the fallback when the data has none.
+    // before stays the fallback when the data has none. #7444: every line takes that style's ink and outline, whatever its
+    // producer's code colour (the original shows control changes, battle results and hints alike in it).
     const auto* advisor_style = command_catalog.find("text_galactic_help");
     if (advisor_style == nullptr) advisor_style = command_catalog.find("tooltip_left_text");
+    Color ink(192.0F / 255, 192.0F / 255, 192.0F / 255);
     if (const auto* style = advisor_style) {
         const auto face = hud_fonts->resolve({std::string(style->text(data::ui::Field::font_name)),
             style->integer(data::ui::Field::font_point_size).value_or(0)}, "english");
-        approach_label->add_theme_font_override("font", hud_fonts->font(face));
+        // CARD-19: command-bar text requests bold whatever its Font_Name (the original's advisor lines are bold, #7444).
+        approach_label->add_theme_font_override("font", hud_fonts->font(face, true));
         approach_label->add_theme_font_size_override("font_size",
             std::max(1, presentation::ui::font_pixel_height(face.point_size, camera.height)));
+        // As CARD-19's body text: the authored RGB, with the fade alpha replacing the ink alpha.
+        if (const auto tint = style->color(data::ui::Field::text_color)) ink = Color(tint->r / 255.0F, tint->g / 255.0F, tint->b / 255.0F);
+        approach_label->add_theme_constant_override("outline_size",
+            style->flag(data::ui::Field::text_outline) ? unverified_name_outline_pixels : 0);
+        approach_label->add_theme_color_override("font_outline_color", Color(0, 0, 0, 1));
     }
-    approach_label->add_theme_color_override("font_color", Color(0, 193.0F / 255, 91.0F / 255));
+    approach_label->add_theme_color_override("font_color", ink);
     hud->add_child(approach_label);
     approach_label->hide();
     EncyclopediaPopupStyle popup_style;
@@ -1679,7 +1725,9 @@ void GalacticMode::State::command_control_action(const std::string& name) {
     else if (name == "b_planet_tab" && selected_hud.ground_enabled) { space_tab_choice = false; selected_hud.space_tab = false; authored_controls.domain_changed(); }
     else if (name == "b_play_pause" && clock_controls_enabled) request_pause(!paused);
     else if (name == "b_fast_forward" && galactic_view::fast_forward_available(fast_forward_controls_enabled, paused, fast_forward_factor.has_value()) && game) {
-        submit_strategic_speed(galactic_view::fast_forward_target(strategic_speed_now(), *fast_forward_factor));
+        // A press acts on what the button shows: the speed request in flight, else the current speed (owner 2026-11-17).
+        const auto shown = sim::math::Fixed::from_raw(speed_guard.shown(strategic_speed_now().raw()));
+        submit_strategic_speed(galactic_view::fast_forward_target(shown, *fast_forward_factor));
     }
 }
 
@@ -2066,7 +2114,17 @@ void GalacticMode::State::service_encyclopedia() {
     if (!bonus_hover && pointer) for (const auto& [id, icon] : planet_weather_icons)
         if (pointer == icon && icon->is_visible_in_tree()) { weather_planet = id; break; }
     const bool weather_hover = weather_planet != 0;
-    const auto special_planet = bonus_hover ? bonus_planet : weather_planet;
+    // WGCI-1: the per-type corruption icon of a planet (the information icon has no popup here); its popup keeps its own identity
+    // bit so a planet change restarts the timer.
+    constexpr std::uint64_t planet_corruption_flag = std::uint64_t{1} << 61;
+    galactic_view::ObjectId corruption_planet{};
+    if (!bonus_hover && !weather_hover && pointer) for (const auto& [id, icon] : corruption_info_icons) {
+        if (pointer != icon || !icon->is_visible_in_tree()) continue;
+        const auto facts = hud_facts.find(id);
+        if (facts != hud_facts.end() && facts->second.corrupted && facts->second.corruption_type != 0) { corruption_planet = id; break; }
+    }
+    const bool corruption_hover = corruption_planet != 0;
+    const auto special_planet = bonus_hover ? bonus_planet : weather_hover ? weather_planet : corruption_planet;
     for (const auto& [name, choice] : displayed_choices) {
         if (pointer != command_buttons.at(name)) continue;
         hovered = choice.type_id; hovered_choice = &choice; break;
@@ -2114,7 +2172,8 @@ void GalacticMode::State::service_encyclopedia() {
         encyclopedia_timing.shown = 0; encyclopedia_timing.alpha = 0;
         encyclopedia_timing.remaining = 0;
     }
-    encyclopedia_timing.service(bonus_hover ? planet_bonus_identity : weather_hover ? planet_weather_identity : hovered, elapsed, admitted);
+    encyclopedia_timing.service(bonus_hover ? planet_bonus_identity : weather_hover ? planet_weather_identity
+        : corruption_hover ? (planet_corruption_flag | corruption_planet) : hovered, elapsed, admitted);
     if (!admitted) { encyclopedia_panel->hide(); return; }
     if (!encyclopedia_timing.shown) { encyclopedia_panel->hide(); encyclopedia_type = 0; return; }
     if (encyclopedia_timing.shown == planet_bonus_identity) {
@@ -2124,8 +2183,8 @@ void GalacticMode::State::service_encyclopedia() {
         const auto planet = std::find_if(galaxy->planets.begin(), galaxy->planets.end(),
             [shown_planet](const auto& row) { return row.id == shown_planet; });
         if (planet == galaxy->planets.end()) { encyclopedia_panel->hide(); return; }
-        if (!encyclopedia_ability || encyclopedia_weather || encyclopedia_planet != shown_planet || encyclopedia_snapshot != displayed_snapshot
-            || encyclopedia_width != camera.width || encyclopedia_height != camera.height) {
+        if (!encyclopedia_ability || encyclopedia_weather || encyclopedia_corruption || encyclopedia_planet != shown_planet
+            || encyclopedia_snapshot != displayed_snapshot || encyclopedia_width != camera.width || encyclopedia_height != camera.height) {
             presentation::ui::UnitCardLooks looks;
             looks.icon = planet->ability.icon; looks.name = planet->ability.title;
             looks.icon_scale = 1.0F; // WGUI-167: bonus header uses full texture scale.
@@ -2135,7 +2194,8 @@ void GalacticMode::State::service_encyclopedia() {
             encyclopedia_panel->update(looks, {}, Vector2(static_cast<float>(point.x), static_cast<float>(point.y)),
                 command_bar->space(), static_cast<float>(placement.scale),
                 Rect2(0, 0, static_cast<float>(camera.width), static_cast<float>(camera.height)));
-            encyclopedia_ability = true; encyclopedia_weather = false; encyclopedia_existing_object = false; encyclopedia_type = 0;
+            encyclopedia_ability = true; encyclopedia_weather = false; encyclopedia_corruption = false;
+            encyclopedia_existing_object = false; encyclopedia_type = 0;
             encyclopedia_planet = shown_planet; encyclopedia_snapshot = displayed_snapshot;
             encyclopedia_width = camera.width; encyclopedia_height = camera.height;
         }
@@ -2148,7 +2208,7 @@ void GalacticMode::State::service_encyclopedia() {
         const auto planet = std::find_if(galaxy->planets.begin(), galaxy->planets.end(),
             [shown_planet](const auto& row) { return row.id == shown_planet; });
         if (planet == galaxy->planets.end()) { encyclopedia_panel->hide(); return; }
-        if (!encyclopedia_ability || !encyclopedia_weather || encyclopedia_planet != shown_planet
+        if (!encyclopedia_ability || !encyclopedia_weather || encyclopedia_corruption || encyclopedia_planet != shown_planet
             || encyclopedia_snapshot != displayed_snapshot || encyclopedia_width != camera.width || encyclopedia_height != camera.height) {
             presentation::ui::UnitCardLooks looks;
             looks.icon = planet->weather.icon; looks.name = planet->weather.name;
@@ -2159,8 +2219,39 @@ void GalacticMode::State::service_encyclopedia() {
             encyclopedia_panel->update(looks, {}, Vector2(static_cast<float>(point.x), static_cast<float>(point.y)),
                 command_bar->space(), static_cast<float>(placement.scale),
                 Rect2(0, 0, static_cast<float>(camera.width), static_cast<float>(camera.height)));
-            encyclopedia_ability = true; encyclopedia_weather = true; encyclopedia_existing_object = false; encyclopedia_type = 0;
+            encyclopedia_ability = true; encyclopedia_weather = true; encyclopedia_corruption = false;
+            encyclopedia_existing_object = false; encyclopedia_type = 0;
             encyclopedia_planet = shown_planet; encyclopedia_snapshot = displayed_snapshot;
+            encyclopedia_width = camera.width; encyclopedia_height = camera.height;
+        }
+        encyclopedia_panel->set_modulate(Color(1, 1, 1, static_cast<float>(encyclopedia_timing.alpha)));
+        encyclopedia_panel->show(); return;
+    }
+    if (encyclopedia_timing.shown & planet_corruption_flag) {
+        // WGCI-1: header icon, type name and mission blurb of the hovered per-type corruption icon; the popup keeps its planet
+        // while it fades out.
+        const auto shown_planet = static_cast<galactic_view::ObjectId>(encyclopedia_timing.shown & ~planet_corruption_flag);
+        const auto facts = hud_facts.find(shown_planet);
+        if (facts == hud_facts.end() || !battle_text) { encyclopedia_panel->hide(); return; }
+        const auto content = galactic_view::corruption_icon_encyclopedia(facts->second.corruption_type,
+            corruption_requirement_icons, corruption_icon_names, corruption_icon_descriptions);
+        if (!content) { encyclopedia_panel->hide(); return; }
+        if (!encyclopedia_ability || !encyclopedia_corruption || encyclopedia_planet != shown_planet
+            || encyclopedia_snapshot != displayed_snapshot || encyclopedia_width != camera.width || encyclopedia_height != camera.height
+            || encyclopedia_corruption_type != facts->second.corruption_type) {
+            presentation::ui::UnitCardLooks looks;
+            looks.icon = content->icon; looks.name = battle_text(content->name_key);
+            looks.icon_scale = 1.0F;
+            if (!content->description_key.empty()) looks.description = battle_text(content->description_key);
+            const auto placement = command_bar->placement();
+            const auto point = presentation::ui::shell_to_screen({encyclopedia_anchor.x, encyclopedia_anchor.y, 0, 0}, placement);
+            encyclopedia_panel->update(looks, {}, Vector2(static_cast<float>(point.x), static_cast<float>(point.y)),
+                command_bar->space(), static_cast<float>(placement.scale),
+                Rect2(0, 0, static_cast<float>(camera.width), static_cast<float>(camera.height)));
+            encyclopedia_ability = true; encyclopedia_weather = false; encyclopedia_corruption = true;
+            encyclopedia_existing_object = false; encyclopedia_type = 0;
+            encyclopedia_planet = shown_planet; encyclopedia_snapshot = displayed_snapshot;
+            encyclopedia_corruption_type = facts->second.corruption_type;
             encyclopedia_width = camera.width; encyclopedia_height = camera.height;
         }
         encyclopedia_panel->set_modulate(Color(1, 1, 1, static_cast<float>(encyclopedia_timing.alpha)));
@@ -2202,7 +2293,7 @@ void GalacticMode::State::service_encyclopedia() {
             Vector2(static_cast<float>(point.x), static_cast<float>(point.y)), command_bar->space(),
             static_cast<float>(placement.scale), Rect2(0, 0, static_cast<float>(camera.width), static_cast<float>(camera.height)));
         encyclopedia_type = encyclopedia_timing.shown;
-        encyclopedia_ability = false; encyclopedia_weather = false;
+        encyclopedia_ability = false; encyclopedia_weather = false; encyclopedia_corruption = false;
         encyclopedia_existing_object = existing_object;
         encyclopedia_planet = selected_planet;
         encyclopedia_snapshot = displayed_snapshot;
@@ -2906,9 +2997,7 @@ void GalacticMode::State::service_approach(double delta) {
         && !(advanced_map_shell && advanced_map_shell->is_visible_in_tree())) {
         const auto line = std::move(approach_text.front());
         approach_text.pop_front();
-        approach_label->set_text(line.text);
-        approach_label->add_theme_color_override("font_color", Color(line.colour[0] / 255.0F, line.colour[1] / 255.0F,
-            line.colour[2] / 255.0F, line.colour[3] / 255.0F));
+        approach_label->set_text(line.text); // in the authored advisor ink; the line's own colour is the history's (WGUI-68)
         approach_delay = advisor_character_seconds * static_cast<double>(line.text.length());
         // WGUI-66/WGP-127: an explicit SFX event wins; otherwise the faction's urgent or message cue.
         if (audio) {
@@ -2934,27 +3023,39 @@ void GalacticMode::State::service_approach(double delta) {
     const auto placement = command_bar->placement();
     const auto point = presentation::ui::shell_to_screen({encyclopedia_anchor.x, encyclopedia_anchor.y, 0, 0}, placement);
     const bool shown = approach_alpha > 0 && !encyclopedia_timing.shown;
-    approach_label->set_position(Vector2(static_cast<float>(point.x), static_cast<float>(point.y)));
-    // #7196: with the authored back, the text wraps inside it (a two-unit inset) and the back and its frame hug the text.
+    const float alpha = approach_alpha / 255.0F;
+    // #7444: the popup's bottom-left is the advisor point and it grows upward, as the encyclopedia at the same hint bone
+    // (GHUD-C04, CARD-19: (60,430) at 1280x720, the place the original draws its advisor lines). With the authored back the
+    // text starts at the back's Offset inside it and wraps to its width less that offset on both sides; the back hugs
+    // the text height plus the offset above and below.
     const float scale = static_cast<float>(placement.scale);
-    const float inset = 2.0F * scale;
     const bool boxed = approach_back != nullptr && approach_back_width_units > 0.0F;
-    const float text_width = boxed ? std::max(1.0F, approach_back_width_units * scale - 2.0F * inset)
-                                   : static_cast<float>(camera.width) - static_cast<float>(point.x);
+    const Vector2 inset = boxed ? approach_text_offset_units * scale : Vector2();
+    const float back_width = boxed ? approach_back_width_units * scale : static_cast<float>(camera.width) - static_cast<float>(point.x);
+    const float text_width = std::max(1.0F, back_width - 2.0F * inset.x);
     approach_label->set_size(Vector2(text_width, 0));
-    approach_label->set_modulate(Color(1, 1, 1, approach_alpha / 255.0F));
+    const float text_height = approach_label->get_combined_minimum_size().y;
+    const Rect2 panel(static_cast<float>(point.x), static_cast<float>(point.y) - text_height - 2.0F * inset.y,
+        back_width, text_height + 2.0F * inset.y);
+    approach_label->set_position(panel.position + inset);
+    approach_label->set_modulate(Color(1, 1, 1, alpha));
     approach_label->set_visible(shown);
     if (approach_back != nullptr) {
-        const float text_height = approach_label->get_combined_minimum_size().y;
-        const Vector2 top_left(static_cast<float>(point.x) - inset, static_cast<float>(point.y) - inset);
-        const Vector2 box(text_width + 2.0F * inset, text_height + 2.0F * inset);
-        for (auto* image : {approach_back, approach_frame}) {
-            image->set_position(top_left);
-            image->set_size(box);
-            image->set_visible(shown && boxed);
+        const std::array<std::pair<TextureRect*, Rect2>, 3> layers{{{approach_glow, panel.grow(popup_glow_units * scale)},
+            {approach_frame, panel.grow(popup_edge_units * scale)}, {approach_back, panel}}};
+        for (const auto& [image, box] : layers) {
+            image->set_position(box.position);
+            image->set_size(box.size);
+            image->set_visible(shown && boxed && image->get_texture().is_valid());
+            image->set_modulate(Color(1, 1, 1, alpha));
         }
-        approach_back->set_modulate(Color(1, 1, 1, approach_alpha / 255.0F * approach_back_alpha));
-        approach_frame->set_modulate(Color(1, 1, 1, approach_alpha / 255.0F));
+        approach_glow->set_modulate(popup_glow_tint(alpha));
+        PackedVector2Array points;
+        PackedColorArray colours;
+        popup_connector(panel, scale, alpha, points, colours);
+        approach_connector->set_polygon(points);
+        approach_connector->set_vertex_colors(colours);
+        approach_connector->set_visible(shown && boxed);
     }
 }
 

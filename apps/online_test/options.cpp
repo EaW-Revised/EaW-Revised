@@ -128,7 +128,9 @@ std::string normalise_invitation_code(std::string_view code) {
 std::string usage() {
     return "usage: eawr_online_test <host|join> [--config server.conf] [--code XXXX] [--log file]\n"
            "       [--address A --port P (--pin SHA256HEX | --system-ca) [--certificate-name N]]\n"
-           "       [--turn-only] [--turn-provider auto|own|cloudflare] [--timeout seconds]\n";
+           "       [--turn-only] [--turn-provider auto|own|cloudflare] [--timeout seconds]\n"
+           "       [--content-root folder] (diagnostic effective XML/Lua admission check)\n"
+           "       [--prepare-ms milliseconds] (diagnostic: a slow local match prepare, 0-60000)\n";
 }
 
 Parsed<Options> parse_arguments(const std::vector<std::string>& arguments, const std::filesystem::path& executable_directory) {
@@ -154,6 +156,7 @@ Parsed<Options> parse_arguments(const std::vector<std::string>& arguments, const
             options.turn_provider = value;
         } else if (flag == "--code") options.code = normalise_invitation_code(value);
         else if (flag == "--log") options.log_path = value;
+        else if (flag == "--content-root") options.content_root = value;
         else if (flag == "--address") { given.address = value; address = true; }
         else if (flag == "--port") { if (!parse_port(value, given.port)) return fail("port must be 1-65535"); port = true; }
         else if (flag == "--certificate-name") { given.certificate_name = value; name = true; }
@@ -166,6 +169,10 @@ Parsed<Options> parse_arguments(const std::vector<std::string>& arguments, const
             if (value.empty() || value.size() > 4 || !all_of_class(value, std::isdigit) || std::stoul(value) == 0)
                 return fail("--timeout needs seconds (1-9999)");
             options.timeout = std::chrono::seconds(std::stoul(value));
+        } else if (flag == "--prepare-ms") {
+            if (value.empty() || value.size() > 5 || !all_of_class(value, std::isdigit) || std::stoul(value) > 60000)
+                return fail("--prepare-ms needs milliseconds (0-60000)");
+            options.prepare = std::chrono::milliseconds(std::stoul(value));
         } else return fail("unknown option '" + flag + "'");
     }
     if (pin && system_ca) return fail("--pin and --system-ca exclude each other");

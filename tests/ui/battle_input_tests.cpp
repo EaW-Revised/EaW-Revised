@@ -223,8 +223,6 @@ void clicks_and_boxes() {
     expect(rect.min_x == 100.0F && rect.max_x == 300.0F && rect.min_y == 50.0F && rect.max_y == 250.0F,
            "a drag spans its rectangle whichever way it goes");
     expect(ui::drag_extent({0.0F, 0.0F}, {30.0F, -120.0F}) == 120.0F, "a drag is measured by its larger side");
-    expect(ui::minimum_drag_select_distance == 100.0F && ui::minimum_drag_distance == 4.0F,
-           "GameConstants.xml drag distances");
 
     selection.retain_sorted(std::vector<sim::EntityId>{2, 3});
     expect(selection.units() == std::vector<sim::EntityId>{2, 3}, "destroyed units leave the selection");
@@ -614,7 +612,7 @@ void overview_pan_follows_the_screen() {
 // O-1, O-2, O-3 and PR #342's review: a release needs its press, and attack mode is disarmed by any
 // right click that is not on an enemy, including one on a selected own unit or an ally.
 void right_clicks() {
-    expect(ui::right_release(std::nullopt, {300.0F, 200.0F}) == ui::RightRelease::ignored,
+    expect(ui::right_release(std::nullopt, {300.0F, 200.0F}, 100.0F, 4.0F) == ui::RightRelease::ignored,
            "a right release without a stored press (cancelled or synthetic) is no click");
     // O-2: the larger screen side decides: <= 4 px a click, 4..100 px the compass, 100 px or more a cancel.
     const std::array<float, 2> press{300.0F, 200.0F};
@@ -634,7 +632,7 @@ void right_clicks() {
              {{404.0F, 280.0F}, ui::RightRelease::cancel, "the larger side counts alone: 104 px and 80 px"},
              {{200.0F, 100.0F}, ui::RightRelease::cancel, "dragging up and left counts the same"},
          }) {
-        expect(ui::right_release(press, release) == expected,
+        expect(ui::right_release(press, release, 100.0F, 4.0F) == expected,
                (std::string("right drag release: ") + what).c_str());
     }
 
@@ -702,11 +700,11 @@ void right_clicks() {
 
     const auto own = unit(1, 7, true, {0.0F, 0.0F, 0.0F}, std::nullopt);
     // O-2 / O-6: display delay is independent of order admission; yaw wraps after rounding.
-    expect(!ui::compass_visible(std::array<float, 2>{0, 0}, {5, 0}, 0.499), "arrow waits 500 ms");
-    expect(ui::compass_visible(std::array<float, 2>{0, 0}, {5, 0}, 0.5), "arrow appears at 500 ms");
-    expect(!ui::compass_visible(std::array<float, 2>{0, 0}, {4, 0}, 1), "click threshold has no arrow");
-    expect(!ui::compass_visible(std::array<float, 2>{0, 0}, {100, 0}, 1), "cancel threshold hides arrow");
-    expect(!ui::compass_visible(std::nullopt, {5, 0}, 1), "cancelled press has no arrow");
+    expect(!ui::compass_visible(std::array<float, 2>{0, 0}, {5, 0}, 0.499, 100.0F, 4.0F), "arrow waits 500 ms");
+    expect(ui::compass_visible(std::array<float, 2>{0, 0}, {5, 0}, 0.5, 100.0F, 4.0F), "arrow appears at 500 ms");
+    expect(!ui::compass_visible(std::array<float, 2>{0, 0}, {4, 0}, 1, 100.0F, 4.0F), "click threshold has no arrow");
+    expect(!ui::compass_visible(std::array<float, 2>{0, 0}, {100, 0}, 1, 100.0F, 4.0F), "cancel threshold hides arrow");
+    expect(!ui::compass_visible(std::nullopt, {5, 0}, 1, 100.0F, 4.0F), "cancelled press has no arrow");
     expect(ui::compass_yaw({0, 0, 0}, {1, -1, 0}) == sim::math::Fixed::from_integer(315).value(), "negative heading wraps");
     expect(ui::compass_yaw({0, 0, 0}, {1000, -0.1F, 0}) == sim::math::Fixed{}, "rounding through 360 wraps to zero");
     expect(ui::compass_yaw({0, 0, 0}, {1, 2, 0}) == sim::math::Fixed::from_ratio(634, 10).value(), "heading rounds to a tenth");
@@ -756,7 +754,8 @@ void right_clicks() {
         auto issued = input.world_command(pick, ui::CommandOrigin::world_click, modifiers, &drag);
         expect(static_cast<bool>(issued), "a right drag command is not refused");
         auto taken = scheduler.take(scheduler.open_tick());
-        expect(taken.size() <= 1, "one gesture issues at most one group command");
+        if (issued && issued.value()) expect(taken.size() == 1, "one gesture issues exactly one group command");
+        else expect(taken.empty(), "a cancelled gesture issues no command");
         if (!taken.empty()) expect(taken.front().units == input.selection(), "group members share the one command");
         payload = taken.empty() ? std::nullopt : std::optional<tactical::CommandPayload>(taken.back().payload);
         return issued && issued.value();

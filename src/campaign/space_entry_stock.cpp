@@ -582,7 +582,8 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         }
         impl->briefings.push_back(std::move(briefing));
     }
-    std::set<std::string> maps;
+    std::set<std::string> maps, mission_maps;
+    std::vector<std::string> unnamed_missions; // mission map names that name no map path, in planet order
     for (const auto& location : plan.locations()) if (location.planet) {
         const auto* planet = data.planet(location.original_type);
         if (!planet) return fail<std::shared_ptr<const StockSpaceEntry>>("missing authored planet");
@@ -595,6 +596,15 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         if (!located.value()) continue; // CGS-13/22: a planet type that cannot be loaded gets no map and no upgrades here
         if (path) { impl->planet_maps.emplace(location.planet->id, path.value()); maps.insert(path.value()); }
         const auto& object = *located.value();
+        // WGCH-126 / WGP-168 (#7357): a solo campaign also prepares the space corruption missions' own maps (each slot's
+        // Tactical_Map_Name with Tactical_Game_Mode SPACE). Multiplayer takes the timed route (WGCH-08) and never plays them.
+        if (plan.mode() != CampaignSetupMode::multiplayer) for (int slot = 1; slot <= 3; ++slot) {
+            const auto prefix = "Corruption_" + std::to_string(slot) + "_Tactical_";
+            if (key(text(object, prefix + "Game_Mode")) != "SPACE") continue;
+            auto mission = map_path(text(object, prefix + "Map_Name"));
+            if (mission) mission_maps.insert(std::move(mission).value());
+            else unnamed_missions.push_back(mission.error().message);
+        }
         if (const auto* abilities = object.value("Abilities")) {
             for (const auto& ability : abilities->value.children) if (key(ability.name) == "GALAXY_WIDE_UPGRADE_ABILITY") {
                 bool global = true;
@@ -626,26 +636,53 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         return fail<std::shared_ptr<const StockSpaceEntry>>("campaign content preparation limit exceeded");
     std::set<std::string> obstacles;
     const auto object_types = assets::object_type_catalog(catalog);
-    for (const auto& path : maps) {
+    // The placed non-marker objects of one space map, which the unit tables load as obstacles.
+    const auto placed_objects = [&](const std::string& path) -> core::Result<std::set<std::string>> {
+        using Placed = core::Result<std::set<std::string>>;
         std::optional<core::gc_load::Scope> map_decode(std::in_place, "prep.space_entry.map_decode");
         auto decoded = assets::load_map(filesystem, path, object_types);
         map_decode.reset();
-        if (!decoded) return Result::failure(decoded.error());
-        if (decoded.value().kind != assets::MapKind::space)
-            return fail<std::shared_ptr<const StockSpaceEntry>>("authored space map has the wrong layer");
+        if (!decoded) return Placed::failure(decoded.error());
+        if (decoded.value().kind != assets::MapKind::space) return fail<std::set<std::string>>("authored space map has the wrong layer");
+        std::set<std::string> names;
         for (const auto& placement : decoded.value().placements)
             if (placement.type_resolution == assets::TypeResolution::unique && placement.type_candidates.size() == 1) {
                 const auto& name = placement.type_candidates.front().logical_name;
                 auto placed = resolve_stock_name(catalog, name, data::Category::game_object, "map placement", impl->skips);
-                if (!placed) return Result::failure(placed.error());
+                if (!placed) return Placed::failure(placed.error());
                 if (!placed.value()) continue;
                 const auto& object = *placed.value();
                 const auto is_marker = data::retail::boolean(text(object, "Is_Marker")).value_or(false);
                 const auto behavior_names = tokens(text(object, "Behavior"));
                 if (key(object.type_name) == "MARKER" || is_marker
                     || std::any_of(behavior_names.begin(), behavior_names.end(), [](const auto& name) { return key(name) == "MARKER"; })) continue;
-                obstacles.insert(name);
+                names.insert(name);
             }
+        return Placed::success(std::move(names));
+    };
+    for (const auto& path : maps) {
+        auto placed = placed_objects(path);
+        if (!placed) return Result::failure(placed.error());
+        obstacles.insert(placed.value().begin(), placed.value().end());
+    }
+    // A mission map that cannot be prepared, or does not fit under the map cap, never refuses the campaign: it is left
+    // out with a load note, and that mission takes the direct route (WGCH-199).
+    const auto skip_mission_map = [&](const std::string& path, const std::string& reason) {
+        core::LoadNote note;
+        note.code = "campaign_corruption_mission_map_skipped";
+        note.message = "space corruption mission map " + path + " is left out: " + reason;
+        note.effective_value = "mission refused";
+        impl->skips.notes.push_back(std::move(note));
+    };
+    for (const auto& reason : unnamed_missions) skip_mission_map("(unnamed)", reason);
+    for (auto at = mission_maps.begin(); at != mission_maps.end();) {
+        if (maps.contains(*at)) { at = mission_maps.erase(at); continue; }
+        if (maps.size() + 1 > 128) { skip_mission_map(*at, "the campaign map limit is reached"); at = mission_maps.erase(at); continue; }
+        auto placed = placed_objects(*at);
+        if (!placed) { skip_mission_map(*at, placed.error().message); at = mission_maps.erase(at); continue; }
+        obstacles.insert(placed.value().begin(), placed.value().end());
+        maps.insert(*at);
+        ++at;
     }
     scene::VfsAssetCache cache(filesystem);
     units::LoadInput load; load.campaign_scene = true; load.catalog = &catalog; load.filesystem = &filesystem;
@@ -866,6 +903,7 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         std::optional<core::gc_load::Scope> start_inputs(std::in_place, "prep.space_entry.map_start_inputs");
         auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, *pinned, *data_identity, start_inputs_cache);
         start_inputs.reset();
+        if (!inputs && mission_maps.contains(path)) { skip_mission_map(path, inputs.error().message); continue; }
         if (!inputs) return Result::failure(inputs.error());
         const auto diagnostic = diagnose({}, inputs.value().placements);
         impl->maps.emplace(path, StockSpaceEntry::Impl::MapContent{pinned, std::move(inputs).value(),
@@ -1266,6 +1304,40 @@ core::Result<tt::TacticalContent> StockSpaceEntry::content(const ConflictRecord&
 core::Result<void> StockSpaceEntry::bind_game(GameSession& game) const {
     game.set_hero_defeat_resolver(impl_->returning.hero);
     return impl_->returning.bind_game(game);
+}
+core::Result<std::optional<RecordedAdmission>> StockSpaceEntry::corruption_mission(const gc::GalacticSnapshot& snapshot,
+    const gc::LiveCorruptionMission& mission, const gc::CorruptionChoice& choice, const sim::EntityId first_free) const {
+    using R = core::Result<std::optional<RecordedAdmission>>;
+    if (!impl_ || choice.mode != 2 || choice.map.empty()) return R::success({});
+    if (first_free == std::numeric_limits<sim::EntityId>::max()) return fail<std::optional<RecordedAdmission>>("conflict allocator exhausted");
+    const auto planet = std::find_if(snapshot.planets().begin(), snapshot.planets().end(), [&](const auto& p) { return p.id == mission.planet; });
+    if (planet == snapshot.planets().end()) return R::success({});
+    // WGCH-126: the actor's current owner invades and the planet's owner is the map defender. No galactic force enters
+    // (player persistence is off): both sides fight with what the mission map places for them.
+    ConflictRecord record;
+    record.id = first_free; record.layer = BattleLayer::space; record.planet = mission.planet;
+    record.invader = mission.player; record.defender = planet->owner;
+    record.corruption_mission = true; record.map_identity = choice.map;
+    record.story_plot = choice.script; // carried, not run: no tactical story-plot runtime yet (WGCH-197)
+    record.tactical.first_free_entity_id = first_free + 1;
+    record.tactical.content_identity = impl_->plan.galaxy().content_identity;
+    for (const auto& seat : snapshot.seats()) if (seat.active)
+        record.seats.push_back({seat.seat_id, seat.player == record.invader || seat.player == record.defender ? seat.player : 0});
+    // #7466: the very predicate the pre-debit probe asked (WGCH-197/199). A choice it accepts is built here, so the service
+    // never refuses a mission the player was already charged for. The record has no forces, so this is also availability.
+    if (!corruption_mission_ready(choice, record.invader, record.defender)) return R::success({});
+    Arbitration arbitration; arbitration.route = ConflictRoute::tactical; arbitration.forced_tactical = true;
+    return R::success(RecordedAdmission{0, std::move(record), arbitration});
+}
+bool StockSpaceEntry::corruption_mission_ready(const gc::CorruptionChoice& choice, const gc::PlayerId invader,
+    const gc::PlayerId defender) const {
+    // Two different, real sides (the conflict queue refuses anything else, #7466), a space choice with a map, and caps.
+    if (!impl_ || choice.mode != 2 || choice.map.empty() || !invader || !defender || invader == defender
+        || impl_->missing_caps.contains(invader) || impl_->missing_caps.contains(defender)) return false;
+    const auto path = map_path(choice.map);
+    if (!path) return false;
+    const auto at = impl_->maps.find(path.value());
+    return at != impl_->maps.end() && !at->second.refusal;
 }
 core::Result<void> StockSpaceEntry::decorate_result(const ConflictRecord& record,
     const tt::TacticalSession& battle, BattleResult& result) const {

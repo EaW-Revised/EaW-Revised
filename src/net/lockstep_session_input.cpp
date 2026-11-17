@@ -254,6 +254,16 @@ core::Result<void> LockstepSession::receive(Received received) {
     }
     if (batch.tick != expected)
         return refused<void>(session_errors::stream_gap, "reliable stream lost or reordered a sealed batch");
+    if (received.received_at) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto age = std::chrono::duration_cast<std::chrono::microseconds>(now - *received.received_at).count();
+        if (age >= 0) {
+            auto& stats = input_receipts_[sender];
+            if (!stats.window_at || now - *stats.window_at >= std::chrono::seconds(1)) { stats = {}; stats.window_at = now; }
+            ++stats.samples; stats.total_us += static_cast<std::uint64_t>(age);
+            stats.max_us = std::max(stats.max_us, static_cast<std::uint64_t>(age));
+        }
+    }
     if (batch.tick >= options_.final_tick_count || batch.tick > adapter_->completed_tick() + input_horizon() - 1)
         return refused<void>(session_errors::resource_limit, "batch exceeds reachable input horizon");
     auto cursor = command_cursors_[sender];

@@ -267,7 +267,7 @@ void test_selection_layer_config() {
         vfs::Vfs no_layer;
         auto removed_layer = ui::parse_settings(ui::serialize_settings(reloaded)).settings;
         ui::apply_selection_config(removed_layer, no_layer);
-        expect(!removed_layer.selection_hotkeys && !removed_layer.selection_hotkeys_authored,
+        expect(removed_layer.selection_hotkeys && !removed_layer.selection_hotkeys_authored,
             "SH-03 removing the layer restores the project default after an unrelated save");
         auto saved = ui::parse_settings("eawr-settings 1\nkeyboard.selection_hotkeys=0\nkey.SELECT_OWN_ALL=Ctrl+U\n").settings;
         ui::apply_selection_config(saved, filesystem.value());
@@ -275,10 +275,23 @@ void test_selection_layer_config() {
         saved.keys.clear();
         expect(ui::selection_key(saved, 0) == "Ctrl+Y", "SH-03 reset restores XML default");
     }
+    {
+        std::ofstream stream(root / "XML" / "SelectionControls.xml");
+        stream << "<Selection_Controls><Selection_Advisor_Enabled>No</Selection_Advisor_Enabled></Selection_Controls>";
+    }
+    const std::array off_mounts{vfs::MountSpec{"mod", root, "data", {}}};
+    auto off_files = vfs::Vfs::mount(off_mounts);
+    expect(static_cast<bool>(off_files), "explicit XML opt-out mounts");
+    if (off_files) {
+        ui::PlayerSettings untouched;
+        ui::apply_selection_config(untouched, off_files.value());
+        expect(!untouched.selection_hotkeys && !untouched.selection_hotkeys_authored,
+            "an explicit XML No overrides the new project default");
+    }
     testing::remove_temp_directory(root);
     vfs::Vfs absent;
     const auto defaults = ui::load_selection_config(absent);
-    expect(!defaults.enabled && defaults.actions[0].default_key == "Ctrl+Q"
+    expect(defaults.enabled && defaults.actions[0].default_key == "Ctrl+Q"
         && defaults.actions[1].default_key == "Q", "SH-03 absent config preserves merged defaults");
 }
 
@@ -294,7 +307,7 @@ void test_revised_settings() {
 
 void test_selection_hotkeys() {
     ui::PlayerSettings settings;
-    expect(!settings.selection_hotkeys && !ui::selection_action(settings, 'Q', false, false, false), "SH-01 defaults off");
+    expect(settings.selection_hotkeys && ui::selection_action(settings, 'Q', false, false, false) == 1, "SH-01 defaults on");
     settings.selection_hotkeys = true;
     settings.selection_hotkeys_authored = true;
     expect(!ui::selection_action(settings, 'Q', false, false, false, false, true)
@@ -396,9 +409,46 @@ bool has_note(const ui::SettingsLoad& load, const std::string& part) {
 
 void test_online_settings() {
     ui::NetworkSettings network;
+    const auto fresh = ui::parse_settings("").settings.network;
+    expect(fresh == network && fresh.online_host == "eaw.ernst.work" && fresh.online_port == 27020
+        && fresh.online_trust == "system" && fresh.online_pin.empty() && fresh.online_ca_file.empty()
+        && !fresh.online_relay_only && fresh.online_turn_provider == "auto",
+        "ST-N2: fresh settings load the public service with operating-system trust");
+    expect(!ui::validate_online_settings(network, true), "public default is configured and valid");
+    expect(ui::serialize_settings(ui::PlayerSettings{}).find("network.online_unconfigured=") == std::string::npos,
+        "ST-N2: configured service defaults carry no unconfigured marker");
+    const auto migrated = ui::parse_settings("eawr-settings 1\nnetwork.online_host=\nnetwork.online_trust=pin\n"
+        "network.online_port=0\nnetwork.online_pin=old\nnetwork.online_ca_file=old.pem\n"
+        "network.online_relay_only=1\nnetwork.online_turn_provider=own\nnetwork.port=5678\nnetwork.allow_upnp=0\n");
+    expect(migrated.settings.network.online_host == network.online_host
+        && migrated.settings.network.online_trust == "system" && migrated.settings.network.online_port == 27020
+        && migrated.settings.network.online_pin.empty() && migrated.settings.network.online_ca_file.empty()
+        && !migrated.settings.network.online_relay_only && migrated.settings.network.online_turn_provider == "auto",
+        "ST-N2: former empty-host defaults migrate all online fields");
+    expect(migrated.settings.network.port == 5678 && !migrated.settings.network.allow_upnp,
+        "ST-N2: empty-host migration leaves LAN choices alone");
+    expect(ui::parse_settings("eawr-settings 1\nnetwork.online_trust=pin\n").settings.network == network,
+        "ST-N2: an older file without online service fields gets the service defaults");
+    const auto custom = ui::parse_settings("eawr-settings 1\nnetwork.online_host=community.example\n"
+        "network.online_port=12345\nnetwork.online_trust=ca-file\nnetwork.online_ca_file=community.pem\n"
+        "network.online_relay_only=1\nnetwork.online_turn_provider=own\nnetwork.online_unconfigured=1\n");
+    expect(custom.settings.network.online_host == "community.example" && custom.settings.network.online_port == 12345
+        && custom.settings.network.online_trust == "ca-file" && custom.settings.network.online_ca_file == "community.pem"
+        && custom.settings.network.online_relay_only && custom.settings.network.online_turn_provider == "own",
+        "ST-N2: a player host and its service settings survive, even beside a stale opt-out marker");
+    ui::PlayerSettings off;
+    off.network.online_host.clear(); // Clearing the Network page's host field.
+    const auto off_text = ui::serialize_settings(off);
+    expect(off_text.find("network.online_unconfigured=1\n") != std::string::npos
+        && ui::parse_settings(off_text).settings == off
+        && ui::parse_settings(ui::serialize_settings(ui::parse_settings(off_text).settings)).settings == off,
+        "ST-N2: explicitly unconfigured survives repeated save/load");
+    expect(ui::parse_settings("eawr-settings 1\nnetwork.online_host=\nnetwork.online_unconfigured=0\n").settings.network == network,
+        "ST-N2: a false opt-out marker still migrates an empty host");
+    network.online_host.clear();
     expect(!ui::validate_online_settings(network), "empty project service can be saved");
     expect(ui::validate_online_settings(network, true)->code == "EAWR-NET-1745", "Online requires a configured service");
-    network.online_host = "service.example"; network.online_pin = std::string(64, 'a');
+    network.online_host = "service.example"; network.online_trust = "pin"; network.online_pin = std::string(64, 'a');
     expect(!ui::validate_online_settings(network, true), "explicit service pin validates");
     ui::PlayerSettings stored; stored.network = network; stored.network.online_relay_only = true; stored.network.online_turn_provider = "own";
     expect(ui::parse_settings(ui::serialize_settings(stored)).settings == stored, "service and relay-only choice round trip");
@@ -462,9 +512,9 @@ void test_fit_radar_settings() {
 }
 
 void test_space_pauses_settings() {
-    expect(!ui::PlayerSettings{}.gameplay.space_pauses_galactic, "Space starts the galactic tour by default (DEV-13)");
-    expect(!ui::parse_settings("eawr-settings 1\n").settings.gameplay.space_pauses_galactic,
-           "an absent setting keeps the original's Space");
+    expect(ui::PlayerSettings{}.gameplay.space_pauses_galactic, "Space pauses by default (DEV-13)");
+    expect(ui::parse_settings("eawr-settings 1\n").settings.gameplay.space_pauses_galactic,
+           "an absent setting enables Space pause");
     for (const bool enabled : {false, true}) {
         ui::PlayerSettings value;
         value.gameplay.space_pauses_galactic = enabled;
@@ -472,21 +522,44 @@ void test_space_pauses_settings() {
         expect(ui::parse_settings(ui::serialize_settings(value)).settings.gameplay.space_pauses_galactic == enabled,
                "Space-pauses keeps its value");
     }
-    expect(!ui::parse_settings("eawr-settings 1\ngameplay.space_pauses_galactic=invalid\n").settings.gameplay.space_pauses_galactic,
-           "an invalid setting keeps the original's Space");
+    expect(ui::parse_settings("eawr-settings 1\ngameplay.space_pauses_galactic=invalid\n").settings.gameplay.space_pauses_galactic,
+           "an invalid setting keeps the pause default");
     expect(ui::parse_settings("eawr-settings 1\ngameplay.space_pauses_galactic=1\n").settings.gameplay.space_pauses_galactic,
            "the stored value is read");
 }
 
 void test_animated_loading_background_settings() {
-    expect(!ui::PlayerSettings{}.gameplay.animated_loading_background, "loading animation defaults off");
-    expect(!ui::parse_settings("eawr-settings 1\n").settings.gameplay.animated_loading_background,
-           "older settings default loading animation off");
+    expect(ui::PlayerSettings{}.gameplay.animated_loading_background, "loading animation defaults on");
+    expect(ui::parse_settings("eawr-settings 1\n").settings.gameplay.animated_loading_background,
+           "a missing key enables loading animation");
     for (const bool enabled : {false, true}) {
         ui::PlayerSettings value;
         value.gameplay.animated_loading_background = enabled;
         expect(ui::parse_settings(ui::serialize_settings(value)).settings == value, "loading animation preference round trips");
     }
+}
+
+void test_tweaks_saved_choices() {
+    const auto missing = ui::parse_settings("eawr-settings 1\n").settings;
+    expect(missing.selection_hotkeys && !missing.selection_hotkeys_authored
+        && missing.gameplay.hover_owner_names == 1 && missing.gameplay.animated_loading_background
+        && missing.gameplay.space_pauses_galactic, "missing tweak keys receive the new defaults");
+    const auto saved = ui::parse_settings("eawr-settings 1\nkeyboard.selection_hotkeys=0\n"
+        "gameplay.hover_owner_names=0\ngameplay.animated_loading_background=0\n"
+        "gameplay.space_pauses_galactic=0\nkey.STOP=X\n").settings;
+    expect(!saved.selection_hotkeys && saved.selection_hotkeys_authored
+        && saved.gameplay.hover_owner_names == 0 && !saved.gameplay.animated_loading_background
+        && !saved.gameplay.space_pauses_galactic, "all four explicit OFF choices survive loading");
+    expect(ui::parse_settings(ui::serialize_settings(saved)).settings == saved,
+        "explicit OFF choices and custom bindings survive an unrelated save");
+    auto selection = saved;
+    ui::apply_selection_config(selection, vfs::Vfs{});
+    expect(!selection.selection_hotkeys, "authored selection OFF wins over the new XML fallback");
+    const auto legacy = ui::parse_settings("eawr-settings 1\ngameplay.hover_owner_names=-1\n").settings;
+    expect(!ui::hover_owner_names_enabled(legacy.gameplay, false)
+        && ui::hover_owner_names_enabled(legacy.gameplay, true), "stored legacy owner-name auto remains mode-dependent");
+    expect(!missing.camera_wasd && ui::selection_key(missing, 0) == "Ctrl+Q"
+        && ui::selection_key(missing, 1) == "Q" && missing.keys.empty(), "binding defaults and WASD stay unchanged");
 }
 
 void test_reinforcement_area_settings() {
@@ -1107,8 +1180,9 @@ int main() {
     test_animated_loading_background_settings();
     test_reinforcement_area_settings();
     test_defaults();
+    test_tweaks_saved_choices();
     expect(ui::hover_owner_names_enabled(ui::GameplaySettings{}, true), "hover names default on in multiplayer");
-    expect(!ui::hover_owner_names_enabled(ui::GameplaySettings{}, false), "hover names default off in solo");
+    expect(ui::hover_owner_names_enabled(ui::GameplaySettings{}, false), "hover names default on in solo");
     ui::PlayerSettings hover_settings;
     hover_settings.gameplay.hover_owner_names = false;
     expect(!ui::parse_settings(ui::serialize_settings(hover_settings)).settings.gameplay.hover_owner_names,

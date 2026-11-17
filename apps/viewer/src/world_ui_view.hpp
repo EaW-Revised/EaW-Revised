@@ -1,6 +1,7 @@
 #pragma once
 
 #include "live_session_view.hpp"
+#include "path_line_view.hpp"
 
 #include "eawr/data/xml_fwd.hpp"
 #include "eawr/presentation/camera/controller.hpp"
@@ -27,6 +28,7 @@
 #include <optional>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace eawr::presentation::godot_backend {
@@ -106,6 +108,8 @@ public:
         std::size_t icons{};
         std::size_t reticles{};
     };
+    // The path line's counters for the report (zero while the tag is off).
+    [[nodiscard]] const PathLineView* path_line_view() const noexcept { return path_lines_.get(); }
     [[nodiscard]] Drawn drawn() const {
         return {circles_drawn_, health_bars_, shield_bars_, icons_.size(), reticles_drawn_};
     }
@@ -113,6 +117,7 @@ public:
 private:
     void prepare_waypoints(const vfs::Vfs& filesystem, const std::shared_ptr<GodotShaderCache>& shaders);
     void draw_waypoints(const Frame& frame, godot::RID canvas_item);
+    void draw_path_lines(const Frame& frame);
     void draw_owner_name(const Frame& frame);
     godot::CanvasLayer* owner_layer_{};
     godot::RID owner_canvas_;
@@ -122,6 +127,11 @@ private:
     const ui::ObserverOwner* owner_shown_{};
     sim::EntityId owner_entity_{};
     std::unique_ptr<GodotRenderer> waypoint_renderer_;
+    // PL-01..PL-04: the selected-ship path line; present only while GameConstants sets
+    // ShouldDisplayPredictionPaths.
+    std::unique_ptr<PathLineView> path_lines_;
+    std::vector<ui::PathLineShip> path_line_ships_;
+    godot::Color path_line_texel_{1.0F, 1.0F, 1.0F, 1.0F};
     std::vector<sim::AssetId> waypoint_assets_;
     std::string waypoint_model_, waypoint_texture_;
     godot::Color waypoint_colour_{128.0F / 255.0F, 128.0F / 255.0F, 128.0F / 255.0F, 1.0F};
@@ -147,6 +157,7 @@ private:
         bool shielded{};
         bool selectable{};
         std::string icon;  // Icon_Name
+        bool team{}; // WSU-54: team brackets use the authored lift
         bool hero_head{}; // WU-47: named identity or Show_Hero_Head
         float layer_z{};   // Layer_Z_Adjust: the height of a combat cell point of this craft type (WU-26)
         float max_thrust{}; // WSU-34: the leader type accelerates the icon's world anchor
@@ -238,6 +249,8 @@ private:
     std::vector<godot::RID> circles_;  // RenderingServer instances of ring_mesh_
     godot::Ref<godot::ImageTexture> atlas_;
     std::map<std::string, godot::Rect2> atlas_regions_;
+    std::map<std::string, godot::Ref<godot::ImageTexture>> component_textures_;
+    [[nodiscard]] godot::RID art_texture(const std::string& name) const;
     std::map<std::string, godot::Ref<godot::ImageTexture>> reticles_;
     GroupText icon_group_;
     GroupText bracket_group_;
@@ -267,6 +280,28 @@ private:
     ui::CombatGrid grid_;
     ui::CombatIconGrid icon_grid_;
     float gripper_snap_distance_{};
+    struct AuthoredQuad final {
+        std::string_view role, texture;
+        std::array<float, 4> rect{};
+    };
+    std::vector<AuthoredQuad> identity_quads_;
+    struct BarGeometry final {
+        sim::EntityId entity{};
+        float x{}, y{}, width{}, height{}, lift{}, spacing{};
+    };
+    std::vector<BarGeometry> bar_geometry_;
+    ui::WorldUiSettings settings_;
+    float identity_scale_{};
+    std::string identity_blank_, identity_hover_, identity_selected_, identity_fallback_icon_, garrison_icon_;
+    std::array<float, 2> identity_upper_offset_{};
+    struct IdentityBar final {
+        float scale{};
+        std::array<float, 2> offset{};
+        std::vector<std::string> back, overlay;
+        int max_level{};
+        bool smooth{}, pixel_align{};
+    } identity_bar_;
+    void draw_identity_bar(godot::RID canvas_item, std::array<float, 2> centre, float fraction, float ui_scale);
     bool identity_pixel_align_{true};
     struct IdentityGeometry final {
         sim::EntityId entity{};

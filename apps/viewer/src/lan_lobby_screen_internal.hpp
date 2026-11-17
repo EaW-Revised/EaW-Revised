@@ -462,6 +462,7 @@ struct EawrLanLobby::Impl final {
     std::string rows_signature;
     std::string preview_path;
     std::string status;
+    model::StatusChatThrottle status_chat; // a counting status reaches chat once, not once per second
     std::string start_caption;
     std::string start_original_caption; // the host's Start caption while the button reads Cancel (#6045)
     std::string start_reason;

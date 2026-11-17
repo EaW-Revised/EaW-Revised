@@ -39,6 +39,7 @@ set(EAWR_UI_MODEL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/hero_tray.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/unit_cards.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/world_ui.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/path_lines.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/cursors.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/settings.cpp"
     ${EAWR_PLATFORM_UI_FILE_SOURCES}

@@ -71,7 +71,13 @@ void argument_tests(const std::filesystem::path& directory) {
     expect(!parse_arguments({"host", "--pin", "zz"}, directory), "bad pin refused");
     expect(!parse_arguments({"host", "--pin", pin, "--system-ca"}, directory), "pin and system CA exclude each other");
     expect(!parse_arguments({"host", "--timeout", "0"}, directory), "zero timeout refused");
+    const auto slow = parse_arguments({"host", "--address", "play.example.org", "--system-ca", "--prepare-ms", "1500"}, directory / "missing");
+    expect(slow && slow.value->prepare.count() == 1500, "a diagnostic prepare time is accepted");
+    expect(!parse_arguments({"host", "--prepare-ms", "60001"}, directory) && !parse_arguments({"host", "--prepare-ms", "-1"}, directory),
+        "the prepare time is bounded");
     expect(!parse_arguments({"host", "--frobnicate", "1"}, directory), "unknown option refused");
+    const auto content = parse_arguments({"host", "--content-root", (directory / "content").string()}, directory);
+    expect(content && content.value->content_root == directory / "content", "diagnostic content root is local input, independent of service settings");
     expect(!parse_arguments({"host", "--address", "x"}, directory / "missing"), "inline server without trust needs a server.conf");
     auto trust_from_file = parse_arguments({"host", "--config", conf.string(), "--address", "other.example.org"}, directory);
     expect(trust_from_file && trust_from_file.value->server.address == "other.example.org" && trust_from_file.value->server.certificate_name == "other.example.org" && trust_from_file.value->server.certificate_sha256.empty(),

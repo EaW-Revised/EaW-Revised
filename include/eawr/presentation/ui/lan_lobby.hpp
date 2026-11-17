@@ -143,6 +143,8 @@ enum class OnlineFailure : std::uint8_t {
 };
 [[nodiscard]] OnlineFailure classify_online_failure(std::string_view diagnostic_code) noexcept;
 [[nodiscard]] std::string_view online_failure_text(OnlineFailure failure) noexcept;
+// Build refusals retain their code and bounded identity detail; service errors keep curated text.
+[[nodiscard]] std::string online_failure_message(std::string_view diagnostic_code, std::string_view detail);
 // A wrong password and a cooldown leave the prompt open so the player can type again.
 [[nodiscard]] bool online_failure_keeps_prompt(OnlineFailure failure) noexcept;
 [[nodiscard]] std::string_view online_list_notice(bool service_failed, std::size_t rooms) noexcept;
@@ -275,6 +277,26 @@ private:
     std::size_t capacity_;
     std::size_t total_{};
     std::vector<ChatLine> lines_;
+};
+
+// A staging status that carries a running counter ("(12 s)", "Initial grace remaining: 9 s") changes every second; the
+// chat must not take a line per change. Two status texts are the same line when they differ only in their counters.
+inline constexpr std::uint64_t lan_status_chat_repeat_ms = 30'000;
+// Each counter becomes one '#' (a seconds count "12 s", the done part of "N of M"): the form two status texts are compared
+// by. Every other number (error codes, seat numbers) stays, so different messages never merge.
+[[nodiscard]] std::string status_counter_stem(std::string_view status);
+enum class StatusChatPost : std::uint8_t { none, first, repeat };
+// Call note() whenever the shown status text changes. A new line posts at once (`first`); the same line with new
+// numbers posts again (`repeat`) only when the screen does not show it in place and lan_status_chat_repeat_ms passed
+// since the last post. An empty status ends the line, so its next start posts again.
+class StatusChatThrottle {
+public:
+    [[nodiscard]] StatusChatPost note(std::string_view status, std::uint64_t now_ms, bool shown_in_place);
+    void reset() { stem_.clear(); posted_ms_ = 0; }
+
+private:
+    std::string stem_;
+    std::uint64_t posted_ms_{};
 };
 
 // A line the player sends: trimmed and cut to the edit box's limit; empty sends nothing.

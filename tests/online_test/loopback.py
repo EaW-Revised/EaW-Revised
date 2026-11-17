@@ -13,6 +13,17 @@ import time
 import uuid
 
 SKIP = 77
+# Both roles prepare for this long; the host must see the guest's Ready well before a prepare could end.
+PREPARE_MS = 1500
+READY_BOUND_MS = 1000
+
+
+def ready_latency_ms(host_log, join_log):
+    """Guest click to host-sees-Ready, from the two roles' machine-wide steady clocks (same machine)."""
+    clicked = re.search(r"ready_click_steady_ms=(\d+)", join_log)
+    seen = re.search(r"peer_ready_steady_ms=(\d+)", host_log)
+    assert clicked and seen, "ready timing lines missing: " + join_log + host_log
+    return int(seen.group(1)) - int(clicked.group(1))
 
 
 def main():
@@ -106,7 +117,9 @@ def main():
 
         # Wrong code: the join role fails with a message and exit 1.
         host_log, join_log = directory / "host.log", directory / "join.log"
-        host, host_out = start("host", host_log)
+        # Both roles prepare their match setup slowly, as a game install does; Ready must not wait for it.
+        slow = ("--prepare-ms", str(PREPARE_MS))
+        host, host_out = start("host", host_log, slow)
         head, code = [], None
         deadline = time.monotonic() + 40
         while code is None:
@@ -128,7 +141,7 @@ def main():
         assert refused.returncode == 1 and "RESULT: FAIL" in refused.stdout, refused.stdout + refused.stderr
 
         # The join role prompts for the code on stdin.
-        join, join_out = start("join", join_log)
+        join, join_out = start("join", join_log, slow)
         join.stdin.write(code + "\n")
         join.stdin.flush()
         host_text = "".join(head) + collect(host, host_out)
@@ -142,6 +155,8 @@ def main():
             assert "Route: direct" in text and "(confirmed by the peer)" in text, text
         hashes = [re.search(r"state hash: (\w{16})", t).group(1) for t in (host_text, join_text)]
         assert hashes[0] == hashes[1], hashes
+        ready_ms = ready_latency_ms(host_log.read_text(), join_log.read_text())
+        assert 0 <= ready_ms < READY_BOUND_MS, f"the host saw the guest's Ready {ready_ms} ms after the click (bound {READY_BOUND_MS} ms, prepare {PREPARE_MS} ms)"
 
         # Sanitized logs: no code, no peer address, no service address.
         for log in (host_log, join_log):
@@ -153,6 +168,7 @@ def main():
         assert not list(clean.iterdir()), "tool read/write smoke must keep the empty working directory clean"
         print("online test kit: host and join PASS over TLS+GNS, peer-confirmed tick-10 hashes, direct route, wrong code FAIL, sanitized logs")
         print("trust:", "pin" if pin_mode else "explicit CA file", "; system CA self-signed rejection passed")
+        print(f"ready latency: the host saw the guest's Ready {ready_ms} ms after the click (prepare {PREPARE_MS} ms, bound {READY_BOUND_MS} ms)")
         print("no-game-data runtime: empty cwd, game-root environment unset:", clean)
         return 0
     finally:

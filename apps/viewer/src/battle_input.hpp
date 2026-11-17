@@ -266,6 +266,7 @@ private:
     std::array<float, 2> viewport_{};
     std::vector<ui::BattleUnit> units_;
     ui::Selection selection_;
+    ui::WorldUiSettings world_ui_settings_;
     std::optional<std::uint64_t> controller_tick_;
     std::uint64_t replacement_tick_{};
     std::size_t card_slots_{};
@@ -349,11 +350,13 @@ private:
     std::optional<Drag> left_;
     std::optional<std::array<float, 2>> right_start_;
     bool right_double_click_{};
+    ui::Modifiers right_modifiers_{};
     std::optional<ui::PickRay> right_press_ray_; // O-2: the camera ray through the right press
     bool right_press_on_selected_{};             // O-2: the press was on a selected unit (facing-only drag)
     double right_held_seconds_{};
     bool right_press_allows_compass_{};
     std::unique_ptr<GodotRenderer> compass_renderer_;
+    std::shared_ptr<const sim::RenderSnapshot> empty_compass_snapshot_{std::make_shared<const sim::RenderSnapshot>()};
     std::unique_ptr<SpacePopulation> compass_population_;
     bool compass_drawn_{};
     std::uint64_t compass_frames_{};

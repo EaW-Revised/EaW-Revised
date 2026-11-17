@@ -43,6 +43,7 @@ void close_one_mesh_edge();
 void capacity_does_not_create_players();
 void nine_seat_staging(const std::vector<std::uint32_t>& owners);
 void editable_staging_team_rules();
+void ready_reaches_host_before_prepare();
 void advanced_options_three_peers();
 void ai_difficulty_two_peers();
 void seat_controls_three_peers(bool drop_during_formation = false);

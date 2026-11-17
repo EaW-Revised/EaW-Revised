@@ -178,6 +178,10 @@ public:
     net::PeerIndex self() const override { return tcp->self(); }
     std::uint32_t peer_count() const override { return tcp->peer_count(); }
     std::optional<net::LinkStats> link_stats(net::PeerIndex peer) const override { return tcp->link_stats(peer); }
+    std::size_t queued_received(net::PeerIndex peer) const override {
+        return tcp->queued_received(peer) + static_cast<std::size_t>(std::count_if(pending.begin(), pending.end(),
+            [peer](const auto& frame) { return frame.from == peer; }));
+    }
     std::uint64_t edge_identity(net::PeerIndex peer) const override { return tcp ? tcp->edge_identity(peer) : 0; }
     void fail_repair(net::PeerIndex peer, unsigned code) override { if (tcp) tcp->fail_repair(peer, code); }
 };
@@ -332,13 +336,13 @@ private:
 DrainWorkers& drain_workers();
 void finish_io(std::unique_ptr<TerminalIo> io);
 // Gate advancement without bypassing the core receive path while presentation holds.
-// Which input-delay mode a lobby game runs. Online (relayed) skirmish: the host proposes the delay from measured RTT (MP-05)
-// with a bounded hold on slow votes. TCP LAN keeps the fixed offered delay. A galactic room never gets it here: the campaign
-// session builds its own options (GalacticLanMatch), where adaptive timing stays off while recovery frontiers refuse it.
+// Both online modes hand this exact session to their live driver. Configure it before setup;
+// campaign recovery frontiers carry the agreed delay and refuse a pending timing transition.
 inline void configure_input_timing(net::SessionOptions& options, const bool online, const net::LobbyGameMode mode) {
-    if (!online || mode == net::LobbyGameMode::galactic) return;
+    if (!online) return;
     options.non_lan = true;
     options.adaptive_timing = net::AdaptiveTiming{.host = 0, .broadband = true, .rtt_ms = {}, .hold_on_expiry = true, .max_deferrals = 4};
+    options.adaptive_timing->responsive = mode == net::LobbyGameMode::galactic;
 }
 
 class GatedMonitor final : public net::SessionMonitor {
@@ -370,8 +374,12 @@ public:
     core::Result<void> on_input_delay(std::uint64_t delay, std::uint64_t retained) override {
         return monitor ? monitor->on_input_delay(delay, retained) : core::Result<void>::success();
     }
+    core::Result<void> on_activated_input_delay(std::uint64_t delay, std::uint64_t retained) override {
+        return monitor ? monitor->on_activated_input_delay(delay, retained) : core::Result<void>::success();
+    }
     core::Result<void> on_departure(net::PeerIndex peer, std::uint64_t tick) override { return monitor->on_departure(peer, tick); }
     bool ready_for_resync() const override { return monitor->ready_for_resync(); }
+    std::optional<std::uint64_t> deferred_resync_frontier() const override { return monitor->deferred_resync_frontier(); }
     core::Result<void> on_resync(std::uint64_t tick, std::string_view hash) override { return monitor->on_resync(tick, hash); }
     core::Result<void> on_reconnect(std::uint64_t tick, std::string_view hash, std::span<const net::PeerIndex> inactive) override {
         return monitor->on_reconnect(tick, hash, inactive);
@@ -660,6 +668,7 @@ public:
     explicit TcpLanMatch(std::filesystem::path root, std::uint64_t delay, bool smoke_progress, std::filesystem::path trace);
     bool lobby_enabled() const override;
     void configure_lobby(std::string name, std::uint32_t colour, std::vector<skirmish::SetupMap> maps, LanLobbyBuilder builder) override;
+    void configure_skirmish_content(std::function<core::Result<core::PreparedContentIdentity>()>) override;
     bool lobby_select(net::LobbySelection selection) override;
     bool lobby_assign(net::PeerIndex peer, net::LobbySelection selection) override;
     bool lobby_game(const skirmish::FixtureOptions& options) override;
@@ -691,21 +700,31 @@ private:
     void reset_lobby();
     void start_lobby();
     void pump_lobby(const skirmish::FixtureOptions& selected);
+    // Skirmish Ready is sent at once; the local match setup is prepared on a worker and gates Start instead.
+    void adopt_lobby_prepare();
+    core::Result<void> ensure_lobby_prepare(const net::LobbySnapshot& state);
     net::LobbyGame prepared_game_, preparing_game_;
+    std::optional<net::LobbyGame> prepare_failed_game_;
+    std::string prepare_failure_;
     std::string lobby_name_;
     std::uint32_t lobby_colour_{};
     net::PeerIndex lobby_self_{};
     std::vector<skirmish::SetupMap> lobby_maps_;
     LanLobbyBuilder lobby_builder_;
+    std::future<core::Result<core::PreparedContentIdentity>> admission_content_job_;
+    std::optional<core::PreparedContentIdentity> admission_content_;
+    std::function<core::Result<core::PreparedContentIdentity>()> admission_content_builder_;
+    std::future<core::Result<core::PreparedContentIdentity>> admission_recheck_job_;
+    std::uint64_t admission_recheck_revision_{};
     std::vector<std::string> factions_;
     std::shared_ptr<net::LobbySession> lobby_;
     std::shared_ptr<net::LobbyResult> lobby_result_;
     net::MessageTransport* lobby_stream_{};
     std::optional<tactical::TacticalSetup> prepared_setup_;
     std::future<core::Result<tactical::TacticalSetup>> preparing_;
-    std::uint64_t preparing_revision_{}, prepared_revision_{}, lobby_clock_{};
+    std::uint64_t lobby_clock_{};
     std::chrono::milliseconds link_timeout_{180'000}, setup_timeout_{180'000};
-    bool ready_pending_{}, lobby_setup_accepted_{}, lobby_room_committed_{};
+    bool lobby_setup_accepted_{}, lobby_room_committed_{};
     std::uint64_t identity_retry_at_ms_{};
     std::set<net::PeerIndex> removed_peers_, closing_peers_;
     std::map<net::PeerIndex, std::uint64_t> known_edges_;
@@ -864,6 +883,7 @@ private:
     bool smoke_progress_{};
     std::optional<std::uint64_t> last_progress_;
     std::optional<std::uint64_t> offered_delay_, waiting_since_;
+    std::string online_host_build_; // Directory observation; native hello independently verifies it.
     std::optional<std::uint64_t> net_stall_at_;
     mutable std::mutex mutex_;
     LanView view_;

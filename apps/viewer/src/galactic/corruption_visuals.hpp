@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <optional>
 #include <set>
 #include <span>
 #include <utility>
@@ -137,6 +138,7 @@ struct CorruptionStyle final {
     float radius{}, endpoint_offset{}, grow_seconds{}, path_width{};
     std::array<float, 4> path_colour{};
     Vec3 path_offset;
+    std::optional<double> link_distance; // MaximumFleetMovementDistance: the planet graph's proximity limit (WGM-16)
     std::string path_texture;
 };
 struct CorruptionLineGeometry final {
@@ -198,9 +200,12 @@ private:
 
 class CorruptionVisuals final {
 public:
-    struct Work final { std::size_t route_visits{}, neighbor_visits{}, adjacency_rebuilds{}; };
+    struct Work final { std::size_t route_visits{}, neighbor_visits{}, adjacency_rebuilds{}, pair_tests{}; };
     [[nodiscard]] Work work() const { return work_; }
-    void update(const GalaxyView& view, const CorruptionPublication& publication) {
+    // `link_distance` is the planet graph's proximity limit (WGP-20 adjacency is the galactic path graph, WGM-16: every pair
+    // within the authored movement distance or joined by a route); empty links named routes only.
+    void update(const GalaxyView& view, const CorruptionPublication& publication,
+        const std::optional<double> link_distance = {}) {
         work_ = {};
         attachments.clear(); connections.clear(); one_shots.clear();
         if (publication.seat != view.local.seat) { reset(); return; }
@@ -234,7 +239,12 @@ public:
         // WGP-20/21: one shared pair represents both reciprocal records. Retain
         // its original emitter owner/generation until either endpoint removes it.
         auto& adjacent = adjacent_; auto& neighbors = neighbors_;
-        bool changed = routes_.size() != view.routes.size();
+        bool changed = routes_.size() != view.routes.size() || link_distance_ != link_distance;
+        if (!changed && link_distance) {
+            changed = sites_.size() != view.planets.size();
+            for (std::size_t index = 0; !changed && index < sites_.size(); ++index)
+                changed = sites_[index].first != view.planets[index].id || !(sites_[index].second == view.planets[index].position);
+        }
         std::size_t route_index{};
         for (const auto& route : view.routes) {
             ++work_.route_visits;
@@ -243,14 +253,31 @@ public:
         }
         if (changed) {
             ++work_.adjacency_rebuilds;
-            routes_.clear(); adjacent.clear(); neighbors.clear(); linked_.clear();
+            routes_.clear(); adjacent.clear(); neighbors.clear(); linked_.clear(); sites_.clear();
+            link_distance_ = link_distance;
+            const auto connect = [&](const ObjectId from, const ObjectId to) {
+                if (from == to) return;
+                if (adjacent.emplace(std::min(from, to), std::max(from, to)).second) {
+                    neighbors[from].push_back(to); neighbors[to].push_back(from);
+                    linked_.try_emplace(from, false); linked_.try_emplace(to, false);
+                }
+            };
             for (const auto& route : view.routes) {
                 routes_.emplace_back(route.from, route.to);
-                if (route.from == route.to) continue;
-                if (adjacent.emplace(std::min(route.from, route.to), std::max(route.from, route.to)).second) {
-                    neighbors[route.from].push_back(route.to); neighbors[route.to].push_back(route.from);
-                    linked_.try_emplace(route.from, false); linked_.try_emplace(route.to, false);
-                }
+                connect(route.from, route.to);
+            }
+            if (link_distance) {
+                // The pair test runs once per graph rebuild, like the sim graph's (WGM-16), never per presented frame.
+                const double limit = *link_distance * *link_distance;
+                for (const auto& planet : view.planets) sites_.emplace_back(planet.id, planet.position);
+                for (std::size_t first = 0; first < view.planets.size(); ++first)
+                    for (std::size_t second = first + 1; second < view.planets.size(); ++second) {
+                        ++work_.pair_tests;
+                        const double dx = static_cast<double>(view.planets[first].position.x) - view.planets[second].position.x;
+                        const double dy = static_cast<double>(view.planets[first].position.y) - view.planets[second].position.y;
+                        const double dz = static_cast<double>(view.planets[first].position.z) - view.planets[second].position.z;
+                        if (dx*dx + dy*dy + dz*dz <= limit) connect(view.planets[first].id, view.planets[second].id);
+                    }
             }
         }
         std::erase_if(lines_, [&](const auto& pair) {
@@ -313,6 +340,8 @@ private:
     CorruptionIndex<CorruptionPlanetFact> facts_;
     CorruptionIndex<PlanetView> present_;
     std::vector<std::pair<ObjectId, ObjectId>> routes_;
+    std::vector<std::pair<ObjectId, Vec3>> sites_; // the planets the proximity pairs were last built from
+    std::optional<double> link_distance_;
     std::set<std::pair<ObjectId, ObjectId>> adjacent_;
     std::map<ObjectId, std::vector<ObjectId>> neighbors_;
     std::map<ObjectId, bool> linked_;

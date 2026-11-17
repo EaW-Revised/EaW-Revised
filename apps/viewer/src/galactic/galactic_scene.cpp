@@ -16,6 +16,7 @@
 #include "texture_volumes.hpp"
 #include "viewer_path.hpp"
 #include "model_preview.hpp"
+#include "planet_thumbnail_model.hpp"
 
 #include "eawr/core/sha256.hpp"
 #include "eawr/core/text.hpp"
@@ -984,7 +985,7 @@ bool GalacticMode::State::service_corruption(const double elapsed) {
         effect_event_cursor = events.through;
     }
     for (auto& fact : publication.planets) galactic_view::configure_corruption(fact, content->corruption_parameters);
-    corruption_visuals.update(*galaxy, publication);
+    corruption_visuals.update(*galaxy, publication, content->corruption_style.link_distance);
     const auto mounted = filesystem ? filesystem : (battle_content ? battle_content->filesystem : nullptr);
     if (!mounted || !audio_catalog) return true;
     std::array<bool, 4> occupied_layers{};
@@ -1185,5 +1186,88 @@ void GalacticMode::State::service_selection_cursor() {
         if (instance_planets.at(instance.entity_id) == selection_cursor_id) instance.fixed_transform = selection_cursor.matrix;
     renderer->submit(std::make_shared<const sim::RenderSnapshot>(galaxy->tick, scenes[0].instances));
 }
+
+namespace galactic_detail {
+
+// PS-08: the search pictures decode a planet model by the galaxy upload's rules above (material plan, texture chain, idle clip
+// and its zoom-rotation sync), without its read-ahead, census or load notes; a refusal is the model's cause instead.
+PreparedPlanetModel prepare_planet_thumbnail_model(const vfs::Vfs& filesystem, const std::string& logical_path,
+                                                   const presentation::lighting::Environment& environment) {
+    PreparedPlanetModel result;
+    result.path = logical_path;
+    auto taken = scene::read_hash_decode_model(filesystem, logical_path);
+    if (!taken.model) { result.cause = core::format_diagnostic(taken.model.error()); return result; }
+    const assets::Model& model = taken.model.value();
+    const auto levels = eawr::viewer::model_preview::unit_levels(model);
+    const auto chosen = eawr::viewer::model_preview::unit_surfaces(model, levels);
+    if (auto bind_player = animation::Player::create(model)) {
+        if (auto bind = bind_player.value().sample({0.0F, animation::PlaybackMode::clamp, 0.0F})) {
+            if (auto bounds = eawr::viewer::model_preview::posed_bounds(model, chosen, bind.value().bones))
+                result.bounds = std::array<float, 6>{bounds.value->min[0], bounds.value->min[1], bounds.value->min[2],
+                    bounds.value->max[0], bounds.value->max[1], bounds.value->max[2]};
+        }
+    }
+    std::optional<assets::Animation> idle_clip;
+    const std::string idle_path = logical_path.substr(0, logical_path.find_last_of('.')) + "_idle_00.ala";
+    if (filesystem.stat(idle_path)) {
+        // As on the map, a refused idle clip is a degradation: the model draws without it.
+        if (auto clip = assets::load_animation(filesystem, idle_path)) {
+            idle_clip = std::move(clip.value());
+            synchronize_zoom_rotation(*idle_clip);
+        }
+    }
+    const space::EnvironmentEffectInputs inputs = galaxy_effect_inputs(environment);
+    std::map<std::string, assets::Texture> textures;
+    const auto load_texture = [&](const std::string_view declared, const scene::TextureProcessing processing) -> std::optional<assets::Texture> {
+        const auto path = probe_texture(filesystem, declared);
+        if (!path) return std::nullopt;
+        const std::string key = ComposeTextureCache::key(*path, processing);
+        if (const auto cached = textures.find(key); cached != textures.end()) return cached->second;
+        auto loaded = assets::load_texture(filesystem, *path);
+        if (!loaded) return std::nullopt;
+        static_cast<void>(apply_galactic_chain(loaded.value(), processing));
+        auto normalized = space::normalize_texture(loaded.value());
+        if (!normalized) return std::nullopt;
+        return textures.emplace(key, std::move(normalized.value())).first->second;
+    };
+    std::string last_skip;
+    for (const space::SceneSurface& surface : space::scene_surfaces(model)) {
+        if (!galactic_view::surface_drawn(eawr::viewer::model_preview::mesh_levels(surface.mesh_name).alt, 0)) continue;
+        SurfaceMaterial planned = plan_surface_material(model, surface, inputs);
+        if (!planned.skip.empty()) { last_skip = std::move(planned.skip); continue; }
+        PreparedPlanetSurface item;
+        item.geometry = model;
+        item.geometry.meshes = {model.meshes[surface.mesh_index]};
+        item.geometry.meshes.front().submeshes = {model.meshes[surface.mesh_index].submeshes[surface.submesh_index]};
+        item.material = planned.material;
+        std::optional<assets::Texture> primary;
+        bool missing = false;
+        for (const auto& [binding, name] : planned.declared) {
+            auto texture = load_texture(name, declared_processing(planned, surface.route, binding));
+            if (!texture) { missing = true; last_skip = binding + " " + name + " does not resolve"; break; }
+            if (ieq(binding, "BaseTexture")) primary = std::move(texture);
+            else item.extra.push_back({binding, std::move(*texture)});
+        }
+        if (missing || !primary) { if (!missing) last_skip = "the surface binds no BaseTexture"; continue; }
+        item.primary = std::move(*primary);
+        if (item.material.route == MaterialRoute::legacy_effect) {
+            const auto normal_maps = normal_map_names(planned);
+            for (auto& family : family_binding_textures(item.material, [&](const std::string_view name) {
+                     return load_texture(name, family_processing(planned, name, normal_maps));
+                 }))
+                item.extra.push_back(std::move(family));
+        }
+        item.effect_clock = surface.route == space::SceneRoute::planet || legacy::reads_effect_time(item.material);
+        if (legacy::reads_effect_time(item.material)) item.material.bindings.push_back({"eawr_effect_time", 0.0F});
+        if (idle_clip) {
+            if (auto player = animation::Player::create(item.geometry, &*idle_clip)) item.idle.emplace(std::move(player.value()));
+        }
+        result.surfaces.push_back(std::move(item));
+    }
+    if (result.surfaces.empty()) result.cause = last_skip.empty() ? std::string("the model has no overview surface") : last_skip;
+    return result;
+}
+
+} // namespace galactic_detail
 
 } // namespace eawr::presentation::godot_backend

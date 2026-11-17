@@ -273,8 +273,9 @@ TacticalSnapshot::TacticalSnapshot(
     std::vector<GarrisonTimerView> garrison_timers,
     std::vector<BeaconState> beacons,
     std::optional<BattleControllerPolicy> controllers,
-    std::vector<TswView> tsw_views)
-    : completed_tick_(completed_tick), players_(std::move(players)), instances_(std::move(instances)),
+    std::vector<TswView> tsw_views,
+    std::vector<SnapshotPredictedPath> predicted_paths)
+    : predicted_paths_(std::move(predicted_paths)), completed_tick_(completed_tick), players_(std::move(players)), instances_(std::move(instances)),
       events_(std::move(events)), combat_events_(std::move(combat_events)), projectiles_(std::move(projectiles)),
       outcome_(outcome), spinning_(std::move(spinning)), squadron_targets_(std::move(squadron_targets)),
       squadrons_(std::move(squadrons)), economy_(std::move(economy)), pads_(std::move(pads)), quits_(std::move(quits)),
@@ -292,6 +293,11 @@ TacticalSnapshot::TacticalSnapshot(
         return std::lower_bound(instances_.begin(), instances_.end(), id,
             [](const TacticalInstance& instance, const EntityId value) { return instance.entity_id < value; });
     };
+    // Only the enabled sidecar has rows. Units killed during the tick publish no plan.
+    std::erase_if(predicted_paths_, [&](const SnapshotPredictedPath& path) {
+        const auto unit = find(path.entity);
+        return !path.plan || unit == instances_.end() || unit->entity_id != path.entity;
+    });
     for (const auto& squadron : squadrons_) {
         const auto container = find(squadron.container);
         if (container == instances_.end() || container->entity_id != squadron.container) continue;
@@ -324,6 +330,12 @@ std::span<const CombatEvent> TacticalSnapshot::combat_events() const noexcept { 
 std::span<const Projectile> TacticalSnapshot::projectiles() const noexcept { return projectiles_; }
 std::span<const AbilitySpawnState> TacticalSnapshot::ability_spawns() const noexcept { return ability_spawns_; }
 const std::optional<BattleOutcome>& TacticalSnapshot::outcome() const noexcept { return outcome_; }
+const PredictedPathHandle* TacticalSnapshot::predicted_path(const EntityId entity) const noexcept {
+    const auto found = std::lower_bound(predicted_paths_.begin(), predicted_paths_.end(), entity,
+        [](const SnapshotPredictedPath& row, const EntityId id) { return row.entity < id; });
+    return found != predicted_paths_.end() && found->entity == entity ? &found->plan : nullptr;
+}
+
 std::span<const SpinningCraft> TacticalSnapshot::spinning() const noexcept { return spinning_; }
 std::span<const SquadronTarget> TacticalSnapshot::squadron_targets() const noexcept { return squadron_targets_; }
 std::span<const Squadron> TacticalSnapshot::squadrons() const noexcept { return squadrons_; }

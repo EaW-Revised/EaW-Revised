@@ -29,6 +29,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <span>
 #include <string>
@@ -400,6 +401,49 @@ namespace session_detail {
 
 } // namespace session_detail
 
+TacticalSession::PredictionPathWork TacticalSession::prediction_path_work() const noexcept {
+    return {impl_->predicted_path_visits, impl_->predicted_path_builds, impl_->predicted_paths.size()};
+}
+
+// PL-01: a ship that flies a move plan with a locomotor profile; fighters and units at rest have none.
+bool TacticalSession::Impl::flies_plan(const LiveUnit& unit) const {
+    return unit.motion && unit.motion->kind == MotionKind::path && unit.motion->nodes.size() >= 2
+        && motion.find(unit.state.type_id) != nullptr;
+}
+
+// PL-01: the shared copy of the unit's plan when the cache holds one with the same stamp. Every planner sets
+// the start tick when it stores nodes, so a plan that stands has the stamp it was copied with: start tick,
+// target, node count and the second and last node. O(1) per moving ship per tick.
+std::shared_ptr<const PredictedPath> TacticalSession::Impl::cached_plan(const LiveUnit& unit) const {
+    const auto found = predicted_paths.find(unit.state.entity_id);
+    if (found == predicted_paths.end()) return {};
+    const auto& entry = found->second;
+    const auto& copy = entry.path->nodes;
+    const auto& nodes = unit.motion->nodes;
+    const auto same_node = [](const PredictedPathNode& a, const PathNode& b) {
+        return a.frame == b.frame && a.position == b.position && a.yaw == b.yaw && a.speed == b.speed;
+    };
+    const bool same = entry.start_tick == unit.motion->start_tick && entry.target == unit.motion->target
+        && copy.size() == nodes.size() && same_node(copy[1], nodes[1]) && same_node(copy.back(), nodes.back());
+    return same ? entry.path : nullptr;
+}
+
+// PL-01: copies the plan once and keeps it for the snapshots that follow. Serial only.
+std::shared_ptr<const PredictedPath> TacticalSession::Impl::remember_plan(const LiveUnit& unit) {
+    auto path = std::make_shared<PredictedPath>();
+    path->nodes.reserve(unit.motion->nodes.size());
+    for (const auto& node : unit.motion->nodes) path->nodes.push_back({node.frame, node.position, node.yaw, node.speed});
+    ++predicted_path_builds;
+    return predicted_paths.insert_or_assign(unit.state.entity_id,
+        session_detail::SessionStorePublication::PredictedPathEntry{std::move(path), unit.motion->start_tick, unit.motion->target})
+        .first->second.path;
+}
+
+// PL-01: drops the plans of units that no longer exist. Serial, every 128 ticks.
+void TacticalSession::Impl::sweep_plans() {
+    std::erase_if(predicted_paths, [this](const auto& entry) { return !handles.contains(entry.first); });
+}
+
 void TacticalSession::Impl::publish_staged(const std::vector<LiveUnit>& live, std::vector<Event> events,
     std::vector<CombatEvent> combat_events) {
         std::vector<UnitState> states;
@@ -431,11 +475,19 @@ void TacticalSession::Impl::publish_staged(const std::vector<LiveUnit>& live, st
             if (unit.waypoints) waypoint_queues_present |= !unit.waypoints->points.empty();
             instances.push_back(std::move(instance));
         }
+        std::vector<SnapshotPredictedPath> paths;
+        if (prediction_paths) {
+            predicted_path_visits += live.size();
+            for (const auto& unit : live) if (flies_plan(unit)) {
+                auto path = cached_plan(unit);
+                paths.push_back({unit.state.entity_id, {path ? std::move(path) : remember_plan(unit)}});
+            }
+        }
         auto tsw_rows = tsw_views(instances);
         current_snapshot = std::make_shared<const TacticalSnapshot>(completed_tick, snapshot_players,
             std::move(instances), std::move(events), std::move(combat_events), projectiles, outcome,
             std::vector<SpinningCraft>{}, std::vector<SquadronTarget>{}, squadrons, economy_views(ledgers, shares), pad_views(), quits,
-            losses, productions, manual_clock_views(), economy_cues, ability_spawns, retreat_views(), garrison_timer_views(), beacons, setup.controllers, std::move(tsw_rows));
+            losses, productions, manual_clock_views(), economy_cues, ability_spawns, retreat_views(), garrison_timer_views(), beacons, setup.controllers, std::move(tsw_rows), std::move(paths));
     }
 
 std::vector<GarrisonTimerView> TacticalSession::Impl::garrison_timer_views() const {

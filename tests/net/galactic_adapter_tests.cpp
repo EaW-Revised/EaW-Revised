@@ -1276,7 +1276,8 @@ void forced_mismatch_bundles() {
                 expect(file->bytes == serial[peer].at(report.encoding_tick),
                     where + "session.bin equals the fresh serial encoding of its tick, byte for byte");
                 if (divergence < 15) expect(report.encoding_tick < report.detected_at, where + "an early divergence keeps the earlier baseline");
-                else expect(report.encoding_tick == report.detected_at, where + "a late divergence keeps the newest encoding");
+                // The asynchronous check may detect up to K ticks after the exchange tick it compared.
+                else expect(report.encoding_tick == report.detected_at / 10 * 10, where + "a late divergence keeps the newest encoding");
             }
         }
     }

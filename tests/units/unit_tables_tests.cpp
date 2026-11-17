@@ -160,6 +160,7 @@ void indexed_collision_geometry() {
     for (const auto hardpoint : {units::no_index, std::uint32_t{1}}) {
         append_u32(original_bytes, 6);
         for (const char ch : std::string_view{"shield"}) original_bytes.push_back(static_cast<std::uint8_t>(ch));
+        original_bytes.push_back(1); // v8: both independently expanded meshes are pose-visible
         append_u32(original_bytes, hardpoint);
         append_u32(original_bytes, static_cast<std::uint32_t>(original.size()));
         for (const auto& triangle : original) for (const auto& p : triangle)

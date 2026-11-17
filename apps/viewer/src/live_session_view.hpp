@@ -360,6 +360,10 @@ public:
     [[nodiscard]] const battle::BattleStart* start_data() const noexcept { return start_ ? &*start_ : nullptr; }
     // The tick the last frame drew (fractional between ticks).
     [[nodiscard]] double presented_tick() const noexcept { return presented_tick_; }
+    // WU-60: the local player just ordered an attack (or a targeted ability) on `target`: flash it, and every member
+    // of its squadron. Presentation only.
+    void flash_order_target(sim::EntityId target);
+    [[nodiscard]] std::uint64_t order_flashes_started() const noexcept { return order_flashes_started_; }
     struct ClockTrace final {
         double newest{}, before{}, after{}, advance{}, delta{}, rate{}, target_rate{};
         bool valid{}, running{};
@@ -924,6 +928,13 @@ private:
     std::uint64_t shield_flash_samples_{};
     std::array<float, 3> max_shield_flash_scale_{1.0F, 1.0F, 1.0F};
     std::map<sim::EntityId, double> shield_flash_start_;
+    // WU-60: the local player's attack order flashes its target (a squadron: every member). Per craft or ship, the
+    // presented tick the flash started at; empty (no per-frame work) while no flash runs.
+    presentation_constants::OrderFlash order_flash_constants_;
+    std::map<sim::EntityId, double> order_flash_start_;
+    std::uint64_t order_flashes_started_{};
+    std::uint64_t order_flash_samples_{};
+    float max_order_flash_multiplier_{1.0F};
     // WSD-02/WSD-08: each SELF_DESTRUCT unit's light effect (a red linear pulse over twice the
     // countdown, a colour flash for the remaining share on a cancel), from the frozen ability
     // snapshot only. Dropped with the unit; the report keeps what it showed.

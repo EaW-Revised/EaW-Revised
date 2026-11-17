@@ -112,13 +112,23 @@ Ref<ImageTexture> WorldUiView::standalone(const vfs::Vfs& filesystem, const std:
 
 std::optional<Rect2> WorldUiView::atlas_region(const std::string& name) const {
     const auto found = atlas_regions_.find(lower(name));
-    if (found == atlas_regions_.end()) return std::nullopt;
-    return found->second;
+    if (found != atlas_regions_.end()) return found->second;
+    const auto standalone = component_textures_.find(lower(name));
+    if (standalone == component_textures_.end() || standalone->second.is_null()) return std::nullopt;
+    return Rect2(0, 0, static_cast<float>(standalone->second->get_width()), static_cast<float>(standalone->second->get_height()));
+}
+
+RID WorldUiView::art_texture(const std::string& name) const {
+    const auto found = component_textures_.find(lower(name));
+    return found != component_textures_.end() ? found->second->get_rid() : atlas_.is_valid() ? atlas_->get_rid() : RID{};
 }
 
 void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live,
                           const std::shared_ptr<GodotShaderCache>& shaders) {
+    identity_quads_.clear(); // report views borrow the style strings refreshed below
     prepare_waypoints(filesystem, shaders);
+    settings_ = ui::world_ui_settings(filesystem);
+    unresolved_.insert(unresolved_.end(), settings_.diagnostics.begin(), settings_.diagnostics.end());
     owner_shown_ = nullptr;
     owner_roster_ = live.observer_owners();
     owner_lines_.clear();
@@ -187,15 +197,47 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
         read_text("st_control_group", bracket_group_);
         if (const auto* component = components.value().catalog.find("st_grab_bar")) {
             identity_pixel_align_ = component->flag(Field::pixel_align, true);
+            identity_scale_ = component->number(Field::scale).value_or(ui::HudBar{}.scale);
+            if (!component->number(Field::scale)) unresolved_.push_back("st_grab_bar Scale missing/invalid; shared component default used");
+            const auto first = [&](Field field) {
+                const auto names = component->list(field);
+                return names.empty() ? std::string{} : names.front();
+            };
+            identity_blank_ = first(Field::blank_texture_name);
+            identity_hover_ = first(Field::mouse_over_texture_name);
+            identity_selected_ = first(Field::selected_texture_name);
+            identity_fallback_icon_ = first(Field::icon_texture_name);
+            if (const auto offset = component->vec2(Field::upper_effect_offset)) identity_upper_offset_ = {offset->x, offset->y};
+            else unresolved_.push_back("st_grab_bar Upper_Effect_Offset missing/invalid; zero offset used");
             // WU-43: active squadron art belongs to the separate lower effect quad.
             if (const auto offset = component->vec2(Field::lower_effect_offset)) squadron_ability_offset_ = {offset->x, offset->y};
-        }
+        } else unresolved_.push_back("st_grab_bar missing; identity frame disabled");
+        if (const auto* component = components.value().catalog.find("st_health_bar")) {
+            identity_bar_.scale = component->number(Field::scale).value_or(ui::HudBar{}.scale);
+            if (!component->number(Field::scale)) unresolved_.push_back("st_health_bar Scale missing/invalid; shared component default used");
+            if (const auto offset = component->vec2(Field::offset)) identity_bar_.offset = {offset->x, offset->y};
+            const auto back = component->list(Field::bar_texture_name);
+            identity_bar_.back.assign(back.begin(), back.end());
+            const auto overlay = component->list(Field::bar_overlay_name);
+            identity_bar_.overlay.assign(overlay.begin(), overlay.end());
+            identity_bar_.max_level = component->integer(Field::max_bar_level).value_or(ui::HudBar{}.max_level);
+            if (!component->integer(Field::max_bar_level)) unresolved_.push_back("st_health_bar Max_Bar_Level missing/invalid; shared component default used");
+            identity_bar_.smooth = component->flag(Field::smooth_bar);
+            identity_bar_.pixel_align = component->flag(Field::pixel_align, true);
+            if (identity_bar_.scale <= 0.0F || identity_bar_.max_level < 0 || identity_bar_.overlay.empty())
+                unresolved_.push_back("st_health_bar missing/invalid art, Scale or Max_Bar_Level; bar disabled");
+        } else unresolved_.push_back("st_health_bar missing; bar disabled");
+        if (const auto* component = components.value().catalog.find("st_garrison_icon")) {
+            const auto icons = component->list(Field::icon_texture_name);
+            if (!icons.empty()) garrison_icon_ = icons.front();
+            else unresolved_.push_back("st_garrison_icon Icon_Texture_Name missing; flag disabled");
+        } else unresolved_.push_back("st_garrison_icon missing; flag disabled");
         if (const auto* component = components.value().catalog.find("st_ability_icon")) {
             bracket_icon_scale_ = component->number(Field::scale).value_or(1.0F);
             // WU-44: the additional active bracket slot uses the lower effect too.
             if (const auto offset = component->vec2(Field::lower_effect_offset)) second_ability_offset_ = {offset->x, offset->y};
         }
-    }
+    } else unresolved_.push_back("world UI components: " + core::format_diagnostic(components.error()));
     // WU-01 (debug build; Factions.xml, ShadowBlobMaterials.xml): the local player's
     // faction names its space selection material; the ring is that material's second texture,
     // tinted by the faction's Selection_Blob_RGBA.
@@ -281,6 +323,20 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
         unresolved_.push_back("MT_CommandBar: " + core::format_diagnostic(atlas.error()));
     }
 
+    // Named component art may be a mod's loose texture rather than an atlas entry.
+    std::set<std::string> attempted_art;
+    const auto cache_art = [&](const std::string& name) {
+        if (name.empty() || atlas_region(name) || !attempted_art.insert(lower(name)).second) return;
+        auto stem = name;
+        const auto dot = stem.find_last_of('.');
+        if (dot != std::string::npos) stem.resize(dot);
+        if (auto texture = standalone(filesystem, stem); texture.is_valid()) component_textures_[lower(name)] = texture;
+    };
+    for (const auto* name : {&identity_blank_, &identity_hover_, &identity_selected_, &garrison_icon_})
+        cache_art(*name);
+    for (const auto& name : identity_bar_.back) cache_art(name);
+    for (const auto& name : identity_bar_.overlay) cache_art(name);
+
     const units::UnitTables* tables = live.tables();
     const sim::tactical::CombatTable* combat = live.combat();
     struct BlobMaterial { std::string texture; bool modulate{}; };
@@ -308,6 +364,7 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
         const sim::tactical::TypeId id = battle::type_id(type.id);
         TypeUi ui_type;
         ui_type.selectable = type.selectable;
+        ui_type.team = type.ability_team_dispatch;
         ui_type.bar_admitted = type.bar_admitted;
         ui_type.name = type.id;
         ui_type.shielded = type.shielded;
@@ -352,6 +409,7 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
             ui_type.bounds_scale = number(tag(object.value(), "GUI_Bounds_Scale")).value_or(1.0F);
             ui_type.hide_health_bar = yes(tag(object.value(), "GUI_Hide_Health_Bar"));
             ui_type.icon = lower(ui::object_icon_name(object.value(), catalog));
+            cache_art(ui_type.icon.empty() ? identity_fallback_icon_ : ui_type.icon);
             ui_type.hero_head = ui::hero_world_identity(type.named_hero, yes(tag(object.value(), "Show_Hero_Head")));
         } else {
             unresolved_.push_back("type " + type.id + ": " + core::format_diagnostic(object.error()));
@@ -404,12 +462,19 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
 
 void WorldUiView::prepare_waypoints(const vfs::Vfs& filesystem, const std::shared_ptr<GodotShaderCache>& shaders) {
     waypoint_assets_.clear();
+    path_lines_.reset();
+    path_line_texel_ = Color(1.0F, 1.0F, 1.0F, 1.0F);
+    bool prediction_paths = false;
     if (auto constants = data::load_document(filesystem, "data/xml/gameconstants.xml")) {
         for (const auto& node : constants.value().root.children) {
             const auto name = lower(node.name);
             if (name == "waypointflagmodelname" || name == "waypointlinetexturename") {
                 data::tag_trace::used(node);
                 (name == "waypointflagmodelname" ? waypoint_model_ : waypoint_texture_) = trim(node.raw_text);
+            } else if (name == "shoulddisplaypredictionpaths") {
+                // PL-01: the one switch of the selected-ship path line; retail data has it false.
+                data::tag_trace::used(node);
+                prediction_paths = yes(trim(node.raw_text));
             } else if (name == "waypointlinelanddashlength" || name == "waypointlinelandgaplength"
                 || name == "waypointlinelanddashvelocity") {
                 const auto value = number(trim(node.raw_text));
@@ -427,7 +492,13 @@ void WorldUiView::prepare_waypoints(const vfs::Vfs& filesystem, const std::share
         if (image.is_valid()) {
             const auto pixel = image->get_image()->get_pixel(0, 0);
             waypoint_colour_ *= pixel; // OF-05: line-list UVs are all (0,0).
+            path_line_texel_ = pixel;  // PL-04: the path line reads the same texel
         }
+    }
+    if (prediction_paths) {
+        path_lines_ = std::make_unique<PathLineView>(*host_);
+        // PL-04: the constant colour (128, 255, 128, 128) times the line texture's first texel.
+        path_lines_->set_colour(Color(128.0F / 255.0F, 1.0F, 128.0F / 255.0F, 128.0F / 255.0F) * path_line_texel_);
     }
     if (waypoint_model_.empty()) return;
     auto loaded = assets::load_model(filesystem, "data/art/models/" + waypoint_model_);

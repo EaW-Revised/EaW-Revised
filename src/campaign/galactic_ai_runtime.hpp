@@ -7,6 +7,7 @@
 #include "eawr/campaign/galactic_story_scripts.hpp"
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
+#include "eawr/core/degradation_ledger.hpp"
 #include "../script/foc/galactic_ai_actions.hpp"
 #include "../script/foc/galactic_ai_goal_state.hpp"
 #include "../script/foc/galactic_ai_selection_content.hpp"
@@ -22,6 +23,7 @@
 #include <vector>
 
 namespace eawr::campaign {
+class GalacticAiWorldReader;
 // Immutable selected stock closure. No live pointers or saved state belong here.
 struct GalacticAiRuntimeSetup {
     script::foc::galactic_ai::LifecycleSetup lifecycle;
@@ -82,6 +84,11 @@ void bind_galactic_ai_actor_changes(script::foc::galactic_ai::NativeActions&,
 [[nodiscard]] core::Result<std::vector<script::foc::galactic_ai::PlayerSelection>> select_live_galactic_ai_players(
     const data::galactic::GalacticData&, const CampaignSetupPlan&, const script::foc::ai::AiData&,
     std::string_view authored_difficulty);
+// Whether the selection above has any player to select: an active AI seat whose faction acquires a controller (a playable
+// faction's Basic_AI under multiplayer rules, or the campaign's AI_Player_Control pair; GCMP-AI-01/03). A seat whose
+// faction acquires none (Neutral, or an ambient faction the campaign assigns nothing) runs no native AI. A seat the
+// selection would refuse (missing campaign, faction or playable Basic_AI) counts, so that refusal is still reported.
+[[nodiscard]] bool galactic_ai_selects_any_player(const data::galactic::GalacticData&, const CampaignSetupPlan&);
 // Co-op on single-player rules (D5): with exactly one human seat, every peer agrees on that seat's faction as "local".
 // Multiplayer rules, or any other human count, give no shared local player.
 [[nodiscard]] std::optional<sim::galactic::PlayerId> shared_story_local_player(const CampaignSetupPlan&);
@@ -111,27 +118,48 @@ struct GalacticAiDigestWork {
     std::map<std::string, std::uint64_t, std::less<>> external_encodes;
     std::uint64_t native_bytes{};
 };
-// #6338: the one warning line per retired galactic AI provider (faction, tick, diagnostic). A retired provider is permanent for the
+// The one error and presentation notice per retired galactic AI provider (faction, tick, diagnostic). A retired provider is permanent for the
 // campaign, so this is how a passive faction is explained in test output and the viewer log. Observer only: never saved, hashed or read by a
 // decision. The count of retirements itself is the manager's saved state (`Manager::lifecycle().retired_providers`).
 struct GalacticAiRetirementLog {
+    struct Pending {
+        script::authoritative::ServiceObserverNotice notice;
+        core::Diagnostic cause;
+    };
     mutable std::mutex mutex;
     std::vector<std::string> lines;
     std::set<sim::galactic::PlayerId> logged;
-    std::map<sim::galactic::PlayerId, std::string> pending;
+    std::map<sim::galactic::PlayerId, Pending> pending;
     // Records the line of a retirement as it happens, without writing anything: the retirement runs inside the AI's own work.
-    void record(const sim::galactic::PlayerId player, std::string line) {
+    void record(const sim::galactic::PlayerId player, std::string_view faction, std::uint64_t tick,
+        std::string_view reason, const core::Diagnostic& fault) {
         const std::lock_guard lock(mutex);
-        if (!logged.contains(player)) pending.try_emplace(player, std::move(line));
+        if (logged.contains(player) || pending.contains(player)) return;
+        Pending entry;
+        entry.notice.text = "AI player " + (faction.empty() ? std::to_string(player) : std::string(faction)) + " stopped after an internal error";
+        const auto context = "player=" + std::to_string(player) + " faction=" + (faction.empty() ? std::string("unknown") : std::string(faction))
+            + " tick=" + std::to_string(tick) + " reason=" + std::string(reason) + " diagnostic=" + fault.code + ": " + fault.message;
+        entry.notice.diagnostic.code = "EAWR-GCAI-PROVIDER-0001";
+        entry.notice.diagnostic.severity = core::Severity::error;
+        entry.notice.diagnostic.message = entry.notice.text + "; " + context;
+        entry.cause = fault; entry.cause.severity = core::Severity::error;
+        entry.cause.message = "AI internal error; " + context;
+        pending.emplace(player, std::move(entry));
     }
-    // Writes the recorded lines, once per player, to the process error stream (the viewer log and test output), from the serial side
-    // of the tick that follows the AI's work.
-    void flush() {
+    // Called only after the whole native attempt commits: failed attempts discard their per-tick reports.
+    // Writes each player's error once to stderr and the ledger, and forwards the notice through the committed report to the viewer.
+    void flush(script::authoritative::ServiceReport& report) {
         const std::lock_guard lock(mutex);
-        for (auto& [player, line] : pending) {
+        for (auto& [player, entry] : pending) {
             if (!logged.insert(player).second) continue;
+            const auto line = core::format_diagnostic(entry.notice.diagnostic);
             std::fprintf(stderr, "%s\n", line.c_str());
-            lines.push_back(std::move(line));
+            lines.push_back(line);
+            const auto source = core::degradation::campaign_source();
+            const auto object = "native galactic player " + std::to_string(player);
+            core::degradation::record(entry.notice.diagnostic.code, source, object, entry.notice.diagnostic.message, core::Severity::error);
+            core::degradation::record(entry.cause.code, source, object, entry.cause.message, core::Severity::error);
+            report.observer_notices.push_back(std::move(entry.notice));
         }
         pending.clear();
     }
@@ -166,6 +194,13 @@ struct GalacticAiApplyTally {
     // {galactic, processing, no auto-resolve}. No production writer exists (pause, battle and held ticks arrive through the world's tick),
     // so the second count must stay 0; a future writer then fails a gate instead of writing AI-owned state from the sim unnoticed.
     std::uint64_t admission_reads{}, admission_non_default{};
+    // Async step 3 (a): the window body reads the world through its window input (galactic_ai_world_reader.hpp). window_input_reads
+    // counts those reads; window_input_mismatches counts reads whose value differs from the live session's at that moment (the
+    // observation oracle only, otherwise 0: equal today, where the body runs inline; the measure of late-inline drift later);
+    // body_live_reads counts reads of the live session the runtime makes while a window input is open, outside the world's own
+    // apply and the lane barrier's named session calls (must stay 0); lane_session_calls counts those named calls (the window's
+    // overlay, identity reservation, barrier and output phase on the session: they move to the lane in step 3c).
+    std::uint64_t window_input_reads{}, window_input_mismatches{}, body_live_reads{}, lane_session_calls{};
 };
 struct GalacticAiRuntimeView {
     std::weak_ptr<const script::foc::ai::Engine> engine;
@@ -199,11 +234,12 @@ struct GalacticAiRuntimeProviders {
     // Unset: no prepass; every table builds in the player's chain.
     std::function<core::Result<script::foc::galactic_ai::ExecutionRouteInput>(
         sim::galactic::PlayerId, const sim::galactic::GalacticSnapshot&, const World&, const Engine&)> execution_input_read_only;
+    // Async step 3 (a): connectivity reads the world through the runtime's reader (its window input inside an AI window).
     std::function<core::Result<script::foc::ai::GalacticConnectivity>(
-        const sim::galactic::GalacticSession&, World&, Engine&, const sim::PartitionExecutor&)> prepare_connectivity;
+        const GalacticAiWorldReader&, World&, Engine&, const sim::PartitionExecutor&)> prepare_connectivity;
     using ConnectivityPublication = std::shared_ptr<const script::foc::ai::GalacticConnectivity>;
     std::function<core::Result<ConnectivityPublication>(
-        const sim::galactic::GalacticSession&, World&, Engine&, const sim::PartitionExecutor&)> prepare_connectivity_publication{};
+        const GalacticAiWorldReader&, World&, Engine&, const sim::PartitionExecutor&)> prepare_connectivity_publication{};
     std::function<core::Result<void>(GameSession&, sim::galactic::GalacticSession&, Actions&, std::shared_ptr<Engine>,
         std::shared_ptr<World>, std::function<const sim::PartitionExecutor*()>)> bind_actions;
     struct ChildScripts {

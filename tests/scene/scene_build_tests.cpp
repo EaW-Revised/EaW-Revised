@@ -387,6 +387,7 @@ void scene_contracts() {
     const auto height_bytes = ted({
         {"EAWR_SCENE_BACKGROUND", std::array<float, 3>{3.0F, 4.0F, -4500.0F}, {336.0F, 336.0F, 0.0F}},
         {"EAWR_SCENE_BAD_HEIGHT", std::array<float, 3>{0.0F, 0.0F, 0.0F}, {}},
+        {"EAWR_SCENE_LOW_ORBIT", std::array<float, 3>{3.0F, 4.0F, -4500.0F}, {0.0F, 345.0F, 0.0F}},
     });
     auto height_source = source;
     height_source.stored_size = height_bytes.size();
@@ -405,6 +406,14 @@ void scene_contracts() {
         expect(!elevated.placements[1].transform
                    && has(elevated.placements[1], Cause::transform_nonfinite, "Layer_Z_Adjust"),
                "invalid authored height fails closed");
+        // A backdrop planet is a SpaceProp variant (SpaceProp_LowOrbit): LZ-01 raises it like any SpaceProp and its
+        // tilted placement keeps the full three-axis matrix (pitch 345 puts sin(pitch) * scale in row 2, column 1).
+        const auto& low_orbit = elevated.placements[2];
+        expect(low_orbit.layer_z_adjust_raw == -2500 * Fixed::scale && low_orbit.transform
+                   && low_orbit.transform->matrix.rows[2][3].raw() == -7000 * Fixed::scale
+                   && low_orbit.transform->matrix.rows[2][1].raw() < -Fixed::scale / 2
+                   && low_orbit.transform->matrix.rows[2][1].raw() > -Fixed::scale,
+               "a SpaceProp_LowOrbit planet takes LZ-01 and keeps its three-axis tilt");
         height_map.value().kind = eawr::assets::MapKind::land;
         const auto land = eawr::scene::build(height_input);
         expect(land.placements[0].layer_z_adjust_raw == 0 && land.placements[0].transform

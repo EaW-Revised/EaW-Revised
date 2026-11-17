@@ -1148,14 +1148,14 @@ const Fixture& m2_fixture() {
 bool is_map_object_placement(const MapPlacement& placement) noexcept {
     // WHZ-01: authored hazard participation admits space props to the simulation.
     return (!placement.marker || placement.reinforcement_point) && !placement.type.empty()
-        && (placement.space_hazard || !detail::iequals(placement.element, "SpaceProp"));
+        && (placement.space_hazard || !core::is_space_prop_element(placement.element));
 }
 
 std::vector<std::string> placed_force_types(const std::vector<MapPlacement>& placements) {
     std::vector<std::string> types;
     for (const MapPlacement& placement : placements) {
         if (!is_map_object_placement(placement) || placement.space_hazard
-            || detail::iequals(placement.element, "SpaceProp")) continue;
+            || core::is_space_prop_element(placement.element)) continue;
         if (roster_disabled_types().contains(type_id(placement.type))) continue;
         types.push_back(placement.type);
     }

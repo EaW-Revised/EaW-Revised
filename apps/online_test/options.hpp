@@ -27,9 +27,13 @@ struct Options {
     std::string code; // join only; prompted for when empty
     std::filesystem::path config_path;
     std::filesystem::path log_path;
+    std::filesystem::path content_root; // Optional diagnostic effective XML/Lua view; never sent as identity.
     bool turn_only{};
     std::string turn_provider{"auto"}; // auto, own or cloudflare: which relay provider's TURN servers to use
     std::chrono::seconds timeout{90};
+    // --prepare-ms: the local match prepare takes this long (a game install's prepare takes seconds), so the
+    // logged Ready latency shows whether Ready waits for it.
+    std::chrono::milliseconds prepare{0};
 };
 
 template<class T> struct Parsed {
@@ -43,7 +47,7 @@ template<class T> struct Parsed {
 // trust (`system-ca` or `pin:<64 hex>`), ca_file (tests only).
 [[nodiscard]] Parsed<ServerConfig> parse_server_conf(std::string_view text);
 // argv[1] is the role; then --config <file>, --code <XXXX>, --log <file>, --address,
-// --port, --certificate-name, --pin <hex>, --system-ca, --ca-file, --turn-only, --timeout <s>.
+// --port, --certificate-name, --pin <hex>, --system-ca, --ca-file, --turn-only, --timeout <s>, --prepare-ms <ms>.
 // Without --address/--ca-file the server comes from --config, else server.conf next to the
 // executable. Explicit flags override the file.
 [[nodiscard]] Parsed<Options> parse_arguments(const std::vector<std::string>& arguments,

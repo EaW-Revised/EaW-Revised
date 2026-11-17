@@ -1725,9 +1725,13 @@ void EawrOptionsScreen::defaults_page() {
         for (const auto command : model::selection_commands) draft_.keys.erase(std::string(command));
         break;
     case Page::network:
-        draft_.network.online_host.clear(); draft_.network.online_port = defaults.network.online_port;
-        draft_.network.online_trust = defaults.network.online_trust; draft_.network.online_pin.clear();
-        draft_.network.online_ca_file.clear(); draft_.network.online_relay_only = false;
+        draft_.network.online_host = defaults.network.online_host;
+        draft_.network.online_port = defaults.network.online_port;
+        draft_.network.online_trust = defaults.network.online_trust;
+        draft_.network.online_pin = defaults.network.online_pin;
+        draft_.network.online_ca_file = defaults.network.online_ca_file;
+        draft_.network.online_relay_only = defaults.network.online_relay_only;
+        draft_.network.online_turn_provider = defaults.network.online_turn_provider;
         break;
     default: return;
     }

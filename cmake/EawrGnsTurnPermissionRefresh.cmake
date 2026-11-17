@@ -6,15 +6,16 @@ include_guard(GLOBAL)
 # at half its lifetime but sends CreatePermission only when the set of permitted peer addresses changes. RFC 5766 gives
 # a permission a fixed five-minute lifetime, so about 300 s after the first remote candidate a relayed connection stops
 # forwarding in BOTH directions while GNS still reports Connected (the connection timeout is minutes). The patch re-sends
-# CreatePermission for the whole permitted list every min(120 s, allocation lifetime / 2), which also lets a test server
-# with a short lifetime exercise it. It also repeats a Refresh or CreatePermission that the server answers with an error
+# CreatePermission for each permitted IP independently every min(120 s, allocation lifetime / 2), so a denied candidate
+# cannot poison another IP's refresh. A short server lifetime exercises it. It also repeats a Refresh or CreatePermission
+# that the server answers with an error
 # carrying a fresh nonce (438 Stale Nonce, 401): upstream treats any reply with a header as success, so one stale nonce
 # ended the refresh chain and the allocation lapsed after its lifetime. Upstream master (d534c19a, 2026-10-02) has no
 # fix; drop this file when a pin bump contains one (docs/gns-transport.md, "TURN permission refresh").
 #
 # Applied after FetchContent_Populate. Every anchor must match exactly the expected number of times, so a changed pin
 # fails the configure loudly instead of silently running unpatched.
-set(EAWR_GNS_TURN_PERMISSION_PATCH_ID "tpr3")
+set(EAWR_GNS_TURN_PERMISSION_PATCH_ID "tpr4")
 
 function(_eawr_gns_count_occurrences text needle out_var)
     string(LENGTH "${needle}" _needle_length)
@@ -30,6 +31,117 @@ function(_eawr_gns_count_occurrences text needle out_var)
         string(SUBSTRING "${_rest}" ${_next} -1 _rest)
     endwhile()
     set(${out_var} ${_count} PARENT_SCOPE)
+endfunction()
+
+# A server may reject any one candidate (CGNAT, a reserved range, or its own IP). A bundled request fails in its
+# entirety, so keep each address's successful refresh and retry deadline independent. Apply after diagnostics so
+# this upgrades warm tpr3 sources as well as pristine ones, without changing the upstream candidate/LAN policy.
+function(eawr_gns_patch_turn_permission_isolation source_dir)
+    set(_directory "${source_dir}/src/steamnetworkingsockets/clientlib")
+    set(_cpp_path "${_directory}/steamnetworkingsockets_ice_client.cpp")
+    set(_hdr_path "${_directory}/steamnetworkingsockets_ice_client.h")
+    file(READ "${_cpp_path}" _cpp)
+    file(READ "${_hdr_path}" _hdr)
+    string(REPLACE "\r\n" "\n" _cpp "${_cpp}")
+    string(REPLACE "\r\n" "\n" _hdr "${_hdr}")
+    set(_marker "EAWR-PATCH turn-permission-isolation")
+    string(FIND "${_cpp}" "${_marker}" _cpp_marked)
+    string(FIND "${_hdr}" "${_marker}" _hdr_marked)
+    if(NOT _cpp_marked EQUAL -1 AND NOT _hdr_marked EQUAL -1)
+        return()
+    endif()
+    if(NOT _cpp_marked EQUAL -1 OR NOT _hdr_marked EQUAL -1)
+        message(FATAL_ERROR "GNS TURN permission isolation patch: partly patched source; use pristine sources")
+    endif()
+
+    set(_fields [=[SteamNetworkingMicroseconds m_usecPermissionRefreshEvery = 120000000;
+        // EAWR-PATCH turn-permission-isolation: append-only session IP list, independent per-allocation deadlines.
+        std_vector<SteamNetworkingMicroseconds> m_vecEawrPermissionAfter;]=])
+    _eawr_gns_replace_anchor(_hdr "ice_client.h"
+        "SteamNetworkingMicroseconds m_usecPermissionRefreshEvery = 120000000;" "${_fields}" 1)
+    set(_request_field [=[int m_nTURNPermissionRevision;
+        int m_nEawrPermissionIndex = -1; // EAWR-PATCH turn-permission-isolation]=])
+    _eawr_gns_replace_anchor(_hdr "ice_client.h" "int m_nTURNPermissionRevision;" "${_request_field}" 1)
+
+    # Replace only the old permission scheduling gate; allocation maintenance retains priority.
+    set(_old_gate [=[        int nSessionRevision = bIsIPv4 ? m_nTURNPermissionRevisionIPv4 : m_nTURNPermissionRevisionIPv6;
+
+        // EAWR-PATCH turn-permission-refresh: a due refresh makes the whole permitted list stale again.
+        if ( pIntf->m_usecPermissionRefreshAfter != 0 && usecNow >= pIntf->m_usecPermissionRefreshAfter )
+        {
+            pIntf->m_usecPermissionRefreshAfter = 0;
+            pIntf->m_nTURNPermissionRevision = 0;
+        }
+        if ( pIntf->m_nTURNPermissionRevision >= nSessionRevision || vecPermitted.empty() )
+            continue;]=])
+    set(_new_gate [=[        // EAWR-PATCH turn-permission-isolation: a denied IP must never poison another IP's permission.
+        pIntf->m_vecEawrPermissionAfter.resize( vecPermitted.size(), 0 );
+        int nPeerIndex = 0;
+        while ( nPeerIndex < len( vecPermitted ) && pIntf->m_vecEawrPermissionAfter[nPeerIndex] > usecNow )
+            ++nPeerIndex;
+        if ( nPeerIndex == len( vecPermitted ) )
+            continue;]=])
+    _eawr_gns_replace_anchor(_cpp "ice_client.cpp" "${_old_gate}" "${_new_gate}" 1)
+    set(_old_loop [=[        for ( const CIPAddress &addr : vecPermitted )
+        {
+            if ( nPeerAttrs >= k_nMaxPeers )
+                break;]=])
+    set(_new_loop [=[        {
+            const CIPAddress &addr = vecPermitted[nPeerIndex];]=])
+    _eawr_gns_replace_anchor(_cpp "ice_client.cpp" "${_old_loop}" "${_new_loop}" 1)
+    _eawr_gns_replace_anchor(_cpp "ice_client.cpp" "const int k_nMaxPeers = 10;" "const int k_nMaxPeers = 1;" 1)
+    _eawr_gns_replace_anchor(_cpp "ice_client.cpp" "const int k_nMaxAuthAttrs = 13; // k_nMaxPeers + 3"
+        "const int k_nMaxAuthAttrs = 4; // one peer + 3 auth attributes" 1)
+    _eawr_gns_replace_anchor(_cpp "ice_client.cpp"
+        "// k_nMaxPeers is 10, and we have 10 slots; bump is safe because we stop at k_nMaxPeers earlier."
+        "// Each request carries exactly one peer IP, followed by three auth attributes." 1)
+    _eawr_gns_replace_anchor(_cpp "ice_client.cpp"
+        "pRequest->m_nTURNPermissionRevision = nSessionRevision;"
+        "pRequest->m_nEawrPermissionIndex = nPeerIndex;" 1)
+    _eawr_gns_replace_anchor(_cpp "ice_client.cpp"
+        "pIntf->m_nTURNPermissionRevision = 0;\n    // Leave m_bRelayFailed"
+        "pIntf->m_nTURNPermissionRevision = 0;\n    pIntf->m_vecEawrPermissionAfter.clear();\n    // Leave m_bRelayFailed" 1)
+
+    # The old callback falsely advanced its success state for a non-auth error such as 403. Replace it as a unit:
+    # each reply belongs to one IP, auth challenges retry immediately, and refusals/timeouts retry after 30 s.
+    set(_callback_start "void CSteamNetworkingICESession::STUNRequestCallback_CreatePermission( const RecvSTUNPktInfo_t &info )")
+    set(_callback_end "void CSteamNetworkingICESession::STUNRequestCallback_ServerReflexiveCandidate(")
+    _eawr_gns_count_occurrences("${_cpp}" "${_callback_start}" _starts)
+    _eawr_gns_count_occurrences("${_cpp}" "${_callback_end}" _ends)
+    if(NOT _starts EQUAL 1 OR NOT _ends EQUAL 1)
+        message(FATAL_ERROR "GNS TURN permission isolation patch: callback boundaries changed")
+    endif()
+    string(FIND "${_cpp}" "${_callback_start}" _start)
+    string(FIND "${_cpp}" "${_callback_end}" _end)
+    math(EXPR _length "${_end} - ${_start}")
+    string(SUBSTRING "${_cpp}" ${_start} ${_length} _old_callback)
+    set(_callback [=[void CSteamNetworkingICESession::STUNRequestCallback_CreatePermission( const RecvSTUNPktInfo_t &info )
+{
+    ICESessionInterface * const pIntf = info.m_pRequest->m_pInterface;
+    pIntf->m_pPendingSTUNRequest = nullptr;
+    const int nPeerIndex = info.m_pRequest->m_nEawrPermissionIndex;
+    Assert( nPeerIndex >= 0 && nPeerIndex < len( pIntf->m_vecEawrPermissionAfter ) );
+    const int nReply = info.m_pHeader != nullptr ? EawrTURNErrorReply( pIntf, info ) : 2;
+    pIntf->m_vecEawrPermissionAfter[nPeerIndex] = info.m_usecNow
+        + ( nReply == 0 ? pIntf->m_usecPermissionRefreshEvery : nReply == 1 ? 0 : 30000000 );
+    if ( nReply == 2 )
+    {
+        const bool bActiveRelay = m_pSelectedCandidatePair != nullptr
+            && m_pSelectedCandidatePair->m_localCandidate.IsRelay()
+            && m_pSelectedCandidatePair->m_localCandidate.m_pInterface == pIntf
+            && static_cast<const CIPAddress &>( m_pSelectedCandidatePair->m_remoteCandidate.m_addr )
+                == ( pIntf->m_boundAddr.GetType() == k_EIPTypeV4 ? m_vecTURNPermittedIPv4 : m_vecTURNPermittedIPv6 )[nPeerIndex];
+        SpewWarning( "ICE: TURN CreatePermission failed%s for peer IP %d (%s); retry in 30 s, other permissions continue\n",
+            bActiveRelay ? " for ACTIVE RELAY" : "", nPeerIndex,
+            info.m_pHeader != nullptr ? "server refusal" : "timeout" );
+    }
+}
+
+]=])
+    _eawr_gns_replace_anchor(_cpp "ice_client.cpp" "${_old_callback}" "${_callback}" 1)
+    file(WRITE "${_cpp_path}" "${_cpp}")
+    file(WRITE "${_hdr_path}" "${_hdr}")
+    message(STATUS "GameNetworkingSockets: carried per-IP TURN permission isolation patch applied")
 endfunction()
 
 function(_eawr_gns_replace_anchor text_var file_label anchor replacement expected_count)

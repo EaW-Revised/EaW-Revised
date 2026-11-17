@@ -730,17 +730,16 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
         auto blocks_ = all_blocks();
         auto tf = tf_id ? taskforces_.find(*tf_id) : taskforces_.end();
         const std::uint64_t id = block_id(command.issuer, command.sequence);
-        if (operation == "galactic_desire_unsupported" && arguments.size() == 1 && player->galactic) {
-            core::LoadNote note; note.code = "EAWR-LOAD-1400";
-            // The runtime collector/publisher deduplicates by code and object,
-            // so successful commits warn once per authored plan type.
-            note.object = "GiveDesireBonus:" + plans_.at(plan->definition).name;
-            note.tag = "GiveDesireBonus"; note.phase = core::LoadPhase::runtime;
-            note.action = core::LoadAction::runtime_degraded;
-            note.diagnostic_code = std::string(authoritative::codes::unsupported_api);
-            note.message = "GiveDesireBonus timed goal bonus is unavailable";
-            note.effective_value = "no bonus applied; nil returned; plan continues without waiting";
-            report.load_notes.push_back(std::move(note));
+        if (operation == "galactic_desire_poll" && arguments.size() == 3 && player->galactic) {
+            const auto requested = handle_id(arguments[1], handle_block);
+            const auto* state = requested ? block(*requested) : nullptr;
+            const auto text = text_of(arguments[2]);
+            std::uint64_t expected{};
+            const auto parsed = std::from_chars(text.data(), text.data() + text.size(), expected);
+            if (!state || !state->desire_request || state->kind != Block::Kind::galactic_desire
+                || parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+                return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "invalid desire poll request"));
+            if (auto applied = apply_desire_bonus(*state->desire_request, expected); !applied) return applied;
             continue;
         }
         if (operation == "galactic_budget_flush" && arguments.size() == 2 && player->galactic) {
@@ -799,6 +798,19 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
         if (tf != taskforces_.end()) native_record_changed(native_all_players, 21, tf->first);
         native_record_changed(native_all_players, 23, id);
         native_records_changed(0, {27, 29, 30});
+        if (operation == "galactic_desire" && arguments.size() == 6 && player->galactic) {
+            const auto selected = handle_id(arguments[1], foc::handle_player);
+            const auto target = handle_id(arguments[3], handle_ai_target);
+            const auto bonus = number_of(arguments[4]), seconds = number_of(arguments[5]);
+            if (!selected || *selected > std::numeric_limits<tactical::PlayerId>::max() || !target || !bonus || !seconds)
+                return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "invalid desire search request"));
+            auto request = make_desire_request(static_cast<tactical::PlayerId>(*selected), text_of(arguments[2]), *target, *bonus, *seconds);
+            if (!request) return core::Result<void>::failure(request.error());
+            Block block; block.id = id; block.instance = command.issuer; block.kind = Block::Kind::galactic_desire;
+            block.desire_request = std::move(request).value();
+            if (player->blocks.emplace(id, std::move(block)).second) index_runtime(runtime_index_.blocks, id, player->player);
+            continue;
+        }
         if (operation == "galactic_starbase" && arguments.size() == 3 && player->galactic) {
             const auto planet = handle_id(arguments[1], handle_game_object);
             const auto level = number_of(arguments[2]);

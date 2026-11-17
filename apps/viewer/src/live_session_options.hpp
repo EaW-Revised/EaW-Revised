@@ -187,6 +187,9 @@ struct Options final {
     std::uint32_t speed_step{ui::default_speed_step};
     // True when --eawr-live-speed chose the step; otherwise a player's saved setting may (#2927).
     bool speed_step_given{};
+    // --eawr-live-max-rate <ticks/s>: test knob, a ceiling on this viewer's real-time pacing (0 = none), so a fixture can
+    // stand in for a machine that cannot reach a requested shared rate. Pacing only; what a tick does is unchanged.
+    std::uint32_t max_rate{};
     std::filesystem::path hashes_path;                    // --eawr-live-hashes <csv>
     std::filesystem::path replay_path;                    // --eawr-live-replay-out <file>
     // Skirmish battle saves (docs/checkpoint-format.md "Skirmish battle saves"), solo local battles with the AI:

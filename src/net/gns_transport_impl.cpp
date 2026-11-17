@@ -70,7 +70,8 @@ ISteamNetworkingConnectionSignaling* GnsTransport::Impl::ReceiveSignal::OnConnec
 void GnsTransport::Impl::ReceiveSignal::SendRejectionSignal(const SteamNetworkingIdentity&, const void*, int) {}
 
 #endif
-GnsTransport::Impl::Impl(bool host, GnsOptions config) : options(std::move(config)), hosting(host), decoder(options, host) {}
+GnsTransport::Impl::Impl(bool host, GnsOptions config) : options(std::move(config)), hosting(host), decoder(options, host),
+    delivery(options.queue_bytes, options.queue_frames) {}
 
 PeerIndex GnsTransport::Impl::remote() const { return peer_slot; }
 
@@ -99,7 +100,7 @@ std::vector<SteamNetworkingConfigValue_t> GnsTransport::Impl::config() const {
     derived_stun.clear();
     if (options.stun_servers.empty() && turn && !options.turn_only) derived_stun = stun_list_for(turn->uri);
     const std::string& stun = options.stun_servers.empty() ? derived_stun : options.stun_servers;
-    std::vector<SteamNetworkingConfigValue_t> values(5 + (turn ? 4 : 0) + (stun.empty() ? 0 : 1));
+    std::vector<SteamNetworkingConfigValue_t> values(7 + (turn ? 4 : 0) + (stun.empty() ? 0 : 1));
     values[0].SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged,
         reinterpret_cast<void*>(Runtime::changed));
     values[1].SetInt32(k_ESteamNetworkingConfig_TimeoutInitial, static_cast<std::int32_t>(options.handshake_timeout.count()));
@@ -108,16 +109,20 @@ std::vector<SteamNetworkingConfigValue_t> GnsTransport::Impl::config() const {
     const auto send_buffer = pair_link ? std::min<std::size_t>(options.queue_bytes, 2 * 1024 * 1024) : options.queue_bytes;
     values[3].SetInt32(k_ESteamNetworkingConfig_SendBufferSize,
         static_cast<std::int32_t>(std::max<std::size_t>(send_buffer, 4096)));
-    // #6130: the default 256 KiB/s ceiling caps even loopback checkpoint transfers.
-    // Keep SendRateMin at its default so congestion control can reduce the rate on slower links.
-    // The ceiling produces no traffic: bounded queues and the 64-packet flush budget still apply.
+    // Keep bulk transfers fast on low-latency links, without forcing a 256 KiB/s
+    // floor on WAN paths. The pinned provider initializes its estimate from RTT;
+    // it does not implement adaptive congestion control after initialization.
     constexpr std::int32_t transfer_rate = 64 * 1024 * 1024;
     values[4].SetInt32(k_ESteamNetworkingConfig_SendRateMax, transfer_rate);
+    values[5].SetInt32(k_ESteamNetworkingConfig_SendRateMin, 64 * 1024);
+    // UDP payload, excluding IP/UDP headers. Fits a 1280-byte path, including
+    // IPv6 headers and TURN channel overhead, without IP fragmentation.
+    values[6].SetInt32(k_ESteamNetworkingConfig_MTU_PacketSize, 1200);
     if (turn) {
-        values[5].SetString(k_ESteamNetworkingConfig_P2P_TURN_ServerList, turn->uri.c_str());
-        values[6].SetString(k_ESteamNetworkingConfig_P2P_TURN_UserList, turn_users.c_str());
-        values[7].SetString(k_ESteamNetworkingConfig_P2P_TURN_PassList, turn_passwords.c_str());
-        values[8].SetInt32(k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable, options.turn_only
+        values[7].SetString(k_ESteamNetworkingConfig_P2P_TURN_ServerList, turn->uri.c_str());
+        values[8].SetString(k_ESteamNetworkingConfig_P2P_TURN_UserList, turn_users.c_str());
+        values[9].SetString(k_ESteamNetworkingConfig_P2P_TURN_PassList, turn_passwords.c_str());
+        values[10].SetInt32(k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable, options.turn_only
             ? k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Relay : k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_All);
     }
     if (!stun.empty()) values.back().SetString(k_ESteamNetworkingConfig_P2P_STUN_ServerList, stun.c_str());
@@ -184,8 +189,8 @@ void GnsTransport::Impl::stop(unsigned reason, std::string message) {
     }
     state = retry ? LinkState::connecting : LinkState::closed;
     if (!retry) release_listener(); else { inbound.clear(); inbound_bytes = 0; }
-    ready = hello_sent = hello_seen = closing = peer_close = ended = close_ack_flushed = false;
-    end_error = 0; decoder.reset();
+    ready = hello_sent = hello_seen = closing = peer_close = ended = close_ack_flushed = lanes_configured = false;
+    end_error = 0; decoder.reset(); delivery.reset();
     closing_pending.reset();
     refusing = false;
     refusal_reason = 0;
@@ -224,7 +229,7 @@ void GnsTransport::Impl::hello() {
     last_receive = last_write = now;
 }
 
-void GnsTransport::Impl::message(std::span<const std::uint8_t> bytes, bool reliable) {
+void GnsTransport::Impl::message(std::span<const std::uint8_t> bytes, bool reliable, std::optional<Clock::time_point> received_at) {
     if (refusing) return;
     auto result = decoder.receive(bytes, {hello_seen, accepted, peer_close, inbound_bytes, inbound.size()}, reliable);
     if (!result) {
@@ -268,7 +273,7 @@ void GnsTransport::Impl::message(std::span<const std::uint8_t> bytes, bool relia
             return;
         }
         if (!pair_ok) { stop(gns_error_pair_identity, "Application data before the pair identity"); return; }
-        inbound_bytes += decoded.frame->size(); inbound.push_back({remote(), std::move(*decoded.frame)});
+        inbound_bytes += decoded.frame->size(); inbound.push_back({remote(), std::move(*decoded.frame), received_at});
     } else if (decoded.kind == TcpMessage::mesh_pair && decoded.control) {
         // Same constant-size secret as the pair grant; the decoder already checked the seats.
         if (!needs_secret || pair_ok || !std::equal(secret.begin(), secret.end(), decoded.control->begin())) {
@@ -297,9 +302,26 @@ bool GnsTransport::Impl::receive() {
         const auto count = sockets().ReceiveMessagesOnConnection(stream, &incoming, 1);
         if (count <= 0) return true;
         const auto old_stream = stream;
+        // GNS timestamps use its local monotonic clock. Convert an elapsed age,
+        // never compare its epoch with std::chrono's implementation-defined one.
+        const auto age = std::max<SteamNetworkingMicroseconds>(0, SteamNetworkingUtils()->GetLocalTimestamp() - incoming->m_usecTimeReceived);
+        const auto received_at = Clock::now() - std::chrono::microseconds(age);
         if (incoming->m_cbSize < 0) stop(1518, "Invalid GNS message size");
-        else message({static_cast<const std::uint8_t*>(incoming->m_pData), static_cast<std::size_t>(incoming->m_cbSize)},
-            (incoming->m_nFlags & k_nSteamNetworkingSend_Reliable) != 0);
+        else {
+            const auto packet = std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(incoming->m_pData),
+                static_cast<std::size_t>(incoming->m_cbSize));
+            const bool reliable = (incoming->m_nFlags & k_nSteamNetworkingSend_Reliable) != 0;
+            if (!reliable && packet.size() == 1 && packet.front() == static_cast<std::uint8_t>(TcpMessage::keepalive))
+                message(packet, false); // native teardown ACK probe, outside the ordered stream
+            else {
+                auto decoded = delivery.receive(packet, reliable);
+                if (!decoded) stop(1518, decoded.error().message);
+                else for (const auto& envelope : decoded.value()) {
+                    message(envelope, true, received_at);
+                    if (stream != old_stream) break;
+                }
+            }
+        }
         incoming->Release();
         if (old_stream != stream) return true;
     }
@@ -318,14 +340,16 @@ void GnsTransport::Impl::flush() {
             packet.insert(packet.end(), next.bytes.begin() + static_cast<std::ptrdiff_t>(next.offset),
                 next.bytes.begin() + static_cast<std::ptrdiff_t>(next.offset + count));
         } else packet = next.bytes;
-        const auto sent = sockets().SendMessageToConnection(stream, packet.data(), static_cast<uint32>(packet.size()),
-            refusing ? k_nSteamNetworkingSend_ReliableNoNagle : k_nSteamNetworkingSend_Reliable, nullptr);
+        auto wire = delivery.encode(packet);
+        const auto sent = sockets().SendMessageToConnection(stream, wire.data(), static_cast<uint32>(wire.size()),
+            k_nSteamNetworkingSend_ReliableNoNagle, nullptr);
         if (sent == k_EResultLimitExceeded) break;
         // Native state can end between RunCallbacks and this send. Let
         // the queued callback deliver its typed peer reason on the next
         // poll instead of replacing it with a generic send failure.
         if (sent == k_EResultNoConnection || sent == k_EResultInvalidState) return;
         if (sent != k_EResultOK) { stop(1506, "GNS reliable send failed"); return; }
+        delivery.sent(std::move(wire), Clock::now(), state == LinkState::open && !closing);
         last_write = Clock::now();
         if (closing) started = last_write;
         next.offset += next.data ? packet.size() - 9 : packet.size();
@@ -333,6 +357,21 @@ void GnsTransport::Impl::flush() {
             outbound_bytes -= next.bytes.size() + (next.data ? 9 : 0); outbound.pop_front();
         }
     }
+}
+
+void GnsTransport::Impl::flush_redundancy() {
+    if (state != LinkState::open || closing || !authenticated() || !pair_ok) return;
+    const auto packet = delivery.redundancy(Clock::now());
+    if (packet.empty()) return;
+    // Copies never block progress or replace the reliable original. Expired
+    // history stops on a paused sender, so a terminal seal still gets retries.
+    auto* message = SteamNetworkingUtils()->AllocateMessage(static_cast<int>(packet.size()));
+    if (!message) return;
+    std::copy(packet.begin(), packet.end(), static_cast<std::uint8_t*>(message->m_pData));
+    message->m_conn = stream;
+    message->m_nFlags = k_nSteamNetworkingSend_UnreliableNoNagle;
+    message->m_idxLane = 1;
+    sockets().SendMessages(1, &message, nullptr, true);
 }
 
 void GnsTransport::Impl::pump_signals() {
@@ -374,6 +413,15 @@ void GnsTransport::Impl::pump() {
     pump_signals();
     sockets().RunCallbacks();
     if (stream == k_HSteamNetConnection_Invalid) { settle_service_closure(); return; }
+    if (ready && !lanes_configured) {
+        // The small duplicate history must leave before queued bulk originals.
+        // Application order is restored by delivery, independently of lanes.
+        const int priorities[]{1, 0};
+        if (sockets().ConfigureConnectionLanes(stream, 2, priorities, nullptr) != k_EResultOK) {
+            stop(1506, "GNS delivery lanes could not be configured"); return;
+        }
+        lanes_configured = true;
+    }
     // A parked pair link (grant not yet delivered) neither answers nor reads; GNS buffers its peer's hello.
     if (ready && !hello_sent && !refusing && granted) hello();
     // Drain queued messages before acting on a closed callback, which would
@@ -432,13 +480,45 @@ void GnsTransport::Impl::pump() {
         SteamNetConnectionRealTimeStatus_t status{};
         const auto valid_ping = sockets().GetConnectionRealTimeStatus(stream, &status, 0, nullptr) == k_EResultOK
             && status.m_eState == k_ESteamNetworkingConnectionState_Connected;
-        // m_flConnectionQualityLocal is the share of packets that arrived intact, or negative while unmeasured.
+        // Native quality subtracts BOTH missing packets and sequence anomalies
+        // (uncorrected reordering, duplicates, lurches). This is not wire loss.
         // Built with emplace rather than a conditional expression: GCC -Wmaybe-uninitialized flags the
         // optional's storage when it is copied into observe() from a ternary (#4386).
         std::optional<double> loss;
         if (valid_ping && status.m_flConnectionQualityLocal >= 0.0F)
             loss.emplace(std::clamp(1.0 - static_cast<double>(status.m_flConnectionQualityLocal), 0.0, 1.0) * 100.0);
         stats.observe(now, valid_ping ? std::optional<int>(status.m_nPing) : std::nullopt, loss);
+        if (valid_ping) {
+            gns_log_push(static_cast<int>(local_slot), static_cast<int>(peer_slot),
+                "out_pps=" + std::to_string(status.m_flOutPacketsPerSec)
+                + " out_Bps=" + std::to_string(status.m_flOutBytesPerSec)
+                + " in_pps=" + std::to_string(status.m_flInPacketsPerSec)
+                + " in_Bps=" + std::to_string(status.m_flInBytesPerSec)
+                + " send_rate_Bps=" + std::to_string(status.m_nSendRateBytesPerSecond)
+                + " pending_reliable=" + std::to_string(status.m_cbPendingReliable)
+                + " unacked_reliable=" + std::to_string(status.m_cbSentUnackedReliable)
+                + " pending_unreliable=" + std::to_string(status.m_cbPendingUnreliable), false, "gns-stats");
+            // Public real-time status combines dropped and weird. The detailed
+            // public report separates them; retain only address-free counters.
+            std::array<char, 16384> detail{};
+            if (sockets().GetDetailedConnectionStatus(stream, detail.data(), static_cast<int>(detail.size())) == 0) {
+                std::string_view remaining(detail.data());
+                while (!remaining.empty()) {
+                    const auto end = remaining.find('\n');
+                    const auto line = remaining.substr(0, end);
+                    // Keep only local end-to-end observations, before the
+                    // report repeats the remote peer's historical counters.
+                    if (line.find("Rate stats received from remote host") != std::string_view::npos
+                        || line.find("No rate stats received from remote host") != std::string_view::npos) break;
+                    if (line.find("Quality:") != std::string_view::npos || line.find("Dropped   :") != std::string_view::npos
+                        || line.find("OutOfOrder:") != std::string_view::npos || line.find("OOOFixed  :") != std::string_view::npos
+                        || line.find("Duplicate :") != std::string_view::npos || line.find("SeqLurch  :") != std::string_view::npos)
+                        gns_log_push(static_cast<int>(local_slot), static_cast<int>(peer_slot), line, false, "gns-quality");
+                    if (end == std::string_view::npos) break;
+                    remaining.remove_prefix(end + 1);
+                }
+            }
+        }
         SteamNetConnectionInfo_t info{};
         const bool info_ok = sockets().GetConnectionInfo(stream, &info);
         const bool connected = info_ok && info.m_eState == k_ESteamNetworkingConnectionState_Connected;
@@ -460,6 +540,7 @@ void GnsTransport::Impl::pump() {
     if (accepted && !closing && outbound.empty() && now - last_write >= options.keepalive)
         control({static_cast<std::uint8_t>(TcpMessage::keepalive)});
     if (ready) flush();
+    if (ready) flush_redundancy();
     if (closing && outbound.empty() && stream != k_HSteamNetConnection_Invalid) {
         if (peer_close && !close_ack_flushed) {
             // GNS schedules receiver ACKs separately from ReceiveMessages.

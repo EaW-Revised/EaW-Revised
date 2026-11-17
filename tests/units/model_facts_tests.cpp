@@ -82,10 +82,12 @@ assets::Mesh mesh(const std::string& name, const bool collidable, const std::int
 std::map<std::string, assets::Model> rich_models() {
     auto result = models(5.0F);
     for (auto& [path, asset] : result) {
+        if (!asset.bones.empty()) asset.bones.front().visible = false;
         asset.meshes.push_back(mesh("heavy_render_only", false, 0, false));
         if (path.find("test_frigate") != std::string::npos) {
             asset.meshes.push_back(mesh("hull_collision", true, 0, false));
             asset.meshes.push_back(mesh("skinned_collision", true, 1, true));
+            asset.meshes.push_back(mesh("cOlLiSiOnBoX", false, 1, false));
         } else if (path.find("test_turret") != std::string::npos) {
             asset.meshes.push_back(mesh("turret_collision", true, 1, true));
         }
@@ -111,13 +113,12 @@ std::string describe(const assets::Model& model) {
     std::string out = model.source.logical_path + "|" + model.source.source_id + "|" + model.source.layer_id + "\n";
     const auto bits = [](const float value) { return std::to_string(std::bit_cast<std::uint32_t>(value)); };
     for (const auto& bone : model.bones) {
-        out += "B " + bone.name + " " + std::to_string(bone.parent);
+        out += "B " + bone.name + " " + std::to_string(bone.parent) + " " + std::to_string(bone.visible);
         for (const float value : bone.relative_transform) out += " " + bits(value);
         out += "\n";
     }
     for (const auto& item : model.meshes) {
-        if (!item.collidable) continue;
-        out += "M " + item.name + " " + std::to_string(item.bone);
+        out += "M " + item.name + " " + std::to_string(item.bone) + " " + std::to_string(item.collidable);
         for (const float value : {item.bounds_min.x, item.bounds_min.y, item.bounds_min.z, item.bounds_max.x, item.bounds_max.y,
                                   item.bounds_max.z}) out += " " + bits(value);
         out += "\n";
@@ -148,6 +149,7 @@ struct TempFolder final {
 platform::DerivedStoreOptions store_options(const fs::path& folder) {
     platform::DerivedStoreOptions options;
     options.folder_utf8 = folder.generic_string();
+    options.facts_format = assets::model_facts_format;
     options.epoch = platform::derived_epoch("facts-test", "build-1");
     options.writer_thread = false;
     options.adopt_age = std::chrono::milliseconds(0); // tests that need the production age set it themselves
@@ -200,15 +202,31 @@ void codec_round_trip() {
     const auto decoded = none ? assets::decode_model_facts(*none, {}) : std::nullopt;
     expect(decoded && decoded->sha256_hex.empty(), "a record without a hash decodes without one");
     expect(!assets::encode_model_facts(rich_models().begin()->second, "abc"), "a malformed hash is refused");
+    // Produce a valid collidable record, then change only its admission flag. Its parts and
+    // every following byte remain well-formed, so rejection specifically tests noncollidable parts.
+    assets::Model malformed;
+    malformed.meshes.push_back(mesh("COLLISIONBOX", true, -1, false));
+    auto body = assets::encode_model_facts(malformed, {});
+    expect(body.has_value(), "the malformed-parts control encodes");
+    if (body) {
+        expect(assets::decode_model_facts(*body, {}).has_value(), "the collidable-parts control decodes");
+        constexpr std::size_t flag = 1 + 32 + 4 + 4 + 2 + 12 + 4;
+        (*body)[flag] = 0;
+        expect(!assets::decode_model_facts(*body, {}), "noncollidable meshes cannot contain parts");
+    }
 }
 
 void projection_keeps_only_what_tables_read() {
     const auto full = rich_models().at("data/art/models/test_frigate.alo");
     const auto kept = assets::simulation_projection(full);
-    expect(kept.bones.size() == full.bones.size(), "the projection keeps every bone");
-    expect(kept.meshes.size() == 2 && kept.meshes[0].name == "hull_collision" && kept.meshes[1].name == "skinned_collision",
-        "the projection keeps the collidable meshes in order");
-    expect(kept.meshes.size() == 2 && kept.meshes[1].submeshes.at(0).vertices.size() == 4
+    expect(kept.bones.size() == full.bones.size() && !kept.bones.empty() && !kept.bones.front().visible,
+        "the projection keeps every bone and reference-pose visibility");
+    expect(kept.meshes.size() == 3 && kept.meshes[0].name == "hull_collision" && kept.meshes[1].name == "skinned_collision",
+        "the projection keeps collision geometry and named box metadata in model order");
+    expect(kept.meshes.size() == 3 && !kept.meshes[2].collidable && kept.meshes[2].name == "cOlLiSiOnBoX"
+        && kept.meshes[2].bone == 1 && kept.meshes[2].bounds_min.x == -3 && kept.meshes[2].bounds_max.z == 1
+        && kept.meshes[2].submeshes.empty(), "noncollidable named boxes retain placement/bounds without render geometry");
+    expect(kept.meshes.size() == 3 && kept.meshes[1].submeshes.at(0).vertices.size() == 4
         && kept.meshes[1].submeshes[0].skin_bones.size() == 2 && kept.meshes[1].submeshes[0].shader.empty(),
         "collision submeshes keep geometry and the skin palette, not materials");
 }
@@ -277,9 +295,27 @@ void store_ignores_other_epoch_and_format() {
     platform::DerivedStore a(other_build);
     expect(!a.lookup(1, key_of("a"), stamp) && a.stats().segments_old == 1, "another build's segment is ignored");
     auto other_format = store_options(folder.path);
-    other_format.facts_format = 2;
+    other_format.facts_format = assets::model_facts_format + 1;
     platform::DerivedStore b(other_format);
     expect(!b.lookup(1, key_of("a"), stamp) && b.stats().segments_old == 1, "another facts format is ignored");
+    TempFolder previous;
+    auto previous_options = store_options(previous.path);
+    previous_options.facts_format = assets::model_facts_format - 1;
+    {
+        platform::DerivedStore old(previous_options);
+        old.put(1, key_of("a"), stamp, body_of("old"));
+        old.flush();
+    }
+    {
+        platform::DerivedStore current(store_options(previous.path));
+        expect(!current.lookup(1, key_of("a"), stamp) && current.stats().segments_old == 1,
+            "format-1 model facts are refused rather than decoded by format 2");
+        current.put(1, key_of("a"), stamp, body_of("rebuilt"));
+        current.flush();
+    }
+    platform::DerivedStore rebuilt(store_options(previous.path));
+    expect(rebuilt.lookup(1, key_of("a"), stamp) == body_of("rebuilt"),
+        "a current-format segment serves the rebuilt facts after refusing an old cache");
 }
 
 // Whatever happens to the bytes, a lookup returns the exact body that was written, or nothing.

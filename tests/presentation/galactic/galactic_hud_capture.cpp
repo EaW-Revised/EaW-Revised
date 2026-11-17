@@ -28,6 +28,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <tuple>
 #include <utility>
 
 using namespace godot;
@@ -105,12 +106,15 @@ public:
 private:
     void stage_steal(GalacticMode::State& state);
     void stage_ability(GalacticMode::State& state);
+    void publish_ability_hero(GalacticMode::State& state);
     std::string name_;
     bool synthetic_{};
     sim::galactic::PlanetId steal_target_{};
     bool steal_published_{};
     int ability_stage_{};
     sim::galactic::PlanetId ability_target_{};
+    sim::galactic::PlanetId ability_home_{};
+    sim::galactic::PlanetId ability_other_{};
     double corruption_fixture_seconds{};
     std::weak_ptr<const void> corruption_fixture_owner_;
     bool corruption_fixture_owner_seen_{};
@@ -545,7 +549,72 @@ void CaptureHudFixture::stage_steal(GalacticMode::State& state) {
 // is told the target planet and the icon to press (and again, as a second stage, when the hero stands over the target); the
 // drag, the tile, the release and the menu are real input, like the owner's. A fourth part "panel" drags the hero's own cell in the
 // selected planet's fleet panel instead of its stack icon. `eawr_ability_why` names what is still missing.
+// #7357: every frame, what the driver needs after the menu closed, read from the viewer's own state: the hero's planet,
+// whether it travels, the selected fleet and the hero's fleet, the planet it started from and its screen point, the selected
+// planet, the name of the hero's cell in that planet's fleet panel when one is shown ("-" otherwise), the screen point of
+// the hero's planet, and another planet B to send it on to with its screen point. Nothing is changed.
+void CaptureHudFixture::publish_ability_hero(GalacticMode::State& state) {
+    if (!state.galaxy || !state.published_snapshot) return;
+    std::string member = name_.substr(std::string_view("ability-stock:").size());
+    if (const auto colon = member.find(':'); colon != std::string::npos) member.resize(colon);
+    const auto bearer = std::find_if(state.production_names.begin(), state.production_names.end(),
+        [&](const auto& row) { return row.second == member; });
+    if (bearer == state.production_names.end()) return;
+    const auto place = eawr::testing::galactic::find_hero_place(*state.published_snapshot, state.galaxy->local.player, bearer->first);
+    if (!place) { Engine::get_singleton()->set_meta("eawr_ability_hero", String("none")); return; }
+    if (!ability_home_ && place->fleet && !place->transit) ability_home_ = place->planet;
+    const auto point = [&](sim::galactic::PlanetId planet) -> String {
+        const auto anchor = state.hud_planet_anchors.find(planet);
+        return anchor == state.hud_planet_anchors.end() ? String("- -") : String::num(anchor->second.x) + " " + String::num(anchor->second.y);
+    };
+    const auto home = point(ability_home_), here = point(place->planet);
+    // The owner's acceptance planet B: the nearest other planet (not the start, not the one the hero stands at) the hero's
+    // fleet can be ordered to by the viewer's own move rule (its combat skip lets a stealth hero leave a defended planet), a
+    // hostile one first, as the owner sent the Defiler on to another enemy planet, and one on screen first, as a player drags
+    // to a planet they can see. "0" when there is none, never a stale one.
+    if (!place->transit && place->fleet) {
+        const auto planets = state.input_planets();
+        const auto* control = state.published_snapshot->control();
+        const auto shown = [&](sim::galactic::PlanetId planet) {
+            const auto anchor = state.hud_planet_anchors.find(planet);
+            return anchor != state.hud_planet_anchors.end() && anchor->second.x >= 8 && anchor->second.y >= 8
+                && anchor->second.x < static_cast<float>(state.camera.width) - 8 && anchor->second.y < static_cast<float>(state.camera.height) - 8;
+        };
+        sim::galactic::PlanetId other{};
+        std::size_t best{}; bool best_hostile{}, best_shown{};
+        for (const auto& planet : state.published_snapshot->planets()) {
+            if (planet.id == ability_home_ || planet.id == place->planet) continue;
+            const auto move = galactic_view::fleet_destination_intent(*state.published_snapshot, state.galaxy->local.player,
+                place->dragged, planet.id, planets, {});
+            if (!move) continue;
+            bool hostile = planet.owner && planet.owner != state.galaxy->local.player;
+            if (control) for (const auto& row : control->players) if (row.player == planet.owner && row.neutral) hostile = false;
+            const bool visible = shown(planet.id);
+            const auto rank = std::tuple{!visible, !hostile, move->path.size()};
+            if (!other || rank < std::tuple{!best_shown, !best_hostile, best}) {
+                other = planet.id; best = move->path.size(); best_hostile = hostile; best_shown = visible;
+            }
+        }
+        ability_other_ = other;
+    }
+    String cell = "-";
+    for (std::size_t index = 0; index < state.shown_panel_cards.size() && cell == "-"; ++index) {
+        const auto* card = state.shown_panel_cards[index];
+        if (!card) continue;
+        const auto& owners = state.fleet_cell_layouts[index].owners;
+        for (std::size_t slot = 0; slot < owners.size() && slot < state.fleet_group_buttons[index].size(); ++slot) {
+            if (!owners[slot] || *owners[slot] >= card->groups.size() || card->groups[*owners[slot]].fleet != place->dragged) continue;
+            const auto button = state.fleet_buttons.find(state.fleet_group_buttons[index][slot]);
+            if (button != state.fleet_buttons.end() && button->second && button->second->is_visible_in_tree()) { cell = button->second->get_name(); break; }
+        }
+    }
+    Engine::get_singleton()->set_meta("eawr_ability_hero", String::num_uint64(place->planet) + " " + String::num_uint64(place->transit ? 1 : 0)
+        + " " + String::num_uint64(state.selected_fleet) + " " + String::num_uint64(place->dragged) + " " + String::num_uint64(ability_home_)
+        + " " + home + " " + String::num_uint64(state.selected_planet) + " " + cell + " " + here
+        + " " + String::num_uint64(ability_other_) + " " + point(ability_other_));
+}
 void CaptureHudFixture::stage_ability(GalacticMode::State& state) {
+    publish_ability_hero(state);
     if (ability_stage_ >= 2 || !state.game || !state.galaxy || !state.published_snapshot || !state.content) return;
     const auto why = [](const char* text) { Engine::get_singleton()->set_meta("eawr_ability_why", String(text)); };
     const auto& snapshot = *state.published_snapshot;
@@ -654,9 +723,10 @@ bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
                 && options.hud_fixture != "radar-locked"
                 && options.hud_fixture != "corruption" && options.hud_fixture != "corruption-clean"
                 && !options.hud_fixture.starts_with("corruption-spread")
+                && options.hud_fixture != "corruption-icons"
                 && options.hud_fixture != "corruption-gaps" && options.hud_fixture != "corruption-locked"
-                && options.hud_fixture != "corruption-no-mission-service"
-                && options.hud_fixture != "theft" && options.hud_fixture != "theft-single" && options.hud_fixture != "theft-many"
+                && options.hud_fixture != "corruption-no-mission-service" && options.hud_fixture != "corruption-republish"
+                && options.hud_fixture != "theft"&& options.hud_fixture != "theft-single" && options.hud_fixture != "theft-many"
                 && options.hud_fixture != "neutralization" && options.hud_fixture != "hack" && options.hud_fixture != "hack-poor"
                 && options.hud_fixture != "hack-fractional"
                 && !galactic_view::weapon_action_live_fixture(options.hud_fixture)
@@ -674,6 +744,15 @@ bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
         fact.planet = 101; fact.discovered = true; fact.display_name = "Synthetic Alpha";
         fact.name_colour = {185.0F / 255.0F, 40.0F / 255.0F, 39.0F / 255.0F};
         fact.surface_accessible = options.hud_fixture == "accessible";
+        if (options.hud_fixture == "corruption-icons") {
+            // WGCI-1: three corrupted planets that each publish a corruption type (sim types 6 bribery, 2 piracy, 5 corrupt militia).
+            fact.corrupted = true; fact.corruption_type = 6;
+            for (const auto& [id, type] : {std::pair<galactic_view::ObjectId, std::uint8_t>{102, 2}, {103, 5}}) {
+                galactic_view::PlanetHudFacts other = fact;
+                other.planet = id; other.corruption_type = type; other.display_name = "Synthetic Planet " + std::to_string(id);
+                hud_facts.emplace(other.planet, other);
+            }
+        }
         hud_facts.emplace(fact.planet, fact);
         selected_planet = fact.planet;
         map_input.selected = fact.planet;
@@ -872,6 +951,10 @@ void CaptureHudFixture::corruption_frame(GalacticMode::State& state, double elap
     auto& galaxy = state.galaxy;
     auto& content = state.content;
     auto& publication = state.corruption_frame_publication;
+    // #7357: the host republishes an unchanged menu while the dialog is open (a new snapshot every frame, same facts).
+    // A click on the dialog must still land, so this fixture hands the HUD a fresh copy of the same menu every frame.
+    if (synthetic_ && name_ == "corruption-republish" && state.corruption_menu.fixture)
+        state.corruption_menu.fixture = galactic_view::corruption_fixture_snapshot(galaxy->local.player, name_);
     if (!synthetic_ && name_ == "cache-corruption-load") {
         if (!state.game) return; // Scene construction samples animation before starting the native owner.
         // Visual qualification only: never alter the native game/checkpoint.
@@ -982,6 +1065,40 @@ bool CaptureHudFixture::configure_score(GalacticMode::State& state, platform::Li
 
     const auto fixture = parse_score_fixture(options.hud_fixture);
     if (options.campaign != galactic_view::synthetic_campaign) return true;
+    if (name_.starts_with("ground-invasion")) {
+        // WGM-39/42: an invasion is requested only when a conflict owner is installed, as in every installed
+        // campaign. Keep a real pending land conflict open to exercise the fleet cards behind its prompt.
+        auto services = std::make_shared<platform::CampaignServiceConfiguration>();
+        services->configure = [](campaign::GameSession& owner) {
+            campaign::GameSession::ConflictLayerServices land;
+            land.content = [](const campaign::ConflictRecord&) { return core::Result<sim::tactical::TacticalContent>::success({}); };
+            land.script_requirement = campaign::ScriptRequirement::none;
+            land.admission = [](const sim::galactic::GalacticSnapshot& snapshot, const sim::galactic::GalacticEvent& event, sim::EntityId next)
+                -> core::Result<std::optional<campaign::RecordedAdmission>> {
+                using Result = core::Result<std::optional<campaign::RecordedAdmission>>;
+                if (event.kind != sim::galactic::GalacticEventKind::land_conflict_requested) return Result::success({});
+                const auto fleets = snapshot.fleets();
+                const auto fleet = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) { return row.id == event.subject; });
+                if (fleet == fleets.end()) return Result::success({});
+                campaign::ConflictRecord record;
+                record.id = next; record.planet = event.value; record.layer = campaign::BattleLayer::land;
+                record.invader = fleet->owner;
+                record.defender = sim::galactic::surface_ground_holder(*snapshot.control(), event.value);
+                record.map_identity = "synthetic-land";
+                record.tactical.first_free_entity_id = next + 1;
+                record.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+                record.seats = {{sim::galactic::SeatId{1}, 1}};
+                for (const auto& member : fleet->members)
+                    record.forces.push_back({member.id, member.type, fleet->owner, fleet->id});
+                std::sort(record.forces.begin(), record.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+                return Result::success(campaign::RecordedAdmission{snapshot.completed_tick(), std::move(record),
+                    {campaign::ConflictRoute::pending_tactical, false, false}});
+            };
+            return owner.install_conflict_layer(campaign::BattleLayer::land, std::move(land));
+        };
+        live.services = std::move(services);
+        return true;
+    }
     if (name_.starts_with("clock-mp-")) {
         clock_pair_ = std::make_unique<ClockCapturePair>();
         const sim::SeatId other{name_ == "clock-mp-coop" ? 2U : 3U};

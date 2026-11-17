@@ -93,7 +93,9 @@ std::shared_ptr<const CorruptionMenu> GalacticSession::Impl::publish_corruption_
                 });
             row.units_satisfied = !choice.unit_count || choice.unit_types.empty()
                 || corruption_unit_count(choice.unit_types, result.player) >= choice.unit_count;
-            row.mission_available = corruption_mission_routable(choice, result.player, std::nullopt);
+            // WGCH-199: a mission whose battle can't be built takes the direct route, so every row has a route. The field
+            // stays for presentation fixtures; a live host now always offers the row.
+            row.mission_available = true;
             result.choices.push_back(std::move(row));
         }
         return std::make_shared<const CorruptionMenu>(std::move(result));
@@ -106,11 +108,14 @@ bool GalacticSession::Impl::corruption_choice_tactical(const CorruptionChoice& c
     return !choice.map.empty() && choice.mode == 2 && player && player->human
         && ability_host && setup.ability_host && !setup.ability_host->multiplayer && !setup.ability_host->fast_corruption;
 }
-bool GalacticSession::Impl::corruption_mission_routable(const CorruptionChoice& choice, const PlayerId owner,
-    const std::optional<std::uint64_t> request) const {
-    if (!corruption_choice_tactical(choice, owner)) return true;
-    return corruption_mission_handler && ability_host->missions.size() < galactic_max_objects
-        && (!corruption_mission_probe || corruption_mission_probe(choice, request));
+bool GalacticSession::Impl::corruption_mission_route(const CorruptionChoice& choice, const PlayerId owner,
+    const PlanetId target, const std::optional<std::uint64_t> request) const {
+    if (!corruption_choice_tactical(choice, owner)) return false;
+    if (!corruption_mission_handler || ability_host->missions.size() >= galactic_max_objects) return false;
+    if (!corruption_mission_probe) return true;
+    const auto planet = planets.find(target);
+    if (planet == planets.end()) return false;
+    return corruption_mission_probe(choice, owner, registry.get<session_detail::PlanetData>(planet->second).owner, request);
 }
 core::Result<bool> GalacticSession::Impl::begin_corruption(PlanetId planet, CorruptionType type, Fixed seconds) {
     using R = core::Result<bool>;
@@ -615,10 +620,10 @@ void GalacticSession::Impl::execute_corruption(const GameCommand& command, const
     if (!defeat) return reject();
     const auto& choice = target->slots[prepared.corruption.slot];
     if (choice.type != prepared.corruption.type) return reject();
-    // Remake-only refusal (no retail counterpart): a mission this host cannot start is refused before the debit,
-    // the prerequisite consumption and the RNG draws, which a later refund could not undo.
-    const bool tactical = corruption_choice_tactical(choice, actor.owner);
-    if (tactical && !corruption_mission_routable(choice, actor.owner, ability_host->next_request)) return reject();
+    // WGCH-199 (owner-requested deviation): a mission whose battle this host can't build takes the direct route (the one
+    // the original uses for AI and multiplayer) instead of being refused. The route is decided before the debit, the
+    // prerequisite consumption and the RNG draws, by the same pure predicate the menu asks.
+    const bool tactical = corruption_mission_route(choice, actor.owner, prepared.planet, ability_host->next_request);
     // WGCH-05/72: charge before the stale unit recheck, with no refund on later refusal.
     if (prepared.price > Fixed{}) {
         auto balance = math::subtract(account->credits, prepared.price), delta = math::negate(prepared.price);
@@ -695,8 +700,8 @@ void GalacticSession::Impl::execute_corruption(const GameCommand& command, const
     }
     const auto request = ability_host->next_request++;
     if (tactical) {
-        // WGCH-72: a failed mission queue can follow the debit and prerequisite consumption; the refusal is retail order.
-        if (!corruption_mission_handler || ability_host->missions.size() >= galactic_max_objects) { touch_abilities(); return reject(); }
+        // WGCH-72/127: a failed mission queue can follow the debit and prerequisite consumption; the refusal is retail
+        // order. The handler and the table room were checked before the debit by corruption_mission_route (#7466).
         LiveCorruptionMission mission{request, actor.id, prepared.planet, actor.owner, prepared.corruption, CorruptionMissionState::queued};
         auto queued = corruption_mission_handler(mission, choice);
         if (!queued) { failed = true; return; }

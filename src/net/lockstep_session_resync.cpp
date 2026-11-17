@@ -60,6 +60,23 @@ core::Result<void> LockstepSession::receive_resync(const Received& received) {
             });
         };
         if (!valid_hex(bytes)) return refused<void>(resync_errors::malformed, "invalid resync hash encoding");
+        if (!resync_ && monitor_ && tick > adapter_->completed_tick()) {
+            const auto frontier = monitor_->deferred_resync_frontier();
+            if (frontier && tick == *frontier) {
+                if (held_ || agreement_ || (options_.reconnect && options_.reconnect->rejoin_source))
+                    return refused<void>(resync_errors::overlap, "early desync recovery overlaps a membership incident");
+                if (!reconnect_available_ || adapter_->completed_tick() < initial_tick_
+                    || reconnect_log_.size() != adapter_->completed_tick() - initial_tick_)
+                    return refused<void>(resync_errors::unavailable, "complete recovery history is unavailable");
+                if (epoch != std::max(reconnect_epoch_, resync_epoch_) + 1)
+                    return refused<void>(resync_errors::agreement, "early resync epoch differs");
+                const auto [at, inserted] = deferred_resync_votes_.emplace(received.from, received);
+                if (!inserted && at->second.frame != received.frame)
+                    return refused<void>(resync_errors::agreement, "peer changed its early resync vote");
+                if (!deferred_resync_since_) deferred_resync_since_ = last_now_.value_or(0);
+                return core::Result<void>::success();
+            }
+        }
         if (!resync_) { if (auto begun = start_resync(epoch, tick); !begun) return begun; }
         if (resync_->epoch != epoch || resync_->tick != tick)
             return refused<void>(resync_errors::agreement, "conflicting resync frontier");
@@ -146,6 +163,29 @@ core::Result<void> LockstepSession::stage_resync() {
     if (adapter->state_hash() != state.hash)
         return refused<void>(resync_errors::hash, "staged replay does not reproduce the authoritative hash");
     state.adapter = std::move(adapter);
+    return core::Result<void>::success();
+}
+
+core::Result<void> LockstepSession::service_deferred_resync() {
+    if (deferred_resync_votes_.empty()) return core::Result<void>::success();
+    const auto frontier = monitor_ ? monitor_->deferred_resync_frontier() : std::nullopt;
+    if (!frontier || adapter_->completed_tick() > *frontier)
+        return refused<void>(resync_errors::agreement, "early resync lost its monitor frontier");
+    const auto now = last_now_.value_or(0);
+    if (now - *deferred_resync_since_ >= options_.resync->timeout_ms)
+        return refused<void>(resync_errors::timeout, "single resync attempt expired before the recovery frontier");
+    for (const auto& [peer, vote] : deferred_resync_votes_) {
+        static_cast<void>(vote);
+        if (departed_[peer] || transport_->link(peer) == LinkState::closed)
+            return refused<void>(resync_errors::overlap, "early resync lost an active voter");
+    }
+    if (adapter_->completed_tick() < *frontier || !monitor_->frozen()) return core::Result<void>::success();
+    auto votes = std::move(deferred_resync_votes_);
+    deferred_resync_votes_.clear(); deferred_resync_since_.reset();
+    for (const auto& [peer, vote] : votes) {
+        static_cast<void>(peer);
+        if (auto accepted = receive_resync(vote); !accepted) return accepted;
+    }
     return core::Result<void>::success();
 }
 

@@ -269,12 +269,18 @@ void encode(Encoder& out, const UnitType& unit) {
     }
     out.each(unit.collision_meshes, [&](const CollisionMesh& mesh) {
         out.text(mesh.name);
+        out.flag(mesh.pose_visible);
         out.u32(mesh.hardpoint);
         out.u32(static_cast<std::uint32_t>(mesh.triangles.size()));
         for (const auto triangle : mesh.triangles) {
             for (const auto& corner : triangle) out.vec3(corner);
         }
     });
+    out.flag(unit.model_collision_box.has_value());
+    if (unit.model_collision_box) {
+        out.vec3(unit.model_collision_box->min);
+        out.vec3(unit.model_collision_box->max);
+    }
     out.fixed(unit.collision_box_modifier);
     out.each(unit.hardpoints, [&](const Hardpoint& hardpoint) { encode(out, hardpoint); });
     encode(out, unit.weapon);
@@ -475,7 +481,7 @@ void encode(Encoder& out, const UnitType& unit) {
 }
 
 void encode_core_table_rows(Encoder& out, const UnitTables& tables) {
-    out.text("eawr-unit-tables-v7");
+    out.text("eawr-unit-tables-v8");
     out.each(tables.units, [&](const UnitType& unit) { encode(out, unit); });
     out.each(tables.obstacles, [&](const ObstacleType& obstacle) {
         out.text(obstacle.id);
@@ -484,6 +490,26 @@ void encode_core_table_rows(Encoder& out, const UnitTables& tables) {
         out.fixed(obstacle.scale_factor);
         out.text(obstacle.model_path);
         encode(out, obstacle.footprint);
+        if (obstacle.footprint.hazard.impassable_asteroid) {
+            out.text("solid-obstacle-model-v1");
+            out.flag(obstacle.collision.has_value());
+            if (obstacle.collision) {
+                out.vec3(obstacle.collision->min);
+                out.vec3(obstacle.collision->max);
+            }
+            out.flag(obstacle.model_collision_box.has_value());
+            if (obstacle.model_collision_box) {
+                out.vec3(obstacle.model_collision_box->min);
+                out.vec3(obstacle.model_collision_box->max);
+            }
+            out.each(obstacle.collision_meshes, [&](const CollisionMesh& mesh) {
+                out.text(mesh.name); out.flag(mesh.pose_visible); out.u32(mesh.hardpoint);
+                out.u32(static_cast<std::uint32_t>(mesh.triangles.size()));
+                for (const auto triangle : mesh.triangles) {
+                    for (const auto& corner : triangle) out.vec3(corner);
+                }
+            });
+        }
     });
     out.each(tables.projectiles, [&](const Projectile& projectile) {
         out.text(projectile.id);

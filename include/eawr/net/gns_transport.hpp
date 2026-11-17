@@ -20,10 +20,11 @@ enum class GnsRelayProvider : std::uint8_t { none, own, cloudflare, unknown };
 // belongs to one pair, and the text. Addresses are replaced by "<addr>"; no credentials or payloads.
 using GnsLogSink = std::function<void(std::string_view)>;
 // GNS hello layout revision (the TCP/LAN protocol stays at 1). 2 added the sender's roster slot and the roster size to the
-// hello (N-peer slice N2); 3 binds mesh signalling and failure reports to their grant secret.
-// The decoder reads magic and version before the rest, so a peer on another revision gets the
-// typed EAWR-NET-1502 and never a malformed-hello error.
-inline constexpr std::uint32_t gns_protocol_version = 3;
+// hello (N-peer slice N2); 3 binds mesh signalling and failure reports to their grant secret;
+// 4 adds ordered delivery ordinals and an unreliable redundant path below the envelope codec.
+// Within the current delivery framing, the decoder checks magic and version
+// before the revision-specific hello tail and gives typed EAWR-NET-1502.
+inline constexpr std::uint32_t gns_protocol_version = 4;
 struct GnsOptions : TcpOptions {
     GnsOptions() { protocol_version = gns_protocol_version; }
     // Qualification/deployment policy: require TURN instead of direct ICE.
@@ -133,6 +134,7 @@ public:
     std::uint32_t peer_count() const override;
     std::uint16_t port() const;
     [[nodiscard]] GnsQueueProgress queue_progress(PeerIndex peer) const;
+    [[nodiscard]] std::size_t queued_received(PeerIndex peer) const override { return queue_progress(peer).inbound_frames; }
     const std::optional<core::Diagnostic>& diagnostic() const;
     // Cached native ping observations, sampled by poll at a one-second cadence.
     // Unknown until the first valid estimate; query on the owning I/O thread.

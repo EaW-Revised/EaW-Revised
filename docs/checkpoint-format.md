@@ -1128,3 +1128,20 @@ goal and production payloads are rejected; no compatibility decoder is retained.
 Both changes form one raid/starbase format update. These AI-only records do not
 alter the existing synthetic galactic replay corpus; its upgrade dry run remains
 the verification of that boundary.
+
+
+## Proposal desire request blocks
+
+The galactic goal payload requires version **19** (WGA-497..502). The new
+TaskForce-free proposal-search block saves its calling plan instance plus a typed
+request: selected player, canonical goal-type name, AI target, single-precision
+amount and absolute synchronization-frame deadline. The selected player can
+differ from the block's semantic plan owner. Full archives, incremental records
+and rollback use the same field inventory; restoring resolves the retained
+references and never restarts the timeout. Unknown goal types or missing owners
+are refused. Version 18 is refused, with no compatibility reader before 1.0.
+
+A poll writes the matching selected player's proposed-goal record; the resulting
+raw desire already belongs to ordinary goal state. There is no success latch,
+background retry, periodic modifier or reversal record. An unsuccessful poll
+changes no proposal. Tactical block archives retain their existing field inventory.

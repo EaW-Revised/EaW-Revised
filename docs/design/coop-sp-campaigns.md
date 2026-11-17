@@ -114,7 +114,7 @@ What changes with an SP map, assumption by assumption:
   script instance (`src/script/authoritative/galactic_bridge.cpp:64-67`).
   - This is deterministic: every peer retires the same instance at the same tick. Unbound APIs therefore cost
     behaviour, not sync.
-  - `GiveDesireBonus` is a warned nil stub (legacy EAWR-5494) and `Get_Story_Plot` is still unbound (legacy EAWR-5495).
+  - `GiveDesireBonus` searches existing proposals while its command is polled (WGA-497..503); it does not grant purchasing authority. `Get_Story_Plot` uses the mounted story owner (legacy EAWR-5495).
     Both are called by AI plan scripts in solo just the same. They block mod fidelity, **not** co-op on stock SP maps.
 - **What would desync.** Only per-peer inputs entering the sim:
   - local player: handled by returning nil today; B4 below keeps it deterministic;

@@ -93,7 +93,7 @@ void BattleInput::draw() {
     // FoC's drag box (SelectBoxBorderColor / SelectBoxFillColor): once the drag passes the select
     // distance, or at once while nothing is selected.
     if (overview_ui_.world_markers && left_ && left_->moved
-        && (ui::drag_extent(left_->start, left_->end) > ui::minimum_drag_select_distance || selection_.empty())) {
+        && (ui::drag_extent(left_->start, left_->end) > *world_ui_settings_.drag_select_distance || selection_.empty())) {
         const ui::ScreenRect rect = ui::drag_rect(left_->start, left_->end);
         const float width = std::max(3.0F, rect.max_x - rect.min_x);
         const float height = std::max(3.0F, rect.max_y - rect.min_y);

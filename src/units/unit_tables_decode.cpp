@@ -271,6 +271,7 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
             mask_flags(*object, unit);
             if (model != nullptr) {
                 unit.collision = collision_bounds(*model->model, model->frames);
+                unit.model_collision_box = collision_bounds(*model->model, model->frames, true);
                 append_collision_meshes(*model->model, model->frames, sim::math::identity_matrix(), no_index,
                     unit.collision_meshes);
             }
@@ -474,6 +475,18 @@ void Loader::load_obstacle(const std::string& id) {
             if (model == nullptr) obstacle.model_path.clear();
         }
         obstacle.footprint = read_footprint(*object, model);
+        if (obstacle.footprint.hazard.impassable_asteroid) {
+            if (model != nullptr) {
+                obstacle.collision = collision_bounds(*model->model, model->frames);
+                obstacle.model_collision_box = collision_bounds(*model->model, model->frames, true);
+                append_collision_meshes(*model->model, model->frames, sim::math::identity_matrix(), no_index,
+                    obstacle.collision_meshes);
+            }
+            if (!obstacle.model_collision_box && obstacle.collision_meshes.empty()) {
+                report_.note(obstacle.id, "Space_Model_Name", obstacle.model_path,
+                    "FD-10: solid asteroid has no model collision shape; fighter avoidance uses its footprint sphere");
+            }
+        }
         // WSU-13: a drawn hazard volume does not automatically admit a mouse contact.
         UnitType selection;
         load_selection(*object, selection);

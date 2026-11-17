@@ -35,15 +35,25 @@ inline constexpr std::uint32_t shared_fast_forward_rate = 60;
 [[nodiscard]] constexpr std::uint32_t shared_fast_forward_target(const std::uint32_t agreed_rate) noexcept {
     return agreed_rate == shared_fast_forward_rate ? nominal_rate : shared_fast_forward_rate;
 }
-// One shared speed request in flight: a second press waits until the agreed rate equals the request, or one shared
-// speed window (300 ticks) has passed, so a double click cannot spend the 2-per-10 s budget. Presentation only.
+// One shared speed request in flight: a second press for a faster rate waits until the agreed rate equals the request,
+// or one shared speed window (300 ticks) has passed, so a double click cannot spend the 2-per-10 s budget. A request
+// back to the nominal 30 is never held behind a faster one: it replaces it, so the seat that asked for 2x can always
+// end it with its own button (owner online test 2026-11-17). Presentation only.
 class SharedSpeedRequest final {
 public:
     static constexpr std::uint64_t release_ticks = 300;
     [[nodiscard]] bool begin(const std::uint32_t agreed_rate, const std::uint32_t target, const std::uint64_t tick) {
-        if (pending_ || agreed_rate == target) return false;
+        if (pending_) {
+            if (target != nominal_rate || pending_->target == target) return false;
+        } else if (agreed_rate == target) {
+            return false;
+        }
         pending_ = Pending{target, tick};
         return true;
+    }
+    // What the button shows and what its next press asks for: the request in flight, else the agreed rate.
+    [[nodiscard]] std::uint32_t shown(const std::uint32_t agreed_rate) const noexcept {
+        return pending_ ? pending_->target : agreed_rate;
     }
     void observe(const std::uint32_t agreed_rate, const std::uint64_t tick) {
         if (pending_ && (agreed_rate == pending_->target || tick < pending_->since || tick - pending_->since >= release_ticks))

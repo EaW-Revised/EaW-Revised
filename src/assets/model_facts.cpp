@@ -1,4 +1,5 @@
 #include "eawr/assets/model_facts.hpp"
+#include "eawr/core/text.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -7,6 +8,10 @@
 
 namespace eawr::assets {
 namespace {
+
+bool kept_mesh(const Mesh& mesh) {
+    return mesh.collidable || core::iequals(mesh.name, "COLLISIONBOX");
+}
 
 void put_u8(std::vector<std::uint8_t>& out, const std::uint8_t value) { out.push_back(value); }
 void put_u16(std::vector<std::uint8_t>& out, const std::uint16_t value) {
@@ -75,17 +80,22 @@ Model simulation_projection(const Model& full) {
         Bone kept;
         kept.name = bone.name;
         kept.parent = bone.parent;
+        kept.visible = bone.visible;
         kept.relative_transform = bone.relative_transform;
         result.bones.push_back(std::move(kept));
     }
     for (const auto& mesh : full.meshes) {
-        if (!mesh.collidable) continue;
+        if (!kept_mesh(mesh)) continue;
         Mesh kept;
         kept.name = mesh.name;
         kept.bounds_min = mesh.bounds_min;
         kept.bounds_max = mesh.bounds_max;
-        kept.collidable = true;
+        kept.collidable = mesh.collidable;
         kept.bone = mesh.bone;
+        if (!mesh.collidable) {
+            result.meshes.push_back(std::move(kept));
+            continue; // FD-10 reads only the named box's bounds and placement.
+        }
         kept.submeshes.reserve(mesh.submeshes.size());
         for (const auto& submesh : mesh.submeshes) {
             Submesh part;
@@ -126,18 +136,21 @@ std::optional<std::vector<std::uint8_t>> encode_model_facts(const Model& model, 
     for (const auto& bone : model.bones) {
         if (!put_name(out, bone.name)) return std::nullopt;
         put_u32(out, static_cast<std::uint32_t>(bone.parent));
+        put_u8(out, bone.visible ? 1 : 0);
         for (const float value : bone.relative_transform) put_float(out, value);
     }
     std::uint32_t meshes = 0;
-    for (const auto& mesh : model.meshes) meshes += mesh.collidable ? 1U : 0U;
+    for (const auto& mesh : model.meshes) meshes += kept_mesh(mesh) ? 1U : 0U;
     put_u32(out, meshes);
     for (const auto& mesh : model.meshes) {
-        if (!mesh.collidable) continue;
+        if (!kept_mesh(mesh)) continue;
         if (!put_name(out, mesh.name)) return std::nullopt;
         put_u32(out, static_cast<std::uint32_t>(mesh.bone));
+        put_u8(out, mesh.collidable ? 1 : 0);
         for (const float value : {mesh.bounds_min.x, mesh.bounds_min.y, mesh.bounds_min.z, mesh.bounds_max.x, mesh.bounds_max.y,
                                   mesh.bounds_max.z}) put_float(out, value);
-        put_u32(out, static_cast<std::uint32_t>(mesh.submeshes.size()));
+        put_u32(out, mesh.collidable ? static_cast<std::uint32_t>(mesh.submeshes.size()) : 0U);
+        if (!mesh.collidable) continue;
         for (const auto& submesh : mesh.submeshes) {
             put_u32(out, static_cast<std::uint32_t>(submesh.vertices.size()));
             for (const auto& vertex : submesh.vertices) {
@@ -169,24 +182,30 @@ std::optional<DecodedModelFacts> decode_model_facts(const std::span<const std::u
         sha.push_back(digits[byte & 15U]);
     }
     if (has_sha != 0) result.sha256_hex = std::move(sha);
-    const auto bones = in.count(2 + 4 + 48);
+    const auto bones = in.count(2 + 4 + 1 + 48);
     result.model.bones.reserve(bones);
     for (std::uint32_t i = 0; i < bones && in.ok(); ++i) {
         Bone bone;
         bone.name = in.name();
         bone.parent = static_cast<std::int32_t>(in.u32());
+        const auto visible = in.u8();
+        if (visible > 1) return std::nullopt;
+        bone.visible = visible != 0;
         for (auto& value : bone.relative_transform) value = in.f32();
         result.model.bones.push_back(std::move(bone));
     }
-    const auto meshes = in.count(2 + 4 + 24 + 4);
+    const auto meshes = in.count(2 + 4 + 1 + 24 + 4);
     for (std::uint32_t m = 0; m < meshes && in.ok(); ++m) {
         Mesh mesh;
         mesh.name = in.name();
         mesh.bone = static_cast<std::int32_t>(in.u32());
+        const auto collidable = in.u8();
+        if (collidable > 1) return std::nullopt;
+        mesh.collidable = collidable != 0;
         mesh.bounds_min = {in.f32(), in.f32(), in.f32()};
         mesh.bounds_max = {in.f32(), in.f32(), in.f32()};
-        mesh.collidable = true;
         const auto parts = in.count(12);
+        if (!mesh.collidable && parts != 0) return std::nullopt;
         for (std::uint32_t s = 0; s < parts && in.ok(); ++s) {
             Submesh part;
             const auto vertices = in.count(16);

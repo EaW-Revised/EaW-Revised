@@ -353,7 +353,10 @@ core::Result<void> GalacticSessionAdapter::install(const std::span<const SeatInp
         if (live_issuer && resume_request && predicted_pause) clock_limiter_.note_resume(command.key.seat, tick);
         const bool debounced = live_issuer && pause_request && !predicted_pause
             && !clock_limiter_.admit_pause(command.key.seat, tick);
-        const bool speed_limited = live_issuer && speed_request && !clock_limiter_.admit_speed(command.key.seat, tick);
+        // A change back to normal (1x) is never refused and spends no budget (owner online test 2026-11-17).
+        const auto* speed = std::get_if<galactic::SetSpeed>(&command.payload);
+        const bool to_normal = speed != nullptr && speed->factor.raw() == sim::math::Fixed::scale;
+        const bool speed_limited = live_issuer && speed_request && !clock_limiter_.admit_speed(command.key.seat, tick, to_normal);
         if (debounced || speed_limited) {
             std::string text = "Pause repeated too quickly; try again in a second.";
             if (speed_limited) {

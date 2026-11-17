@@ -104,6 +104,52 @@ core::Result<std::optional<GalacticGoalIdentity>> Engine::allocate_galactic_goal
     return core::Result<Answer>::success(answer);
 }
 
+// WGA-497/498: select the explicit player's active galactic goal owner, not
+// the calling plan's player. Duration conversion uses single-precision seconds.
+core::Result<DesireRequest> Engine::make_desire_request(tactical::PlayerId id, std::string name,
+    std::uint64_t target_id, Real bonus, Real seconds) const {
+    const auto* player = player_ai(id);
+    name = upper_case(name);
+    if (!player || !player->galactic || !data_.goals.contains(name) || !target(target_id)
+        || std::find(player->targets.begin(), player->targets.end(), target_id) == player->targets.end())
+        return refuse<DesireRequest>("GiveDesireBonus requires the selected player's goal owner and target");
+    const auto delta = static_cast<std::int32_t>(to_single(to_single(seconds) * real(tactical::logical_frames_per_second)));
+    if (delta > 0 && frame_ > std::numeric_limits<std::int64_t>::max() - delta)
+        return refuse<DesireRequest>("GiveDesireBonus synchronization deadline exceeds the project clock");
+    DesireRequest request;
+    request.player = id; request.goal_type = std::move(name); request.target = target_id;
+    request.bonus = to_single(bonus); request.expiry = frame_ + delta;
+    return core::Result<DesireRequest>::success(std::move(request));
+}
+const Goal* Engine::proposed_desire_goal(const DesireRequest& request) const {
+    const auto* player = player_ai(request.player);
+    if (!player) return nullptr;
+    for (const auto& goal : player->proposed)
+        if (goal.target == request.target && player->functions.at(goal.function).goal_name == request.goal_type)
+            return &goal;
+    return nullptr;
+}
+core::Result<void> Engine::apply_desire_bonus(const DesireRequest& request, std::uint64_t expected_goal) {
+    const auto* found = proposed_desire_goal(request);
+    // Bindings read between the two engine barriers. No proposal can change
+    // between that read and the ordered poll write; never redirect to a new goal.
+    if (!found || found->id != expected_goal)
+        return refuse<void>("GiveDesireBonus proposal changed before its ordered poll commit");
+    const auto write = native_record_scope();
+    native_record_changed(request.player, 2, found->id); mark_native_state_changed();
+    auto* player = player_ai(request.player);
+    for (auto& goal : player->proposed) if (goal.id == expected_goal) {
+        // WGA-500: ordinary raw-desire clamp, after the single-precision sum.
+        auto value = to_single(goal.desire + request.bonus);
+        const auto ceiling = to_single(real(1000000000000000000LL));
+        if (value < Real{}) value = Real{};
+        if (ceiling < value) value = ceiling;
+        goal.desire = value;
+        break;
+    }
+    return core::Result<void>::success();
+}
+
 std::optional<GalacticGoalIdentity> Engine::galactic_goal(tactical::PlayerId id, std::uint64_t goal) const {
     const auto* player = player_ai(id);
     if (!player || !player->galactic) return {};

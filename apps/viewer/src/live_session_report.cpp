@@ -123,13 +123,20 @@ void LiveSessionView::save_failure_replay() {
     };
     auto reason_path = path; reason_path += ".connection-loss.json";
     bool saved = true;
+    if (failure) {
+        auto diagnostic_path = path; diagnostic_path += ".failure.json";
+        const auto comparison = options_.lan ? options_.lan->view().setup_difference : std::string{};
+        const auto diagnostic = "{\"code\":" + json(failure->code) + ",\"message\":" + json(failure->message)
+            + ",\"setup_difference\":" + json(comparison) + "}\n";
+        saved = publish(diagnostic_path, diagnostic);
+    }
     if (connection_loss) {
         std::ostringstream reason;
         reason << "{\"end_reason\":\"connection-loss\",\"winner\":null,\"completed_tick\":" << replay.final_tick_count
             << ",\"local_player\":" << player_ << ",\"code\":" << json(failure->code)
             << ",\"reason\":" << json(failure->message)
             << ",\"peer\":" << json(options_.lan ? options_.lan->view().peer_name : std::string{}) << "}\n";
-        saved = publish(reason_path, reason.str());
+        saved = publish(reason_path, reason.str()) && saved;
     }
     if (saved) saved = publish(path, std::string_view(reinterpret_cast<const char*>(bytes.value().data()), bytes.value().size()));
     if (!saved) {
@@ -757,6 +764,11 @@ void LiveSessionView::write_report_light_effects(std::ostream& output) const {
            << ", \"max_self_destruct_light_red\": " << max_self_destruct_light_red_
            << ", \"shield_flash_samples\": " << shield_flash_samples_
            << ", \"shield_flash_duration\": " << shield_flash_constants_.duration
+           << ", \"order_flashes\": " << order_flashes_started_
+           << ", \"order_flash_samples\": " << order_flash_samples_
+           << ", \"max_order_flash_multiplier\": " << max_order_flash_multiplier_
+           << ", \"order_flash_level\": " << order_flash_constants_.level
+           << ", \"order_flash_pulse_seconds\": " << order_flash_constants_.pulse_seconds
            << ", \"max_shield_flash_scale\": [" << max_shield_flash_scale_[0] << ','
            << max_shield_flash_scale_[1] << ',' << max_shield_flash_scale_[2] << ']';
 }

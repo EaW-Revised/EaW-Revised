@@ -45,6 +45,12 @@ var directory = %(directory)s
 var action_rows = %(rows)s
 var close_rows = ["h_close", "corrupt_close"]
 var again = %(again)s
+var after = %(after)s
+var phase = ""
+var step = 0
+var mark = 0
+var press_at = Vector2.ZERO
+var planet_b = ""
 func _initialize():
     var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
     viewport = SubViewport.new()
@@ -69,6 +75,19 @@ func mouse(point, down):
     event.position = point
     event.global_position = point
     viewport.push_input(event,true)
+func rmouse(point, down):
+    var event = InputEventMouseButton.new()
+    event.button_index = MOUSE_BUTTON_RIGHT
+    event.pressed = down
+    event.position = point
+    event.global_position = point
+    viewport.push_input(event,true)
+func hero():
+    if not Engine.has_meta("eawr_ability_hero"): return PackedStringArray()
+    return str(Engine.get_meta("eawr_ability_hero")).split(" ")
+func hero_point(fields, at):
+    if fields.size() <= at + 1 or fields[at] == "-": return null
+    return Vector2(float(fields[at]), float(fields[at + 1]))
 func centre(name):
     var node = viewport.find_child(name,true,false)
     if node == null or not node.is_visible_in_tree():
@@ -172,9 +191,124 @@ func menu_step():
         if again and round == 1:
             round = 2
             wait_key = "eawr_ability_stage2"
-            mode = "wait"
+            mode = "after" if after != "" else "wait"
+            phase = "settle"
+            step = 0
         else:
             finish("acted")
+# #7357: after Close the hero must still take orders (the owner's acceptance). "icon": its stack icon is dragged onto an
+# empty orbit slot of another planet B (not the one it stands at, not its start; a hostile one first), an ordinary move. "panel": its planet is clicked and double-clicked (the fleet panel shows in the
+# focused view) and its cell in that panel is clicked: the hero is selected. The fixture reports the hero every frame.
+func on_screen(point):
+    return point != null and point.x >= 0 and point.y >= 0 and point.x < 1280 and point.y < 720
+func double_click(point):
+    var event = InputEventMouseButton.new()
+    event.button_index = MOUSE_BUTTON_LEFT
+    event.pressed = true
+    event.double_click = true
+    event.position = point
+    event.global_position = point
+    viewport.push_input(event,true)
+    mouse(point,false)
+func after_step():
+    step += 1
+    var fields = hero()
+    if step %% 60 == 0: print("DRAG_HERO=", " ".join(fields), " phase=", phase)
+    if fields.size() < 14:
+        if step > 1200: finish("no-hero")
+        return
+    if phase == "settle" and step >= 60:
+        print("DRAG_AFTER_CLOSE=", " ".join(fields))
+        shot("after-close")
+        phase = "icon" if after == "icon" else "planet"
+        mark = step
+    elif phase == "icon":
+        if not Engine.has_meta("eawr_ability_stage2"):
+            if step > mark + 900: finish("no-icon")
+            return
+        press_at = centre(str(Engine.get_meta("eawr_ability_stage2")).split(" ")[2])
+        # The owner's acceptance: on to another planet B, not back to A and not necessarily home.
+        var home = hero_point(fields, 12)
+        if press_at == null or not on_screen(home):
+            if step > mark + 900: finish("no-icon-or-home")
+            return
+        var t = step - mark
+        if t == 1:
+            motion(press_at,false)
+            mouse(press_at,true)
+        elif t == 3: motion(press_at + Vector2(24,0),true)
+        elif t == 5: motion(press_at + Vector2(48,0),true)
+        elif t >= 7 and t <= 16: motion(press_at + (home - press_at) * (t - 6) / 10.0,true)
+        elif t > 16:
+            # As the fleet drag case: hovering a planet shows its empty orbit slot icons; the move is the drop on one.
+            var slot = null
+            for icon in range(3):
+                if slot == null: slot = centre("fleet_empty_slot_%%d" %% icon)
+            var receiver = viewport.find_child("fleet_route_preview",true,false)
+            if t %% 10 == 0 or slot != null:
+                print("DRAG_ROUTE=", receiver.get_meta("route_preview") if receiver != null and receiver.has_meta("route_preview") else "none",
+                    " slot=", slot, " dragging=", viewport.gui_is_dragging())
+            if slot == null:
+                if t > 120:
+                    shot("no-slot")
+                    mouse(home,false)
+                    finish("no-empty-slot")
+                return
+            motion(slot,true)
+            phase = "drop"
+            press_at = slot
+            mark = step
+    elif phase == "drop":
+        if step == mark + 5:
+            var receiver = viewport.find_child("fleet_route_preview",true,false)
+            print("DRAG_ROUTE_AT_DROP=", receiver.get_meta("route_preview") if receiver != null and receiver.has_meta("route_preview") else "none")
+            mouse(press_at,false)
+            planet_b = fields[11]
+            print("DRAG_MOVE_DROP=", press_at, " other=", fields[11])
+            phase = "move"
+            mark = step
+    elif phase == "planet":
+        press_at = hero_point(fields, 9)
+        if not on_screen(press_at):
+            if step > mark + 900: finish("no-planet-point")
+            return
+        var t = step - mark
+        if t == 1:
+            motion(press_at,false)
+            mouse(press_at,true)
+            mouse(press_at,false)
+        elif t == 20:
+            double_click(press_at)
+            print("DRAG_PLANET_FOCUS=", press_at)
+            phase = "cell"
+            mark = step
+    elif phase == "cell":
+        if fields[8] == "-":
+            if step > mark + 600:
+                shot("no-cell")
+                finish("no-cell")
+            return
+        press_at = centre(fields[8])
+        if press_at == null: return
+        motion(press_at,false)
+        mouse(press_at,true)
+        mouse(press_at,false)
+        print("DRAG_CELL_CLICK=", fields[8])
+        phase = "selected"
+        mark = step
+    elif phase == "selected" and step >= mark + 30:
+        print("DRAG_SELECTED=", "yes" if fields[2] == fields[3] else "no", " selected=", fields[2], " hero_fleet=", fields[3])
+        shot("selected")
+        # The move itself is the "icon" round's: the focused view hides the start planet.
+        finish("selected")
+    elif phase == "move":
+        if fields[1] == "1" or fields[0] == planet_b:
+            print("DRAG_MOVED=", " ".join(fields))
+            finish("moved")
+        elif step > mark + 600:
+            print("DRAG_STUCK=", " ".join(fields))
+            shot("stuck")
+            finish("stuck")
 func _process(delta):
     elapsed += delta
     if elapsed > 1000.0:
@@ -189,6 +323,7 @@ func _process(delta):
         if Engine.has_meta(wait_key): start_drag()
     elif mode == "drag": drag_step()
     elif mode == "menu": menu_step()
+    elif mode == "after": after_step()
     return false
 '''
 
@@ -211,13 +346,14 @@ class GalacticStockAbilityDragRuntime(unittest.TestCase):
     """Per action kind: tile while dragging, menu after the drop, the action runs."""
 
     def run_case(self, campaign, member, rows, enemy_faction="", enemy_company="", company="", recruit="", structure="",
-                 again=False, enemy_planet="", panel=False):
+                 again=False, enemy_planet="", panel=False, after="", home=""):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-ability-drag-%s-" % member))
         from tools.inventory.corpus import Corpus
         source = Corpus(pathlib.Path(support.GAME_ROOT)).read_effective("foc", "data/xml/" + CAMPAIGN_FILE)
         self.assertIsNotNone(source)
         tree = ET.fromstring(source.data)
         node, active, mine, enemies = sandbox(tree, campaign)
+        mine = home or mine  # `home`: one of the active faction's own starting planets to place the hero at
         if recruit:
             # The sandboxes start over the population cap (23 of 20), and a purchase is admitted only into free room
             # (WGEP-69): drop the active faction's starting ships and ground units, keep its structures.
@@ -245,7 +381,7 @@ class GalacticStockAbilityDragRuntime(unittest.TestCase):
         (xml / CAMPAIGN_FILE).write_bytes(ET.tostring(tree, encoding="utf-8"))
         report, driver = directory / "report.json", directory / "driver.gd"
         driver.write_text(DRIVER % {"directory": json.dumps(directory.as_posix()), "rows": json.dumps(rows),
-                                    "again": "true" if again else "false"}, encoding="utf-8")
+                                    "again": "true" if again else "false", "after": json.dumps(after)}, encoding="utf-8")
         purchase = ("--eawr-galactic-queue", recruit) if recruit else ()
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
@@ -313,6 +449,34 @@ class GalacticStockAbilityDragRuntime(unittest.TestCase):
         self.assertEqual(data["corruption_hud"]["choices_accepted"], 1, "the land choice ran once")
         self.assertEqual(data["corruption_hud"]["accepted_slot"], 1, "the stock slot 1 land mission choice was the one that ran")
         self.assertIn("DRAG_ACTION_CLICK=corrupt_button_icon_a", chr(10).join(lines), "its row was enabled, so the second round could click it")
+
+    def free_after_close(self, after):
+        # #7357: the owner's Cancel on the Corrupt Planet dialog. Retail leaves the hero free (WGCH-121): round 1 travels to the
+        # enemy planet and closes the menu, then the parked hero is given orders by real input. The drop planet is the owner's:
+        # the Empire's Corellia, with its starbase and ships in orbit. A player reaches it from a planet next to it, where it
+        # is revealed (a route needs a revealed planet, WGM-18): the Defiler starts at Zann's Bothawui, Corellia's neighbour
+        # in this conquest.
+        result, data, lines = self.run_case("Sandbox_Equal_Footing_Underworld", "Underworld_Saboteur", [],
+                                            enemy_faction="Empire", enemy_planet="Corellia", company="Underworld_Saboteur_Team",
+                                            home="Bothawui", again=True, after=after)
+        text = chr(10).join(lines)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("DRAG_MODAL=corruption_modal", text, "the release must open the corruption dialog")
+        self.assertIn("DRAG_ACTION_CLICK=corrupt_close", text, "round 1 closes the dialog")
+        self.assertEqual(data["corruption_hud"]["closes"], 1)
+        self.assertEqual(data["corruption_hud"]["choices_accepted"], 0)
+        if after == "panel":
+            self.assertIn("DRAG_SELECTED=yes", text, "the hero is selected from its planet's fleet panel after Close")
+            self.assertIn("DRAG_END=selected", text)
+        else:
+            self.assertIn("DRAG_END=moved", text, "the hero's stack icon takes an ordinary move to another planet after Close")
+            self.assertEqual(data["fleet_hud"]["drag"]["orders"], 1, "the drop home is one ordinary fleet order")
+
+    def test_saboteur_after_close_by_dragging_its_stack_icon_to_another_planet(self):
+        self.free_after_close("icon")
+
+    def test_saboteur_after_close_by_its_cell_in_the_focused_planet_panel(self):
+        self.free_after_close("panel")
 
 
 if __name__ == "__main__":

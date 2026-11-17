@@ -183,7 +183,7 @@ struct SpaceFootprint final {
     bool operator==(const SpaceFootprint&) const = default;
 };
 
-// A map object type the unit tables load only for its footprint (#71).
+// A map object type's footprint and, for a solid asteroid, its immutable FD-10 geometry.
 struct ObstacleType final {
     std::string id;
     std::string xml_type;
@@ -199,6 +199,9 @@ struct ObstacleType final {
     bool last_state_visible_under_fow{};
     bool initial_state_visible_under_fow{};
     std::uint64_t table_order{};
+    std::optional<CollisionBounds> collision{};
+    std::optional<CollisionBounds> model_collision_box{};
+    std::vector<CollisionMesh> collision_meshes{};
     bool operator==(const ObstacleType&) const = default;
 };
 
@@ -249,6 +252,8 @@ struct CombatConstants final {
     std::vector<Bounty> bounty_sp{}, bounty_mp{};
     std::vector<NamedConstant> scalars;
     std::vector<DamageToArmor> damage_to_armor;
+    // PL-01: load-time presentation opt-in; excluded from content identity.
+    bool prediction_paths{};
     bool operator==(const CombatConstants&) const = default;
 };
 

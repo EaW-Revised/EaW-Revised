@@ -55,24 +55,30 @@ struct Room {
     unsigned bad_mounts{};
     bool alias_mount_names{};
     std::vector<std::uint8_t> host_mods; // The mod description the host opens its room with.
+    std::optional<eawr::core::PreparedContentIdentity> admission_content;
+    std::vector<std::string> setup_evidence;
     std::map<unsigned, unsigned> offers_by_peer, discarded;
     explicit Room(unsigned count = 2, std::size_t workers = 1, net::LobbyLimits limits = {}, bool early = false, bool concurrent = false,
-        std::vector<std::uint8_t> initial_host_mods = {})
+        std::vector<std::uint8_t> initial_host_mods = {},
+        std::optional<eawr::core::PreparedContentIdentity> content = {}, bool defer_initial_pumps = false)
         : network(count), executor(std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers)), streams(count, nullptr), early_lock(early) {
         concurrent_prepare = concurrent; host_mods = std::move(initial_host_mods);
+        admission_content = std::move(content);
         for (unsigned peer = 0; peer < count; ++peer) transports.push_back(std::make_unique<eawr::testing::FakeTransport>(network, peer));
         sessions.push_back(require(net::LobbySession::host(*transports[0], "test-room", std::min(count, net::max_lobby_seats),
             selection(0), 1, {"data/art/maps/test.ted", {0}}, hooks(0), limits)));
         for (unsigned peer = 1; peer < count; ++peer) sessions.push_back(require(net::LobbySession::join(*transports[peer], "test-room", 0, hooks(peer), limits)));
         for (unsigned peer = 1; peer < std::min(count, net::max_lobby_seats); ++peer)
             require(host().admit(peer, "identity-" + std::to_string(peer), selection(peer), peer + 1, revision()));
-        rounds(3);
+        if (!defer_initial_pumps) rounds(3);
     }
     net::LobbySession& host() { return sessions[0]; }
     net::LobbySession& client() { return sessions[1]; }
     std::uint64_t revision() { return host().snapshot().revision; }
     net::LobbyHooks hooks(unsigned peer) {
         net::LobbyHooks value;
+        value.admission_content = admission_content;
+        value.setup_difference = [this](std::string summary) { setup_evidence.push_back(std::move(summary)); };
         if (peer == 0) value.mounted_mods = host_mods;
         if (concurrent_prepare) {
             value.preparation_mounts = [this, peer](const net::LobbySnapshot&, const net::SetupOffer* prepared) {
@@ -205,6 +211,63 @@ struct Room {
     }
     void inject(unsigned from, unsigned to, net::LobbyFrame frame) { require(transports[from]->send(to, require(net::encode_lobby_frame(frame)))); }
 };
+void skirmish_content_admission() {
+    eawr::core::PreparedContentIdentity content(sim::identity_domain("room", "same").digest);
+    content.layers.push_back({"Fixture (Workshop 123)", sim::identity_domain("layer", "same").digest});
+    Room equal(2, 1, {}, false, false, {}, content);
+    expect(std::get<net::LobbySnapshot>(require(net::decode_lobby_frame(require(net::encode_lobby_frame(equal.host().snapshot())))))
+        == equal.host().snapshot(), "room content survives the canonical codec");
+    equal.commit();
+    Room changed(2, 1, {}, false, false, {}, content, true);
+    auto snapshot = changed.host().snapshot(); snapshot.content->layers[0].digest[0] ^= 1;
+    changed.network.inbox[1].clear();
+    changed.inject(0, 1, snapshot);
+    changed.network.round += 10;
+    require(changed.client().pump(changed.network.round));
+    expect(!changed.client().notice(), "guest keeps the reliable stream alive until the host acknowledges the refusal");
+    changed.network.round += 10; require(changed.client().pump(changed.network.round));
+    expect(changed.contexts == 0, "waiting for acknowledgement never creates setup");
+    auto renamed_host = changed.host().snapshot().seats.front().selection; renamed_host.name = "Renamed host";
+    require(changed.host().request(net::LobbyAction::select, changed.host().snapshot().revision, std::move(renamed_host)));
+    changed.network.round += 10; require(changed.host().pump(changed.network.round));
+    changed.network.round += 10;
+    const auto refused = changed.client().pump(changed.network.round);
+    expect(!refused && refused.error().code == "EAWR-NET-1609"
+        && refused.error().message.find("mod content/order differs at layer 1") != std::string::npos
+        && refused.error().message.find("; host ") != std::string::npos
+        && refused.error().message.find(" vs you ") != std::string::npos
+        && refused.error().message.find("update the Workshop item 123 on both PCs") != std::string::npos,
+        "changed content is refused at JOIN with the existing named layer diagnostic and both values");
+    expect(changed.contexts == 0, "content refusal precedes setup and cannot become 0304");
+    expect(changed.host().notice() && changed.host().notice()->message == refused.error().message
+        && changed.host().snapshot().phase == net::LobbyPhase::staging && changed.host().snapshot().seats.size() == 1,
+        "host retains the named refusal across a newer staging revision and frees only the refusing seat");
+    Room no_ack(2, 1, {}, false, false, {}, content, true);
+    auto invalid_content = no_ack.host().snapshot(); invalid_content.content->digest[0] ^= 1;
+    no_ack.network.inbox[1].clear(); no_ack.inject(0, 1, invalid_content); no_ack.network.round += 10;
+    require(no_ack.client().pump(no_ack.network.round));
+    const auto timed_out = no_ack.client().pump(no_ack.network.round + 5'000);
+    expect(!timed_out && timed_out.error().code == "EAWR-NET-1609"
+        && timed_out.error().message.starts_with("mod content differs"),
+        "a missing refusal acknowledgement stays bounded and preserves the named local cause");
+    Room evidence;
+    evidence.bad_offer = true; evidence.propose(); static_cast<void>(evidence.client().accept_setup()); evidence.rounds(5);
+    expect(!evidence.setup_evidence.empty(), "an offer mismatch keeps full local evidence before wire truncation");
+    const auto& summary = evidence.setup_evidence.front();
+    const auto wire_at = summary.find(",wire_hex=");
+    expect(wire_at != std::string::npos, "failure evidence retains the decodable frozen snapshot bytes");
+    const auto wire_end = summary.find('}', wire_at);
+    const auto wire = summary.substr(wire_at + 10, wire_end - wire_at - 10);
+    Bytes snapshot_wire;
+    for (std::size_t i = 0; i < wire.size(); i += 2)
+        snapshot_wire.push_back(static_cast<std::uint8_t>(std::stoul(wire.substr(i, 2), nullptr, 16)));
+    const auto frozen = std::get<net::LobbySnapshot>(require(net::decode_lobby_frame(snapshot_wire)));
+    expect(frozen.phase == net::LobbyPhase::starting && frozen.frozen_revision != 0,
+        "the retained snapshot decodes to the exact frozen Start revision");
+    for (const auto* field : {"expected_snapshot={room=", "revision=", "frozen_revision=", "snapshot=", "expected_offer={", "received_offer={",
+            "seed=", "domain=", "setup=", "seats=", "input_delay=", "final_tick_count=", "recovery="})
+        expect(summary.find(field) != std::string::npos, std::string("offer evidence retains ") + field);
+}
 void revised_layer_join() {
     const auto root = std::filesystem::temp_directory_path() / ("eawr-revised-lobby-"
         + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -282,12 +345,12 @@ void codec() {
     expect(std::get<net::LobbySnapshot>(require(net::decode_lobby_frame(with_mods))).mounted_mods == invalid.mounted_mods,
         "mounted description survives the lobby snapshot");
     auto old_mods = with_mods;
-    old_mods[old_mods.size() - 6] = 1;
+    old_mods[old_mods.size() - 7] = 1;
     const auto old_result = net::decode_lobby_frame(old_mods);
     expect(!old_result && old_result.error().message.find("mod list version 1, this build needs version 2") != std::string::npos,
         "old lobby mod description gives a clear version diagnostic");
     auto forged_mods = with_mods;
-    forged_mods[forged_mods.size() - 2] = 1;
+    forged_mods[forged_mods.size() - 3] = 1;
     expect(!net::decode_lobby_frame(forged_mods), "an oversized mod count in a received snapshot is refused");
     invalid.mounted_mods = {3, 1, 1, 1, 0, 0};
     expect(!net::encode_lobby_frame(invalid), "excessive mounted mod count is refused");
@@ -1006,8 +1069,9 @@ void asynchronous_host_start() {
         expect(room.client().notice() && room.client().notice()->message.find("preparing") != std::string::npos,
             "#6045 a guest's edit is refused and says why the room is locked");
         bool told = false;
-        for (const auto& line : room.client().chat_history()) told = told || line.text.find("preparing the campaign") != std::string::npos;
-        expect(told, "#6045 the room is told once that the host is preparing");
+        // This fixture room is not a campaign room, so the room is told the offer hook's own pending reason.
+        for (const auto& line : room.client().chat_history()) told = told || line.text.find("derivation running") != std::string::npos;
+        expect(told, "#6045 the room is told once why the host's Start is pending");
         expect(room.host().snapshot().revision == before.revision && room.host().snapshot().game == before.game, "#6045 the locked room did not change");
         // The derivation finishes: Start publishes on the next pump and the match proceeds as usual.
         room.held_offers.clear();
@@ -1324,7 +1388,7 @@ void concurrent_preparation_cleanup() {
         Room room(2, 1, limits, false, true); room.held_offers = {1}; room.all_ready();
         require(room.host().start(room.revision())); room.rounds(30);
         expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.builds == 0 && room.host().notice()
-            && room.host().notice()->message.find("timed out") != std::string::npos, "missing prepared claim times out without subset commit");
+            && room.host().notice()->message.find("Preparation took longer than") != std::string::npos, "missing prepared claim times out without subset commit");
     }
     {
         // #6288 review: a hook's empty refusal text still reaches the host at once, with a fixed message.
@@ -1343,12 +1407,12 @@ void concurrent_preparation_cleanup() {
             "a whitespace-only guest refusal message cancels the attempt immediately with the fixed text");
     }
     {
-        // The host's own pending derivation still expires: the 30-minute bound is the only limit once nothing is exempt.
+        // The host's own pending derivation still expires: the preparation bound (net::preparation_timeout_minutes) is the only limit once nothing is exempt.
         net::LobbyLimits limits; limits.preparation_timeout_ms = 20;
         Room room(2, 1, limits, false, true); room.held_offers = {0, 1}; room.all_ready();
         require(room.host().start(room.revision())); room.rounds(30);
         expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.builds == 0 && room.host().notice()
-            && room.host().notice()->message.find("timed out") != std::string::npos, "a held host offer times out without subset commit");
+            && room.host().notice()->message.find("Preparation took longer than") != std::string::npos, "a held host offer times out without subset commit");
     }
     {
         Room room(3, 1, {}, false, true); room.all_ready();
@@ -1387,7 +1451,7 @@ void preparation_codec() {
             expect(!net::decode_lobby_frame(std::span(bytes).first(size)), "truncated preparation frame is refused");
         auto old = bytes; old[1] = 2;
         const auto refused = net::decode_lobby_frame(old);
-        expect(!refused && refused.error().message.find("version 4") != std::string::npos, "mixed lobby protocol refuses explicitly");
+        expect(!refused && refused.error().message.find("version 5") != std::string::npos, "mixed lobby protocol refuses explicitly");
         auto trailing = bytes; trailing.push_back(0); expect(!net::decode_lobby_frame(trailing), "trailing preparation bytes are refused");
     }
     expect(frames.size() >= 2, "both preparation frame kinds were exercised");
@@ -1531,20 +1595,26 @@ void host_mod_list_not_shared() {
 // #7198: the wait text and the room's preparation deadline come from one constant; neither carries its own number.
 void preparation_bound_has_one_source() {
     const auto bound = std::to_string(net::preparation_timeout_minutes) + " minutes";
-    expect(net::preparation_timeout_minutes >= 10, "the bound covers the slowest measured chain with margin (never under 10 minutes)");
+    expect(net::preparation_timeout_minutes >= 2 && net::preparation_timeout_minutes <= 5, "the bound is between the 2 minute floor and the owner's 5 minute ceiling");
     expect(net::LobbyLimits{}.preparation_timeout_ms == net::preparation_timeout_minutes * 60'000, "the default deadline equals the constant");
-    const auto host = net::galactic_prepare_wait_text(true, "3 min so far");
-    const auto guest = net::galactic_prepare_wait_text(false, "3 min so far");
-    expect(host.find("take up to " + bound + ".") != std::string::npos, "the host line names the constant's value");
-    expect(guest.find("take up to " + bound + ".") != std::string::npos, "the client line names the constant's value");
-    expect(host.find("3 min so far") != std::string::npos && host.find("The room is locked") != std::string::npos
-        && guest.find("3 min so far") != std::string::npos, "the lines keep their progress and locked-room text");
-    expect(host.find("20 minutes") == std::string::npos && guest.find("20 minutes") == std::string::npos, "no stale second number");
+    const auto host = net::galactic_prepare_wait_text(true, 42);
+    const auto guest = net::galactic_prepare_wait_text(false, 42);
+    // Owner (net-3): short lines; the counter is in seconds and the locked note goes into the first chat line only.
+    expect(host == "Preparing the campaign (42 s). Gives up after " + bound + ".", "the host line reads as specified, with the constant's value");
+    expect(guest == "Preparing your copy (42 s).", "the client line reads as specified");
+    expect(net::galactic_prepare_locked_note == "Room locked while preparing.", "the host's one-off locked note");
+    expect(host.find("locked") == std::string::npos, "the repeating line does not carry the locked note");
+    const auto limit = net::LobbyLimits{}.preparation_timeout_ms;
+    expect(net::preparation_timeout_message(limit, limit + 250).rfind("Preparation took longer than " + bound + " (" + std::to_string(limit / 1000) + " s): ", 0) == 0
+        && net::preparation_timeout_message(limit, limit).find("try again") != std::string::npos, "the timeout message names the bound, the elapsed time and a hint");
+    for (const auto& line : {host, guest})
+        expect(line.find("12 minutes") == std::string::npos && line.find("20 minutes") == std::string::npos, "no stale second number");
 }
 
 int main() {
     try {
         preparation_bound_has_one_source();
+        skirmish_content_admission();
         host_mod_description_refresh();
         host_mod_list_not_shared();
         concurrent_campaign_preparation(); concurrent_preparation_locks_once(); concurrent_preparation_cleanup(); preparation_codec();

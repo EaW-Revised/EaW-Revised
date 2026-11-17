@@ -11,10 +11,14 @@ struct GroundStack {
     std::vector<GroundCompany> companies;
     std::vector<FleetStackEntry> contents;
 };
+// `orbit_landing`: a local orbit fleet here holding landable ground units is being dragged. Its ground control is
+// then always the drop target (GGS-05, owner rule 2026-11-16): whoever holds the surface, empty or not, its contents
+// known or not. An unknown surface shows as an empty stack, so the target reveals nothing.
 inline std::optional<GroundStack> ground_stack(const sim::galactic::GalacticSnapshot& snapshot,
-    PlayerId local, ObjectId planet, std::size_t textures, bool empty_drop_target = false) {
+    PlayerId local, ObjectId planet, std::size_t textures, bool empty_drop_target = false, bool orbit_landing = false) {
     const auto roster = ground_roster(snapshot, local, planet);
-    if (!roster.accessible || (!roster.contents_known && !roster.count_known) || !snapshot.observer()) return {};
+    const bool known = roster.contents_known || roster.count_known;
+    if (!roster.accessible || (!known && !orbit_landing) || !snapshot.observer()) return {};
     const auto& facts = snapshot.observer()->planets;
     const auto observed = std::find_if(facts.begin(), facts.end(),
         [planet](const auto& row) { return row.planet == planet; });
@@ -28,11 +32,11 @@ inline std::optional<GroundStack> ground_stack(const sim::galactic::GalacticSnap
     // the session admits a landing on an uncontested empty surface (WGM-39/53), and a planet with no base or troops has no
     // allegiance, so it is neither allied nor has a faction to count for (#6934).
     const bool known_empty = roster.count_known && roster.count && *roster.count == 0;
-    if (!owner_faction && !(empty_drop_target && known_empty)) return {};
+    if (!owner_faction && !(empty_drop_target && known_empty) && !orbit_landing) return {};
     GroundStack result;
     result.owner = observed->allegiance; result.allied = roster.allied;
     result.contents_known = roster.contents_known;
-    for (const auto& transport : observed->landed_transports) {
+    if (known) for (const auto& transport : observed->landed_transports) {
         if (!transport.id || transport.delete_pending || faction(transport.owner) != owner_faction) continue;
         ++result.count;
     }
@@ -43,7 +47,7 @@ inline std::optional<GroundStack> ground_stack(const sim::galactic::GalacticSnap
         if (group == result.contents.end()) result.contents.push_back({company.type, 1});
         else ++group->count;
     }
-    if (!result.count && !(empty_drop_target && (result.allied || known_empty))) return {};
+    if (!result.count && !(empty_drop_target && (result.allied || known_empty)) && !orbit_landing) return {};
     result.texture = stack_texture_index(result.count, textures);
     if (!result.contents_known && result.count) result.contents.push_back({{}, result.count});
     return result;
@@ -75,7 +79,7 @@ inline std::optional<GroundStack> ground_drop_stack(const sim::galactic::Galacti
     }
     const bool landing = selected_ground && source != fleets.end() && source->orbit == planet
         && fleet_can_land(snapshot, local, fleet, stack);
-    return ground_stack(snapshot, local, planet, textures, surface_units_held || landing);
+    return ground_stack(snapshot, local, planet, textures, surface_units_held || landing, landing);
 }
 // GGS-04: only observer-admitted local companies enter a seat command.
 inline std::vector<ObjectId> ground_stack_units(const GroundStack& stack) {

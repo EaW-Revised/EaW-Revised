@@ -12,6 +12,7 @@ struct SessionStoreSquadronRoster {
 
 struct SessionStoreFlightScratch {
     std::map<EntityId, math::TrigCache> craft_trig; // scratch; one writer per craft
+    std::vector<CraftObstacle> craft_obstacles; // FD-10: retain the high-water capacity between ticks
 };
 
 struct SessionStoreFlights {

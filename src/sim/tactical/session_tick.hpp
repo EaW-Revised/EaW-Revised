@@ -459,6 +459,7 @@ private:
     };
     std::optional<Commands> commands_;
     struct Systems {
+        std::vector<SnapshotPredictedPath> predicted_paths; // allocated only for PL-01 opt-in content
         std::optional<std::vector<LiveUnit>> inputs;
         std::optional<std::uint64_t> capture_index_bodies;
         std::optional<std::uint64_t> capture_prepare_bodies;

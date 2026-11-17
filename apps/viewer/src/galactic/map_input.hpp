@@ -317,7 +317,8 @@ struct SurfaceOrbitTarget {
         [&](const auto& row) { return row.id == planet; });
     if (destination == planets.end()) return false;
     const auto qualified = sim::galactic::can_land_transport(*snapshot.control(), *snapshot.fleet_control(),
-        local, destination->owner, member, snapshot.movement());
+        local, sim::galactic::surface_defended_against(*snapshot.control(), local, planet, snapshot.movement())
+            ? PlayerId{} : destination->owner, member, snapshot.movement());
     return qualified && qualified.value();
 }
 
@@ -340,10 +341,7 @@ struct SurfaceOrbitTarget {
     if (destination == planets.end()) return false;
     bool capable = false;
     for (const auto& member : merged.members) {
-        const auto qualified = sim::galactic::can_land_transport(*snapshot.control(), *snapshot.fleet_control(),
-            local, destination->owner, member, snapshot.movement());
-        if (!qualified) return false;
-        capable = capable || qualified.value();
+        capable = capable || transport_can_land(snapshot, local, fleet->orbit, member);
     }
     return capable;
 }

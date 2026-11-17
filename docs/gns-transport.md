@@ -110,15 +110,18 @@ release their own connection/listener handles after their drain.
 The adapter uses existing transport control kinds (`TcpMessage` hello, accept,
 keepalive, close and data), without adding application kinds. Both sides check
 protocol version, exact caller-supplied build identity, frame limit and role
-before opening the stream. GNS has its own hello revision, `gns_protocol_version` (2, the
-LAN/TCP protocol stays 1), bumped when the sender slot and roster size joined the hello; the
-decoder reads magic, version and build before the revision-specific tail. The N2 decoder
-therefore reports 1502 for an old-layout hello and 1503 for a different build. A build from
-before revision 2 is unchanged: it checks the hello length first and answers an N2 hello with
-its own 1518. The existing `SetupSession` still compares content,
+before opening the stream. GNS has its own hello revision, `gns_protocol_version` (4, the
+LAN/TCP protocol stays 1). Revision 2 added roster fields, 3 bound mesh signalling
+to its grant secret, and 4 adds delivery ordinals below the envelope codec. Builds
+using the current delivery wrapper still report 1502 for a differing hello version
+and 1503 for a different build. An unwrapped hello from the previous patch is
+recognized only as the first reliable message and passed to that same decoder,
+so the patched endpoint reports the typed mismatch; the old endpoint's error
+cannot be changed. Older delivery formats do not carry application traffic.
+The existing `SetupSession` still compares content,
 setup and tick-zero state. A GNS data message contains little-endian u32 total
 frame bytes and u32 fragment offset, followed by up to 64 KiB of application
-data. Fragments stay contiguous on one reliable lane; the receiver validates
+data. Fragments stay contiguous in the restored stream; the receiver validates
 size/offset and emits only a complete frame. This preserves empty frames,
 arbitrary first bytes and the default 1 MiB application limit despite GNS's
 512 KiB send-message limit. The configurable maximum remains 16 MiB.
@@ -135,8 +138,9 @@ receiver ACKs, and its pending unreliable bytes must drain too. This prevents
 the final reliable close from waiting on a receiver ACK after its ICE route is
 destroyed when P2P's native close signalling is unavailable. The probe uses an
 existing kind, carries no game frame and cannot alter fragment assembly; only
-this exact one-byte control is permitted unreliably after admission. All game
-frames and other control envelopes remain reliable.
+this exact one-byte control bypasses the delivery ordinal after admission. Game
+frames and other control envelopes retain reliable originals, with the small-frame
+redundancy described below.
 Loss of the final best-effort probe can still produce a bounded close timeout
 on a lossy route.
 The close timeout bounds a stalled drain: accepting queued fragments or a new
@@ -161,6 +165,61 @@ without inventing samples for the missed intervals. The first sample initializes
 smoothed RTT; subsequent samples use the common 1/8 RTT and 1/4 absolute consecutive
 RTT-delta jitter updates. GNS's packet-jitter high-water field is not this jitter.
 Lockstep admission and desync state remain in their existing modules.
+
+### WAN delivery and quality observations
+
+The UDP payload limit is 1200 bytes, leaving room for IPv6 and TURN channel
+headers within a 1280-byte path. Application frames are fragmented by GNS,
+rather than relying on IP fragmentation. Reliable sends disable Nagle. The
+provider's pacing floor is 64 KiB/s; the ceiling remains 64 MiB/s for fast
+checkpoint transfers on low-latency paths. This pinned provider initializes
+its rate estimate from RTT, then clamps it between the floor and ceiling;
+it does not implement adaptive congestion control afterward. Its previous
+256 KiB/s default floor could exceed a slow uplink during bulk transfers.
+Neither the ceiling nor the adapter's 64 native-send-call budget is a count
+of datagrams sent immediately: GNS token-paces and fragments those messages.
+
+Each reliable transport envelope is prefixed with a little-endian u64 ordinal,
+starting at zero on each connection. A second, higher-priority native lane sends
+unreliable, no-Nagle copies of recent small envelopes. One copy datagram contains
+at most 1000 bytes and 24 records (`u16 record size`, then the ordinal-prefixed
+envelope). History is limited by both those bounds and 750 ms of age, and repeats
+at most once per 100 ms, including while no new input is sealed. The maximum
+duplicate payload rate is 10,000 bytes/s per edge; reliable originals retain
+bandwidth even at the pacing floor. Large fragments use reliable delivery only.
+
+The receiver merges both paths before decoding any frame or control. It emits
+only the next ordinal, buffers bounded future copies, and discards late originals
+and duplicate copies. At copy capacity it discards optional lookahead and relies
+on the reliable originals; it never skips an ordinal. Conflicting buffered copies
+or a gap on the native reliable lane fail closed. This preserves exact input and
+control ordering, fragment assembly, checkpoint barriers, close tails and replay
+bytes. A lost tick can arrive through a later history datagram without waiting
+for the native reliable retransmit. A missing large fragment still gates later
+envelopes, as the ordered application contract requires.
+
+The historical `loss_pct` observation is **quality degradation**, not a pure wire
+loss measurement. In the pinned upstream source, `APIGetConnectionRealTimeStatus`
+subtracts dropped and weird-sequence fractions from one. `LinkStatsTrackerBase`
+divides each count by received plus missing packets; weird sequences include
+uncorrected reordering, duplicate packets and sequence lurches, while corrected
+reordering is counted separately. A clean voice call cannot distinguish these
+causes in this stream. The `gns-stats` diagnostic reports native bytes/packets per
+second, send-rate estimate and pending/unacknowledged reliable bytes. The
+address-free `gns-quality` lines retain upstream's separate dropped, reordered,
+corrected, duplicate and lurch counters. The public SDK does not expose a direct
+retransmit counter in its real-time status; unacknowledged/pending bytes alone
+must not be described as one.
+
+`net_gns_wan_zero_loss` and `net_gns_wan_lockstep` run two native GNS processes
+through a userspace UDP shaper, with real encrypted data, ACKs and retransmits.
+The profile is 200 ms RTT, a 1280-byte IPv4 path MTU, a 1 Mbit/s byte-paced link
+and a four-packet tail-drop queue per direction, first with zero random loss,
+then with seeded 20% random loss. Both processes run the real `LockstepSession`
+over a small deterministic mode and report wait time, stall count, longest wait,
+quality and a canonical-input state hash. The shaper records actual UDP payload
+sizes and separate random, MTU and queue drops. It changes no player or host
+network configuration and requires no elevated rights.
 
 The introduction interface maps an expiring join code to a rendezvous containing
 two opaque peer identities and a session identity. It forwards bounded
@@ -320,7 +379,7 @@ Realtime TURN on the public server, coturn in a private one) stops forwarding in
 lockstep wait, so the match ends as NET-0106 and not as a link loss. Upstream master (`d534c19a`, the pin) has no fix.
 
 **Carried patch.** `cmake/EawrGnsTurnPermissionRefresh.cmake` is applied right after the FetchContent populate and
-repeats CreatePermission for the whole permitted list every `min(120 s, allocation lifetime / 2)`. Each anchor must match
+repeats CreatePermission for each permitted IP independently every `min(120 s, allocation lifetime / 2)`. Each anchor must match
 exactly the expected number of times, so a changed pin fails the configure instead of silently running unpatched; the
 patch id is part of the build prefix. Drop the file when a pin bump contains an upstream fix. The SYSTEM provider cannot
 be patched and warns at configure time. `net_gns_turn_permission` (tests/net/gns_turn_processes.py) runs two real GNS
@@ -331,6 +390,28 @@ with a header as success, so one stale nonce ended the refresh chain and the all
 (600 s on coturn). The new nonce (and a changed realm, with its long-term key) is adopted and the request is re-sent at
 once, at most five times in a row; any other error reply on a Refresh re-arms it after 30 s. `net_gns_turn_nonce`
 rotates the server nonce every 2 s so every request is answered with 438 first, and requires the frames to keep flowing.
+
+**Per-address permissions.** Some TURN servers reject an entire CreatePermission request if any peer address is denied.
+The pinned classifier treats CGNAT and some reserved ranges as public; LAN TURN configurations also permit private
+candidates. Sending up to ten addresses in one request let one 403 stop refreshes for the selected public peer too.
+Each allocation now sends exactly one peer IP per request, with an independent refresh/retry deadline. A refusal or
+timeout retries that IP after 30 s and never advances another IP's success state; nonce challenges retry immediately.
+The former ten-address sweep limit no longer omits later candidates. A warning names any failure, marks a failure for
+the selected local relay as `ACTIVE RELAY`, and retains the error-code reply diagnostic. LAN relay support remains.
+`net_gns_turn_denied` adds a CGNAT candidate to the real GNS ICE exchange, rejects any request containing it atomically
+with 403, and requires both processes to keep exchanging ordered frames for 40 s across six-second permission expiries,
+including repeated 403 retries and successful refreshes for the allowed IP. This client uses Send Indication rather
+than ChannelBind, so there is no separate channel lifetime to maintain.
+
+For a manual live proof, the same fixture accepts `live-turn-host <service> <port> <seconds>` and
+`live-turn-join <service> <port> <seconds> <invitation>`, with 720–3600 seconds. Run the processes on different hosts.
+They use system TLS trust and force the own TURN provider. The host uses relay-only ICE and the guest advertises
+host/reflexive candidates: a server that denies its own IP cannot connect two relay-only allocations on itself.
+Both processes require the pair to stay relayed and identify it as `relay(own)` by the end, print redacted TURN diagnostics and periodic
+route/last-receive counters, and reject an active-relay permission failure. The local-relay host requires repeated
+successful permission refreshes; the guest uses the remote relay socket without needing a local permission. Its provider
+may initially be unknown until its own unused allocation first refreshes successfully. The host prints a
+single-use invitation for the joiner; never publish that invitation or service credentials in a receipt.
 
 **Loud failure.** `GnsOptions::ack_silence_timeout` (15 s): a Connected link with reliable bytes in flight and neither
 validated reliable inbound messages nor send-window progress for that long stops with EAWR-NET-1507,

@@ -8,6 +8,7 @@
 #include "eawr/data/retail_values.hpp"
 #include "ui/theme_builder.hpp"
 #include <godot_cpp/classes/theme.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 #include <algorithm>
 
 using namespace godot;
@@ -19,6 +20,11 @@ bool GalacticMode::State::build_battle_dialog() {
     auto loaded = data::ui::load_dialog_catalog(*filesystem);
     if (!loaded) { failure = core::format_diagnostic(loaded.error()); return false; }
     auto catalog = std::make_shared<data::ui::DialogCatalog>(std::move(loaded).value());
+    bool invalid_search_layout{};
+    planet_search_layout = galactic_view::load_planet_search_layout(*filesystem, invalid_search_layout);
+    if (invalid_search_layout)
+        godot::UtilityFunctions::push_warning("EAWR-UI-PLANET-SEARCH: invalid dialog layer; retaining the last valid definition");
+    if (planet_search_layout) catalog->script.dialogs.push_back(planet_search_layout->dialog);
     auto loaded_atlas = assets::load_mega_texture_atlas(*filesystem,
         "data/art/textures/" + catalog->skin.texture_file + ".mtd");
     if (!loaded_atlas) { failure = core::format_diagnostic(loaded_atlas.error()); return false; }

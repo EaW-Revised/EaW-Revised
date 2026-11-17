@@ -1,4 +1,7 @@
 #include "skirmish_prepare.hpp"
+#include "eawr/campaign/space_entry.hpp"
+#include "eawr/core/sha256.hpp"
+#include "eawr/vfs/vfs.hpp"
 #include "lan_match.hpp"
 #include <iomanip>
 #include <locale>
@@ -9,7 +12,49 @@
 #include <algorithm>
 #include <charconv>
 #include <sstream>
+#include <stdexcept>
 namespace eawr::presentation::godot_backend {
+core::Result<core::PreparedContentIdentity> skirmish_room_content(const vfs::Vfs& filesystem,
+    std::span<const skirmish::SetupMap> maps, const std::vector<std::string>& mod_labels) {
+    using Result = core::Result<core::PreparedContentIdentity>;
+    std::vector<units::InputFile> consumed;
+    auto identity = skirmish::read_data_identity(filesystem, &consumed);
+    if (!identity) return Result::failure(identity.error());
+    std::vector<core::ContentInputReceipt> receipts;
+    for (const auto& input : consumed) receipts.push_back({input.logical_path, input.layer_id, input.sha256});
+    for (const auto& map : maps) {
+        if (!map.unavailable.empty()) continue;
+        auto record = filesystem.stat(map.path);
+        if (!record) return Result::failure(record.error());
+        auto bytes = filesystem.open(record.value());
+        if (!bytes) return Result::failure(bytes.error());
+        receipts.push_back({record.value().canonical_path, record.value().layer_id,
+            core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(bytes.value().data()), bytes.value().size()))});
+    }
+    core::PreparedContentIdentity content;
+    try { content.layers = campaign::prepared_content_layers(filesystem.layer_ids(), receipts); }
+    catch (const std::runtime_error& error) {
+        return Result::failure(net::lobby_diagnostic(net::LobbyReason::setup_failed, error.what()));
+    }
+    // Layer IDs are local grouping keys. Strip them before the room publishes any labels.
+    std::size_t mod{};
+    core::Sha256Hasher hash;
+    constexpr std::string_view domain = "eawr-skirmish-room-content-v1";
+    hash.update(std::span(reinterpret_cast<const std::uint8_t*>(domain.data()), domain.size()));
+    for (auto& layer : content.layers) {
+        hash.update(layer.digest);
+        if (layer.name == "base") layer.name = "Base game";
+        else if (layer.name == "expansion") layer.name = "Expansion";
+        else if (layer.name == vfs::revised_layer_id) layer.name = "Revised";
+        else {
+            layer.name = mod < mod_labels.size() ? mod_labels[mod] : "Mod layer " + std::to_string(mod + 1);
+            ++mod;
+        }
+        layer.name = net::sanitize_lobby_text(layer.name, 192);
+    }
+    content.digest = hash.digest();
+    return Result::success(std::move(content));
+}
 core::Result<std::vector<std::uint32_t>> skirmish_player_ids(std::string_view text) {
     using Result = core::Result<std::vector<std::uint32_t>>;
     std::vector<std::uint32_t> ids;

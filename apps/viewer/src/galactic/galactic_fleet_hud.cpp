@@ -587,7 +587,7 @@ void GalacticMode::State::service_fleet_stack_popup() {
         if (fleet_publication->fleet_control())
             galactic_view::apply_fleet_transport_traits(display_traits, fleet_publication->fleet_control()->types);
         auto complete = sim::galactic::observed_fleets(*fleet_publication, galaxy->local.player,
-            display_traits, std::numeric_limits<std::size_t>::max(), visibility);
+            display_traits, std::numeric_limits<std::size_t>::max(), visibility, {}, {}, {}, departing_transports);
         if (fleet_publication->fleet_control())
             galactic_view::apply_local_transport_traits(complete.cards, fleet_publication->fleets(), fleet_publication->fleet_control()->types);
         std::vector<const sim::galactic::ObservedFleet*> cards;
@@ -680,6 +680,13 @@ void GalacticMode::State::rebuild_ground_badges() {
             attach_ground_stack_drag(button, planet.id);
             if (fleet_drag_receiver) hud->move_child(fleet_drag_receiver, hud->get_child_count() - 1);
         }
+        // GGS-05: a ground control that appears with a held fleet (unknown enemy ground) is placed at once; the
+        // label pass otherwise waits for the next camera or hover change and the target stays unplaced.
+        if (inserted || badge.hidden) {
+            hud_label_key.reset();
+            if (const auto label = planet_label_records.find(planet.id); label != planet_label_records.end())
+                label->second.placed = false;
+        }
         badge.ground_planet = planet.id; badge.owner = icon->owner; badge.shown = true; badge.hidden = false;
         badge.texture = icon->texture; badge.contents = icon->contents;
         const auto hover = style->list(data::ui::Field::mouse_over_texture_name);
@@ -749,7 +756,7 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
     if (displayed_snapshot->fleet_control())
         galactic_view::apply_fleet_transport_traits(display_traits, displayed_snapshot->fleet_control()->types);
     fleet_intelligence = sim::galactic::observed_fleets(*displayed_snapshot, galaxy->local.player,
-        display_traits, capacity, fleet_visibility, image_rank, indices, hero_preference.rank);
+        display_traits, capacity, fleet_visibility, image_rank, indices, hero_preference.rank, departing_transports);
     if (displayed_snapshot->fleet_control())
         galactic_view::apply_local_transport_traits(fleet_intelligence.cards, displayed_snapshot->fleets(), displayed_snapshot->fleet_control()->types);
     ++fleet_projection_rebuilds;

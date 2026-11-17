@@ -229,7 +229,7 @@ struct TacticalSuperWeaponStart final {
 
 // WGT-57: the record of the planet backdrop a destroyed planet's space battle removes: the placement carrying
 // DUMMY_TACTICAL_SUPER_WEAPON_TARGET nearest to the world origin (the first on a tie), whatever its owner; a target is
-// a SpaceProp (a backdrop), so no other element qualifies. Absent when the map has none (the rule is then a no-op).
+// a SpaceProp-family element (a backdrop), so no other element qualifies. Absent when the map has none (the rule is then a no-op).
 [[nodiscard]] core::Result<std::optional<std::uint32_t>> destroyed_backdrop_record(
     const std::vector<MapPlacement>& placements);
 

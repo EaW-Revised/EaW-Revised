@@ -222,7 +222,7 @@
   flag: nothing is saved, hashed or replayed, and Resume Game is admitted exactly as the clock button is (where the button is disabled, e.g. a
   closed clock, it takes no press and is drawn grey: a project choice, the original's look there is unverified) and asks for the same pause change (multiplayer
   gating unchanged). **Not the pause key:** in the original the Space key toggles the cinematic view (HUD hidden, letterbox
-  bars), not pause; the remake's earlier Space-pauses binding is replaced by the tour (HCB-74) unless the player turns on Options > Tweaks > Space pauses the galactic game (default off, DEV-13), which gives Space back to pausing. **Unverified:** the banner over the
+  bars), not pause; the remake's earlier Space-pauses binding is replaced by the tour (HCB-74) unless Options > Tweaks > Space pauses the galactic game is enabled (default on, owner decision 2026-11-17, DEV-13), which gives Space back to pausing. **Unverified:** the banner over the
   planetary view (a pending battle prompt occupied the same slot in the only capture; it is drawn as on the galaxy view) and the
   banner while a modal window is up. Evidence: `test_viewer_galactic_pause_banner_runtime.py` (button lit, banner text and place,
   Resume Game and the button both play again; Resume Game refused where the button is).
@@ -231,7 +231,7 @@
   (docs/behaviour/walks/gc-cinematic-tour.md, GCT-01..12): a looping, shuffled fly-by of the planets, the letterbox bands in
   (the bands of HCB-72 and HCB-11c), the game GUI hidden, the game running; any mouse press (or a pointer move of a twentieth of the
   screen or more) ends it, the click consumed. Space acts on its release and no longer pauses (the debug build has no pause key; the
-  pause control is the clock panel's button, HCB-73); the opt-in Options > Tweaks switch "Space pauses the galactic game" (default off, DEV-13) gives Space back to pausing, and then Space does not start the tour (the camera button still does). The button was inert
+  pause control is the clock panel's button, HCB-73); the Options > Tweaks switch "Space pauses the galactic game" (default on, owner decision 2026-11-17, DEV-13) gives Space back to pausing, and then Space does not start the tour (the camera button still does). The button was inert
   with a diagnostic before. **Unverified:** the speed profile and distances, the selected planet, Escape, the pointer, the Tab hold.
 
 Audit dated 2026-10-09, against `f58f8f3d6b09f71f74de1c0a4305800f2f8a815c`.

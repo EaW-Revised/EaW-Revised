@@ -20,6 +20,7 @@ struct SessionStoreRules {
     };
     std::vector<OwnerProfiles> owner_profiles;
     MotionTable motion;
+    const bool prediction_paths; // PL-01: bound once from immutable loaded constants.
     CombatTable combat;
     std::map<std::pair<TypeId, std::uint32_t>, std::shared_ptr<const WeaponProfile>> manual_admission_profiles;
     VictoryRules victory;
@@ -32,7 +33,7 @@ struct SessionStoreRules {
         const MapBox& box)
         : setup(source), controller_entry(source.controllers ? std::optional(source) : std::nullopt),
           sensors(sensor_table.begin(), sensor_table.end()), durability(table), motion(motion_table),
-          combat(combat_table), victory(victory_rules), abilities(ability_table), economy(economy_rules), map_box(box) {}
+          prediction_paths(motion_table.prediction_paths), combat(combat_table), victory(victory_rules), abilities(ability_table), economy(economy_rules), map_box(box) {}
 };
 
 } // namespace eawr::sim::tactical::session_detail

@@ -1,4 +1,5 @@
-"""#7196: the advisor popup draws every line (enemy fleet approaching, control changed) inside its authored back."""
+"""#7196/#7444: the advisor popup draws every line (enemy fleet approaching, control changed) inside its authored back,
+built like the encyclopedia popup (CARD-19) at the hint bone, in the authored advisor text style."""
 import json
 import os
 import pathlib
@@ -43,9 +44,15 @@ func _process(_delta):
         for entry in seen:
             if entry["text"] == label.text: known = true
         if not known:
+            var glow = root.find_child("GalacticAdvisorGlow", true, false)
+            var connector = root.find_child("GalacticAdvisorConnector", true, false)
+            var ink = label.get_theme_color("font_color")
             var entry = {"text": label.text, "label": rect_of(label), "back": rect_of(back) if back != null else [],
                 "back_visible": back != null and back.visible, "frame": rect_of(frame_node) if frame_node != null else [],
-                "frame_visible": frame_node != null and frame_node.visible, "frame_frame": frame}
+                "frame_visible": frame_node != null and frame_node.visible, "frame_frame": frame,
+                "glow": rect_of(glow) if glow != null else [], "glow_visible": glow != null and glow.visible,
+                "connector_visible": connector != null and connector.visible,
+                "ink": [ink.r, ink.g, ink.b], "outline": label.get_theme_constant("outline_size")}
             seen.append(entry)
             var image = root.get_texture().get_image()
             var box = Rect2i(Vector2i(int(entry["back"][0]) - 16, int(entry["back"][1]) - 16),
@@ -85,10 +92,26 @@ func _process(_delta):
             self.assertGreaterEqual(ly, by - 0.5)
             self.assertLessEqual(lx + lw, bx + bw + 0.5, "the text ends inside the back")
             self.assertLessEqual(ly + lh, by + bh + 0.5)
-            self.assertEqual(entry["frame"], entry["back"], "the frame covers the back")
-        # The same box for both lines: one origin and one width (the height follows the text).
-        self.assertEqual(first["back"][:3], second["back"][:3], f"both lines draw in the same box ({directory})")
-        self.assertEqual(first["label"][:2], second["label"][:2], "both lines start at the same point")
+            # #7444 / CARD-19: the edge and the additive glow surround the back; the connector is drawn with it.
+            self.assertTrue(entry["glow_visible"] and entry["connector_visible"], f"glow and connector drawn ({directory})")
+            for outer, name in ((entry["frame"], "edge"), (entry["glow"], "glow")):
+                ox, oy, ow, oh = outer
+                self.assertTrue(ox < bx and oy < by and ox + ow > bx + bw and oy + oh > by + bh, f"the {name} surrounds the back")
+            gx, gy, gw, gh = entry["glow"]
+            fx, fy, fw, fh = entry["frame"]
+            self.assertTrue(gx < fx and gx + gw > fx + fw, "the glow is larger than the edge")
+            # #7444: every line takes the authored advisor text style's ink (stock text_galactic_help 192,192,192) and its
+            # outline, whatever its producer's code colour (red control change, green approach).
+            self.assertEqual([round(value * 255) for value in entry["ink"]], [192, 192, 192], "the authored advisor ink")
+            self.assertGreater(entry["outline"], 0, "the authored text outline")
+        # The same box for both lines: one bottom-left corner and one width; it grows upward with the text.
+        self.assertEqual(first["back"][0], second["back"][0], f"both lines draw in the same box ({directory})")
+        self.assertEqual(first["back"][2], second["back"][2])
+        self.assertAlmostEqual(first["back"][1] + first["back"][3], second["back"][1] + second["back"][3], delta=0.5)
+        self.assertEqual(first["label"][0], second["label"][0], "both lines start at the same x")
+        # GHUD-C04 / CARD-19: the original draws the popup's bottom-left at (60,430) at 1280x720 (the stock hint bone).
+        self.assertAlmostEqual(first["back"][0], 60.0, delta=2.0, msg="the popup's left edge at the hint bone")
+        self.assertAlmostEqual(first["back"][1] + first["back"][3], 430.0, delta=2.0, msg="its bottom at the hint bone")
 
 
 if __name__ == "__main__":

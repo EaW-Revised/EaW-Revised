@@ -337,6 +337,9 @@ struct SetupRuntime final : SessionMonitor, MessageTransport {
         return result;
     }
     core::Result<void> receive(const Received& received) override { return providers.monitor->receive(received); }
+    core::Result<void> on_activated_input_delay(std::uint64_t delay, std::uint64_t retained) override {
+        return providers.monitor->on_activated_input_delay(delay, retained);
+    }
     core::Result<void> on_link_repair(PeerIndex peer, std::function<bool(PeerIndex)> ownership = {}) override {
         return providers.monitor->on_link_repair(peer, std::move(ownership));
     }
@@ -349,6 +352,7 @@ struct SetupRuntime final : SessionMonitor, MessageTransport {
         return providers.monitor->on_reconnect(tick, hash, inactive);
     }
     bool ready_for_resync() const override { return providers.monitor->ready_for_resync(); }
+    std::optional<std::uint64_t> deferred_resync_frontier() const override { return providers.monitor->deferred_resync_frontier(); }
     core::Result<void> on_resync(std::uint64_t tick, std::string_view hash) override { return providers.monitor->on_resync(tick, hash); }
     bool may_step() const override { return released && !refusal && providers.monitor->may_step(); }
 

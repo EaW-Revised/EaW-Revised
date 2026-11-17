@@ -5,6 +5,7 @@
 #include "eawr/data/xml.hpp"
 
 #include <array>
+#include <cmath>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -41,7 +42,8 @@ int main() {
         xml << "<GameConstants><Laser_Beam_Z_Scale_Factor>4</Laser_Beam_Z_Scale_Factor>"
             "<Laser_Kite_Z_Scale_Factor>2</Laser_Kite_Z_Scale_Factor>"
             "<Shield_Flash_Scale>2, 3, 4</Shield_Flash_Scale>"
-            "<Shield_Flash_Duration>0.25</Shield_Flash_Duration></GameConstants>";
+            "<Shield_Flash_Duration>0.25</Shield_Flash_Duration>"
+            "<GUI_Flash_Level>2</GUI_Flash_Level><GUI_Rapid_Flash_Duration>0.2</GUI_Rapid_Flash_Duration></GameConstants>";
     }
     const std::array mounts{eawr::vfs::MountSpec{"constants", scratch / "Data", "data", {}}};
     auto mounted = eawr::vfs::Vfs::mount(mounts);
@@ -52,6 +54,22 @@ int main() {
         expect(lasers.beam == 4.0F && lasers.kite == 2.0F, "effective XML laser scales");
         expect(flash.scale == std::array<float, 3>{2.0F, 3.0F, 4.0F} && flash.duration == 0.25F,
                "effective XML flash scale and duration");
+        const auto order_flash = pc::load_order_flash(mounted.value());
+        expect(order_flash.level == 2.0F && order_flash.pulse_seconds == 0.2, "effective XML order flash level and pulse");
+        {   // WU-60: three sawtooth pulses of whole frames, 1 + level at each start, nothing after the third.
+            const pc::OrderFlash stock{3.0F, 0.1};
+            const auto at = [&](const double frame) { return pc::order_flash_multiplier(stock, frame / 30.0); };
+            expect(at(0) && std::abs(*at(0) - 4.0F) < 1e-4F, "order flash starts at 1 + level");
+            expect(at(1) && std::abs(*at(1) - 3.0F) < 1e-4F && at(2) && std::abs(*at(2) - 2.0F) < 1e-4F,
+                   "order flash falls linearly within a pulse");
+            expect(at(3) && std::abs(*at(3) - 1.0F) < 1e-4F, "a stock pulse spans four frames and ends at 1");
+            expect(at(4) && std::abs(*at(4) - 4.0F) < 1e-4F && at(8) && std::abs(*at(8) - 4.0F) < 1e-4F,
+                   "pulses restart at 1 + level");
+            expect(at(11) && std::abs(*at(11) - 1.0F) < 1e-4F, "last frame of the third pulse");
+            expect(!at(12) && !at(40), "order flash is over after three pulses");
+            expect(!pc::order_flash_multiplier(stock, -0.01), "order flash has not started before its tick");
+            expect(!pc::order_flash_multiplier(pc::OrderFlash{3.0F, 0.0}, 0.0), "zero pulse length shows nothing");
+        }
         for (const auto invalid : {"-1", "nan", "inf", "1junk", "", "1,2"}) {
             const eawr::data::DocumentOverrides override({{"data/xml/gameconstants.xml", "Laser_Beam_Z_Scale_Factor", {invalid}},
                 {"data/xml/gameconstants.xml", "Shield_Flash_Duration", {invalid}}});
@@ -62,6 +80,12 @@ int main() {
             const eawr::data::DocumentOverrides override({{"data/xml/gameconstants.xml", "Shield_Flash_Scale", {invalid}}});
             expect(pc::load_flash(mounted.value()).scale == std::array<float, 3>{1.0F, 1.1F, 1.25F},
                    "invalid flash RGB falls back atomically");
+        }
+        for (const auto invalid : {"-1", "nan", "inf", "1junk", "", "1,2"}) {
+            const eawr::data::DocumentOverrides override({{"data/xml/gameconstants.xml", "GUI_Rapid_Flash_Duration", {invalid}},
+                {"data/xml/gameconstants.xml", "GUI_Flash_Level", {invalid}}});
+            const auto fallback = pc::load_order_flash(mounted.value());
+            expect(fallback.level == 3.0F && fallback.pulse_seconds == 0.1, "invalid order flash values fall back");
         }
         const eawr::data::DocumentOverrides missing({{"data/xml/gameconstants.xml", "Laser_Kite_Z_Scale_Factor", {}}});
         expect(pc::load_lasers(mounted.value()).kite == 1.2F, "missing laser tag falls back");

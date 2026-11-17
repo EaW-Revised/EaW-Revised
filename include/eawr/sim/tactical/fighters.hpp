@@ -319,12 +319,20 @@ private:
     std::map<std::array<std::int32_t, 2>, Cell> cells_;
 };
 
-// FD-10: a ship or static object fighters steer around (a unit with a space layer), as a sphere
-// of its soft radius (project: FoC tests the hull's collision shape).
+struct CombatProfile;
+struct DurabilityProfile;
+struct DurabilityState;
+
+// FD-10: immutable start-of-frame model geometry and eligibility, behind a conservative sphere.
 struct CraftObstacle {
     EntityId id{};
     math::Vec3 position{};
     math::Fixed radius{};
+    const CombatProfile* geometry{};
+    math::Mat3x4 transform{};
+    const DurabilityProfile* durability_profile{};
+    const DurabilityState* durability{};
+    bool footprint_sphere{}; // FD-10: shapeless solid asteroid only; warned once when its type loads
 };
 
 // How a craft flies a dogfight this frame (#457, FD-01 to FD-07).
@@ -376,6 +384,10 @@ struct GuardChase {
 };
 
 // What one craft's frame reads (copied before the phase, never written by it).
+struct CraftAvoidanceWork {
+    std::uint64_t queries{}, triangles{};
+};
+
 struct CraftFrame {
     const CraftView* self{};
     const CraftView* leader{};        // the squadron's first live member (FM-10)
@@ -408,6 +420,7 @@ struct CraftFrame {
     // FD-10: the ships to steer around, ascending ID.
     std::span<const CraftObstacle> obstacles{};
     math::TrigCache* trig_cache{}; // optional; the locomotor owns a local cache otherwise
+    CraftAvoidanceWork* avoidance_work{}; // additive diagnostics; one writer per movement partition
 };
 
 struct CraftStep {

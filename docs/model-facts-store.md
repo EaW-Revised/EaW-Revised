@@ -7,12 +7,18 @@ does not fill it.)
 
 ## What a record holds
 
-The simulation projection of a model (`units::simulation_projection`): every bone (name, parent, the twelve transform
-values as stored), and for each collidable mesh its name, bone, bounds and, per submesh, the vertex positions, each
+The simulation projection of a model (`assets::simulation_projection`): every bone (name, parent, reference-pose visibility,
+the twelve transform values as stored), and for each collidable mesh its name, bone, bounds and, per submesh, the vertex positions, each
 vertex's first skin bone, the indices and the skin palette. Floats are stored as their raw bits. Everything else in the
-model (materials, lights, proxies, non-collidable meshes, normals, texture coordinates, weights) is never read by the
+model (materials, lights, proxies, other non-collidable meshes, normals, texture coordinates, weights) is never read by the
 tables and is not stored. A new table reader of another model field must extend the projection and the record format
 (bump `facts_format`); `unit_model_facts_contracts` compares tables built with and without the store.
+
+FD-10 also reads the first case-insensitive named `COLLISIONBOX` mesh's bounds and bone placement, even when it is
+noncollidable. Format 2 keeps that metadata without its render geometry, plus bone visibility and each retained mesh's
+collision eligibility. Format-1 caches are refused and rebuilt from source on the first load; this causes a one-time cold
+rebuild on first start. No old-format record reader is retained. Cold, warm and damaged-cache loads must produce identical
+tables, including the authored box and reference-pose collision visibility.
 
 ## Where it is used
 

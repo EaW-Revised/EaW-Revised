@@ -205,19 +205,18 @@ void human_refusal(const eawr::sim::PartitionExecutor& pool, std::vector<std::st
 }
 void missions(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
     const auto base = setup(true); auto config = base; ability_fixture::add_observer(config, 2, {1000, 3000});
-    auto refused = take(eawr::campaign::GameSession::create(config)); const auto prepared = prepare(refused, config, pool, hashes);
-    // The missing mission service is a remake gap with no retail counterpart: the menu offers the choice as
-    // unavailable and an execution refuses before any debit, consumption or RNG draw.
-    const auto* menu = refused.galaxy().snapshot()->corruption_menu();
-    expect(menu && !menu->choices[0].mission_available && menu->choices[1].mission_available,
-        "a mission choice with no live mission service is offered unavailable; a plain choice stays available");
-    const auto before_draw = refused.galaxy().economy_corruption()->random_draws;
-    const auto before_objects = refused.galaxy().snapshot()->fleets().size();
-    order(refused, 2, gc::ExecutePreparedAbility{prepared}); hashes.push_back(take(refused.step(pool)).state_hash.get());
-    expect(refused.galaxy().snapshot()->player_economy()->players[1].credits == f(1000) && refused.return_state().heroes.empty()
-        && refused.galaxy().snapshot()->fleets().size() == before_objects && refused.galaxy().economy_corruption()->random_draws == before_draw
-        && refused.galaxy().ability_state()->missions.empty() && !refused.galaxy().ability_state()->transitions[0].transition.active(),
-        "GameSession's missing mission service refuses before the debit, the actor consumption and any RNG draw");
+    auto direct = take(eawr::campaign::GameSession::create(config)); const auto prepared = prepare(direct, config, pool, hashes);
+    // WGCH-199: with no live mission service the space mission can't be played, so the choice takes the original's direct
+    // route (as AI and multiplayer do) instead of being disabled: offered, charged once, no mission, the timed transition.
+    const auto* menu = direct.galaxy().snapshot()->corruption_menu();
+    expect(menu && menu->choices[0].mission_available && menu->choices[1].mission_available,
+        "a mission choice with no live mission service is still offered (it takes the direct route)");
+    order(direct, 2, gc::ExecutePreparedAbility{prepared}); hashes.push_back(take(direct.step(pool)).state_hash.get());
+    const auto state = direct.galaxy().ability_state()->transitions[0].transition;
+    expect(direct.galaxy().snapshot()->player_economy()->players[1].credits == f(900) && direct.return_state().heroes.size() == 1
+        && direct.galaxy().ability_state()->missions.empty() && state.increasing && state.end - state.start == 150
+        && direct.galaxy().ability_state()->corruption_usage[1].uses[2] == 1,
+        "a space mission with no service debits once, queues no mission, counts one use and starts the five second transition");
     auto world = take(gc::GalacticSession::create(base)); std::vector<gc::HeroReturnRecord> returns;
     world.set_ability_consumption_handler([&](const gc::HeroDefeat& defeat) {
         auto scheduled = gc::schedule_hero_return(returns, defeat, world.clock().galactic_frame, world.snapshot()->planets());
@@ -474,6 +473,40 @@ void accepted_space_mission(const eawr::sim::PartitionExecutor& pool, std::vecto
         expect(session->return_state().heroes.size() == 1, "mission return leaves the consumed actor on its default return");
     }
 }
+// #7466 review F1: a stale preparation whose target planet now belongs to the actor's owner. The mission battle would have
+// the same invader and defender, which the conflict queue refuses, and that refusal is not one of the original's
+// (WGCH-127). So the probe sends the choice down the direct route before the debit (WGCH-199): charged once, no
+// refusal, the timed transition. Before #7466's fix it was charged and then refused.
+void stale_owned_target(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    auto config = setup(true); ability_fixture::add_observer(config, 2, {1000, 3000});
+    auto game = take(campaign::GameSession::create(config));
+    game.set_conflict_service([](const auto&, const auto&, auto) {
+        return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({});
+    }, [](const campaign::ConflictRecord&) { return eawr::core::Result<tactical::TacticalContent>::success(mission_content()); }, {}, eawr::campaign::ScriptRequirement::none);
+    // As the stock service: the defender is the target planet's current owner.
+    game.set_corruption_mission_service([](const gc::GalacticSnapshot& snapshot, const auto& mission, const auto& choice, auto next) {
+        auto record = mission_conflict(mission, choice, next);
+        for (const auto& planet : snapshot.planets()) if (planet.id == mission.planet) record.defender = planet.owner;
+        campaign::Arbitration arbitration; arbitration.route = campaign::ConflictRoute::tactical; arbitration.forced_tactical = true;
+        return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success(
+            campaign::RecordedAdmission{0, std::move(record), arbitration});
+    });
+    const auto prepared = prepare(game, config, pool, hashes);
+    gc::PlayerId owner{};
+    for (const auto& actor : game.galaxy().snapshot()->actor_records()) if (actor.id == prepared.actor) owner = actor.owner;
+    expect(owner != 0, "the stale-preparation fixture finds the actor's owner");
+    // The player takes the planet (here by the debug owner command) while the corruption menu is still open.
+    order(game, 2, gc::DebugSetPlanetOwner{config.planets[0].id, owner}); hashes.push_back(take(game.step(pool)).state_hash.get());
+    const auto before = game.galaxy().snapshot()->player_economy()->players[1].credits;
+    order(game, 3, gc::ExecutePreparedAbility{prepared});
+    const auto step = take(game.step(pool)); hashes.push_back(step.state_hash.get());
+    for (unsigned wait = 0; wait < 3; ++wait) hashes.push_back(take(game.step(pool)).state_hash.get());
+    const auto state = game.galaxy().ability_state()->transitions[0].transition;
+    expect(before == f(1000) && game.galaxy().snapshot()->player_economy()->players[1].credits == f(900)
+        && game.galaxy().ability_state()->missions.empty() && !game.battle() && !game.pending_conflict()
+        && state.increasing && game.galaxy().ability_state()->corruption_usage[1].uses[2] == 1,
+        "a stale preparation against the actor's own planet takes the direct route: charged once, no mission, the transition runs");
+}
 void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
     for (unsigned variant = 0; variant < 15; ++variant) {
         auto config = setup(); const auto target = config.planets[0].id, actor = buyer(config);
@@ -593,11 +626,59 @@ void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>&
     }
 }
 } // namespace
+// #7426: the corruption menu is published only for a planet the human player has discovered (WGUI-99), and a lone stealth hero
+// does not discover the planet it orbits (WGUI-01). The host refuses such a preparation with a reason the seat is told
+// instead of holding an open preparation nobody can see or cancel; a discovered planet still opens the menu, and an AI
+// owner, which chooses without a published menu, is not gated. In multiplayer each human's own discovery decides, never the
+// other human's. Variants: 0 solo undiscovered, 1 solo discovered, 2 AI undiscovered, 3 AI discovered, 4 multiplayer with
+// only the other human discovering it, 5 multiplayer with only the acting human discovering it.
+void undiscovered_target(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    std::optional<gc::corruption_fixture::Type> ai_target[2];
+    for (unsigned variant = 0; variant < 6; ++variant) {
+        const bool ai = variant == 2 || variant == 3, multiplayer = variant >= 4;
+        auto config = setup();
+        auto& observer = ability_fixture::add_observer(config, ai ? 1 : 2, {1000, 3000});
+        if (multiplayer) { observer.human_observers = {1, 2}; observer.solo_reference_human = 0; }
+        const auto planet = config.planets[0].id;
+        for (auto& record : observer.records) if (record.planet == planet) {
+            if (record.player == 2) record.discovered = variant == 1 || variant == 3 || variant == 5;
+            if (record.player == 1 && multiplayer) record.discovered = variant == 4;
+        }
+        if (ai) config.economy_corruption->players[1].human = false;
+        auto game = take(eawr::campaign::GameSession::create(config));
+        order(game, 1, gc::PrepareGalacticAbility{buyer(config), config.planets[0].id, gc::AbilityKind::corruption});
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        const auto snapshot = game.galaxy().snapshot();
+        const auto events = snapshot->events();
+        const bool refused = std::any_of(events.begin(), events.end(), [](const auto& event) {
+            return event.kind == gc::GalacticEventKind::command_rejected
+                && event.reason == gc::GalacticRejectReason::ability_target_undiscovered; });
+        const auto* state = game.galaxy().ability_state();
+        // The acting human's own menu: in multiplayer its seat's view, in solo the local snapshot.
+        const bool menu_shown = multiplayer ? game.galaxy().view_snapshot({2})->corruption_menu() != nullptr
+                                            : snapshot->corruption_menu() != nullptr;
+        if (variant == 0 || variant == 4) {
+            expect(refused && state->preparations.empty() && !menu_shown
+                && game.galaxy().snapshot()->player_economy()->players[1].credits == f(1000),
+                variant == 0 ? "a human corruption preparation on an undiscovered planet is refused as undiscovered, with no hidden open menu"
+                    : "in multiplayer the acting human's own discovery decides: another human's discovery does not admit it");
+        } else if (variant == 1 || variant == 5) {
+            expect(!refused && state->preparations.size() == 1 && state->preparations[0].open && menu_shown,
+                variant == 1 ? "a discovered planet still opens the corruption menu"
+                    : "in multiplayer the acting human's discovery opens its menu although the other human has not discovered the planet");
+        } else {
+            expect(!refused && state->transitions[0].transition.active() && state->preparations.size() == 1 && !state->preparations[0].open,
+                "an AI owner chooses and settles without a published menu, discovered or not");
+            ai_target[variant - 2] = state->transitions[0].transition.target;
+        }
+    }
+    expect(ai_target[0] && ai_target[0] == ai_target[1], "an AI's corruption choice is the same with or without its discovery");
+}
 int case_galactic_ability_corruption_tests() {
     ability_fixture::arm_watchdog();
     try {
         using Phase = void (*)(const eawr::sim::PartitionExecutor&, std::vector<std::string>&);
-        const Phase phases[] = {direct, direct_voice, ai_invocation, human_refusal, missions, land_timed, stale_units, representative, unsuccessful_missions, accepted_space_mission, startup, removal};
+        const Phase phases[] = {direct, direct_voice, ai_invocation, human_refusal, undiscovered_target, missions, land_timed, stale_units, representative, unsuccessful_missions, accepted_space_mission, stale_owned_target, startup, removal};
         std::vector<std::string> baseline;
         for (std::size_t count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter workers(count); std::vector<std::string> hashes;

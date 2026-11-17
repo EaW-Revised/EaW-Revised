@@ -56,7 +56,8 @@ std::string_view setup_difference_sentence(std::string_view message) {
         return {};
     }
     if (message.starts_with(net::setup_offer_differs_message)) {
-        const auto rest = message.substr(net::setup_offer_differs_message.size());
+        auto rest = message.substr(net::setup_offer_differs_message.size());
+        rest = rest.substr(0, rest.find(';')); // Field/value diagnostics follow the named player-facing part.
         if (rest == std::string(": ").append(net::setup_difference_ai_configuration)) return ai;
         if (rest == std::string(": ").append(net::setup_difference_start_state)) return data;
     }
@@ -65,6 +66,7 @@ std::string_view setup_difference_sentence(std::string_view message) {
 } // namespace
 
 std::string online_start_failure_text(const core::Diagnostic& diagnostic, const LanReason reason, const bool galactic) {
+    if (diagnostic.code == "EAWR-NET-1609" && diagnostic.message.starts_with("mod content")) return diagnostic.message;
     // Online skirmish rooms fail Start with the same codes; their text stays the generic online one.
     if (!galactic) return {};
     const auto code = [](net::LobbyReason value) { return net::lobby_diagnostic(value, "").code; };

@@ -1,4 +1,5 @@
 #include "eawr/sim/tactical/combat.hpp"
+#include "eawr/sim/tactical/damage.hpp"
 
 #include "../math/wide.hpp"
 #include "tactical_internal.hpp"
@@ -8,6 +9,8 @@
 #include <cstdlib>
 #include <numeric>
 #include <string>
+#include <utility>
+#include <type_traits>
 
 // Projectile collision with a type's meshes (#536, docs/behaviour/space-damage.md DG-36): a tree
 // of boxes over each mesh's triangles, and an exact segment test in the unit's frame.
@@ -259,10 +262,66 @@ CollisionMesh collision_mesh(std::vector<CollisionTriangle> triangles, const std
 
 namespace {
 
+// FD-10 look-aheads can be much longer than projectile steps. Clip only those queries
+// to a cube strictly outside the admitted mesh before grid determinants are evaluated.
+// Its faces cannot be model surfaces, so clipping preserves the open-endpoint policy.
+core::Result<std::optional<std::pair<math::Vec3, math::Vec3>>> clip_model_look(
+    const math::Vec3& from, const math::Vec3& to, const std::uint8_t exponent) {
+    using Out = core::Result<std::optional<std::pair<math::Vec3, math::Vec3>>>;
+    const auto extent = (max_mesh_extent * 3 / 2) * (std::int64_t{1} << exponent) * Fixed::scale;
+    const Fixed low = Fixed::from_raw(-extent), high = Fixed::from_raw(extent);
+    const CollisionBox guard{{low, low, low}, {high, high, high}};
+    const auto identity = math::identity_matrix();
+    auto entry = segment_enters_box(guard, identity, from, to);
+    if (!entry) return Out::failure(entry.error());
+    if (!entry.value()) return Out::success(std::nullopt);
+    auto reverse = segment_enters_box(guard, identity, to, from);
+    if (!reverse) return Out::failure(reverse.error());
+    if (!reverse.value()) return Out::success(std::nullopt);
+    const auto point = [&](const math::Vec3& start, const math::Vec3& end, const Fixed share) -> core::Result<math::Vec3> {
+        const std::array<Fixed, 3> a{start.x, start.y, start.z}, b{end.x, end.y, end.z};
+        std::array<Fixed, 3> result{};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            auto delta = math::subtract(b[axis], a[axis]);
+            if (!delta) return core::Result<math::Vec3>::failure(delta.error());
+            auto part = math::multiply(delta.value(), share);
+            if (!part) return core::Result<math::Vec3>::failure(part.error());
+            auto placed = math::add(a[axis], part.value());
+            if (!placed) return core::Result<math::Vec3>::failure(placed.error());
+            result[axis] = placed.value();
+        }
+        return core::Result<math::Vec3>::success({result[0], result[1], result[2]});
+    };
+    auto start = point(from, to, *entry.value());
+    auto end = point(to, from, *reverse.value());
+    if (!start) return Out::failure(start.error());
+    if (!end) return Out::failure(end.error());
+    return Out::success(std::pair{start.value(), end.value()});
+}
+
+// Trees built by collision_mesh halve a uint32 triangle count at every split, so
+// at most 32 sibling nodes are pending. Keep projectile traversal storage unchanged.
+class ModelStack final {
+public:
+    void assign(std::size_t, std::uint32_t root) { size_ = 1; values_[0] = root; }
+    [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+    [[nodiscard]] std::uint32_t back() const { return values_[size_ - 1]; }
+    void pop_back() { --size_; }
+    void push_back(std::uint32_t value) { values_[size_++] = value; }
+private:
+    // One pending sibling per halving split, plus the current node (collision_mesh).
+    static constexpr std::size_t capacity = 64;
+    static_assert(capacity >= std::numeric_limits<std::uint32_t>::digits + 1);
+    std::array<std::uint32_t, capacity> values_; // written by assign/push before it is read
+    std::size_t size_{};
+};
+
 // DG-36: preserve the complete original query kernel for all existing admitted content.
+template <bool Model, typename Enabled>
 core::Result<std::optional<MeshHit>> constant_grid_segment_hits(std::span<const CollisionMesh> meshes,
-    const std::function<bool(std::size_t)>& enabled, const math::Mat3x4& transform, const math::Vec3& from,
+    const Enabled& enabled, const math::Mat3x4& transform, const math::Vec3& from,
     const math::Vec3& to, MeshCollisionWork* work) {
+    constexpr bool open_segment = Model;
     using Out = core::Result<std::optional<MeshHit>>;
     const auto& m = transform.rows;
     const math::Vec3 origin{m[0][3], m[1][3], m[2][3]};
@@ -289,17 +348,25 @@ core::Result<std::optional<MeshHit>> constant_grid_segment_hits(std::span<const 
         }
         return math::Vec3{result[0], result[1], result[2]};
     };
-    const auto start = grid(local(from));
-    const auto end = grid(local(to));
+    const auto local_start = local(from), local_end = local(to);
+    auto start = grid(local_start);
+    auto end = grid(local_end);
     if (error) return Out::failure(*error);
+    bool within = true;
     for (const auto value : {start.x, start.y, start.z, end.x, end.y, end.z}) {
-        // Beyond twice the mesh extent the segment cannot meet a mesh the table validated.
-        if (value > max_local || value < -max_local) return Out::success(std::nullopt);
+        within = within && value >= -max_local && value <= max_local;
+    }
+    if (!within) {
+        if (!open_segment) return Out::success(std::nullopt); // unchanged projectile step domain
+        auto clipped = clip_model_look(local_start, local_end, 0);
+        if (!clipped) return Out::failure(clipped.error());
+        if (!clipped.value()) return Out::success(std::nullopt);
+        start = grid(clipped.value()->first); end = grid(clipped.value()->second);
     }
     const auto delta = minus(end, start);
     std::optional<Fraction> best;
     std::size_t best_mesh = 0;
-    std::vector<std::uint32_t> stack;
+    std::conditional_t<Model, ModelStack, std::vector<std::uint32_t>> stack;
     for (std::size_t index = 0; index < meshes.size(); ++index) {
         const auto& mesh = meshes[index];
         if (mesh.nodes.empty() || !enabled(index)) continue;
@@ -321,8 +388,11 @@ core::Result<std::optional<MeshHit>> constant_grid_segment_hits(std::span<const 
                 const auto& triangle = triangles[t];
                 if (work != nullptr) ++work->triangles;
                 const auto hit = meets_triangle(start, delta, grid(triangle.a), grid(triangle.b), grid(triangle.c));
+                if (open_segment && hit && hit->numerator > 0 && hit->numerator < hit->denominator)
+                    return Out::success(MeshHit{to_fixed(*hit), index}); // FD-10 needs presence only
                 // The first along the segment; on a tie the earlier mesh, then the triangle met first.
-                if (hit && (!best || less(*hit, *best))) {
+                if (hit && (!open_segment || (hit->numerator > 0 && hit->numerator < hit->denominator))
+                    && (!best || less(*hit, *best))) {
                     best = hit;
                     best_mesh = index;
                 }
@@ -333,9 +403,11 @@ core::Result<std::optional<MeshHit>> constant_grid_segment_hits(std::span<const 
     return Out::success(MeshHit{to_fixed(*best), best_mesh});
 }
 
+template <bool Model, typename Enabled>
 core::Result<std::optional<MeshHit>> adaptive_grid_segment_hits(std::span<const CollisionMesh> meshes,
-    const std::function<bool(std::size_t)>& enabled, const math::Mat3x4& transform, const math::Vec3& from,
+    const Enabled& enabled, const math::Mat3x4& transform, const math::Vec3& from,
     const math::Vec3& to, MeshCollisionWork* work) {
+    constexpr bool open_segment = Model;
     using Out = core::Result<std::optional<MeshHit>>;
     const auto& m = transform.rows;
     const math::Vec3 origin{m[0][3], m[1][3], m[2][3]};
@@ -370,7 +442,7 @@ core::Result<std::optional<MeshHit>> adaptive_grid_segment_hits(std::span<const 
     bool within = false;
     std::optional<Fraction> best;
     std::size_t best_mesh = 0;
-    std::vector<std::uint32_t> stack;
+    std::conditional_t<Model, ModelStack, std::vector<std::uint32_t>> stack;
     for (std::size_t index = 0; index < meshes.size(); ++index) {
         const auto& mesh = meshes[index];
         if (mesh.nodes.empty() || !enabled(index)) continue;
@@ -388,6 +460,14 @@ core::Result<std::optional<MeshHit>> adaptive_grid_segment_hits(std::span<const 
                 within = true;
                 for (const auto value : {start.x, start.y, start.z, end.x, end.y, end.z})
                     within = within && value >= -max_local && value <= max_local;
+                if (!within && open_segment) {
+                    auto clipped = clip_model_look(local_start, local_end, mesh.grid_exponent);
+                    if (!clipped) { error = clipped.error(); return; }
+                    if (clipped.value()) {
+                        start = quantize(clipped.value()->first); end = quantize(clipped.value()->second);
+                        delta = minus(end, start); within = true;
+                    }
+                }
                 cached_exponent = mesh.grid_exponent;
             }
             if (!within) return;
@@ -408,7 +488,8 @@ core::Result<std::optional<MeshHit>> adaptive_grid_segment_hits(std::span<const 
                     if (work != nullptr) ++work->triangles;
                     const auto hit = meets_triangle(start, delta, quantize(triangle.a), quantize(triangle.b), quantize(triangle.c));
                     // The first along the segment; on a tie the earlier mesh, then the triangle met first.
-                    if (hit && (!best || less(*hit, *best))) {
+                    if (hit && (!open_segment || (hit->numerator > 0 && hit->numerator < hit->denominator))
+                        && (!best || less(*hit, *best))) {
                         best = hit;
                         best_mesh = index;
                     }
@@ -417,6 +498,8 @@ core::Result<std::optional<MeshHit>> adaptive_grid_segment_hits(std::span<const 
         };
         if (mesh.grid_exponent == 0) visit.template operator()<true>();
         else visit.template operator()<false>();
+        if (error) return Out::failure(*error);
+        if (open_segment && best) return Out::success(MeshHit{to_fixed(*best), best_mesh});
     }
     if (!best) return Out::success(std::nullopt);
     return Out::success(MeshHit{to_fixed(*best), best_mesh});
@@ -429,8 +512,32 @@ core::Result<std::optional<MeshHit>> segment_hits_meshes(std::span<const Collisi
     const math::Vec3& to, MeshCollisionWork* work) {
     // One exponent comparison per mesh; the old kernel has no adaptive traversal branches.
     if (std::all_of(meshes.begin(), meshes.end(), [](const CollisionMesh& mesh) { return mesh.grid_exponent == 0; }))
-        return constant_grid_segment_hits(meshes, enabled, transform, from, to, work);
-    return adaptive_grid_segment_hits(meshes, enabled, transform, from, to, work);
+        return constant_grid_segment_hits<false>(meshes, enabled, transform, from, to, work);
+    return adaptive_grid_segment_hits<false>(meshes, enabled, transform, from, to, work);
+}
+
+
+core::Result<std::optional<ModelCollisionHit>> segment_hits_model(const CollisionBox* box,
+    std::span<const CollisionMesh> meshes, const ModelCollisionFilter enabled,
+    const math::Mat3x4& transform, const math::Vec3& from, const math::Vec3& to, MeshCollisionWork* work) {
+    using Out = core::Result<std::optional<ModelCollisionHit>>;
+    if (box != nullptr) {
+        // A point query distinguishes containment from an outside entry rounded to zero.
+        auto inside = segment_enters_box(*box, transform, from, from);
+        if (!inside) return Out::failure(inside.error());
+        if (inside.value()) return Out::success(ModelCollisionHit{true});
+        auto hit = segment_enters_box(*box, transform, from, to);
+        if (!hit) return Out::failure(hit.error());
+        if (!hit.value() || hit.value()->raw() >= math::Fixed::scale) return Out::success(std::nullopt);
+        return Out::success(ModelCollisionHit{false});
+    }
+    const bool base = std::all_of(meshes.begin(), meshes.end(),
+        [](const CollisionMesh& mesh) { return mesh.grid_exponent == 0; });
+    auto hit = base ? constant_grid_segment_hits<true>(meshes, enabled, transform, from, to, work)
+                    : adaptive_grid_segment_hits<true>(meshes, enabled, transform, from, to, work);
+    if (!hit) return Out::failure(hit.error());
+    if (!hit.value()) return Out::success(std::nullopt);
+    return Out::success(ModelCollisionHit{false});
 }
 
 } // namespace eawr::sim::tactical

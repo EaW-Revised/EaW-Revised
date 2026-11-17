@@ -40,7 +40,7 @@ as the defaults. No compatibility is kept before 1.0: change the format, bump th
 | PD-01 | Reinforcement areas only while placing | `gameplay.reinforcement_areas_only_while_placing`, 0/1 | on | owner request (legacy EAWR-5136) |
 | ST-N1 | Network port (1234 is "use the default port"), NAT negotiation, firewall bypass, UPnP | integer, 0/1 | 1234, on, on, on | debug build |
 | ST-N1 | Quickmatch default, connection speed, preferred faction, lobby locale | integers | 1 (land), 0 (modem), 0 (random), -1 (the game language) | debug build |
-| ST-N2 | Online service (project-authored) | host, port, trust mode, certificate pin or CA file, relay-only preference | empty host, port 27020, pin trust, relay-only off | project |
+| ST-N2 | Online service (project-authored) | host, port, trust mode, certificate pin or CA file, relay-only preference, TURN provider | eaw.ernst.work, port 27020, system trust, empty pin and CA file, relay-only off, TURN auto | owner-requested public service defaults |
 | ST-K3 | Camera keys | arrows / WASD | arrows (retail) | owner request |
 | ST-P3 | Render thread (Performance page, restart required) | Separate (legacy Safe shown when saved) | Separate | owner request |
 | ST-K1 | Key overrides (command name to key text) | map | empty: the project's keys | project |
@@ -48,6 +48,14 @@ as the defaults. No compatibility is kept before 1.0: change the format, bump th
 The retail anti-aliasing level is not stored: its slider drives the render profile (section 4).
 The full-screen mode's refresh rate, the audio provider name and the profile's name, colour and
 last-game fields are not options and are not stored here.
+
+ST-N2 applies those online defaults to new installs and older records with a missing or empty
+`network.online_host`. A nonempty player host and its service settings are preserved. Clearing
+the host field in Network Options saves
+`network.online_unconfigured=1` beside the empty host, so that deliberate unconfigured choice
+survives loading. The marker has no effect on a nonempty host. Migration changes no LAN options.
+The Network page's Defaults action restores all seven online service defaults, including TURN auto;
+it preserves LAN choices and clears the explicit opt-out when saved.
 
 ST-A1 deliberately departs from the retail release's fresh-profile master of 0.75: the owner
 requested that the master output be reduced by at least half. Master 0.37 scales every channel to 37/75 of its previous
@@ -236,7 +244,7 @@ setter calls. Camera/input presentation changes do not enter simulation hashes.
 
 ### Optional bulk selection (SH-01)
 
-Options > Tweaks has a default-off **Selection hotkeys** toggle. In Options > Controls,
+Options > Tweaks has a default-on **Selection hotkeys** toggle. In Options > Controls,
 **Select own units** defaults to Ctrl+Q and **Select own units on screen** defaults to Q.
 Each row is a press-to-bind button (legacy EAWR-5131): click it, then press a letter key, alone or with Ctrl; Esc cancels.
 A chord the other action holds, or that the command, camera-preset or ability maps already use (for example
@@ -261,7 +269,7 @@ additively by SFXEventFilesAdditions.xml alongside the winning primary SFX regis
 or disabling Revised restores ordinary selection responses; existing game events remain loaded.
 The folder is general project-added data and can hold future Revised additions.
 
-SelectionControls.xml supplies optional XML defaults: Selection_Advisor_Enabled (No),
+SelectionControls.xml supplies optional XML defaults: Selection_Advisor_Enabled (Yes),
 Selection_Action Name (SELECT_OWN_ALL or SELECT_OWN_SCREEN), Default_Key (Ctrl+Q / Q), and
 repeatable Faction_SFXEvent text (`faction,event`) for an explicit override, Advisor_SFXEvent (`advisor event,event`) for derived voice, and Default_Faction_SFXEvent (`faction,event`) for fallback. Candidates merge from lower to higher layers; faction overrides apply only above Revised when it is present. An unmapped advisor falls back to the faction default, then silence. A layer can author just one action. Mods with custom advisor events can add mappings or an explicit faction override.
 Options > Tweaks overrides the default enable switch; Controls rebinding overrides XML
@@ -285,11 +293,29 @@ reset once to on when it is read (a note says so), and the next save writes the
 line. After that a stored off is the player's own choice and wins. A fresh profile,
 and a file from before the option existed, start with it on.
 
-**Space pauses the galactic game** (DEV-13, owner decision) (legacy EAWR-6291) is a default-off checkbox
+**Space pauses the galactic game** (DEV-13, owner decision) (legacy EAWR-6291) is a default-on checkbox
 in Options > Tweaks, stored as `gameplay.space_pauses_galactic`. Apply/Accept saves
-it, Cancel discards edits and Defaults switches it off. Off is the original's Space on the
+it, Cancel discards edits and Defaults switches it on. Off is the original's Space on the
 galaxy map: it starts the cinematic tour (on its release) and never pauses. On, Space only
 pauses and resumes (on its press, like the clock panel's pause button) and never starts the
 tour, which stays on the camera button. The pause button, the paused banner and its Resume
 Game button work in both settings. The key reads the setting each time it is used, so a
 change applies without a restart.
+
+### Tweaks defaults (owner decision 2026-11-17)
+
+All six Options > Tweaks preferences now default on: selection hotkeys, owner names
+(including solo), reinforcement areas only while placing, animated loading background,
+fit radar to galaxy, and Space pauses the galactic game. Binding values stay unchanged.
+Animated loading keeps the planet background moving while loading; owner names show
+the known player name when hovering a visible unit.
+
+New profiles and missing keys receive the new defaults. Existing stored OFF values
+for loading animation, owner names and Space pause remain OFF: these records carry no
+per-field authored-choice information. A saved owner-names value of -1 still follows
+the old multiplayer-on/solo-off policy. Selection hotkeys already distinguish an
+explicit player choice from an untouched XML default: untouched records inherit the
+active layer default (now Yes for the built-in Revised template and when no XML
+exists), while an explicit player OFF or a mod-authored No stays OFF. The existing
+radar migration is unchanged. These settings do not change match rules or public
+export contents.

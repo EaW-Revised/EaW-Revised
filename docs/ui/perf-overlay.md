@@ -71,6 +71,19 @@ The factor itself is data: WGM-210 (4x), `galactic::fast_forward_factor_raw`.
 
 ## Network section (legacy EAWR-4043)
 
+The network line also shows sealed lead ticks and input delay in milliseconds at the logical 30 Hz rate.
+Per-seat tick time is observed input-frontier cadence, including stalls and packet batching; it is not remote CPU cost.
+The `recv avg/max` figures measure local native-ready-to-consume age for accepted sealed batches when the transport
+provides receipt timestamps. GNS timestamps refer to the native message that made an ordered application frame ready,
+including a completing fragment or redundancy delivery. They do not measure the age of its first wire byte.
+
+Wait counters use `B` for a missing peer batch, `Q` for a missing batch with decoded frames still queued for consumption,
+`H` for a hash exchange, `T` for an agreed timing activation awaiting votes, and `O` for another admission barrier.
+`Q` diagnoses consumer backlog; it does not assert that the particular missing tick is present in that backlog.
+The summary log spells these out as `wait_batch_s`, `wait_queued_s`, `wait_hash_s`, `wait_timing_s`, `wait_other_s`
+and corresponding `_ms` fields. Cause changes partition waiting time without resetting the longest overall stall.
+Poll gaps and receipt age use one-second observation windows. Unknown receipt age remains unmeasured.
+
 In an online or LAN match the panel gains a network section: a one-line verdict, the lockstep waits (waits per
 second, milliseconds waited in the last second, the longest wait in the last 10 s), the seat the simulation waits
 for right now, and per remote seat the round trip, jitter and packet loss (`rtt -` until the transport has a

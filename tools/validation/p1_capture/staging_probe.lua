@@ -151,6 +151,11 @@ EaWR_Stage = {
 	reticle_leg = 2500,  -- units off the station, towards the map centre
 	reticle_leg_time = 12,
 	reticle_hold = 300,  -- seconds each subject is held under the camera
+	-- attack_flash: an own corvette (selected) and an enemy cruiser 1400 apart; the camera centres the enemy so
+	-- a right click at the screen centre orders the attack. Both are invulnerable and hold fire until ordered.
+	flash_own = "Corellian_Corvette",
+	flash_enemy = "Tartan_Patrol_Cruiser",
+	flash_hold = 900,
 	-- backdrop (#3935)
 	backdrop_type = "Death_Star_II",
 	backdrop_at = {0, 0, 0}, -- open space at the map centre, clear of every station
@@ -1724,6 +1729,62 @@ function EaWR_Stage_Reticle()
 	end
 end
 
+function EaWR_Stage_Attack_Flash()
+	local d = EaWR_Stage
+	local now = EaWR_Stage_Now()
+	local age = now - d.phase_start
+	if d.phase == "wait" then
+		EaWR_Stage_Wait_Line("AF", age)
+		if age >= d.wait_for then
+			EaWR_Stage_Set_Phase("spawn")
+		end
+		return
+	end
+	if d.phase == "spawn" then
+		local localp, enemy = EaWR_Stage_Players()
+		if not localp or not enemy then
+			EaWR_Stage_Error("no players")
+			EaWR_Stage_Set_Phase("wait")
+			d.wait_for = 2
+			return
+		end
+		local own = EaWR_Stage_Spawn(d.flash_own, localp, Create_Position(-700, 0, 0))
+		local foe = EaWR_Stage_Spawn(d.flash_enemy, enemy, Create_Position(700, 0, 0))
+		if not own or not foe then
+			EaWR_Stage_Set_Phase("wait")
+			d.wait_for = 2
+			return
+		end
+		d.ship = own[1]
+		d.subject = foe[1]
+		d.helpers = {foe[1]}
+		for i = 1, table.getn(own) do
+			EaWR_Stage_Call("invulnerable", function() return own[i].Make_Invulnerable(true) end)
+		end
+		EaWR_Stage_Call("invulnerable", function() return foe[1].Make_Invulnerable(true) end)
+		EaWR_Stage_Call("prevent-fire", function() return foe[1].Prevent_Opportunity_Fire(true) end)
+		EaWR_Stage_Call("select", function() return localp.Select_Object(d.ship) end)
+		EaWR_Stage_Call("camera", Point_Camera_At, d.subject)
+		d.tag = "AF"
+		EaWR_Stage_Set_Phase("hold")
+		d.line = "AF hold +0.0"
+		return
+	end
+	d.line = "AF " .. d.phase .. " +" .. string.format("%.1f", age)
+	-- The route's refocus step can scroll the camera: keep the enemy at the screen centre.
+	if d.phase == "hold" and EaWR_Stage_Valid(d.subject) then
+		EaWR_Stage_Call("camera", Point_Camera_At, d.subject)
+	end
+	if d.phase == "hold" and age >= d.flash_hold then
+		EaWR_Stage_Dispose({d.ship, d.subject})
+		d.ship = nil
+		d.subject = nil
+		d.helpers = {}
+		EaWR_Stage_Set_Phase("wait")
+		d.wait_for = 2
+	end
+end
+
 -- #3935 backdrop: one In_Background unit held while the stills run.
 function EaWR_Stage_Backdrop()
 	local d = EaWR_Stage
@@ -2109,6 +2170,8 @@ function EaWR_Stage_Step()
 		EaWR_Stage_Outcome(d.scenario == "victory")
 	elseif d.scenario == "reticle" then
 		EaWR_Stage_Reticle()
+	elseif d.scenario == "attack_flash" then
+		EaWR_Stage_Attack_Flash()
 	elseif d.scenario == "findmask" then
 		EaWR_Stage_Find_Mask()
 	elseif d.scenario == "melee" then

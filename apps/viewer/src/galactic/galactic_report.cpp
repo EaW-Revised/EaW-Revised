@@ -1,4 +1,5 @@
 #include "galactic_mode_internal.hpp"
+#include "planet_thumbnails.hpp"
 #include "report_privacy.hpp"
 #include "viewer_path.hpp"
 #include "ui/build_queue_dial.hpp"
@@ -200,6 +201,9 @@ void GalacticMode::State::write_report_controls(std::ostringstream& output) cons
     output << ",\n  \"story_summary\": " << (story_summary ? story_summary->report_json() : "null");
     output << ",\n  \"pause_banner\": " << (pause_banner ? pause_banner->report_json() : "null");
     output << ",\n  \"cinematic_tour\": " << tour_report_json();
+    output << ",\n  \"planet_search\": " << (planet_search ? planet_search->report_json() : "null");
+    const auto* pictures = dynamic_cast<const PlanetThumbnails*>(planet_search_thumbnails.get());
+    output << ",\n  \"planet_search_pictures\": " << (pictures ? pictures->report_json() : "null");
     output << ",\n  \"story_letterbox\": {\"on\": " << (story_hud.letterbox_on() ? "true" : "false")
            << ", \"progress\": " << story_hud.letterbox_progress()
            << ", \"band_height\": " << story_band_height.value_or(-1.0F)
@@ -493,6 +497,7 @@ void GalacticMode::State::write_report_panels(std::ostringstream& output) const 
     output << ",\n  \"encyclopedia\": {\"type\": " << encyclopedia_type
         << ", \"planet_ability\": " << (encyclopedia_ability ? "true" : "false")
         << ", \"planet_weather\": " << (encyclopedia_weather ? "true" : "false")
+        << ", \"planet_corruption\": " << (encyclopedia_corruption ? "true" : "false")
         << ", \"visible\": " << (encyclopedia_panel && encyclopedia_panel->is_visible() ? "true" : "false")
         << ", \"alpha\": " << encyclopedia_timing.alpha
         << ", \"title\": " << json(encyclopedia_panel ? encyclopedia_panel->get_content().name : std::string{})

@@ -230,18 +230,23 @@ void LiveSessionView::press_fast_forward() {
         if (view.clock_paused || !lan_gameplay_enabled(view)) return;
         const auto agreed = ui::speed_step_rates[std::min<std::size_t>(view.options.tactical_speed, ui::speed_step_rates.size() - 1)];
         shared_speed_.observe(agreed, view.session_tick);
-        const auto target = ui::shared_fast_forward_target(agreed);
+        // The press acts on what the button shows (the request in flight, else the agreed rate): a press on a lit
+        // button always asks for the nominal 30, even while this seat's own 2x request is still in flight.
+        const auto target = ui::shared_fast_forward_target(shared_speed_.shown(agreed));
         const auto step = target == ui::shared_fast_forward_rate ? static_cast<std::uint32_t>(ui::speed_step_rates.size() - 1)
                                                                  : ui::default_speed_step;
-        if (!shared_speed_.begin(agreed, target, view.session_tick)) return;
-        if (!options_.lan->request_speed(step)) shared_speed_.reset();
+        const char* outcome = "sent";
+        if (!shared_speed_.begin(agreed, target, view.session_tick)) outcome = "in-flight";
+        else if (!options_.lan->request_speed(step)) { shared_speed_.reset(); outcome = "refused"; }
         else shared_fast_forward_pressed_ = target == ui::shared_fast_forward_rate; // immediate feedback until the next frame
+        godot::UtilityFunctions::print("EAWR net event=speed-press tick=", static_cast<std::int64_t>(view.session_tick),
+            " agreed=", static_cast<std::int64_t>(agreed), " target=", static_cast<std::int64_t>(target), " outcome=", outcome);
         return;
     }
     if (session_) if (const auto pace = session_->agreed_pacing()) {
         // #5355 (TP-MP06): the agreed battle-child clock toggles the shared 2x, one request in flight at a time.
         shared_speed_.observe(pace->target_rate, session_->completed_tick());
-        const auto target = ui::shared_fast_forward_target(pace->target_rate);
+        const auto target = ui::shared_fast_forward_target(shared_speed_.shown(pace->target_rate));
         if (!pace->paused && shared_speed_.begin(pace->target_rate, target, session_->completed_tick())) {
             session_->set_target_rate(target);
             shared_fast_forward_pressed_ = target == ui::shared_fast_forward_rate; // immediate feedback until the next frame
@@ -1528,7 +1533,33 @@ void LiveSessionView::apply_frame_opacity(const std::shared_ptr<const sim::tacti
 
 void LiveSessionView::apply_frame_shield_flashes(BattleScene& population,
         GodotRenderer& renderer,
-        const std::map<sim::EntityId, std::array<float, 3>>& visual_scales) {
+        const std::map<sim::EntityId, std::array<float, 3>>& visual_scales_in) {
+    // WU-60: an attack order's target flash multiplies the whole model's light scale RGB (every piece, the
+    // hardpoint models included) by 1 + level while a pulse starts, falling linearly to 1; it stacks with the shield
+    // flash below. No work while no flash runs.
+    const std::map<sim::EntityId, std::array<float, 3>>* scales_in_use = &visual_scales_in;
+    std::map<sim::EntityId, std::array<float, 3>> flashed_scales;
+    if (!order_flash_start_.empty()) {
+        flashed_scales = visual_scales_in;
+        scales_in_use = &flashed_scales;
+        for (auto flash = order_flash_start_.begin(); flash != order_flash_start_.end();) {
+            // The presented clock can read just before the order's tick on the next frame: still the first pulse.
+            const double seconds = std::max(0.0, presented_tick_ - flash->second) / tactical::logical_frames_per_second;
+            const auto multiplier = presentation_constants::order_flash_multiplier(order_flash_constants_, seconds);
+            if (!multiplier) { flash = order_flash_start_.erase(flash); continue; }
+            ++order_flash_samples_;
+            max_order_flash_multiplier_ = std::max(max_order_flash_multiplier_, *multiplier);
+            if (const auto ship = ship_of_entity_.find(flash->first); ship != ship_of_entity_.end()) {
+                std::array<float, 3> scale{1.0F, 1.0F, 1.0F};
+                if (const auto base = flashed_scales.find(flash->first); base != flashed_scales.end()) scale = base->second;
+                for (float& channel : scale) channel *= *multiplier;
+                flashed_scales[flash->first] = scale;
+                for (const sim::EntityId piece : population.live_ship_entities(ship->second)) renderer.set_light_scale(piece, scale);
+            }
+            ++flash;
+        }
+    }
+    const auto& visual_scales = *scales_in_use;
     // #427: the shield shells' clock is the presentation clock (seconds).
     population.set_shield_time(renderer, static_cast<float>(presented_tick_ / tactical::logical_frames_per_second));
     // #427/#438 BP-21: opt-in only. A hit the shield took whole starts the colour flash at the tick's
@@ -1733,6 +1764,21 @@ void LiveSessionView::finish() {
         time << time_.track_csv();
         if (!time) finish_status_ = "could not write " + ViewerPath::utf8(time_path);
     }
+}
+
+void LiveSessionView::flash_order_target(const sim::EntityId target) {
+    // WU-60: a squadron (named by its container or by a member) flashes every member.
+    const auto container = squadron_of_.find(target);
+    const sim::EntityId root = container == squadron_of_.end() ? target : container->second;
+    const auto members = squadron_members_.find(root);
+    const double start = presented_tick_;
+    if (members == squadron_members_.end()) {
+        order_flash_start_[target] = start;
+    } else {
+        for (const sim::EntityId member : members->second) order_flash_start_[member] = start;
+        order_flash_start_[root] = start;
+    }
+    ++order_flashes_started_;
 }
 
 } // namespace eawr::presentation::godot_backend

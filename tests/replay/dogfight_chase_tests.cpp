@@ -313,22 +313,52 @@ void test_spin_in_dogfight() {
 // the frigate has a space layer and flies through it when it has none; two craft ordered through
 // each other do not avoid each other.
 void test_avoidance() {
-    const auto through = [](const bool layered, double& closest, bool& relaxed) {
+    const auto through = [](const bool layered, double& closest, bool& relaxed,
+        const bool solid_prop = false, const bool shaped = true) {
         Session fixture;
         fixture.setup.seed = seed;
         fixture.setup.players = players();
         fixture.setup.units = {unit(10, single_type, empire, at(-800, 0)), unit(11, craft_type, empire, at(-800, 0)),
             unit(40, frigate_type, rebel, at(0, 0))};
+        if (solid_prop && shaped) {
+            // A launched craft starts inside the prop's broad sphere and outside its actual hull.
+            fixture.setup.units[0].position = at(-100, 0);
+            fixture.setup.units[1].position = at(-100, 0);
+        }
         fixture.setup.squadrons = {{10, {11}}};
         fixture.motion = motion(layered);
+        // FD-10: the footprint is only the broad phase; give this synthetic frigate a hull.
+        // Its corners fit within the fixture's 150-unit conservative sphere.
+        for (auto& profile : fixture.weapons.profiles) {
+            if (profile.type_id == frigate_type) {
+                profile.model_collision_box = tactical::CollisionBox{at(-75, -75, -75), at(75, 75, 75)};
+            }
+        }
+        if (solid_prop) {
+            for (auto& footprint : fixture.motion.footprints) {
+                if (footprint.type_id != frigate_type) continue;
+                footprint.layer = tactical::SpaceLayer::static_object;
+                footprint.obstacle = true;
+                footprint.impassable_asteroid = true;
+            }
+            std::erase_if(fixture.weapons.profiles, [](const auto& profile) { return profile.type_id == frigate_type; });
+            tactical::CombatProfile asteroid;
+            asteroid.type_id = frigate_type;
+            if (shaped) asteroid.model_collision_box = tactical::CollisionBox{at(-75, -75, -75), at(75, 75, 75)};
+            fixture.weapons.avoidance_obstacles.push_back(std::move(asteroid));
+        }
         fixture.durability = durability(1000000);
         fixture.orders = {{empire, 10, tactical::MovePayload{at(1500, 0)}}};
         closest = 1e9;
         relaxed = false;
+        std::uint64_t narrow_queries = 0;
         const auto hashes = run(fixture, 1, 400, [&](const tactical::TacticalSession& session, const tactical::TacticalTick& tick) {
+            narrow_queries += session.tick_work().avoidance_queries;
             if (const auto craft = position_of(*tick.snapshot, 11)) closest = std::min(closest, distance(*craft, at(0, 0)));
             if (const auto flight = session.craft_state(11)) relaxed = relaxed || flight->relaxation > 0;
         });
+        expect((narrow_queries > 0) == (layered && (!solid_prop || shaped)),
+            "FD-10: session counters report real narrow queries only for admitted hulls");
         expect_workers(fixture, 400, hashes, layered ? "C-25 layered" : "C-25 unlayered");
     };
     double open = 0;
@@ -344,6 +374,14 @@ void test_avoidance() {
     // FoC only reacts inside the ship's bounds plus its speed, so a craft heading straight at a
     // ship's centre still passes close (S-28: 16 to 51 units off the corvette's centre).
     expect(avoided > open, "C-25 (FD-10): the craft passes further off the layered frigate's centre");
+
+    for (const bool shaped : {true, false}) {
+        double asteroid_approach = 0;
+        bool asteroid_relaxed = false;
+        through(true, asteroid_approach, asteroid_relaxed, true, shaped);
+        expect(asteroid_relaxed && asteroid_approach > open,
+            "FD-10/WHZ-08: craft avoid a solid asteroid prop, using its model or the shapeless-prop footprint fallback");
+    }
 
     // FD-11: two craft on crossing moves pass through each other.
     Session crossing;

@@ -1,4 +1,5 @@
 #include "eawr/net/lobby_session.hpp"
+#include "eawr/net/galactic_lobby.hpp"
 #include "eawr/net/galactic_setup.hpp"
 #include "eawr/net/lan_directory.hpp"
 #include "eawr/net/mesh_policy.hpp"
@@ -14,6 +15,13 @@
 namespace eawr::net {
 namespace {
 using Bytes = std::vector<std::uint8_t>;
+std::string digest_text(std::span<const std::uint8_t> digest) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string text;
+    text.reserve(digest.size() * 2);
+    for (const auto byte : digest) { text += digits[byte >> 4U]; text += digits[byte & 15U]; }
+    return text;
+}
 constexpr std::size_t name_limit = 64, chat_limit = 512, choice_limit = 256;
 constexpr std::size_t options_limit = 64U * 1024U;
 constexpr std::size_t mod_description_limit = max_lobby_mod_description_bytes;
@@ -26,6 +34,62 @@ bool valid_room(std::string_view room) {
     return !room.empty() && room.size() <= 64 && std::all_of(room.begin(), room.end(), [](char c) {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
     });
+}
+// Keep the refusal useful without publishing the (potentially MiB-sized) setup.
+// Payload values are represented by their length and SHA-256; scalar terms and
+// the small human roster are written directly. No credentials live in these terms.
+std::string offer_difference(const SetupOffer& host, const SetupOffer& local, bool host_delay) {
+    std::string message{setup_offer_differs_message};
+    if (host.domain == galactic_setup_domain && local.domain == galactic_setup_domain)
+        if (const auto part = galactic_setup_difference(host.setup, local.setup); !part.empty())
+            message += ": " + std::string(part);
+    const auto field = [&](std::string_view name, const std::string& a, const std::string& b) {
+        message += "; " + std::string(name) + "(host=" + a + ",local=" + b + ")";
+    };
+    if (host.seed != local.seed) field("seed", std::to_string(host.seed), std::to_string(local.seed));
+    if (host.domain != local.domain) field("domain", host.domain, local.domain);
+    if (host.setup != local.setup) {
+        const auto payload = [](const Bytes& bytes) { return std::to_string(bytes.size()) + ":" + core::sha256_hex(bytes); };
+        field("setup", payload(host.setup), payload(local.setup));
+    }
+    if (host.seats != local.seats) {
+        const auto roster = [](const std::vector<SetupSeat>& seats) {
+            std::string result;
+            for (const auto& seat : seats) {
+                if (!result.empty()) result += "/";
+                result += std::to_string(seat.peer) + ":" + std::to_string(seat.seat.value) + ":" + std::to_string(seat.player);
+            }
+            return result;
+        };
+        field("seats", roster(host.seats), roster(local.seats));
+    }
+    if (!host_delay && host.input_delay != local.input_delay)
+        field("input_delay", std::to_string(host.input_delay), std::to_string(local.input_delay));
+    if (host.final_tick_count != local.final_tick_count)
+        field("final_tick_count", std::to_string(host.final_tick_count), std::to_string(local.final_tick_count));
+    if (host.recovery != local.recovery) {
+        const auto policy = [](const SetupRecoveryPolicy& value) {
+            return std::to_string(value.reconnect) + "/" + std::to_string(value.resync)
+                + "/" + std::to_string(value.grace_ms) + "/" + std::to_string(value.progress_timeout_ms)
+                + "/" + std::to_string(value.hard_cap_ms) + "/" + std::to_string(value.max_log_bytes)
+                + "/" + std::to_string(value.resync_timeout_ms);
+        };
+        field("recovery", policy(host.recovery), policy(local.recovery));
+    }
+    return message;
+}
+std::string offer_summary(const SetupOffer& offer) {
+    std::string seats;
+    for (const auto& seat : offer.seats) seats += std::to_string(seat.peer) + ":" + std::to_string(seat.seat.value) + ":" + std::to_string(seat.player) + "/";
+    const auto& p = offer.recovery;
+    return "seed=" + std::to_string(offer.seed) + ",domain=" + offer.domain
+        + ",setup=" + std::to_string(offer.setup.size()) + ":" + core::sha256_hex(offer.setup)
+        + ",seats=" + seats + ",input_delay=" + std::to_string(offer.input_delay)
+        + ",final_tick_count=" + std::to_string(offer.final_tick_count)
+        + ",recovery=" + std::to_string(p.reconnect) + "/" + std::to_string(p.resync)
+        + "/" + std::to_string(p.grace_ms) + "/" + std::to_string(p.progress_timeout_ms)
+        + "/" + std::to_string(p.hard_cap_ms) + "/" + std::to_string(p.max_log_bytes)
+        + "/" + std::to_string(p.resync_timeout_ms);
 }
 struct Writer {
     Bytes bytes;
@@ -164,7 +228,18 @@ std::string layer_difference(const std::vector<core::ContentLayerIdentity>& expe
     while (at < expected.size() && at < actual.size() && expected[at].digest == actual[at].digest) ++at;
     if (at == expected.size() && at == actual.size()) return {};
     const auto& name = at < expected.size() ? expected[at].name : actual[at].name;
-    return "mod content/order differs at layer " + std::to_string(at + 1) + ": " + (name.empty() ? "unnamed mod" : name);
+    const auto side = [at](const auto& layers) {
+        if (at >= layers.size()) return std::string{"missing"};
+        return layers[at].name.substr(0, 64) + "/" + digest_text(layers[at].digest).substr(0, 8);
+    };
+    std::string message = "mod content/order differs at layer " + std::to_string(at + 1) + ": "
+        + (name.empty() ? "unnamed mod" : name.substr(0, 96)) + "; host " + side(expected) + " vs you " + side(actual);
+    if (const auto workshop = name.find("Workshop "); workshop != std::string::npos) {
+        const auto begin = workshop + 9;
+        const auto end = name.find_first_not_of("0123456789", begin);
+        if (end != begin) message += "; update the Workshop item " + name.substr(begin, end - begin) + " on both PCs";
+    }
+    return message;
 }
 bool same_prepared_claim(const LobbyPrepared& a, const LobbyPrepared& b) {
     return a.room == b.room && a.revision == b.revision && a.attempt == b.attempt && a.manifest == b.manifest
@@ -211,6 +286,14 @@ LobbyDigest prepared_hash(const LobbyPrepared& value) {
 }
 
 bool valid_lobby_mod_description(std::span<const std::uint8_t> bytes) { return valid_mod_description(bytes); }
+core::Result<void> validate_lobby_content(const core::PreparedContentIdentity& host, const core::PreparedContentIdentity& local) {
+    if (const auto different = layer_difference(host.layers, local.layers); !different.empty())
+        return failure<void>(LobbyReason::setup_failed, different);
+    if (host.digest != local.digest)
+        return failure<void>(LobbyReason::setup_failed, "mod content differs: host " + digest_text(host.digest)
+            + " vs you " + digest_text(local.digest));
+    return core::Result<void>::success();
+}
 core::Diagnostic lobby_diagnostic(LobbyReason reason, std::string message) {
     core::Diagnostic value;
     const unsigned code = reason == LobbyReason::pair_unreachable ? 1762U : reason == LobbyReason::mesh_incomplete ? 1764U
@@ -219,6 +302,13 @@ core::Diagnostic lobby_diagnostic(LobbyReason reason, std::string message) {
     value.message = sanitize_lobby_text(message, 512);
     return value;
 }
+std::string preparation_timeout_message(const std::uint64_t limit_ms, const std::uint64_t elapsed_ms) {
+    const auto bound = limit_ms % 60'000 == 0 ? std::to_string(limit_ms / 60'000) + (limit_ms == 60'000 ? " minute" : " minutes")
+                                              : std::to_string(limit_ms / 1'000) + " s";
+    return "Preparation took longer than " + bound + " (" + std::to_string(elapsed_ms / 1'000) + " s): the campaign preparation timed out. "
+        "A large mod chain on a slower PC can need more time; try again, or pick a smaller campaign.";
+}
+
 core::Diagnostic start_pending_diagnostic(std::string message) {
     core::Diagnostic value;
     value.code = std::string(start_pending_code);
@@ -266,6 +356,12 @@ core::Result<Bytes> encode_lobby_frame(const LobbyFrame& frame) {
 
                 if (!valid_mod_description(value.mounted_mods)) throw std::runtime_error("invalid mounted mods");
                 out.blob(value.mounted_mods, mod_description_limit);
+                out.u8(value.content ? 1 : 0);
+                if (value.content) {
+                    validate_layers(value.content->layers);
+                    if (!nonzero(value.content->digest)) throw std::runtime_error("missing room content checksum");
+                    out.digest(value.content->digest); out.layers(value.content->layers);
+                }
             } else if constexpr (std::is_same_v<T, LobbyRequest>) {
                 if (!value.revision || static_cast<unsigned>(value.action) > static_cast<unsigned>(LobbyAction::snapshot)
                     || (value.action != LobbyAction::select && value.selection != LobbySelection{}))
@@ -308,7 +404,7 @@ core::Result<LobbyFrame> decode_lobby_frame(std::span<const std::uint8_t> bytes)
         if (bytes.size() > max_lobby_frame_bytes) throw std::runtime_error("oversized room frame");
         Reader in{bytes, 0};
         const auto kind = in.u8();
-        if (in.u32() != lobby_wire_version) throw std::runtime_error("unsupported room protocol version; this build needs version 4 (host mod refresh)");
+        if (in.u32() != lobby_wire_version) throw std::runtime_error("unsupported room protocol version; this build needs version 5 (skirmish content admission)");
         auto room = in.text(64);
         if (!valid_room(room)) throw std::runtime_error("invalid room identifier");
         LobbyFrame result;
@@ -332,6 +428,11 @@ core::Result<LobbyFrame> decode_lobby_frame(std::span<const std::uint8_t> bytes)
             if (!mods.empty() && mods.front() == 1) throw std::runtime_error("mod list version 1, this build needs version 2");
             if (!valid_mod_description(mods)) throw std::runtime_error("invalid mounted mods");
             value.mounted_mods.assign(mods.begin(), mods.end());
+            if (in.boolean()) {
+                value.content.emplace(); value.content->digest = in.digest(); value.content->layers = in.layers();
+                if (!nonzero(value.content->digest)) throw std::runtime_error("missing room content checksum");
+                validate_layers(value.content->layers);
+            }
             validate_snapshot(value); result = std::move(value); break;
         }
         case lobby_request_kind: {
@@ -426,7 +527,7 @@ public:
                 auto* frame = std::get_if<LobbySetupFrame>(&decoded.value());
                 const auto found = std::find(peers.begin(), peers.end(), raw->from);
                 if (frame && frame->room == room && frame->revision == revision && frame->attempt == attempt && found != peers.end())
-                    return Received{static_cast<PeerIndex>(found - peers.begin()), std::move(frame->frame)};
+                    return Received{static_cast<PeerIndex>(found - peers.begin()), std::move(frame->frame), raw->received_at};
             }
         }
         return {};
@@ -434,6 +535,10 @@ public:
     LinkState link(PeerIndex peer) const override { return peer < peers.size() ? outer->link(peers[peer]) : LinkState::closed; }
     PeerIndex self() const override { return static_cast<PeerIndex>(std::find(peers.begin(), peers.end(), outer->self()) - peers.begin()); }
     std::uint32_t peer_count() const override { return static_cast<std::uint32_t>(peers.size()); }
+    std::size_t queued_received(PeerIndex peer) const override {
+        return static_cast<std::size_t>(std::count_if(inbox.begin(), inbox.end(), [peer](const auto& frame) { return frame.from == peer; }))
+            + (peer < peers.size() ? outer->queued_received(peers[peer]) : 0);
+    }
     std::optional<LinkStats> link_stats(PeerIndex peer) const override {
         return peer < peers.size() ? outer->link_stats(peers[peer]) : std::nullopt;
     }
@@ -453,6 +558,8 @@ struct LobbyRuntime {
     LobbyLimits limits;
     std::optional<std::uint64_t> now;
     std::optional<LobbyNotice> notice;
+    std::optional<core::Diagnostic> admission_refusal;
+    std::uint64_t admission_refusal_since{};
     std::deque<LobbyChat> history;
     std::uint64_t chat_sequence{};
     std::uint32_t next_seat{2};
@@ -578,6 +685,11 @@ struct LobbyRuntime {
     core::Result<void> validate(const LobbySnapshot& candidate, bool starting = false) const {
         auto encoded = encode_lobby_frame(candidate);
         if (!encoded) return core::Result<void>::failure(encoded.error());
+        if (lobby_game_mode(candidate.game) != LobbyGameMode::galactic && (hooks.admission_content || candidate.content)) {
+            if (!hooks.admission_content || !candidate.content)
+                return failure<void>(LobbyReason::setup_failed, "mod content verification is unavailable; all players need matching content");
+            if (auto valid = validate_lobby_content(*candidate.content, *hooks.admission_content); !valid) return valid;
+        }
         return hooks.validate(candidate, starting);
     }
     core::Result<void> abort(LobbyReason reason, std::string message) {
@@ -717,17 +829,25 @@ struct LobbyRuntime {
         setup_pending = false;
         auto identify = context->providers.identify;
         if (!identify) { reset_setup(); return failure<void>(LobbyReason::setup_failed, "missing local content identifier"); }
-        context->providers.identify = [identify = std::move(identify), expected = std::move(expected).value()](const SetupOffer& offered) {
+        const bool host_delay = context->options.session.non_lan && expected.value().domain == galactic_setup_domain;
+        const auto snapshot_bytes = encode_lobby_frame(state);
+        const auto snapshot_summary = "room=" + state.room + ",revision=" + std::to_string(state.revision)
+            + ",frozen_revision=" + std::to_string(state.frozen_revision) + ",map=" + state.game.map
+            + ",options=" + core::sha256_hex(state.game.options)
+            + ",snapshot=" + (snapshot_bytes ? core::sha256_hex(snapshot_bytes.value()) : "unavailable")
+            + ",wire_hex=" + (snapshot_bytes ? digest_text(snapshot_bytes.value()) : "unavailable");
+        context->providers.identify = [identify = std::move(identify), expected = std::move(expected).value(), host_delay,
+            evidence = hooks.setup_difference, snapshot_summary](const SetupOffer& offered) {
+            // An online campaign starts with the host's validated delay. A guest's
+            // local latency estimate must never become a second admission term;
+            // subsequent changes use the unanimous timing-control protocol.
             if (offered.seed != expected.seed || offered.domain != expected.domain || offered.setup != expected.setup
-                || offered.seats != expected.seats || offered.input_delay != expected.input_delay || offered.final_tick_count != expected.final_tick_count
+                || offered.seats != expected.seats || (!host_delay && offered.input_delay != expected.input_delay) || offered.final_tick_count != expected.final_tick_count
                 || offered.recovery != expected.recovery)
             {
-                std::string message{setup_offer_differs_message};
-                // Name the differing part so the host can tell the player which input to compare.
-                if (offered.domain == galactic_setup_domain && expected.domain == galactic_setup_domain)
-                    if (const auto part = galactic_setup_difference(offered.setup, expected.setup); !part.empty())
-                        message += ": " + std::string(part);
-                return failure<sim::MatchAgreement>(LobbyReason::setup_failed, std::move(message));
+                if (evidence) evidence(offer_difference(offered, expected, host_delay) + "; expected_snapshot={" + snapshot_summary
+                    + "}; expected_offer={" + offer_summary(expected) + "}; received_offer={" + offer_summary(offered) + "}");
+                return failure<sim::MatchAgreement>(LobbyReason::setup_failed, offer_difference(offered, expected, host_delay));
             }
             return identify(offered);
         };
@@ -826,11 +946,30 @@ struct LobbyRuntime {
             if (stream->inbox.size() >= 8192 || envelope->frame.size() > limits.queued_setup_bytes - stream->bytes)
                 return failure<void>(LobbyReason::resource_limit, "setup queue exceeded bound");
             stream->bytes += envelope->frame.size();
-            stream->inbox.push_back({static_cast<PeerIndex>(found - stream->peers.begin()), std::move(envelope->frame)});
+            stream->inbox.push_back({static_cast<PeerIndex>(found - stream->peers.begin()), std::move(envelope->frame), raw.received_at});
+            return core::Result<void>::success();
+        }
+        if (admission_refusal) {
+            // The host's removal acknowledges our report. Keep the reliable stream alive until then:
+            // closing it immediately can discard the report and leave the host with only a lost seat.
+            if (std::holds_alternative<LobbyClosed>(frame) || std::holds_alternative<LobbyRejected>(frame))
+                return core::Result<void>::failure(*admission_refusal);
             return core::Result<void>::success();
         }
         if (is_host) {
             if (!seat(raw.from)) return failure<void>(LobbyReason::authority, "unadmitted room sender");
+            if (const auto* refused = std::get_if<LobbyRejected>(&frame)) {
+                // A guest may refuse its own admission, never another seat or host-owned choices.
+                if (state.phase != LobbyPhase::staging || !state.content || refused->revision > state.revision
+                    || refused->reason != LobbyReason::setup_failed || !refused->message.starts_with("mod content"))
+                    return failure<void>(LobbyReason::authority, "invalid guest content refusal");
+                const auto message = refused->message;
+                const auto name = seat(raw.from)->selection.name;
+                static_cast<void>(post(state.host, name + ": " + message, true));
+                auto removed = remove(raw.from, LobbyReason::setup_failed, false, message);
+                notice = LobbyNotice{state.room, state.revision, LobbyReason::setup_failed, message};
+                return removed;
+            }
             if (const auto* request = std::get_if<LobbyRequest>(&frame)) {
                 auto applied = apply_request(raw.from, *request);
                 if (!applied) {
@@ -867,7 +1006,16 @@ struct LobbyRuntime {
                 auto frozen = state; frozen.phase = snapshot->phase; frozen.chat_sequence = snapshot->chat_sequence;
                 if (frozen != *snapshot) return failure<void>(LobbyReason::frozen, "in-flight room choices changed");
             }
-            if (auto valid = hooks.validate(*snapshot, snapshot->phase != LobbyPhase::staging); !valid) return valid;
+            if (auto valid = validate(*snapshot, snapshot->phase != LobbyPhase::staging); !valid) {
+                if (snapshot->phase == LobbyPhase::staging && valid.error().message.starts_with("mod content")) {
+                    auto sent = send(state.host, LobbyRejected{{state.room, snapshot->revision,
+                        LobbyReason::setup_failed, valid.error().message}});
+                    if (!sent) return valid;
+                    admission_refusal = valid.error(); admission_refusal_since = now.value_or(0);
+                    return core::Result<void>::success();
+                }
+                return valid;
+            }
             if (snapshot->phase != LobbyPhase::staging && nonzero(snapshot->start_attempt) && !preparation)
                 return failure<void>(LobbyReason::setup_failed, "setup announcement has no agreed preparation manifest");
             if (snapshot->phase == LobbyPhase::committed && (!setup || state.frozen_revision != snapshot->frozen_revision))
@@ -938,6 +1086,7 @@ core::Result<LobbySession> LobbySession::host(MessageTransport& transport, std::
     if (!made) return core::Result<LobbySession>::failure(made.error());
     auto value = std::move(made).value(); value->state.capacity = capacity; value->state.game = std::move(game);
     value->state.mounted_mods = value->hooks.mounted_mods;
+    value->state.content = value->hooks.admission_content;
     value->state.seats.push_back({transport.self(), sim::SeatId{1}, player, clean_selection(std::move(selection)), false});
     if (auto valid = value->validate(value->state); !valid) return core::Result<LobbySession>::failure(valid.error());
     value->initialized = true; return core::Result<LobbySession>::success(LobbySession(std::move(value)));
@@ -1129,8 +1278,12 @@ core::Result<void> LobbyRuntime::begin_start(const std::uint64_t revision) {
         if (is_start_pending(error)) {
             if (!value.start_pending) {
                 value.start_pending = revision;
-                static_cast<void>(value.post(value.state.host,
-                    "The host is preparing the campaign for all players. The room is locked until that is done.", true));
+                // A campaign room says the campaign is being prepared; any other room shows the pending
+                // reason its offer hook gave (a skirmish Start waits on the pre-Start mod content check).
+                const bool campaign = lobby_game_mode(frozen.game) == LobbyGameMode::galactic;
+                static_cast<void>(value.post(value.state.host, campaign
+                    ? std::string("The host is preparing the campaign for all players. The room is locked until that is done.")
+                    : error.message, true));
             }
             return core::Result<void>::success();
         }
@@ -1204,7 +1357,7 @@ core::Result<void> LobbyRuntime::resume_start() {
 core::Result<void> LobbyRuntime::poll_preparation() {
     if (!preparation || preparation_failed || setup) return core::Result<void>::success();
     if (now.value_or(0) - preparation_since >= limits.preparation_timeout_ms)
-        return refuse_preparation("prepared campaign agreement timed out");
+        return refuse_preparation(preparation_timeout_message(limits.preparation_timeout_ms, now.value_or(0) - preparation_since));
     if (!prepared_offer) {
         // Chat cursors may advance while preparation runs. The worker always sees the published immutable inputs.
         const auto frozen = std::get<LobbySnapshot>(decode_lobby_frame(preparation->snapshot).value());
@@ -1265,6 +1418,11 @@ core::Result<void> LobbySession::pump(std::uint64_t now) {
     if (value.taken) return failure<void>(LobbyReason::frozen, "game owns the room transport");
     if (value.now && now < *value.now) return failure<void>(LobbyReason::invalid_choice, "room clock moved backwards");
     value.now = now;
+    // A missing acknowledgement must not hide the local named refusal or leave admission hanging.
+    constexpr std::uint64_t refusal_ack_timeout_ms = 5'000;
+    if (value.admission_refusal && (value.transport->link(value.state.host) == LinkState::closed
+        || now - value.admission_refusal_since >= refusal_ack_timeout_ms))
+        return core::Result<void>::failure(*value.admission_refusal);
     if (value.state.phase == LobbyPhase::closed) return core::Result<void>::success();
     if (!value.is_host && value.transport->link(value.state.host) == LinkState::closed) {
         value.notice = LobbyNotice{value.state.room, value.state.revision, LobbyReason::host_closed, "host connection lost"};
@@ -1326,7 +1484,7 @@ core::Result<void> LobbySession::pump(std::uint64_t now) {
     } else if (!value.is_host && value.setup_pending) {
         if (auto created = value.create_setup(); !created) return value.fail_setup_creation(created.error());
     }
-    if (value.setup) {
+    if (value.setup && (!value.hooks.setup_pump_ready || value.hooks.setup_pump_ready())) {
         if (auto pumped = value.setup->pump(now); !pumped) {
             if (value.is_host) {
                 if (value.state.phase == LobbyPhase::committed) {

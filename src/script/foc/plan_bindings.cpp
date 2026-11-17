@@ -563,6 +563,28 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
     }
 }
 
+// Only the creating instance can see a request before its ordered commit.
+// The read view cannot expose other players' pending writes (WGA-498/499).
+core::Result<std::optional<ai::DesireRequest>> staged_desire_request(
+    BindingContext& context, const ai::Engine& engine, std::uint64_t block) {
+    const auto commands = context.staged_commands();
+    context.charge_host_work(commands.size());
+    for (auto at = commands.rbegin(); at != commands.rend(); ++at) {
+        if (at->issuer != context.instance()) return core::Result<std::optional<ai::DesireRequest>>::failure(
+            make_error(authoritative::codes::invalid_request, "staged command view contains another instance"));
+        if (at->verb != ai::verb_ai || ai::block_id(at->issuer, at->sequence) != block || at->arguments.size() != 6) continue;
+        const auto& args = at->arguments;
+        if (std::get<std::string>(args[0].data) != "galactic_desire") continue;
+        const auto* player = as_handle(args[1], handle_player);
+        const auto* target = as_handle(args[3], ai::handle_ai_target);
+        const auto request = engine.make_desire_request(static_cast<tactical::PlayerId>(player->id),
+            std::get<std::string>(args[2].data), target->id, std::get<Real>(args[4].data), std::get<Real>(args[5].data));
+        if (!request) return core::Result<std::optional<ai::DesireRequest>>::failure(request.error());
+        return core::Result<std::optional<ai::DesireRequest>>::success(request.value());
+    }
+    return core::Result<std::optional<ai::DesireRequest>>::success({});
+}
+
 void register_blocks(ScriptScheduler& scripts, const HostPtr& host, std::vector<core::Diagnostic>& errors) {
     const auto method = [&](std::string_view name, Binding binding) {
         if (auto added = scripts.register_method(ai::handle_block, name, std::move(binding)); !added) errors.push_back(added.error());
@@ -572,6 +594,18 @@ void register_blocks(ScriptScheduler& scripts, const HostPtr& host, std::vector<
     method("IsFinished", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const Handle* found = as_handle(arguments[0], ai::handle_block);
         const ai::Block* block = found == nullptr || host->engine == nullptr ? nullptr : host->engine->block(found->id);
+        std::optional<ai::DesireRequest> pending;
+        if (found && !block && host->engine) {
+            auto request = staged_desire_request(context, *host->engine, found->id);
+            if (!request) return core::Result<ValueList>::failure(request.error());
+            pending = std::move(request).value();
+        }
+        const auto* request = block && block->desire_request ? &*block->desire_request : pending ? &*pending : nullptr;
+        if (request) {
+            const auto* proposal = host->engine->proposed_desire_goal(*request);
+            if (proposal) stage(context, "galactic_desire_poll", {arguments[0], Value::text(std::to_string(proposal->id))});
+            return one(boolean(proposal || host->engine->frame() >= request->expiry));
+        }
         if (block == nullptr) return one(boolean(false));
         if (block->kind == ai::Block::Kind::galactic_starbase) {
             const auto level = context.query_immediate("galactic.starbase_level", {handle(handle_game_object, block->destination_object)});
@@ -607,7 +641,7 @@ void register_blocks(ScriptScheduler& scripts, const HostPtr& host, std::vector<
         const Handle* found = as_handle(arguments[0], ai::handle_block);
         const ai::Block* block = found == nullptr || host->engine == nullptr ? nullptr : host->engine->block(found->id);
         if (block == nullptr) return none();
-        if (block->kind == ai::Block::Kind::galactic_starbase) return none();
+        if (block->kind == ai::Block::Kind::galactic_starbase || block->kind == ai::Block::Kind::galactic_desire) return none();
         if (block->kind == ai::Block::Kind::galactic_invade && !block->galactic_request) return one(boolean(block->result));
         if (block->kind == ai::Block::Kind::galactic_invade && block->galactic_request) {
             const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(host->galactic_execution.get());
@@ -960,9 +994,7 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
         return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
     });
     add("GiveDesireBonus", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
-        // Retail requires five arguments and returns a timed bonus block. The
-        // timed native owner is an open gap; nil lets BlockOnCommand decline
-        // the unavailable request without retiring the calling plan.
+        // WGA-497..500: proposal-search block; creation never changes desire.
         if (arguments.size() != 5) return fail("GiveDesireBonus expects a player, goal, target, bonus and duration");
         const auto* player = as_handle(arguments[0], handle_player);
         const auto* goal = std::get_if<std::string>(&arguments[1].data);
@@ -980,11 +1012,17 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
         const auto* plan = host->engine->plan_of_instance(context.instance());
         if (!plan || !host->engine->galactic_goal(plan->player, plan->goal)) {
             context.report(authoritative::codes::unsupported_api,
-                "GiveDesireBonus timed goal bonus is unavailable outside a retained galactic plan");
+                "GiveDesireBonus requires a retained galactic plan owner");
             return none();
         }
-        stage(context, "galactic_desire_unsupported", {});
-        return none();
+        const auto target_id = target ? target->id : host->engine->target_of_object(object->id)->id;
+        const auto request = host->engine->make_desire_request(static_cast<tactical::PlayerId>(player->id), *goal,
+            target_id, *bonus, *duration);
+        if (!request) return core::Result<ValueList>::failure(request.error());
+        const auto sequence = context.command_sequence();
+        stage(context, "galactic_desire", {arguments[0], Value::text(request.value().goal_type),
+            handle(ai::handle_ai_target, target_id), number(request.value().bonus), number(ai::to_single(*duration))});
+        return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
     });
     add("FindDeadlyEnemy", [host](BindingContext& context, const ValueList& arguments) {
         return find_deadly_enemy(*host, context, arguments);

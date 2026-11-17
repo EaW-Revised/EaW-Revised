@@ -956,6 +956,13 @@ core::Result<void> GalacticSession::NativeActionBarrier::discard() {
     while (!state_->segments.empty()) state_->segments.pop_back();
     return core::Result<void>::success();
 }
+const GalacticSession::NativeActionShadow* GalacticSession::NativeActionBarrier::view() const noexcept {
+    // The same resolution as GalacticSession::native_shadow(), keyed by this barrier's world instead of a session.
+    if (!state_) return nullptr;
+    const auto context = native_action_barrier_context.lock();
+    const auto* state = static_cast<const State*>(context.get());
+    return state && state->owner == state_->owner && !state->finished && !state->segments.empty() ? state->segments.back().get() : nullptr;
+}
 GalacticSession::NativeActionBarrier::Work GalacticSession::NativeActionBarrier::work() const noexcept {
     Work result;
     if (!state_) return result;

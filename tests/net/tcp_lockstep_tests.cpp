@@ -97,6 +97,7 @@ void battle(DepartureCase departure = DepartureCase::none) {
     net::DesyncOptions monitor_options;
     monitor_options.input_delay = options.input_delay;
     monitor_options.exchange_every = 2;
+    monitor_options.deferred_compare = false; // interval <= delay: barrier
     net::DesyncMonitor first_monitor(*host, monitor_options), second_monitor(*client, monitor_options);
     auto first = take(net::TacticalLockstepSession::create(setup, content, *host, one, seats, options,
         depart ? &first_monitor : nullptr));
@@ -209,7 +210,7 @@ void mutual_loss_or_real_quit(unsigned workers, bool hash_gap, bool real_quit = 
     const std::vector<tactical::SeatBinding> seats{{sim::SeatId{1}, 1, true, false}, {sim::SeatId{2}, 2, true, false}};
     eawr::platform::ThreadWorkerAdapter executor(workers);
     net::SessionOptions policy; policy.final_tick_count = 1000; policy.completeness_timeout_ms = 30'000;
-    net::DesyncOptions checks; checks.input_delay = policy.input_delay; checks.exchange_every = 2;
+    net::DesyncOptions checks; checks.input_delay = policy.input_delay; checks.exchange_every = 2; checks.deferred_compare = false; // barrier
     net::DesyncMonitor left_monitor(left, checks), right_monitor(right, checks);
     auto first = take(net::TacticalLockstepSession::create(setup, {}, left, executor, seats, policy, hash_gap ? &left_monitor : nullptr));
     auto second = take(net::TacticalLockstepSession::create(setup, {}, right, executor, seats, policy, hash_gap ? &right_monitor : nullptr));

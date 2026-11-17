@@ -106,6 +106,7 @@ bool LiveSessionView::prepare_source(const BattleSource& source, const vfs::Vfs&
 bool LiveSessionView::prepare_head(const vfs::Vfs& filesystem, const std::string_view map_path,
                                    std::string& failure, const BattleSource*& source) {
     shield_flash_constants_ = presentation_constants::load_flash(filesystem);
+    order_flash_constants_ = presentation_constants::load_order_flash(filesystem);
     auto preview_colours = ui::reinforcement_colours(filesystem);
     // Missing mod presentation constants keep the model's ordinary light multiplier.
     preview_colours_ = preview_colours ? preview_colours.value()
@@ -540,6 +541,7 @@ bool LiveSessionView::start(std::string& failure) {
     session_options.pacing = options_.real_time ? platform::LiveSession::Pacing::real_time
                                                 : platform::LiveSession::Pacing::driven;
     session_options.target_rate = time_.target_rate(); // #459 TM-01
+    session_options.max_rate = options_.max_rate;
     // Solo real-time play compares no tick hashes: finish() reads them only for replay verification and the
     // hash CSV, the replay file carries none, and lockstep (options_.lan) exchanges them per tick. Without
     // those consumers a tick skips its state encode + hash (sim::StateHashPolicy::on_demand).

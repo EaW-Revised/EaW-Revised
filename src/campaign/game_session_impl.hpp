@@ -189,6 +189,7 @@ public:
     std::optional<RecordedAdmission> admission;
     std::vector<RecordedAdmission> queued_admissions, waiting_admissions;
     CorruptionMissionService corruption_mission_service;
+    CorruptionMissionReadiness corruption_mission_readiness;
     core::Result<void> queue_conflict(ConflictRecord, Arbitration);
     std::vector<RecordedAdmission> admissions;
     std::multimap<std::uint64_t, RecordedAdmission> replay_admissions;

@@ -16,6 +16,7 @@ except ImportError:
 
 @unittest.skipUnless(support.RUNTIME and support.GAME_ROOT, "requires GPU viewer and installed FoC")
 class GalacticGroundRuntime(unittest.TestCase):
+    render_thread = "separate"
     @classmethod
     def setUpClass(cls):
         # Rig staging excludes ignored caches; the eye check must use the installed authored faces.
@@ -732,10 +733,169 @@ func _process(delta):
         # fleet stay in orbit, and the release is one typed landing command naming that unit.
         data, initial = self.native("land-cell")
         self.assertEqual(data["ground_hud"]["land_orders"], 1)
+        self.assertEqual(data["ground_hud"]["last_land"], "land_units")
         self.assertEqual(data["live_session"]["submitted_orders"], 1)
         before = sum(row["count"] for row in initial["fleet_hud"]["cards"] if row["local"])
         after = sum(row["count"] for row in data["fleet_hud"]["cards"] if row["local"])
         self.assertEqual(after, before - 1, "only the dragged unit may leave orbit")
+
+    def test_drops_on_defended_enemy_ground_send_the_invading_command(self):
+        # P1 regression of #7178 (WGM-39/42, GGS-10): over the opponent's defended surface a unit cell invades with
+        # that unit alone (the unit landing, which the sim turns into the subset invasion) and a whole card with
+        # its fleet. Real native press, drag and release on the focused planet's ground control.
+        for fixture, action, command in (("ground-invasion", "land-cell", "land_units"),
+                ("ground-invasion", "land-drag", "land_fleet"), ("ground-invasion-base", "land-cell", "land_units")):
+            with self.subTest(fixture=fixture, action=action):
+                data, initial = self.native(action, fixture)
+                # Evidence for the receipt: the orbit cards before and after, and whether a battle prompt opened.
+                print("INVASION-EVIDENCE " + json.dumps({"fixture": fixture, "action": action,
+                    "before": [[row["fleet"], row["count"]] for row in initial["fleet_hud"]["cards"] if row["local"]],
+                    "after": [[row["fleet"], row["count"]] for row in data["fleet_hud"]["cards"] if row["local"]],
+                    "battle_dialog": data.get("battle_dialog"), "ground": data["ground_hud"].get("last_land")}))
+                self.assertEqual(data["ground_hud"]["land_orders"], 1, data["ground_hud"])
+                self.assertEqual(data["ground_hud"]["last_land"], command)
+                self.assertEqual(data["live_session"]["submitted_orders"], 1)
+                self.assertEqual(data["battle_dialog"]["phase"], "choice", "the invasion prompt must remain open")
+                self.assertGreater(data["battle_dialog"]["conflict"], 0)
+                before_count = sum(row["count"] for row in initial["fleet_hud"]["cards"] if row["local"])
+                after_count = sum(row["count"] for row in data["fleet_hud"]["cards"] if row["local"])
+                self.assertEqual(after_count, before_count - (1 if command == "land_units" else 2),
+                    "invading transports leave the card at once; ships and undragged units stay")
+                self.assertTrue(any(group["representative"] == 7003
+                    for row in data["fleet_hud"]["cards"] if row["local"] for group in row["groups"]),
+                    "the ship stays in its orbit card during the land prompt")
+                # The simulation retains the invading transports in orbit until the conflict returns.
+                def orbit(report):
+                    rows = [row for row in report["fleets"] if row["planet"] == 101 and row["owner"] == 1]
+                    return sum(row["fleets"] for row in rows), sum(row["members"] for row in rows)
+                (fleets_before, members_before), (fleets_after, members_after) = orbit(initial), orbit(data)
+                self.assertEqual(members_after, members_before, "an invasion waits in orbit until its battle")
+                self.assertEqual(fleets_after, fleets_before + (1 if command == "land_units" else 0),
+                                 "the dragged unit alone forms the invading fleet" if command == "land_units"
+                                 else "a whole card invades with its fleet unsplit")
+
+    def overview_drop(self, fixture):
+        """Galaxy overview: press the local orbit fleet's stack icon at planet 101 and release it on that planet's
+        ground stack icon, with real native events. Returns the report and the gesture evidence."""
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-ground-overview-"))
+        report, evidence, driver = [directory / name for name in ["report.json", "gesture.json", "driver.gd"]]
+        driver.write_text('''extends SceneTree
+var elapsed = 0.0
+var frame = 0
+var viewport
+var source = Vector2.ZERO
+var target = Vector2.ZERO
+var evidence = {}
+var directory = %s
+func _initialize():
+    viewport = SubViewport.new()
+    viewport.size = Vector2i(1280, 720)
+    viewport.handle_input_locally = true
+    viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+    root.add_child(viewport)
+    viewport.add_child(load("res://main.tscn").instantiate())
+    viewport.notify_mouse_entered()
+    current_scene = viewport
+func key(code):
+    for down in [true, false]:
+        var event = InputEventKey.new()
+        event.keycode = code
+        event.pressed = down
+        viewport.push_input(event, true)
+func motion(point, held):
+    var event = InputEventMouseMotion.new()
+    event.position = point
+    event.global_position = point
+    event.relative = Vector2(24, 0)
+    event.button_mask = MOUSE_BUTTON_MASK_LEFT if held else 0
+    viewport.push_input(event, true)
+func mouse(point, down):
+    var event = InputEventMouseButton.new()
+    event.button_index = MOUSE_BUTTON_LEFT
+    event.position = point
+    event.global_position = point
+    event.pressed = down
+    viewport.push_input(event, true)
+func shown(prefix):
+    var stack = [current_scene]
+    while stack.size() > 0:
+        var node = stack.pop_back()
+        for child in node.get_children(): stack.push_back(child)
+        if node is Control and String(node.name).begins_with(prefix) and node.is_visible_in_tree(): return node
+    return null
+func _process(delta):
+    elapsed += delta
+    if elapsed < 2.0: return false
+    frame += 1
+    if frame == 10: key(KEY_HOME)
+    if frame == 12: key(KEY_PAGEUP)
+    if frame == 14: key(KEY_PAGEDOWN)
+    if frame == 60:
+        evidence["ground_at_rest"] = shown("ground_presence_101") != null
+        var orbit = shown("fleet_presence_101_")
+        evidence["orbit_drawn"] = orbit != null
+        if orbit:
+            evidence["orbit"] = String(orbit.name)
+            source = orbit.get_global_rect().get_center()
+    if frame == 62:
+        motion(source, false)
+        mouse(source, true)
+    if frame == 66: motion(source + Vector2(24, 0), true)
+    if frame == 70:
+        # The drag began at frame 66: an icon that appeared with it must already stand at its planet.
+        var early = shown("ground_presence_101")
+        evidence["placed_promptly"] = early != null and early.get_global_rect().size.x > 0
+    if frame == 72:
+        var ground = shown("ground_presence_101")
+        evidence["ground_while_dragging"] = ground != null
+    if frame == 76:
+        # An icon that appeared with the drag is placed by the HUD after it is created: aim at its placed rect.
+        var ground = shown("ground_presence_101")
+        if ground:
+            target = ground.get_global_rect().get_center()
+            evidence["target"] = [target.x, target.y]
+        motion(target, true)
+    if frame == 78:
+        evidence["dragging"] = viewport.gui_is_dragging()
+        viewport.get_texture().get_image().save_png(directory + "/held.png")
+    if frame == 82: mouse(target, false)
+    if frame == 120:
+        var file = FileAccess.open(directory + "/gesture.json", FileAccess.WRITE)
+        file.store_string(JSON.stringify(evidence))
+        file.close()
+        viewport.get_texture().get_image().save_png(directory + "/after.png")
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''' % json.dumps(directory.as_posix()), encoding="utf-8")
+        args = ["--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", fixture,
+                "--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750",
+                "--eawr-font-cache", str(self.font_cache),
+                "--eawr-game-root", support.GAME_ROOT, "--eawr-report", str(report)]
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver),
+            *(["--render-thread", self.render_thread] if getattr(self, "render_thread", None) else []), "--", *args],
+            cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(report.read_text(encoding="utf-8")), json.loads(evidence.read_text(encoding="utf-8"))
+
+    def test_overview_ground_icon_receives_an_invasion_while_a_landing_fleet_is_dragged(self):
+        # GGS-05 (owner rule 2026-11-16): dragging an orbit fleet that holds ground units shows its planet's ground
+        # icon as the drop target on enemy ground too, even with no enemy card known; the drop is the invasion.
+        for fixture, at_rest in (("ground-invasion", True), ("ground-invasion-base", False)):
+            with self.subTest(fixture=fixture):
+                data, evidence = self.overview_drop(fixture)
+                print("OVERVIEW-EVIDENCE " + json.dumps({"fixture": fixture, "evidence": evidence,
+                    "drag": data["fleet_hud"]["drag"], "battle_dialog": data.get("battle_dialog")}))
+                self.assertTrue(evidence["orbit_drawn"], evidence)
+                self.assertEqual(evidence["ground_at_rest"], at_rest, evidence)
+                self.assertTrue(evidence["ground_while_dragging"], evidence)
+                self.assertTrue(evidence["placed_promptly"], evidence)
+                drag = data["fleet_hud"]["drag"]
+                self.assertEqual(drag["orders"], 1, drag)
+                self.assertEqual(drag["last_kind"], 2, drag)  # DropKind::land
+                self.assertEqual(drag["last_destination"], 101, drag)
 
     def test_noncombat_passenger_can_land_from_a_fleet_or_unit_cell(self):
         # GGS-11: stay-in-transport cargo supplies no land-combat capability,

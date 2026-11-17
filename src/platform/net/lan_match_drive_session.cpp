@@ -64,10 +64,12 @@ DriverResult TcpLanMatch::drive_session(const tactical::TacticalSetup& setup, pl
         }
         if (pumped.value().completed) adapter_->completed_at(now);
         const auto& completeness = session.waiting_for();
-        const bool waiting = (completeness && !completeness->peers.empty()) || !io_->monitor->waiting_for_peers().empty();
+        const auto wait_kind = session.wait_kind(gate_.advance_allowed, pumped.value().completed.has_value());
+        const bool waiting = wait_kind != net::SessionWaitKind::none;
         const auto missing = completeness && !completeness->peers.empty() ? completeness->peers : io_->monitor->waiting_for_peers();
         if (diagnostics_->stall(waiting, now, missing)) input_progress("stall-start");
-        diagnostics_->ledger.observe(now, waiting, missing.empty() ? 0 : missing.front());
+        diagnostics_->ledger.observe(now, waiting, missing.empty() ? 0 : missing.front(),
+            waiting ? static_cast<presentation::ui::NetWaitKind>(wait_kind) : presentation::ui::NetWaitKind::batch);
         if (!waiting) waiting_since_.reset();
         else {
             if (!waiting_since_) waiting_since_ = now;
@@ -95,6 +97,8 @@ DriverResult TcpLanMatch::drive_session(const tactical::TacticalSetup& setup, pl
                     || view_.options_change_tick != adapter_->options_changed_at)) {
                 view_.options_actor = adapter_->options_actor; view_.options_change_tick = adapter_->options_changed_at;
                 view_.options_name = seat_name(*adapter_->options_actor);
+                diagnostics_->emit("speed-applied", "agreed", diagnostics_->seat, "step=" + std::to_string(view_.options.tactical_speed)
+                    + " session_tick=" + std::to_string(adapter_->options_changed_at) + " actor_seat=" + std::to_string(adapter_->options_actor->value));
             }
             if (pumped.value().completed) {
                 // Only the pause notice is owned here; other input feedback (a cancelled reservation) must survive.
@@ -109,22 +113,31 @@ DriverResult TcpLanMatch::drive_session(const tactical::TacticalSetup& setup, pl
             }
             view_.link_stats.reset();
             view_.net_peers.clear();
+            view_.net_input_delay = session.input_delay();
+            view_.net_lead_ticks = session.next_seal() > adapter_->completed_tick() ? session.next_seal() - adapter_->completed_tick() : 0;
+            const auto self = lobby_stream_ ? lobby_stream_->self() : io_->transport.self();
+            view_.net_local_tick_ms = diagnostics_->input_tick_ms(self, adapter_->completed_tick(), now);
+            view_.net_poll_gap_ms = session.max_poll_gap_ms();
             // The ledger scan is bounded but the driver polls far more often than the overlay redraws.
             if (!net_stall_at_ || now < *net_stall_at_ || now - *net_stall_at_ >= 100) {
                 view_.net_stall = diagnostics_->ledger.snapshot(now);
                 net_stall_at_ = now;
             }
-            for (net::PeerIndex peer = 0; peer < io_->transport.peer_count(); ++peer)
-                if (peer != io_->transport.self()) {
-                    const auto stats = io_->transport.link_stats(peer);
+            for (net::PeerIndex peer = 0; peer < setup_result().offer().seats.size(); ++peer)
+                if (peer != self) {
+                    const auto native = lobby_result_ ? lobby_result_->snapshot().seats[peer].peer : peer;
+                    const auto stats = io_->transport.link_stats(native);
                     if (stats && (!view_.link_stats || stats->smoothed_rtt > view_.link_stats->smoothed_rtt)) view_.link_stats = stats;
                     constexpr double per_ms = 1.0 / 1000.0;
-                    const auto route = io_->transport.tcp ? net_route_of(io_->transport.tcp->pair(peer)) : presentation::ui::NetRouteInfo{};
+                    const auto route = io_->transport.tcp ? net_route_of(io_->transport.tcp->pair(native)) : presentation::ui::NetRouteInfo{};
                     diagnostics_->route(peer, route, stats ? stats->loss_pct : 0.0);
                     view_.net_peers.push_back(stats
                         ? presentation::ui::NetPeerLink{peer, true, static_cast<double>(stats->smoothed_rtt.count()) * per_ms,
                                                         static_cast<double>(stats->jitter.count()) * per_ms, stats->loss_pct, route.route, route.lossy}
                         : presentation::ui::NetPeerLink{peer, false, 0.0, 0.0, 0.0, route.route, route.lossy});
+                    auto& projected = view_.net_peers.back();
+                    projected.input_tick_ms = diagnostics_->input_tick_ms(peer, session.received_through(peer), now);
+                    LanDiagnostics::receipts(projected, session, peer);
                 }
             if (view_.phase != LanPhase::ended) {
                 view_.message.clear(); view_.diagnostic_code.clear();

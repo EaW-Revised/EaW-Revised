@@ -477,7 +477,7 @@ bool GalacticMode::State::request_ground_land(bool submit, galactic_view::Object
     const auto command = map_input.command({galactic_view::DropKind::land, id, 0, selected_planet, {}, {}, {}, {}}, planets);
     if (!command) return false;
     game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, *command, {}});
-    ++submitted_orders; ++ground_hud.land_orders;
+    ++submitted_orders; ++ground_hud.land_orders; ground_hud.last_land_units = false;
     return true;
 }
 
@@ -491,7 +491,7 @@ bool GalacticMode::State::request_ground_land_members(bool submit, std::span<con
     if (!submit) return true;
     if (!map_input.gates.galactic || !map_input.gates.world_allowed() || map_input.gates.tutorial_locked) return false;
     game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, sim::galactic::LandUnits{selected_planet, *units}, {}});
-    ++submitted_orders; ++ground_hud.land_orders;
+    ++submitted_orders; ++ground_hud.land_orders; ground_hud.last_land_units = true;
     return true;
 }
 
@@ -831,6 +831,7 @@ void GalacticMode::State::write_ground_report(std::ostream& output) const {
     const auto sale_rect = ground_hud.sale ? ground_hud.sale->get_global_rect() : Rect2{};
     output << ",\"rect\":[" << sale_rect.position.x << ',' << sale_rect.position.y << ',' << sale_rect.size.x << ',' << sale_rect.size.y << "]}"
         << ",\"boxes\":" << ground_hud.boxes << ",\"land_orders\":" << ground_hud.land_orders
+        << ",\"last_land\":" << json(!ground_hud.land_orders ? "" : ground_hud.last_land_units ? "land_units" : "land_fleet")
         << ",\"launch_orders\":" << ground_hud.launch_orders << ",\"reorders\":" << ground_hud.reorders
         << ",\"launch\":{\"command\":" << json(ground_hud.last_launch_land ? "transfer_surface opcode 25"
             : ground_hud.last_launch_path.empty() ? "launch_from_surface opcode 18" : "launch_fleet opcode 22")

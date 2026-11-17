@@ -132,7 +132,10 @@ orders, as next-tick commands.
   - 100 px or more: the move is cancelled and nothing is ordered (the arrow is hidden while the
     cursor is in that zone). An armed move mode stays armed.
   - A left press while the right button is held ends the gesture in the debug build (the two-button
-    state cancels it); Escape is not special there (unverified: low value, not implemented).
+    state cancels it); Escape is not special there (debug-build walk found no Escape handler; runtime capture unverified).
+    The viewer has no compass-specific Escape cancellation. Escape instead reaches the in-game
+    menu (MNU-19), whose ordinary pause and input handling still apply; resuming a held gesture
+    has no retail runtime proof.
   Works in space and on land, for one unit and for groups; galactic has none. Implemented: the
   band and the press-point order (`ui::right_release`, `ui::compass_plan`, `RightDrag` in the command
   sink). A compass release whose press met no battle-plane point cancels like a 100 px drag: the
@@ -161,11 +164,12 @@ orders, as next-tick commands.
   the ships without a turn), and a press so near the edge that no useful range is left is a plain
   move at the press point. On land the drag gives no order. A turn in place has no move
   acknowledgement and no move marker (retail response unverified; the least visible choice).
-  Ctrl (attack-move) and Alt (queue) do not change it: a drag from a selected ship is a facing-only
-  order whatever the modifiers, because the debug build's facing-only event carries only the heading
-  (modifier flags ride on the move-with-facing event, not on this one; the modifier carry-over is
-  UNVERIFIED, so nothing is queued and nothing attack-moves). A drag that starts off the selection
-  keeps its attack-move or queue meaning at the press point.
+  The debug build's facing-only event carries only the heading; modifier flags ride on the
+  move-with-facing event, and their carry-over to a facing-only gesture is UNVERIFIED. In the
+  viewer, Ctrl alone (attack-move) and Alt alone (queue) retain a facing-only order from a selected
+  ship: nothing is queued and nothing attack-moves. Ctrl+Alt is the guard exception, including
+  a press on a selected ship: it orders guard and does not turn in place. A drag that starts off
+  the selection keeps its attack-move or queue meaning at the press point.
 - O-5. Orders reach the simulation only as commands through the UI-07 sink, stamped for the next
   open tick, so they are recorded in the replay.
 - O-6 (debug build; the arrival is UNVERIFIED). The compass heading travels with the move to the
@@ -181,7 +185,10 @@ orders, as next-tick commands.
   locomotor (the whole-program field search was cut off), so a ship might arrive on its path heading
   and use the angle only for its slot. Implemented for off-selection space ship compass moves: one group move at the press point
   carries one yaw in [0, 360), rounded to 0.1 degree (MV-40/MV-41). Queued moves retain it;
-  attack-move and guard keep their existing command forms. Pressing on the selected ship still
+  attack-move and guard keep their existing command forms. Their compass arrow is hidden while
+  Ctrl selects those orders, since those payloads do not carry a final yaw. This is a project limitation:
+  the debug-build input walk carries attack-move flags with the heading. A Ctrl drag pressed on a
+  selected ship still shows the arrow and turns in place (O-4); an armed Move mode ignores Ctrl. Pressing on the selected ship still
   turns in place (O-4). Land and fighters are follow-ups; this viewer piece does not change them. `FinalFormationFacingMinimumAngle` and
   `FinalFormationFacingDeltaCoefficient` stay `deferred`; `FinalFacing180Penalty` (a path-search cost) is not traced.
 

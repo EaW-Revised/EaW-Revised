@@ -43,13 +43,14 @@ public:
     std::condition_variable condition;
     bool hold_join{}, release_join{};
     OnlineRoomMetadata published;
+    std::string advertised_build{"local-build"};
     std::string bridge;
     std::shared_ptr<BlockingList> list_gate;
     ~FakeService() override { if (list_gate) list_gate->destroyed = true; }
     eawr::core::Result<OnlineRoomPage> list(std::string, std::uint32_t) override {
         ++lists;
         if (list_gate) { list_gate->entered = true; while (!list_gate->released) std::this_thread::sleep_for(2ms); }
-        auto value = metadata(); value.build = "foreign-build";
+        auto value = metadata(); value.build = advertised_build;
         return eawr::core::Result<OnlineRoomPage>::success({{{std::string(32, 'a'), value, true}}, {}});
     }
     eawr::core::Result<OnlineRoomPublication> publish(OnlineRoomMetadata value, std::string) override {
@@ -185,6 +186,7 @@ void fixed_password_rooms() {
 }
 void live_source() {
     auto service = std::make_unique<FakeService>(); auto* fake = service.get();
+    fake->advertised_build = "foreign-build";
     OnlineLobbyGameSource source(std::move(service), metadata());
     until([&] { source.pump(); return !source.games().empty(); });
     { const auto before = fake->lists.load(); source.refresh(); until([&] { return fake->lists > before; }); }
@@ -200,6 +202,29 @@ void live_source() {
     presence.locked = true; source.announce(presence); until([&] { return fake->heartbeats == 1; });
     { std::lock_guard lock(fake->mutex); expect(fake->published.starting && fake->published.map == "custom-map", "Presence updates keep data-driven map and hide starting room"); }
     presence.place = LobbyPlace::lobby; source.announce(presence); until([&] { return fake->leaves == 1; });
+}
+void different_build_refused_at_join() {
+    for (const bool matching : {false, true}) {
+        auto service = std::make_unique<FakeService>(); auto* fake = service.get();
+        fake->advertised_build = matching ? "local-build" : "foreign-build";
+        OnlineLobbyGameSource source(std::move(service), metadata());
+        until([&] { source.pump(); return !source.games().empty(); });
+        const LobbyAttemptId attempt{LobbySourceKind::online, 123};
+        source.begin_join(attempt, std::string(32, 'a'), "private", "Guest");
+        std::vector<OnlineLobbyJoinCompletion> results;
+        until([&] { results = source.take_join_results(); return !results.empty(); });
+        expect(results.size() == 1 && results[0].attempt == attempt, "Build admission completes exactly this join attempt");
+        if (!matching) {
+            expect(results[0].refusal && results[0].refusal->code == "EAWR-NET-1503"
+                && results[0].refusal->message.find("foreign-build") != std::string::npos
+                && results[0].refusal->message.find("local-build") != std::string::npos,
+                "Different game builds are refused with 1503 and both identities before setup, never 0304");
+            expect(fake->joins == 0 && !results[0].admission, "An incompatible row never requests a relay seat");
+        } else {
+            expect(results[0].admission && results[0].admission->build_identity == "local-build" && fake->joins == 1,
+                "A matching row carries its checked identity into transport admission and the freeze check");
+        }
+    }
 }
 void destruction_drains_off_frame() {
     auto gate = std::make_shared<BlockingList>();
@@ -404,6 +429,6 @@ void menu_transient_failure() {
 }
 }
 int main() {
-    try { fixtures(); fixed_password_rooms(); live_source(); destruction_drains_off_frame(); bridge_publication_waits(); cancellation(); recovery_and_validation(); menu_old_relay(); menu_channel(); menu_poll_policy(); menu_transient_failure(); std::cout << "Online lobby source and cancellation contracts passed\n"; return 0; }
+    try { fixtures(); fixed_password_rooms(); live_source(); different_build_refused_at_join(); destruction_drains_off_frame(); bridge_publication_waits(); cancellation(); recovery_and_validation(); menu_old_relay(); menu_channel(); menu_poll_policy(); menu_transient_failure(); std::cout << "Online lobby source and cancellation contracts passed\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

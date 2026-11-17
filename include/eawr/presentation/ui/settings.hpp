@@ -163,10 +163,10 @@ struct GameplaySettings final {
     bool absolute_scrolling{true};
     bool delay_tooltips{false};
     bool reinforcement_areas_only_while_placing{true}; // PD-01: presentation only.
-    bool animated_loading_background{false};
+    bool animated_loading_background{true};
     bool fit_radar_to_galaxy{true}; // WGUI-177 / DEV-9: galactic radar expansion, on by default (the original's fixed frame is the opt-out).
-    bool space_pauses_galactic{false}; // DEV-13 (#6291): Space pauses the galaxy clock; off = the original's Space (cinematic tour).
-    int hover_owner_names{-1}; // #5130: -1 follows mode (MP on, solo off), 0 off, 1 on.
+    bool space_pauses_galactic{true}; // DEV-13: off restores Space as the cinematic tour.
+    int hover_owner_names{1}; // -1 retains the saved mode-dependent choice (MP on, solo off), 0 off, 1 on.
     bool right_button_scroll{false};
     bool both_buttons_rotate{false};
     bool alternate_mouse{false};
@@ -198,10 +198,10 @@ struct NetworkSettings final {
     int preferred_faction{0};  // 0 random, then the playable factions in data order
     int connection_speed{0};   // 0 modem, 1 broadband
     int lobby_locale{-1};      // -1 follows the game language
-    // Project online service. Empty ships unconfigured; LAN retains its own settings.
-    std::string online_host;
+    // ST-N2: public online service defaults; LAN retains its own settings.
+    std::string online_host{"eaw.ernst.work"};
     int online_port{27020};
-    std::string online_trust{"pin"}; // pin, ca-file, or operating-system trust
+    std::string online_trust{"system"}; // pin, ca-file, or operating-system trust
     std::string online_pin;
     std::string online_ca_file;
     bool online_relay_only{};
@@ -228,7 +228,7 @@ struct SelectionActionConfig final {
     friend bool operator==(const SelectionActionConfig&, const SelectionActionConfig&) = default;
 };
 struct SelectionConfig final {
-    bool enabled{};
+    bool enabled{true};
     std::array<SelectionActionConfig, 2> actions{{{"Ctrl+Q", {}, {}, {}, true}, {"Q", {}, {}, {}, true}}};
     SelectionActionConfig gift{}; // GIFT_UNITS uses the same advisor mapping, without a keyboard binding.
     friend bool operator==(const SelectionConfig&, const SelectionConfig&) = default;
@@ -245,7 +245,7 @@ struct PlayerSettings final {
     bool camera_wasd{};
     SelectionConfig selection_config;
     bool selection_hotkeys_authored{};
-    bool selection_hotkeys{}; // SH-01: optional presentation deviation, default off.
+    bool selection_hotkeys{true}; // SH-01: player and layer opt-outs still win.
     // Command name -> key text overrides of the keyboard pages. Empty keeps the project's
     // keys; SH-01 writes only its two feature-specific binding overrides.
     std::map<std::string, std::string> keys;

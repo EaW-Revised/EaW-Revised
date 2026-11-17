@@ -36,6 +36,22 @@ def tree(temporary: str) -> pathlib.Path:
 
 
 class PublishScanTests(unittest.TestCase):
+    def test_public_service_host_is_an_exact_private_name_exception(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            domain = CONFIG['security']['public_hosts'][0]
+            path = write(root, 'service.md', f'{domain} HOSTX\n'
+                         f'private.{domain}\n{domain}.private\nprefix-{domain}\n{domain}-suffix\n')
+            hits = publish_scan.security_scan(root, CONFIG, [path], extra_terms=[domain, 'HOSTX'])
+            self.assertEqual(len(hits), 5, hits)
+            self.assertTrue(any('HOSTX' in hit for hit in hits))
+            self.assertFalse(any(f':1: private-name: {domain}' in hit for hit in hits))
+            # An exemption for a service host cannot hide a path or a separate rule.
+            path = write(root, 'service.md', domain)
+            hits = publish_scan.security_scan(root, CONFIG, [path], {'blocked-host': domain}, [domain])
+            self.assertEqual(len(hits), 1, hits)
+            self.assertIn('blocked-host', hits[0])
+
     def test_scanner_configuration_does_not_create_security_hits(self):
         config_path = ROOT / 'tools/publish_scan/config.json'
         self.assertEqual(publish_scan.security_scan(ROOT, CONFIG, [config_path]), [])

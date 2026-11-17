@@ -25,7 +25,7 @@ bool GalacticMode::State::tour_allowed() const {
     galactic_view::TourGates gates;
     gates.map_showing = !tactical && !loading;
     gates.paused = paused;
-    gates.prompt_up = galaxy_modal_open();
+    gates.prompt_up = galaxy_modal_open() || (planet_search && planet_search->visible());
     return galactic_view::tour_may_play(gates);
 }
 

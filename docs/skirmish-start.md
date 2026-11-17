@@ -50,7 +50,7 @@ identity is the unit-table identity ([unit-data.md](unit-data.md#content-identit
   craft follow the map objects (below) in the entity order, and each craft is placed by its own
   search (space-fighters FC-02).
 - **Map objects (SK-04).** Every placement that is neither a marker (`Is_Marker`, the `Marker`
-  element) nor a `SpaceProp` is a map object on its own position and yaw, owned as the next rule
+  element) nor a `SpaceProp`-family element (`SpaceProp`, `SpaceProp_*`) is a map object on its own position and yaw, owned as the next rule
   says. A map object with roll or pitch keeps its yaw alone (the Euler order is unresolved,
   [asset-formats.md](asset-formats.md)); the census lists the dropped angles. The capture points
   stay inert (SK-32): rules v1 has no capture system.
@@ -128,7 +128,7 @@ replay data. It changes the snapshot digest and never the state hash, so a repla
 which binds no sensor table, has the same state hash and a different snapshot digest.
 
 `tests/skirmish/fixtures/m2-start.eawr-replay` is that replay with 30 ticks. Its tick-zero state
-hash is `8d86889577010d6d3c7b8113f64059a248162b1cb45cc2fc12dc4434b0c5b502`. The CLI test
+hash is `2a570551ceffcaac38ac1165ac9dd124bf5701081591bd5d880bb1c732c313e1`. The CLI test
 recomputes it from the header and setup bytes with the frozen `EAWRTST` encoding; with
 `EAWR_EAW_GAME_ROOT` the start is rebuilt from FoC data and must write the same bytes.
 The recording adds SKSU setup metadata and MTID content domains to the header. These preserve

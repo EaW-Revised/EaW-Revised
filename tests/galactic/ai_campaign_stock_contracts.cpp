@@ -7,6 +7,10 @@
 #include "eawr/campaign/mp_lobby_catalog.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "eawr/checkpoint/game.hpp"
+#include "eawr/core/degradation_ledger.hpp"
+#include "eawr/platform/degradation_summary.hpp"
+#include "eawr/platform/live_story_feed.hpp"
+#include "../../apps/viewer/src/galactic/story_text_state.hpp"
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -601,7 +605,8 @@ struct NativeIsolationFixture {
     std::shared_ptr<cp::GalacticAiRuntimeSetup> setup;
     eawr::platform::CampaignServiceConfiguration configuration;
     std::vector<std::shared_ptr<Instance>> instances;
-    NativeIsolationFixture(std::size_t workers, std::set<galactic::PlayerId> faults, bool throws, bool after, bool published = false, bool late = false, bool infrastructure = false)
+    std::shared_ptr<std::array<std::uint64_t, 3>> fault_ticks = std::make_shared<std::array<std::uint64_t, 3>>();
+    NativeIsolationFixture(std::size_t workers, std::set<galactic::PlayerId> faults, bool throws, bool after, bool published = false, bool late = false, bool infrastructure = false, bool staggered = false)
         : executor(std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers)),
           layout(galactic::synthetic_galaxy({.seed = 42, .planets = 3, .players = 3, .fleets_per_player = 0})),
           setup(std::make_shared<cp::GalacticAiRuntimeSetup>()) {
@@ -614,6 +619,7 @@ struct NativeIsolationFixture {
         setup->content_identity = std::string(64, 'b'); setup->immediate_instances = setup->immediate_requests = 16;
         setup->perception.seed = 42; setup->lifecycle.categories = {{"OFFENSIVE", 1}};
         setup->lifecycle.service_periods = {1, 1, 1, 1, 1, 1};
+        if (staggered) setup->lifecycle.schedule = ga::standard_async_schedule;
         for (const auto& player : layout.players) {
             const auto id = player.player_id;
             layout.player_economy->players.push_back({id, fixed(100), fixed(1000), 1, 5});
@@ -640,6 +646,9 @@ struct NativeIsolationFixture {
         if (late) {
             setup->lifecycle.xml["data/xml/ai/players/fixture.xml"] = R"(<AIPlayerType><Name>Fixture</Name><GalacticFreeStoreScript>Late</GalacticFreeStoreScript><Templates><Galactic>Default</Galactic></Templates><Difficulty_Adjustments><Normal>Normal</Normal></Difficulty_Adjustments></AIPlayerType>)";
             setup->modules.emplace("Data/Scripts/FreeStore/Late.lua", "Seen = 0\nfunction Base_Definitions() Seen = Seen + 1; NativeLateFixture() end\nfunction main() while true do coroutine.yield(true) end end\n");
+            if (staggered) setup->modules["Data/Scripts/FreeStore/Late.lua"] =
+                "function Base_Definitions() ServiceRate = 0; NativeLateFixture() end\n"
+                "function main() while true do NativeLateFixture(); coroutine.yield(true) end end\n";
         }
         const auto late_faults = faults;
         must(cp::configure_galactic_ai_runtime(configuration, setup, [this, faults = std::move(faults), throws, after, published, late, infrastructure] {
@@ -701,9 +710,13 @@ struct NativeIsolationFixture {
             return eawr::core::Result<cp::GalacticAiRuntimeProviders>::success(std::move(providers));
         }));
         if (late) {
-            const auto binding = [late_faults](auth::BindingContext& context, const auth::ValueList&) {
-                if (context.instance() <= 3 && late_faults.contains(static_cast<galactic::PlayerId>(context.instance())))
+            const auto binding = [late_faults, staggered, observed_ticks = fault_ticks](auth::BindingContext& context, const auth::ValueList&) {
+                if (context.instance() <= 3 && late_faults.contains(static_cast<galactic::PlayerId>(context.instance()))
+                    && (!staggered || context.tick() >= context.instance())) {
+                    // Each chain writes its own observer slot, outside authoritative state.
+                    (*observed_ticks)[context.instance() - 1] = context.tick();
                     context.issue_command(std::string(ga::verb_freestore_move), {});
+                }
                 return eawr::core::Result<auth::ValueList>::success({});
             };
             // Bind before the checkpoint loader validates the scheduler identity.
@@ -732,6 +745,7 @@ void native_provider_isolation_contracts() {
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
         std::string trace;
         for (const auto fault : {1U, 2U, 3U}) for (const bool throws : {false, true}) for (const bool after : {false, true}) {
+            eawr::core::degradation::reset_for_tests();
             NativeIsolationFixture fixture(workers, {fault}, throws, after);
             auto game = fixture.create(fixture.layout); const auto live = fixture.instances.back();
             const auto first = must(game.step(*fixture.executor));
@@ -747,13 +761,27 @@ void native_provider_isolation_contracts() {
             }
             expect(manager->provider_retired(fault) && manager->lifecycle().retired_providers.size() == 1,
                 "first/middle/last deterministic native fault retires exactly its actual provider");
-            // #6338: the retirement is visible: one warning line with the player, the tick and the diagnostic, however the fault came.
+            // A real native retirement is an error class with actionable context.
             const auto retirement_lines = live->view.retirements ? live->view.retirements->snapshot() : std::vector<std::string>{};
             expect(cp::galactic_ai_provider_retirements(live->view) == 1, "the campaign digest counts the one real retirement");
-            expect(retirement_lines.size() == 1 && retirement_lines[0].find("EAWR-GCAI-PROVIDER-0001 [warning]") == 0
+            expect(retirement_lines.size() == 1 && retirement_lines[0].find("EAWR-GCAI-PROVIDER-0001 [error]") == 0
                 && retirement_lines[0].find(" player=" + std::to_string(fault) + " ") != std::string::npos
                 && retirement_lines[0].find(" tick=") != std::string::npos && retirement_lines[0].find(" diagnostic=") != std::string::npos,
-                "a forced provider retirement logs exactly one warning line naming player, tick and diagnostic" + (retirement_lines.empty() ? std::string() : ": " + retirement_lines[0]));
+                "a forced provider retirement logs exactly one ERROR naming player, tick and diagnostic" + (retirement_lines.empty() ? std::string() : ": " + retirement_lines[0]));
+            const auto ledger = eawr::core::degradation::snapshot();
+            const auto entry = std::find_if(ledger.classes.begin(), ledger.classes.end(), [](const auto& row) {
+                return row.code == "EAWR-GCAI-PROVIDER-0001";
+            });
+            expect(entry != ledger.classes.end() && entry->severity == eawr::core::Severity::error
+                && entry->objects == 1 && entry->example_detail.find("player=" + std::to_string(fault)) != std::string::npos
+                && entry->example_detail.find("faction=FIXTURE") != std::string::npos
+                && entry->example_detail.find("tick=") != std::string::npos
+                && entry->example_detail.find("reason=") != std::string::npos
+                && entry->example_detail.find("diagnostic=") != std::string::npos,
+                "each actual retirement reaches the F3 ledger and summary as one error object with player/faction/tick/cause");
+            expect(std::count_if(first.diagnostics.begin(), first.diagnostics.end(), [](const auto& row) {
+                return row.code == "EAWR-GCAI-PROVIDER-0001" && row.severity == eawr::core::Severity::error;
+            }) == 1, "the completed game tick forwards one retirement error to the viewer diagnostics");
             std::int64_t prior = 100;
             for (const auto& account : game.galaxy().snapshot()->player_economy()->players) {
                 const auto expected = account.player == fault ? 100 : 100 + 10 + prior - 100;
@@ -779,6 +807,60 @@ void native_provider_isolation_contracts() {
                     "faulted checkpoint continues sibling native services with identical hashes");
             trace += first.state_hash.get() + replay_hash;
         }
+        for (const bool multiplayer : {false, true}) {
+            NativeIsolationFixture fixture(workers, {2U}, false, false);
+            fixture.layout.seats[0].kind = galactic::SeatKind::human; fixture.layout.seats[0].human_side_id = 1;
+            if (multiplayer) { fixture.layout.seats[2].kind = galactic::SeatKind::human; fixture.layout.seats[2].human_side_id = 2; }
+            for (auto& player : fixture.layout.production->players) {
+                player.human = std::any_of(fixture.layout.seats.begin(), fixture.layout.seats.end(),
+                    [&](const auto& seat) { return seat.player == player.player && seat.kind == galactic::SeatKind::human; });
+                player.pay_as_you_go = !player.human;
+            }
+            auto game = fixture.create(fixture.layout);
+            std::size_t native_notices = 0;
+            game.set_story_notice_handler([&](const auto&) {
+                ++native_notices; return eawr::core::Result<void>::success();
+            });
+            auto first = must(game.step(*fixture.executor));
+            expect(first.story_presentation.size() == (multiplayer ? 2U : 1U),
+                "SP and MP host emit one presentation notice per human owner");
+            eawr::platform::LiveStoryFeed feed;
+            feed.publish(first.story_presentation, [](auto) -> const galactic::story::GoalsState* { return nullptr; });
+            const auto delivered = feed.after(0, 1U);
+            eawr::viewer::galactic::StoryTextState text;
+            expect(delivered.events.size() == 1 && text.apply(delivered.events.front().event)
+                && text.lines().size() == 1 && text.lines().front().text_id == "AI player FIXTURE stopped after an internal error",
+                "the real story-text HUD model displays the one-line faction notice");
+            expect(feed.after(0, 2U).events.empty() && feed.after(0, 3U).events.size() == (multiplayer ? 1U : 0U),
+                "the host feed addresses human recipients, never the retired AI");
+            expect(native_notices == 0, "AI failure notices do not enter native story events or plot inputs");
+            const auto second = must(game.step(*fixture.executor));
+            expect(second.story_presentation.empty(), "the retirement notice is delivered once, not repeated every frame");
+            text.advance(15);
+            expect(text.lines().empty(), "the retirement line is transient presentation");
+        }
+        {
+            NativeIsolationFixture fixture(workers, {}, false, false, false, true);
+            // The host pumps main only at an authored ServiceRate. Raise the
+            // fixture's real Lua error during the guaranteed attachment call.
+            fixture.setup->modules["Data/Scripts/FreeStore/Late.lua"] =
+                "function Base_Definitions() error('hosted AI diagnostic fixture') end\nfunction main() end\n";
+            auto game = fixture.create(fixture.layout);
+            const auto tick = must(game.step(*fixture.executor));
+            const auto error = std::find_if(tick.diagnostics.begin(), tick.diagnostics.end(), [](const auto& row) {
+                return row.code == "EAWR-SCRIPT-0211" && row.message.find("hosted AI diagnostic fixture") != std::string::npos;
+            });
+            expect(error != tick.diagnostics.end() && error->severity == eawr::core::Severity::error
+                && error->message.find("faction=FIXTURE") != std::string::npos,
+                "ordinary hosted AI script errors reach GameTick with their faction context");
+            eawr::core::degradation::reset_for_tests();
+            eawr::platform::ScriptFaultLedger ledger;
+            ledger.record(tick.diagnostics);
+            const auto snapshot = eawr::core::degradation::snapshot();
+            expect(std::any_of(snapshot.classes.begin(), snapshot.classes.end(), [](const auto& row) {
+                return row.code == "EAWR-SCRIPT-0211" && row.source == "stock" && row.severity == eawr::core::Severity::error;
+            }), "the live diagnostic adapter records hosted AI script errors as an ERROR class");
+        }
         for (const auto fault : {1U, 2U, 3U}) {
             NativeIsolationFixture late(workers, {fault}, false, true, false, true);
             auto game = late.create(late.layout); const auto live = late.instances.back();
@@ -801,6 +883,54 @@ void native_provider_isolation_contracts() {
                 && must(game.step(*late.executor)).state_hash.get() == must(loaded.session.step(*late.executor)).state_hash.get(),
                 "late native fault checkpoint restores retired ownership and attached Lua continuation exactly");
         }
+        {
+            eawr::core::degradation::reset_for_tests();
+            NativeIsolationFixture staggered(workers, {1, 2}, false, true, false, true, false, true);
+            staggered.layout.seats[2].kind = galactic::SeatKind::human; staggered.layout.seats[2].human_side_id = 1;
+            staggered.layout.production->players[2].human = true;
+            staggered.layout.production->players[2].pay_as_you_go = false;
+            auto game = staggered.create(staggered.layout); const auto live = staggered.instances.back();
+            auto first = must(game.step(*staggered.executor));
+            const auto manager = live->view.manager.lock();
+            expect(manager && manager->schedule() == ga::standard_async_schedule,
+                "staggered faults use the production fifteen-tick window rather than the reference fixture schedule");
+            expect(manager && manager->provider_retired(1) && manager->provider_retired(2) && !manager->provider_retired(3),
+                "two command-tail faults retire their actual providers within one completed window");
+            expect((*staggered.fault_ticks)[0] > 0 && (*staggered.fault_ticks)[0] < (*staggered.fault_ticks)[1]
+                && (*staggered.fault_ticks)[1] <= ga::standard_async_schedule.batch_ticks,
+                "the second provider faults on a later virtual tick of the same first window");
+            std::cerr << "staggered retirement workers=" << workers << " fault_ticks=" << (*staggered.fault_ticks)[0]
+                << ',' << (*staggered.fault_ticks)[1] << " notices=" << first.story_presentation.size() << '\n';
+            for (const auto player : {1U, 2U})
+                expect(std::count_if(first.diagnostics.begin(), first.diagnostics.end(), [player](const auto& row) {
+                    return row.code == "EAWR-GCAI-PROVIDER-0001" && row.severity == eawr::core::Severity::error
+                        && row.message.find("player=" + std::to_string(player) + " ") != std::string::npos;
+                }) == 1, "both retirements survive discarded attempts as exactly one viewer ERROR each");
+            eawr::platform::LiveStoryFeed feed;
+            const auto notice_count = first.story_presentation.size();
+            feed.publish(first.story_presentation, [](auto) -> const galactic::story::GoalsState* { return nullptr; });
+            const auto delivered = feed.after(0, 3U);
+            expect(notice_count == 2 && delivered.events.size() == 2
+                && std::all_of(delivered.events.begin(), delivered.events.end(), [](const auto& row) {
+                    eawr::viewer::galactic::StoryTextState text;
+                    return text.apply(row.event) && text.lines().size() == 1
+                        && text.lines().front().text_id == "AI player FIXTURE stopped after an internal error";
+                }), "the human receives both transient retirement notices from the committed window");
+            expect(live->view.retirements->snapshot().size() == 2, "both committed retirements write one process error line");
+            const auto ledger = eawr::core::degradation::snapshot();
+            expect(std::any_of(ledger.classes.begin(), ledger.classes.end(), [](const auto& row) {
+                return row.code == "EAWR-GCAI-PROVIDER-0001" && row.severity == eawr::core::Severity::error && row.objects == 2;
+            }), "the committed window publishes both error objects to the degradation ledger");
+            const auto ids = ck::game_identities(staggered.layout); const auto bytes = must(ck::save_game_checkpoint(game, ids));
+            auto loaded = must(ck::load_game_checkpoint(bytes, ids, staggered.configuration.restore, *staggered.executor));
+            expect(must(ck::save_game_checkpoint(loaded.session, ids)) == bytes,
+                "staggered retirement checkpoint recaptures canonical bytes without observer state");
+            const auto second = must(game.step(*staggered.executor));
+            const auto restored = must(loaded.session.step(*staggered.executor));
+            expect(second.story_presentation.empty() && restored.story_presentation.empty()
+                && second.state_hash.get() == restored.state_hash.get(), "neither live continuation nor restore repeats retirement notices");
+            trace += first.state_hash.get() + second.state_hash.get();
+        }
         for (const bool throws : {false, true}) {
             NativeIsolationFixture successive(workers, {1, 2}, throws, true);
             auto game = successive.create(successive.layout); const auto live = successive.instances.back();
@@ -810,11 +940,17 @@ void native_provider_isolation_contracts() {
                 && live->calls.at(1) == 1 && live->calls.at(2) == 1 && live->calls.at(3) == 1,
                 "two successive faults retire in bounded attempts while the third native sibling runs once from the original root");
             NativeIsolationFixture infrastructure(workers, {2}, throws, true, false, false, true);
+            eawr::core::degradation::reset_for_tests();
             auto broken = infrastructure.create(infrastructure.layout); const auto infrastructure_attempt = infrastructure.instances.back();
             expect(!broken.step(*infrastructure.executor) && infrastructure_attempt->calls.at(1) == 1
                 && infrastructure_attempt->calls.at(2) == 1 && !infrastructure_attempt->calls.contains(3)
                 && !infrastructure_attempt->view.manager.lock()->provider_retired(2),
                 "executor Result and allocation exception remain infrastructure refusal with no retirement or retry");
+            const auto errors = eawr::core::degradation::snapshot();
+            expect(std::any_of(errors.classes.begin(), errors.classes.end(), [](const auto& row) {
+                return row.code == "EAWR-GCAI-INTERNAL-0001" && row.severity == eawr::core::Severity::error
+                    && row.example_detail.find("diagnostic=") != std::string::npos;
+            }), "unrecoverable AI Results and exceptions leave an ERROR class even without a provider retirement");
             NativeIsolationFixture published(workers, {2}, throws, true, true);
             auto refused = published.create(published.layout); const auto attempted = published.instances.back();
             const auto failed = refused.step(*published.executor);

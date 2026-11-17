@@ -24,8 +24,8 @@ inline constexpr std::uint8_t lobby_closed_kind = 78, lobby_rejected_kind = 79;
 inline constexpr std::uint8_t lobby_mod_review_ack_kind = 99;
 inline constexpr std::uint8_t lobby_prepare_kind = 100, lobby_prepared_kind = 101;
 inline constexpr std::uint8_t lobby_mods_refresh_kind = 102;
-// Every lobby frame carries this version after its kind byte. 4 added the host mod-description refresh (kind 102).
-inline constexpr std::uint32_t lobby_wire_version = 4;
+// Every lobby frame carries this version after its kind byte. 5 adds effective skirmish content at admission.
+inline constexpr std::uint32_t lobby_wire_version = 5;
 using LobbyDigest = std::array<std::uint8_t, 32>;
 
 enum class LobbyPhase : std::uint8_t { staging, starting, committed, closed };
@@ -65,6 +65,7 @@ struct LobbySnapshot {
     std::vector<LobbySeat> seats; // Host first, then ascending stable seat IDs.
     std::vector<std::uint8_t> mounted_mods; // Host description for display, not simulation.
     LobbyDigest start_attempt{}; // Fresh host nonce for concurrent new-campaign preparation; zero on legacy/checkpoint paths.
+    std::optional<core::PreparedContentIdentity> content{}; // Effective skirmish inputs, checked on the first snapshot and before freeze.
     friend bool operator==(const LobbySnapshot&, const LobbySnapshot&) = default;
 };
 enum class LobbyAction : std::uint8_t { select, ready, unready, leave, snapshot };
@@ -133,6 +134,8 @@ using LobbyFrame = std::variant<LobbySnapshot, LobbyRequest, LobbyChatRequest, L
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> encode_lobby_frame(const LobbyFrame& frame);
 [[nodiscard]] core::Result<LobbyFrame> decode_lobby_frame(std::span<const std::uint8_t> frame);
 [[nodiscard]] core::Diagnostic lobby_diagnostic(LobbyReason reason, std::string message);
+[[nodiscard]] core::Result<void> validate_lobby_content(const core::PreparedContentIdentity& host,
+    const core::PreparedContentIdentity& local);
 
 // #6045: a hook that needs minutes of local work (a Galactic Conquest campaign derivation) runs it on a worker thread and
 // answers this diagnostic until the work has finished. The room stays serviced meanwhile: the host's `start` records a
@@ -144,8 +147,12 @@ inline constexpr std::string_view start_pending_code = "EAWR-NET-1618";
 
 // #7198: the one bound on campaign preparation, in whole minutes. The room's deadline (LobbyLimits::preparation_timeout_ms) and
 // the wait text the lobby shows both come from this value. Measured on the rig (11-16, two-seat lobby preparation, Remake 5.0 Grand
-// campaign 156 planets, slowest chain 5.73 min on a laptop): twice the slowest, rounded up, never under 10 minutes.
-inline constexpr std::uint64_t preparation_timeout_minutes = 12;
+// campaign 156 planets, slowest run 5.73 min on a loaded laptop, 2.8 min on a faster host; stock and mid-size chains well under a
+// minute). The owner's ceiling is 5 minutes: min(5 min, 3 x slowest measured), never under 2 minutes. Change only this value.
+inline constexpr std::uint64_t preparation_timeout_minutes = 5;
+static_assert(preparation_timeout_minutes >= 2 && preparation_timeout_minutes <= 5, "owner ceiling 5 minutes, floor 2 minutes");
+// What the room says when preparation passes its bound: names the bound and the elapsed time, and a hint (never a bare failure).
+[[nodiscard]] std::string preparation_timeout_message(std::uint64_t limit_ms, std::uint64_t elapsed_ms);
 struct LobbyLimits {
     std::size_t frames_per_pump{256}, queued_setup_bytes{8U * 1024U * 1024U};
     std::size_t chat_history{128}, chat_messages_per_window{4};
@@ -159,7 +166,12 @@ struct LobbySetupContext {
     std::shared_ptr<void> lifetime; // Optional owner of per-attempt monitors/executors/provider inputs.
 };
 struct LobbyHooks {
+    // Presentation binds its live monitor after setup creation, before tick-zero pumping.
+    std::function<bool()> setup_pump_ready;
     std::vector<std::uint8_t> mounted_mods;
+    std::optional<core::PreparedContentIdentity> admission_content{};
+    // Full local evidence before bounded wire refusal text is sanitized. Contains summaries, never capabilities.
+    std::function<void(std::string)> setup_difference;
     // Empty disables concurrent preparation (checkpoint/skirmish). Called before expensive work on every peer;
     // equal canonical bytes prove the local interpretation of the frozen initialization inputs.
     std::function<core::Result<std::vector<sim::IdentityDomain>>(const LobbySnapshot&, const std::vector<SetupSeat>&)> preparation_inputs;

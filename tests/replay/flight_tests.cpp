@@ -6,6 +6,9 @@
 
 #include "../support/check.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
+#include "eawr/sim/tactical/combat.hpp"
+#include "eawr/sim/tactical/durability.hpp"
+#include "eawr/sim/math/geometry.hpp"
 
 #include <algorithm>
 #include <array>
@@ -19,6 +22,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -478,6 +483,207 @@ void test_stopped_craft_beside_a_ship() {
     }
 }
 
+// Fixed synthetic heavy-melee slice: 240 craft inside 44 overlapping ship broad spheres.
+// Each hull has 32 separated surface triangles; the look-ahead crosses their bounds but misses
+// their surfaces. This deliberately exercises repeated narrow traversal rather than early hits.
+void test_avoidance_work_budget() {
+    auto profile = x_wing();
+    std::vector<tactical::CollisionTriangle> triangles;
+    for (std::int64_t face = 0; face < 32; ++face)
+        triangles.push_back({at(face * 2, -100, -100), at(face * 2, 100, -100), at(face * 2, -100, 100)});
+    tactical::CombatProfile hull;
+    hull.meshes = {tactical::collision_mesh(std::move(triangles), tactical::no_hardpoint, tactical::no_hardpoint, false)};
+    std::vector<tactical::CraftObstacle> obstacles;
+    for (std::uint32_t ship = 0; ship < 44; ++ship)
+        obstacles.push_back({1000 + ship, {}, units(150), &hull, math::identity_matrix(), nullptr, nullptr});
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> reference;
+    std::vector<tactical::CraftView> reference_craft;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        std::vector<tactical::CraftView> craft;
+        for (std::uint32_t member = 0; member < 240; ++member) {
+            tactical::CraftState initial;
+            initial.velocity = {profile.max_speed, Fixed{}, Fixed{}};
+            craft.push_back({member + 1, at(-50 - static_cast<std::int64_t>(member % 3), 50, 50), initial, &profile});
+        }
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> counts;
+        for (std::uint32_t tick = 0; tick < 16; ++tick) {
+            const auto before = craft;
+            std::vector<std::optional<tactical::CraftStep>> staged(craft.size());
+            std::vector<tactical::CraftAvoidanceWork> work(workers);
+            {
+                std::vector<std::jthread> threads;
+                for (std::size_t worker = 0; worker < workers; ++worker) threads.emplace_back([&, worker] {
+                    for (auto index = worker; index < craft.size(); index += workers) {
+                        tactical::CraftFrame frame;
+                        frame.self = frame.leader = &before[index];
+                        frame.moving = true; frame.hold = at(1000, 50, 50);
+                        frame.obstacles = obstacles; frame.avoidance_work = &work[worker];
+                        const auto result = tactical::step_craft(frame);
+                        if (result) staged[index] = result.value();
+                    }
+                });
+            }
+            tactical::CraftAvoidanceWork total;
+            for (const auto& item : work) { total.queries += item.queries; total.triangles += item.triangles; }
+            counts.push_back({total.queries, total.triangles});
+            std::cout << "FD-10 budget " << workers << " workers tick " << tick << ": "
+                      << total.queries << " queries, " << total.triangles << " triangles\n";
+            // The fixed slice peaks at 10,560 queries and 337,920 triangle tests per tick
+            // (240 craft x 44 hulls x 32 triangles). Budget that baseline plus 5% headroom;
+            // wall time is deliberately absent, so slower hosts enforce the same limit.
+            expect(total.queries <= 11088 && total.triangles <= 354816,
+                "FD-10: heavy-melee narrow work stays within its per-tick budget");
+            for (std::size_t index = 0; index < craft.size(); ++index) {
+                expect(staged[index].has_value(), "FD-10: heavy-melee slice steps");
+                if (!staged[index]) continue;
+                craft[index].position = staged[index]->position;
+                craft[index].state = staged[index]->state;
+            }
+        }
+        expect(std::any_of(counts.begin(), counts.end(), [](const auto& count) { return count.first > 0 && count.second > 0; }),
+            "FD-10: the budget exercises actual narrow queries and triangle tests");
+        if (workers == 1) { reference = counts; reference_craft = craft; }
+        else {
+            expect(counts == reference, "FD-10: per-tick query and triangle counts match on 1/2/4/8 workers");
+            for (std::size_t index = 0; index < craft.size(); ++index)
+                expect(craft[index].position == reference_craft[index].position && craft[index].state == reference_craft[index].state,
+                    "FD-10: counted heavy-melee flight matches on 1/2/4/8 workers");
+        }
+    }
+}
+
+// FD-10/WSQ-35: stock launch coordinates, with an invented hull surface just ahead.
+// The broad sphere contains the launch, but the model surface does not. Read copied inputs
+// and commit disjoint outputs exactly as the session does; schedules must not separate members.
+void test_model_launch_avoidance() {
+    const auto fixed = [](const double value) { return Fixed::from_raw(static_cast<std::int64_t>(std::llround(value * one))); };
+    tactical::CraftProfile profile = x_wing();
+    profile.max_speed = tenths(54);
+    const math::Vec3 origin = at(-500, -1500, -110);
+    tactical::CombatProfile hull;
+    const Fixed face = fixed(16.5);
+    hull.meshes = {tactical::collision_mesh({
+        {{face, units(-100), units(-100)}, {face, units(100), units(-100)}, {face, units(100), units(100)}},
+        {{face, units(-100), units(-100)}, {face, units(100), units(100)}, {face, units(-100), units(100)}}},
+        tactical::no_hardpoint, tactical::no_hardpoint, false)};
+    auto placement = math::identity_matrix();
+    placement.rows[0][3] = origin.x; placement.rows[1][3] = origin.y; placement.rows[2][3] = origin.z;
+    const std::array<tactical::CraftObstacle, 1> obstacles{{{9, origin, fixed(148.382), &hull, placement, nullptr, nullptr}}};
+    std::vector<tactical::CraftView> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        std::vector<tactical::CraftView> craft;
+        tactical::CraftState initial;
+        initial.pitch = fixed(44.3701);
+        initial.velocity = {math::multiply(profile.max_speed, math::cos_turn(math::divide(initial.pitch, units(360)).value())).value(),
+            Fixed{}, Fixed::from_raw(-math::multiply(profile.max_speed,
+                math::sin_turn(math::divide(initial.pitch, units(360)).value())).value().raw())};
+        for (std::uint32_t member = 0; member < 7; ++member)
+            craft.push_back({member + 1, {fixed(-484.5673), units(-1500), fixed(-118.7671)}, initial, &profile});
+        const auto hold = craft[0].position;
+        for (std::uint32_t age = 1; age <= 16; ++age) {
+            const auto before = craft;
+            std::array<std::optional<tactical::CraftStep>, 7> staged;
+            {
+                std::vector<std::jthread> threads;
+                for (std::size_t worker = 0; worker < workers; ++worker) threads.emplace_back([&, worker] {
+                    for (auto index = worker; index < craft.size(); index += workers) {
+                        tactical::CraftFrame frame;
+                        frame.self = &before[index]; frame.leader = &before[0];
+                        frame.hold = hold; frame.obstacles = obstacles;
+                        const auto result = tactical::step_craft(frame);
+                        if (result) staged[index] = result.value();
+                    }
+                });
+            }
+            for (std::size_t index = 0; index < craft.size(); ++index) {
+                expect(staged[index].has_value(), "FD-10: parallel launch step succeeds");
+                if (!staged[index]) continue;
+                craft[index].position = staged[index]->position; craft[index].state = staged[index]->state;
+                expect(craft[index].position == craft[0].position && craft[index].state == craft[0].state,
+                    "FD-10: all seven launch members remain coincident through relaxation");
+                expect(craft[index].state.relaxation == 16 - age, "FD-10: one avoidance turn then 15 decrements");
+                expect(craft[index].state.yaw.raw() == 0 && std::abs(real(craft[index].state.pitch) - 39.5701) < 0.001,
+                    "FD-10: the first away pitch and yaw stay fixed throughout relaxation");
+            }
+            if (age == 1) expect(std::abs(real(craft[0].position.x) + 481.1755) < 0.001
+                && real(craft[0].position.y) == -1500 && std::abs(real(craft[0].position.z) + 121.5700) < 0.001,
+                "FD-10: equal-age first launch step matches the observed position");
+        }
+        if (workers == 1) reference = craft;
+        else for (std::size_t index = 0; index < craft.size(); ++index)
+            expect(craft[index].position == reference[index].position && craft[index].state == reference[index].state,
+                "FD-10: 1/2/4/8 schedules produce identical launch flight");
+    }
+    const tactical::ModelCollisionFilter enabled{};
+    // The explicit box takes precedence over a surface and reports containment on its boundary.
+    const tactical::CollisionBox box{at(-20, -20, -20), at(20, 20, 20)};
+    for (const auto start : {at(0, 0), at(20, 0)}) {
+        const auto contact = tactical::segment_hits_model(&box, hull.meshes, enabled, math::identity_matrix(), start, at(100, 0));
+        expect(contact && contact.value() && contact.value()->starts_inside,
+            "FD-10: a genuine box-interior or boundary start is classified inside");
+        hull.model_collision_box = box;
+        tactical::CraftView craft{1, start, {}, &profile};
+        craft.state.velocity = {profile.max_speed, Fixed{}, Fixed{}};
+        const std::array<tactical::CraftObstacle, 1> inside{{{9, {}, units(150), &hull, math::identity_matrix(), nullptr, nullptr}}};
+        tactical::CraftFrame frame;
+        frame.self = frame.leader = &craft; frame.hold = at(100, 0); frame.obstacles = inside;
+        const auto step = tactical::step_craft(frame);
+        expect(step && step.value().state.relaxation == 0, "FD-10: a genuine shape-inside start skips avoidance");
+    }
+    const auto exit = tactical::segment_hits_model(nullptr, hull.meshes, enabled, math::identity_matrix(), at(0, 0), at(100, 0));
+    expect(exit && exit.value() && !exit.value()->starts_inside,
+        "FD-10: mesh surface exits do not infer volume containment");
+    const auto endpoint = tactical::segment_hits_model(nullptr, hull.meshes, enabled, math::identity_matrix(), at(0, 0), {face, Fixed{}, Fixed{}});
+    expect(endpoint && !endpoint.value(), "FD-10: a mesh contact at the segment endpoint is excluded");
+    tactical::MeshCollisionWork work;
+    const auto long_look = tactical::segment_hits_model(nullptr, hull.meshes, enabled, math::identity_matrix(),
+        at(-50000, 0), at(50000, 0), &work);
+    expect(long_look && long_look.value() && !long_look.value()->starts_inside,
+        "FD-10: long mod-driven look-aheads are clipped before bounded mesh arithmetic");
+    expect(work.meshes == 1 && work.boxes == 1 && work.triangles <= 2,
+        "FD-10: the model query traverses one loaded root and at most its two surface triangles");
+    const std::array<tactical::CollisionMesh, 1> large{{tactical::collision_mesh({
+        {at(40000, -1000, -1000), at(40000, 1000, -1000), at(40000, 0, 1000)}},
+        tactical::no_hardpoint, tactical::no_hardpoint, false)}};
+    const auto adaptive = tactical::segment_hits_model(nullptr, large, enabled, math::identity_matrix(),
+        at(-200000, 0), at(200000, 0));
+    expect(large[0].grid_exponent > 0 && adaptive && adaptive.value(),
+        "FD-10: oversized authored meshes retain long-look collision on their admitted grid");
+    tactical::CraftState rotated;
+    rotated.yaw = units(90);
+    const auto rotated_frame = math::to_matrix(tactical::craft_rotation(rotated).value(), at(100, 200, 300)).value();
+    const auto transformed_inside = tactical::segment_hits_model(&box, {}, enabled, rotated_frame,
+        math::transform_point(rotated_frame, at(10, 0)).value(), math::transform_point(rotated_frame, at(100, 0)).value());
+    expect(transformed_inside && transformed_inside.value() && transformed_inside.value()->starts_inside,
+        "FD-10: explicit box containment follows its translated and rotated model frame");
+    hull.model_collision_box.reset();
+    tactical::DurabilityProfile health_profile;
+    tactical::DurabilityState health;
+    const auto eligible_step = [&](const bool visible, const std::uint32_t source, const bool shield) {
+        hull.meshes[0].pose_visible = visible; hull.meshes[0].source_hardpoint = source; hull.meshes[0].shield = shield;
+        tactical::CraftView craft{1, at(10, 0), {}, &profile};
+        craft.state.velocity = {profile.max_speed, Fixed{}, Fixed{}};
+        const std::array<tactical::CraftObstacle, 1> obstacle{{{9, {}, units(150), &hull,
+            math::identity_matrix(), &health_profile, &health}}};
+        tactical::CraftFrame frame;
+        frame.self = frame.leader = &craft; frame.hold = at(100, 0); frame.obstacles = obstacle;
+        return tactical::step_craft(frame);
+    };
+    const auto hidden = eligible_step(false, tactical::no_hardpoint, false);
+    expect(hidden && hidden.value().state.relaxation == 0, "FD-10: hidden model surfaces are not avoidance hulls");
+    health.shields = units(600);
+    const auto shield = eligible_step(true, tactical::no_hardpoint, true);
+    expect(shield && shield.value().state.relaxation == 0,
+        "FD-10: the shield-only collision mask is excluded even while shields are up");
+    health_profile.hardpoints.resize(1); health_profile.hardpoints[0].max_health = units(100);
+    health.hardpoints = {Fixed{}};
+    const auto destroyed = eligible_step(true, 0, false);
+    health.hardpoints[0] = units(1);
+    const auto standing = eligible_step(true, 0, false);
+    expect(destroyed && standing && destroyed.value().state.relaxation == 0 && standing.value().state.relaxation == 15,
+        "FD-10: destroyed attached model surfaces are excluded without rebuilding geometry");
+}
+
 // #615 (AB-24, FM-11): a speed factor that rounds a follower's maximum speed to zero in Q24.
 // FoC's float speed stays positive, so the budget ratio of a follower slower than its formation
 // speed is huge, not a trap: the follower steps with its budgets scaled up.
@@ -531,6 +737,8 @@ int main() {
     test_late_reversal_rejoins();
     test_formation_banks_with_leader();
     test_stopped_craft_beside_a_ship();
+    test_model_launch_avoidance();
+    test_avoidance_work_budget();
     test_speed_factor_rounding_to_zero();
     test_failure_names_the_site();
     if (failures != 0) {

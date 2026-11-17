@@ -85,13 +85,13 @@ public:
     // title (case-insensitive). Empty when the data lists none: the entry stays off.
     [[nodiscard]] const std::vector<CampaignRow>& rows() const noexcept { return rows_; }
     [[nodiscard]] const std::vector<CampaignFacts>& campaigns() const noexcept { return campaigns_; }
-    // WGP-40: the playable factions by display name (the drop-down sorts), and the last is selected
-    // while nothing else is.
+    // DEV-26: the selected campaign's playable sides, retaining WGP-40a/c table order and blank
+    // captions. Before a campaign is selected, the whole playable faction table is offered.
     [[nodiscard]] const std::vector<FactionChoice>& factions() const noexcept { return factions_; }
 
     // Opening the screen: no row (WGP-66: a profile's last campaign is not stored yet), the last
     // faction and the normal difficulty (WGP-40).
-    void reset() noexcept;
+    void reset();
     void select_row(std::optional<std::size_t> row);
     [[nodiscard]] std::optional<std::size_t> selected_row() const noexcept { return row_; }
     [[nodiscard]] const CampaignRow* selected() const noexcept;
@@ -141,11 +141,13 @@ private:
     std::vector<CampaignFacts> campaigns_;
     std::vector<CampaignRow> rows_;
     std::vector<FactionChoice> factions_;
+    std::vector<FactionChoice> all_factions_;
     CampaignHostSupport support_;
     std::optional<std::size_t> row_;
     std::optional<std::size_t> faction_;
     bool options_visible_{false};
     void refresh_options_visible() noexcept;
+    void refresh_factions();
     CampaignDifficulty difficulty_{CampaignDifficulty::normal};
     std::optional<TechOptions> accepted_{};
     std::optional<TechOptions> editing_{};

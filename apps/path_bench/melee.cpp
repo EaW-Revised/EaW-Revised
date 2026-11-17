@@ -68,6 +68,7 @@ constexpr double tick_budget_ms = 1000.0 / tactical::logical_frames_per_second;
 struct Options {
     std::string size;
     std::optional<std::string> game_root;
+    std::optional<std::string> map;
     std::uint64_t seed = 601;
     std::uint64_t ticks = 4500;
     std::vector<std::size_t> workers;
@@ -118,6 +119,8 @@ template <typename T>
             options.size = std::string(value);
         } else if (argument == "--game-root") {
             options.game_root = std::string(value);
+        } else if (argument == "--map") {
+            options.map = std::string(value);
         } else if (argument == "--seed") {
             const auto seed = parse_number<std::uint64_t>(value);
             if (!seed) return std::nullopt;
@@ -178,7 +181,7 @@ struct Content {
     skirmish::SessionContent content;
 };
 
-[[nodiscard]] std::optional<Content> load(const std::filesystem::path& root) {
+[[nodiscard]] std::optional<Content> load(const std::filesystem::path& root, const std::optional<std::string>& map) {
     const auto fail = [](const std::string& what) {
         std::cerr << "path_bench --melee: " << what << '\n';
         return std::optional<Content>{};
@@ -203,9 +206,17 @@ struct Content {
     input.catalog = &catalog.value().catalog;
     input.filesystem = &filesystem.value();
     input.model = access.model;
+    input.space_map = map.value_or("");
     auto tables = eawr::units::load_unit_tables(input);
     if (!tables) return fail("the FoC unit tables do not load");
-    const auto& fixture = skirmish::m2_fixture();
+    auto fixture = skirmish::m2_fixture();
+    if (map) {
+        skirmish::FixtureOptions options;
+        options.map = *map;
+        auto selected = skirmish::fixture_from_options(options, filesystem.value(), catalog.value().catalog);
+        if (!selected) return fail("the selected map fixture does not resolve");
+        fixture = std::move(selected).value();
+    }
     auto inputs = skirmish::read_start_inputs(fixture, filesystem.value(), catalog.value().catalog, tables.value());
     if (!inputs) return fail("the M2 start inputs do not read");
     auto start = skirmish::build_start(fixture, inputs.value());
@@ -516,7 +527,7 @@ int melee_main(const int argc, const char* const argv[]) {
     const auto options = parse_options(argc, argv);
     if (!options) {
         std::cerr << "usage: path_bench --melee s|m|l|xl [--seed <n>] [--ticks <n>] [--workers <n|hardware>[,...]]\n"
-                     "                  [--game-root <dir>] [--csv <prefix>] [--replay-out <file>] [--timing on|off]\n"
+                     "                  [--game-root <dir>] [--map <ted>] [--csv <prefix>] [--replay-out <file>] [--timing on|off]\n"
                      "                  [--list 1] [--execution live|legacy] [--hash on|off] [--profile on [--profile-interval <us>]]\n";
         return 2;
     }
@@ -524,7 +535,7 @@ int melee_main(const int argc, const char* const argv[]) {
         std::cout << "SKIPPED: set EAWR_EAW_GAME_ROOT for the melee benchmark\n";
         return 0;
     }
-    auto content = load(*options->game_root);
+    auto content = load(*options->game_root, options->map);
     if (!content) return 1;
     auto melee = skirmish::build_melee(
         content->tables, content->start, options->size == "xl" ? skirmish::MeleeSize::xl : *skirmish::melee_size(options->size),
@@ -532,6 +543,20 @@ int melee_main(const int argc, const char* const argv[]) {
     if (!melee) {
         std::cerr << "path_bench --melee: " << eawr::core::format_diagnostic(melee.error()) << '\n';
         return 1;
+    }
+    if (options->map) {
+        auto& setup = melee.value().replay.setup;
+        eawr::sim::EntityId next_id = 1;
+        for (const auto& unit : setup.units) next_id = std::max(next_id, unit.entity_id + 1);
+        std::size_t props = 0;
+        for (const auto& placed : content->start.units) {
+            if (placed.role != skirmish::UnitRole::map_object) continue;
+            auto prop = placed.state;
+            prop.entity_id = next_id++;
+            setup.units.push_back(std::move(prop));
+            ++props;
+        }
+        std::cout << "selected map " << *options->map << ": " << props << " authored map objects\n";
     }
     const auto* replay = &melee.value().replay;
     std::cout << "melee " << options->size << ", seed " << options->seed << ": " << melee.value().ships << " ships and "

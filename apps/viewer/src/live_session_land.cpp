@@ -209,6 +209,7 @@ bool LiveSessionView::prepare_land(const vfs::Vfs& filesystem, const data::Catal
         for (const auto& player : setup_->players) team_of_player_[player.player_id] = player.team_id;
         options_.reveal = true; // Land fog presentation belongs to L6 P2.
         shield_flash_constants_ = presentation_constants::load_flash(filesystem);
+        order_flash_constants_ = presentation_constants::load_order_flash(filesystem);
         return true;
     } catch (const std::exception& error) { failure = error.what(); return false; }
 }

@@ -483,6 +483,19 @@ int corruption_transition_percent(const float fraction) noexcept {
     return static_cast<int>(clamped * 100.0);
 }
 
+std::optional<CorruptionIconEncyclopedia> corruption_icon_encyclopedia(const std::uint8_t type,
+    const std::vector<std::string>& requirement_icons, const std::vector<std::string>& names,
+    const std::vector<std::string>& descriptions) {
+    if (type == 0) return std::nullopt;
+    const std::size_t index = type - 1u;
+    if (index >= names.size() || names[index].empty()) return std::nullopt;
+    CorruptionIconEncyclopedia result;
+    result.name_key = names[index];
+    if (index < requirement_icons.size()) result.icon = requirement_icons[index];
+    if (index < descriptions.size()) result.description_key = descriptions[index];
+    return result;
+}
+
 std::int64_t siphon_tooltip_credits(const sim::math::Fixed siphoned) noexcept {
     constexpr auto scale = sim::math::Fixed::scale;
     const auto raw = siphoned.raw();

@@ -68,16 +68,6 @@
    "reason": "Per-object optional; sourced FoC default; absent tag stays silent by rule (#2540)."
   },
   {
-   "file": "include/eawr/presentation/ui/selection.hpp",
-   "text": "inline constexpr float minimum_drag_select_distance = 100.0F;",
-   "ticket": 828
-  },
-  {
-   "file": "include/eawr/presentation/ui/world_ui.hpp",
-   "text": "inline constexpr float health_bar_scale = 1500.0F;",
-   "ticket": 828
-  },
-  {
    "file": "include/eawr/sim/tactical/combat.hpp",
    "text": "inline constexpr std::int64_t max_sphere_modifier = 256;",
    "ticket": "false-positive",

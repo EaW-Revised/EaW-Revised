@@ -427,11 +427,18 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
     if (state.galactic_editing && (!staging || !options || state.galactic_editing->campaign != options->campaign))
         close_galactic_options(false);
     // The dialog may draw fewer rows than the campaign has factions: a player's row goes first, so it is never the one cut.
+    // A row no player can take and whose AI seat runs no controller (Neutral, or an ambient faction the entry assigns
+    // nothing, GCMP-AI-03) is not drawn: it has neither a player nor an AI to name.
+    const auto unseated = [&](std::size_t index) {
+        if (campaign == nullptr || index >= campaign->factions.size()) return false;
+        const auto& faction = campaign->factions[index];
+        return faction.neutral || (!faction.playable && !faction.ai_controller);
+    };
     std::vector<model::GalacticRowFacts> facts;
     if (options) {
         for (std::size_t index = 0; index < options->rows.size(); ++index) {
             const bool known = campaign != nullptr && index < campaign->factions.size();
-            facts.push_back({options->rows[index].human, known && campaign->factions[index].playable, known && campaign->factions[index].neutral});
+            facts.push_back({options->rows[index].human, known && campaign->factions[index].playable, unseated(index)});
         }
     }
     impl.galactic_row_order = model::galactic_row_order(facts, dialog_rows);
@@ -441,10 +448,9 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
         const std::size_t index = order[slot]; // the campaign row drawn on dialog row `slot`
         const auto& source = options->rows[index];
         model::StagingRow& row = rows[slot];
-        const bool neutral = campaign != nullptr && index < campaign->factions.size() && campaign->factions[index].neutral;
         row.faction = source.faction;
         if (const auto side = net::galactic_lobby_side(*options, source.player)) row.team = *side - 1U;
-        row.kind = neutral ? model::RowKind::none : source.human ? model::RowKind::open : model::RowKind::ai;
+        row.kind = unseated(index) ? model::RowKind::none : source.human ? model::RowKind::open : model::RowKind::ai;
         row.accepted = row.kind == model::RowKind::ai;
         if (row.kind == model::RowKind::ai) row.name = ai_seat_caption(options->difficulty);
         bool first = true;

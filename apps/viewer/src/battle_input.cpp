@@ -66,6 +66,8 @@ BattleInput::~BattleInput() {
 void BattleInput::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live,
                           const std::shared_ptr<GodotShaderCache>& shaders) {
     prepare_battle_selection_settings<ActiveSettings>(selection_fallback_, filesystem);
+    world_ui_settings_ = ui::world_ui_settings(filesystem);
+    for (const auto& diagnostic : world_ui_settings_.diagnostics) note(diagnostic);
     world_ui_->prepare(filesystem, catalog, live, shaders);
     cursor_.prepare(filesystem);
     beacon_delay_ = ui::beacon_place_delay(filesystem);
@@ -91,7 +93,7 @@ void BattleInput::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
 
 void BattleInput::hide_compass() noexcept {
     compass_drawn_ = false;
-    if (compass_renderer_) compass_renderer_->submit(std::make_shared<const sim::RenderSnapshot>());
+    if (compass_renderer_) compass_renderer_->submit(empty_compass_snapshot_);
 }
 
 void BattleInput::compass_frame(const LiveSessionView& live) {
@@ -102,10 +104,15 @@ void BattleInput::compass_frame(const LiveSessionView& live) {
         return selection_.contains(unit.entity) && unit.part != sim::invalid_entity_id;
     });
     const auto mode = input ? input->mode() : ui::OrderMode::attack;
-    const bool available = ships && right_press_allows_compass_ && !right_double_click_ && !placing_ && !beacon_targeting_
+    // O-6: attack-move/guard have no final-yaw payload yet; do not promise a heading.
+    // O-4: Ctrl on the selected ship still turns in place. Armed Move ignores Ctrl.
+    const bool heading_order = mode == ui::OrderMode::move || !right_modifiers_.ctrl
+        || (right_press_on_selected_ && !right_modifiers_.alt);
+    const bool available = heading_order && ships && right_press_allows_compass_ && !right_double_click_ && !placing_ && !beacon_targeting_
         && !ability_target_ && !special_target_source_
         && (mode == ui::OrderMode::none || mode == ui::OrderMode::move);
-    if (!available || !pointer_ || !ui::compass_visible(right_start_, *pointer_, right_held_seconds_) || !right_press_ray_ || !scene_) {
+    if (!available || !pointer_ || !ui::compass_visible(right_start_, *pointer_, right_held_seconds_,
+                                             *world_ui_settings_.drag_select_distance, *world_ui_settings_.drag_click_distance) || !right_press_ray_ || !scene_) {
         if (compass_drawn_) hide_compass();
         return;
     }
@@ -634,7 +641,7 @@ void BattleInput::cursor_frame(const LiveSessionView& live, const BattleCamera& 
     compass_frame(live);
     ui::CursorInput input;
     input.dragging = left_ && left_->moved
-        && (ui::drag_extent(left_->start, left_->end) > ui::minimum_drag_select_distance || selection_.empty());
+        && (ui::drag_extent(left_->start, left_->end) > *world_ui_settings_.drag_select_distance || selection_.empty());
     if (const auto* viewport = host_->get_viewport()) input.hud = viewport->gui_get_hovered_control() != nullptr;
     input.own_selection = own_selection_;
     input.movable_selection = movable_selection_;

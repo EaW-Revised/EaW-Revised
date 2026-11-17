@@ -177,11 +177,11 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
             context.set_target_rate = [&, peer](std::uint32_t rate) {
                 rates[peer].emplace_back(worlds[peer].completed_tick(), rate);
             };
-            // script_only: the world hash stays equal and only the full (script) hash diverges from tick 136,
+            // script_only: the world hash stays equal and only the full (script) hash diverges from tick 166,
             // so the last window is detected only if the finish row carries the full hash.
             if (script_only) context.world_hash = [&, peer] { return worlds[peer].state_sha256(); };
             context.state_hash = [&, peer] {
-                if (final_window == 2 && peer == 1 && (script_only ? worlds[peer].completed_tick() >= 136 : worlds[peer].completed_tick() == 136))
+                if (final_window == 2 && peer == 1 && (script_only ? worlds[peer].completed_tick() >= 166 : worlds[peer].completed_tick() == 166))
                     return std::string(64, 'b'); // only the final, non-periodic window diverges
                 return worlds[peer].state_sha256();
             };
@@ -193,10 +193,10 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
             context.departures = [&, peer] { const auto controls = worlds[peer].departure_controls();
                 return std::vector<tactical::DepartureControl>{controls.begin(), controls.end()}; };
             context.snapshot = [&, peer]() -> std::shared_ptr<const tactical::TacticalSnapshot> {
-                if (final_window > 0 && final_window < 5 && worlds[peer].completed_tick() >= 137) {
+                if (final_window > 0 && final_window < 5 && worlds[peer].completed_tick() >= 167) {
                     // A synthetic normal victory ends between periodic exchanges,
                     // with both humans still active (unlike LAN quit membership).
-                    const tactical::BattleOutcome outcome{tactical::VictoryCondition::enemy_starbase_destroyed, 1, 0, 1, 2, 137};
+                    const tactical::BattleOutcome outcome{tactical::VictoryCondition::enemy_starbase_destroyed, 1, 0, 1, 2, 167};
                     return std::make_shared<tactical::TacticalSnapshot>(worlds[peer].completed_tick(),
                         std::vector<tactical::SnapshotPlayer>{}, std::vector<tactical::TacticalInstance>{},
                         std::vector<tactical::Event>{}, std::vector<tactical::CombatEvent>{},
@@ -349,7 +349,7 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        stage = "running to tick 120";
+        stage = "running to tick 150";
         std::array<bool, 2> sent{};
         std::array<std::uint64_t, 2> clicks{};
         std::array<std::shared_ptr<eawr::presentation::ui::CommandScheduler>, 2> schedulers;
@@ -366,8 +366,9 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
             });
         }
         bool monitor_stall_seen{};
+        std::uint64_t stall_tick{}; unsigned stall_polls{};
         bool speed_sent{};
-        const auto goal = final_window >= 5 ? 180U : 120U;
+        const auto goal = final_window >= 5 ? 180U : 150U;
         while (worlds[0].completed_tick() < goal || worlds[1].completed_tick() < goal
             || (final_window >= 5 && !recovery_seen)) {
             const auto survivor_applied = [&] { return (speed_survivor == 0 ? host : join)->view().options.tactical_speed == 4; };
@@ -425,7 +426,12 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                 expect(host->request_speed(0) && join->request_speed(4), "both humans request shared speed");
                 if (!speed_during_departure)
                     // #5355 owner decision: 2 local changes per 10 session seconds.
-                    expect(host->request_speed(1) && !host->request_speed(2), "a local change past the window budget is refused");
+                    // (Step 2, normal speed, is never refused by the budget; step 3 is.)
+                    expect(host->request_speed(1) && !host->request_speed(3), "a local change past the window budget is refused");
+                if (!speed_during_departure)
+                    // A repeat of the last queued step (= / - pressed again while a change waits) is already requested:
+                    // it adds no input and spends no budget, so it is answered even with the budget spent.
+                    expect(host->request_speed(1), "a repeated queued step is not queued twice");
                 expect(!host->request_speed(5), "invalid speed refused locally");
                 expect(host->view().options.tactical_speed == 2 && join->view().options.tactical_speed == 2,
                     "request cannot mutate local pacing before future admission");
@@ -435,15 +441,24 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
             relay();
             for (std::size_t peer = 0; peer < 2; ++peer) {
                 if (failed[peer]) continue;
-                if (final_window < 5 && !monitor_stall_seen && worlds[0].completed_tick() == 120 && worlds[1].completed_tick() == 119) {
-                    clock += 3001;
-                    require(drivers[0](contexts[0], {}, clock));
-                    expect(viewer::lan_message(host->view()).find("Waiting for Opponent") != std::string::npos,
-                        "a stalled hash exchange exposes the same delayed overlay");
-                    monitor_stall_seen = true;
+                // The joiner is held at 140. The asynchronous hash check no longer stalls the host at an
+                // exchange point, so the host runs ahead until it waits on the opponent's inputs; once it
+                // stops advancing, that wait must show the delayed overlay.
+                if (final_window < 5 && !monitor_stall_seen && peer == 0 && worlds[0].completed_tick() > 140
+                    && worlds[1].completed_tick() == 140) {
+                    stall_polls = worlds[0].completed_tick() == stall_tick ? stall_polls + 1 : 0;
+                    stall_tick = worlds[0].completed_tick();
+                    if (stall_polls >= 20) {
+                        clock += 3001;
+                        require(drivers[0](contexts[0], {}, clock));
+                        expect(viewer::lan_message(host->view()).find("Waiting for Opponent") != std::string::npos,
+                            "a stalled opponent exposes the same delayed overlay");
+                        expect(worlds[0].completed_tick() == stall_tick && stall_tick < 150, "the waiting host advanced past its bound");
+                        monitor_stall_seen = true;
+                    }
                 }
                 contexts[peer].advance_allowed = worlds[peer].completed_tick() < (speed_sent ? goal : 45U)
-                    && (final_window >= 5 || peer == 0 || monitor_stall_seen || worlds[peer].completed_tick() < 119);
+                    && (final_window >= 5 || peer == 0 || monitor_stall_seen || worlds[peer].completed_tick() < 140);
                 if (final_window >= 6 && rejoined && peer == (final_window == 7 ? 0U : 1U) && activations[peer] == 0)
                     contexts[peer].advance_allowed = false; // Publication must not wait for the next due tick.
                 std::vector<tactical::PlayerCommand> commands;
@@ -577,8 +592,8 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
             std::cout << "viewer recovery case=" << final_window << " workers=" << workers << " state=" << worlds[0].state_sha256() << '\n';
             host->cancel(); join->cancel(); return;
         }
-        expect(monitor_stall_seen, "hash exchange stall path exercised");
-        expect(hashes[0] == hashes[1] && hashes[0].size() == 120, "two viewer facades advance the existing worlds with identical hashes");
+        expect(monitor_stall_seen, "stalled-opponent overlay path exercised");
+        expect(hashes[0] == hashes[1] && hashes[0].size() == 150, "two viewer facades advance the existing worlds with identical hashes");
         expect(speed_sent && rates[0] == rates[1] && !rates[0].empty(), "speed choices apply at identical ticks/rates on both peers");
         expect(rates[0].front().first > 45, "speed event executes at a future tick");
         expect(host->view().options == join->view().options && host->view().options.tactical_speed == 4,
@@ -601,7 +616,7 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                     "real LAN facade click executes at completed frame C+D+1 for delay 5");
             }
         }
-        stage = "draining tick 120 hash exchange";
+        stage = "draining tick 150 hash exchange";
         contexts[0].advance_allowed = contexts[1].advance_allowed = false;
         for (unsigned i = 0; i < 8; ++i) {
             relay();
@@ -616,13 +631,13 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
             while (host->view().connected || join->view().connected) {
                 expect(std::chrono::steady_clock::now() < deadline, "final-window close deadline");
                 relay();
-                contexts[0].advance_allowed = worlds[0].completed_tick() < 136
-                    || worlds[1].completed_tick() >= 136;
+                contexts[0].advance_allowed = worlds[0].completed_tick() < 166
+                    || worlds[1].completed_tick() >= 166;
                 require(drivers[0](contexts[0], {}, clock));
                 if ((final_window == 2 || final_window == 3) && !delayed &&
                     host->view().phase == viewer::LanPhase::ended) {
                     stage = "ended host retains final exchange beyond the teardown timeout";
-                    expect(worlds[1].completed_tick() == 136, "hold peer before final summary");
+                    expect(worlds[1].completed_tick() == 166, "hold peer before final summary");
                     const auto release = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
                     while (std::chrono::steady_clock::now() < release) {
                         require(drivers[0](contexts[0], {}, clock++));
@@ -633,7 +648,7 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                 }
                 if (final_window == 4 && host->view().phase == viewer::LanPhase::ended) {
                     stage = "malformed post-end summary produces a typed failure";
-                    expect(worlds[1].completed_tick() == 136, "malformed frame arrives before peer final summary");
+                    expect(worlds[1].completed_tick() == 166, "malformed frame arrives before peer final summary");
                     const std::array<std::uint8_t, 1> malformed{net::desync_combined_kind};
                     require(relay_join->send(0, malformed));
                     (void)relay_join->poll();
@@ -658,7 +673,7 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                 }
                 if (final_window == 3 && host->view().phase == viewer::LanPhase::ended) {
                     stage = "viewer termination with an unresponsive final-window drain in flight";
-                    expect(worlds[1].completed_tick() == 136, "peer has not produced its final summary");
+                    expect(worlds[1].completed_tick() == 166, "peer has not produced its final summary");
                     expect(viewer::try_abort_lan(*host, nullptr), "UI hands off the incomplete final exchange");
                     const auto began = std::chrono::steady_clock::now();
                     // The peer does not pump or acknowledge close during shutdown.
@@ -669,7 +684,7 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                         "Leave after a long end panel starts a fresh bounded drain");
                     expect(elapsed < std::chrono::seconds(3),
                         "viewer termination bounds an unresponsive drain, then joins its worker");
-                    expect(worlds[0].completed_tick() == 137 && worlds[1].completed_tick() == 136,
+                    expect(worlds[0].completed_tick() == 167 && worlds[1].completed_tick() == 166,
                         "termination never advances an ended world or its unresponsive peer");
                     // The held facade diagnoses a closed link only when it needs
                     // another seal/hash voter. Resume it AFTER the shutdown assertion
@@ -680,7 +695,7 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                         (void)drivers[1](contexts[1], {}, clock++);
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     }
-                    expect(worlds[0].completed_tick() == 137, "released host world remains ended during peer recovery");
+                    expect(worlds[0].completed_tick() == 167, "released host world remains ended during peer recovery");
                     expect(join->view().phase == viewer::LanPhase::ended,
                         "peer observes the socket released before either match is destroyed");
                     return;
@@ -688,7 +703,7 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                 if (final_window == 1 && !left && host->view().phase == viewer::LanPhase::ended) {
                     // The joiner has not reached the end yet. UI cleanup must return
                     // without waiting for it, while its final exchange still arrives.
-                    expect(worlds[1].completed_tick() < 137, "peer is held behind the final tick at UI exit");
+                    expect(worlds[1].completed_tick() < 167, "peer is held behind the final tick at UI exit");
                     const auto began = std::chrono::steady_clock::now();
                     expect(viewer::try_abort_lan(*host, nullptr), "terminal UI exit accepted");
                     expect(std::chrono::steady_clock::now() - began < std::chrono::milliseconds(250),
@@ -697,7 +712,7 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                 }
                 // Hold the second final tick until A is visibly ended. This
                 // deterministically exercises a summary arriving after phase ended.
-                contexts[1].advance_allowed = worlds[1].completed_tick() < 136
+                contexts[1].advance_allowed = worlds[1].completed_tick() < 166
                     || host->view().phase == viewer::LanPhase::ended;
                 std::exception_ptr failure;
                 {
@@ -710,12 +725,12 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
                 ++clock;
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            expect(worlds[0].completed_tick() == 137 && worlds[1].completed_tick() == 137,
+            expect(worlds[0].completed_tick() == 167 && worlds[1].completed_tick() == 167,
                 "ended drainage never advances either world");
             if (final_window == 2) {
                 for (const auto& match : {host, join}) {
                     expect(match->view().reason == viewer::LanReason::desync, "final-only divergence is reported on both peers");
-                    expect(match->view().desync_tick == (script_only ? 137U : 136U) && !match->view().bundle_path.empty(),
+                    expect(match->view().desync_tick == (script_only ? 167U : 166U) && !match->view().bundle_path.empty(),
                         "final rows locate the divergent tick and publish diagnostics before close");
                 }
             } else {
@@ -728,13 +743,13 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
             stage = "departing peer at maximum lead";
             contexts[0].advance_allowed = false;
             contexts[1].advance_allowed = true;
-            while (worlds[1].completed_tick() < 125) {
+            while (worlds[1].completed_tick() < 155) {
                 expect(std::chrono::steady_clock::now() < deadline, "maximum lead deadline");
                 for (std::size_t peer = 0; peer < 2; ++peer) require(drivers[peer](contexts[peer], {}, clock));
                 ++clock;
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            expect(worlds[0].completed_tick() == 120 && worlds[1].completed_tick() == 125,
+            expect(worlds[0].completed_tick() == 150 && worlds[1].completed_tick() == 155,
                 "departing peer reaches the held survivor's sealed LAN horizon D");
             contexts[1].advance_allowed = false;
             // Flush the departing peer's new seal horizon before closing the real stream.
@@ -780,12 +795,12 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
             expect(!host->view().departure && !host->view().victory
                 && viewer::lan_message(host->view()).starts_with("Connection lost: the match could not continue"),
                 "unconfirmed two-peer close shows connection loss, never a fabricated opponent quit or win");
-            if (departed_ahead) expect(worlds[0].completed_tick() <= 130,
+            if (departed_ahead) expect(worlds[0].completed_tick() <= 160,
                 "maximum-lead loss never executes beyond the validated receive frontier");
             return;
         }
         stage = "intentional quit agreement";
-        const tactical::PlayerCommand quit{{120, 1, 1}, {}, tactical::QuitPayload{}};
+        const tactical::PlayerCommand quit{{150, 1, 1}, {}, tactical::QuitPayload{}};
         require(drivers[0](contexts[0], std::span(&quit, 1), clock++));
         while (!host->view().departure || !join->view().departure) {
             expect(std::chrono::steady_clock::now() < deadline, "quit result deadline");

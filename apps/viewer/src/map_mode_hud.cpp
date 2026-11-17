@@ -217,6 +217,10 @@ void MapMode::State::sync_net_perf(const double delta) {
     report.seat = lan.seat;
     report.peers = lan.net_peers;
     report.stall = lan.net_stall;
+    report.input_delay_ticks = lan.net_input_delay;
+    report.lead_ticks = lan.net_lead_ticks;
+    report.local_tick_ms = lan.net_local_tick_ms;
+    report.max_poll_gap_ms = lan.net_poll_gap_ms;
     report.frame_ms = summary.frame_avg_ms;
     report.sim_ms = summary.tick_avg_ms;
     net_report = std::move(report);
@@ -2158,14 +2162,6 @@ void MapMode::State::update_tsw_cinematic() {
                 for (std::size_t row = 0; row < 3; ++row) input.dish[row] = center[row] + input.dish_axis[row] / axis_length * radius;
             }
             if (!presentation::camera::tsw_camera(input, 0)) continue; // a degenerate box: no cinematic
-            if (const auto first = presentation::camera::tsw_camera(input, 0)) {
-                // One line per shot for the eye check: the dish point and the shot's eye, in source coordinates.
-                UtilityFunctions::print("EAWR tsw camera: dish ", input.dish[0], " ", input.dish[1], " ", input.dish[2], "; axis ",
-                    input.dish_axis[0], " ", input.dish_axis[1], " ", input.dish_axis[2], "; radius ", input.radius,
-                    "; centre ", center[0], " ", center[1], " ", center[2], "; unit ", unit->position[0], " ", unit->position[1], " ",
-                    unit->position[2], "; fov ", space->live_camera_frame() ? space->live_camera_frame()->vertical_fov_degrees : 0.0F, "; eye ", first.value().eye[0], " ",
-                    first.value().eye[1], " ", first.value().eye[2], "; from event tick ", static_cast<int64_t>(event.tick));
-            }
             cinematic.input = input;
             cinematic.start_tick = event.tick;
             cinematic.active = true;

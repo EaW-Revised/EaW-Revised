@@ -124,17 +124,16 @@ void factions_and_start() {
     expect(model.start_request() && model.start_request()->campaign == "Set_Beta_Raiders",
            "WGP-29: another faction starts that faction's entry of the same set");
 
-    // WGP-67: a faction the set has no entry for disables Start.
+    // DEV-26: a faction the set has no entry for is absent from the choices.
     std::vector<ui::CampaignFacts> sparse = stock_like();
     sparse.erase(std::remove_if(sparse.begin(), sparse.end(), [](const ui::CampaignFacts& facts) {
                      return facts.campaign_set == "Set_Beta" && facts.faction == "Raiders";
                  }), sparse.end());
     ui::CampaignSetupModel missing(sparse, factions());
     missing.select_row(1);
-    missing.select_faction(1); // Raiders
-    expect(!missing.can_start() && !missing.start_request() && !missing.start_disabled_reason().empty(),
-           "WGP-67: a missing same-set faction variant disables Start with a reason");
-    missing.select_faction(2);
+    expect(missing.factions().size() == 2 && missing.factions()[1].name == "Syndicate",
+           "DEV-26: missing variant is filtered, remaining order retained");
+    missing.select_faction(1);
     expect(missing.can_start(), "another faction of that set starts");
 
     // Names are the data's: a faction name case difference still finds its entry.
@@ -169,19 +168,19 @@ void side_list_is_the_table() {
            "WGP-40a: a faction without display text is a row with no caption");
     expect(*model.selected_faction() == 4, "WGP-40: the last playable row is selected on open");
 
-    // WGP-40b: a side without an entry in the campaign can be chosen; it only greys Start and options.
+    // DEV-26: choosing a campaign removes sides without an entry in its set.
     model.select_row(0);
-    expect(!model.can_start() && !model.options_available() && !model.start_disabled_reason().empty(),
-           "WGP-40b: the selected side Dummy_2 has no entry: Start and options are off");
+    expect(model.factions().size() == 2 && model.factions()[0].name == "Rebel"
+               && model.factions()[1].name == "Empire" && model.selected_faction() == 1,
+           "DEV-26: only campaign variants remain, in table order, with the last selected");
     model.select_faction(3);
-    expect(!model.can_start() && !model.options_available()
-               && model.start_disabled_reason().find("Dummy_1") != std::string::npos,
-           "WGP-40b: a captionless side names its identity in the reason");
+    expect(model.selected_faction() == 1, "stale side indices cannot select a removed side");
     model.select_faction(0);
     expect(model.can_start() && model.options_available(), "WGP-40b: a side with an entry enables both");
-    model.select_faction(2);
-    expect(!model.can_start() && !model.options_available(), "WGP-40b: back to a side with no entry greys both again");
-    expect(model.factions().size() == 5, "choosing a side never changes the list");
+    expect(model.factions().size() == 2, "choosing a side never changes the filtered list");
+    model.select_row(std::nullopt);
+    expect(model.factions().size() == 5 && model.selected_faction() == 0,
+           "clearing the campaign restores every side and preserves its selected identity");
 }
 
 // WGP-40b: the options button is hidden with no campaign, follows the entry's custom-settings flag, and a side with no
@@ -198,8 +197,8 @@ void options_visibility() {
     model.select_faction(0);
     expect(model.options_visible() && model.options_available(), "WGP-40b: a supporting entry shows and enables it");
     model.select_faction(2);
-    expect(model.options_visible() && !model.options_available(),
-           "WGP-40b: a side with no entry leaves it shown but disabled");
+    expect(model.options_visible() && model.options_available(),
+           "DEV-26: a removed side index leaves the valid selected variant alone");
     model.select_faction(1);
     expect(!model.options_visible() && !model.options_available(),
            "WGP-40b: an entry that does not support custom settings hides it");
@@ -207,6 +206,41 @@ void options_visibility() {
     expect(!model.options_visible(), "WGP-40b: a side with no entry leaves it as it was (hidden)");
     model.select_row(std::nullopt);
     expect(!model.options_visible(), "WGP-40b: deselecting the campaign hides it");
+}
+
+// DEV-26: campaign-side shapes found in stock, RaW and BFC, with invented identities.
+void campaign_side_filter() {
+    auto all = factions();
+    all.push_back({"Blank", "", true});
+    auto campaigns = stock_like(); // stock: every globally playable side has a variant
+    campaigns.push_back(entry("Alpha_Blank", "Set_Alpha", "Blank", "alpha Footing", 1));
+    campaigns.push_back(entry("Pair_A", "Pair", "WARDENS", "Pair", 4));
+    campaigns.push_back(entry("Pair_B", "PAIR", "Raiders", "Pair", 4)); // RaW: two sides
+    campaigns.push_back(entry("Solo", "", "Syndicate", "Solo", 5)); // standalone entry
+    campaigns.push_back(entry("NoPlayer", "Empty", "Hostile", "Empty", 6));
+    ui::CampaignSetupModel model(campaigns, all, {true, true});
+    model.select_row(0);
+    expect(model.factions().size() == 4 && model.factions().back().name == "Blank"
+        && model.factions().back().title.empty(), "all-playable campaign retains every row and blank caption");
+    model.select_faction(0);
+    model.select_row(3);
+    expect(model.factions().size() == 2 && model.factions()[0].name == "Wardens"
+        && model.factions()[1].name == "Raiders" && model.selected_faction() == 0,
+        "two-side campaign uses case-insensitive set/player identities and retains the chosen identity");
+    expect(model.start_request() && model.start_request()->campaign == "Pair_A",
+        "filtered row starts its authored player variant");
+    model.select_row(1); // BFC also authors sets lacking one of the global sides
+    expect(model.factions().size() == 3 && model.selected_faction() == 0,
+        "switching to a broader campaign restores sides without losing the selected identity");
+    model.select_row(4);
+    expect(model.factions().size() == 1 && model.factions()[0].name == "Syndicate"
+        && model.can_start(), "standalone campaign matches its own identity and selects its only side");
+    model.select_row(5);
+    expect(model.factions().empty() && !model.selected_faction() && !model.can_start()
+        && !model.options_available(), "campaign with no globally playable variant keeps both gates off");
+    model.reset();
+    expect(model.factions().size() == 4 && model.selected_faction() == 3 && !model.can_start(),
+        "reopening restores the full table and default selection");
 }
 
 void difficulty_and_options() {
@@ -296,6 +330,7 @@ int main() {
     factions_and_start();
     side_list_is_the_table();
     options_visibility();
+    campaign_side_filter();
     difficulty_and_options();
     technology_options();
     if (eawr::test::ui::failures() != 0) {

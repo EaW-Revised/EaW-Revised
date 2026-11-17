@@ -246,32 +246,37 @@ void WorldUiView::draw_identity(const Frame& frame, const RID canvas_item, const
     const bool selected = frame.selection->contains(entity);
     const bool hovered = frame.hovered_icon && *frame.hovered_icon == entity;
     const int level = ui::bar_level(fraction);
-    const float side = ui::squadron_frame_side * ui_scale;
+    const std::string& frame_name = selected && !identity_selected_.empty() ? identity_selected_
+        : hovered && !identity_hover_.empty() ? identity_hover_ : identity_blank_;
+    const auto frame_region = atlas_region(frame_name);
+    if (!frame_region || identity_scale_ <= 0.0F) return;
+    const auto icon_region = atlas_region(type.icon.empty() ? identity_fallback_icon_ : type.icon);
     const float x = screen[0], y = screen[1];
-    const auto aligned_frame = ui::squadron_icon_rect(screen, side, identity_pixel_align_);
-    const auto aligned_inner = ui::squadron_icon_rect(screen, 50.0F * 0.6F * ui_scale, identity_pixel_align_);
+    // WSU-60: retain native-size scaling before viewport scaling; snapping can expose float roundoff.
+    const auto frame_size = frame_region->size * identity_scale_ * ui_scale;
+    const auto inner_size = icon_region ? icon_region->size * identity_scale_ * ui_scale : Vector2{};
+    const auto rectangle = [&](Vector2 size) {
+        const auto aligned = ui::squadron_icon_rect(screen, size.x, identity_pixel_align_);
+        const auto vertical = ui::squadron_icon_rect(screen, size.y, identity_pixel_align_);
+        return ui::SquadronIconRect{aligned.x, vertical.y, aligned.width, vertical.height};
+    };
+    const auto aligned_frame = rectangle(frame_size);
+    const auto aligned_inner = rectangle(inner_size);
     // WU-21: the gripper frame tinted by the owner's lobby colour (else its faction's `Color`, #3076),
     // or the yellow select frame while selected or under the pointer; the entity's icon inside it.
     const ui::Rgb tint = frame.live->owner_ui_colour(owner).value_or(ui::Rgb{255, 255, 255});
     identity_geometry_.push_back({entity, screen, aligned_frame, aligned_inner, tint, owner});
     const Rect2 frame_rect(aligned_frame.x, aligned_frame.y, aligned_frame.width, aligned_frame.height);
-    const std::string frame_name = selected || hovered ? "i_button_unit_frame_gripper_select.tga"
-                                                       : "i_button_unit_frame_gripper.tga";
-    if (atlas_.is_valid()) {
-        if (const auto region = atlas_region(frame_name)) {
-            rendering->canvas_item_add_texture_rect_region(canvas_item, frame_rect, atlas_->get_rid(), *region,
-                                                           selected || hovered ? Color(1, 1, 1, 1) : colour(tint));
-        }
-        if (!type.icon.empty()) {
-            if (const auto region = atlas_region(type.icon)) {
-                rendering->canvas_item_add_texture_rect_region(canvas_item,
-                    Rect2(aligned_inner.x, aligned_inner.y, aligned_inner.width, aligned_inner.height), atlas_->get_rid(), *region);
-            }
-        }
+    if (art_texture(frame_name).is_valid()) {
+        rendering->canvas_item_add_texture_rect_region(canvas_item, frame_rect, art_texture(frame_name), *frame_region,
+                                                       selected || hovered ? Color(1, 1, 1, 1) : colour(tint));
+        identity_quads_.push_back({"frame", frame_name, {frame_rect.position.x, frame_rect.position.y,
+            frame_rect.size.x, frame_rect.size.y}});
+        if (icon_region) rendering->canvas_item_add_texture_rect_region(canvas_item,
+            Rect2(aligned_inner.x, aligned_inner.y, aligned_inner.width, aligned_inner.height),
+            art_texture(type.icon.empty() ? identity_fallback_icon_ : type.icon), *icon_region);
     }
-    const float bar_scale = ui::squadron_bar_scale * ui_scale;
-    bar(canvas_item, x, y + ui::squadron_bar_offset * ui_scale, ui::bar_width(ui::BarSize::small) * bar_scale,
-        ui::bar_height * bar_scale, fraction, ui::health_bar_colour(level));
+    draw_identity_bar(canvas_item, {x, y}, fraction, ui_scale);
     icons_.push_back({entity, battle::type_id(type.name), owner == frame.live->local_player() && frame.live->can_control(entity), hostile,
                       type.selectable, frame_rect.position.x, frame_rect.position.y,
                       frame_rect.position.x + frame_rect.size.x, frame_rect.position.y + frame_rect.size.y});
@@ -282,6 +287,7 @@ void WorldUiView::draw_identity(const Frame& frame, const RID canvas_item, const
 void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const float ui_scale) {
     icons_.clear();
     identity_geometry_.clear();
+    identity_quads_.clear();
     icon_rows_.clear();
     flag_rows_.clear();
     RenderingServer* rendering = RenderingServer::get_singleton();
@@ -457,7 +463,7 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
             if (identity != types_.end()) {
                 draw_identity(frame, canvas_item, squadron, identity->second, owner, seen.front()->hostile,
                               {x, y}, fraction, ui_scale);
-                icon_rows_.back() += gridded;
+                if (!icon_rows_.empty()) icon_rows_.back() += gridded;
                 icon_sample.screen = *screen;
                 icon_sample.drawn = true;
                 icon_sample.grid = grid_screen.has_value();
@@ -467,14 +473,15 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
         draw_group(frame, canvas_item, squadron, {x, y}, true, ui_scale);
         // WU-37, WU-38 (#632): a launched squadron's icon carries FoC's small white flag, on an
         // ally's icon only.
-        if (atlas_.is_valid() && frame.live->squadron_launched(squadron) && frame.live->is_ally_of_local(owner)) {
-            if (const auto region = atlas_region("i_garrison_flag.tga")) {
-                const float flag_w = ui::garrison_flag_width * ui_scale;
-                const float flag_h = ui::garrison_flag_height * ui_scale;
-                const float flag_x = x + ui::garrison_flag_offset_x * ui_scale - flag_w * 0.5F;
-                const float flag_y = y + ui::garrison_flag_offset_y * ui_scale - flag_h * 0.5F;
+        if (art_texture(garrison_icon_).is_valid() && frame.live->squadron_launched(squadron) && frame.live->is_ally_of_local(owner)) {
+            if (const auto region = atlas_region(garrison_icon_)) {
+                const float flag_w = region->size.x * ui_scale;
+                const float flag_h = region->size.y * ui_scale;
+                const float flag_x = x + identity_upper_offset_[0] * ui_scale - flag_w * 0.5F;
+                const float flag_y = y - identity_upper_offset_[1] * ui_scale - flag_h * 0.5F;
                 rendering->canvas_item_add_texture_rect_region(canvas_item, Rect2(flag_x, flag_y, flag_w, flag_h),
-                                                               atlas_->get_rid(), *region);
+                                                               art_texture(garrison_icon_), *region);
+                identity_quads_.push_back({"garrison", garrison_icon_, {flag_x, flag_y, flag_w, flag_h}});
                 flag_rows_.push_back(std::to_string(squadron) + ":x=" + std::to_string(std::lround(flag_x))
                                      + ",y=" + std::to_string(std::lround(flag_y)));
             }
@@ -532,11 +539,13 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
             table != nullptr ? table->find(instance->type_id) : nullptr) : 1.0F;
         draw_identity(frame, canvas_item, unit.entity, types_.at(rider->type_id), instance->owner,
             unit.hostile, *screen, health, ui_scale);
+        // Missing frame art disables this identity, including its hit rectangle.
+        if (icons_.empty() || icons_.back().squadron != unit.entity) continue;
         // Portrait identity is display-only; type selection still uses the carrier.
         icons_.back().type = unit.type;
         if (const auto carrier = types_.find(unit.type); carrier != types_.end())
             icons_.back().selectable = carrier->second.selectable;
-        icon_rows_.back() += ":rider=" + std::to_string(rider->entity_id)
+        if (!icon_rows_.empty()) icon_rows_.back() += ":rider=" + std::to_string(rider->entity_id)
             + ":type=" + types_.at(rider->type_id).name;
     }
     max_grid_icons_ = std::max(max_grid_icons_, grid_icons_);

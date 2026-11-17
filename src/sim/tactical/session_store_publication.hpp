@@ -2,6 +2,8 @@
 
 #include "session_types.hpp"
 
+#include <unordered_map>
+
 namespace eawr::sim::tactical::session_detail {
 
 // Ordered fragments preserve the session's original member lifetime order.
@@ -16,6 +18,21 @@ struct SessionStoreHistory {
 
 struct SessionStorePublication {
     bool waypoint_queues_present{}; // Derived component-commit gate, outside canonical state.
+    // PL-01: the immutable copy of each moving ship's move plan, kept while the plan stands so every snapshot
+    // publishes a pointer. Derived presentation cache: never hashed, never checkpointed. Workers only read it;
+    // the serial tail of the systems phase adds a plan when it changes.
+    // An entry carries the stamp of the plan it copied (start tick, target and the shape of the nodes), so
+    // a tick checks a moving ship in constant time instead of comparing every node.
+    struct PredictedPathEntry {
+        std::shared_ptr<const PredictedPath> path;
+        std::uint64_t start_tick{};
+        math::Vec3 target{};
+    };
+    std::unordered_map<EntityId, PredictedPathEntry> predicted_paths;
+    // PL-01: sparse disjoint staging retains capacity across ticks; snapshots own only live rows.
+    std::array<std::vector<std::pair<std::size_t, SnapshotPredictedPath>>, tick_partition_count> prediction_scratch;
+    std::uint64_t predicted_path_builds{}; // plans copied so far (work counter)
+    std::uint64_t predicted_path_visits{};
     std::shared_ptr<const TacticalSnapshot> current_snapshot;
     std::uint64_t registry_emplacement_count{};
     std::function<void(std::string_view, bool)> commit_observer;

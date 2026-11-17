@@ -551,6 +551,18 @@ void probe_move_and_ground_admission() {
     assert(!gc::has_ground_capability(control, {30, 10}, movement.get()).value());
     assert(fleet_can_land(snapshot(), 1, 10));
     destination_owner = 2;
+    // GGS-13: political ownership cannot admit noncombat passengers over defended enemy ground.
+    gc::ControlPlanet surface; surface.planet = 1; surface.landed = {{50, 10, 2}};
+    control.planets = {surface};
+    movement->contents.push_back({50, {{51, 9}}});
+    destination_owner = 1;
+    assert(!transport_can_land(snapshot(), 1, 1, fleets.front().members.front()));
+    assert(!fleet_can_land(snapshot(), 1, 10));
+    control.planets.front().landed.clear();
+    assert(fleet_can_land(snapshot(), 1, 10));
+    control.planets.clear();
+    movement->contents.pop_back();
+    destination_owner = 2;
     movement->contents[0].children = {{31, 8}};
     movement->contents.push_back({40, {{41, 9}}});
     fleets.push_back({11, 1, 1, {{40, 10}}});
@@ -1205,7 +1217,7 @@ void neutralize_refusals_have_their_own_text() {
     using R = eawr::sim::galactic::GalacticRejectReason;
     const std::array reasons{R::neutralize_no_hero, R::neutralize_allied_hero, R::neutralize_not_targetable,
         R::neutralize_unavailable, R::insufficient_credits, R::incompatible_location, R::invalid_path, R::cannot_depart,
-        R::movement_blocked, R::movement_ability_required, R::invalid_membership};
+        R::movement_blocked, R::movement_ability_required, R::invalid_membership, R::ability_target_undiscovered};
     std::set<std::string_view> texts;
     for (const auto reason : reasons) texts.insert(ability_refusal_text(reason));
     assert(texts.size() == reasons.size());

@@ -141,7 +141,12 @@ public:
         std::vector<GarrisonTimerView> garrison_timers = {},
         std::vector<BeaconState> beacons = {},
         std::optional<BattleControllerPolicy> controllers = std::nullopt,
-        std::vector<TswView> tsw_views = {});
+        std::vector<TswView> tsw_views = {},
+        std::vector<SnapshotPredictedPath> predicted_paths = {});
+
+    // PL-01: absent unless loaded content opts in; excluded from canonical bytes/checkpoints.
+    [[nodiscard]] std::span<const SnapshotPredictedPath> predicted_paths() const noexcept { return predicted_paths_; }
+    [[nodiscard]] const PredictedPathHandle* predicted_path(EntityId entity) const noexcept;
 
     [[nodiscard]] const std::optional<BattleControllerPolicy>& controller_policy() const noexcept { return controllers_; }
     [[nodiscard]] std::span<const RetreatView> retreat_views() const noexcept { return retreat_views_; }
@@ -182,6 +187,7 @@ public:
     [[nodiscard]] std::string sha256() const;
 
 private:
+    std::vector<SnapshotPredictedPath> predicted_paths_;
     std::vector<RetreatView> retreat_views_;
     std::vector<TswView> tsw_views_;
     std::uint64_t completed_tick_{};

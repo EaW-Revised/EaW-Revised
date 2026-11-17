@@ -99,6 +99,10 @@ def security_scan(root: Path, config: dict[str, Any], files: Iterable[Path],
                 bool(item.get("match_only")))
                for item in scan["allow"]]
     identifiers = {(item["path"], item["identifier"]) for item in scan.get("identifier_allow", [])}
+    # Owner-approved public service names exempt only their exact DNS token, never
+    # a neighbouring private name on the same line or another subdomain.
+    public_hosts = [re.compile(r"(?<![\w.-])" + re.escape(host) + r"(?![\w.-])", re.I)
+                    for host in scan.get("public_hosts", [])]
     # These two patterns never use context regexes: only reviewed full-line bytes
     # in an exact file can suppress them. New or changed text always needs review.
     exact_patterns = {"lan-host", "private-ipv4"}
@@ -117,6 +121,10 @@ def security_scan(root: Path, config: dict[str, Any], files: Iterable[Path],
                 found += [("private-name", m, True) for m in term_pattern.finditer(line)]
             for name, match, private_term in found:
                 value = match.group(0)
+                if private_term and number and any(
+                        host.start() <= match.start() and host.end() >= match.end()
+                        for rx in public_hosts for host in rx.finditer(line)):
+                    continue
                 if private_term and any(
                         (relpath, token.group(0)) in identifiers
                         and token.start() <= match.start() and token.end() >= match.end()

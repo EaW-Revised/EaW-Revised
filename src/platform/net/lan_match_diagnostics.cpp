@@ -153,7 +153,8 @@ void TcpLanMatch::set_failure(const core::Diagnostic& diagnostic, bool terminal)
         if (lost && (runtime_ || lobby_result_))
             if (const auto peer = core_session().connection_lost_peer()) lost_name = seat_name(*peer);
         LanReason reason = LanReason::refused;
-        if (diagnostic.code == "EAWR-NET-1762") reason = LanReason::refused; // The named player may contain words such as "build" or "version".
+        if (diagnostic.code == "EAWR-NET-1762"
+            || (diagnostic.code == "EAWR-NET-1609" && diagnostic.message.starts_with("mod content"))) reason = LanReason::refused;
         else if (diagnostic.code == net::lobby_diagnostic(net::LobbyReason::not_ready, "").code) reason = LanReason::cancelled;
         else if (diagnostic.code == "EAWR-NET-0202" || diagnostic.message.find("build") != std::string::npos) reason = LanReason::build;
         else if (diagnostic.code == "EAWR-NET-0201" || diagnostic.message.find("version") != std::string::npos) reason = LanReason::version;
@@ -183,7 +184,8 @@ void TcpLanMatch::set_failure(const core::Diagnostic& diagnostic, bool terminal)
             }
             else if (online_options_) {
                 view_.diagnostic_code = diagnostic.code;
-                if (reason == LanReason::build && diagnostic.code != "EAWR-NET-1530") view_.message = "All players need the same game build.";
+                if (diagnostic.code == "EAWR-NET-1503") view_.message = diagnostic.message; // Includes both safe build identifiers at admission.
+                else if (reason == LanReason::build && diagnostic.code != "EAWR-NET-1530") view_.message = "All players need the same game build.";
                 else if (diagnostic.code == "EAWR-NET-1810") view_.message = "Choose between two and nine human seats.";
                 else if (diagnostic.code == "EAWR-NET-1300") view_.message = "Choose two to nine humans sharing up to three owners.";
                 else if (diagnostic.code == "EAWR-NET-1520") view_.message = "The online service did not accept your access credentials.";

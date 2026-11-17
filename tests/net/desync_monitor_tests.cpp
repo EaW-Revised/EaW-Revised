@@ -87,6 +87,7 @@ struct Pair {
         options.build_identity = "test-build";
         options.max_retained_bytes = budget;
         options.exchange_every = every;
+        options.deferred_compare = false; // Barrier contracts; DeferredPeers covers the default-on path.
         return options;
     }
     void drain() {
@@ -166,6 +167,75 @@ void peer_confirmation(const std::filesystem::path& directory) {
     for (std::uint64_t tick = 1; tick <= 10; ++tick) good(dropped.left.record(tick, digest(tick)));
     good(dropped.left.on_departure(1, 10));
     require(dropped.left.peer_confirmed_tick() != 10, "departure cannot count as remote tick-10 proof");
+}
+
+void default_interval(const std::filesystem::path& directory) {
+    require(net::DesyncOptions{}.exchange_every == 150, "default cadence is five seconds at 30 Hz");
+    require(net::default_deferred_compare && net::DesyncOptions{}.deferred_compare,
+        "the asynchronous desync check is on by default from the shared constant");
+    constexpr auto every = net::default_hash_exchange_every;
+    for (const auto end : {149U, 150U, 151U, 310U}) {
+        Pair pair(directory, 16 * 1024 * 1024, every);
+        for (std::uint64_t tick = 0; tick <= end; ++tick) {
+            const bool due = tick % every == 0 || tick == end;
+            require(pair.left.needs_encoding(tick, tick == end) == due, "only due/end ticks request encoding");
+            good(pair.left.record(tick, digest(tick), {}, {}, tick == end));
+            good(pair.right.record(tick, digest(tick), {}, {}, tick == end));
+            require(pair.left.waiting() == due && pair.right.waiting() == due, "150-tick exchange cadence");
+            if (due) {
+                require(!pair.left.can_step() && !pair.right.can_step(), "setup/end/due checks stay barriers");
+                require(pair.left.waiting_for_peers() == std::vector<net::PeerIndex>{1}, "missing summary remains a voter");
+            }
+            pair.drain();
+        }
+        require(pair.left.agreed_end() && pair.right.agreed_end(), "exact and partial ends agree");
+    }
+    for (const auto end : {149U, 150U, 151U}) {
+        Pair pair(directory, 16 * 1024 * 1024, every);
+        for (std::uint64_t tick = 0; tick <= end; ++tick) {
+            good(pair.left.record(tick, digest(tick))); good(pair.right.record(tick, digest(tick))); pair.drain();
+        }
+        good(pair.left.finish()); good(pair.right.finish()); pair.drain();
+        require(pair.left.agreed_end() && pair.right.agreed_end(), "finish flushes the partial 150-tick window");
+    }
+    Pair delayed(directory, 16 * 1024 * 1024, every);
+    for (std::uint64_t tick = 0; tick <= 150; ++tick) {
+        good(delayed.left.record(tick, digest(tick))); good(delayed.right.record(tick, digest(tick)));
+        if (tick != 150) delayed.drain();
+    }
+    auto fast = delayed.b.poll(), late = delayed.a.poll();
+    require(fast && late, "both tick-150 summaries were sent");
+    good(delayed.right.receive(*fast)); good(delayed.right.record(151, digest(151)));
+    require(delayed.left.waiting() && !delayed.left.can_step(), "missing summary still holds the completed barrier");
+    good(delayed.left.receive(*late)); good(delayed.left.record(151, digest(151)));
+    good(delayed.left.finish()); good(delayed.right.finish()); delayed.drain();
+    require(delayed.left.agreed_end() && delayed.right.agreed_end(), "late summary preserves the faster peer's partial tail");
+
+    Pair recovered(directory, 16 * 1024 * 1024, every);
+    const std::array<std::uint8_t, 1> encoding{9};
+    for (std::uint64_t tick = 0; tick <= 150; ++tick) {
+        good(recovered.left.record(tick, digest(tick), encoding));
+        good(recovered.right.record(tick, digest(tick, tick == 149), encoding)); recovered.drain();
+    }
+    check_report(recovered, 149, 150);
+    require(recovered.left.ready_for_resync() && recovered.right.ready_for_resync(), "larger window retains recovery proof");
+    require(!recovered.left.checkpoint_recovery_source(), "two peers still cannot elect a GC recovery majority");
+    good(recovered.left.on_resync(150, digest(150))); good(recovered.right.on_resync(150, digest(150)));
+    for (std::uint64_t tick = 151; tick <= 300; ++tick) {
+        good(recovered.left.record(tick, digest(tick))); good(recovered.right.record(tick, digest(tick)));
+        require(recovered.left.waiting() == (tick == 300), "recovery keeps the shared cadence"); recovered.drain();
+    }
+    require(recovered.left.recovered_report() && recovered.left.peer_confirmed_tick() == 300, "recovery preserves diagnosis and resumes agreement");
+
+    Pair departed(directory, 16 * 1024 * 1024, every);
+    for (std::uint64_t tick = 0; tick <= 149; ++tick) {
+        good(departed.left.record(tick, digest(tick))); good(departed.right.record(tick, digest(tick))); departed.drain();
+    }
+    good(departed.left.on_departure(1, 149));
+    good(departed.left.record(150, digest(150)));
+    require(departed.left.can_step() && !departed.left.report(), "departure inside a larger window removes its voter");
+    good(departed.left.record(151, digest(151), {}, {}, true));
+    require(departed.left.agreed_end(), "survivor completes the partial end");
 }
 
 void synthetic(const std::filesystem::path& directory, std::uint64_t fault, std::uint64_t end,
@@ -769,6 +839,7 @@ struct EvidencePair {
         options.match_setup = {1, 2, 3};
         options.build_identity = "test-build";
         options.exchange_every = 30;
+        options.deferred_compare = false; // Evidence contracts are stated against the barrier exchange.
         options.share_evidence = share;
         options.replay_journal = [] { return std::vector<std::uint8_t>{'j', 'r', 'n'}; };
         return options;
@@ -934,11 +1005,302 @@ void evidence_respects_the_transport_limit() {
     }
 }
 
+struct DeferredPeers {
+    explicit DeferredPeers(std::uint32_t count, std::optional<std::uint64_t> final = {}) : bus(count) {
+        for (net::PeerIndex peer = 0; peer < count; ++peer) {
+            transports.push_back(std::make_unique<FakeTransport>(bus, peer));
+            net::DesyncOptions options;
+            options.exchange_every = 10; options.input_delay = 3;
+            options.deferred_compare = true; options.final_tick = final;
+            options.match_setup = {1, 2, 3}; options.build_identity = "deferred-test";
+            monitors.push_back(std::make_unique<net::DesyncMonitor>(*transports.back(), options));
+        }
+    }
+    void drain() {
+        for (unsigned round = 0; round < 20; ++round) {
+            bool progress = false;
+            for (net::PeerIndex peer = 0; peer < monitors.size(); ++peer)
+                while (auto frame = transports[peer]->poll()) { good(monitors[peer]->receive(*frame)); progress = true; }
+            if (!progress) return;
+        }
+        require(false, "deferred exchange did not quiesce");
+    }
+    void record(std::uint64_t tick, std::optional<net::PeerIndex> bad = {}, bool end = false) {
+        const std::array<std::uint8_t, 2> encoding{4, 5}, input{6, 7};
+        for (net::PeerIndex peer = 0; peer < monitors.size(); ++peer)
+            good(monitors[peer]->record(tick, digest(tick, bad == peer), encoding, input, end));
+    }
+    void through(std::uint64_t last) {
+        for (std::uint64_t tick = 0; tick <= last; ++tick) { record(tick); drain(); }
+    }
+    std::vector<std::pair<net::PeerIndex, net::Received>> hold_rows(net::PeerIndex sender) {
+        std::vector<std::pair<net::PeerIndex, net::Received>> held;
+        for (unsigned round = 0; round < 20; ++round) {
+            bool progress = false;
+            for (net::PeerIndex peer = 0; peer < monitors.size(); ++peer) while (auto frame = transports[peer]->poll()) {
+                if (frame->from == sender && frame->frame.front() == net::desync_rows_kind) held.emplace_back(peer, std::move(*frame));
+                else good(monitors[peer]->receive(*frame));
+                progress = true;
+            }
+            if (!progress) return held;
+        }
+        throw std::runtime_error("held-row exchange did not quiesce");
+    }
+    Bus bus;
+    std::vector<std::unique_ptr<FakeTransport>> transports;
+    std::vector<std::unique_ptr<net::DesyncMonitor>> monitors;
+};
+
+void deferred_monitor_contracts() {
+    for (const auto peers : {2U, 4U, 8U}) {
+        {
+            DeferredPeers match(peers);
+            match.record(0);
+            for (const auto& monitor : match.monitors)
+                require(!monitor->can_step() && monitor->waiting(), "setup must remain synchronous");
+            match.drain();
+            for (std::uint64_t tick = 1; tick <= 45; ++tick) {
+                match.record(tick);
+                for (const auto& monitor : match.monitors) require(monitor->can_step(), "equal deferred exchange stalled");
+                match.drain();
+            }
+        }
+        {
+            DeferredPeers match(peers);
+            match.through(9); match.record(10);
+            for (std::uint64_t tick = 11; tick <= 13; ++tick) {
+                match.record(tick);
+                for (const auto& monitor : match.monitors)
+                    require(monitor->can_step() == (tick < 13), "missing summary did not gate exactly at N+K");
+            }
+            for (const auto& monitor : match.monitors)
+                require(monitor->waiting_for_peers().size() == peers - 1, "deadline lost missing voters");
+            match.drain();
+            for (const auto& monitor : match.monitors) require(monitor->can_step(), "summary arrival did not resume stepping");
+            match.record(14); match.drain();
+        }
+        {
+            DeferredPeers match(peers);
+            match.through(9); match.record(10, peers - 1); match.drain();
+            for (const auto& monitor : match.monitors) {
+                require(!monitor->frozen() && monitor->can_step() && monitor->report(), "early mismatch must diagnose without freezing");
+                require(monitor->report()->first_divergent_tick == 10, "diagnosis mixed current and sealed rows");
+                require(!bundle_file(monitor->report()->bundle, "session.bin").empty(), "deferred encoding missing");
+                const auto csv = bundle_file(monitor->report()->bundle, "hashes.csv");
+                require(csv.find(digest(10, true)) != std::string::npos, "deferred bundle lost divergent row");
+                require(std::count(csv.begin(), csv.end(), '\n') == static_cast<std::ptrdiff_t>(1 + peers * 10),
+                    "deferred bundle must contain every peer's complete sealed rows");
+            }
+            for (std::uint64_t tick = 11; tick <= 13; ++tick) { match.record(tick); match.drain(); }
+            for (const auto& monitor : match.monitors)
+                require(monitor->frozen() && !monitor->can_step() && monitor->ready_for_resync(), "recovery frontier must be N+K");
+            if (peers >= 3) require(match.monitors.back()->checkpoint_recovery_source() == 0,
+                "GC minority did not elect lowest strict-majority source");
+            else require(!match.monitors.back()->checkpoint_recovery_source(), "two-peer GC divergence must refuse election");
+            for (auto& monitor : match.monitors) { good(monitor->on_resync(13, digest(13))); require(monitor->can_step(), "resync did not clear inflight window"); }
+        }
+        {
+            DeferredPeers match(peers);
+            match.through(9);
+            // Only peer 0 has received a pending larger timing proposal.
+            good(match.monitors[0]->on_input_delay(3, 5));
+            match.record(10, peers - 1); match.drain();
+            for (std::uint64_t tick = 11; tick <= 13; ++tick) { match.record(tick); match.drain(); }
+            for (const auto& monitor : match.monitors)
+                require(monitor->frozen() && monitor->ready_for_resync() && monitor->deferred_resync_frontier() == 13,
+                    "pending timing proposal changed one peer's recovery frontier");
+        }
+        {
+            DeferredPeers match(peers);
+            match.through(9);
+            for (net::PeerIndex peer = 0; peer < peers; ++peer) {
+                good(match.monitors[peer]->on_input_delay(3, peer == 0 ? 8 : 5));
+                good(match.monitors[peer]->on_activated_input_delay(3, 5));
+            }
+            match.record(10, peers - 1); match.drain();
+            for (std::uint64_t tick = 11; tick <= 15; ++tick) { match.record(tick); match.drain(); }
+            for (auto& monitor : match.monitors) {
+                require(monitor->frozen() && monitor->deferred_resync_frontier() == 15,
+                    "activated retained delay did not define a common frontier");
+                good(monitor->on_resync(15, digest(15)));
+            }
+            for (std::uint64_t tick = 16; tick <= 19; ++tick) { match.record(tick); match.drain(); }
+            for (net::PeerIndex peer = 0; peer < peers; ++peer) {
+                good(match.monitors[peer]->on_input_delay(3, peer == 0 ? 8 : 3));
+                good(match.monitors[peer]->on_activated_input_delay(3, 3));
+            }
+            match.record(20, peers - 1); match.drain();
+            for (std::uint64_t tick = 21; tick <= 23; ++tick) { match.record(tick); match.drain(); }
+            for (const auto& monitor : match.monitors)
+                require(monitor->frozen() && monitor->deferred_resync_frontier() == 23,
+                    "pending proposal masked the expiry of activated retention");
+        }
+        for (const bool finish : {false, true}) {
+            DeferredPeers match(peers);
+            match.through(9); match.record(10, peers - 1); match.drain();
+            match.record(11, {}, !finish);
+            if (finish) for (auto& monitor : match.monitors) good(monitor->finish());
+            match.drain();
+            for (const auto& monitor : match.monitors)
+                require(monitor->frozen() && monitor->ready_for_resync() && monitor->deferred_resync_frontier() == 11,
+                    "unplanned end/finish left an unreachable recovery frontier");
+        }
+        {
+            DeferredPeers match(peers);
+            match.through(9); match.record(10);
+            match.record(11);
+            for (auto& monitor : match.monitors) good(monitor->on_input_delay(5, 5));
+            match.record(12); match.record(13);
+            for (const auto& monitor : match.monitors) require(!monitor->can_step(), "delay change moved immutable deadline");
+            match.drain();
+            for (const auto& monitor : match.monitors) require(monitor->can_step(), "delay change prevented retirement");
+        }
+        for (const bool finish : {false, true}) {
+            DeferredPeers match(peers, 12);
+            match.through(9); match.record(10); match.record(11);
+            match.record(12, {}, !finish);
+            if (finish) for (auto& monitor : match.monitors) good(monitor->finish());
+            for (const auto& monitor : match.monitors) require(!monitor->agreed_end(), "end discarded unresolved inflight window");
+            match.drain();
+            for (const auto& monitor : match.monitors) require(monitor->agreed_end(), "partial end did not remain a synchronous barrier");
+        }
+        {
+            DeferredPeers match(peers, 12);
+            match.through(9); match.record(10); match.drain();
+            match.record(11, peers - 1); match.record(12, {}, true); match.drain();
+            for (const auto& monitor : match.monitors)
+                require(monitor->frozen() && monitor->report()->first_divergent_tick == 11,
+                    "final synchronous check lost mismatch in last partial window");
+        }
+        {
+            DeferredPeers match(peers, 12);
+            match.through(9); match.record(10, peers - 1); match.drain();
+            match.record(11); match.record(12, {}, true); match.drain();
+            for (const auto& monitor : match.monitors)
+                require(monitor->frozen() && monitor->ready_for_resync(), "known final tick did not cap recovery frontier");
+        }
+        {
+            DeferredPeers match(peers);
+            match.through(9);
+            for (net::PeerIndex peer = 0; peer < peers; ++peer) good(match.monitors[peer]->on_link_repair(peer));
+            match.record(10);
+            for (auto& inbox : match.bus.inbox) inbox.clear(); // original summary sends were lost with the old links
+            for (net::PeerIndex peer = 0; peer < peers; ++peer) for (net::PeerIndex remote = 0; remote < peers; ++remote)
+                if (peer != remote) good(match.monitors[peer]->on_link_repair(remote));
+            match.drain(); // duplicate previous + in-flight summaries authenticate and retire
+            for (std::uint64_t tick = 11; tick <= 14; ++tick) { match.record(tick); match.drain(); }
+            for (const auto& monitor : match.monitors) require(monitor->can_step(), "link repair did not resend sealed inflight window");
+        }
+        {
+            DeferredPeers match(peers);
+            match.through(9); match.record(10);
+            for (auto& monitor : match.monitors) good(monitor->finish());
+            for (const auto& monitor : match.monitors) require(!monitor->agreed_end(), "exact-boundary finish skipped inflight agreement");
+            match.drain();
+            for (const auto& monitor : match.monitors) require(monitor->agreed_end(), "exact-boundary finish never agreed");
+        }
+        {
+            DeferredPeers match(peers);
+            match.through(9); match.record(10, peers - 1); match.drain();
+            match.record(11);
+            for (auto& monitor : match.monitors) good(monitor->on_departure(peers - 1, 11));
+            match.drain();
+            for (net::PeerIndex peer = 0; peer + 1 < peers; ++peer) {
+                require(match.monitors[peer]->can_step() && !match.monitors[peer]->frozen(), "departed mismatch retained an active freeze");
+                require(match.monitors[peer]->report() && match.monitors[peer]->report()->diagnostic_only,
+                    "departed mismatch must remain diagnostic_only");
+            }
+        }
+        {
+            DeferredPeers match(peers);
+            match.through(9); match.record(10); match.record(11);
+            for (auto& monitor : match.monitors) good(monitor->on_departure(peers - 1, 11));
+            match.drain();
+            for (net::PeerIndex peer = 0; peer + 1 < peers; ++peer)
+                require(match.monitors[peer]->can_step(), "departing voter held an unresolved deferred window");
+        }
+        {
+            DeferredPeers match(peers);
+            match.through(9); match.record(10, peers - 1);
+            const auto held = match.hold_rows(peers - 1);
+            require(held.size() == peers - 1, "fixture did not hold the departing peer's rows");
+            match.record(11);
+            for (auto& monitor : match.monitors) good(monitor->on_departure(peers - 1, 11));
+            for (const auto& [peer, frame] : held) good(match.monitors[peer]->receive(frame));
+            match.drain();
+            for (net::PeerIndex peer = 0; peer + 1 < peers; ++peer)
+                require(match.monitors[peer]->can_step() && match.monitors[peer]->report()
+                    && match.monitors[peer]->report()->diagnostic_only && match.monitors[peer]->report()->first_divergent_tick == 10,
+                    "late departed rows must diagnose the retained sealed window without freezing survivors");
+        }
+    }
+    {
+        DeferredPeers match(2); match.through(9); match.record(10);
+        const auto summary = match.bus.inbox[0].front();
+        good(match.monitors[0]->receive(summary));
+        // Now previous_, not current rows_: a normal duplicate is still refused.
+        require(!match.monitors[0]->receive(summary), "unnegotiated duplicate summary was accepted");
+    }
+    {
+        DeferredPeers match(2); match.through(9); match.record(10);
+        auto summary = match.bus.inbox[0].front();
+        // A valid next-window digest can arrive before our local exchange; it
+        // must never be compared against the sealed 1..10 window.
+        const auto set_tick = [&](std::size_t offset, std::uint64_t tick) {
+            for (unsigned shift = 0; shift < 64; shift += 8) summary.frame[offset++] = static_cast<std::uint8_t>(tick >> shift);
+        };
+        set_tick(1, 11); set_tick(9, 20);
+        good(match.monitors[0]->receive(summary));
+        require(!match.monitors[0]->frozen() && !match.monitors[0]->report(), "future summary contaminated inflight comparison");
+        match.drain();
+    }
+    for (const auto delay : {10U, 11U}) {
+        Bus bus; FakeTransport transport(bus, 0);
+        net::DesyncOptions options; options.deferred_compare = true; options.exchange_every = 10; options.input_delay = delay;
+        net::DesyncMonitor invalid(transport, options);
+        require(!invalid.record(0, digest(0)), "K >= I must be refused");
+    }
+    {
+        DeferredPeers match(2); match.through(9);
+        good(match.monitors[0]->on_input_delay(3, 64)); // pending proposal only
+        match.record(10); match.record(11); match.record(12); match.record(13);
+        for (const auto& monitor : match.monitors)
+            require(!monitor->can_step() && monitor->deferred_resync_frontier() == 13,
+                "pending high delay changed the comparison bound");
+        match.drain();
+    }
+    for (const auto active : {3U, 64U}) {
+        DeferredPeers match(2); match.through(9);
+        for (auto& monitor : match.monitors) {
+            good(monitor->on_input_delay(active, 64));
+            good(monitor->on_activated_input_delay(active, 64));
+        }
+        match.record(10);
+        for (const auto& monitor : match.monitors)
+            require(!monitor->can_step() && !monitor->deferred_resync_frontier(),
+                "runtime activated K >= I must use a synchronous window");
+        match.drain();
+        for (auto& monitor : match.monitors) {
+            require(monitor->can_step(), "synchronous fallback did not agree");
+            good(monitor->on_input_delay(3, 3)); good(monitor->on_activated_input_delay(3, 3));
+        }
+        for (std::uint64_t tick = 11; tick <= 19; ++tick) { match.record(tick); match.drain(); }
+        match.record(20);
+        for (const auto& monitor : match.monitors) require(monitor->can_step(), "lower lead did not resume deferred comparison");
+        match.drain();
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         require(argc == 3, "usage: desync_monitor_tests fixture artifact-directory");
         const std::filesystem::path directory = argv[2];
         peer_confirmation(directory);
+        default_interval(directory);
+        for (const auto fault : {149U, 150U, 151U}) {
+            synthetic(directory, fault, 310, false, net::default_hash_exchange_every);
+            synthetic(directory, fault, 310, true, net::default_hash_exchange_every);
+        }
         adaptive_departure_bounds();
         scripted_battle(argv[1], directory);
         scripted_battle(argv[1], directory, true);
@@ -964,6 +1326,7 @@ int main(int argc, char** argv) {
         input_only_divergence_shares_evidence();
         evidence_is_authenticated_and_bounded();
         evidence_respects_the_transport_limit();
+        deferred_monitor_contracts();
         std::cout << "desync monitor contracts passed\n";
         return 0;
     } catch (const std::exception& exception) {

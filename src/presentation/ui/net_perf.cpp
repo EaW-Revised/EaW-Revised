@@ -47,11 +47,19 @@ const char* net_route_text(const NetRoute route) {
     return "unknown";
 }
 
-void NetStallLedger::observe(const std::uint64_t now_ms, const bool waiting, const std::uint32_t peer) {
+void NetStallLedger::observe(const std::uint64_t now_ms, const bool waiting, const std::uint32_t peer, NetWaitKind kind) {
+    if (waiting_ && (!waiting || kind != kind_)) {
+        classified_.push_back({class_since_, now_ms, peer_, kind_});
+        if (classified_.size() > net_perf_max_episodes) classified_.pop_front();
+        class_since_ = now_ms;
+        kind_ = kind;
+    }
     if (waiting && !waiting_) {
         waiting_ = true;
         since_ = now_ms;
         peer_ = peer;
+        kind_ = kind;
+        class_since_ = now_ms;
     } else if (!waiting && waiting_) {
         waiting_ = false;
         episodes_.push_back({since_, now_ms, peer_});
@@ -63,10 +71,13 @@ void NetStallLedger::observe(const std::uint64_t now_ms, const bool waiting, con
 void NetStallLedger::trim(const std::uint64_t now_ms) {
     while (!episodes_.empty() && now_ms > episodes_.front().end && now_ms - episodes_.front().end > net_perf_history_ms)
         episodes_.pop_front();
+    while (!classified_.empty() && now_ms > classified_.front().end && now_ms - classified_.front().end > net_perf_history_ms)
+        classified_.pop_front();
 }
 
 void NetStallLedger::reset() {
     episodes_.clear();
+    classified_.clear();
     waiting_ = false;
 }
 
@@ -84,11 +95,19 @@ NetStallSnapshot NetStallLedger::snapshot(const std::uint64_t now_ms) const {
         if (length >= out.longest_ms_last_second) { out.longest_ms_last_second = length; out.longest_peer_last_second = episode.peer; }
     };
     for (const Episode& episode : episodes_) add(episode);
+    const auto classify = [&](const Episode& episode) {
+        if (episode.end < second_from) return;
+        const auto index = static_cast<std::size_t>(episode.kind);
+        ++out.stalls_by_kind[index];
+        out.ms_by_kind[index] += episode.end - std::max(episode.start, second_from);
+    };
+    for (const auto& episode : classified_) classify(episode);
     if (waiting_) {
         out.waiting = true;
         out.wait_peer = peer_;
         out.wait_ms = now_ms > since_ ? now_ms - since_ : 0;
-        add({since_, std::max(now_ms, since_), peer_});
+        add({since_, std::max(now_ms, since_), peer_, kind_});
+        classify({class_since_, std::max(now_ms, class_since_), peer_, kind_});
     }
     return out;
 }
@@ -130,7 +149,15 @@ std::string net_summary_line(const NetPerfReport& report) {
     else out << '-';
     out << " wait_ms=" << (stall.waiting ? stall.wait_ms : 0) << " stalls_per_s=" << stall.stalls_last_second
         << " stalled_ms_1s=" << stall.stalled_ms_last_second << " longest_ms_10s=" << stall.longest_ms_10s
-        << " frame_ms=" << fixed("%.1f", report.frame_ms) << " sim_ms=" << fixed("%.1f", report.sim_ms) << " peers=";
+        << " frame_ms=" << fixed("%.1f", report.frame_ms) << " sim_ms=" << fixed("%.1f", report.sim_ms);
+    if (report.input_delay_ticks) out << " lead_ticks=" << report.lead_ticks << " input_delay_ms="
+        << fixed("%.1f", static_cast<double>(report.input_delay_ticks) * 1000.0 / 30.0)
+        << " local_tick_ms=" << fixed("%.1f", report.local_tick_ms);
+    constexpr std::array names{"batch", "queued", "hash", "timing", "other"};
+    for (std::size_t index = 0; index < names.size(); ++index)
+        out << " wait_" << names[index] << "_s=" << stall.stalls_by_kind[index] << " wait_" << names[index] << "_ms=" << stall.ms_by_kind[index];
+    out << " poll_gap_max_ms=" << fixed("%.1f", report.max_poll_gap_ms);
+    out << " peers=";
     if (report.peers.empty()) out << '-';
     for (std::size_t index = 0; index < report.peers.size(); ++index) {
         const NetPeerLink& peer = report.peers[index];
@@ -138,6 +165,9 @@ std::string net_summary_line(const NetPerfReport& report) {
         if (!peer.measured) out << "unmeasured";
         else out << "rtt_ms=" << fixed("%.0f", peer.rtt_ms) << ",jitter_ms=" << fixed("%.0f", peer.jitter_ms)
                  << ",loss_pct=" << fixed("%.1f", peer.loss_pct);
+        if (peer.input_tick_ms > 0.0) out << ",input_tick_ms=" << fixed("%.1f", peer.input_tick_ms);
+        if (peer.receipt_samples) out << ",receive_consume_avg_ms=" << fixed("%.1f", peer.receipt_avg_ms)
+            << ",receive_consume_max_ms=" << fixed("%.1f", peer.receipt_max_ms);
     }
     return out.str();
 }
@@ -153,12 +183,23 @@ std::string net_report_json(const NetPerfReport& report) {
     out << ", \"wait_ms\": " << (stall.waiting ? stall.wait_ms : 0) << ", \"stalls_per_s\": " << stall.stalls_last_second
         << ", \"stalled_ms_1s\": " << stall.stalled_ms_last_second << ", \"longest_ms_10s\": " << stall.longest_ms_10s
         << ", \"longest_peer_10s\": " << stall.longest_peer_10s << ", \"frame_ms\": " << fixed("%.3f", report.frame_ms)
-        << ", \"sim_ms\": " << fixed("%.3f", report.sim_ms) << ", \"peers\": [";
+        << ", \"sim_ms\": " << fixed("%.3f", report.sim_ms)
+        << ", \"lead_ticks\": " << report.lead_ticks << ", \"input_delay_ticks\": " << report.input_delay_ticks
+        << ", \"input_delay_ms\": " << fixed("%.3f", static_cast<double>(report.input_delay_ticks) * 1000.0 / 30.0)
+        << ", \"local_tick_ms\": " << fixed("%.3f", report.local_tick_ms)
+        << ", \"poll_gap_max_ms\": " << fixed("%.3f", report.max_poll_gap_ms) << ", \"wait_classes\": [";
+    for (std::size_t index = 0; index < stall.stalls_by_kind.size(); ++index)
+        out << (index ? ", " : "") << "{\"stalls_per_s\": " << stall.stalls_by_kind[index] << ", \"ms\": " << stall.ms_by_kind[index] << "}";
+    out << "], \"peers\": [";
     for (std::size_t index = 0; index < report.peers.size(); ++index) {
         const NetPeerLink& peer = report.peers[index];
         out << (index == 0 ? "" : ", ") << "{\"peer\": " << peer.peer << ", \"route\": \"" << net_route_name(peer.route) << "\", \"route_lossy\": " << (peer.route_lossy ? "true" : "false") << ", \"measured\": " << (peer.measured ? "true" : "false")
             << ", \"rtt_ms\": " << fixed("%.1f", peer.rtt_ms) << ", \"jitter_ms\": " << fixed("%.1f", peer.jitter_ms)
-            << ", \"loss_pct\": " << fixed("%.1f", peer.loss_pct) << "}";
+            << ", \"loss_pct\": " << fixed("%.1f", peer.loss_pct)
+            << ", \"input_tick_ms\": " << fixed("%.3f", peer.input_tick_ms)
+            << ", \"receipt_samples\": " << peer.receipt_samples
+            << ", \"receive_consume_avg_ms\": " << fixed("%.3f", peer.receipt_avg_ms)
+            << ", \"receive_consume_max_ms\": " << fixed("%.3f", peer.receipt_max_ms) << "}";
     }
     out << "]}";
     return out.str();

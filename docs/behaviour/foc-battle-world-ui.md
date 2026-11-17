@@ -105,6 +105,13 @@ Nothing here reaches the simulation.
   layout for multiple heads: stacked flagship identities and the hero tray
   remain separate work (legacy EAWR-1194).
 
+The viewer reads `Health_Bar_Scale`, `Min_Health_Bar_Scale` and `Health_Bar_Spacing`
+from effective GameConstants XML (WSU-51/53). Team brackets replace the bounds lift
+with `Team_Healthbar_Offset` (WSU-54); squadron containers still have no space bracket.
+Missing or malformed constants are diagnosed and their dependent display is omitted.
+Selection reads both authored drag distances for box drawing, release and the
+right-button compass/cancel classification (selection S-2/O-2).
+
 ## Squadron icon
 
 - WU-49 (retail capture, fighter arrival comparison, 2026-10-04). During hyperspace
@@ -122,6 +129,17 @@ Nothing here reaches the simulation.
   `Color` otherwise, as in a campaign battle (WGT-120). While the squadron is selected or the pointer is over the icon the frame is
   the yellow `i_button_unit_frame_gripper_select`, untinted (project: the footage shows it bright
   yellow).
+  The named components supply the live viewer geometry: `st_grab_bar` supplies
+  `Scale` and normal/hover/selected frame textures, and `Upper_Effect_Offset`
+  places the garrison overlay (+Y up). `st_health_bar` supplies `Scale`, `Offset`,
+  `Bar_Texture_Name`, `Bar_Overlay_Name`, `Max_Bar_Level` and `Smooth_Bar`.
+  Back and overlay sizes come from their atlas regions or loose textures; the overlay chooses
+  ceil(fraction x maximum level), clamped to its authored list, and smooth bars
+  narrow that overlay from its left edge (CARD-4). `st_garrison_icon` supplies
+  the flag texture and its native size for both squadron icons and unit brackets.
+  These consumers establish coverage only for these components, not other
+  command-bar contexts. Selection-material texture resolution remains a separate gap.
+
 - WU-22 (walk [WSU-32](walks/sensors-ui.md)). The icon's bar shows the squadron's health: the mean
   display health percent (WSU-52) of the squadron's current craft. A lost craft leaves the mean; it
   does not count as empty (debug build).
@@ -445,6 +463,19 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
   then toggling between half and full size every three, whether or not the pointer is over the unit.
   The flash ends early when the hardpoint is destroyed. The cursor keeps its plain attack look (no
   hardpoint cursor).
+- WU-60 (debug build + rig capture; attack-order target flash). After the local player orders an attack on an object
+  (and after a targeted ability on an enemy object), the client lights the target model up: the whole model's light
+  scale RGB is multiplied by 1 + `GUI_Flash_Level` x remaining/`GUI_Rapid_Flash_Duration`, so a pulse starts at
+  1 + level (4.0 in stock data) and falls linearly to 1. The pulse restarts twice: three pulses, then nothing (the
+  count of 3 is fixed by the game; the slow `GUI_Flash_Duration` single flash is the selection flash and is not used
+  here). Alpha is untouched. A squadron target flashes every member. It is local presentation only: it runs in the
+  order's UI path, never through the event queue, so the other players and replays see nothing, and it stacks with
+  the hardpoint reticle flash (WU-42). It applies only while the object's model is drawn in tactical mode and the
+  object is selectable. Timing, observed on a 30 fps rig recording of a right click on an enemy cruiser: the game's
+  clock moves in whole logical frames and a pulse ends once the elapsed time is strictly past its length, so the
+  stock 0.1 s pulse spans four frames (multipliers 4, 3, 2, 1 of RGB), the three pulses 12 frames (0.4 s); the
+  remake times it on the presented tick clock the same way. One recording: the exact frame counts are unverified
+  at other frame rates.
 - WU-51 (debug build; retail station-upgrade hover). A targetable reticle under the pointer
   immediately shows its hardpoint's `Tooltip_Text`, resolved through the game's text database,
   followed by ` - N%`. N is the nearest integer to 100 times current health divided by maximum

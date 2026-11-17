@@ -28,6 +28,12 @@ bool erase_control_actor(PoliticalControlSetup&, EntityId);
 // of ground-combat participation. A nonallied destination retains WGM-106.
 [[nodiscard]] core::Result<bool> can_land_transport(const PoliticalControlSetup&,
     const FleetControlSetup&, PlayerId player, PlayerId planet_owner, FleetMember, const MovementSetup*);
+// WGM-39/42: a surface's ground holder is its ground base owner, else the owner of its first landed force
+// (zero for an empty or unknown surface). Occupation is independent of combat capability.
+[[nodiscard]] PlayerId surface_ground_holder(const PoliticalControlSetup&, PlanetId planet);
+// WGM-42/107: defense is a ground base, otherwise the first live ground-capable landed entry.
+[[nodiscard]] bool surface_defended_against(const PoliticalControlSetup&, PlayerId player, PlanetId planet,
+    const MovementSetup* = nullptr);
 // WGM-C01/C03 and WGM-27: live occupation, independent of political ownership.
 [[nodiscard]] core::Result<PlayerId> orbital_occupation(const PoliticalControlSetup*,
     PlanetId, std::span<const Fleet>, const MovementSetup*, std::span<const CensusObject> = {});

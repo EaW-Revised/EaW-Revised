@@ -16,10 +16,12 @@ inline constexpr std::string_view match_options_domain = "EAWR-MATCH-OPTIONS-1";
 inline constexpr std::uint32_t match_speed_choices = 5; // MP-06
 // MP-06 / MP-U1: local speed requests share ClockThrottle's budget (#4574).
 // Ticks are session ticks (30 per session second), as in ClockThrottle. An accepted tick expires once its age
-// exceeds the window.
+// exceeds the window. A request back to the default speed is always accepted and spends nothing: the budget limits
+// leaving normal speed, never returning to it (owner online test 2026-11-17: the 2x requester could not end it).
 class MatchSpeedWindow {
 public:
-    bool accept(std::uint64_t session_tick) {
+    bool accept(std::uint64_t session_tick, bool to_default = false) {
+        if (to_default) return true;
         while (!accepted_.empty() && session_tick >= accepted_.front() && session_tick - accepted_.front() > ClockThrottle::window_ticks)
             accepted_.pop_front();
         if (accepted_.size() >= ClockThrottle::speed_changes_per_window) return false;

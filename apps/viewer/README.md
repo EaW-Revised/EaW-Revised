@@ -448,6 +448,8 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   Timers and counters only; the hashes do not change.
 - `--eawr-live-speed 0..4` (default 2): the tactical speed setting, 10, 20, 30, 45 or 60 ticks
   a second ([time controls](../../docs/behaviour/tactical-time-controls.md) TM-01).
+- `--eawr-live-max-rate <1..1000>` (test knob): a ceiling on this viewer's real-time pacing, so a
+  multiplayer fixture can stand in for a machine that cannot reach the shared rate. Pacing only.
 
 The time panel's pause and fast-forward buttons work as in FoC ([time
 controls](../../docs/behaviour/tactical-time-controls.md)): pause stops the simulation while the

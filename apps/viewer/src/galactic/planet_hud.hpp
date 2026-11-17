@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -443,6 +444,22 @@ struct StatusRowOrigin final { double x{}, y{}; };
 // WGSI-11: the smuggler icon's tooltip fills its authored text's %d with the siphoned credits rounded to the nearest
 // whole credit (halves away from zero).
 [[nodiscard]] std::int64_t siphon_tooltip_credits(sim::math::Fixed siphoned) noexcept;
+
+// WGCI-1: the encyclopedia popup of a per-type corruption icon. `type` is the published corruption type (0 none, then the
+// eight authored types in order), so the authored lists are read at `type - 1`. The header icon is the type's entry of the
+// mission-requirement icon list, the title the type's entry of the planet-icon encyclopedia name list and the body its
+// entry of the description list; a list that is too short for the type leaves that part empty (a mod may author fewer),
+// and a type without a name opens nothing.
+struct CorruptionIconEncyclopedia final {
+    std::string icon, name_key, description_key;
+    friend bool operator==(const CorruptionIconEncyclopedia&, const CorruptionIconEncyclopedia&) = default;
+};
+[[nodiscard]] std::optional<CorruptionIconEncyclopedia> corruption_icon_encyclopedia(std::uint8_t type,
+    const std::vector<std::string>& requirement_icons, const std::vector<std::string>& names,
+    const std::vector<std::string>& descriptions);
+// WGCI-2: the plain tooltip line of the information icon (an uncorrupted planet while the local faction benefits from
+// corruption); the per-type icon has no plain tooltip.
+inline constexpr std::string_view corruption_information_tooltip_key = "TEXT_TOOLTIP_CLICK_FOR_INFO";
 
 // GHUDL-18: the filter controls the authored icon; unknown ownership uses grey. #6053: retail builds the icon from
 // the command-bar mega texture only (debug build: no atlas entry, no quad), so a

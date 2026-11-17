@@ -90,6 +90,7 @@ struct CollisionMesh final {
     std::string name;
     std::uint32_t hardpoint{no_index};
     IndexedCollisionTriangles triangles;
+    bool pose_visible{true}; // FD-10: reference-pose renderable eligibility
     bool operator==(const CollisionMesh&) const = default;
 };
 

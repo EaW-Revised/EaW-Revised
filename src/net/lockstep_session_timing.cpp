@@ -21,7 +21,12 @@ std::uint64_t LockstepSession::input_horizon() const noexcept {
 }
 
 core::Result<void> LockstepSession::notify_timing() {
-    if (monitor_) return monitor_->on_input_delay(options_.input_delay, (input_horizon() - 2) / 2);
+    if (monitor_) {
+        if (auto notified = monitor_->on_input_delay(options_.input_delay, (input_horizon() - 2) / 2); !notified) return notified;
+        auto retained = options_.input_delay;
+        if (adapter_->completed_tick() < retain_until_) retained = std::max(retained, retained_delay_);
+        return monitor_->on_activated_input_delay(options_.input_delay, retained);
+    }
     return core::Result<void>::success();
 }
 
@@ -41,7 +46,7 @@ core::Result<void> LockstepSession::replay_timing_control(std::span<const std::u
     retained_delay_ = options_.input_delay;
     retain_until_ = event.tick + sealed_input_horizon(retained_delay_);
     options_.input_delay = event.delay;
-    const auto cadence = 64 * std::max<std::uint64_t>(1, event.delay / 2);
+    const auto cadence = options_.adaptive_timing->responsive ? 8 : 64 * std::max<std::uint64_t>(1, event.delay / 2);
     next_policy_tick_ = (event.tick / cadence + 1) * cadence;
     last_timing_ = event;
     timing_.reset();
@@ -171,7 +176,7 @@ core::Result<void> LockstepSession::advance_timing() {
             retained_delay_ = options_.input_delay;
             retain_until_ = tick + sealed_input_horizon(retained_delay_);
             options_.input_delay = timing_->event.delay;
-            const auto cadence = 64 * std::max<std::uint64_t>(1, options_.input_delay / 2);
+            const auto cadence = options_.adaptive_timing->responsive ? 8 : 64 * std::max<std::uint64_t>(1, options_.input_delay / 2);
             next_policy_tick_ = (tick / cadence + 1) * cadence;
             last_timing_ = timing_->event;
             timing_.reset();
@@ -182,7 +187,8 @@ core::Result<void> LockstepSession::advance_timing() {
     if (self_ != options_.adaptive_timing->host || tick < next_policy_tick_ || tick < retain_until_ || agreement_ || held_
         || checkpoint_ || !deferred_departures_.empty())
         return notify_timing();
-    const auto cadence = 64 * std::max<std::uint64_t>(1, options_.input_delay / 2);
+    const auto slow_cadence = 64 * std::max<std::uint64_t>(1, options_.input_delay / 2);
+    const auto cadence = options_.adaptive_timing->responsive ? 8 : slow_cadence;
     // Catch-up and a retained transition can pass a policy boundary. Rejoin on
     // the next global 64R boundary, rather than inventing a wall-clock policy pass.
     if (tick % cadence != 0) {
@@ -213,7 +219,17 @@ core::Result<void> LockstepSession::advance_timing() {
         }
     }
     const auto delay = adaptive_input_delay(worst, options_.adaptive_timing->broadband);
-    if (delay == options_.input_delay) return notify_timing();
+    if (delay >= options_.input_delay) {
+        lower_delay_samples_ = 0;
+        lower_delay_candidate_ = 0;
+        if (delay == options_.input_delay) return notify_timing();
+    } else if (options_.adaptive_timing->responsive) {
+        // A short recovery of the link must not repeatedly shrink and regrow the pipeline.
+        if (tick % slow_cadence != 0) return notify_timing();
+        if (lower_delay_candidate_ != delay) { lower_delay_candidate_ = delay; lower_delay_samples_ = 0; }
+        if (++lower_delay_samples_ < 4) return notify_timing();
+        lower_delay_samples_ = 0;
+    }
     const auto effective = tick + 2 * sealed_input_horizon(std::max(delay, options_.input_delay)) + 1;
     if (effective >= options_.final_tick_count) return notify_timing();
     timing_ = TimingAgreement{{effective, delay}, std::vector<bool>(seats_.size()), true, last_now_.value_or(0)};

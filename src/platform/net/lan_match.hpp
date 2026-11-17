@@ -44,6 +44,7 @@ struct LanView {
     std::string peer_name{"Opponent"}, message, bundle_path, setup_summary;
     bool mod_review_pending{};
     std::vector<std::uint8_t> host_mod_description;
+    std::string setup_difference; // Full local offer/snapshot summary retained beside a failure replay.
     // Guest: the host's newest mod description (a refresh after the room opened, e.g. its content digests finished) and how many
     // refreshes arrived. Display only; never part of the match.
     std::vector<std::uint8_t> host_mod_refresh;
@@ -66,6 +67,8 @@ struct LanView {
     // #4043: per remote seat link quality and the lockstep wait ledger for the F3 overlay's network section. Presentation only.
     std::vector<presentation::ui::NetPeerLink> net_peers;
     presentation::ui::NetStallSnapshot net_stall;
+    std::uint64_t net_input_delay{}, net_lead_ticks{};
+    double net_local_tick_ms{}, net_poll_gap_ms{};
     net::MatchOptions options{};
     bool clock_paused{};
     std::uint64_t session_tick{}, world_tick{}, pause_change_tick{};
@@ -316,6 +319,7 @@ public:
     // Opt-in for the staging screen. The legacy setup screen keeps its existing path.
     virtual bool lobby_enabled() const { return false; }
     virtual void configure_lobby(std::string, std::uint32_t, std::vector<skirmish::SetupMap>, LanLobbyBuilder) {}
+    virtual void configure_skirmish_content(std::function<core::Result<core::PreparedContentIdentity>()>) {}
     virtual bool lobby_select(net::LobbySelection) { return false; }
     virtual bool lobby_assign(net::PeerIndex, net::LobbySelection) { return false; }
     virtual bool lobby_game(const MatchSetup&) { return false; }

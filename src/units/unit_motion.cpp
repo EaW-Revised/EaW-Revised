@@ -601,6 +601,7 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const
     std::optional<core::Diagnostic> error;
 
     tactical::MotionTable table;
+    table.prediction_paths = tables.constants.prediction_paths;
     auto arc = sim::math::divide(Fixed::from_raw(360 * Fixed::scale), *rotations);
     if (!arc) return Result::failure(failure("MaxRotationsSpace: " + arc.error().message));
     table.rules.arc_degrees = arc.value();

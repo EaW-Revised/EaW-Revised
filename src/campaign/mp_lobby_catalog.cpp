@@ -123,7 +123,11 @@ sim::galactic::MpLobbyCampaign make_row(const data::galactic::GalacticData& data
         // A single-player entry names its human faction; every other faction is an AI seat.
         const bool playable = faction.is_playable.value_or(false) && !neutral
             && (multiplayer || upper(faction.name) == upper(campaign.starting_active_player));
-        row.factions.push_back({next, next, 0, faction.name, playable, neutral});
+        // GCMP-AI-01/03: the controller an AI seat on this row acquires, as the start selects it (galactic_ai_runtime).
+        const bool assigned = std::any_of(campaign.ai_player_control.begin(), campaign.ai_player_control.end(),
+            [&](const auto& pair) { return upper(pair.faction) == upper(faction.name); });
+        const bool ai_controller = !neutral && ((multiplayer && faction.is_playable.value_or(false)) || assigned);
+        row.factions.push_back({next, next, 0, faction.name, playable, neutral, ai_controller});
     }
     return row;
 }
