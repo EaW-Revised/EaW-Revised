@@ -568,6 +568,52 @@ def run_osslsigncode(exe: str, path: Path, ca_file: Path) -> tuple[bool, str]:
     return done.returncode == 0, done.stdout + done.stderr
 
 
+_OSSL_ESCAPE = re.compile(r"\\x([0-9a-fA-F]{2})")
+_RDN_SPLIT = re.compile(r"/(?=[A-Za-z][A-Za-z0-9.]*=)")
+
+
+def decode_ossl_text(text: str) -> str:
+    """osslsigncode prints every non-printable byte of a certificate name as a literal `\\xNN`, and the O and CN of an
+    Artifact Signing certificate are UTF-16BE BMPStrings (`\\x00E\\x00r...`). Turn the escapes back into bytes, drop the
+    NULs of the 16-bit characters and read the rest as UTF-8, or Latin-1 when it is not valid UTF-8."""
+    raw = _OSSL_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), text).replace("\0", "")
+    try:
+        return raw.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return raw
+
+
+def signer_subjects(output: str) -> list[str]:
+    """The decoded `Subject:` lines of the signer's own certificate in `osslsigncode verify` output: the lines under
+    "Signer's certificate:" up to the next blank line. The chain listing, issuers and timestamp data are not read, so
+    no other certificate can stand in for the signer."""
+    subjects: list[str] = []
+    in_signer = False
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Signer's certificate:"):
+            in_signer = True
+        elif in_signer and not stripped:
+            in_signer = False
+        elif in_signer and stripped.startswith("Subject:"):
+            subjects.append(decode_ossl_text(stripped[len("Subject:"):].strip()))
+    return subjects
+
+
+def signer_matches_subject(output: str, expected: str) -> bool:
+    """True when the O or CN of a signer certificate subject equals or contains `expected` (an `O=`/`CN=` component
+    written out in full is accepted too). Other name parts (country, city) and other certificates never count."""
+    expected = expected.strip()
+    if not expected:
+        return False
+    for subject in signer_subjects(output):
+        for part in _RDN_SPLIT.split(subject.lstrip("/")):
+            key, _, value = part.partition("=")
+            if key.strip().upper() in ("CN", "O") and (expected in value or expected == part.strip()):
+                return True
+    return False
+
+
 def verify(release_dir: Path, final_dir: Path, osslsigncode: str = "", require_ossl: bool = False, subject: str = "",
            runner: Callable[[str, Path, Path], tuple[bool, str]] = run_osslsigncode) -> list[str]:
     """Every problem found, empty when the final set is consistent. The expected signer `subject` is required: the
@@ -633,7 +679,7 @@ def verify(release_dir: Path, final_dir: Path, osslsigncode: str = "", require_o
                             ok, text = runner(osslsigncode, target, ca_file)
                         if not ok:
                             problems.append(f"{name}: osslsigncode refused {rel}")
-                        elif subject.strip() and subject not in text:
+                        elif subject.strip() and not signer_matches_subject(text, subject):
                             problems.append(f"{name}: {rel} is not signed by the expected subject")
                     new_sha = sha256_bytes(data)
                 elif kind in ("never", "foreign", "unknown"):

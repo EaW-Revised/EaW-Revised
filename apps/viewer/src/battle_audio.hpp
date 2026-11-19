@@ -234,6 +234,7 @@ private:
         const audio::SfxEvent* spotted{};
         bool squadron{};
         bool base{};
+        bool selectable{}; // the type authors the SELECTABLE behaviour: a team container is then itself a selected speaker (BA-24)
         bool community_property{};
         const audio::SfxEvent* sold{};
         std::vector<const audio::SfxEvent*> hardpoint_deaths;           // HardPoints order

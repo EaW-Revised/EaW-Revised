@@ -236,6 +236,12 @@ from this survey.
 | --- | --- | --- |
 | TCFA-18 | A registered ordinary space body carries its effective `Attack_Category_Restrictions` into non-direct damage retaliation. A matching attacker category refuses the response before target suitability; overriding the inherited mask with a disjoint category admits the same otherwise suitable attacker. This qualification covers `SpaceUnit`, `Template`, `SpecialStructure` and `SecondaryStructure` bodies in the loaded space closure, without extending projectile, menu or land dispatch. | WTA-29; debug build TCAI-E03; common body mask loading, combat-profile binding and `retaliation_state`. The synthetic XML contract checks both inheritance and override through the actual retaliation consumer. |
 
+## Bribe price and tactical sale percentage by class
+
+| Rule | Finding and registry decision | Evidence |
+| --- | --- | --- |
+| TCFA-19 | `Tactical_Bribe_Cost` and the two bribe modifiers decode from the effective object for every registered space class spelling in the loaded space closure, inherited or overridden, and the shared cost query applies the corrupted or uncorrupted modifier. Those spellings are `partial` with the existing live-handler gap; land, hero-company and unregistered unit classes keep their `todo` rows. `Tactical_Sell_Percentage` on a `SpecialStructure` that carries the tactical-sale behavior reaches the pad sale table that the refund reads, so that pair is `applied`; its land classes stay `todo`. | WGCH-205, WBP-31; the synthetic class fixture in `unit_tables_synthetic_loader_tests.cpp` covers inheritance and override through the loader, the cost query and the skirmish economy sale table. |
+
 ## Chase ranges and attacker extension on ships and containers
 
 | Rule | Finding and registry decision | Evidence |

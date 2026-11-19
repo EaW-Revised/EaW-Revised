@@ -931,6 +931,16 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
     }
     if (!selected) return;
     const TypeSounds& speaker = *selected;
+    // BA-24: the type's select, move and single-attack getters take the leading craft's cue first and fall back to the cue
+    // of the type they were called on, the team container's. Only a container that authors SELECTABLE is a selected object
+    // (an ordinary squadron entry is not), so only then is that fallback reachable.
+    const TypeSounds* container = nullptr;
+    if (const auto seen = last_seen_.find(chosen); seen != last_seen_.end()) {
+        if (const auto type = types_.find(seen->second.type);
+            type != types_.end() && &type->second != &speaker && type->second.selectable) {
+            container = &type->second;
+        }
+    }
     const bool group = acknowledgement.units.size() > 1;
     // SND-77: the speaking unit has any ability switched on.
     bool ability_enabled = false;
@@ -946,6 +956,7 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
     case BattleInput::Acknowledgement::Kind::select_screen:
     case BattleInput::Acknowledgement::Kind::select:
         line = audio::ability_variant(ability_enabled, speaker.select_ability, speaker.select);
+        if (!line && container) line = container->select;
         break;
     case BattleInput::Acknowledgement::Kind::move:
         {
@@ -976,6 +987,7 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
         line = audio::move_response(asteroid, nebula, group, speaker.move_asteroid,
                                    speaker.move_nebula, speaker.group_move,
                                    audio::ability_variant(ability_enabled, speaker.move_ability, speaker.move));
+        if (!line && container) line = container->move;
         kind = "move";
         if (line && line == speaker.move_asteroid && asteroid) kind = "move_asteroid";
         else if (line && line == speaker.move_nebula && !asteroid && nebula) kind = "move_nebula";
@@ -984,6 +996,7 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
     case BattleInput::Acknowledgement::Kind::attack:
         line = group && speaker.group_attack != nullptr ? speaker.group_attack
             : audio::ability_variant(ability_enabled, speaker.attack_ability, speaker.attack);
+        if (!line && container) line = container->attack;
         kind = "attack";
         if (const auto target = entity_types_.find(acknowledgement.target); target != entity_types_.end()) {
             const auto type = types_.find(target->second);

@@ -456,6 +456,9 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
         const auto& behavior = type.footprint.hazard;
         sounds.base = std::any_of(behavior.behavior.begin(), behavior.behavior.end(), base_behavior)
             || std::any_of(behavior.space_behavior.begin(), behavior.space_behavior.end(), base_behavior);
+        const auto selectable_behavior = [](const std::string& name) { return same(name, "SELECTABLE"); };
+        sounds.selectable = std::any_of(behavior.behavior.begin(), behavior.behavior.end(), selectable_behavior)
+            || std::any_of(behavior.space_behavior.begin(), behavior.space_behavior.end(), selectable_behavior);
         sounds.community_property = type.community_property || type.station_community_property;
         if (const auto sighting = value.single("Play_SFXEvent_On_Sighting")) {
             data::tag_trace::used(sighting->value);

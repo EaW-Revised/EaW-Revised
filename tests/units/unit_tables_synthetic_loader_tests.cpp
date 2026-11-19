@@ -403,8 +403,59 @@ static void space_ai_class_consumers() {
     }
 }
 
+// WGCH-205 / WBP-31: the bribe price and sale percentage read the effective object, not its class spelling.
+static void space_bribe_and_sale_class_consumers() {
+    namespace t = eawr::sim::tactical;
+    const auto q = [](const int value) { return Fixed::from_integer(value).value(); };
+    for (const std::string spelling : {"SpecialStructure", "Template", "DummyStructure", "Freighter", "GenericHeroUnit",
+        "HeroUnit", "Mission_Object", "Props_Wave", "SpaceFauna", "TransportUnit"}) {
+        for (const bool overridden : {false, true}) {
+            TempTree tree;
+            auto xml = units_xml("3600", "Unit_Select_Test");
+            xml.insert(xml.rfind("</Objects>"), "<Template Name=\"Price_Parent\">"
+                "<Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>"
+                "<Behavior>SELECTABLE, TACTICAL_SELL</Behavior>"
+                "<Tactical_Bribe_Cost>100</Tactical_Bribe_Cost>"
+                "<Bribe_Modifier_On_Corrupted_Planets>0.5</Bribe_Modifier_On_Corrupted_Planets>"
+                "<Bribe_Modifier_On_Uncorrupted_Planets>1.5</Bribe_Modifier_On_Uncorrupted_Planets>"
+                "<Tactical_Sell_Percentage>0.25</Tactical_Sell_Percentage></Template>"
+                "<" + spelling + " Name=\"Price_Target\"><Variant_Of_Existing_Type>Price_Parent</Variant_Of_Existing_Type>"
+                + (overridden ? "<Tactical_Bribe_Cost>400</Tactical_Bribe_Cost>"
+                    "<Tactical_Sell_Percentage>0.75</Tactical_Sell_Percentage>" : "")
+                + "</" + spelling + ">");
+            write_fixture(tree.root, xml);
+            const auto loaded = load(tree.root, models(-40.0F), "Normal_Default",
+                eawr::sim::tactical::BattleDomain::space, {"Price_Target"});
+            const auto* unit = loaded.tables ? loaded.tables->find("Price_Target") : nullptr;
+            expect(unit != nullptr, "WGCH-205: bribe and sale fixture loads each class spelling: " + spelling);
+            if (!unit) continue;
+            const auto price = overridden ? 400 : 100;
+            expect(unit->tactical_bribe_cost == q(price) && unit->tactical_sale
+                && unit->tactical_sell_percentage == Fixed::from_decimal(overridden ? "0.75" : "0.25").value(),
+                "WGCH-205/WBP-31: inherited and overridden price and sale percentage decode for " + spelling);
+            const auto corrupted = eawr::units::tactical_bribe_cost(*unit, *unit, true);
+            const auto clean = eawr::units::tactical_bribe_cost(*unit, *unit, false);
+            expect(corrupted && clean && corrupted.value() == q(price / 2) && clean.value() == q(price * 3 / 2),
+                "WGCH-205: the cost query applies the authored corrupted and uncorrupted modifiers for " + spelling);
+            // The sale percentage reaches the skirmish economy table through the same loaded type.
+            eawr::skirmish::SkirmishStart start;
+            start.setup.players = {{1, 1, eawr::skirmish::faction_id("Rebel"), t::player_flag_commandable}};
+            const auto rules = eawr::skirmish::economy_rules(start, {}, *loaded.tables);
+            expect(static_cast<bool>(rules), "WBP-31: sale fixture economy binds for " + spelling);
+            if (!rules) continue;
+            const auto target_id = eawr::assets::object_type_crc("Price_Target");
+            const auto sale = std::find_if(rules.value().pad_sales.begin(), rules.value().pad_sales.end(),
+                [&](const auto& entry) { return entry.type == target_id; });
+            expect(sale != rules.value().pad_sales.end()
+                && sale->percentage == Fixed::from_decimal(overridden ? "0.75" : "0.25").value(),
+                "WBP-31: the authored sale percentage reaches the economy sale table for " + spelling);
+        }
+    }
+}
+
 void synthetic_tables() {
     space_ai_class_consumers();
+    space_bribe_and_sale_class_consumers();
     template_durability_tables();
     // WBR-01: renamed live bodies own the automatic reveal source, not a purchase template.
     for (const auto& multiplier : {"1.75", "0.25", "1", "0", "-2"}) {

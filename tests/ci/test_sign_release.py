@@ -31,6 +31,43 @@ ENV = {"SIGNING_ENDPOINT": "https://weu.codesigning.azure.net", "SIGNING_ACCOUNT
 SUBJECT = "CN=Example Maintainer"
 
 
+def ossl_escape(name: str) -> str:
+    """How osslsigncode prints a BMPString: every UTF-16BE byte as a literal \\xNN-style escape or character."""
+    return "".join("\\x00" + c for c in name)
+
+
+def ossl_output(name: str) -> str:
+    """osslsigncode verify output shaped like a real run, with the signer's name as a BMPString."""
+    escaped = ossl_escape(name)
+    return (f"Signer's certificate:\n\tSigner #0:\n\t\tSubject: /C=BE/O={escaped}/CN={escaped}\n"
+            "\t\tIssuer : /C=US/O=Microsoft Corporation/CN=Example CA\n\nNumber of certificates: 1\n")
+
+
+# the real signer block and chain listing of a release-mode run (names are BMPStrings)
+BMP_NAME = "Ernst@Work BV"
+BMP_ESCAPED = ossl_escape(BMP_NAME)
+BMP_OUTPUT = f"""Signature Index: 0  (Primary Signature)
+Message digest algorithm  : SHA256
+
+Signer's certificate:
+\tSigner #0:
+\t\tSubject: /C=BE/ST=Antwerpen/L=Schoten/O={BMP_ESCAPED}/CN={BMP_ESCAPED}
+\t\tIssuer : /C=US/O=Microsoft Corporation/CN=Microsoft ID Verified CS EOC CA 03
+\t\tSerial : 33000A9F9DBA6B7198855FB4750000000A9F9D
+
+Number of certificates: 3
+\tSigner #0:
+\t\tSubject: /C=BE/ST=Antwerpen/L=Schoten/O={BMP_ESCAPED}/CN={BMP_ESCAPED}
+\t\tIssuer : /C=US/O=Microsoft Corporation/CN=Microsoft ID Verified CS EOC CA 03
+\t------------------
+\tSigner #1:
+\t\tSubject: /C=US/O=Microsoft Corporation/CN=Microsoft ID Verified CS EOC CA 03
+\t\tIssuer : /C=US/O=Microsoft Corporation/CN=Microsoft ID Verified Code Signing PCA 2021
+
+Signature verification: ok
+"""
+
+
 def make_pe(payload: bytes = b"code", overlay: bytes = b"", signed: bool = False) -> bytes:
     """A minimal PE32+ file: one 0x200-byte section, optional overlay, optionally already carrying a fake signature."""
     head = bytearray(0x200)
@@ -366,14 +403,18 @@ class SignReleaseTests(unittest.TestCase):
         for empty in ("", "  "):
             problems = sign_release.verify(release, final, subject=empty)
             self.assertTrue(any("no expected signer subject" in p for p in problems), problems)
-        problems = sign_release.verify(release, final, "ossl", True, runner=lambda exe, path, ca: (True, "Subject: anything"))
+        problems = sign_release.verify(release, final, "ossl", True, runner=lambda exe, path, ca: (True, ossl_output("anything")))
         self.assertTrue(any("no expected signer subject" in p for p in problems), problems)
         wrong = sign_release.verify(release, final, "ossl", True, SUBJECT,
-                                    runner=lambda exe, path, ca: (True, "Subject: CN=Someone Else"))
+                                    runner=lambda exe, path, ca: (True, ossl_output("Someone Else")))
         self.assertTrue(any("not signed by the expected subject" in p for p in wrong), wrong)
         right = sign_release.verify(release, final, "ossl", True, SUBJECT,
-                                    runner=lambda exe, path, ca: (True, f"Subject: {SUBJECT}"))
+                                    runner=lambda exe, path, ca: (True, ossl_output("Example Maintainer")))
         self.assertEqual(right, [])
+        # the real output prints the certificate's UTF-16 name as \xNN escapes
+        bmp = sign_release.verify(release, final, "ossl", True, BMP_NAME,
+                                  runner=lambda exe, path, ca: (True, BMP_OUTPUT))
+        self.assertEqual(bmp, [])
         # the command line: no --subject and no SIGNING_SUBJECT fails, either source passes
         with mock.patch.object(sign_release.shutil, "which", return_value=None):
             with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
@@ -382,6 +423,34 @@ class SignReleaseTests(unittest.TestCase):
                 self.assertEqual(sign_release.main(["verify", str(release), "--final", str(final)],
                                                    {"SIGNING_SUBJECT": SUBJECT}), 0)
         self.assertIn("no expected signer subject", err.getvalue())
+
+    def test_signer_subject_is_decoded_from_osslsigncode_escapes(self):
+        matches = sign_release.signer_matches_subject
+        self.assertEqual(sign_release.decode_ossl_text(BMP_ESCAPED), BMP_NAME)
+        self.assertEqual(sign_release.signer_subjects(BMP_OUTPUT), [f"/C=BE/ST=Antwerpen/L=Schoten/O={BMP_NAME}/CN={BMP_NAME}"])
+        self.assertTrue(matches(BMP_OUTPUT, BMP_NAME))
+        self.assertTrue(matches(BMP_OUTPUT, "Ernst@Work"))              # contained in the CN
+        self.assertTrue(matches(BMP_OUTPUT, f"CN={BMP_NAME}"))           # a whole component
+        self.assertFalse(matches(BMP_OUTPUT, "Someone Else BV"))
+        self.assertFalse(matches(BMP_OUTPUT, "Schoten"))                 # only O and CN count
+        self.assertFalse(matches(BMP_OUTPUT, ""))
+        # a UTF-8 or Latin-1 byte name decodes as well
+        self.assertEqual(sign_release.decode_ossl_text(r"Caf\xc3\xa9"), "Café")
+        self.assertEqual(sign_release.decode_ossl_text(r"\x00C\x00a\x00f\x00\xe9"), "Café")
+
+    def test_subject_only_in_an_issuer_or_chain_certificate_does_not_pass(self):
+        matches = sign_release.signer_matches_subject
+        issuer_only = BMP_OUTPUT.replace(BMP_ESCAPED, ossl_escape("Other Name BV"))
+        issuer_only = issuer_only.replace("Issuer : /C=US/O=Microsoft Corporation/CN=Microsoft ID Verified CS EOC CA 03",
+                                          f"Issuer : /C=BE/O={BMP_ESCAPED}/CN=Some CA", 1)
+        self.assertIn(BMP_ESCAPED, issuer_only)
+        self.assertFalse(matches(issuer_only, BMP_NAME))
+        # the same name on a chain certificate under "Number of certificates" is not the signer either
+        chain_only = BMP_OUTPUT.replace(BMP_ESCAPED, ossl_escape("Other Name BV"))
+        chain_only += f"\n\tSigner #3:\n\t\tSubject: /C=BE/O={BMP_ESCAPED}\n"
+        self.assertFalse(matches(chain_only, BMP_NAME))
+        # no signer block at all: nothing matches
+        self.assertFalse(matches(f"Subject: /O={BMP_ESCAPED}\n", BMP_NAME))
 
     def test_osslsigncode_verify_command_passes_the_timestamp_ca(self):
         ca = ROOT / "tools/release/signing_host/microsoft-identity-verification-root-2020.pem"
