@@ -1,4 +1,5 @@
 #include "asset_internal.hpp"
+#include "eawr/assets/asset_names.hpp"
 #include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
@@ -78,10 +79,22 @@ core::Result<MegaTextureAtlas> load_page_and_bind(
 
 const MegaTextureEntry* MegaTexture::find(const std::string_view name) const noexcept {
     const auto found = std::find_if(entries.rbegin(), entries.rend(),
-                                    [name](const MegaTextureEntry& entry) {
-                                        return ascii_equal(entry.name, name);
-                                    });
+        [name](const MegaTextureEntry& entry) { return ascii_equal(entry.name, name); });
     return found == entries.rend() ? nullptr : &*found;
+}
+
+const MegaTextureEntry* MegaTexture::find_sibling(const std::string_view name) const {
+    // Texture sibling tolerance deviation: use the loose-file retry sequence,
+    // excluding the authored name and duplicate candidates. Callers own priority.
+    const MegaTextureEntry* entry = nullptr;
+    std::string previous;
+    static_cast<void>(resolve_texture_name({}, name, [&](const std::string_view candidate) {
+        if (ascii_equal(candidate, name) || ascii_equal(candidate, previous)) return false;
+        previous = candidate;
+        entry = find(candidate);
+        return entry != nullptr;
+    }));
+    return entry;
 }
 
 core::Result<MegaTexture> load_mega_texture(const std::span<const std::byte> bytes,
@@ -236,7 +249,7 @@ core::Result<std::optional<MegaTextureAtlas>> load_shadowed_atlas_entry(
         if (!bytes) return Result::failure(bytes.error());
         auto directory = load_mega_texture(bytes.value(), source_from(record));
         if (!directory) return Result::failure(directory.error());
-        if (!directory.value().find(entry)) continue;
+        if (!directory.value().find(entry) && !directory.value().find_sibling(entry)) continue;
         std::vector<vfs::AssetRecord> pages;
         for (const auto suffix : {".dds", ".tga"}) {
             auto found = filesystem.candidates(directory.value().backing_page_stem + suffix);

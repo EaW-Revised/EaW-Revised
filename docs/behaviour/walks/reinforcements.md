@@ -409,3 +409,13 @@ Nearby tags remain separate consumers: `Reinforcement_Time_Multiplier`,
 not WR-79's cap equation or WR-83's location search. Radius overlays, countdown
 sounds and blobs belong to presentation. This docs-only append applies no tag
 and changes no tag-registry status.
+
+
+## WR-85: Faction placement-shadow material is land-only
+
+**WR-85 (debug build, RSM-01/02).** The only reader of faction
+`Reinforcements_Shadow_Blob_Material_Name` belongs to land reinforcement
+placement and requires a terrain instance. It assigns the authored material
+to the terrain shadow used for that placement preview. The separate space
+branch creates model clones (WR-12) and never reads this material. Its missing
+land presentation consumer is therefore outside the space-arrival path.

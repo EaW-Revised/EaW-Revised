@@ -27,16 +27,25 @@ bool GalacticMode::State::build_battle_dialog() {
     if (planet_search_layout) catalog->script.dialogs.push_back(planet_search_layout->dialog);
     auto loaded_atlas = assets::load_mega_texture_atlas(*filesystem,
         "data/art/textures/" + catalog->skin.texture_file + ".mtd");
-    if (!loaded_atlas) { failure = core::format_diagnostic(loaded_atlas.error()); return false; }
-    auto atlas = std::make_shared<assets::MegaTextureAtlas>(std::move(loaded_atlas).value());
+    auto atlas = std::make_shared<assets::MegaTextureAtlas>();
+    if (loaded_atlas) *atlas = std::move(loaded_atlas).value();
+    else {
+        UtilityFunctions::push_warning(String::utf8(core::format_diagnostic(loaded_atlas.error()).c_str()));
+        pending_texture_notes.push_back(galactic_view::unresolved_ui_texture_note(catalog->skin.texture_file));
+    }
     auto textures = std::make_shared<UiTextures>(*atlas, *filesystem);
+    textures->set_missing_fallback(missing_shell_texture());
+    if (loaded_atlas && !textures->page_failure().empty()) {
+        UtilityFunctions::push_warning(String::utf8(textures->page_failure().c_str()));
+        pending_texture_notes.push_back(galactic_view::unresolved_ui_texture_note(catalog->skin.texture_file));
+    }
     auto loaded_text = data::ui::load_language_text_database(*filesystem, "english");
     if (!loaded_text) { failure = core::format_diagnostic(loaded_text.error()); return false; }
     auto database = std::make_shared<data::ui::TextDatabase>(std::move(loaded_text).value());
     BattleDialog::Style style;
     style.text = [database](std::string_view key) {
-        const auto* row = database->find(key);
-        return row ? data::ui::to_utf8(row->value) : std::string(key);
+        data::ui::TextLookup lookup(*database);
+        return data::ui::to_utf8(lookup.text(key));
     };
     battle_text = style.text;
     // WGP-34: the summary picture belongs to the local faction.
@@ -107,7 +116,8 @@ bool GalacticMode::State::build_battle_dialog() {
         return built;
     };
     style.pending = [this, texture = style.texture, text = style.text](Vector2 size, bool single) {
-        return build_pending_battle_hud(*filesystem, command_catalog, *hud_fonts, command_faction, size, single, texture, text,
+        return build_pending_battle_hud(*filesystem, command_catalog, *hud_fonts, command_faction, size, single, texture,
+            [this](std::string_view name) { return shell_texture(name); }, text,
             [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
     };
     battle_dialog_builder = style.dialog;
@@ -146,9 +156,11 @@ void GalacticMode::State::service_battle_advisor() {
     const auto local = galaxy->local.player;
     const auto planet = static_cast<sim::galactic::PlanetId>(outcome->planet);
     // WGUI-120: an uninvolved observer's result line needs known fleet presence at the planet (read from the
-    // publication shown when the outcome arrives).
+    // publication shown when the outcome arrives). The planet's visibility counts even when no fleet survives there
+    // (the original asks the planet, not a fleet), so a land battle between two other factions is announced too.
     const bool presence = std::any_of(fleet_intelligence.presence.begin(), fleet_intelligence.presence.end(),
-        [&](const auto& row) { return row.planet == planet; });
+        [&](const auto& row) { return row.planet == planet; })
+        || std::binary_search(fleet_intelligence.presence_planets.begin(), fleet_intelligence.presence_planets.end(), planet);
     std::vector<galactic_view::CampaignRecordEntry> record;
     record.reserve(outcome->record.size());
     for (const auto& row : outcome->record) record.push_back({row.original_type, row.owner});

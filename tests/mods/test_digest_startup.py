@@ -26,7 +26,14 @@ assert 'context.review_wait_lease = ' in front and 'screen_wait_lease()' in fron
 refresh = (viewer / 'lan_lobby_screen_refresh.cpp').read_text()
 assert 'progress.files_total == 0 ? "Reading mod folders"' in refresh
 assert 'EAWR_MOD_REVIEW_STATUS' in refresh
-assert 'if (!checking_mods && !status.empty()) note_chat(model::ChatKind::notice, status);' in refresh
+# Mod checks stay in the progress header; other notices pass through the
+# counting-status throttle before reaching chat.
+status_changed = refresh.split('if (status != impl.status) {', 1)[1].split('\nvoid EawrLanLobby::', 1)[0]
+assert 'if (!checking_mods) {' in status_changed
+chat_status = status_changed.split('if (!checking_mods) {', 1)[1]
+assert 'const bool in_place = preparing && progress && status == room->prepare_status;' in chat_status
+assert 'impl.status_chat.note(status, Time::get_singleton()->get_ticks_msec(), in_place)' in chat_status
+assert chat_status.index('if (post != model::StatusChatPost::none) {') < chat_status.index('note_chat(model::ChatKind::notice, line);')
 assert 'mod_progress_notice' not in refresh
 assert 'deferred_mod_review' in lobby
 

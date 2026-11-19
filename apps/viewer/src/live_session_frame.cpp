@@ -517,7 +517,7 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
     if (!population.pose_live_clips(renderer, clip_poses, pose_workers_)) return fail(population.failure());
     if (!population.pose_live_turrets(renderer, live, clip_poses, pose_workers_)) return fail(population.failure());
     clip_timer.finish();
-    apply_frame_shield_flashes(population, renderer, visual_scales);
+    apply_frame_shield_flashes(population, renderer, visual_scales, delta);
     BattleScene::Update update;
     publish_frame_instances(latest, population, renderer, observations, update);
     // TSW-15: the target props the super weapon has destroyed leave the environment view's drawing.
@@ -1533,20 +1533,34 @@ void LiveSessionView::apply_frame_opacity(const std::shared_ptr<const sim::tacti
 
 void LiveSessionView::apply_frame_shield_flashes(BattleScene& population,
         GodotRenderer& renderer,
-        const std::map<sim::EntityId, std::array<float, 3>>& visual_scales_in) {
-    // WU-60: an attack order's target flash multiplies the whole model's light scale RGB (every piece, the
-    // hardpoint models included) by 1 + level while a pulse starts, falling linearly to 1; it stacks with the shield
-    // flash below. No work while no flash runs.
+        const std::map<sim::EntityId, std::array<float, 3>>& visual_scales_in, const double delta) {
+    // WU-61: hull-click feedback uses a gentle bounded pulse; hardpoint clicks keep WU-42.
+    // No work after the last burst and its quiet interval finish.
     const std::map<sim::EntityId, std::array<float, 3>>* scales_in_use = &visual_scales_in;
     std::map<sim::EntityId, std::array<float, 3>> flashed_scales;
-    if (!order_flash_start_.empty()) {
+    for (auto gate = order_flash_gates_.begin(); gate != order_flash_gates_.end();) {
+        gate->second.advance(delta);
+        if (gate->second.ready()) gate = order_flash_gates_.erase(gate);
+        else ++gate;
+    }
+    if (!order_flash_elapsed_.empty()) {
+        const double advance = std::isfinite(delta) ? std::max(0.0, delta) : 0.0;
         flashed_scales = visual_scales_in;
         scales_in_use = &flashed_scales;
-        for (auto flash = order_flash_start_.begin(); flash != order_flash_start_.end();) {
-            // The presented clock can read just before the order's tick on the next frame: still the first pulse.
-            const double seconds = std::max(0.0, presented_tick_ - flash->second) / tactical::logical_frames_per_second;
-            const auto multiplier = presentation_constants::order_flash_multiplier(order_flash_constants_, seconds);
-            if (!multiplier) { flash = order_flash_start_.erase(flash); continue; }
+        for (auto flash = order_flash_elapsed_.begin(); flash != order_flash_elapsed_.end();) {
+            // WU-61: unscaled render time keeps the comfort envelope unchanged at fast-forward or pause.
+            const double seconds = flash->second;
+            flash->second += advance;
+            double footprint_half_area = 0.0;
+            if (const auto ship = ship_of_entity_.find(flash->first); ship != ship_of_entity_.end()) {
+                if (const auto box = population.live_ship_box(ship->second)) {
+                    const auto half = ui::minimap_world_half_size(box->model_to_world, box->low, box->high);
+                    footprint_half_area = static_cast<double>(half[0]) * half[1];
+                }
+            }
+            const auto multiplier = presentation_constants::order_flash_multiplier(
+                order_flash_constants_, seconds, footprint_half_area);
+            if (!multiplier) { flash = order_flash_elapsed_.erase(flash); continue; }
             ++order_flash_samples_;
             max_order_flash_multiplier_ = std::max(max_order_flash_multiplier_, *multiplier);
             if (const auto ship = ship_of_entity_.find(flash->first); ship != ship_of_entity_.end()) {
@@ -1770,13 +1784,18 @@ void LiveSessionView::flash_order_target(const sim::EntityId target) {
     // WU-60: a squadron (named by its container or by a member) flashes every member.
     const auto container = squadron_of_.find(target);
     const sim::EntityId root = container == squadron_of_.end() ? target : container->second;
+    // WU-61: root/member aliases share admission; a refused repeat changes neither timer nor order dispatch.
+    auto& gate = order_flash_gates_[root];
+    if (!gate.try_start(order_flash_constants_)) {
+        if (gate.ready()) order_flash_gates_.erase(root);
+        return;
+    }
     const auto members = squadron_members_.find(root);
-    const double start = presented_tick_;
     if (members == squadron_members_.end()) {
-        order_flash_start_[target] = start;
+        order_flash_elapsed_[target] = 0.0;
     } else {
-        for (const sim::EntityId member : members->second) order_flash_start_[member] = start;
-        order_flash_start_[root] = start;
+        for (const sim::EntityId member : members->second) order_flash_elapsed_[member] = 0.0;
+        order_flash_elapsed_[root] = 0.0;
     }
     ++order_flashes_started_;
 }

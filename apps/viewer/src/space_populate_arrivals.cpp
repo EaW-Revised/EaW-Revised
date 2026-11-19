@@ -230,6 +230,8 @@ bool SpacePopulation::classify_arrival(ComposeContext& context, const std::size_
     const data::Catalog& catalog = *options_.catalog;
     const auto& ship = options_.placed_ships[ship_index];
     live_death_clone_[ship_index] = ship.death_clone;
+    if (scene::space_live_record_owner(ship.live_entity, options_.battle_start, environment_records)
+        == scene::SpaceRecordOwner::environment) return true;
     const bool live = ship.live_entity != 0;
     const std::string live_name = "live unit " + std::to_string(ship.live_entity) + " (" + ship.object_id + ")";
     const data::Definition* definition = catalog.find(ship.object_id, data::Category::game_object);
@@ -246,8 +248,8 @@ bool SpacePopulation::classify_arrival(ComposeContext& context, const std::size_
     placed_map.source = map.source;
     placed_map.kind = domain() == sim::tactical::BattleDomain::land ? assets::MapKind::land : assets::MapKind::space;
     assets::Placement source;
-    // A live unit takes a record past the map's, so no map record rule
-    // (environment, session) applies to it.
+    // Ownership was checked against the authored start above; the composed placement
+    // has its own identity past the map's records.
     source.key = {map.source, live ? static_cast<std::uint32_t>(map_placements_ + ship_index) : 0U};
     source.type_crc = 0U; // A synthetic placement; the XML identity is explicit.
     source.type_resolution = assets::TypeResolution::unique;
@@ -316,7 +318,8 @@ bool SpacePopulation::finish_classify(ComposeContext& context, const std::size_t
     const auto& environment_records = context.environment_records;
     for (auto& decision : std::span(decisions_).subspan(first_decision)) {
         const auto record = scene_->placements[decision.scene_ordinal].record_ordinal;
-        if (std::find(environment_records.begin(), environment_records.end(), record) != environment_records.end()) {
+        if (scene::space_record_owner(record, environment_records, options_.session_records)
+            == scene::SpaceRecordOwner::environment) {
             decision.role = scene::SpaceRole::environment;
             decision.drawn_surfaces.clear();
             decision.hardpoints.clear();
@@ -632,7 +635,7 @@ void SpacePopulation::compose_hull_pieces(ComposeContext& context, ComposeBatch&
         prewarm_unit(index);
         if (hardpoint == scene::HardpointOwnerArt::none) plan->units.emplace_back([=] { add_surface(index, std::nullopt); });
         else plan->units.emplace_back([=] {
-            add_surface(index, HardpointGate{decision_index, hardpoint, HardpointGate::Art::engine_particle});
+            add_surface(index, HardpointGate{decision_index, hardpoint, HardpointGate::Art::engine_particle, std::nullopt});
         });
     }
     // BP-74/WHE-35/36: hidden charge meshes are admitted once, then gated by the
@@ -674,7 +677,7 @@ void SpacePopulation::compose_hull_pieces(ComposeContext& context, ComposeBatch&
     for (const auto& decal : decision.damage_decals) {
         prewarm_unit(decal.surface);
         plan->units.emplace_back([=] {
-            add_surface(decal.surface, HardpointGate{decision_index, decal.hardpoint, HardpointGate::Art::damage_decal});
+            add_surface(decal.surface, HardpointGate{decision_index, decal.hardpoint, HardpointGate::Art::damage_decal, std::nullopt});
         });
     }
     if (split == nullptr) {
@@ -1024,7 +1027,8 @@ void SpacePopulation::compose_hardpoint_pieces(ComposeContext& context, ComposeB
                     continue;
                 }
                 pieces.push_back({upload, placed.value(), std::nullopt,
-                                  HardpointGate{decision_index, hardpoint_index, HardpointGate::Art::attached_model},
+                                  HardpointGate{decision_index, hardpoint_index, HardpointGate::Art::attached_model,
+                                               static_cast<std::uint32_t>(attachment_index)},
                                   live_ship, *frame});
                 pieces.back().cloak_hidden = cloak_ship; // WST-12: the cloak hides the hardpoints
                 if (!effect_missing && scene::colorizes(submesh.shader)) pieces.back().colour = colour;
@@ -1806,7 +1810,7 @@ bool SpacePopulation::begin_live_append(GodotRenderer& renderer, const vfs::Vfs&
     pending->map.source = compose_source_;
     pending->map.kind = domain() == sim::tactical::BattleDomain::land ? assets::MapKind::land : assets::MapKind::space;
     pending->owner = std::make_shared<ComposeOwner>(renderer, pending->map, filesystem, compose_camera_,
-        std::span<const std::uint32_t>{}, *options_.catalog, options_.map_sha256);
+        environment_records_, *options_.catalog, options_.map_sha256);
     if (ticket != 0 && ahead_prefetch_ && ahead_tickets_.contains(ticket)) pending->batch.textures.set_prefetch(ahead_prefetch_.get());
     // The steps hold references into these two vectors across frames, so a proxy copy appended meanwhile must not move
     // them: room is reserved here (append_model_proxies finishes the pending append first when it would run out).
@@ -1924,7 +1928,7 @@ bool SpacePopulation::append_live_ships(GodotRenderer& renderer, const vfs::Vfs&
         auto object = options_.catalog->resolve(id, category);
         return object ? std::optional(std::move(object).value()) : std::nullopt;
     };
-    ComposeContext context{renderer, map, filesystem, compose_camera_, {}, cache, input, resolve};
+    ComposeContext context{renderer, map, filesystem, compose_camera_, environment_records_, cache, input, resolve};
     return compose_range(context, first_ship, first_decision, next_arrival_asset_, next_arrival_piece_);
 }
 

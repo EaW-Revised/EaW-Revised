@@ -2340,7 +2340,7 @@ std::uint64_t LiveGameSession::request_save(LiveSaveRequest request) {
     if (impl_->options_.step_driver && !impl_->options_.step_driver->may_save(request.seat)) {
         outcome.phase = LiveSavePhase::rejected;
         outcome.diagnostic = diagnostic("EAWR-PLATFORM-0600",
-            "Only the host can save a multiplayer campaign.");
+            "This seat cannot save the multiplayer campaign.");
     } else if (impl_->stopping_ || impl_->ended_ || busy || impl_->options_.saves.directory.empty() || !save_detail::valid_name(request.name)) {
         outcome.phase = LiveSavePhase::rejected;
         outcome.diagnostic = diagnostic("EAWR-SAVE-0103", "Save unavailable, already in progress, or name invalid.");

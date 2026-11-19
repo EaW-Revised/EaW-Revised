@@ -197,7 +197,7 @@ void container_replenishment_loading() {
         "<Create_Team_Type>Test_Squadron</Create_Team_Type><Lua_Script>ObjectScript_Test</Lua_Script>"),
         "WHE-63: leader authors its creation team");
     expect(replace_once(xml, "<Container Name=\"Team\">", "<Container Name=\"Team\">"
-        "<Unit_Abilities_Data>" + refill + "</Unit_Abilities_Data>"), "WHE-70: display container authors refill");
+        "<Unit_Abilities_Data SubObjectList=\"Yes\">" + refill + "</Unit_Abilities_Data>"), "WHE-70: display container authors refill");
     write_fixture(tree.root, xml);
     const auto tables = load_layers({tree.root});
     if (!tables) return;
@@ -345,7 +345,7 @@ void bare_stub_rows_are_dropped() {
         const auto begin = xml.find("<Unit_Abilities_Data", ship);
         const auto end = xml.find("</Unit_Abilities_Data>", begin);
         xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
-            "<Unit_Abilities_Data><Unit_Ability><Type>" + std::string(kind) + "</Type></Unit_Ability>"
+            "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>" + std::string(kind) + "</Type></Unit_Ability>"
             "<Unit_Ability><Type>TURBO</Type><Recharge_Seconds>1</Recharge_Seconds></Unit_Ability></Unit_Abilities_Data>");
         write_fixture(tree.root, xml);
         const auto tables = load_layers({tree.root});
@@ -380,7 +380,7 @@ void replenish_row_without_a_team_type() {
     const auto begin = xml.find("<Unit_Abilities_Data", ship);
     const auto end = xml.find("</Unit_Abilities_Data>", begin);
     xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
-        "<Unit_Abilities_Data><Unit_Ability><Type>REPLENISH_WINGMEN</Type></Unit_Ability>"
+        "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>REPLENISH_WINGMEN</Type></Unit_Ability>"
         "<Unit_Ability><Type>TURBO</Type><Recharge_Seconds>1</Recharge_Seconds></Unit_Ability></Unit_Abilities_Data>");
     write_fixture(tree.root, xml);
     const auto tables = load_layers({tree.root});
@@ -426,7 +426,7 @@ void non_blast_self_destruct_is_kept() {
     const auto begin = xml.find("<Unit_Abilities_Data", ship);
     const auto end = xml.find("</Unit_Abilities_Data>", begin);
     xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
-        "<Unit_Abilities_Data><Unit_Ability><Type>SELF_DESTRUCT</Type><Expiration_Seconds>3</Expiration_Seconds>"
+        "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>SELF_DESTRUCT</Type><Expiration_Seconds>3</Expiration_Seconds>"
         "<Spawned_Object_Type>Proj_Test_Turbo</Spawned_Object_Type></Unit_Ability>"
         "<Unit_Ability><Type>TURBO</Type><Recharge_Seconds>1</Recharge_Seconds></Unit_Ability></Unit_Abilities_Data>");
     write_fixture(tree.root, xml);
@@ -459,7 +459,7 @@ void self_destruct_stop_parameter() {
         const auto begin = xml.find("<Unit_Abilities_Data", ship);
         const auto end = xml.find("</Unit_Abilities_Data>", begin);
         xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
-            std::string("<Unit_Abilities_Data><Unit_Ability><Type>SELF_DESTRUCT</Type>")
+            std::string("<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>SELF_DESTRUCT</Type>")
             + "<Expiration_Seconds>3</Expiration_Seconds><Spawned_Object_Type>Proj_Test_Turbo</Spawned_Object_Type>"
             + authored + "</Unit_Ability></Unit_Abilities_Data>");
         write_fixture(tree.root, xml);
@@ -487,7 +487,7 @@ void interdict_default_parameter() {
         const auto begin = xml.find("<Unit_Abilities_Data", ship);
         const auto end = xml.find("</Unit_Abilities_Data>", begin);
         xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
-            std::string("<Unit_Abilities_Data><Unit_Ability><Type>INTERDICT</Type>")
+            std::string("<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>INTERDICT</Type>")
             + authored + "</Unit_Ability></Unit_Abilities_Data>");
         write_fixture(tree.root, xml);
         const auto tables = load_layers({tree.root});
@@ -513,7 +513,7 @@ void active_by_default_other_kind_note() {
         const auto begin = xml.find("<Unit_Abilities_Data", ship);
         const auto end = xml.find("</Unit_Abilities_Data>", begin);
         xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
-            std::string("<Unit_Abilities_Data><Unit_Ability><Type>TURBO</Type><Recharge_Seconds>1</Recharge_Seconds>")
+            std::string("<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>TURBO</Type><Recharge_Seconds>1</Recharge_Seconds>")
             + authored + "</Unit_Ability></Unit_Abilities_Data>");
         write_fixture(tree.root, xml);
         const auto tables = load_layers({tree.root});
@@ -547,6 +547,35 @@ void zero_speed_multiplier_loads() {
     expect(defend != nullptr && defend->modifiers.speed.raw() == 0, "#5704: the zero multiplier is kept as authored");
 }
 
+void large_speed_multiplier_loads() {
+    TempTree tree;
+    write_fixture(tree.root, with_second_frigate(layer_xml("15", "200")));
+    auto tables = load_layers({tree.root});
+    if (!tables) return;
+    const auto loaded = eawr::units::ability_table(*tables, std::vector<t::PlayerId>{1});
+    expect(static_cast<bool>(loaded), "WAB-24: authored 200x speed loads under strict policy");
+    if (!loaded) return;
+    for (const auto name : {"Test_Frigate", "Test_Frigate_Two"}) {
+        const auto* ability = ability_of(loaded.value(), name, t::AbilityKind::defend);
+        expect(ability && ability->modifiers.speed.raw() == raw(200), "WAB-24: direct and inherited 200x speed stay authored");
+    }
+    // This factor cannot scale the largest admitted formation deceleration in Q24; name only its own type.
+    for (auto& unit : tables->units) {
+        if (unit.id != "Test_Frigate") continue;
+        for (auto& modifier : unit.abilities.front().modifiers)
+            if (modifier.modifier == "SPEED_MULTIPLIER") modifier.value = eawr::units::Fixed::from_raw(raw(2097152));
+    }
+    expect(!eawr::units::ability_table(*tables, std::vector<t::PlayerId>{1}),
+        "WAB-24: an overflowing speed factor fails strict loading");
+    std::vector<eawr::core::Diagnostic> skipped;
+    const auto lenient = eawr::units::ability_table(*tables, std::vector<t::PlayerId>{1}, nullptr, true,
+        eawr::units::ContentErrors::skip_object, &skipped);
+    expect(lenient && skipped.size() == 1 && skipped.front().message.find("skipped unit type 'Test_Frigate'") != std::string::npos,
+        "WAB-24: tolerant loading diagnoses the overflowing type");
+    expect(lenient && ability_of(lenient.value(), "Test_Frigate_Two", t::AbilityKind::defend) != nullptr,
+        "WAB-24: the independently loaded inherited type remains available");
+}
+
 void concentrate_fire_large_damage_loads() {
     TempTree tree;
     auto xml = with_second_frigate(layer_xml("15", "0.8"));
@@ -555,10 +584,10 @@ void concentrate_fire_large_damage_loads() {
     expect(begin != std::string::npos && end != std::string::npos, "#5704: ability fixture exists");
     if (begin == std::string::npos || end == std::string::npos) return;
     xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin, R"(
-      <Unit_Abilities_Data><Unit_Ability><Type>CONCENTRATE_FIRE</Type><Effective_Radius>6000</Effective_Radius>
+      <Unit_Abilities_Data SubObjectList="Yes"><Unit_Ability><Type>CONCENTRATE_FIRE</Type><Effective_Radius>6000</Effective_Radius>
         <Expiration_Seconds>15</Expiration_Seconds><Recharge_Seconds>20</Recharge_Seconds>
         <GUI_Activated_Ability_Name>focus</GUI_Activated_Ability_Name></Unit_Ability></Unit_Abilities_Data>
-      <Abilities><Concentrate_Fire_Attack_Ability Name="focus"><Activation_Style>User_Input</Activation_Style>
+      <Abilities SubObjectList="Yes"><Concentrate_Fire_Attack_Ability Name="focus"><Activation_Style>User_Input</Activation_Style>
         <Applicable_Unit_Categories>Frigate</Applicable_Unit_Categories><Applicable_Unit_Types/>
         <Stacking_Category>0</Stacking_Category><Target_Damage_Increase_Percent>5</Target_Damage_Increase_Percent>
         <Target_Speed_Decrease_Percent>0</Target_Speed_Decrease_Percent>
@@ -668,7 +697,7 @@ std::string with_abilities(std::string xml, const std::string_view abilities, co
     expect(ship != std::string::npos && begin != std::string::npos && end != std::string::npos,
         "#5704: the fixture has a frigate ability block");
     xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
-        std::string(handlers) + "<Unit_Abilities_Data>" + std::string(abilities) + "</Unit_Abilities_Data>");
+        std::string(handlers) + "<Unit_Abilities_Data SubObjectList=\"Yes\">" + std::string(abilities) + "</Unit_Abilities_Data>");
     return xml;
 }
 
@@ -1123,7 +1152,7 @@ void sub_frame_expiration_is_one_frame() {
         const auto begin = xml.find("<Unit_Abilities_Data", ship);
         const auto end = xml.find("</Unit_Abilities_Data>", begin);
         xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
-            "<Unit_Abilities_Data><Unit_Ability><Type>" + std::string(kind)
+            "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>" + std::string(kind)
             + "</Type><Expiration_Seconds>0.01</Expiration_Seconds></Unit_Ability></Unit_Abilities_Data>");
         write_fixture(tree.root, xml);
         const auto tables = load_layers({tree.root});
@@ -1160,7 +1189,7 @@ void area_decal_distance_is_authored() {
             const auto begin = xml.find("<Unit_Abilities_Data", ship);
             const auto end = xml.find("</Unit_Abilities_Data>", begin);
             xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
-                "<Unit_Abilities_Data><Unit_Ability><Area_Effect_Decal_Distance>" + std::string(distance)
+                "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Area_Effect_Decal_Distance>" + std::string(distance)
                 + "</Area_Effect_Decal_Distance><Type>" + kind + "</Type>"
                   "</Unit_Ability></Unit_Abilities_Data>");
             write_fixture(tree.root, xml);
@@ -1192,7 +1221,7 @@ void ability_limits() {
             const auto begin = xml.find("<Unit_Abilities_Data", ship);
             const auto end = xml.find("</Unit_Abilities_Data>", begin);
             xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
-                "<Unit_Abilities_Data><Unit_Ability><Type>" + std::string(kind) + "</Type>"
+                "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>" + std::string(kind) + "</Type>"
                 + (omitted ? "" : "<Spawned_Object_Type>Missing_Test_Object</Spawned_Object_Type>")
                 + "<Expiration_Seconds>3</Expiration_Seconds><Recharge_Seconds>20</Recharge_Seconds>"
                   "</Unit_Ability><Unit_Ability><Type>TURBO</Type><Recharge_Seconds>1</Recharge_Seconds>"
@@ -1237,10 +1266,10 @@ void ability_limits() {
         const auto begin = xml.find("<Unit_Abilities_Data", ship);
         const auto end = xml.find("</Unit_Abilities_Data>", begin);
         xml.replace(begin, end + std::string_view("</Unit_Abilities_Data>").size() - begin,
-            "<Abilities><Energy_Weapon_Attack_Ability Name=\"Test_Beam\"><Activation_Style>User_Input</Activation_Style>"
+            "<Abilities SubObjectList=\"Yes\"><Energy_Weapon_Attack_Ability Name=\"Test_Beam\"><Activation_Style>User_Input</Activation_Style>"
             "<Activation_Max_Range>" + std::string(range) + "</Activation_Max_Range>"
             "<Activation_Min_Range>" + std::string(range) + "</Activation_Min_Range>"
-            "</Energy_Weapon_Attack_Ability></Abilities><Unit_Abilities_Data><Unit_Ability><Type>ENERGY_WEAPON</Type>"
+            "</Energy_Weapon_Attack_Ability></Abilities><Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>ENERGY_WEAPON</Type>"
             "<GUI_Activated_Ability_Name>Test_Beam</GUI_Activated_Ability_Name></Unit_Ability></Unit_Abilities_Data>");
         write_fixture(tree.root, xml);
         const auto tables = load_layers({tree.root});
@@ -1338,6 +1367,7 @@ void ability_limits() {
     interdict_default_parameter();
     active_by_default_other_kind_note();
     zero_speed_multiplier_loads();
+    large_speed_multiplier_loads();
     concentrate_fire_large_damage_loads();
     oversized_collision_loads_with_warning();
     long_projectile_lifetime_loads_leniently();

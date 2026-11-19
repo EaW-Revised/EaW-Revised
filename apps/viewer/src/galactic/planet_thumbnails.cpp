@@ -121,6 +121,7 @@ struct PlanetThumbnails::Impl final {
     struct Surface final {
         sim::AssetId asset{};
         bool effect_clock{};
+        std::int32_t bone{-1};
     };
     struct Resident final {
         std::vector<Surface> surfaces;
@@ -139,10 +140,12 @@ struct PlanetThumbnails::Impl final {
         std::array<float, 3> offset{}; // source map units from the listed planet
         float scale{1.0F};
         bool world{};
+        int alternate{};  // the surface alternate the map draws for this object now (WGUI-05)
+        std::string key;  // resident identity: model plus alternate
     };
     struct Composite final {
         std::vector<Member> members; // the listed planet first
-        std::string signature;       // member models, for rebinding when the map's choice changes
+        std::string signature;       // member keys, for rebinding when the map's choice changes
     };
 
     GalacticMode::State& state;
@@ -150,8 +153,18 @@ struct PlanetThumbnails::Impl final {
     std::map<std::string, Resident, std::less<>> residents;
     std::unordered_map<std::uint64_t, Composite> composites;
     std::map<std::string, std::string, std::less<>> failures;
+    struct SpinSample final {
+        double clock{};
+        std::array<float, 12> row{}, map{};
+    };
+    // Opt-in renderer evidence, like the map's zoom timing/palette probe. Two samples per shown bone.
+    std::map<std::pair<std::uint64_t, std::int32_t>, std::pair<SpinSample, SpinSample>> spin_samples;
     // Off-thread model prepares in flight (bounded); each still uploads on the main thread, one per frame.
-    struct Load final { std::string path; std::future<galactic_detail::PreparedPlanetModel> future; };
+    struct Load final {
+        std::string key, model;
+        int alternate{};
+        std::future<galactic_detail::PreparedPlanetModel> future;
+    };
     static constexpr std::size_t max_loads = 4;
     std::vector<Load> loads;
     sim::AssetId next_asset{1};
@@ -316,14 +329,15 @@ struct PlanetThumbnails::Impl final {
         return found == state.galaxy->planets.end() ? nullptr : &*found;
     }
 
-    void start_load(const std::string& path) {
+    void start_load(const Member& member) {
         if (loads.size() >= max_loads || !state.filesystem) return;
-        cells.set(path, Cells::Model::loading);
+        cells.set(member.key, Cells::Model::loading);
         const auto environment = state.content ? state.content->lighting : galactic_view::galaxy_lighting({});
         // Decode and texture work off the main thread; the shared mount is read-only and thread-safe.
-        loads.push_back({path, std::async(std::launch::async, [filesystem = state.filesystem, path, environment] {
-            return galactic_detail::prepare_planet_thumbnail_model(*filesystem, path, environment);
-        })});
+        loads.push_back({member.key, member.model, member.alternate, std::async(std::launch::async,
+            [filesystem = state.filesystem, path = member.model, alternate = member.alternate, environment] {
+                return galactic_detail::prepare_planet_thumbnail_model(*filesystem, path, alternate, environment);
+            })});
     }
 
     void fail(const std::string& path, std::string cause) {
@@ -338,7 +352,7 @@ struct PlanetThumbnails::Impl final {
         });
         if (ready == loads.end()) return;
         auto prepared = ready->future.get();
-        const std::string path = std::move(ready->path);
+        const std::string path = std::move(ready->key), model = std::move(ready->model);
         loads.erase(ready);
         if (!prepared.cause.empty()) { fail(path, std::move(prepared.cause)); return; }
         Resident resident;
@@ -350,7 +364,7 @@ struct PlanetThumbnails::Impl final {
             const sim::AssetId asset = next_asset++;
             auto uploaded = renderer->upload(asset, surface.geometry, surface.primary, surface.material, surface.extra);
             if (!uploaded) { cause = core::format_diagnostic(uploaded.error()); continue; }
-            resident.surfaces.push_back({asset, surface.effect_clock});
+            resident.surfaces.push_back({asset, surface.effect_clock, surface.geometry.meshes.front().bone});
             if (!resident.idle && surface.idle) resident.idle.emplace(std::move(*surface.idle));
         }
         if (resident.surfaces.empty()) { fail(path, cause.empty() ? std::string("no surface uploaded") : cause); return; }
@@ -365,7 +379,7 @@ struct PlanetThumbnails::Impl final {
         if (state.content) {
             // Loop_Idle_Anim_00 of the planets that draw this model, as the map reads it.
             for (const auto& [id, art] : state.content->art)
-                if (const auto* view = planet_view(id); view && view->model == path) { resident.loop = art.loop_idle; break; }
+                if (const auto* view = planet_view(id); view && view->model == model) { resident.loop = art.loop_idle; break; }
         }
         residents.insert_or_assign(path, std::move(resident));
         cells.set(path, Cells::Model::ready);
@@ -421,22 +435,36 @@ struct PlanetThumbnails::Impl final {
         bool pending_member = false, drawable = false;
         for (const auto& member : group.members) {
             if (member.model.empty()) continue;
-            switch (cells.model(member.model)) {
+            switch (cells.model(member.key)) {
             case Cells::Model::failed: break;
             case Cells::Model::loading: pending_member = true; break;
-            case Cells::Model::absent: start_load(member.model); pending_member = true; break;
-            case Cells::Model::ready: drawable = true; break;
+            case Cells::Model::absent: start_load(member); pending_member = true; break;
+            // A ready member is kept this frame even while the row still waits on another member.
+            case Cells::Model::ready: drawable = true; cells.touch(member.key); break;
             }
         }
         if (pending_member || !drawable) return {};
         const auto cell = cells.bind(id, group.signature);
         if (!cell) return {};
-        for (const auto& member : group.members) cells.touch(member.model); // shown members are never evicted
+        for (const auto& member : group.members) cells.touch(member.key); // shown members are never evicted
         return pictures[*cell];
     }
 
     [[nodiscard]] bool world_planet(const std::uint64_t id) const {
         return state.planet_layer(id) == 0 && !state.fixture_enabled(GalacticHudFixture::Feature::unaligned_planets);
+    }
+
+    // WGUI-05 as the map's submit applies it: the shell for an undiscovered campaign planet that has one, else
+    // the normal surfaces. A picture is never the camera target, so the camera's zoom alternate never applies.
+    [[nodiscard]] int map_alternate(const std::uint64_t id) const {
+        galactic_view::PlanetShellInput art;
+        art.galaxy_planet = state.galaxy_planet_ids.contains(id);
+        if (art.galaxy_planet) {
+            art.scene_art = std::find(state.scene_objects.begin(), state.scene_objects.end(), id) != state.scene_objects.end();
+            art.discovered = art.scene_art || state.planet_discovered(id);
+            art.has_shell = state.shell_planets.contains(id);
+        }
+        return galactic_view::planet_alternate(art);
     }
 
     const Composite& composite(const galactic_view::PlanetView& view) {
@@ -445,24 +473,31 @@ struct PlanetThumbnails::Impl final {
         auto [entry, inserted] = composites.try_emplace(view.id);
         auto& group = entry->second;
         if (inserted) {
-            group.members.push_back({view.id, {}, {}, view.scale, world_planet(view.id)});
+            group.members.push_back({view.id, {}, {}, view.scale, world_planet(view.id), 0, {}});
             for (const auto& other : state.galaxy->planets) {
                 const float dx = other.position.x - view.position.x, dy = other.position.y - view.position.y;
                 if (other.id == view.id || dx * dx + dy * dy > colocated * colocated) continue;
-                group.members.push_back({other.id, {}, {dx, dy, other.position.z - view.position.z}, other.scale, world_planet(other.id)});
+                group.members.push_back({other.id, {}, {dx, dy, other.position.z - view.position.z}, other.scale, world_planet(other.id), 0, {}});
             }
         }
-        // Members follow the map's current model choice (for example a destroyed-state model).
+        // Members follow the map's current model choice (for example a destroyed-state model) and the surface
+        // alternate the map draws for them (an undiscovered campaign planet's grid shell).
         bool changed = inserted;
         static const std::string none;
         for (auto& member : group.members) {
             const auto* current = planet_view(member.id);
             const std::string& model = current ? current->model : none;
-            if (member.model != model) { member.model = model; changed = true; }
+            const int alternate = map_alternate(member.id);
+            if (member.model != model || member.alternate != alternate || inserted) {
+                member.model = model;
+                member.alternate = alternate;
+                member.key = viewer::galactic::thumbnail_model_key(model, alternate);
+                changed = true;
+            }
         }
         if (changed) {
             group.signature.clear();
-            for (const auto& member : group.members) { group.signature += member.model; group.signature += '|'; }
+            for (const auto& member : group.members) { group.signature += member.key; group.signature += '|'; }
         }
         return group;
     }
@@ -480,15 +515,14 @@ struct PlanetThumbnails::Impl final {
     };
     // Framing from the drawn extent of every member as the map places them, so a system's backdrop and its
     // small planets keep the map's proportions. The largest half-extent fills the cell: a round body or a
-    // flat disc fits exactly. A lone turning model whose bounds hold its pivot is centred on that pivot, so
-    // no idle pose leaves the cell.
+    // flat disc fits exactly. A lone turning model is framed about its pivot, so no idle pose leaves the cell.
     [[nodiscard]] std::optional<Frame> framing_of(const Composite& group) const {
         std::array<float, 3> low{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
         std::array<float, 3> high{-low[0], -low[1], -low[2]};
         std::size_t drawn = 0;
         const Resident* only = nullptr;
         for (const auto& member : group.members) {
-            const auto found = residents.find(member.model);
+            const auto found = residents.find(member.key);
             if (found == residents.end()) continue;
             ++drawn; only = &found->second;
             const auto& box = found->second.box;
@@ -498,17 +532,9 @@ struct PlanetThumbnails::Impl final {
             }
         }
         if (drawn == 0) return std::nullopt;
-        Frame result;
-        for (std::size_t axis = 0; axis < 3; ++axis) result.centre[axis] = (low[axis] + high[axis]) * 0.5F;
-        const bool pivot = drawn == 1 && only->idle && low[0] <= 0.0F && high[0] >= 0.0F && low[1] <= 0.0F && high[1] >= 0.0F
-            && low[2] <= 0.0F && high[2] >= 0.0F;
-        if (pivot) result.centre = {};
-        float radius = 0.0F;
-        for (std::size_t axis = 0; axis < 3; ++axis)
-            radius = std::max({radius, std::abs(low[axis] - result.centre[axis]), std::abs(high[axis] - result.centre[axis])});
-        if (!std::isfinite(radius) || radius <= 1.0e-6F) return std::nullopt;
-        result.k = fill / radius;
-        return result;
+        const auto extent = viewer::galactic::thumbnail_extent(low, high, drawn == 1 && only->idle.has_value());
+        if (!std::isfinite(extent.radius) || extent.radius <= 1.0e-6F) return std::nullopt;
+        return Frame{extent.centre, fill / extent.radius};
     }
 
     [[nodiscard]] std::optional<sim::math::Mat3x4> member_transform(const std::size_t index, const Member& member, const Frame& framing) const {
@@ -542,7 +568,7 @@ struct PlanetThumbnails::Impl final {
             const auto group = cells.shown(index) ? composites.find(cells.planet(index)) : composites.end();
             const bool shown = group != composites.end() && group->second.signature == cells.model_of(index)
                 && std::any_of(group->second.members.begin(), group->second.members.end(),
-                    [&](const auto& member) { return residents.contains(member.model); });
+                    [&](const auto& member) { return residents.contains(member.key); });
             const std::uint64_t planet = shown ? cells.planet(index) : 0;
             const std::string& model = shown ? cells.model_of(index) : none;
             if (submitted[index].first != planet || submitted[index].second != model) {
@@ -559,7 +585,7 @@ struct PlanetThumbnails::Impl final {
                 if (!framing) continue;
                 std::size_t piece = 0;
                 for (const auto& member : group.members) {
-                    const auto found = residents.find(member.model);
+                    const auto found = residents.find(member.key);
                     if (found == residents.end()) continue;
                     const auto matrix = member_transform(index, member, *framing);
                     for (const auto& surface : found->second.surfaces) {
@@ -577,7 +603,7 @@ struct PlanetThumbnails::Impl final {
             if (!submitted[index].first) continue;
             std::size_t piece = 0;
             for (const auto& member : composites.at(submitted[index].first).members) {
-                const auto found = residents.find(member.model);
+                const auto found = residents.find(member.key);
                 if (found == residents.end()) continue;
                 auto& resident = found->second;
                 if (resident.posed_frame != now) {
@@ -602,6 +628,22 @@ struct PlanetThumbnails::Impl final {
                     if (resident.idle)
                         static_cast<void>(renderer->set_skin_pose(static_cast<sim::EntityId>(index * surfaces_per_cell + piece),
                             surface.asset, resident.pose.bones));
+                    if (state.options.zoom_timing && resident.idle && surface.bone >= 0) {
+                        const auto row = renderer->bone_evidence(static_cast<sim::EntityId>(index * surfaces_per_cell + piece), surface.bone);
+                        const auto model = state.planet_models.find(member.id);
+                        if (!row || model == state.planet_models.end() || !model->second) continue;
+                        for (const auto& map_surface : state.models[*model->second].surfaces) {
+                            if (map_surface.bone != surface.bone || map_surface.status != "drawn") continue;
+                            const auto entity = state.piece_entities.find({member.id, map_surface.asset});
+                            if (entity == state.piece_entities.end()) continue;
+                            const auto map = state.planet_renderer(member.id).bone_evidence(entity->second, surface.bone);
+                            if (!map) continue;
+                            const SpinSample sample{clock, *row, *map};
+                            auto [entry, inserted] = spin_samples.try_emplace(std::pair{member.id, surface.bone}, sample, sample);
+                            if (!inserted) entry->second.second = sample;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -639,6 +681,22 @@ std::string PlanetThumbnails::report_json() const {
         if (!planet) continue;
         out << (first ? "" : ",") << "{\"planet\":" << planet << ",\"model\":" << core::json_quote(model) << '}';
         first = false;
+    }
+    out << "],\"spin_samples\":[";
+    first = true;
+    for (const auto& [key, samples] : impl.spin_samples) {
+        out << (first ? "" : ",") << "{\"planet\":" << key.first << ",\"bone\":" << key.second << ",\"samples\":[";
+        bool next = false;
+        for (const auto& sample : {samples.first, samples.second}) {
+            out << (next ? "," : "") << "{\"clock\":" << sample.clock;
+            for (const auto& [name, matrix] : {std::pair{"row", sample.row}, std::pair{"map", sample.map}}) {
+                out << ",\"" << name << "\":[";
+                for (std::size_t i = 0; i < matrix.size(); ++i) out << (i ? "," : "") << matrix[i];
+                out << ']';
+            }
+            out << '}'; next = true;
+        }
+        out << "]}"; first = false;
     }
     out << "],\"failures\":[";
     first = true;

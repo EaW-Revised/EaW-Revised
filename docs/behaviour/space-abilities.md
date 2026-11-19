@@ -28,8 +28,8 @@ every type; no ship identity or stock value is a runtime condition.
 | WLK-06 | Presentation follows the selected projectile's authored appearance and detonation sounds. The existing target-ability response cue uses the runtime holder's `SFXEvent_Target_Ability` (the authored team container for a squadron), then the team-to-member fallback, once on activation. | debug build target-handler boundary; BA-54; project presentation routing |
 
 The stock Red Squadron container's recharge and damage multiplier are content, not constants.
-The ordinary mode-multiplier cap of 64 remains unchanged; the shot-only exemption applies
-only to Lucky Shot's cause-damage input, and its other modifiers keep the existing limits.
+The non-speed ordinary mode-multiplier cap of 64 remains unchanged; the shot-only exemption applies
+only to Lucky Shot's cause-damage input. Speed uses the representation-derived bound in WAB-24.
 Projectile override selection reads the firing craft's primary ordinary ability; a secondary
 Lucky slot can still boost a qualifying normal hit without selecting that override.
 If ion and Lucky locks are both active, the remake's combat-world projection uses
@@ -48,6 +48,19 @@ continuation and worker-count hashes. Ordinary stun and hero-clash state remain 
 unmodelled interfaces described above; this change does not invent separate Lucky Shot states for them.
 
 ## Applicability
+
+### Mod coverage audit
+
+| Rule | Behaviour and current coverage | Source |
+|---|---|---|
+| ABG-01 | Automatic space command bonuses and healing use the same nested handler loaders for `SpaceUnit`, `UniqueUnit` and `StarBase`; the XML class alone does not select a different consumer. Ordinary command sources compile the shared WHE-14 type/category filter, including exclusions, into their recipient lists and retain their authored percentage contributions for WHE-53/55 reduction. An explicit applicable type bypasses ordinary exclusions. The separate `DUMMY_UPGRADE` recipient compiler is not covered by that command-source claim. Automatic healers retain their name, mode, filter, flat/percentage amount, interval and single-target choice and receive WSH-01..10 service. Land and nonautomatic handlers remain separate coverage, as do the existing healing bounds, ties and lifecycle seams. | debug build: command eligibility, shared type filtering and healing service rechecked; current loader, command-recipient compiler and healing service audit |
+| ABG-02 | The common ability light request retains the authored effect type, first and second colours, duration and pulse count, but starts only when the recipient has no active light effect. `Color_Flash` blends the first colour back to the incoming model colour over its duration; its renderer reads neither the second colour nor pulse count. `Linear_Pulse` and `Smooth_Pulse` use the first colour and pulse count; `Two_Way_Pulse` also uses the second colour. Automatic healing currently applies only `Color_Flash` first colour and duration. Other authored types, their second-colour/pulse consumers and occupied-light arbitration remain separate gaps; a parsed count is not an applied count. The same automatic healing light path serves `SpaceUnit`, `UniqueUnit` and `StarBase`. | debug build: owner/target light requests and per-type colour application rechecked; WSH-08/10 |
+| ABG-03 | A `UniqueUnit` carrying an ordinary `LASER_DEFENSE` slot uses the same named handler binding, authored run/look timing, projectile filtering and beam presentation as a `SpaceUnit`. The XML class does not select a separate handler. The current ordinary space path consumes the listed timing, range, projectile-category, beam texture/width/frame/colour and bone parameters. Land and independently automatic handlers remain outside this scoped claim; the lightning-particle field is not applied by the simple beam renderer. | debug build: named point-defence handler and beam lifecycle; WLD-01..12; current runtime consumer audit |
+
+The registry audit corrects stale TODO rows for these existing consumers; it changes no
+battle behaviour. In particular, it does not extend the campaign-only player-ledger adapter
+to standalone battlefield modifiers. That handler's tactical player effects, described by
+WGT-50 in [the tactical-entry walk](walks/gc-tactical.md), remain a separate space gap.
 
 - Product: Star Wars Empire at War: Forces of Corruption, space tactical battles, the abilities
   the M2 fleet authors (space ability implementation). The claims come from the FoC debug build, read on 2026-09-28
@@ -243,3 +256,73 @@ leader's ability data. Right-click ends targeting; the Broadside retail capture
 shows the overlay remains behind the menu opened by Escape. The targeting radius
 does not alter the ability's effect or reveal range (BARR-04, WFP-01).
 Evidence: debug build and Broadside retail capture.
+
+**ABG-08 — healing target presentation.** For automatic space healing, a
+successful recipient pulse presents `Target_Particle_Effect` at the first
+available name in the ordered `Target_Particle_Bone_Name` list. Both ordinary
+space units and unique units or starbases use the same consumer. These are
+presentation effects; they do not change recipient selection or healing.
+Evidence: debug build; WSH-08. The current adapter falls back to bone index zero
+when no candidate matches; a model whose `ROOT` is elsewhere still needs that
+fallback corrected. Land and nonautomatic healing presentation remain separate.
+
+**ABG-09 — runtime team healing scope.** A squadron's `Create_Team_Type`
+resolves its runtime container's nested `Force_Healing_Ability` declaration.
+The ability table binds those handlers to the session's squadron identity,
+including name, activation style, recipient categories/types/exclusions, range,
+amount, percentage, interval and single-target choice. The ordinary automatic
+healing service consumes them on the container's own hull (WSH-01..07, AB-60,
+WSQ-60). This does not establish support for an arbitrary Container object that
+is not reached as a runtime team type. Evidence: debug build and existing team
+loading/ability binding. The viewer's particle, light and audio preparation still
+indexes the purchase type's ordinary handlers, so runtime team healing
+presentation is a separate gap. Team range-blob data is retained, but its runtime
+selection path has not been verified here.
+
+**ABG-10 — unique-unit LURE parameters.** Ordinary LURE binding is shared by
+space holders, including UniqueUnit: `Pulse_Frequency_Secs` sets the pulse period
+and `Target_Types` supplies exact type identities for the search (WLU-03/04).
+This does not extend support to other ability families that author the same
+tags. LURE does not read `Is_Pulsing`; other families' use of that flag has not
+been established, so its class-wide coverage remains open. Evidence: debug build.
+
+**ABG-11 — space harmonic-bomb countdown.** A SpaceUnit's ordinary
+`HARMONIC_BOMB` declaration reads `Bomb_Countdown_Seconds`, binds it to the
+spawned-object profile and starts the created bomb's countdown (WHE-61/62).
+The current nested reader is specific to HARMONIC_BOMB; it does not read this tag
+for WEAKEN_ENEMY or establish support for every other spawned-ability family.
+Evidence: debug build and the shared space loader/activation consumer.
+
+**ABG-14 — ordinary station point defence.** A StarBase with an ordinary
+`LASER_DEFENSE` slot uses the shared space loader, activation, projectile filter,
+radius, duration and recharge consumers (WLD-01..05). Its beam uses the authored
+bones, texture, width, colour and frame count (WLD-12). This scope requires the
+ordinary slot; it does not establish execution of an independently automatic
+nested handler or land point defence. Evidence: debug build and the shared
+ability compiler, defence service and beam renderer.
+
+**ABG-15 — custom labels and ordinary countdowns.** `SkirmishSpaceUnit` is an
+XML element label, not an additional ability implementation (SG-CLS-01). When
+its resolved object is an ordinary space holder, the shared ability compiler
+binds `Recharge_Seconds` and `Expiration_Seconds` for supported ability kinds.
+Kind-specific timing rules still apply. A runtime team or craft uses its own
+ability rows (AB-15/60), and an unloaded scene object has no countdown consumer.
+Evidence: debug-build ability getters and the class resolver/ability compiler.
+
+**ABG-16 — automatic runtime team jammers.** The `Create_Team_Type` loader
+retains the runtime Container's nested handler name and activation style on the
+squadron profile (AB-60). Automatic jammer service uses that handler to register
+the source and apply its existing jamming rules (WHE-32, FS-45/46, FC-77,
+FD-75). The ordinary team compiler does not publish a `SENSOR_JAMMING` slot, so
+this does not establish manual team activation. The debug build's owner
+particle is attached through activation, service and termination; current
+automatic registration does not publish that persistent presentation lifecycle.
+Evidence: debug build and the runtime team loader/compiler and jammer service.
+
+**ABG-17 — unresolved defence lightning placement.** The point-defence loader
+retains `Lightning_Effect_Name`, while the current renderer consumes only the
+authored beam look (WLD-12). Rechecking debug-build service, beam creation and
+update, hit and termination paths did not establish an independent lightning
+placement or lifecycle. Keep that consumer unresolved for UniqueUnit and
+StarBase; neither parsing nor an ordinary beam demonstrates application of the
+lightning field, and these checks do not establish that the original ignores it.

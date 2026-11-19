@@ -70,6 +70,9 @@ enum class ListRule : std::uint8_t {
 // The verified rule of a list tag (case-insensitive), or nullopt for a tag AU-82 did not read.
 [[nodiscard]] std::optional<ListRule> list_rule(std::string_view tag) noexcept;
 
+// LCGA-01: case-insensitive object-field identity, including verified XML spelling aliases.
+[[nodiscard]] bool object_tag_matches(std::string_view authored, std::string_view requested) noexcept;
+
 // The layers of one object, most-derived first (as EffectiveObject::chain names them); the last
 // layer is the base type, every earlier one a variant.
 using Layers = std::span<const Definition* const>;

@@ -753,7 +753,7 @@ void selector_contracts() {
     translated_scene_contracts();
     planet_effect_contracts();
     asset_name_contracts();
-    expect(eawr::scene::legacy_selectors().size() == 22, "the selector table matches the accepted legacy list");
+    expect(eawr::scene::legacy_selectors().size() == 24, "the selector table matches the accepted legacy list");
     const auto* alpha = eawr::scene::find_legacy_selector("MeshAlpha.fx");
     expect(alpha != nullptr && alpha->transparent && alpha->technique == "sph_t1",
            "MeshAlpha is the fixed transparent-phase pass");
@@ -795,6 +795,12 @@ void selector_contracts() {
     const auto* deathstar = eawr::scene::find_legacy_selector("planet_deathstar.FX");
     expect(deathstar != nullptr && !deathstar->transparent && deathstar->stored_values
                && deathstar->technique == "sph_t3", "Death Star is the stored-value opaque highest-detail family");
+    const auto* closeup = eawr::scene::find_legacy_selector("PLANET_SHIM_CLOSEUP.FX");
+    const auto* lights = eawr::scene::find_legacy_selector("MeshAdditive_CityLights_Closeup.fx");
+    expect(closeup != nullptr && closeup->stored_values && !closeup->transparent
+               && closeup->technique == "sph_t3" && lights != nullptr && lights->stored_values
+               && lights->transparent && lights->technique == "t0",
+           "closeup body and lights select their distinct authored passes");
     const auto* vertex_additive = eawr::scene::find_legacy_selector("MeshAdditiveVColor.fx");
     expect(vertex_additive != nullptr && vertex_additive->transparent && vertex_additive->technique == "t0"
                && vertex_additive->pass == "t0_p0",

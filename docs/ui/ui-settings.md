@@ -246,11 +246,17 @@ setter calls. Camera/input presentation changes do not enter simulation hashes.
 
 Options > Tweaks has a default-on **Selection hotkeys** toggle. In Options > Controls,
 **Select own units** defaults to Ctrl+Q and **Select own units on screen** defaults to Q.
-Each row is a press-to-bind button (legacy EAWR-5131): click it, then press a letter key, alone or with Ctrl; Esc cancels.
+Each row is a press-to-bind button (legacy EAWR-5131): click it, then press a letter key, alone or with Ctrl,
+or a side/extra mouse button, optionally with Ctrl/Shift/Alt; Esc cancels. Mouse buttons display as Mouse 4,
+Mouse 5 and higher. Left and right remain reserved for selecting and orders; middle conflicts with the camera.
 A chord the other action holds, or that the command, camera-preset or ability maps already use (for example
 Ctrl+A, G, Ctrl+D), is refused with a message under the rows and the binding stays.
 Selection hotkeys are suspended while the development free camera is active.
 Labels follow the active keyboard layout; stored chords refer to physical keys.
+Every save writes `migrate.selection_hotkeys_default_on=1`. On an unstamped profile, a saved OFF
+override is discarded once and an installed XML enable default of No migrates to ON. The XML migration
+persists an ON override so the old XML cannot turn it off again after restarting. This also resets genuine
+old opt-outs once; choices made after migration, including OFF, survive subsequent loads.
 These feature rows persist through Apply/Accept; Cancel discards changes and Reset selection keys restores
 the active XML defaults (Ctrl+Q/Q without a layer override). The general retail keyboard editor remains read-only. See
 [SH-01](../behaviour/performance-deviations.md#sh-01-optional-selection-hotkeys) for admission.

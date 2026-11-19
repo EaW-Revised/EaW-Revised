@@ -134,6 +134,8 @@ public:
     [[nodiscard]] std::optional<int> process(double delta);
     // World input the host routes here (interactive runs only).
     void input(const godot::Ref<godot::InputEvent>& event);
+    // PS-05: pointer boundaries update text focus before GUI dispatch, including same-frame keys.
+    void observe_pointer(const godot::Ref<godot::InputEvent>& event);
     // HUD/widget producers use the same policy and seat-issued sink as world input.
     void input_gates(viewer::galactic::InputGates gates);
     bool select_planet(std::uint64_t planet, bool delayed = false);

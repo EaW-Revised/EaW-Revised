@@ -12,6 +12,14 @@ int main() {
     using namespace eawr;
     namespace search = viewer::galactic;
     using test::ui::expect;
+    expect(search::planet_search_name(false, "", "Planète cachée", "Internal") == "Planète cachée",
+        "hidden HUD captions resolve the authored localized name without discovery facts");
+    expect(search::planet_search_name(false, "", "", "Internal") == "Internal",
+        "hidden names retain the map's internal-name fallback");
+    expect(search::planet_search_name(false, "", "   ", "Dummy") == "   ",
+        "an explicitly blank authored dummy stays blank for index exclusion");
+    expect(search::planet_search_name(true, "", "Label", "Internal").empty(),
+        "normal rows preserve the HUD's blank-name admission");
     search::PlanetSearchIndex index;
     const auto alphabetical = [](const auto& a, const auto& b) { return a < b; };
     std::vector<search::PlanetSearchEntry> source{
@@ -20,19 +28,27 @@ int main() {
         {11, "Planète", "planète", true}, {18, "Missing_Text_Internal", "missing_text_internal", true},
         {23, "   ", "   ", true}};
     expect(index.update(source, alphabetical), "new discovered/localized names build an index");
-    expect(index.filter("") == std::vector<std::uint64_t>({9,6,4,18,11}), "empty query is alphabetical; equal names retain campaign order");
+    expect(index.filter("") == std::vector<std::uint64_t>({9,6,4,2,18,11}), "empty query includes hidden names alphabetically; equal names retain campaign order");
     expect(index.filter("ph") == std::vector<std::uint64_t>({9,6}), "incremental substring searches display text");
-    expect(index.filter("hidden").empty(), "undiscovered exact or partial names never appear");
+    expect(index.filter("hidden") == std::vector<std::uint64_t>({2}), "undiscovered names remain searchable");
     expect(index.filter("   ").empty(), "a mod's deliberately blank-name dummy has no search row");
     expect(index.filter("planète") == std::vector<std::uint64_t>({11}), "localized UTF-8 keys survive the model intact");
     expect(index.filter("missing_text") == std::vector<std::uint64_t>({18}), "the caller's internal-name fallback is searchable");
     expect(!index.update(source, alphabetical), "unchanged discovery and language do not sort again");
     source[1].name = "Another hidden name";
-    expect(!index.update(source, alphabetical), "hidden-name changes are not a search oracle or an index invalidation");
+    expect(index.update(source, alphabetical), "hidden-name changes refresh the listed name");
     source[2].discovered = false;
-    expect(index.update(source, alphabetical) && index.filter("alpha") == std::vector<std::uint64_t>({6}), "observer changes remove old discoveries");
+    expect(index.update(source, alphabetical) && index.filter("alpha") == std::vector<std::uint64_t>({9,6}), "observer changes retain names but update row admission");
+    const auto discovered = [&](std::uint64_t id) {
+        const auto row = std::find_if(index.entries().begin(), index.entries().end(),
+            [id](const auto& entry) { return entry.id == id; });
+        return row != index.entries().end() && row->discovered;
+    };
+    expect(!discovered(9), "a retained hidden row carries no selection/art admission");
+    source[2].discovered = true;
+    expect(index.update(source, alphabetical) && discovered(9), "exploration turns the same retained row into a normal row");
     source[3].name = "Autre nom"; source[3].folded = "autre nom";
-    expect(index.update(source, alphabetical) && index.filter("alpha").empty(), "language/name changes replace the old search text");
+    expect(index.update(source, alphabetical) && index.filter("alpha") == std::vector<std::uint64_t>({9}), "language/name changes replace the old search text");
     // A relocated test package (the cross route's Windows test stage) supplies the source root at run time (#7546).
     const auto directory = testing::runtime_path("EAWR_TEST_SOURCE_ROOT", "tools/revised_planet_search",
         EAWR_SOURCE_DIR "/tools/revised_planet_search");

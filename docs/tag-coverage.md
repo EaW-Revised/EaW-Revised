@@ -294,6 +294,17 @@ cell of a rule table, a list item or a bold paragraph; only the leading rule ID 
 `TODO #2566:` note, printed by the gate for follow-up without guessing a consumer or rule.
 The gate caps these notes at 30 rows and requires a tracking ticket on each TODO note; lower the ceiling as gaps close.
 
+### Mod labels and class-agnostic tags
+
+A mod names its objects with its own element labels (`Props_Space_Nebula`, `Yoden_SpaceProp`, `Props_Stargate`), and the
+manifest keys each label as its own class. The loader reads a tag from the object whatever its element is called
+([mod-object-class.md](behaviour/mod-object-class.md), SG-CLS-01 to SG-CLS-03), so a label's `todo` row on a tag the FoC
+rows already apply is a naming gap, not an unwired tag. `python tools/inventory/tag_registry.py render` therefore lists a
+computed view, "Mod labels that inherit a class-agnostic tag": a todo pair on a class the FoC XML does not author, on a tag
+whose FoC rows are all applied or partial with no `types`, no `missing_types` and at least one code location. One
+restricted row (a tag applied for ships only, say) keeps every label pair at its own status. The view changes no row and no
+gate: the registry JSON still carries each label's `todo` until someone reviews it.
+
 ### Changing a row
 
 A PR that starts applying a tag (or stops):

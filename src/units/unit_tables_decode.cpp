@@ -223,6 +223,10 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         record_layers(*object);
         unit.id = object->effective.object_id;
         unit.xml_type = object->effective.type_name;
+        // WGCH-205: bribe inputs belong to ordinary ground units as well as production-capable types.
+        unit.tactical_bribe_cost = object->fixed("Tactical_Bribe_Cost", report_, false);
+        unit.bribe_corrupted_modifier = object->fixed("Bribe_Modifier_On_Corrupted_Planets", report_, false);
+        unit.bribe_uncorrupted_modifier = object->fixed("Bribe_Modifier_On_Uncorrupted_Planets", report_, false);
         // SG-CLS-01: an element name that is no FoC class settled its class from the chain or the tags; never silent.
         if (!object->effective.class_origin.empty())
             report_.note(unit.id, "class", object->effective.type_name, object->effective.class_origin);
@@ -368,6 +372,8 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         else load_body(*object, unit);
         if (unit.kind == UnitKind::squadron && unit.max_squad_size == 0) return; // FL-06: skip the invalid type only
         if (!hero_company) load_abilities(*object, unit);
+        if (!unit.destruction_survivors.empty()) unit.survivor_ejection = std::any_of(unit.abilities.begin(), unit.abilities.end(),
+            [](const auto& ability) { return iequals(ability.authored_type, "EJECT_VEHICLE_THIEF"); });
         load_production(*object, unit);
         if (unit.build_pad) {
             for (const auto& group : unit.production.buildable) {
@@ -436,7 +442,9 @@ void Loader::load_company(Object& object, UnitType& unit) {
     // WHE-49: a unique ship may form an authored team during creation.
     if (flag(*ship, "Create_Team", false).value_or(false)) {
         const auto team = trim(ship->text("Create_Team_Type"));
-        if (team.empty()) report_.missing(unit.id, "Create_Team_Type", {}, "created space team has no type");
+        // WHE-49/WHE-SQ-02: an unnamed creation team does not remove the
+        // transport body. Its fighter profile supplies the ordinary self group.
+        if (team.empty()) enqueue(unit.deployed_space_type, UnitKind::ship);
         else {
             unit.deployed_space_type = team;
             enqueue(team, UnitKind::squadron);

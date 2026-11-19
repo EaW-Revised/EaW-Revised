@@ -83,15 +83,18 @@ void test_hangar() {
 
     // Unlimited reserve never runs out.
     auto unlimited_profile = profile;
-    unlimited_profile.entries = {{squadron_a, 1, tactical::unlimited_reserve}};
-    auto unlimited = tactical::initial_spawner(seed, 1, 1);
-    std::size_t total = 0;
-    for (std::uint64_t round = 0; round < 5; ++round) {
-        const auto from = 1 + round * 300;
-        total += service(unlimited_profile, unlimited, from, from + 300).size();
-        tactical::squadron_lost(unlimited_profile, unlimited, 0, from + 299);
+    for (const auto reserve : {tactical::unlimited_reserve, -2, std::numeric_limits<std::int32_t>::min()}) {
+        unlimited_profile.entries = {{squadron_a, 1, reserve}};
+        auto unlimited = tactical::initial_spawner(seed, 1, 1);
+        std::size_t total = 0;
+        for (std::uint64_t round = 0; round < 5; ++round) {
+            const auto from = 1 + round * 300;
+            total += service(unlimited_profile, unlimited, from, from + 300).size();
+            tactical::squadron_lost(unlimited_profile, unlimited, 0, from + 299);
+        }
+        expect(total == 5 && unlimited.entries[0].remaining == tactical::unlimited_reserve,
+            "FL-02: every negative authored reserve remains unlimited across replacements");
     }
-    expect(total == 5 && unlimited.entries[0].remaining == tactical::unlimited_reserve, "FL-02: a negative reserve never runs out");
 
     // C-02 / FL-08: replacement time follows the loss and the retained service phase.
     // The 418 input below is a controlled boundary case, not a measured detach frame.
@@ -177,7 +180,13 @@ void test_validation() {
     expect(!tactical::validate_squadron_table(offsets), "one offset per member");
     auto negative = motion().squadrons;
     negative.spawners[0].entries[0].starting = -1;
-    expect(!tactical::validate_squadron_table(negative), "spawn counts are nonnegative");
+    expect(!tactical::validate_squadron_table(negative), "starting spawn counts are nonnegative");
+    for (const auto reserve : {-2, std::numeric_limits<std::int32_t>::min()}) {
+        auto unlimited = motion().squadrons;
+        unlimited.spawners[0].entries[0].reserve = reserve;
+        expect(static_cast<bool>(tactical::validate_squadron_table(unlimited)),
+            "FL-02: every negative authored reserve is admitted as unlimited");
+    }
     auto overflow = motion().squadrons;
     overflow.spawners[0].entries[0].starting = 2;
     overflow.spawners[0].entries[0].reserve = std::numeric_limits<std::int32_t>::max();

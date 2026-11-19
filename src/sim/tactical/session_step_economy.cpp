@@ -369,7 +369,8 @@ core::Result<void> session_detail::Tick::station_upgrades() {
                     if (remaining != unlimited_reserve && old_hangar != nullptr && prior != spawners.end() && prior->second.ready) {
                         const auto match = std::find_if(old_hangar->entries.begin(), old_hangar->entries.end(),
                             [&](const SpawnEntryProfile& previous_entry) { return previous_entry.squadron == entry.squadron; });
-                        if (match != old_hangar->entries.end() && match->reserve != unlimited_reserve) {
+                        // FL-02: authored negative reserves are all unlimited; only finite profiles have a spent budget.
+                        if (match != old_hangar->entries.end() && match->reserve >= 0) {
                             const auto slot = static_cast<std::size_t>(match - old_hangar->entries.begin());
                             if (slot < prior->second.entries.size()) remaining = std::max(0,
                                 remaining - (match->reserve + match->starting - prior->second.entries[slot].remaining));
@@ -465,6 +466,7 @@ core::Result<void> session_detail::Tick::economy() {
     if (queued_production) {
         const auto counted = impl_->count_owned(survivors, executor);
         if (!counted) return core::Result<void>::failure(counted.error());
+        count_destruction_birth_ownership();
         production_census_visits += survivors.size();
     }
     static_cast<void>(impl_->prune_upgrade_holders(ledgers, survivors));

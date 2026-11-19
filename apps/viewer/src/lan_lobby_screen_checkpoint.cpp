@@ -9,6 +9,8 @@
 namespace eawr::presentation::godot_backend {
 namespace {
 using viewer::checkpoint_work;
+// How many times in a row a restore ended by a real room change is applied again without the host pressing Apply (#7878).
+constexpr unsigned max_checkpoint_reapplies = 3;
 sim::galactic::MpRoster display_roster(const GalacticLobbyBackend::CheckpointCandidate& candidate) {
     auto roster = candidate.original_roster;
     roster.seats = candidate.saved.seats;
@@ -127,7 +129,7 @@ void EawrLanLobby::process_checkpoint_read() {
         if (polled.state == State::ready) {
             auto prepared = std::move(*polled.value);
             if (prepared && prepared.value().manifest.epoch <= impl.galactic_backend->selection_epoch()) {
-                impl.checkpoint_problem = "The room changed while the save was restoring. Apply the saved seats again.";
+                impl.checkpoint_problem = "The saved game selection changed while the save was restoring. Apply the saved seats again.";
                 (void)checkpoint_work([discard = std::move(prepared).value()] { static_cast<void>(discard); });
             } else {
                 if (prepared) {
@@ -151,7 +153,25 @@ void EawrLanLobby::process_checkpoint_read() {
             impl.checkpoint_problem = "Restoring the saved game timed out. Return to the lobby or try again when it finishes.";
             impl.checkpoint_signature.clear();
         } else if (polled.state == State::room_changed) {
-            impl.checkpoint_problem = "The room changed while the save was restoring. Apply the saved seats again.";
+            // #7878: only a real change (players, seats, settings) gets here. Say what it was; re-apply by itself while the
+            // assignment can still be fitted to the room, and stop after a few rounds so a room that keeps changing is not
+            // restored forever.
+            const auto* before = impl.checkpoint_prepare.submitted_room();
+            impl.checkpoint_room_change = before && snapshot ? GalacticLobbyBackend::describe_checkpoint_room_change(*before, *snapshot) : std::string{};
+            if (impl.checkpoint_request != impl.checkpoint_auto_request) impl.checkpoint_reapplies = 0;
+            const std::string change = impl.checkpoint_room_change.empty() ? std::string("The room changed while the save was restoring.")
+                                                                           : impl.checkpoint_room_change;
+            if (snapshot && impl.checkpoint_reapplies < max_checkpoint_reapplies) {
+                ++impl.checkpoint_reapplies;
+                impl.checkpoint_reapply_request = impl.checkpoint_request;
+                note_chat(model::ChatKind::notice, change + " The saved game is being restored again.");
+            } else {
+                // The seat assignment is fitted to the new room in the next lobby refresh, which clears the panel line; the
+                // sentence is kept there (checkpoint_kept_problem) so the host still sees what changed.
+                impl.checkpoint_problem = change + " Apply the saved seats again.";
+                impl.checkpoint_kept_problem = impl.checkpoint_problem;
+                note_chat(model::ChatKind::notice, impl.checkpoint_problem);
+            }
             impl.checkpoint_signature.clear();
         } else if (polled.state == State::failed) {
             impl.checkpoint_problem = "The saved game could not be restored.";
@@ -280,13 +300,13 @@ void EawrLanLobby::apply_checkpoint_selection() {
     impl.checkpoint_applied = false;
     impl.checkpoint_problem = "Restoring saved game...";
     const auto request = ++impl.checkpoint_request;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    const auto deadline = std::chrono::steady_clock::now() + viewer::checkpoint_restore_limit;
     (void)impl.checkpoint_prepare.submit(request, configured->snapshot, deadline,
         [backend = impl.galactic_backend, snapshot = configured->snapshot,
         roster, bindings = impl.checkpoint_bindings, bytes = impl.checkpoint_bytes,
         epoch = impl.galactic_backend->selection_epoch() + 1]() mutable {
         return backend->prepare_checkpoint(snapshot, std::move(roster), std::move(bindings), std::move(bytes), epoch);
-    });
+    }, &GalacticLobbyBackend::same_checkpoint_room);
     impl.rows_signature.clear(); impl.checkpoint_signature.clear();
 }
 
@@ -308,6 +328,29 @@ void EawrLanLobby::refresh_checkpoint_staging() {
         impl.checkpoint_bound_peers = std::move(room_peers);
         impl.galactic_backend->clear_checkpoint(); impl.checkpoint_applied = false;
         impl.checkpoint_problem.clear(); impl.checkpoint_signature.clear(); impl.rows_signature.clear();
+    }
+    // #7878: the restore ended because the room really changed: apply the saved seats again, now fitted to the new room. When
+    // they no longer fit (a human is missing or extra) the refusal names the change and what is needed.
+    if (impl.checkpoint_reapply_request != 0) {
+        const bool current = impl.checkpoint_reapply_request == impl.checkpoint_request;
+        impl.checkpoint_reapply_request = 0;
+        if (current && impl.host && staging && impl.checkpoint_candidate && impl.checkpoint_bytes && !impl.checkpoint_prepare.active()) {
+            const auto before = impl.checkpoint_problem;
+            apply_checkpoint_selection();
+            const std::string change = impl.checkpoint_room_change.empty() ? std::string("The room changed while the save was restoring.")
+                                                                           : impl.checkpoint_room_change;
+            if (impl.checkpoint_prepare.active()) impl.checkpoint_auto_request = impl.checkpoint_request;
+            else if (impl.checkpoint_problem == before) impl.checkpoint_problem = change + " Apply the saved seats again.";
+            else if (!impl.checkpoint_problem.empty())
+                impl.checkpoint_problem = change + " The saved seats no longer fit the room (" + impl.checkpoint_problem + ").";
+            impl.checkpoint_signature.clear();
+        }
+    }
+    // The reconcile above clears the panel line; a room-change sentence that was not re-applied survives it (#7878).
+    if (!impl.checkpoint_kept_problem.empty()) {
+        if (impl.checkpoint_candidate && impl.checkpoint_problem.empty() && !impl.checkpoint_prepare.active())
+            impl.checkpoint_problem = impl.checkpoint_kept_problem;
+        impl.checkpoint_kept_problem.clear(); impl.checkpoint_signature.clear();
     }
     auto button = [&](const char* id, const char* caption, const char* anchor) {
         auto* found = EAWR_CONTROL(EawrUiButton, id);

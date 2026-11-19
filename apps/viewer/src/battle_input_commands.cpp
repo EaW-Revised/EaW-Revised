@@ -45,6 +45,92 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
     // frames. LAN reserves this epoch until its intent reaches the core.
     const auto input_epoch = live.input_epoch();
     if (input_epoch) live.note_native_input(input_epoch.epoch());
+    const auto* saved_selection = ActiveSettings::get();
+    if (saved_selection == nullptr) saved_selection = &selection_fallback_;
+    const auto select_action = [&](const std::optional<std::size_t> action) {
+        if (!action) return false;
+        refresh(live, population, space);
+        std::vector<ui::BattleUnit> candidates;
+        const auto& snapshot = live.battle_frame().latest;
+        if (snapshot && live.tables()) {
+            // Admission is independent of render nodes, camera culling and fog draw lists.
+            std::map<sim::tactical::TypeId, const units::UnitType*> types;
+            for (const auto& type : live.tables()->units) types.emplace(battle::type_id(type.id), &type);
+            std::map<sim::tactical::TypeId, const units::LandCompany*> companies;
+            for (const auto& company : live.tables()->land_companies) companies.emplace(battle::type_id(company.id), &company);
+            for (const auto& instance : snapshot->instances()) {
+                if (instance.owner != live.local_player() || !live.can_control(instance)
+                    || (instance.durability && instance.durability->hull.raw() <= 0)) continue;
+                const auto found = types.find(instance.type_id);
+                if (found == types.end()) continue;
+                const auto& type = *found->second;
+                ui::BattleUnit candidate;
+                candidate.entity = instance.entity_id;
+                candidate.type = instance.type_id;
+                candidate.own = true;
+                candidate.selectable = type.selectable;
+                candidate.locomotion = type.locomotion;
+                candidate.decoration = type.decoration;
+                candidate.hero = type.named_hero || type.generic_hero || type.team_named_hero || type.team_generic_hero;
+                // Craft select their squadron once; the container supplies ownership and hero identity.
+                if (const auto parent = live.squadron_of().find(instance.entity_id); parent != live.squadron_of().end()) {
+                    const auto* container = live.snapshot_index().instance(parent->second);
+                    if (!container || container->owner != live.local_player() || !live.can_control(*container)) continue;
+                    const auto team_type = types.find(container->type_id);
+                    candidate.entity = parent->second;
+                    if (team_type != types.end()) {
+                        const auto& team = *team_type->second;
+                        candidate.hero = candidate.hero || team.named_hero || team.generic_hero || team.team_named_hero || team.team_generic_hero;
+                        candidate.selectable = candidate.selectable && team.selectable;
+                    } else {
+                        // Land roots use company profiles, separate from renderable unit types (LC-01).
+                        const auto company = companies.find(container->type_id);
+                        if (company == companies.end()) continue;
+                        candidate.hero = candidate.hero || std::any_of(company->second->members.begin(), company->second->members.end(),
+                            [](const auto& member) { return member.named_hero || member.generic_hero || member.kind == units::LandObjectKind::hero; });
+                    }
+                }
+                if (*action == 1) {
+                    const float radius = static_cast<float>(instance.soft_radius.raw()) / static_cast<float>(sim::math::Fixed::scale);
+                    ui::Vec3f origin{};
+                    for (std::size_t axis = 0; axis < 3; ++axis)
+                        origin[axis] = static_cast<float>(instance.fixed_transform.rows[axis][3].raw())
+                            / static_cast<float>(sim::math::Fixed::scale);
+                    // SH-01: projected soft-radius bounds; partial overlap counts, behind camera does not.
+                    for (unsigned corner = 0; corner < 8; ++corner) {
+                        auto point = origin;
+                        for (std::size_t axis = 0; axis < 3; ++axis)
+                            point[axis] += (corner & (1U << axis)) ? radius : -radius;
+                        if (const auto pixel = project(point)) {
+                            if (!candidate.selection_bounds) candidate.selection_bounds = std::array<float, 4>{(*pixel)[0], (*pixel)[1], (*pixel)[0], (*pixel)[1]};
+                            else {
+                                auto& bounds = *candidate.selection_bounds;
+                                bounds[0] = std::min(bounds[0], (*pixel)[0]); bounds[1] = std::min(bounds[1], (*pixel)[1]);
+                                bounds[2] = std::max(bounds[2], (*pixel)[0]); bounds[3] = std::max(bounds[3], (*pixel)[1]);
+                            }
+                        }
+                    }
+                }
+                candidates.push_back(candidate);
+            }
+        }
+        inspect_.reset();
+        selection_.bulk(candidates, *action == 1 ? std::optional(viewport_rect()) : std::nullopt,
+            saved_selection->selection_config.actions[*action].include_heroes);
+        note(*action == 0 ? "select own all" : "select own on screen");
+        acknowledge(*action == 0 ? Acknowledgement::Kind::select_all : Acknowledgement::Kind::select_screen);
+        refresh_cards(live);
+        ++events_;
+        draw();
+        return true;
+    };
+    if (const auto* mouse = Object::cast_to<InputEventMouseButton>(event.ptr())) {
+        const auto action = ui::selection_mouse_action(*saved_selection,
+            selection_mouse_number(static_cast<int>(mouse->get_button_index())),
+            mouse->is_shift_pressed(), mouse->is_ctrl_pressed(), mouse->is_alt_pressed(),
+            mouse->is_meta_pressed(), space.live_camera_free());
+        if (action) return mouse->is_pressed() ? select_action(action) : true;
+    }
     if (const auto* motion = Object::cast_to<InputEventMouseMotion>(event.ptr())) {
         pointer_ = {static_cast<float>(motion->get_position().x), static_cast<float>(motion->get_position().y)};
         if (left_) {
@@ -146,87 +232,12 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
         const Key code = pressed_key->get_physical_keycode() != KEY_NONE ? pressed_key->get_physical_keycode()
                                                                           : pressed_key->get_keycode();
         // SH-01: physical feature bindings precede camera command relocation.
-        const auto* saved_selection = ActiveSettings::get();
-        if (saved_selection == nullptr) saved_selection = &selection_fallback_;
         if (code >= KEY_A && code <= KEY_Z) {
             const auto action = ui::selection_action(*saved_selection, static_cast<char>('A' + code - KEY_A),
                 pressed_key->is_shift_pressed(), pressed_key->is_ctrl_pressed(), pressed_key->is_alt_pressed(),
                 pressed_key->is_meta_pressed(), space.live_camera_free());
             if (action) {
-                refresh(live, population, space);
-                std::vector<ui::BattleUnit> candidates;
-                const auto& snapshot = live.battle_frame().latest;
-                if (snapshot && live.tables()) {
-                    // Admission is independent of render nodes, camera culling and fog draw lists.
-                    std::map<sim::tactical::TypeId, const units::UnitType*> types;
-                    for (const auto& type : live.tables()->units) types.emplace(battle::type_id(type.id), &type);
-                    std::map<sim::tactical::TypeId, const units::LandCompany*> companies;
-                    for (const auto& company : live.tables()->land_companies) companies.emplace(battle::type_id(company.id), &company);
-                    for (const auto& instance : snapshot->instances()) {
-                        if (instance.owner != live.local_player() || !live.can_control(instance)
-                            || (instance.durability && instance.durability->hull.raw() <= 0)) continue;
-                        const auto found = types.find(instance.type_id);
-                        if (found == types.end()) continue;
-                        const auto& type = *found->second;
-                        ui::BattleUnit candidate;
-                        candidate.entity = instance.entity_id;
-                        candidate.type = instance.type_id;
-                        candidate.own = true;
-                        candidate.selectable = type.selectable;
-                        candidate.locomotion = type.locomotion;
-                        candidate.decoration = type.decoration;
-                        candidate.hero = type.named_hero || type.generic_hero || type.team_named_hero || type.team_generic_hero;
-                        // Craft select their squadron once; the container supplies ownership and hero identity.
-                        if (const auto parent = live.squadron_of().find(instance.entity_id); parent != live.squadron_of().end()) {
-                            const auto* container = live.snapshot_index().instance(parent->second);
-                            if (!container || container->owner != live.local_player() || !live.can_control(*container)) continue;
-                            const auto team_type = types.find(container->type_id);
-                            candidate.entity = parent->second;
-                            if (team_type != types.end()) {
-                                const auto& team = *team_type->second;
-                                candidate.hero = candidate.hero || team.named_hero || team.generic_hero || team.team_named_hero || team.team_generic_hero;
-                                candidate.selectable = candidate.selectable && team.selectable;
-                            } else {
-                                // Land roots use company profiles, separate from renderable unit types (LC-01).
-                                const auto company = companies.find(container->type_id);
-                                if (company == companies.end()) continue;
-                                candidate.hero = candidate.hero || std::any_of(company->second->members.begin(), company->second->members.end(),
-                                    [](const auto& member) { return member.named_hero || member.generic_hero || member.kind == units::LandObjectKind::hero; });
-                            }
-                        }
-                        if (*action == 1) {
-                            const float radius = static_cast<float>(instance.soft_radius.raw()) / static_cast<float>(sim::math::Fixed::scale);
-                            ui::Vec3f origin{};
-                            for (std::size_t axis = 0; axis < 3; ++axis)
-                                origin[axis] = static_cast<float>(instance.fixed_transform.rows[axis][3].raw())
-                                    / static_cast<float>(sim::math::Fixed::scale);
-                            // SH-01: projected soft-radius bounds; partial overlap counts, behind camera does not.
-                            for (unsigned corner = 0; corner < 8; ++corner) {
-                                auto point = origin;
-                                for (std::size_t axis = 0; axis < 3; ++axis)
-                                    point[axis] += (corner & (1U << axis)) ? radius : -radius;
-                                if (const auto pixel = project(point)) {
-                                    if (!candidate.selection_bounds) candidate.selection_bounds = std::array<float, 4>{(*pixel)[0], (*pixel)[1], (*pixel)[0], (*pixel)[1]};
-                                    else {
-                                        auto& bounds = *candidate.selection_bounds;
-                                        bounds[0] = std::min(bounds[0], (*pixel)[0]); bounds[1] = std::min(bounds[1], (*pixel)[1]);
-                                        bounds[2] = std::max(bounds[2], (*pixel)[0]); bounds[3] = std::max(bounds[3], (*pixel)[1]);
-                                    }
-                                }
-                            }
-                        }
-                        candidates.push_back(candidate);
-                    }
-                }
-                inspect_.reset();
-                selection_.bulk(candidates, *action == 1 ? std::optional(viewport_rect()) : std::nullopt,
-                    saved_selection->selection_config.actions[*action].include_heroes);
-                note(*action == 0 ? "select own all" : "select own on screen");
-                acknowledge(*action == 0 ? Acknowledgement::Kind::select_all : Acknowledgement::Kind::select_screen);
-                refresh_cards(live);
-                ++events_;
-                draw();
-                return true;
+                return select_action(action);
             }
         }
         std::int64_t command_code = static_cast<std::int64_t>(code);
@@ -612,11 +623,12 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
                 + std::to_string(static_cast<double>(drag->face_toward->y.raw()) / sim::math::Fixed::scale);
         } else if (attacked) {
             what = "attack " + std::to_string(pick.entity);
-            live.flash_order_target(pick.entity);  // WU-60
             if (pick.hardpoint != sim::tactical::attack_hull) {
                 what += " hardpoint " + std::to_string(pick.hardpoint);
                 world_ui_->flash_reticle(pick.entity, pick.hardpoint);  // WU-42
                 ++hardpoint_orders_;
+            } else {
+                live.flash_order_target(pick.entity);  // WU-61: hull clicks only
             }
         } else if (guarding) {
             what = pick.entity != sim::invalid_entity_id && pick.own && !over_selected

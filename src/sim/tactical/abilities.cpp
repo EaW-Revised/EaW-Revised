@@ -1,6 +1,7 @@
 #include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/land_abilities.hpp"
 #include "eawr/sim/tactical/combat.hpp"
+#include "eawr/sim/tactical/motion.hpp"
 
 #include "../replay_internal.hpp"
 #include "tactical_internal.hpp"
@@ -9,6 +10,7 @@
 #include <array>
 #include "eawr/core/ascii.hpp"
 #include <functional>
+#include <limits>
 #include <utility>
 #include <cstdlib>
 #include <string>
@@ -19,6 +21,9 @@ namespace {
 using math::Fixed;
 
 constexpr std::int64_t one_raw = Fixed::scale;
+// WAB-24: cover ordinary rates and formation deceleration, which admits the coordinate bound.
+constexpr std::int64_t speed_limit_raw = std::numeric_limits<std::int64_t>::max()
+    / std::max(max_motion_rate, max_motion_coordinate);
 
 struct KindName {
     AbilityKind kind;
@@ -82,6 +87,17 @@ constexpr std::array<KindName, 32> kind_names{{
     const auto raw = left.raw() * right.raw();
     const auto half = one_raw / 2;
     return Fixed::from_raw(raw >= 0 ? (raw + half) / one_raw : -((-raw + half) / one_raw));
+}
+
+[[nodiscard]] core::Result<Fixed> speed_product(const Fixed left, const Fixed right) {
+    auto result = math::multiply(left, right);
+    if (!result) return result;
+    // WAB-24: retain positive half-away rounding. Unsigned wrap preserves the low 25 product bits;
+    // a half tie with an even truncated quotient is the only difference from math's ties-to-even.
+    const auto low = static_cast<std::uint64_t>(left.raw()) * static_cast<std::uint64_t>(right.raw());
+    if ((low & (2 * one_raw - 1)) == one_raw / 2)
+        return core::Result<Fixed>::success(Fixed::from_raw(result.value().raw() + 1));
+    return result;
 }
 
 [[nodiscard]] Fixed modifier_of(const AbilityModifiers& modifiers, const AbilityModifier modifier) noexcept {
@@ -428,6 +444,7 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
             }
         }
     }
+    auto speed_envelope = Fixed::from_raw(one_raw);
     for (const auto& ability : profile.abilities) {
         if (ability.kind == AbilityKind::none || to_string(ability.kind) == "NONE") {
             return invalid("unknown ability kind" + type);
@@ -520,7 +537,8 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
             if (weaken.on_detonation && (weaken.radius.raw() <= 0 || weaken.radius.raw() > 65536 * one_raw
                 || weaken.duration_frames == 0 || weaken.duration_frames > max_ability_frames || weaken.categories == 0
                 || weaken.take_damage_increase.raw() < 0 || weaken.take_damage_increase.raw() > 4 * one_raw
-                || weaken.cause_damage_reduction.raw() < 0 || weaken.cause_damage_reduction.raw() > one_raw))
+                // WHE-62: negate the signed percentage at application; negative reductions raise damage.
+                || !bounded(weaken.cause_damage_reduction, false)))
                 return invalid("invalid weaken radius, duration, categories or contribution" + type);
         }
         // WSD-01: the countdown needs an authored expiration, and the blast object an enabled area blast.
@@ -599,11 +617,19 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
         // AB-22/AB-23: an interval multiplier of 0 is accepted (the interval then floors at one frame); negative is not.
         if (!bounded(m.weapon_delay, true) || !bounded(m.shield_regen, false) || !bounded(m.shield_regen_interval, false)
             || m.shield_regen_interval.raw() < 0 || !bounded(m.energy_regen, false) || !bounded(m.energy_regen_interval, false)
-            || m.energy_regen_interval.raw() < 0 || !bounded(m.speed, false) || m.speed.raw() < 0
+            || m.energy_regen_interval.raw() < 0 || m.speed.raw() < 0 || m.speed.raw() > speed_limit_raw
             || !bounded(m.scatter_radius, true)
             || (ability.kind != AbilityKind::lucky_shot && !bounded(m.cause_damage, false)) || !bounded(m.take_damage, false)
             || !bounded(m.fire_rate, false) || m.cause_damage.raw() < 0 || m.take_damage.raw() < 0) {
             return invalid("a multiplier is out of bounds" + type);
+        }
+        // WAB-24: omitting every factor <= 1 bounds every active subset, including intermediate
+        // products before a later zero or reduction. Lucky Shot never contributes ordinary modes.
+        if (ability.kind != AbilityKind::lucky_shot && m.speed.raw() > one_raw) {
+            const auto combined = speed_product(speed_envelope, m.speed);
+            if (!combined || combined.value().raw() > speed_limit_raw)
+                return invalid("speed multiplier combination exceeds the Q24 motion range" + type);
+            speed_envelope = combined.value();
         }
         if (ability.kind == AbilityKind::barrage
             && (ability.barrage_target_type == 0 || ability.expiration_frames == 0
@@ -806,7 +832,10 @@ Fixed ability_multiplier(const UnitAbilityProfile& profile, const AbilityState& 
         // WLK-03: the Lucky multiplier belongs to its first matching impact only.
         if (!state.slots[index].active || profile.abilities[index].kind == AbilityKind::lucky_shot) continue;
         const auto factor = modifier_of(profile.abilities[index].modifiers, modifier);
-        value = value.raw() == one_raw ? factor : product(value, factor);
+        // WAB-24: validated speed envelopes make every active subset representable. The checked
+        // wide intermediate is needed even when its final Q24 value fits (e.g. 200 x 200).
+        value = value.raw() == one_raw ? factor : modifier == AbilityModifier::speed
+            ? speed_product(value, factor).value() : product(value, factor);
     }
     return value;
 }

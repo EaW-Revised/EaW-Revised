@@ -86,6 +86,10 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
     if (!tables) tables = load_start_tables(filesystem, catalog, failure, {}, true);
     if (!tables) return false;
     tactical::TacticalSetup& setup = replay->setup;
+    // An allocator boundary also occurs in skirmishes with skipped placements;
+    // only recorded campaign origin or campaign rules select campaign fog.
+    const auto fog_context = skirmish::replay_fog_context(setup);
+    if (!fog_context) { failure = core::format_diagnostic(fog_context.error()); return false; }
     const std::string replay_map = setup.skirmish ? setup.skirmish->map : std::string(map_path);
     if (units::content_identity(*tables) != replay.value().setup.content_identity) {
         // WHZ-01: live recordings include the selected map's authored hazard
@@ -159,7 +163,7 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
             selected_victory = inputs.value().space_victory_condition;
             // Display reveal bypasses drawing only; replay targeting retains the map's fog grid.
             {
-                auto fog = skirmish::fog_rules(inputs.value());
+                auto fog = skirmish::fog_rules(inputs.value(), fog_context.value());
                 if (!fog) {
                     failure = "live session fog rules: " + core::format_diagnostic(fog.error());
                     return false;
@@ -213,7 +217,7 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
             inputs = skirmish::read_start_inputs(replay_fixture, filesystem, catalog, *tables);
             if (!inputs) { failure = core::format_diagnostic(inputs.error()); return false; }
             {
-                auto fog = skirmish::fog_rules(inputs.value());
+                auto fog = skirmish::fog_rules(inputs.value(), fog_context.value());
                 if (!fog) { failure = core::format_diagnostic(fog.error()); return false; }
                 content.value().fog = fog.value();
                 content.value().map_box = skirmish::map_box(inputs.value());

@@ -87,8 +87,8 @@ add_test(
 
 
 add_test(
-    NAME ci_sign_release_stub
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_sign_release_stub.py"
+    NAME ci_sign_release
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_sign_release.py"
 )
 
 add_test(

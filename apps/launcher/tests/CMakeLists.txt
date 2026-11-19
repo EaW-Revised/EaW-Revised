@@ -28,6 +28,9 @@ add_test(NAME launcher_smoke
             "${PROJECT_SOURCE_DIR}/apps/viewer/project/project.godot")
 set_tests_properties(launcher_smoke PROPERTIES TIMEOUT 300)
 
+
+
+
 # The real dialogs, clicked on a private desktop (nothing reaches a screen). Skips (77) when the host
 # cannot create one.
 

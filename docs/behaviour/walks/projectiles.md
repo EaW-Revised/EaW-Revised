@@ -115,6 +115,12 @@ An unverified interior is stated alongside its established interface.
 | WPJ-40 | Decoration detonation creation requires allowed model visibility to enemy, view-frustum admission, local fog clear and `Is_Particle_Enabled`. With an object supplied, the inspected fog helper queries that object; only the no-object overload uses the point. Non-decoration effect objects enter the synchronized manager and do not use those decoration culls; their ability initialization remains the effect/hero interface. A culled decoration can suppress expiry sound under WPJ-35 without suppressing damage. | debug build EWP-15/16 | **differs**, G8/G9: target/source draw admission and viewer particle creation do not preserve this projectile-object admission contract. Exact generic decoration ownership/culls are particles/audio interfaces. |
 | WPJ-41 | Ordinary service work is O(1) motion plus owner-player ray-collection traversal and admitted object geometry/sphere work. Missile guidance adds current target/bone reads and bounded angle work; rocket route lookup reuses a retained path, rebuilding only on construction/redirection. Defence adds a scan over registered defence sources, not every unit. Blast query work happens at detonation through WAD-08–21. No numeric retail frame-time budget was measured. | debug build EWP-01/05/07/09/11; RFL/WAD interfaces | **same** work decomposition for supported flight, `ProjectileScratch`, collection tree and mesh BVHs; `MeshCollisionWork`/candidate counts support deterministic work assertions. DP-01 keeps motion/contact staging partitioned and commits ordered hits. |
 
+## Projectile modifier radius
+
+| Rule | Original behaviour | Evidence | Remake comparison |
+|---|---|---|---|
+| WPCM-01 | `Projectile_Combat_Mod_Radius` is not a registered projectile/object-definition input. The projectile combat-modifier delivery queries enemy collidables using positive `Projectile_Blast_Area_Range`; it has no separate modifier-radius field. Authoring the unregistered name does not change that reach. | Debug build: typed object-definition tag table and string references, plus projectile modifier recipient query. | The unregistered radius is **foc-ignores**. The actual timed projectile combat-modifier family remains an implementation gap; ordinary blast-damage support does not supply its modifier ledger or lifetime. |
+
 ## Concrete cases and limits of diagnosis
 
 - **Rebel starbase shield generator.** Levels 1–3 use
@@ -207,11 +213,12 @@ or appearance acceptance and do not close G1/G8/G9.
 ## XML coverage remaining
 
 The audited `docs/tag-coverage/statuses.json` marks these direct flight/aim inputs
-**todo**: `Projectile_Acceleration_Per_Frame`, `Projectile_Bomb_Fall_Accel_Rate`, `Projectile_Max_Scan_Range`,
+**todo**: `Projectile_Acceleration_Per_Frame`, `Projectile_Bomb_Fall_Accel_Rate`,
 `Projectile_Redirect_Chance_Modifier`, `Ranged_Target_Z_Adjust` (including
 `SpaceStructure`/`SpaceUnit`), and `Targeting_Fire_Inaccuracy_Fixed_Radius`
-(`SpaceBuildable`/`SpaceUnit`). The scan-range todo is not evidence that a new
-retargeting algorithm is wanted (WPJ-14). Redirect probability is a defence
+(`SpaceBuildable`/`SpaceUnit`). `Projectile/Projectile_Max_Scan_Range` is
+**foc-ignores**: both nonpositive and positive values produce no replacement
+under the original comparison in WPJ-14. Redirect probability is a defence
 interface whose exact consumer is U8.
 
 Damage-routing interfaces also read `Projectile_Damages_Random_Hard_Points` and

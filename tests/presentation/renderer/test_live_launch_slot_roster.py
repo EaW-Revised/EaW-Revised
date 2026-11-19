@@ -49,7 +49,7 @@ HARNESS = r'''
 namespace sim {
 using EntityId = std::uint64_t;
 namespace math {
-struct Fixed { int raw = 0; };
+struct Fixed { int value = 0; int raw() const { return value; } };
 struct Vec3 { Fixed x, y, z; };
 }
 namespace tactical {
@@ -62,7 +62,17 @@ struct CarriedObject { EntityId entity_id{}; TypeId type_id{}; std::vector<Carri
 struct CampaignReserve { EntityId id{}; TypeId type{}; PlayerId owner{}; bool restricted{}; TypeId purchase_type{};
                          std::vector<CarriedObject> contained; };
 struct CampaignBattleSetup { std::vector<CampaignReserve> reserves; };
-struct TacticalSetup { std::optional<CampaignBattleSetup> campaign; };
+struct Player { PlayerId player_id{}; FactionId faction_id{}; };
+struct TacticalSetup { std::optional<CampaignBattleSetup> campaign; std::vector<Player> players; };
+struct DestructionSurvivorChoice {
+    TypeId type{}; math::Fixed weight{1}; std::vector<FactionId> affiliations;
+    bool company{}; std::vector<TypeId> members;
+};
+struct DestructionSurvivorProfile {
+    std::vector<DestructionSurvivorChoice> choices; std::int32_t minimum{1}, maximum{1}; bool ejection{};
+};
+struct CombatProfile { TypeId type_id{}; std::optional<DestructionSurvivorProfile> destruction_survivors; };
+struct CombatTable { std::vector<CombatProfile> profiles; };
 struct HeroDeployment { TypeId purchase{}, deployed{}; };
 struct SpawnEntryProfile { TypeId squadron{}; std::int32_t starting{}; };
 struct SpawnerProfile { TypeId type_id{}; PlayerId owner{}; std::vector<SpawnEntryProfile> entries; };
@@ -151,6 +161,7 @@ using skirmish::LobbyColour;
 }
 __ARRIVAL_IMPL__
 __CAMPAIGN_HEADER__
+__SURVIVOR_HEADER__
 __WARM_HEADER__
 __DEVICE_HEADER__
 using namespace presentation;
@@ -186,7 +197,7 @@ inline void slot_grown(std::string_view) {}
 enum class Phase { slot_prologue, slot_launch_slot, slot_death_clone, slot_ship_meta, slot_append };
 struct DetailScope { explicit DetailScope(Phase) {} };
 }
-float to_float(sim::math::Fixed value) { return static_cast<float>(value.raw); }
+float to_float(sim::math::Fixed value) { return static_cast<float>(value.raw()); }
 std::string space_model_path(int) { return {}; }
 std::string battle_model_path(int, bool) { return {}; }
 std::string tag_text(int, const char*) { return {}; }
@@ -248,6 +259,10 @@ struct LiveSessionView {
     bool warm_recipe_read_ = false;
     std::optional<tactical::MotionTable> motion_;
     const tactical::MotionTable* motion() const { return motion_ ? &*motion_ : nullptr; }
+    std::optional<tactical::CombatTable> combat_;
+    const tactical::CombatTable* combat() const { return combat_ ? &*combat_ : nullptr; }
+    void prepare_survivor_slots(const vfs::Vfs&, const data::Catalog&);
+    std::set<std::pair<tactical::PlayerId, tactical::TypeId>> survivor_demand_;
     std::optional<skirmish::SkirmishStart> start_;
     std::optional<units::UnitTables> tables_;
     tactical::EconomyRules economy_;
@@ -336,6 +351,10 @@ __SHIP_OF__
 __ROWS__
 // The source-side selection, copied from production, over the same inputs the view holds.
 struct BattleSourceState {
+    std::optional<tactical::CombatTable> combat_;
+    const tactical::CombatTable* combat() const { return combat_ ? &*combat_ : nullptr; }
+    void prepare_survivor_slots(const vfs::Vfs&, const data::Catalog&);
+    std::set<std::pair<tactical::PlayerId, tactical::TypeId>> survivor_demand_;
     std::optional<skirmish::SkirmishStart> start_;
     std::optional<units::UnitTables> tables_;
     tactical::EconomyRules economy_;
@@ -410,6 +429,35 @@ LiveSessionView session(const bool campaign) {
 
 __STORAGE__
 int main() {
+    // DS-09: owner-specific warming and cold growth never require an arrival.
+    {
+        const vfs::Vfs filesystem; const data::Catalog catalog;
+        SpacePopulation population; GodotRenderer renderer;
+        LiveSessionView view;
+        view.start_.emplace(); view.tables_.emplace(); view.setup_.emplace(); view.combat_.emplace();
+        view.tables_->units = {{"Large"}, {"Medium"}, {"Unrelated"}, {"Team"}, {"Member"}};
+        const auto id = skirmish::type_id;
+        for (const auto& type : view.tables_->units) view.presentation_types_.emplace(id(type.id), &type);
+        view.start_->players = {{{1, 0, 101}, true, std::nullopt}};
+        view.setup_->players = {{1, 101}, {4, 404}};
+        view.start_->units = {{{5, id("Large"), 1, {}}, {}, "Large"}};
+        tactical::DestructionSurvivorProfile profile;
+        profile.choices = {{id("Medium"), {1}, {404}, false, {}},
+            {id("Team"), {1}, {101}, true, {id("Member"), id("Member")}},
+            {id("Unrelated"), {0}, {404}, false, {}}, {0, {1}, {404}, false, {}}};
+        view.combat_->profiles = {{id("Large"), profile}};
+        view.prepare_launch_slots(filesystem, catalog, battle::ArrivalPlan{});
+        if (view.slots(4, "Medium") != 1 || view.slots(1, "Member") != 2 || view.slots(1, "Team") != 0) return 101;
+        view.arrival_slots_.population = &population; view.arrival_slots_.renderer = &renderer;
+        view.arrival_slots_.remaining = 0;
+        const auto first = view.ship_of(100, id("Medium"), 4);
+        if (!first || view.arrival_slots_.grown != 0 || view.ship_of(100, id("Medium"), 4) != first) return 102;
+        if (!view.ship_of(101, id("Medium"), 4) || view.arrival_slots_.grown != 1) return 103;
+        if (view.ship_of(102, id("Medium"), 1) || view.ship_of(103, id("Unrelated"), 4)) return 104;
+        if (view.arrival_slots_.remaining != 0 || !view.arrivals_.empty()) return 105;
+        auto land = view; land.options_.land = true;
+        if (land.ship_of(104, id("Medium"), 4)) return 106;
+    }
     // #6992: a land pad completes a structure after tick zero: the entity gets a drawn slot with no plan, no purchase row and
     // an exhausted per-frame budget; a type that is not a pad's structure still gets none, and neither does a space session.
     {
@@ -907,7 +955,8 @@ class LiveLaunchSlotRoster(unittest.TestCase):
         header = header.replace('eawr::battle', 'battle').replace('struct BattleStart;', 'using BattleStart = skirmish::SkirmishStart;\nusing skirmish::type_id;')
         plan = (ROOT / 'src/battle/arrival_plan.cpp').read_text()
         plan = '\n'.join(line for line in plan.splitlines() if not line.startswith('#')).replace('eawr::battle', 'battle')
-        prepare = extract_function(source, 'void LiveSessionView::prepare_launch_slots(')
+        prepare = (extract_function(source, 'void LiveSessionView::prepare_launch_slots(')
+                   + extract_function(source, 'void LiveSessionView::prepare_survivor_slots('))
         warm = extract_function(source, 'bool LiveSessionView::warm_campaign_slots(')
         fallback = extract_function(source, 'void LiveSessionView::note_preload_fallback(')
         def planner_header(name):
@@ -915,6 +964,7 @@ class LiveLaunchSlotRoster(unittest.TestCase):
             return '\n'.join(line for line in text.splitlines() if not line.startswith('#')).replace(
                 'namespace eawr::presentation', 'namespace presentation')
         campaign_header = planner_header('campaign_warm_arrivals.hpp')
+        survivor_header = planner_header('destruction_survivor_warm.hpp')
         warm_header = planner_header('reserve_warm_plan.hpp')
         device_header = (ROOT / 'include/eawr/presentation/godot/device_budget.hpp').read_text()
         device_header = '\n'.join(line for line in device_header.splitlines() if not line.startswith('#')).replace(
@@ -988,7 +1038,7 @@ bool storage_contract() {
             directory = Path(temp)
             cpp = directory / 'launch_slots.cpp'
             exe = directory / ('launch_slots.exe' if os.name == 'nt' else 'launch_slots')
-            cpp.write_text(HARNESS.replace('__DEF_WARM__', str(defaults['warm_launches'])).replace('__DEF_PURCHASE__', str(defaults['purchase_slots'])).replace('__DEF_BUDGET__', str(defaults['arrival_slot_budget'])).replace('__STORAGE__', storage).replace('__ARRIVAL_HEADER__', header).replace('__ARRIVAL_IMPL__', plan).replace('__SOURCE_LABEL__', source_label).replace('__ADD_SLOT__', add_slot).replace('__GROW__', grow).replace('__PREPARE__', prepare).replace('__WARM__', warm).replace('__FALLBACK__', fallback).replace('__CAMPAIGN_HEADER__', campaign_header).replace('__WARM_HEADER__', warm_header).replace('__DEVICE_HEADER__', device_header).replace('__SELECT__', select).replace('__BIND_IDENTITY__', bind_identity).replace('__SHIP_OF__', ship_of).replace('__P1__', p1_index).replace('__ROWS__', rows), encoding='utf-8')
+            cpp.write_text(HARNESS.replace('__DEF_WARM__', str(defaults['warm_launches'])).replace('__DEF_PURCHASE__', str(defaults['purchase_slots'])).replace('__DEF_BUDGET__', str(defaults['arrival_slot_budget'])).replace('__STORAGE__', storage).replace('__ARRIVAL_HEADER__', header).replace('__ARRIVAL_IMPL__', plan).replace('__SOURCE_LABEL__', source_label).replace('__ADD_SLOT__', add_slot).replace('__GROW__', grow).replace('__PREPARE__', prepare).replace('__WARM__', warm).replace('__FALLBACK__', fallback).replace('__CAMPAIGN_HEADER__', campaign_header).replace('__SURVIVOR_HEADER__', survivor_header).replace('__WARM_HEADER__', warm_header).replace('__DEVICE_HEADER__', device_header).replace('__SELECT__', select).replace('__BIND_IDENTITY__', bind_identity).replace('__SHIP_OF__', ship_of).replace('__P1__', p1_index).replace('__ROWS__', rows), encoding='utf-8')
             compile_fixture(toolchain, cpp, exe)
             ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)

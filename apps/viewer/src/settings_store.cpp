@@ -23,6 +23,11 @@
 namespace eawr::presentation::godot_backend {
 namespace ui = presentation::ui;
 
+int selection_mouse_number(const int button) noexcept {
+    if (button >= 1 && button <= 3) return button;
+    return button >= 8 ? button - 4 : 0;
+}
+
 std::string keyboard_key_label(const std::string_view physical_chord) {
     std::string label(physical_chord);
     if (label.empty()) return label;

@@ -9,6 +9,7 @@ set(EAWR_GODOT_UI_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/kit_buttons.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/kit_controls.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/theme_builder.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/staging_preview.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical_hud.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical_hud_shell.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical_hud_build.cpp"

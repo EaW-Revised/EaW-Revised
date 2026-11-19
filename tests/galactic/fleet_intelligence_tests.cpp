@@ -390,6 +390,20 @@ void worker_parity() {
         expect(*baseline == projection && hash == session.snapshot()->sha256(), "1/2/4/8 workers preserve projection and snapshot hash");
     }
 }
+// Legacy #7805: the advisor's battle result line asks the planet's current visibility, not for a surviving fleet, so a
+// planet the observer sees with presence knowledge is listed even when no fleet orbits it (a land battle's aftermath).
+void presence_planets_without_fleets() {
+    gc::PlanetKnowledge k; k.fleet_presence = true;
+    const auto none = std::vector<gc::Fleet>{{9,2,99,{{91,100}}}}; // the only fleet orbits another planet
+    const std::array<gc::FleetDisplayVisibility,1> seen{{{10,true}}}, hidden{{{10,false}}};
+    const auto empty = gc::observed_fleets(snapshot(k, true, 2, 2, {}, none), 1, traits(), 8, seen);
+    expect(empty.presence.empty() && empty.presence_planets == std::vector<gc::PlanetId>{10},
+        "a seen planet with presence knowledge and no fleet is a presence planet");
+    expect(gc::observed_fleets(snapshot(k, true, 2, 2, {}, none), 1, traits(), 8, hidden).presence_planets.empty(),
+        "a planet without current sight is never a presence planet");
+    expect(gc::observed_fleets(snapshot(gc::PlanetKnowledge{}, true, 2, 2, {}, none), 1, traits(), 8, seen).presence_planets.empty(),
+        "a seen planet without presence knowledge is not a presence planet");
+}
 void delayed_sight() {
     gc::PlanetKnowledge k; k.fleet_presence = k.fleet_count = k.fleet_contents = true;
     const std::array<gc::FleetDisplayVisibility,1> seen{{{10,true}}}, hidden{{{10,false}}};
@@ -501,7 +515,7 @@ void scale_digest() {
     expect(!result.cards.empty(), "the scale projection publishes cards");
 }
 int case_galactic_fleet_intelligence_tests() {
-    try { masking(); overview_image_masking(); overview_hero(); planet_heroes(); live_actor_masking(); strongest_and_capacity(); slot_merge(); company_true_type(); worker_parity(); delayed_sight(); gui_index_projection(); duplicate_rows_keep_first(); scale_digest(); }
+    try { masking(); overview_image_masking(); overview_hero(); planet_heroes(); live_actor_masking(); strongest_and_capacity(); slot_merge(); company_true_type(); worker_parity(); delayed_sight(); presence_planets_without_fleets(); gui_index_projection(); duplicate_rows_keep_first(); scale_digest(); }
     catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

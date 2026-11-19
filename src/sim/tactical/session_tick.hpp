@@ -348,6 +348,29 @@ private:
     std::vector<SpecialShot> special_shots_;
     std::vector<EntityId> projectile_defence_order_; // ordered activation notifications, committed only on success
     std::vector<LiveUnit> object_turn_births_; // sparse turn creations join after indexed tracking rows
+    // DS-T1: born during an ordered death hook, relevant to victory immediately,
+    // joined only after periodic services. These are sparse tick-local rows.
+    struct DestructionBirths {
+        DestructionBirths() : crafts(flight_values), minds(mind_values) {}
+        UnitStage units;
+        std::map<EntityId, CraftState> flight_values;
+        std::map<EntityId, SquadronState> mind_values;
+        detail::MapStage<CraftState> crafts;
+        detail::MapStage<SquadronState> minds;
+        std::map<EntityId, ArrivalState> arrivals;
+        std::map<EntityId, PopulationShare> shares;
+        std::vector<Squadron> squadrons;
+        std::vector<EntityId> spawners;
+        std::vector<std::pair<EntityId, PlayerId>> earners;
+    };
+    std::optional<DestructionBirths> destruction_births_;
+    std::optional<core::Diagnostic> destruction_birth_error_;
+    std::vector<EntityId> born_entity_ids_; // sparse placement overlay for same-tick births
+    core::Result<void> create_destruction_survivors(const UnitState& source);
+    core::Result<void> join_destruction_survivors();
+    void count_destruction_birth_ownership();
+    core::Result<math::Vec3> survivor_flyout(const UnitState& source,
+        const DestructionSurvivorProfile& profile, const LiveUnit& first);
     std::vector<ObjectTurnRecord> object_turn_log_; // #3644: uses applied this tick, moved to the record on success
     std::vector<ObjectTurnOutcome> object_turn_outcomes_; // #3644: reported on TacticalTick
     std::vector<EntityId> created_static_defences_; // creation notifications within this frame

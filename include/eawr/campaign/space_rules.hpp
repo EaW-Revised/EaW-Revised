@@ -19,6 +19,7 @@ struct SpaceRulePlayer {
     std::optional<sim::math::Fixed> strategic_credit_cap{}; // WGP-188: nonparticipant modifier owner
 };
 struct SpaceRuleInputs {
+    bool corrupted{};
     std::vector<SpaceRulePlayer> players; // ascending player ID
     std::vector<sim::EntityId> restricted_reserves; // ascending identity; WR-09
     std::vector<sim::tactical::CampaignUpgrade> upgrades; // qualified holders, WGT-14..16

@@ -87,12 +87,18 @@ public:
     using Clock = std::chrono::steady_clock;
     struct Poll { CheckpointRestoreState state; std::optional<Value> value; };
     [[nodiscard]] bool active() const { return work_.valid(); }
-    template<class Work> bool submit(std::uint64_t request, Room room, Clock::time_point deadline, Work work) {
+    // `same` decides whether the room at the end is still the room the work was built for (#7878). The default is full
+    // equality; the lobby passes the restore's own notion (players, seats, game settings), so a revision, a readiness flag or
+    // the host's display-only mod description moving during a long restore is not a room change.
+    using Same = bool (*)(const Room&, const Room&);
+    template<class Work> bool submit(std::uint64_t request, Room room, Clock::time_point deadline, Work work, Same same = nullptr) {
         if (active()) return false;
-        request_ = request; room_ = std::move(room); deadline_ = deadline; timed_out_ = false;
+        request_ = request; room_ = std::move(room); deadline_ = deadline; timed_out_ = false; same_ = std::move(same);
         work_ = checkpoint_work(std::move(work));
         return true;
     }
+    // The room the last submitted work was built for; what a room_changed result is compared against.
+    [[nodiscard]] const Room* submitted_room() const { return room_ ? &*room_ : nullptr; }
     Poll poll(std::uint64_t request, const Room* room, Clock::time_point now) {
         if (!active()) return {CheckpointRestoreState::idle, {}};
         const bool current = request == request_ && !timed_out_;
@@ -102,22 +108,27 @@ public:
         }
         try {
             auto value = work_.get();
-            if (!current || !room || *room != *room_) {
+            if (!current || !room || !matches(*room)) {
                 (void)checkpoint_work([discard = std::move(value)] { static_cast<void>(discard); });
                 return {current ? CheckpointRestoreState::room_changed : CheckpointRestoreState::stale, {}};
             }
             return {CheckpointRestoreState::ready, std::move(value)};
         } catch (...) {
-            return {current && room && *room == *room_ ? CheckpointRestoreState::failed : CheckpointRestoreState::stale, {}};
+            return {current && room && matches(*room) ? CheckpointRestoreState::failed : CheckpointRestoreState::stale, {}};
         }
     }
 private:
+    [[nodiscard]] bool matches(const Room& room) const { return same_ ? same_(*room_, room) : *room_ == room; }
     std::future<Value> work_;
     std::optional<Room> room_;
+    Same same_{};
     Clock::time_point deadline_{};
     std::uint64_t request_{};
     bool timed_out_{};
 };
+// The host's restore of a saved campaign has no progress signal yet, so the limit is a flat 5 minutes (owner decision): a
+// heavy-mod chain needs about two minutes to rebuild, and a fixed 30 s refused it (#7858).
+inline constexpr std::chrono::minutes checkpoint_restore_limit{5};
 // The saved-game listing reads and checks every save on a worker; the lobby gives up on it after this long (#5512).
 inline constexpr std::chrono::seconds checkpoint_listing_limit{30};
 inline bool checkpoint_listing_expired(std::chrono::steady_clock::time_point started, std::chrono::steady_clock::time_point now,

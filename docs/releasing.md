@@ -210,7 +210,7 @@ macOS support remains experimental; these release archives do not provide a macO
 | `eaw-revised-<version>-windows-x64-debug.zip` | The same folder built in the Debug configuration, with PDBs, asserts and the debug tools (below) |
 | `eaw-revised-<version>-<platform>-viewer.zip` | The Godot viewer project with its built GDExtension, `play-demo.cmd` / `play-demo.sh`, and the Python launcher and font extractor (testers and developers with their own Godot) |
 | `SHA256SUMS.txt` | The SHA-256 of every archive |
-| `update-manifest.json` | Written beside the Windows player zip for the launcher's updater (schema 1): archive name, size and SHA-256, every file of the player folder with size, SHA-256 and component (`game`, `launcher`, `service`, `layers`), tag, version, channel (`stable`, or `preview` for a `-suffix` version; `--channel` overrides), build id (the packaged commit), `min_updater` 1 and `signature` fixed to the empty string (releases stay unsigned; integrity is HTTPS plus these hashes). Deterministic, validated against the client's rules before it is written. Its SHA-256 is listed in `SHA256SUMS.txt`. Upload it as a release asset like the zips; the packager never uploads. |
+| `update-manifest.json` | Written beside the Windows player zip for the launcher's updater (schema 1): archive name, size and SHA-256, every file of the player folder with size, SHA-256 and component (`game`, `launcher`, `service`, `layers`), tag, version, channel (`stable`, or `preview` for a `-suffix` version; `--channel` overrides), build id (the packaged commit), `min_updater` 1 and `signature` fixed to the empty string (the manifest itself is not signed; integrity is HTTPS plus these hashes, and the executables carry Authenticode signatures once a release is signed, see Code signing). Deterministic, validated against the client's rules before it is written. Its SHA-256 is listed in `SHA256SUMS.txt`. Upload it as a release asset like the zips; the packager never uploads. |
 
 ### The player folder
 
@@ -234,7 +234,7 @@ shipped, so no console window opens); `project/` with the viewer project and its
 with the project, Godot and godot-cpp licence texts, plus `LICENSE` and `THIRD_PARTY_NOTICES.md`;
 `README.md` (this repository's `docs/player-guide.md`); and `runtime.json` (Godot identity and SHA-256, launcher
 and extension SHA-256); and `SHA256SUMS` (the SHA-256 of every other file in the folder). The release is
-not code-signed (owner decision) (legacy EAWR-3966): the player guide tells players about the SmartScreen warning and that
+code-signed only when its notes say so (see Code signing): the player guide tells players about the SmartScreen warning and that
 Smart App Control or a managed-PC policy may block it. The packager refuses to write the zip if it would carry a font, `.meg`, `StarWarsG.exe`
 or other game file. `EAWR.exe` hashes that engine before starting it and compares the SHA-256 with `godot_sha256` in `runtime.json`; a
 mismatch or a missing hash logs `EAWR-ENGINE-UNPATCHED` and adds `--eawr-engine-unverified` to the viewer arguments
@@ -403,24 +403,66 @@ When the job cannot link with symbols (no `--require-symbols`, or a viewer reuse
   the Godot licence texts for it).
 - **No graphical test results.** GPU tests are not run on the hosted runners.
 
-## Optional signing handoff
+## Code signing
 
-Signing is OFF by default and nothing in the recipe calls it. `tools/release/sign_release.py` is a disabled stub:
-without `EAWR_SIGNING=1` it changes nothing and exits 0; with it, it exits 2 until the step below exists. When off, every
-release stays exactly unsigned and the update manifest `signature` stays `""` (the manifest validator requires that).
+Windows executables are signed with Azure Artifact Signing (Authenticode, SHA-256, RFC 3161 timestamp). A release is
+**signed only when its notes say so**: the first signed release is the one whose signed bytes passed the clean Windows PC check
+below. Until then releases are described as unsigned, and the player guide keeps the unsigned wording. Git tags are a separate
+matter: they stay annotated and unsigned.
 
-Design for turning it on (a decision for the owner; no Azure calls are made by this recipe):
+### Flow
 
-1. The pool builds and packages unsigned, as today. Keys and credentials never exist on a build worker.
-2. On a machine the owner controls, a prepare step unpacks the player zip, checks every member against `update-manifest.json`
-   and lists the binaries to sign: `EAWR.exe`, `EAWR Mods.exe`, `eawr_mods_service.exe`, `eawr_loadcheck.exe`, the viewer DLL
-   and the Bink helper. Azure Artifact Signing (formerly Trusted Signing) signs those files only.
-3. **Never sign `godot/Godot_v4.7.2-stable_win64.exe`:** its SHA-256 is the engine pin (`tools/engine_pins.json`,
-   `tools/release/kit_engine.py verify`). The earlier signing draft (legacy EAWR-6018) lists the Godot exe among the binaries to sign; drop it there.
-4. A finish step rewrites `runtime.json` hashes for the signed files, regenerates the folder `SHA256SUMS`, re-zips, rewrites
-   `update-manifest.json` (still `signature: ""`) and `SHA256SUMS.txt`, and records signed vs unsigned hashes in a receipt.
-   Then run `kit_engine.py verify` on the result and the fresh-user gate on the signed bytes.
-5. Symbols: signing a binary does not change its PDB identity, but re-check with the packager's identity check before upload.
+1. The pool builds and packages the release **unsigned**, exactly as above. Keys and credentials never exist on a build worker.
+2. A maintainer drops the finished release directory (archives, `SHA256SUMS.txt`, `update-manifest.json`) on the dedicated
+   signing host and starts the `Sign release` workflow (`tools/oss/public/.github/workflows/sign-release.yml`), which runs
+   only on that host's self-hosted runner and only after the repository owner approves it in GitHub. The host holds no
+   secret: the Azure login is a federated OIDC credential bound to the workflow's environment. Setup:
+   [tools/release/signing_host/README.md](../tools/release/signing_host/README.md).
+3. `tools/release/sign_release.py` does the work in four steps. `plan` checks the dropped files against `SHA256SUMS.txt`, the SHA-256
+   named in the request and the update manifest's tag, and classifies every Windows executable against
+   `config/signing-targets.json`: a binary with no decision fails the run, so a new executable needs a line there.
+   `sign` signs the listed files with the pinned `jsign` (`config/signing-tools.json`), refuses a result that changed more
+   than the signature, and writes `signing-receipt.json`. `finish` (no credentials) puts the signed files back, rewrites
+   `runtime.json`, the folder `SHA256SUMS`, `update-manifest.json` (its `signature` stays `""`) and `SHA256SUMS.txt`.
+   `verify` proves the final set. Without the `SIGNING_*` account variables `sign` is a dry run that signs nothing.
+4. The maintainer fetches the result and runs `python tools/release/sign_release.py verify <release dir> --final <final dir> --subject <name>`
+   (and the fresh-user gate on the signed bytes), uploads the final archives to the draft, and the rest of the recipe applies unchanged.
 
-Reusable from the draft (legacy EAWR-6018) (`sign_release.py` prepare/finish, `sign-release.yml`): the manifest-vs-archive verification and the
-signed/unsigned receipt. Not reusable as is: the hosted workflow (credentials must stay on the owner's machine) and the Godot entry.
+What gets signed: `EAWR.exe`, `EAWR Mods.exe`, `eawr_mods_service.exe`, `eawr_loadcheck.exe`, the viewer DLL, the Bink helper
+and the headless tools, in the player, Debug, tools and viewer archives. **Not** the patched Godot exe: its SHA-256 is the
+engine pin (`tools/engine_pins.json`, `kit_engine.py verify`, `godot_sha256` in `runtime.json`), and signing it needs a pin
+change of its own. Run the clean-PC check below with Smart App Control on; if the unsigned engine is blocked there, that pin
+change comes first. Third-party files keep their own signatures.
+
+### How to verify a signed release
+
+- On Linux or Windows with Python: `python tools/release/sign_release.py verify <unsigned release dir> --final <downloaded or final dir>`
+  needs the unsigned set and checks that every signed file has the same code bytes as its unsigned original, every listed file
+  is signed, and the hashes and manifest agree. With `osslsigncode` installed it also verifies each signature against the
+  Microsoft root pinned in the repository. `--subject <name>` (or `SIGNING_SUBJECT`) is required and is checked against each
+  signature: the Microsoft root also trusts other Artifact Signing customers, so a valid chain alone does not say it is ours.
+- On Windows, for the extracted folder a player would get: `pwsh tools/release/verify_signatures.ps1 -Folder <folder> -ExpectedSubject <name>`
+  (status `Valid`, timestamp present, trusted chain for every listed file; it also fails when a file that
+  `required_in_player` in `config/signing-targets.json` names is missing from the folder), or by hand
+  `Get-AuthenticodeSignature .\EAWR.exe | Format-List` and the file's Properties, Digital Signatures tab.
+- Certificates are valid for three days, so the signature check relies on the timestamp countersignature. A file without one is a failure.
+- **Clean Windows PC check** (once before the first signed release, again after any change to the signing flow): download the
+  player zip from the draft in a browser so it carries the Mark-of-the-Web, extract it with Explorer, start `EAWR.exe`, and
+  record what SmartScreen says (publisher shown or "Unknown publisher"), the Digital Signatures tab, and the same with Smart App
+  Control on. SmartScreen reputation builds with download history, so a new release can still ask for one confirmation.
+
+### Credentials and rules
+
+- Nothing secret is in the repository, in issues, in logs or in `out/`. Azure account, profile, tenant and client values live as
+  GitHub environment variables, not in files. `sign_release.py` passes the access token to `jsign` through the environment only.
+- The workflow runs only from `main`, only on `workflow_dispatch`, only on the dedicated runner. No hosted runner minutes are used.
+  What enforces it: (1) the `release-signing` environment allows deployments from `main` only (repository setting; this is the
+  enforcement against a workflow file copied to another branch and edited); (2) a job guard on the signing host, which the runner
+  runs before every job and which refuses anything but this workflow, from `main`, on `workflow_dispatch`, in this repository
+  (`tools/release/signing_host/job-guard.sh`); (3) a job-level condition and a first step in the workflow, which only protect
+  against a mistake, since an edited copy brings its own version of them.
+- The account has one certificate profile (the real, Public Trust one). The pipeline test (`mode=test` of the workflow) signs a
+  throwaway `eawr-signing-test.exe` with it, never a release artifact; that signature is real and timestamped.
+- A change to who may sign, which profile is used or the target list is a reviewed change to the files named above.
+- A signed manifest (the updater design's option B) is a separate decision: the manifest keeps its reserved empty `signature`
+  until the updater that reads it exists.

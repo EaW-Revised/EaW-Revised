@@ -139,6 +139,25 @@ std::map<std::string, ProductionArt> load_production_art(
     return result;
 }
 
+PlanetInfoMetadata planet_info_metadata(const data::galactic::Planet& planet, const data::ui::TextDatabase* text) {
+    const auto localized = [&](const std::string& key) {
+        const auto* entry = !text || key.empty() ? nullptr : text->find(key);
+        return entry ? data::ui::to_utf8(entry->value) : std::string{};
+    };
+    PlanetInfoMetadata result;
+    result.tactical = localized(planet.describe_tactical);
+    result.advantage = localized(planet.describe_advantage);
+    result.history = localized(planet.describe_history);
+    result.weather = localized(planet.describe_weather);
+    result.terrain = localized(planet.describe_terrain);
+    result.population = localized(planet.describe_population);
+    result.wildlife = localized(planet.describe_wildlife);
+    // GPI-08: every authored entry, in order; an unresolved key draws nothing.
+    for (const auto& key : planet.encyclopedia_text)
+        if (auto line = localized(key); !line.empty()) result.encyclopedia.push_back(std::move(line));
+    return result;
+}
+
 PlanetAbilityMetadata planet_ability_metadata(const data::galactic::Planet& planet,
     const data::ui::TextDatabase* text, std::vector<std::string>& diagnostics) {
     PlanetAbilityMetadata result;
@@ -404,6 +423,7 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
         item.name = location;
         item.ability = planet_ability_metadata(*planet, language ? &language.value() : nullptr, result.diagnostics);
         item.weather.icon = planet->planet_weather_icon;
+        item.info = planet_info_metadata(*planet, language ? &language.value() : nullptr);
         if (language) {
             const auto localized = [&](const std::string& key) {
                 const auto* entry = key.empty() ? nullptr : language.value().find(key);
@@ -411,15 +431,6 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
             };
             item.weather.name = localized(planet->planet_weather_name);
             item.weather.info = localized(planet->planet_weather_info);
-            item.info.tactical = localized(planet->describe_tactical);
-            item.info.advantage = localized(planet->describe_advantage);
-            item.info.history = localized(planet->describe_history);
-            item.info.weather = localized(planet->describe_weather);
-            item.info.terrain = localized(planet->describe_terrain);
-            item.info.population = localized(planet->describe_population);
-            // GPI-08: every authored entry, in order; an unresolved key draws nothing.
-            for (const auto& key : planet->encyclopedia_text)
-                if (auto line = localized(key); !line.empty()) item.info.encyclopedia.push_back(std::move(line));
         }
         // GPI-07: the planet type's header contribution (a nonzero value draws the badge).
         if (const auto capacity = fields.number("Additional_Population_Capacity"))
@@ -435,6 +446,8 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
             if (folded(home.name) == folded(location) && owner != players.end()) item.owner = owner->second;
         }
         PlanetArt art;
+        art.ground_capacity = planet->special_structures_land;
+        art.space_capacity = planet->max_space_base;
         art.land_tactical_map = planet->land_tactical_map;
         art.corruption_success_speech = planet->corruption_success_speech_event;
         art.corruption_success_hologram = planet->corruption_success_hologram_name;

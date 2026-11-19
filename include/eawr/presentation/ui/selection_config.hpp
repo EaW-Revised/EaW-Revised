@@ -102,6 +102,11 @@ namespace eawr::presentation::ui {
 }
 inline void apply_selection_config(PlayerSettings& settings, const vfs::Vfs& filesystem) {
     settings.selection_config = load_selection_config(filesystem);
-    if (!settings.selection_hotkeys_authored) settings.selection_hotkeys = settings.selection_config.enabled;
+    if (!settings.selection_hotkeys_authored) {
+        settings.selection_hotkeys = settings.selection_config.enabled || settings.selection_hotkeys_migration_pending;
+        // An older installed XML No must not turn the migrated default off again after the stamp is saved.
+        if (settings.selection_hotkeys_migration_pending && !settings.selection_config.enabled)
+            settings.selection_hotkeys_authored = true;
+    }
 }
 } // namespace eawr::presentation::ui

@@ -57,6 +57,7 @@ struct PlanetWeatherMetadata final {
 // GHUD-R45: the Planet Info dialog sections, localized (empty when the planet authors no key or it is unresolved).
 struct PlanetInfoMetadata final {
     std::string tactical{}, advantage{}, history{}, weather{}, terrain{}, population{};
+    std::string wildlife{};
     // The focused planet card (GPI-07/08): every localized Encyclopedia_Text entry in authored order, and the
     // planet type's Additional_Population_Capacity (its header contribution badge; zero draws no badge).
     std::vector<std::string> encyclopedia{};

@@ -17,6 +17,7 @@
 #include <godot_cpp/classes/world2d.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cmath>
@@ -94,6 +95,27 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted, LiveSes
         return;
     }
     if (scripted.kind == "key") {
+        if (scripted.key.starts_with("Mouse ")) {
+            const auto number = std::string_view(scripted.key).substr(6);
+            int index{};
+            const auto [end, error] = std::from_chars(number.data(), number.data() + number.size(), index);
+            if (error != std::errc{} || end != number.data() + number.size() || index < 1 || index > 28) {
+                note(name + ": unknown mouse button " + scripted.key);
+                return;
+            }
+            for (const bool pressed : {true, false}) {
+                Ref<InputEventMouseButton> event;
+                event.instantiate();
+                event->set_button_index(static_cast<MouseButton>(index <= 3 ? index : index + 4));
+                event->set_pressed(pressed);
+                event->set_position(win(viewport_[0] * 0.5F, viewport_[1] * 0.5F));
+                event->set_global_position(event->get_position());
+                modifiers(**event);
+                engine->parse_input_event(event);
+            }
+            ++scripted_fired_;
+            return;
+        }
         const Key code = OS::get_singleton()->find_keycode_from_string(String(scripted.key.c_str()));
         if (code == KEY_NONE) {
             note(name + ": unknown key " + scripted.key);

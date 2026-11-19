@@ -78,7 +78,7 @@ void domain_tags() {
     auto xml = units_xml("3600", "Unit_Select_Test");
     const std::string fighter_tag = "<SpaceUnit Name=\"Test_Fighter\">";
     xml.insert(xml.find(fighter_tag) + fighter_tag.size(), R"(
-      <Abilities><Combat_Bonus_Ability Name="Fixture_Command">
+      <Abilities SubObjectList="Yes"><Combat_Bonus_Ability Name="Fixture_Command">
         <Activation_Style>Space_Automatic</Activation_Style>
         <Stacking_Category>3</Stacking_Category>
         <Applicable_Unit_Types>Test_Frigate</Applicable_Unit_Types>
@@ -94,7 +94,7 @@ void domain_tags() {
                  {"User_Input", true, false}, {"", true, false}}) {
             auto variant = units_xml("3600", "Unit_Select_Test");
             variant.insert(variant.find(tag) + tag.size(),
-                "<Abilities><Retreat_Prevention_Ability Name=\"Custom_Retreat\"><Activation_Style>" + style
+                "<Abilities SubObjectList=\"Yes\"><Retreat_Prevention_Ability Name=\"Custom_Retreat\"><Activation_Style>" + style
                 + "</Activation_Style><Initially_Enabled>" + (enabled ? "Yes" : "No")
                 + "</Initially_Enabled></Retreat_Prevention_Ability></Abilities>");
             write_fixture(tree.root, variant);

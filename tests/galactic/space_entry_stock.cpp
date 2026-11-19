@@ -166,6 +166,7 @@ void installed_reserve_order(const std::shared_ptr<const campaign::StockSpaceEnt
     gc::corruption_fixture::MarketItem offer;
     offer.id = 10; offer.faction = 1; offer.ability_names = {"Test_Cloak", "Test_Salvo"};
     market.items.push_back(offer);
+    market.planets.front().corruption = gc::corruption_fixture::Type::racketeering;
     auto galaxy = take(gc::GalacticSession::create(setup));
     expect(galaxy.snapshot()->fleets().front().motion.orbit_entry > 0
         && galaxy.snapshot()->fleets().front().motion.orbit_entry < galaxy.snapshot()->fleets().back().motion.orbit_entry,
@@ -178,6 +179,8 @@ void installed_reserve_order(const std::shared_ptr<const campaign::StockSpaceEnt
         record.forces.push_back({member.id,member.type,fleet.owner,fleet.id});
     std::sort(record.forces.begin(),record.forces.end(),[](const auto& a,const auto& b){return a.id < b.id;});
     const auto resolved = take(provider->resolve(record,*galaxy.snapshot(),901));
+    expect(resolved.conflict.tactical.campaign->corrupted,
+        "WGCH-204: installed child entry copies authoritative planet corruption");
     const auto& policy = resolved.conflict.tactical.campaign->market_abilities;
     expect(policy && policy->items.size() == 1 && policy->items[0].abilities == offer.ability_names
         && policy->owners.size() == setup.players.size() && policy->owners[0].purchased == std::vector<std::uint32_t>{10}

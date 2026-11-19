@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "jsign": {
+    "version": "7.6",
+    "sha256": "6cf58aa080e7ff82656f320cff8d4a3bff30408df8766806dcba3740dd839fa5",
+    "url": "https://github.com/ebourg/jsign/releases/download/7.6/jsign-7.6.jar",
+    "note": "the same bytes are on Maven Central (net.jsign:jsign:7.6); the jar needs Java 8 or newer, the signing host uses 17"
+  },
+  "timestamp": {
+    "url": "http://timestamp.acs.microsoft.com",
+    "mode": "RFC3161"
+  },
+  "root_ca": {
+    "file": "tools/release/signing_host/microsoft-identity-verification-root-2020.pem",
+    "sha256_fingerprint": "5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270",
+    "note": "Microsoft Identity Verification Root Certificate Authority 2020, the root of Artifact Signing public trust certificates"
+  },
+  "oidc": {
+    "audience": "api://AzureADTokenExchange",
+    "scope": "https://codesigning.azure.net/.default"
+  }
+}

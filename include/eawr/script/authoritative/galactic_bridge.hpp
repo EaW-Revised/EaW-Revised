@@ -150,6 +150,8 @@ public:
     [[nodiscard]] core::Result<void> register_verb(std::string_view verb, GalacticCommandTranslator translator);
     // WGM-154: staged orbit test through an explicitly selected script seat.
     [[nodiscard]] core::Result<void> bind_orbit_recheck(sim::galactic::SeatId seat);
+    // WGCH-130/167: deferred taskforce ground activation, routed to its AI seat.
+    [[nodiscard]] core::Result<void> bind_ground_abilities();
     [[nodiscard]] core::Result<void> set_ai_engine(std::shared_ptr<GalacticScriptEngine> engine);
     [[nodiscard]] core::Result<void> set_story_engine(std::shared_ptr<GalacticScriptEngine> engine);
     // The world setup may install this independently after the AI/story hosts,

@@ -307,6 +307,7 @@ struct ProjectilePower final {
 void apply_hardpoint_weapon_limits(core::Result<tactical::WeaponProfile>& entry,
     const Weapon& weapon, const Hardpoint& hardpoint) {
     entry.value().range = weapon.range.value_or(Fixed{});
+    entry.value().min_range = weapon.min_range.value_or(Fixed{});
     entry.value().cone_width = weapon.cone_width_degrees.value_or(Fixed{});
     entry.value().cone_height = weapon.cone_height_degrees.value_or(Fixed{});
     entry.value().special = hardpoint.type == HardpointType::weapon_special;
@@ -914,6 +915,43 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
         auto unit_set_index = set_index; // committed only when the whole type builds
         if (auto phase_error = bind_combat_profile_identity(unit, profile, shot_profile, unit_set_index))
             return phase_error;
+        if (!unit.destruction_survivors.empty()) {
+            auto& survivors = profile.destruction_survivors.emplace();
+            survivors.minimum = unit.survivor_minimum;
+            survivors.maximum = unit.survivor_maximum;
+            survivors.flyout_distance = unit.survivor_flyout_distance;
+            survivors.ejection = unit.survivor_ejection;
+            if (unit.survivor_bay.axes) {
+                const auto& axis = (*unit.survivor_bay.axes)[0];
+                const auto turned_x = sim::math::subtract(Fixed{}, axis.y);
+                if (!turned_x) return turned_x.error();
+                survivors.bay_direction = Vec3{turned_x.value(), axis.x, axis.z};
+            }
+            for (const auto& authored : unit.destruction_survivors) {
+                tactical::DestructionSurvivorChoice choice;
+                choice.weight = authored.weight;
+                if (authored.type_index < tables.units.size()) {
+                    const auto& target = tables.units[authored.type_index];
+                    if (type_selection.keeps(target) && (!target.model_path.empty() || target.kind == UnitKind::squadron)) {
+                        choice.type = assets::object_type_crc(target.id);
+                        for (const auto& faction : detail::tokens(target.affiliation))
+                            choice.affiliations.push_back(assets::object_type_crc(faction));
+                        if (target.kind == UnitKind::squadron) {
+                            choice.company = true;
+                            choice.max_squad_size = target.max_squad_size;
+                            for (const auto& member : target.members) {
+                                if (member.craft_index >= tables.units.size()) continue;
+                                const auto& body = tables.units[member.craft_index];
+                                if (!type_selection.keeps(body) || body.model_path.empty()) continue;
+                                if (choice.members.empty()) choice.create_team = body.creates_team;
+                                choice.members.push_back(assets::object_type_crc(body.id));
+                            }
+                        }
+                    }
+                }
+                survivors.choices.push_back(std::move(choice));
+            }
+        }
         const WeaponProfileBuilder weapon_profile{category_bits, opportunity_cutoff};
         // Compute_AI_Combat_Power (A-06, research AT-09): a weapon hardpoint's share of the type's
         // AI_Combat_Power is its projectile's AI_Combat_Power over the sum of all its weapon

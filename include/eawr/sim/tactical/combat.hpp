@@ -148,7 +148,7 @@ struct WeaponProfile {
     bool requires_manual_target{}; // WAD-39: manual consumer supplies a separate assignment
     std::optional<ShotProfile> barrage_shot{}; // WAD-38: ordinary weapon inputs, overridden projectile
     std::optional<ShotProfile> charged_shot{}; // WAD-35: optional charged override, else ordinary shot
-    math::Fixed manual_min_range{};
+    math::Fixed min_range{}; // Fire_Min_Range_Distance, shared by automatic fire and manual admission (WWP-20)
     std::uint32_t manual_cooldown_frames{};
     std::optional<ManualTurretProfile> manual_turret{};
     bool manual_turret_required{};
@@ -312,6 +312,28 @@ struct SpecialWeaponState {
     friend bool operator==(const SpecialWeaponState&, const SpecialWeaponState&) = default;
 };
 
+// DS-01..07: resolved choices retain their authored weights, including a choice
+// that cannot place a model in this mode (type 0). This preserves no-spawn mass.
+struct DestructionSurvivorChoice {
+    TypeId type{};
+    math::Fixed weight{};
+    std::vector<FactionId> affiliations;
+    bool create_team{true};
+    bool company{};
+    std::vector<TypeId> members; // only members whose mode model can be placed
+    std::uint32_t max_squad_size{10};
+    friend bool operator==(const DestructionSurvivorChoice&, const DestructionSurvivorChoice&) = default;
+};
+
+struct DestructionSurvivorProfile {
+    std::vector<DestructionSurvivorChoice> choices;
+    std::int32_t minimum{1}, maximum{1};
+    std::optional<math::Fixed> flyout_distance;
+    std::optional<math::Vec3> bay_direction;
+    bool ejection{};
+    friend bool operator==(const DestructionSurvivorProfile&, const DestructionSurvivorProfile&) = default;
+};
+
 struct CombatProfile {
     TypeId type_id{};
     std::uint64_t category_bits{};                  // CategoryMask, as a candidate
@@ -350,6 +372,7 @@ struct CombatProfile {
     std::optional<TswProfile> tactical_super_weapon{}; // TSW-01..05: the TACTICAL_SUPER_WEAPON behaviour's numbers
     bool star_base{}; // DUMMY_STAR_BASE behavior, independent of XML class
     std::vector<ShotProfile> death_projectiles{}; // WNO-29: one choice per ordinary death
+    std::optional<DestructionSurvivorProfile> destruction_survivors{};
     // #5696: a lenient load drops an authored entry that names no projectile, but WAR-108 draws over the authored
     // count. `death_projectile_authored` is that count and `death_projectile_slots[i]` the authored position of
     // `death_projectiles[i]`; both are empty/0 when every authored entry resolved (the draw is then over the size).

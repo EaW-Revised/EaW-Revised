@@ -131,9 +131,11 @@ core::Result<TacticalTick> phase_failure(const std::string_view phase, core::Dia
 
 core::Result<TacticalTick> session_detail::Tick::run() {
     core::tick_profile::Scope tail("serial.tactical.tail");
-    const auto timed = [](const std::string_view name, auto&& run) {
+    const auto timed = [this](const std::string_view name, auto&& run) {
         core::tick_profile::Scope scope(name);
-        return run();
+        auto result = run();
+        if (result && destruction_birth_error_) return decltype(result)::failure(*destruction_birth_error_);
+        return result;
     };
     metrics_.emplace();
     metrics_.value().initial_emplacements.emplace(impl_->registry_emplacement_count);
@@ -184,6 +186,7 @@ core::Result<TacticalTick> session_detail::Tick::run() {
     if (const auto phase = timed("serial.tactical.station_upgrades", [&] { return station_upgrades(); }); !phase) return phase_failure("station_upgrades", phase.error());
     if (const auto phase = timed("serial.tactical.economy", [&] { return economy(); }); !phase) return phase_failure("economy", phase.error());
     if (const auto phase = timed("serial.tactical.hangars", [&] { return hangars(); }); !phase) return phase_failure("hangars", phase.error());
+    if (const auto phase = timed("serial.tactical.destruction_births", [&] { return join_destruction_survivors(); }); !phase) return phase_failure("destruction_births", phase.error());
     if (const auto phase = timed("serial.tactical.bonuses", [&] { return bonuses(); }); !phase) return phase_failure("bonuses", phase.error());
     if (const auto phase = timed("serial.tactical.finalize", [&] { return finalize(); }); !phase) return phase_failure("finalize", phase.error());
     if (const auto phase = timed("serial.tactical.commit", [&] { return commit(); }); !phase) return phase_failure("commit", phase.error());

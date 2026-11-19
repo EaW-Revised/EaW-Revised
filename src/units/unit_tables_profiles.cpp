@@ -141,6 +141,7 @@ void Loader::load_hardpoint(const std::string& id, UnitType& unit, const Frames*
             weapon.appearance_delay_frames = count(*object, "Projectile_Appearance_Delay_Frames", false);
             weapon.full_salvo_delay_multiplier = object->fixed("Full_Salvo_Weapon_Delay_Multiplier", report_, false);
             weapon.range = object->fixed("Fire_Range_Distance", report_, true);
+            weapon.min_range = object->fixed("Fire_Min_Range_Distance", report_, false);
             weapon.cone_width_degrees = object->fixed("Fire_Cone_Width", report_, true);
             weapon.cone_height_degrees = object->fixed("Fire_Cone_Height", report_, true);
             weapon.damage_type = object->text("Damage_Type");
@@ -389,6 +390,42 @@ void Loader::load_body(Object& object, UnitType& unit) {
             unit.model_path = model_path(unit.model);
             model = frames(unit.model_path, unit.id);
             if (model == nullptr) unit.model_path.clear();
+        }
+        // DS-01..03/07: this space slice admits the assigned source classes only.
+        if (iequals(unit.xml_type, "SpaceUnit") || iequals(unit.xml_type, "SpecialStructure")) {
+            const auto choices = tokens(object.text("Destruction_Survivors"));
+            for (std::size_t index = 0; index + 1 < choices.size(); index += 2) {
+                const auto weight = data::retail::float_value(choices[index + 1]);
+                if (!weight || weight->value.raw() < 0) {
+                    report_.missing(unit.id, "Destruction_Survivors", choices[index + 1], "expected a nonnegative weight");
+                    continue;
+                }
+                unit.destruction_survivors.push_back({choices[index], weight->value});
+                auto target = resolve(*input_.catalog, choices[index], data::Category::game_object,
+                    unit.id, "Destruction_Survivors", report_);
+                if (target) {
+                    record_layers(*target);
+                    // DS-05: a type lacking a model for this mode fails placement. Do not
+                    // load its land body as a space dependency, or discard its probability.
+                    if (!tokens(target->text("Squadron_Units")).empty() || !trim(target->text("Space_Model_Name")).empty())
+                        enqueue(choices[index], UnitKind::ship);
+                }
+            }
+            if (choices.size() % 2 != 0)
+                report_.missing(unit.id, "Destruction_Survivors", choices.back(), "expected type, weight pairs");
+            if (!unit.destruction_survivors.empty()) {
+                unit.survivor_minimum = static_cast<std::int32_t>(
+                    object.integer("Minimum_Destruction_Survivor_Count", report_, false).value_or(1));
+                unit.survivor_maximum = static_cast<std::int32_t>(
+                    object.integer("Maximum_Destruction_Survivor_Count", report_, false).value_or(1));
+                const auto distances = tokens(object.text("Spawned_Squadron_Location_Flyout_Distances"));
+                if (!distances.empty()) {
+                    if (const auto value = data::retail::float_value(distances.front())) unit.survivor_flyout_distance = value->value;
+                    else report_.missing(unit.id, "Spawned_Squadron_Location_Flyout_Distances", distances.front(), "expected a distance");
+                }
+                const auto bones = tokens(object.text("Spawned_Squadron_Location_Bones"));
+                if (!bones.empty()) unit.survivor_bay = point(bones.front(), model, unit.id, "Spawned_Squadron_Location_Bones");
+            }
         }
         if (has_behavior(object, "TURRET")) {
             auto& turret = unit.object_turret.emplace(UnitType::ObjectTurret{});
@@ -697,3 +734,15 @@ void Loader::load_selection(Object& object, UnitType& unit) {
     }
 
 } // namespace eawr::units::unit_tables_detail
+
+namespace eawr::units {
+core::Result<Fixed> tactical_bribe_cost(const UnitType& briber, const UnitType& target,
+    const std::optional<bool> corrupted_location) {
+    const auto one = Fixed::from_raw(Fixed::scale);
+    const auto price = target.tactical_bribe_cost.value_or(Fixed{});
+    if (price <= one) return core::Result<Fixed>::success(Fixed{});
+    if (!corrupted_location) return core::Result<Fixed>::success(price);
+    return sim::math::multiply(price, (*corrupted_location
+        ? briber.bribe_corrupted_modifier : briber.bribe_uncorrupted_modifier).value_or(one));
+}
+} // namespace eawr::units

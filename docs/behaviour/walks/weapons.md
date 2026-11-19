@@ -143,7 +143,13 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
   (space-weapon-fire W-07). An attempt fails when the planar (XY) distance from it to the aim point
   exceeds the weapon's range plus the **target's soft radius** (WWP-21), or is less than
   `Fire_Min_Range_Distance`. The range is `Fire_Range_Distance` times one plus the parent's fire
-  range modifiers (abilities), times the garrisoned multiplier while the parent is in limbo.
+  range modifiers (abilities), times the garrisoned multiplier while the parent is in limbo. The minimum
+  is the raw effective hardpoint value, default zero, with no range modifier or target-radius
+  adjustment; equality passes, and a negative value imposes no lower bound on a nonnegative
+  distance. The float field mapping retains its sign without normalization. It may exceed the
+  nominal maximum, whose target-radius padding
+  remains independent. This gate precedes muzzle draws and lead and applies to each pulse
+  (debug build recheck, WMR-01: shot attempt, minimum getter and hardpoint initialization).
 - **WWP-21** (debug build, EWW-05) A unit without model geometry has zero type soft radius,
   before either radius override. Otherwise its soft radius is its type's `Custom_Soft_Footprint_Radius`
   when positive, else its `Space_Obstacle_Radius` when positive, else the larger planar half extent
@@ -357,7 +363,8 @@ With the per-unit flight heights the M2 ships sit up to 290 units apart in heigh
 
 | Test | Metric | Rule |
 |---|---|---|
-| Hardpoint fire range and minimum range | planar, plus the target's soft radius | WWP-20 |
+| Hardpoint maximum fire range | planar, plus the target's soft radius | WWP-20 |
+| Hardpoint minimum fire range | planar, without target-radius adjustment | WWP-20 |
 | Opportunity scan box | 3-D cube, 1.1 × range | R-07 |
 | Opportunity aim-point range | 3-D, plus the soft radius (R-11) | R-11 |
 | Ship-level scan and attack distance | planar | T-06, A-04 |
@@ -427,7 +434,7 @@ Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (
 | WWP-17 | ordinary TURRET objects use authored mechanical aim/readiness and posed muzzle | applied to ordinary space objects and attached manual hardpoint turret models |
 | WWP-18 | projectile override comes with targeted ion-shot input and HUD (legacy EAWR-561) | same after the targeted ion-shot input and HUD work |
 | WWP-19 | a squadron resolves to a random live craft per hardpoint attempt (`random_member`, a draw keyed by seed, frame, unit and slot), then the R-10 search on it | **same** (G-04 resolved) |
-| WWP-20 | planar range plus the target radius | same for M2; minimum range missing (not in M2; G-08) |
+| WWP-20 | planar upper range plus the target radius; independent signed minimum | applied to space hardpoints, including authored minima outside M2; absent defaults to zero |
 | WWP-21 | shared type-footprint conversion (AV-05), including no-layer types and ordinary space squadron containers | same for M2; specialized formation-team geometry has no ordinary space consumer |
 | WWP-22 | true-default world box, X/Y/Z draws; explicit false keeps the 50 % endpoint draw | applied; unavailable B uses A without a draw (project fallback) |
 | WWP-23 to WWP-25 | `lead`, `pointable`, `scatter` | same |
@@ -473,9 +480,11 @@ Counts, by rule (62 simulation rules; WWP-40 is presentation): **same 47**, **di
 | G-05 fighter targeting-state fire gate (legacy EAWR-712) | WWP-43 | The unit's own weapon fires only in the "okay to attack" targeting state and tests no range; ours tests the planar attack distance. The state's inside (walk 1/2) decides when a fighter may fire; the retail dogfight outcome comparison shot log shows retail fighters never firing beyond 424 units. | M (after walk 1/2) |
 | G-06 height-adjusted target positions (legacy EAWR-713) | WWP-16, WWP-19, WWP-64, WWP-72 | **Implemented** for `SpaceUnit` and `SpaceStructure`: launch fallbacks, nearest-hardpoint reference and missile steering use `Ranged_Target_Z_Adjust` (Nebulon-B +35; resource container +30). | S |
 | G-07 ion weapons, energy drain and stun (legacy EAWR-561) | WWP-02 | A stunned, disabled or in-limbo parent's hardpoints freeze their recharge (ion energy drain and hardpoint damage (legacy EAWR-561)). | XS in ion weapons, energy drain and stun (legacy EAWR-561) |
-| G-08 unused M2 weapon-rule coverage (legacy EAWR-714) | WWP-04, 09, 14, 17, 20 (minimum), 28, 53 (`Fires_Forward` yes), 60, 61, 68 (lifetime) | Rules FoC reads that no M2 object authors. | M (nice-to-have) |
+| G-08 unused M2 weapon-rule coverage (legacy EAWR-714) | WWP-04, 09, 14, 17, 28, 53 (`Fires_Forward` yes), 60, 61, 68 (lifetime) | Rules FoC reads that no M2 object authors. | M (nice-to-have) |
 
-WWP-22 is no longer part of G-08: omitted tags enable the random box by default in stock space weapons.
+WWP-20 minimum range is no longer part of G-08: effective authored values reach space hardpoint
+firing and manual admission. WWP-22 is also covered: omitted tags enable the random box by default
+in stock space weapons.
 
 ### XML tags this subsystem reads
 
@@ -499,12 +508,14 @@ Projectile: `Projectile_Category`, `Max_Speed`, `Max_Rate_Of_Turn`, `Projectile_
 
 In [statuses.json](../../tag-coverage/statuses.json) (M2 XML tag coverage audit), these rows are `todo` and belong to
 this walk: `HardPoint/Projectile_Damage` (G-02), `SpaceUnit/Ranged_Target_Z_Adjust` and
-`SpaceStructure/Ranged_Target_Z_Adjust` (G-06), `Projectile/Projectile_Max_Scan_Range` (read: 0 on
-every M2 missile, so a lost missile never retargets; MS-05), `SpaceUnit/Collidable_By_Projectile_Living`,
+`SpaceStructure/Ranged_Target_Z_Adjust` (G-06), `SpaceUnit/Collidable_By_Projectile_Living`,
 and the same tag on `SpaceStructure`, `StarBase`, `SpaceBuildable` and `SecondaryStructure` (FoC
 reads it, WWP-66; every M2 unit sets yes, so loading it changes nothing in M2; G-08). `Projectile/Projectile_Width`
 and `_Length` are drawing data (presentation). `HardPoint/Allows_Special_Weapon_Use` and the
 `Energy_Beam_*` constants belong to special weapons (not M2).
+`Projectile/Projectile_Max_Scan_Range` is **foc-ignores**: the original comparison
+selects no replacement even for positive values (WPJ-14), matching the current
+no-reacquisition result.
 
 ## Interfaces to other walks
 

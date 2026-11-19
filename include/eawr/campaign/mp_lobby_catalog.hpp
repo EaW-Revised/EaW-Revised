@@ -57,6 +57,18 @@ using LobbyAiLevels = std::function<std::array<std::string, 3>(std::string_view 
 // single-player entry the authored single-player rules (every peer derives the same value from the agreed campaign).
 [[nodiscard]] CampaignRulesFlavour campaign_rules_flavour(const data::galactic::Campaign& campaign) noexcept;
 
+// The controller an AI seat on `faction` acquires (WGA-02 / WGS-08 under single-player rules, GCMP-AI-01/03 under
+// multiplayer rules). `type` is the AI player type, empty when the seat acquires none (Neutral, or an ambient faction the
+// campaign assigns nothing). `missing` names the input the start refuses without (an unknown faction, or a playable
+// multiplayer faction without Basic_AI, GCMP-AI-04), empty otherwise. The start's AI selection and the lobby's row
+// caption both read it, so they cannot disagree.
+struct AiControllerChoice {
+    std::string_view type;
+    std::string_view missing;
+};
+[[nodiscard]] AiControllerChoice ai_controller_choice(const data::galactic::GalacticData& data,
+    const data::galactic::Campaign& campaign, CampaignRulesFlavour rules, std::string_view faction);
+
 // The faction a start with one local human (no lobby to choose) seats that player on. A single-player entry names it
 // (Starting_Active_Player); a multiplayer entry authors none, so it is the first faction the entry's lobby row lets a
 // player hold (the row's playable flag, in the data's faction order). Empty when the entry has no such faction.

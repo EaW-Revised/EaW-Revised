@@ -1,5 +1,7 @@
 #include "battle_input.hpp"
 #include "eawr/battle/start.hpp"
+#include "eawr/data/xml.hpp"
+#include "eawr/data/retail_values.hpp"
 
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/presentation/ui/world_ui.hpp"
@@ -299,8 +301,14 @@ void BattleInput::refresh_hero_types(const units::UnitTables* tables) {
     hero_types_ = {};
     if (tables != nullptr) {
         for (const units::UnitType& type : tables->units) {
-            if (type.named_hero || type.generic_hero || type.display_contained_hero_bars)
-                hero_types_.add({battle::type_id(type.id), type.named_hero, type.generic_hero, type.display_contained_hero_bars});
+            bool show_hero_head = false;
+            if (hero_catalog_ != nullptr) {
+                if (const auto object = hero_catalog_->resolve(type.id, data::Category::game_object))
+                    show_hero_head = data::retail::boolean(object.value().single_text("Show_Hero_Head")).value_or(false);
+            }
+            if (type.named_hero || show_hero_head || type.display_contained_hero_bars)
+                hero_types_.add({battle::type_id(type.id), type.named_hero, type.generic_hero,
+                                 type.display_contained_hero_bars, show_hero_head});
         }
     }
     hero_types_.finish();

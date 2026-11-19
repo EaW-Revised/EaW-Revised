@@ -4,6 +4,7 @@
 #include "dx8_mesh.hpp"
 #include "family.hpp"
 #include "grass.hpp"
+#include "galactic_closeup.hpp"
 #include "mesh_additive.hpp"
 #include "mesh_additive_2x.hpp"
 #include "mesh_bump_spec_glow_colorize.hpp"
@@ -53,6 +54,8 @@ inline constexpr Family families[]{
     mesh_shield::family,
     mesh_shield::farseer_family,
     planet_deathstar::family,
+    galactic_closeup::body_family,
+    galactic_closeup::lights_family,
 };
 
 [[nodiscard]] inline std::span<const Family> registry() noexcept {
@@ -108,7 +111,9 @@ inline constexpr Family families[]{
 // A zero XY rate needs no per-tick write, including unused nonzero Z/W.
 [[nodiscard]] inline bool reads_effect_time(const MaterialDescription& material) noexcept {
     const Family* family = find_family(material);
-    if (family != nullptr && family->program == planet_deathstar::family.program
+    if (family != nullptr && (family->program == planet_deathstar::family.program
+            || family->program == galactic_closeup::body_family.program
+            || family->program == galactic_closeup::lights_family.program)
         && material.pass_name == family->pass_name && admits_pass(*family, material.pass)) {
         return bindings::scalar_or(material, "CloudScrollRate", 0.0025F) != 0.0F;
     }

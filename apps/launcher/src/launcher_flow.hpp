@@ -14,6 +14,8 @@ namespace eawr::launcher {
 inline constexpr int kExitOk = 0;
 inline constexpr int kExitError = 2;
 inline constexpr int kExitCancelled = 3;
+inline constexpr int kExitGpuReset = 74; // Viewer/launcher contract: device loss or render-stall watchdog.
+inline constexpr int kExitForceClosed = 75;
 // A Godot exit with a non-zero code inside this window gets an error dialog.
 inline constexpr double kEarlyExitSeconds = 60.0;
 inline constexpr const char* kGodotExecutableName = "Godot_v4.7.2-stable_win64.exe";
@@ -105,6 +107,10 @@ public:
     // From now on every started child gets APPDATA=<folder> (all other variables unchanged); nullopt = inherit.
     // Instance n >= 2 sets it around the game start so the game's user:// is its own. Default: ignored.
     virtual void set_appdata(const std::optional<fs::path>&) {}
+    virtual void configure_watchdog(const fs::path&, bool) {}
+    [[nodiscard]] virtual std::string watchdog_token() const { return {}; }
+    [[nodiscard]] virtual bool session_closed() const { return false; }
+    virtual bool start_detached(const fs::path&, const std::vector<std::wstring>&, const fs::path&) { return false; }
     // Starts exe with a hidden console (never a visible one) and waits for it to exit.
     virtual ChildResult run(const fs::path& exe, const std::vector<std::wstring>& args, const fs::path& working_directory) = 0;
     virtual ChildResult run_monitored(const fs::path& exe, const std::vector<std::wstring>& args,

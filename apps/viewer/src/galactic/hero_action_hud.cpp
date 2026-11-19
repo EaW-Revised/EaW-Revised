@@ -56,14 +56,7 @@ bool GalacticMode::State::build_hero_action_hud() {
             }
         for (const auto& mesh : look.meshes) {
             if (mesh.alternate && mesh.alternate != tallest) continue;
-            const auto path = presentation::ui::vfs_standalone_textures(*filesystem)(mesh.texture);
-            if (!path) { failure = "hero action shell texture is absent: " + mesh.texture; return false; }
-            auto texture = assets::load_texture(*filesystem, *path);
-            if (!texture) { failure = core::format_diagnostic(texture.error()); return false; }
-            std::string why;
-            auto pixels = texture_image(texture.value(), why);
-            if (pixels.is_null()) { failure = why; return false; }
-            setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles, {}});
+            setup.meshes.push_back({mesh.blend, shell_texture(mesh.texture), mesh.triangles, {}});
         }
         surface.panel->setup(std::move(setup), nullptr);
         surface.close_name = "h_close";

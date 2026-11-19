@@ -103,6 +103,8 @@ struct DisplayFacts final {
 
 // ST-K3: match physical positions but show the active layout's letter.
 [[nodiscard]] std::string keyboard_key_label(std::string_view physical_chord);
+// Godot puts four wheel directions between middle and the side buttons.
+[[nodiscard]] int selection_mouse_number(int godot_button) noexcept;
 [[nodiscard]] std::string camera_keys_help(bool wasd);
 
 } // namespace eawr::presentation::godot_backend

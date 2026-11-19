@@ -157,7 +157,7 @@ skipped. IDs from 0x8000 are never part of a state hash.
 | 11 | child-state | a battle's full state | v8, below |
 | 12 | mod-list | ordered mounted mod descriptions | v1 |
 | 13 | tactical-return | persistent hero returns, upgrades and structure markers; latest tactical result and its conflict context | v1 |
-| 14 | galactic-ai | completed boundary and versioned native AI components, including retained funding and the async lane's pending slices plus, when it is not empty, the queue of world events the AI has not received yet (`galactic-async`; optional trailing block tagged `eawr-gcai-lane-inbox` v4: v2 (legacy EAWR-6378) actor notifications carry the world scripts' AI-usage writes; v3 (legacy EAWR-6917) the story's AI control switches are queued until the next window start; v4 (async step 2b) refusal entries carry the consequence of a hop or purchase the world refused while a slice applied (kind 8: consequence kind, player, fleet or purchase identity, the movement requests the hop leaves open). The block is absent only when the queue is empty and no applied control switch is recorded), followed on the async schedule by the billing view (`eawr-gcai-billing-view` v4: the visible and pending window publications, each with the AI funding ledgers, the purchase billing rows, the AI-owned native sync digests, the AI scheduler sync hash, the plan scripts' story-plot edits, the window's load diagnostics, its runtime load notes and the AI's GlobalValue writes, plus the credit and bill log since the visible one; absent while no publication exists) and the story-owned GlobalValue store (`eawr-gcai-story-globals` v1; async schedule only), followed by the actors the async stage lost that the world has not yet applied or has refused (`eawr-gcai-stage-losses` v1: per actor the window's snapshot tick and the virtual tick of the slice that holds the loss; optional trailing block, zero bytes when the set is empty, so a save without a pending stage loss is unchanged) (legacy EAWR-6337) | v2 (native state v2, lifecycle v3, outbox v2, lane inbox v4, billing view v4, story globals v1, stage losses v1; an older lane inbox or billing view block no longer loads, no back-compat before 1.0) |
+| 14 | galactic-ai | completed boundary and versioned native AI components, including retained funding and the async lane's pending slices plus, when it is not empty, the queue of world events the AI has not received yet (`galactic-async`; optional trailing block tagged `eawr-gcai-lane-inbox` v4: v2 (legacy EAWR-6378) actor notifications carry the world scripts' AI-usage writes; v3 (legacy EAWR-6917) the story's AI control switches are queued until the next window start; v4 (async step 2b) refusal entries carry the consequence of a hop or purchase the world refused while a slice applied (kind 8: consequence kind, player, fleet or purchase identity, the movement requests the hop leaves open). The block is absent only when the queue is empty and no applied control switch is recorded), followed on the async schedule by the billing view (`eawr-gcai-billing-view` v4: the visible and pending window publications, each with the AI funding ledgers, the purchase billing rows, the AI-owned native sync digests, the AI scheduler sync hash, the plan scripts' story-plot edits, the window's load diagnostics, its runtime load notes and the AI's GlobalValue writes, plus the credit and bill log since the visible one; absent while no publication exists) and the story-owned GlobalValue store (`eawr-gcai-story-globals` v1; async schedule only), followed by the actors the async stage lost that the world has not yet applied or has refused (`eawr-gcai-stage-losses` v1: per actor the window's snapshot tick and the virtual tick of the slice that holds the loss; optional trailing block, zero bytes when the set is empty, so a save without a pending stage loss is unchanged) (legacy EAWR-6337), followed by a window the AI finished that the world has not adopted yet (`eawr-gcai-finished-window` v1, async step 3b: the AI tick that adopts it, the window's batch (snapshot tick, identity frontier, lane floor, slices) and its billing publication; optional trailing block, written only while such a window waits, which happens only on a test schedule that adopts a window's output after the window, so production saves are unchanged) | v2 (native state v2, lifecycle v3, outbox v2, lane inbox v4, billing view v4, story globals v1, stage losses v1, finished window v1; an older lane inbox or billing view block no longer loads, no back-compat before 1.0) |
 | 15 | galactic-abilities | live ability preparations and lifecycle | galaxy sections |
 | 16 | campaign-scoring | ordered build, death and ownership counters | galaxy sections |
 | 17 | galactic-owner | full world/session barrier, consumed and future command/native cursors, admission queues, child owners and the story plot state, including pending actor changes and their AI-usage writes; each planet's production offer table is a pool index | galaxy v56 |
@@ -974,24 +974,26 @@ Restore performs no producer refresh and preserves the next ordinary deadline ex
 
 ### Multiplayer player-save barrier
 
-Only the host can admit the ordinary player-save request through sealed GC input.
-After it executes, every peer stops new gameplay admission and reports the end of its
-already sealed or accepted input. The host chooses their maximum as completed barrier N.
+Any commandable human seat can admit the ordinary player-save request through sealed GC input
+(a guest may save, and a survivor may save after the host departed). After it executes, every
+peer stops new gameplay admission and reports the end of its already sealed or accepted
+input. The barrier leader, the lowest-numbered peer that still votes when the barrier begins
+(the host while it is present), chooses their maximum as completed barrier N. Only one barrier
+runs at a time: a request that lands during another barrier is retried by its requester.
 Peers keep servicing transport and drain all accepted commands below N; no private inbox
 becomes authoritative save input. At N each peer captures and exchanges the canonical
 capture, state and chained-frontier SHA-256 values. Only equal proofs from every peer
 allow the host's release and each peer's scheduled history-base commit.
 
-The host adds local presentation/repository hints after agreement, then queues the bytes
+The requesting peer adds its local presentation/repository hints after agreement, then queues the bytes
 to the existing atomic disk publisher. Admission resumes independently of disk success;
 a failed write reports a failed save without undoing a peer's committed capture boundary.
 A capture refusal, interrupted roster/timing transition or mismatched proof asks the
-host to release the save barrier with failure before history commit. Only the host's
+leader to release the save barrier with failure before history commit. Only the leader's
 terminal release can resolve a barrier: a peer's release-0 is a refusal request sent to
-the host, not a local rollback. The host may refuse on its agreement timeout before
+the leader, not a local rollback. The leader may refuse on its agreement timeout before
 commit. Once proofs match, peers retain the hold across ordinary completeness timeouts
-until the host's release arrives. A closed host stream or an existing agreed host
-departure ends the peer's session through the normal connection-loss failure route.
+until the leader's release arrives. A closed leader stream ends the peer's session through the normal connection-loss failure route.
 A missing terminal decision is bounded to 120 seconds after matching proofs (or from
 barrier start while still awaiting proofs/refusal). Expiry ends participation with
 `save barrier unresolved: host connection lost`; it never commits or rolls back history.

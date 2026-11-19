@@ -264,8 +264,6 @@ core::Result<galactic::GameCommand> GalacticSessionAdapter::authorize(const Seat
     if (issuer->kind != sim::SeatKind::human || issuer->player == 0)
         return fail_with<galactic::GameCommand>(session_errors::admission, "only commandable human seats may send galactic input");
     const auto& payload = decoded.value().payload;
-    if (save_host_ && std::holds_alternative<galactic::SaveRequest>(payload) && input.key.seat != *save_host_)
-        return fail_with<galactic::GameCommand>(session_errors::admission, "only the agreed host can request a campaign save");
     // D8: a Galactic MP seat stays departed until checkpoint-based rejoin is available (GCMP-15).
     if (std::holds_alternative<galactic::SeatRejoin>(payload)) {
         if (recovery_rejoins_.contains(input.key)) return decoded;

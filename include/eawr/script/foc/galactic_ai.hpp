@@ -54,6 +54,10 @@ struct Clocks {
 struct AsyncSchedule {
     std::uint32_t batch_ticks{1};
     std::uint32_t apply_delay{0};
+    // Async step 3b: the world adopts a window's output (its batch and publication) at the AI tick s + adopt_delay (H).
+    // 0 adopts it as the window ends (the production value); a test schedule sets 1 to save and resume between the window's finish
+    // and its adoption. At most min(batch_ticks, apply_delay): adopted before the next window starts and before its first apply.
+    std::uint32_t adopt_delay{0};
     bool operator==(const AsyncSchedule&) const = default;
 };
 inline constexpr AsyncSchedule synchronous_reference_schedule{1, 0};

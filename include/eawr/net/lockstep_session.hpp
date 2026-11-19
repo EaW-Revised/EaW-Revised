@@ -120,8 +120,9 @@ struct DepartureEvent {
 inline constexpr std::uint8_t checkpoint_drain_kind = 86, checkpoint_cutoff_kind = 87,
     checkpoint_proof_kind = 88, checkpoint_release_kind = 89;
 using CheckpointProof = std::array<std::array<std::uint8_t, 32>, 3>;
+// The barrier is led by the lowest-numbered peer that still votes when it begins (the host while it is present), so a
+// save keeps working after the host departs.
 struct CheckpointCallbacks {
-    PeerIndex host{};
     std::function<core::Result<CheckpointProof>(const std::map<sim::SeatId, std::uint64_t>&)> capture;
     std::function<core::Result<void>()> commit;
     std::function<void(core::Diagnostic)> refused;
@@ -156,7 +157,7 @@ public:
     virtual core::Result<CompletedTick> step() = 0;
     virtual bool is_departure(const SeatInput& input) const = 0;
     virtual bool is_rejoin(const SeatInput&) const { return false; }
-    // True only after an accepted host SaveRequest executed at the last tick.
+    // True only after an accepted SaveRequest executed at the last tick.
     virtual bool checkpoint_requested() const { return false; }
 };
 
@@ -468,6 +469,7 @@ private:
     [[nodiscard]] core::Result<PumpResult> fail(core::Diagnostic diagnostic);
     struct CheckpointBarrier {
         std::uint64_t epoch{}, since_ms{};
+        PeerIndex leader{};
         std::vector<std::optional<std::uint64_t>> drains;
         std::vector<bool> voters;
         std::map<PeerIndex, CheckpointProof> proofs;

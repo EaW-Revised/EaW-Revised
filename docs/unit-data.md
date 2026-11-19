@@ -22,7 +22,7 @@ Production identities select the game-object registry, so a same-name nested abi
 | Viewer attached-particle placements and fog/ship classification | game objects |
 | Scene attachment callback | explicit category: hardpoints for attachment IDs, game objects for placements |
 
-Map type enumeration, scene placement, skirmish marker candidates and viewer unit/clone/model lookups also use game objects; viewer faction styling uses factions. Namespace winners retain the existing layer/registry/definition precedence. The untyped XML scanner and value-override tooling retain their global-winner contract and separate resolver cache entries. Owned automatic abilities are read directly from every `Abilities` block in the most-derived authoring layer; they are never recovered through a global ability-name lookup.
+Map type enumeration, scene placement, skirmish marker candidates and viewer unit/clone/model lookups also use game objects; viewer faction styling uses factions. Namespace winners retain the existing layer/registry/definition precedence. The untyped XML scanner and value-override tooling retain their global-winner contract and separate resolver cache entries. Owned automatic abilities are read directly from the dispatched `Abilities` blocks, without a global ability-name lookup. The unit-table selector follows [WABL-01/02](behaviour/walks/abilities.md): exact `SubObjectList="Yes"` dispatch, ordinary append and per-block variant replacement; an undispatched empty block preserves inheritance.
 
 All eleven stock Underworld duplicate upgrade names retain their parent identity, price, time and owned ability data. Eight combat upgrades use their authored station menus and prerequisites. `US_Plasma_Cannon_Use_Upgrade` stays disabled while its battlefield modifier is deferred. Extort Cash belongs to `Underworld_Mineral_Extractor`, retains both income modifiers and stays disabled while owned income-multiplier activation is deferred. `Fire_Range_Bonus_Percentage` remains in the catalog owner subtree but its targeting effect remains deferred; the identity regression does not claim range simulation. These existing effects remain tracked in the upgrade effect coverage (legacy EAWR-760).
 
@@ -146,8 +146,13 @@ turned like a point and normalized, which orient its cone (space-weapon-fire W-0
 as in FoC's hardpoint data. The object weapon (`Projectile_Types`) ranges by
 `Targeting_Max_Attack_Distance`. When the unit authors `Fires_Forward` no, its cone is its
 `Turret_Rotate_Extent_Degrees` (yaw) and `Turret_Elevate_Extent_Degrees` (pitch) about the unit's
-own facing (space-weapon-fire W-09); without both it has no cone. `Is_Turret`,
-`Turret_XY_Only`, `Fire_Min_Range_Distance` and the soft coordinate radius are not loaded.
+own facing (space-weapon-fire W-09). Ordinary hardpoint turrets use their authored mechanical
+frames and committed poses ([hardpoint turrets](behaviour/hardpoint-turrets.md) HPT-01..08);
+object-level turrets retain their separate UA-05 rules. Shared type footprints supply the soft
+coordinate radius (WWP-21). The effective inherited `Fire_Min_Range_Distance` defaults to zero
+and retains its signed value without scaling or clamping. It independently gates planar
+pre-lead aim distance from the fire-bone midpoint on every space hardpoint firing attempt,
+including manual fire; target-radius padding extends only the upper bound (WWP-20).
 
 With [space damage](behaviour/space-damage.md) handling each weapon whose projectile has a
 `Max_Speed` carries a shot: the projectile's damage, speed and shield/hitpoint flags, the damage

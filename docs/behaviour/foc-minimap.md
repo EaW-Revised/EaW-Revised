@@ -102,6 +102,14 @@ Output: the minimap image inside the radar mesh; camera moves and move orders fr
   case, recorded in the data-assumption audit. The remake uses the loaded team type with the
   squadron's colour, selection and identity once, suppresses its craft identities, and leaves
   dead, docked and empty teams out.
+  The debug-build creation and radar-accessor caller audit (MMH-E01/02, 2026-11-18)
+  confirms that the `Squadron` purchase/dummy type is separate from the created team:
+  its own `Is_Visible_On_Radar` value is not copied or consulted for that runtime
+  identity. This no-effect finding concerns ordinary purchase/team creation; directly
+  instantiated `Squadron`-typed map objects are outside this audit. The created
+  `Container` type's effective `Radar_Icon_Name` and `Radar_Icon_Size` already feed
+  the minimap style reader and renderer. Inherited values and explicit overrides
+  apply there; an empty name takes MM-16's point path rather than a textured quad.
   The exact upstream member exclusion in the original is unverified; the squadron identity count
   follows the owner's observed presentation. Member deletion makes the first remaining member
   the leader for this presentation path.

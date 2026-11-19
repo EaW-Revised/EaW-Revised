@@ -558,6 +558,7 @@ int main(const int argc, char** argv) {
     test_avoidance();
     test_intercepted();
     test_retarget_clears_the_hardpoint();
+    test_bomber_hardpoint_approach();
     test_group_move();
     test_refused_member_find();
     test_solo_fighter();

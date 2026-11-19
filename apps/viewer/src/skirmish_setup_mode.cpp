@@ -30,6 +30,7 @@
 #include "ui/kit.hpp"
 #include "ui/message_box_view.hpp"
 #include "ui/theme_builder.hpp"
+#include "ui/staging_preview.hpp"
 #include "eawr/data/ui/dialog_catalog.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/data/ui/text_database.hpp"
@@ -132,7 +133,7 @@ struct SkirmishSetupMode::State final {
     EawrUiList* list{};
     EawrUiList* game_types{};
     EawrUiButton *official{}, *custom{};
-    std::vector<Control*> start_icons;
+    StagingPreview start_icons;
     TextureRect* preview{};
     EawrUiLabel* status{};
     EawrUiButton* start{};
@@ -173,6 +174,9 @@ struct SkirmishSetupMode::State final {
     std::optional<data::ui::TextDatabase> text_database;
     std::optional<data::ui::TextLookup> text_lookup;
     // Faction names in the data's order (the faction registries), and the captions they show.
+    // #7842: all_factions is the catalog's playable, non-neutral list; faction_names/captions are what the selected map
+    // can start (skirmish::setup_factions_for_map), and the combos show exactly those.
+    std::vector<skirmish::SetupFaction> all_factions, listed_factions;
     std::vector<std::string> faction_names, faction_captions;
     std::string local_name, platform_name;
     // #2935: the player profile (docs/ui/player-profile.md): the defaults the screen opens with and what Start
@@ -249,6 +253,7 @@ struct SkirmishSetupMode::State final {
             : index == controller_hard ? sim::tactical::AiLevel::hard : sim::tactical::AiLevel::normal;
     }
     void resolve_factions();
+    void list_factions(const skirmish::SetupMap* map);
     void fill_map_list();
     void idle_row(std::size_t row);
     void process_map_kind();
@@ -284,16 +289,12 @@ std::size_t SkirmishSetupMode::State::live_rows() const {
     return skirmish::setup_row_count(maps[static_cast<std::size_t>(selected)]);
 }
 
-// WSS-12/13: every playable faction of the effective catalog, in registry order, each with the caption its
-// Text_ID gives (the faction's own name when the data or the database gives none). The map offers none of
-// this: a faction its stations cannot start is refused at Start, not hidden here.
+// WSS-12/13: every playable, non-neutral faction of the effective catalog, in registry order, each with the caption its
+// Text_ID gives (the faction's own name when the data or the database gives none). list_factions then narrows the
+// combos to what the selected map can start (#7842, DEV-27).
 void SkirmishSetupMode::State::resolve_factions() {
-    faction_names.clear();
-    faction_captions.clear();
-    for (const auto& entry : skirmish::setup_factions(*catalog)) {
-        faction_names.push_back(entry.name);
-        faction_captions.push_back(model::faction_display_name(*catalog, text_lookup ? &*text_lookup : nullptr, entry.name));
-    }
+    all_factions = skirmish::setup_factions(*catalog);
+    list_factions(nullptr);
     // The local player's name: the OS account stands in for the profile name until a profile page exists.
     for (const char* variable : {"USERNAME", "USER"}) {
         if (!local_name.empty()) break;
@@ -302,6 +303,35 @@ void SkirmishSetupMode::State::resolve_factions() {
     }
     platform_name = local_name;
     if (local_name.empty()) local_name = lookup(model::skirmish_setup_text_key(model::SetupText::host_player));
+}
+
+// #7842: the faction list for one map (nullptr: every catalog faction). A combo keeps its faction when the new list
+// still has it, else it takes the row's default; an Open row stays blank.
+void SkirmishSetupMode::State::list_factions(const skirmish::SetupMap* const map) {
+    std::array<std::string, skirmish::local_setup_rows> previous;
+    std::array<bool, skirmish::local_setup_rows> blank{};
+    for (std::size_t slot = 0; slot < skirmish::local_setup_rows; ++slot) {
+        if (faction[slot] == nullptr) continue;
+        const int shown = faction[slot]->get_selected();
+        blank[slot] = shown < 0;
+        if (shown >= 0 && static_cast<std::size_t>(shown) < faction_names.size())
+            previous[slot] = faction_names[static_cast<std::size_t>(shown)];
+    }
+    const auto before = faction_names;
+    listed_factions = skirmish::setup_factions_for_map(all_factions, map);
+    faction_names.clear();
+    faction_captions.clear();
+    for (const auto& entry : listed_factions) {
+        faction_names.push_back(entry.name);
+        faction_captions.push_back(model::faction_display_name(*catalog, text_lookup ? &*text_lookup : nullptr, entry.name));
+    }
+    if (faction_names == before) return;
+    for (std::size_t slot = 0; slot < skirmish::local_setup_rows; ++slot) {
+        if (faction[slot] == nullptr) continue;
+        faction[slot]->clear();
+        for (const auto& shown : faction_captions) faction[slot]->add_item(text(shown));
+        faction[slot]->select(blank[slot] ? -1 : skirmish::keep_listed_faction(listed_factions, previous[slot], slot == 0 ? 0U : 1U));
+    }
 }
 
 bool SkirmishSetupMode::State::mount() {
@@ -1043,7 +1073,6 @@ void SkirmishSetupMode::State::filter_maps() {
     selected = -1;
     selection.map.clear();
     preview->set_texture(Ref<ImageTexture>());
-    for (auto* icon : start_icons) { icon->hide(); icon->queue_free(); }
     start_icons.clear();
     if (maps.empty()) {
         for (auto* value : team) value->clear();
@@ -1064,6 +1093,7 @@ void SkirmishSetupMode::State::refresh_map(const int index) {
     selected = index;
     const auto& map = maps[static_cast<std::size_t>(index)];
     skirmish::repair_setup_selection(selection, map);
+    list_factions(&map);
     notice.clear();
     const auto rows = skirmish::setup_row_count(map);
     // Keep the status/footer space. Only maps needing generated controls change row pitch;
@@ -1122,40 +1152,8 @@ void SkirmishSetupMode::State::refresh_map(const int index) {
         if (auto texture = assets::load_texture(*filesystem, "data/art/textures/generic_space.dds")) image = texture_image(texture.value(), failure);
     }
     preview->set_texture(image.is_valid() ? ImageTexture::create_from_image(image) : Ref<ImageTexture>());
-    for (auto* icon : start_icons) { icon->hide(); icon->queue_free(); }
-    start_icons.clear();
-    if (preview->is_visible() && map.metadata.new_markers == true && map.metadata.start_positions) {
-        auto decoded = assets::load_map(*filesystem, map.path);
-        if (decoded && decoded.value().declared_extents) {
-            const auto& extents = *decoded.value().declared_extents;
-            if (extents.first > 0 && extents.second > 0) {
-                // WSS-10: centred space coordinates; preview Y points down.
-                const auto origin = preview->get_position();
-                const auto size = preview->get_size();
-                for (std::size_t i = 0; i < map.metadata.start_positions->size(); ++i) {
-                    const auto& point = map.metadata.start_positions->at(i);
-                    const float x = std::clamp(0.5F + point.x / extents.first, 0.0F, 1.0F);
-                    const float y = std::clamp(0.5F - point.y / extents.second, 0.0F, 1.0F);
-                    auto* backing = memnew(ColorRect);
-                    backing->set_color(Color(0.01F, 0.01F, 0.02F, 0.85F));
-                    backing->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-                    // Keep numbers readable at the preview edges (project inset).
-                    backing->set_position(origin + Vector2(size.x * (0.1F + x * 0.8F) - 10,
-                        size.y * (0.1F + y * 0.8F) - 10));
-                    backing->set_size(Vector2(20, 20));
-                    root->add_child(backing);
-                    auto* number = memnew(EawrUiLabel);
-                    number->set_role("L_Text");
-                    number->set_text(text(std::to_string(i + 1)));
-                    number->set_alignment(HORIZONTAL_ALIGNMENT_CENTER);
-                    number->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-                    number->set_size(Vector2(20, 20));
-                    backing->add_child(number);
-                    start_icons.push_back(backing);
-                }
-            }
-        }
-    }
+    start_icons.rebuild(*preview, map, *filesystem, skirmish::setup_factions(*catalog),
+        atlas ? &*atlas : nullptr, textures.get());
     validate();
 }
 
@@ -1212,16 +1210,16 @@ void SkirmishSetupMode::State::validate() {
         if (!repaired) { start->set_disabled(true); status->set_text(text(repaired.error().message)); return; }
     }
     for (const auto& record : selection.slots) colour[record.slot - 1]->select(static_cast<int>(*record.colour_index));
-    for (std::size_t i = 0; i < start_icons.size(); ++i) {
-        auto* icon = static_cast<ColorRect*>(start_icons[i]);
-        icon->set_color(Color(0.01F, 0.01F, 0.02F, 0.85F));
-        for (const auto& record : selection.slots) {
-            if (record.team != i || *record.colour_index >= palette.size()) continue;
+    std::vector<StagingPreviewSeat> preview_seats;
+    for (const auto& record : selection.slots) {
+        Color backing(0.01F, 0.01F, 0.02F, 0.85F);
+        if (*record.colour_index < palette.size()) {
             const auto& rgb = palette[*record.colour_index].rgb;
-            icon->set_color(Color(rgb[0] / 510.0F, rgb[1] / 510.0F, rgb[2] / 510.0F, 0.95F));
-            break;
+            backing = Color(rgb[0] / 510.0F, rgb[1] / 510.0F, rgb[2] / 510.0F, 0.95F);
         }
+        preview_seats.push_back({record.team, record.faction, backing});
     }
+    start_icons.update(preview_seats);
     const auto options_result = skirmish::setup_options(selection, maps);
     start->set_disabled(!options_result || editing.has_value());
     std::vector<model::SetupRow> rows;
@@ -1781,12 +1779,22 @@ void SkirmishSetupMode::process() {
                     probe->queue_free();
                 }
                 state.report_layouts();
-                // WSS-12/13: the host row's drop-down lists every playable catalog faction.
+                // WSS-12/13 with DEV-27: the host row's drop-down lists the factions the selected map can start.
                 String listed;
                 for (int item = 0; item < state.faction[0]->get_item_count(); ++item)
                     listed += (item ? String("|") : String()) + state.faction[0]->get_item_text(item);
                 UtilityFunctions::print("EAWR setup factions: count=", state.faction[0]->get_item_count(),
                     " items=", listed);
+                // #7842: what the selected map's station candidates offer, for the list check (team:faction,faction;...).
+                String offered;
+                for (const auto& side : state.maps[static_cast<std::size_t>(state.selected)].teams) {
+                    String members;
+                    for (const auto& name : side.factions) members += (members.is_empty() ? String() : String(",")) + text(name);
+                    offered += (offered.is_empty() ? String() : String(";")) + String::num_int64(side.team) + ":" + members;
+                }
+                UtilityFunctions::print("EAWR setup map factions: new_markers=",
+                    state.maps[static_cast<std::size_t>(state.selected)].metadata.new_markers == true ? 1 : 0,
+                    " teams=", offered);
                 for (std::size_t row = 0; row < skirmish::setup_row_count(state.maps[static_cast<std::size_t>(state.selected)]); ++row)
                     report_row(row);
             }
@@ -1923,7 +1931,8 @@ void SkirmishSetupMode::process() {
         } else if (state.frames == 28) {
             UtilityFunctions::print("EAWR setup official map list: ", !state.custom_maps,
                 "; maps: ", static_cast<int64_t>(state.maps.size()),
-                "; preview starts: ", static_cast<int64_t>(state.start_icons.size()));
+                "; preview starts: ", static_cast<int64_t>(state.start_icons.size()),
+                "; preview emblems: ", static_cast<int64_t>(state.start_icons.emblem_count()));
         } else if (state.frames >= 32 && state.frames <= 48) {
             state.list->grab_focus();
             for (std::size_t i = 0; i < state.maps.size(); ++i) if (state.three_players

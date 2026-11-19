@@ -18,6 +18,8 @@
 #include "eawr/sim/galactic/corruption_actions.hpp"
 #include "eawr/sim/galactic/income.hpp"
 #include "eawr/sim/tactical/admission.hpp"
+#include "eawr/script/authoritative/galactic_bridge.hpp"
+#include "eawr/script/foc/tactical_ai.hpp"
 #include "../../apps/viewer/src/galactic/ability_drop.hpp"
 
 #include <exception>
@@ -119,6 +121,44 @@ void direct_voice(const eawr::sim::PartitionExecutor& pool, std::vector<std::str
             expect(at != notices.end() && at->player == 2 && at->planet == config.planets[0].id && at->slot == prepared.corruption.slot,
                 "the notice names the acting owner, the planet and the chosen slot");
         } else expect(voiced == 0, "a non-local acting owner voices nothing");
+    }
+}
+void staged_ai_invocation(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    namespace auth = eawr::script::authoritative;
+    namespace foc = eawr::script::foc;
+    for (const bool stale : {false, true}) {
+        auto config = setup(true);
+        config.seats[1].kind = gc::SeatKind::ai; config.seats[1].human_side_id = 0;
+        auto& payer = config.production->players[1];
+        payer.human = false; payer.uses_population_cap = false; payer.pay_as_you_go = true;
+        config.economy_corruption->players[1].human = false;
+        config.ability_host->profiles[0].ground_activated = {gc::AbilityKind::corruption};
+        auto game = take(eawr::campaign::GameSession::create(config));
+        auth::SessionConfig clock; clock.tick_duration = {1, 30}; clock.galactic_clock = true;
+        auth::ModuleManifest manifest;
+        take(manifest.add("Ground.lua", "function Start() Activate() end"));
+        auto scripts = take(auth::ScriptScheduler::create(clock, std::move(manifest)));
+        take(scripts.register_binding("Activate", [actor = buyer(config), planet = config.planets[stale ? 1 : 0].id]
+            (auth::BindingContext& context, const auth::ValueList&) {
+            context.issue_command("galactic.ground_ability", {auth::Value{auth::Handle{foc::handle_player, 2}},
+                auth::Value{auth::Handle{foc::handle_game_object, actor}}, auth::Value{auth::Handle{foc::handle_game_object, planet}}});
+            return eawr::core::Result<auth::ValueList>::success({});
+        }));
+        take(scripts.create_instance(1, "Ground.lua"));
+        auth::ScriptEvent event; event.key = {1, auth::first_simulation_producer, 1, 0}; event.target = 1;
+        event.kind = auth::ScriptEvent::Kind::call; event.name = "Start";
+        take(scripts.submit_event(std::move(event)));
+        auto story = take(auth::ScriptScheduler::create(clock, {}));
+        take(game.install_galactic_scripts(std::move(scripts), std::move(story)));
+        take(game.galactic_scripts()->bind_ground_abilities());
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(!game.galaxy().ability_state()->transitions[0].transition.active(), "staged AI activation does not mutate during Lua service");
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(game.galaxy().ability_state()->transitions[0].transition.active() != stale,
+            "ground activation rechecks the actor's actual planet at the ordinary command barrier");
+        expect(game.galaxy().snapshot()->player_economy()->players[1].credits == f(stale ? 1000 : 900),
+            "staged AI corruption charges once only for an admitted current location");
+        expect(game.return_state().heroes.size() == (stale ? 0U : 1U), "staged AI corruption uses the ordinary hero return owner");
     }
 }
 void ai_invocation(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
@@ -678,7 +718,7 @@ int case_galactic_ability_corruption_tests() {
     ability_fixture::arm_watchdog();
     try {
         using Phase = void (*)(const eawr::sim::PartitionExecutor&, std::vector<std::string>&);
-        const Phase phases[] = {direct, direct_voice, ai_invocation, human_refusal, undiscovered_target, missions, land_timed, stale_units, representative, unsuccessful_missions, accepted_space_mission, stale_owned_target, startup, removal};
+        const Phase phases[] = {direct, direct_voice, ai_invocation, staged_ai_invocation, human_refusal, undiscovered_target, missions, land_timed, stale_units, representative, unsuccessful_missions, accepted_space_mission, stale_owned_target, startup, removal};
         std::vector<std::string> baseline;
         for (std::size_t count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter workers(count); std::vector<std::string> hashes;

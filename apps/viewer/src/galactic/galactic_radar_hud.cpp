@@ -55,9 +55,7 @@ bool GalacticMode::State::build_radar_hud() {
         for (const auto& mesh : look.meshes) {
             // Authored shell meshes may name cropped command-atlas entries
             // (including i_button_blank.tga), as well as standalone textures.
-            const auto texture = command_texture(mesh.texture);
-            if (texture.is_null()) { failure = "advanced map shell texture is absent or undecodable: " + mesh.texture; return false; }
-            setup.meshes.push_back({mesh.blend, texture, mesh.triangles, {}});
+            setup.meshes.push_back({mesh.blend, shell_texture(mesh.texture, false), mesh.triangles, {}});
         }
         advanced_map_shell->setup(std::move(setup), nullptr);
         advanced_map_shell->hide();

@@ -156,6 +156,8 @@ struct LiveTickEvents {
     std::vector<LiveBaseAttack> base_attacks{};
     std::vector<LiveHardpointLoss> hardpoint_losses{};
     std::vector<sim::tactical::DamageChange> damage_changes{};
+    // BA-65: only this completed tick's losses, before snapshot history eviction.
+    std::vector<sim::tactical::BattleLoss> unit_losses{};
 };
 
 // What events_after() hands back: the ticks with presented events in (after, through], oldest

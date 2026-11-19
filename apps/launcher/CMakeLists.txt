@@ -16,6 +16,7 @@ set(EAWR_LAUNCHER_CORE_SOURCES
     src/launcher_flow.cpp
     src/launcher_state.cpp
     src/win_process.cpp
+    src/win_watchdog.cpp
     src/win_registry.cpp
     src/win_ui.cpp
     "${PROJECT_SOURCE_DIR}/src/core/sha256.cpp"

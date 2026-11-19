@@ -63,6 +63,7 @@ void planet_bonus_metadata(const data::galactic::GalacticData& tables) {
     entry("MOD_NAME", u"Authored name"); entry("MOD_DESCRIPTION", u"Authored description");
     entry("INFO_TITLE", u"Retail title"); entry("ENC_FIRST", u"Retail body");
     entry("ENC_SECOND", u"Must not appear");
+    entry("MOD_WILDLIFE", u"Synthetic wildlife \u03bb");
     for (std::uint32_t i = 0; i < text.entries.size(); ++i) text.crc_order.push_back(i);
     std::sort(text.crc_order.begin(), text.crc_order.end(),
         [&](const auto a, const auto b) { return text.entries[a].crc < text.entries[b].crc; });
@@ -75,6 +76,14 @@ void planet_bonus_metadata(const data::galactic::GalacticData& tables) {
     assert(weather_tooltip({"i.tga", "Storm", "Wind"}) == std::string("Storm") + '\n' + "Wind");
     assert(weather_tooltip({"i.tga", "Storm", ""}) == "Storm" && weather_tooltip({"i.tga", "", "Wind"}) == "Wind");
     assert(planet->describe_history == "MOD_HISTORY");
+    assert(planet->describe_wildlife == "MOD_WILDLIFE");
+    const auto info = planet_info_metadata(*planet, &text);
+    assert(info.wildlife == "Synthetic wildlife \xce\xbb");
+    assert(info.encyclopedia.size() == 2);
+    assert(planet_info_metadata(*planet, nullptr).wildlife.empty());
+    auto unresolved = *planet;
+    unresolved.describe_wildlife = "NO_SUCH_KEY";
+    assert(planet_info_metadata(unresolved, &text).wildlife.empty());
     assert(planet->planet_ability_name == "MOD_NAME" && planet->planet_ability_description == "MOD_DESCRIPTION");
     std::vector<std::string> diagnostics;
     const auto bonus = planet_ability_metadata(*planet, &text, diagnostics);
@@ -162,10 +171,11 @@ void campaign_art_is_data_driven() {
       <Scale_Factor>1</Scale_Factor><In_Background>Yes</In_Background><Loop_Idle_Anim_00>Yes</Loop_Idle_Anim_00></Planet>
       <Planet Name="Alpha"><Behavior>PLANET</Behavior><Galactic_Position>12,34,10</Galactic_Position><Galactic_Model_Name>Alpha</Galactic_Model_Name>
       <Scale_Factor>2.5</Scale_Factor><Show_Name>Yes</Show_Name><Name_Adjust>1,2,3</Name_Adjust>
+      <Special_Structures_Land>8</Special_Structures_Land><Max_Space_Base>4</Max_Space_Base>
       <Mouse_Collide_Override_Sphere_Radius>17</Mouse_Collide_Override_Sphere_Radius><Text_ID>ALPHA</Text_ID>
       <Planet_Ability_Name>BASE_NAME</Planet_Ability_Name><Planet_Ability_Description>BASE_DESCRIPTION</Planet_Ability_Description>
       <Planet_Ability_Icon>base_bonus.tga</Planet_Ability_Icon><Describe_Advantage>INFO_TITLE</Describe_Advantage>
-      <Encyclopedia_Text>ENC_FIRST, ENC_SECOND</Encyclopedia_Text></Planet>
+      <Encyclopedia_Text>ENC_FIRST, ENC_SECOND</Encyclopedia_Text><Describe_Wildlife>MOD_WILDLIFE</Describe_Wildlife></Planet>
       <Planet Name="Beta"><Variant_Of_Existing_Type>Alpha</Variant_Of_Existing_Type>
       <Galactic_Position>99,0,10</Galactic_Position><Scale_Factor>TBD</Scale_Factor>
       <Planet_Ability_Name>MOD_NAME</Planet_Ability_Name><Planet_Ability_Description>MOD_DESCRIPTION</Planet_Ability_Description>
@@ -241,6 +251,9 @@ void campaign_art_is_data_driven() {
     auto content = load_scene_content(filesystem.value(), catalog.value().catalog, tables.value(), "Art");
     if (!content) std::cerr << core::format_diagnostic(content.error()) << std::endl;
     assert(content);
+    assert(content.value().art.at(2).ground_capacity == 8 && content.value().art.at(2).space_capacity == 4);
+    assert(content.value().art.at(3).ground_capacity == 8 && content.value().art.at(3).space_capacity == 4);
+    assert(!content.value().art.at(1).ground_capacity && !content.value().art.at(1).space_capacity);
     // Stock MP campaigns have faction rows but no solo Starting_Active_Player.
     auto multiplayer_tables = tables.value();
     auto multiplayer = multiplayer_tables.campaigns.front();

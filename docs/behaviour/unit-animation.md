@@ -78,6 +78,11 @@ headless replay hashes do not change.
   Nearby `Apply_Y_Turret_Rotate_To_Axis` / `Apply_Z_Turret_Rotate_To_Axis` selectors are not
   applied here: the retained pointing path directly builds local Y pitch and Z yaw transforms
   (UC-E8); alternate-axis consumers and deployed land extents remain deferred.
+  UA-05 applies to an admitted space object declaring `TURRET` independently of its XML element label
+  (SG-CLS-01): this includes `SpaceBuildable`, `SpaceTurret`, `SpaceUnit`, `Template` and `UniqueUnit`.
+  Initialization binds `Turret_Bone_Name` and optional `Barrel_Bone_Name` against the effective object model;
+  inherited template values follow SG-CLS-02. The existing profile, mechanical pointing and prepared viewer
+  pose share this geometry. Land articulation and admission of abstract types remain separate qualifications.
 - **UA-06 X-wing S-foils.** `DEPLOY` plays when the `SPOILER_LOCK` ability is switched on and
   `UNDEPLOY` when it is switched off, at `Deployment_Anim_Rate`, blended over 1/30 s, starting at the
   frame that mirrors the current clip's remaining frames. Attacking does not move the S-foils.
@@ -121,10 +126,24 @@ headless replay hashes do not change.
   `Override_Death_Persistence_Duration` (30 s) is copied onto a clone's death data only when the dying
   object is infantry, so it never touches a ship or station clone. A clone with persistence −1 is never
   faded or removed by the death behaviour, whatever its clip does; it also stays when the clip has ended.
+  The type is the clone's effective type, regardless of its XML element label: a `SpaceUnit`
+  death clone reads its own inherited or overridden persistence, rather than the dying ship's
+  value. The existing presentation reader applies this rule to resolved death-clone types;
+  this coverage does not establish creation or deployment of another object. Debug build,
+  clone creation and death lifetime consumer.
 - **UA-11 Bone visibility.** Every frame a model draws each mesh only while the bone it hangs on
   (a skin's visibility bone) is visible in the pose; a clip's visibility keys hide pieces, and a
   held last frame keeps them hidden. A death clip that ends with every piece hidden leaves the
   clone drawn empty for as long as it persists. (UC-E10)
+- **UA-12 Hardpoint art on a clone.** Two Star Destroyer mods give their death-clone type a `HardPoints`
+  entry of type `HARD_POINT_DUMMY_ART` whose `Model_To_Attach` is a whole hull on a bone of the clone's
+  skeleton (the stock clones have none). The remake draws that art at the bone's bind frame and, like
+  every mesh of the clone, only while the bone it hangs on is visible in the clone's pose: the DIE clip
+  hides the bone at its last frame, so the attached hull goes with the clone's own pieces instead of
+  staying on the map for the rest of the battle (UA-11 applied to attached art). The art does not yet
+  follow the bone's motion during the clip, and whether the original attaches hardpoint art to a clone at
+  all is unverified (no stock clone has any); until it is, the visible-while-the-bone-is-visible reading is
+  the least visible one that still shows the clone's own pieces.
 - **UA-09 Station death.** A clone type with `Should_Death_Clone_Play_Idle` starts on its idle clip
   when the dying station had no clip running; the death behaviour then blends to `DIE` as in UA-08.
   (UC-E3, UC-E4)

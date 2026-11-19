@@ -4,6 +4,7 @@
 #include "../support/check.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/campaign/setup.hpp"
+#include "eawr/platform/sim_workers.hpp"
 #include "../../src/sim/galactic/checkpoint_fields_internal.hpp"
 
 #include <algorithm>
@@ -114,6 +115,10 @@ inline void verify(const Plan& plan, const Services& services, const Configurati
         "History sampling does not change the sealed input frontier");
     auto restored = take(eawr::checkpoint::load_game_checkpoint(
         take(eawr::checkpoint::save_game_checkpoint(*baseline.game(), identities)), identities, configuration.restore, executor));
+    // The baseline above deliberately reinstates the former double recorder.
+    // Independently round-trip the production owner, without changing its
+    // service ownership, on every supported determinism worker count.
+    const auto production_bytes = take(eawr::checkpoint::save_game_checkpoint(*corrected.game(), identities));
     // Match the loader's ordinary input-journal compaction on both controls.
     // This leaves chart History and every gameplay/hash field untouched.
     baseline.game()->schedule_history_rebase(boundary);
@@ -121,6 +126,21 @@ inline void verify(const Plan& plan, const Services& services, const Configurati
     take(baseline.game()->step(executor)); take(corrected.game()->step(executor)); take(restored.session.step(executor));
     equal_except_history(*baseline.game(), *corrected.game(), "fresh");
     equal_except_history(*baseline.game(), restored.session, "restored");
+    const auto production_tick2 = take(eawr::checkpoint::save_game_checkpoint(*corrected.game(), identities));
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        const eawr::platform::ThreadWorkerAdapter restore_executor(workers);
+        auto loaded = take(eawr::checkpoint::load_game_checkpoint(
+            production_bytes, identities, configuration.restore, restore_executor));
+        eawr::testing::require(take(eawr::checkpoint::save_game_checkpoint(loaded.session, identities)) == production_bytes,
+            "production History and complete checkpoint bytes survive direct restore");
+        take(loaded.session.step(restore_executor));
+        eawr::testing::require(corrected.game()->galaxy().history_archive() == loaded.session.galaxy().history_archive(),
+            "production History rows remain identical after the first resumed turn");
+        eawr::testing::require(take(eawr::checkpoint::save_game_checkpoint(loaded.session, identities)) == production_tick2,
+            "production complete checkpoint remains identical after the first resumed turn");
+        std::cout << "History production round-trip tick=2 workers=" << workers
+            << " history_rows_equal=true checkpoint_bytes_equal=true\n";
+    }
     std::ofstream output(directory / "history-owner-diff.tsv");
     output << "owner\ttick\tplayer\tindex\tframe\teconomy_bits\tplanets\ttechnology\tmilitary_bits\n";
     std::size_t fresh_difference{}, restored_difference{};
@@ -141,7 +161,7 @@ inline void verify(const Plan& plan, const Services& services, const Configurati
                     << row.technology << '\t' << row.military.bits << '\n';
             }
     output.close(); eawr::testing::require(static_cast<bool>(output), "History owner diff receipt is durable");
-    std::cout << "History owner diff tick=2 fresh_duplicate_rows=" << fresh_difference
+    std::cout << "History deliberately duplicated control tick=2 fresh_duplicate_rows=" << fresh_difference
         << " restore_duplicate_rows=" << restored_difference
         << " other_owner_fields_equal=true native_components_equal=true script_payloads_equal=true\n";
 }

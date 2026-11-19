@@ -14,6 +14,7 @@ namespace eawr::presentation::godot_backend {
 BuiltPendingBattleHud build_pending_battle_hud(const vfs::Vfs& filesystem,
     const data::ui::CommandBarCatalog& catalog, FontProvider& fonts, presentation::ui::HudFaction faction,
     Vector2 size, bool single, const std::function<Ref<Texture2D>(std::string_view)>& texture,
+    const std::function<Ref<Texture2D>(std::string_view)>& shell_texture,
     const std::function<std::string(std::string_view)>& text,
     const std::function<void(const std::string&)>& sound) {
     BuiltPendingBattleHud built;
@@ -62,10 +63,8 @@ BuiltPendingBattleHud build_pending_battle_hud(const vfs::Vfs& filesystem,
     }
     std::stable_sort(shell_look.meshes.begin(), shell_look.meshes.end(), [](const auto& left, const auto& right) { return left.z < right.z; });
     for (const auto& mesh : shell_look.meshes) {
-        const auto path = presentation::ui::vfs_standalone_textures(filesystem)(mesh.texture); if (!path) return built;
-        auto loaded = assets::load_texture(filesystem, *path); if (!loaded) return built;
-        std::string why; auto pixels = texture_image(loaded.value(), why); if (pixels.is_null()) return built;
-        setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles, {}});
+        // The caller shares shell resolution, placeholder and unresolved-texture notes.
+        setup.meshes.push_back({mesh.blend, shell_texture(mesh.texture), mesh.triangles, {}});
     }
     const auto space = presentation::ui::reference_space({static_cast<std::uint32_t>(size.x), static_cast<std::uint32_t>(size.y)});
     // GHUD-S75: the alert caller supplies half the UI camera height, moving

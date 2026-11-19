@@ -44,7 +44,8 @@ using namespace galactic_test;
 
 // W1 S2/S3 P4: what the AI's inbox holds (read from the saved async lane block): an actor loss or change, a bill the world decided
 // against the billing view.
-struct InboxHolds { bool actor_change{}, bill{}, stage_loss{}; }; // stage_loss (#6337): the saved lane holds a non-empty stage-loss set
+// stage_loss (#6337): the saved lane holds a non-empty stage-loss set; finished (async step 3b): a window finished and not adopted
+struct InboxHolds { bool actor_change{}, bill{}, stage_loss{}, finished{}; };
 InboxHolds inbox_holds(cp::GameSession& game) {
     InboxHolds holds;
     const auto saved = must(game.save_galactic_ai());
@@ -55,6 +56,8 @@ InboxHolds inbox_holds(cp::GameSession& game) {
     if (decoded.tail.empty()) return holds;
     constexpr std::string_view stage_losses_tag = "eawr-gcai-stage-losses";
     holds.stage_loss = std::search(decoded.tail.begin(), decoded.tail.end(), stage_losses_tag.begin(), stage_losses_tag.end()) != decoded.tail.end();
+    constexpr std::string_view finished_tag = "eawr-gcai-finished-window";
+    holds.finished = std::search(decoded.tail.begin(), decoded.tail.end(), finished_tag.begin(), finished_tag.end()) != decoded.tail.end();
     cp::GalacticAiLaneInbox inbox; must(inbox.restore_prefix(decoded.tail)); // the billing view block follows (W1 S3)
     using Change = gc::GalacticSession::NativeActorChange;
     for (const auto& entry : inbox.entries()) {
@@ -75,13 +78,14 @@ std::filesystem::path game_root() {
 // One stock day on `workers` simulation workers. The P4 sweep runs inside the 4-worker day.
 struct DayResult {
     std::string final_hash;
+    std::string galaxy_hash;
     // overlay_refused, stale, at_once, queued, drained, late, out_of_order, bills_viewed, billing_direct, billing_view_mismatch,
     // marks_outside_window
     std::array<std::uint64_t, 11> tally{};
     bool opponents{true};
     bool refusal_floor{true}, strategic_floor{true};
 };
-DayResult run_day(std::size_t workers) {
+DayResult run_day(std::size_t workers, eawr::script::foc::galactic_ai::AsyncSchedule schedule, bool full_window) {
     DayResult result;
     std::cout << "GCAI-REFUSAL-RUN workers=" << workers << " begin" << std::endl;
     const auto root = game_root();
@@ -116,7 +120,7 @@ DayResult run_day(std::size_t workers) {
     const auto setup = must(cp::prepare_stock_galactic_ai_runtime(files, loaded.catalog, data, types, plan, {},
         std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers),
         eawr::data::retail::boolean(fog->text).value(), gc::galactic_max_objects, gc::galactic_max_objects, "Normal_Default",
-        eawr::script::foc::galactic_ai::retail_service_periods, galactic_campaign_gate::test_schedule()));
+        eawr::script::foc::galactic_ai::retail_service_periods, schedule));
     auto observed = std::make_shared<galactic_campaign_gate::Observations>();
     for (const auto& player : setup->lifecycle.players) observed->players.emplace(player.player, galactic_campaign_gate::PlayerProgress{});
     const auto services = must(cp::prepare_live_campaign_services(files, loaded.catalog, data, types, plan, "Normal_Default"));
@@ -168,7 +172,7 @@ DayResult run_day(std::size_t workers) {
     constexpr std::uint64_t p4_span = 15, p4_follow = 16;
     struct Sweep {
         const char* trigger{};
-        std::uint64_t first{}, bill_saves{}, loss_saves{};
+        std::uint64_t first{}, bill_saves{}, loss_saves{}, finished_saves{};
         bool done{};
         std::vector<std::pair<std::uint64_t, std::vector<std::uint8_t>>> saves;
         std::map<std::uint64_t, std::string> hashes;
@@ -196,8 +200,10 @@ DayResult run_day(std::size_t workers) {
         const auto state = must(root_owner.game()->step(*setup->executor));
         result.final_hash = state.state_hash.get();
         const bool sweeping = async && workers == 4 && tick >= 300;
-        const auto last_first = std::max({sweeps[0].first, sweeps[1].first, sweeps[2].first});
-        const auto holds = sweeping && (!sweeps[0].first || !sweeps[1].first || !sweeps[2].first || tick < last_first + p4_span)
+        const bool saving = std::any_of(sweeps.begin(), sweeps.end(), [&](const auto& sweep) {
+            return sweep.first && tick < sweep.first + p4_span;
+        });
+        const auto holds = sweeping && (!sweeps[0].first || !sweeps[1].first || !sweeps[2].first || saving || tick == episodes[0].tick)
             ? inbox_holds(*root_owner.game()) : InboxHolds{};
         if (sweeping && !sweeps[0].first && holds.actor_change) sweeps[0].first = tick;
         if (sweeping && !sweeps[1].first && holds.bill) sweeps[1].first = tick;
@@ -208,10 +214,14 @@ DayResult run_day(std::size_t workers) {
             if (tick < sweep.first + p4_span) {
                 if (holds.bill) ++sweep.bill_saves;
                 if (holds.stage_loss) ++sweep.loss_saves;
+                if (holds.finished) ++sweep.finished_saves;
                 sweep.saves.emplace_back(tick, must(ck::save_game_checkpoint(*root_owner.game(), identities)));
             }
             if (tick > sweep.first && tick <= sweep.first + p4_span + p4_follow) sweep.hashes.emplace(tick, state.state_hash.get());
             if (tick != sweep.first + p4_span + p4_follow) continue;
+            if (full_window)
+                galactic_campaign_gate::check(sweep.finished_saves == sweep.saves.size(),
+                    "P4: with a whole-window adoption delay every saved tick holds a finished window");
             // Restored sessions report their own battles to the shared observer: keep the day's counts to the control run.
             const auto players_before = observed->players;
             std::size_t compared{};
@@ -232,7 +242,8 @@ DayResult run_day(std::size_t workers) {
             }
             observed->players = players_before;
             std::cout << "GCAI-ASYNC-P4 trigger=" << sweep.trigger << " first_tick=" << sweep.first << " saves=" << sweep.saves.size()
-                << " bill_saves=" << sweep.bill_saves << " stage_loss_saves=" << sweep.loss_saves << " compared_ticks=" << compared << " equal=true" << std::endl;
+                << " bill_saves=" << sweep.bill_saves << " stage_loss_saves=" << sweep.loss_saves << " finished_saves=" << sweep.finished_saves
+                << " compared_ticks=" << compared << " equal=true" << std::endl;
             sweep.saves.clear(); sweep.done = true;
         }
         const auto engine = observed->runtimes.front().engine.lock();
@@ -308,6 +319,7 @@ DayResult run_day(std::size_t workers) {
         if (tick % 600 == 0) std::cout << "synchronized-day progress tick=" << state.completed_tick << std::endl;
     }
     galactic_campaign_gate::check(root_owner.game()->completed_tick() == 6000, "bounded stock observation reaches its exact tick limit");
+    result.galaxy_hash = root_owner.game()->galaxy().state_sha256();
     if (workers == 4) {
         std::cout << "GCAI-ASYNC-PUBLISHED workers=4 ticks_reading_publication=" << published_differs << std::endl;
         // Review #6425: the AI-owned state changes on every serviced tick of the stock day, so on the async day every observed tick
@@ -326,6 +338,12 @@ DayResult run_day(std::size_t workers) {
     std::cout << "GCAI-ASYNC-PAUSE workers=" << workers << " pauses=" << pause_ticks.size() << std::endl;
     galactic_campaign_gate::check(pause_ticks.size() == 2, "the day paused the galaxy twice (the lane served windows while the world's tick was held)");
     galactic_campaign_gate::check(!async || workers != 4 || sweeps[3].done, "P4: the pause window is saved at every tick, loaded and continued (pause/resume fed again after each load)");
+    // Async step 3b: with an adoption delay the sweeps must save a window that finished and is not adopted yet (and load it on 1/2/4/8).
+    galactic_campaign_gate::check(setup->lifecycle.schedule.adopt_delay == 0 || workers != 4
+            || sweeps[0].finished_saves + sweeps[1].finished_saves + sweeps[2].finished_saves != 0,
+        "P4: the adopt-delay day saves a finished window before its adoption");
+    galactic_campaign_gate::check(setup->lifecycle.schedule.adopt_delay != 0 || sweeps[0].finished_saves + sweeps[1].finished_saves
+            + sweeps[2].finished_saves == 0, "without an adoption delay no finished window is ever saved");
     // Runtime wiring of the identity blocks (W1 S0): on an async schedule every window reserved its entity and invasion blocks in
     // the world when it began, so the world's counters stand at or above the lane frontier (the end of the newest block).
     {
@@ -506,9 +524,11 @@ int run() {
     galactic_campaign_gate::check(trace_environment == 0, "stock-day refusal observer can be enabled");
     // The day on 4 workers (with the P4 sweep), then on 1, 2 and 8: the world and the delivery tally must not depend on it.
     std::optional<DayResult> first;
+    const auto schedule = galactic_campaign_gate::test_schedule();
+    const bool full_window = schedule.adopt_delay == schedule.batch_ticks;
     bool opponents = true, refusal_floor = true, strategic_floor = true;
     for (const std::size_t workers : {4, 1, 2, 8}) {
-        const auto day = run_day(workers);
+        const auto day = run_day(workers, schedule, full_window);
         if (!first) first = day;
         else galactic_campaign_gate::check(day.final_hash == first->final_hash && day.tally == first->tally,
             "the stock day and its delivery tally are equal on 1/2/4/8 workers (workers " + std::to_string(workers) + ")");
@@ -517,6 +537,17 @@ int run() {
         strategic_floor = strategic_floor && day.strategic_floor;
     }
     std::cout << "GCAI-ASYNC-WORKERS 4,1,2,8 final_hash_equal=true tally_equal=true" << std::endl;
+    if (schedule.adopt_delay) {
+        const auto stock = run_day(1, eawr::script::foc::galactic_ai::standard_async_schedule, false);
+        // K legitimately hashes a waiting finished window; compare its galaxy with stock while peers still compare the full hash above.
+        const bool hash_equal = full_window ? first->galaxy_hash == stock.galaxy_hash : first->final_hash == stock.final_hash;
+        galactic_campaign_gate::check(hash_equal && first->tally == stock.tally,
+            full_window ? "the full-window-adoption day has the stock galaxy hash and delivery tallies"
+                        : "the delayed-adoption day has the stock day's final hash and delivery tallies");
+        std::cout << "GCAI-ASYNC-ADOPTION adopt_delay=" << schedule.adopt_delay
+            << (full_window ? " stock_galaxy_hash_equal=" : " stock_hash_equal=") << hash_equal
+            << " stock_tally_equal=" << (first->tally == stock.tally) << std::endl;
+    }
     galactic_campaign_gate::check(opponents, "both stock opponents produce attributed hostile movement and conflicts by tick 12000 (400 game s)");
     // Keep the stored allowances strict, but print every worker's strategic evidence before a floor failure.
     galactic_campaign_gate::check(refusal_floor, "W1 floors A: no apply-time refusals beyond the stored base");

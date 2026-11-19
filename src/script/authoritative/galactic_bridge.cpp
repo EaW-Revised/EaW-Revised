@@ -614,6 +614,27 @@ core::Result<void> register_galactic_orbit_recheck_method(ScriptScheduler& scrip
         return core::Result<ValueList>::success({});
     });
 }
+core::Result<void> ScriptedGalacticSession::bind_ground_abilities() {
+    return register_verb("galactic.ground_ability", [owner = impl_.get()](const ScriptCommand& command) {
+        using Result = core::Result<GalacticOrder>;
+        if (command.arguments.size() != 3)
+            return Result::failure(error(codes::command_unroutable, "ground activation requires player, actor and planet"));
+        const auto* player = std::get_if<Handle>(&command.arguments[0].data);
+        const auto* actor = std::get_if<Handle>(&command.arguments[1].data);
+        const auto* planet = std::get_if<Handle>(&command.arguments[2].data);
+        if (!player || player->kind != foc::handle_player || !actor || actor->kind != foc::handle_game_object || !actor->id
+            || !planet || planet->kind != foc::handle_game_object || !planet->id)
+            return Result::failure(error(codes::command_unroutable, "ground activation requires typed live identities"));
+        const auto snapshot = owner->world.snapshot();
+        const auto seats = snapshot->seats();
+        const auto seat = std::find_if(seats.begin(), seats.end(), [player](const auto& row) {
+            return row.player == player->id && row.active && row.kind == gc::SeatKind::ai;
+        });
+        if (seat == seats.end())
+            return Result::failure(error(codes::command_unroutable, "ground activation requires an active AI seat"));
+        return Result::success({seat->seat_id, gc::DeployGroundAbility{actor->id, planet->id}});
+    });
+}
 core::Result<void> ScriptedGalacticSession::bind_orbit_recheck(gc::SeatId seat) {
     const auto& seats = impl_->world.setup().seats;
     const auto selected = std::find_if(seats.begin(), seats.end(), [seat](const auto& row) { return row.seat_id == seat; });

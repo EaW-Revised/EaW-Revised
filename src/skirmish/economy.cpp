@@ -326,6 +326,12 @@ core::Result<tactical::EconomyRules> economy_rules(
         [](const tactical::EconomyPlayer& left, const tactical::EconomyPlayer& right) { return left.player < right.player; });
     if (campaign && start.setup.campaign) rules.players = start.setup.campaign->players;
 
+    const auto pad_price = [campaign](const auto& production) {
+        // WBP-11/31: both debit and generic sale cost use a positive campaign price, else MP.
+        return campaign && production.build_cost_campaign.value_or(Fixed{}).raw() > 0
+            ? *production.build_cost_campaign : production.build_cost_multiplayer.value_or(Fixed{});
+    };
+
     for (const auto& type : tables.units) {
         if (!selection.keeps(type)) continue;
         const auto& production = type.production;
@@ -368,7 +374,7 @@ core::Result<tactical::EconomyRules> economy_rules(
                 "AI pad build duration is out of range");
             const auto ai_seconds = static_cast<std::uint32_t>(ai_effective.trunc_to_integer());
             rules.pads.construction.push_back({type_id(type.id), type_id(type.constructed_type),
-                (campaign ? production.build_cost_campaign : production.build_cost_multiplayer).value_or(Fixed{}), seconds, ai_seconds, type.child_persists});
+                pad_price(production), seconds, ai_seconds, type.child_persists});
         }
         // PU-10 to PU-13, PU-20: one menu per faction group of a station's list.
         for (const auto& group : campaign ? production.buildable_campaign : production.buildable) {
@@ -379,6 +385,17 @@ core::Result<tactical::EconomyRules> economy_rules(
             menu.station_producer = !type.build_pad && !type.under_construction;
             menu.faction = faction_id(group.faction);
             menu.next_level = production.next_level.empty() ? 0 : type_id(production.next_level);
+            auto production_build_multiplier = build_multiplier;
+            if (!type.build_pad && campaign && start.setup.campaign) {
+                const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(),
+                    [&](const auto& row) { return faction_id(row.name) == menu.faction; });
+                // WGCH-204: multiply seconds before converting to whole frames, once.
+                const auto scaled = sim::math::multiply(build_multiplier,
+                    faction == inputs.factions.end() ? Fixed::from_raw(Fixed::scale)
+                        : faction->corruption_production_time[start.setup.campaign->corrupted ? 0U : 1U]);
+                if (!scaled) return Result::failure(scaled.error());
+                production_build_multiplier = scaled.value();
+            }
             for (const auto& name : group.types) {
                 tactical::BuildOption option;
                 option.type = type_id(name);
@@ -406,7 +423,7 @@ core::Result<tactical::EconomyRules> economy_rules(
                         for (const auto& prerequisite : costs.prerequisites) option.requirements.prerequisites.push_back(type_id(prerequisite));
                         option.price = costs.build_cost_multiplayer.value_or(Fixed{});
                         if (costs.build_time_seconds) {
-                            const auto seconds = sim::math::multiply(*costs.build_time_seconds, build_multiplier);
+                            const auto seconds = sim::math::multiply(*costs.build_time_seconds, production_build_multiplier);
                             const bool invalid_time = !seconds || seconds.value().raw() <= 0
                                 || seconds.value().raw() > 86400 * Fixed::scale;
                             if (invalid_time) {
@@ -436,7 +453,7 @@ core::Result<tactical::EconomyRules> economy_rules(
                     // WBP-11/12/15: no queue multiplier, population or station gates.
                     if (option.disabled_reason.empty()) option.disabled_reason = roster_disabled_reason(built->constructed_type);
                     option.kind = tactical::BuildKind::structure;
-                    option.price = (campaign ? costs.build_cost_campaign : costs.build_cost_multiplayer).value_or(Fixed{});
+                    option.price = pad_price(costs);
                     const auto seconds = costs.build_time_seconds
                         ? duration(*costs.build_time_seconds, notes, "EAWR-LOAD-0354", built->id, "Tactical_Build_Time").trunc_to_integer() : 0;
                     option.build_frames = static_cast<std::uint32_t>(std::max<std::int64_t>(0, seconds)) * 30;
@@ -463,7 +480,7 @@ core::Result<tactical::EconomyRules> economy_rules(
                                                                                               : tactical::BuildQueue::units;
                 option.price = (campaign ? costs.build_cost_campaign : costs.build_cost_multiplayer).value_or(Fixed{});
                 if (costs.build_time_seconds) {
-                    const auto seconds = sim::math::multiply(*costs.build_time_seconds, build_multiplier);
+                    const auto seconds = sim::math::multiply(*costs.build_time_seconds, production_build_multiplier);
                     const bool invalid_time = !seconds || seconds.value().raw() <= 0
                         || seconds.value().raw() > 86400 * Fixed::scale;
                     if (invalid_time) {
@@ -497,7 +514,7 @@ core::Result<tactical::EconomyRules> economy_rules(
                         return income_streams && !costs.income.empty()
                             && node.rfind("Income_Stream_Ability", 0) == 0;
                     });
-                const bool effect_free = only_stream_nodes && built->abilities.empty()
+                const bool no_other_effects = built->abilities.empty()
                     && built->special_abilities.empty() && built->team_abilities.empty() && built->team_special_abilities.empty()
                     && built->special_unlocks.empty() && !built->consume_after_special_fire
                     && costs.income_bonuses.empty() && costs.bounties.empty()
@@ -505,6 +522,13 @@ core::Result<tactical::EconomyRules> economy_rules(
                     && (costs.removes_previous.empty() || !costs.income.empty()) // a next income level replaces the lower one
                     && costs.combat_bonuses.empty() && costs.stealth_duration_bonuses.empty()
                     && costs.battlefield_bonuses.empty() && costs.ability_enables.empty();
+                const bool effect_free = only_stream_nodes && no_other_effects;
+                const bool ground_only = built->abilities.empty() && built->team_abilities.empty()
+                    && built->team_special_abilities.empty() && built->lua_script.empty()
+                    && !built->consume_after_special_fire && !costs.level_up && !costs.increments_tech
+                    && costs.next_level.empty() && costs.removes_previous.empty()
+                    && start.setup.domain == tactical::BattleDomain::space && !built->inactive_abilities.empty()
+                    && built->ground_only_abilities == built->inactive_abilities.size();
                 if (costs.upgrade_object && !effect_free && !costs.level_up && costs.combat_bonuses.empty() && costs.ability_enables.empty()
                     && !costs.increments_tech
                     && costs.stealth_duration_bonuses.empty() && (!campaign || costs.bounties.empty())
@@ -520,6 +544,11 @@ core::Result<tactical::EconomyRules> economy_rules(
                     option.available = false;
                     // The icon must not look buyable (legacy #6809): the card shows its disabled state and why.
                     if (option.disabled_reason.empty()) option.disabled_reason = std::string(unsupported_upgrade_reason);
+                }
+                if (costs.upgrade_object && ground_only) {
+                    option.available = false;
+                    if (option.disabled_reason.empty() || option.disabled_reason == unsupported_upgrade_reason)
+                        option.disabled_reason = "Only works in ground battles";
                 }
                 if (option.kind == tactical::BuildKind::upgrade && tables.domain == sim::tactical::BattleDomain::land) {
                     option.available = false;

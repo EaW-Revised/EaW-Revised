@@ -888,12 +888,35 @@ core::Result<GalacticLobbyBackend::PreparedCheckpoint> GalacticLobbyBackend::pre
         std::move(manifest), snapshot, std::move(agreement), std::move(bytes), hash});
 }
 core::Result<void> GalacticLobbyBackend::commit_checkpoint(PreparedCheckpoint prepared, const net::LobbySnapshot& current) {
-    if (current != prepared.snapshot || prepared.manifest.epoch <= selection_epoch_)
+    // #7878: only a real room change (players, seats, game settings) voids a prepared restore; the revision, readiness and
+    // the host's display-only mod description move while a long restore runs without changing anything it was built from.
+    if (current.phase != net::LobbyPhase::staging || !same_resume_room(prepared.snapshot, current)
+        || prepared.manifest.epoch <= selection_epoch_)
         return resume_refusal<void>("invalid_selection_or_stale_epoch");
     selection_epoch_ = prepared.manifest.epoch;
     resume_ = std::move(prepared);
     { const std::lock_guard lock(preparation_mutex_); preparation_.reset(); }
     return core::Result<void>::success();
+}
+bool GalacticLobbyBackend::same_checkpoint_room(const net::LobbySnapshot& left, const net::LobbySnapshot& right) {
+    return same_resume_room(left, right);
+}
+std::string GalacticLobbyBackend::describe_checkpoint_room_change(const net::LobbySnapshot& before, const net::LobbySnapshot& after) {
+    if (same_resume_room(before, after)) return {};
+    const auto named = [](const net::LobbySeat& seat) { return seat.selection.name.empty() ? std::string("A player") : seat.selection.name; };
+    const auto holds = [](const net::LobbySnapshot& room, const net::PeerIndex peer) {
+        return std::any_of(room.seats.begin(), room.seats.end(), [&](const auto& seat) { return seat.peer == peer; });
+    };
+    std::string text;
+    for (const auto& seat : after.seats)
+        if (!holds(before, seat.peer)) text += (text.empty() ? "" : " ") + named(seat) + " joined the room.";
+    for (const auto& seat : before.seats)
+        if (!holds(after, seat.peer)) text += (text.empty() ? "" : " ") + named(seat) + " left the room.";
+    if (!text.empty()) return text;
+    if (before.room != after.room) return "The room was reopened.";
+    if (before.host != after.host) return "The host changed.";
+    if (before.game != after.game) return "The campaign settings changed.";
+    return "A player changed seat.";
 }
 core::Result<void> GalacticLobbyBackend::select_checkpoint(const net::LobbySnapshot& snapshot,
     sim::galactic::MpRoster roster, std::vector<net::SetupSeat> bindings,

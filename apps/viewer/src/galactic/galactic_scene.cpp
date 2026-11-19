@@ -143,7 +143,8 @@ struct SurfaceMaterial final {
         nullptr,
         {},
     };
-    if (surface.route == space::SceneRoute::planet) {
+    // PS-09: galaxy nebula surfaces use the same authored material plan as space environments.
+    if (surface.route == space::SceneRoute::planet || surface.route == space::SceneRoute::nebula) {
         const space::EnvironmentEffectPlan plan = space::plan_environment_effect(
             model, surface.mesh_index, surface.submesh_index, "t0", inputs);
         if (plan.status != space::EnvironmentEffectStatus::ready) {
@@ -785,7 +786,8 @@ bool GalacticMode::State::upload_models() {
             }
             // AVC-02/05: use the tactical renderer's authored UV-scroll clock
             // admission. A model without an idle clip can still animate.
-            const bool effect_clock = surface.route == space::SceneRoute::planet || legacy::reads_effect_time(material);
+            const bool effect_clock = surface.route == space::SceneRoute::planet || surface.route == space::SceneRoute::nebula
+                || legacy::reads_effect_time(material);
             if (legacy::reads_effect_time(material)) material.bindings.push_back({"eawr_effect_time", 0.0F});
             item.asset = next_asset++;
             auto uploaded = timed(detail.gpu, [&] { return target.upload(item.asset, geometry, *primary, material, extra); });
@@ -1191,7 +1193,7 @@ namespace galactic_detail {
 
 // PS-08: the search pictures decode a planet model by the galaxy upload's rules above (material plan, texture chain, idle clip
 // and its zoom-rotation sync), without its read-ahead, census or load notes; a refusal is the model's cause instead.
-PreparedPlanetModel prepare_planet_thumbnail_model(const vfs::Vfs& filesystem, const std::string& logical_path,
+PreparedPlanetModel prepare_planet_thumbnail_model(const vfs::Vfs& filesystem, const std::string& logical_path, const int alternate,
                                                    const presentation::lighting::Environment& environment) {
     PreparedPlanetModel result;
     result.path = logical_path;
@@ -1232,7 +1234,7 @@ PreparedPlanetModel prepare_planet_thumbnail_model(const vfs::Vfs& filesystem, c
     };
     std::string last_skip;
     for (const space::SceneSurface& surface : space::scene_surfaces(model)) {
-        if (!galactic_view::surface_drawn(eawr::viewer::model_preview::mesh_levels(surface.mesh_name).alt, 0)) continue;
+        if (!galactic_view::surface_drawn(eawr::viewer::model_preview::mesh_levels(surface.mesh_name).alt, alternate)) continue;
         SurfaceMaterial planned = plan_surface_material(model, surface, inputs);
         if (!planned.skip.empty()) { last_skip = std::move(planned.skip); continue; }
         PreparedPlanetSurface item;
@@ -1257,7 +1259,8 @@ PreparedPlanetModel prepare_planet_thumbnail_model(const vfs::Vfs& filesystem, c
                  }))
                 item.extra.push_back(std::move(family));
         }
-        item.effect_clock = surface.route == space::SceneRoute::planet || legacy::reads_effect_time(item.material);
+        item.effect_clock = surface.route == space::SceneRoute::planet || surface.route == space::SceneRoute::nebula
+            || legacy::reads_effect_time(item.material);
         if (legacy::reads_effect_time(item.material)) item.material.bindings.push_back({"eawr_effect_time", 0.0F});
         if (idle_clip) {
             if (auto player = animation::Player::create(item.geometry, &*idle_clip)) item.idle.emplace(std::move(player.value()));

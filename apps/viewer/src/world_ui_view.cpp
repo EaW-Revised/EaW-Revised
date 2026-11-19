@@ -60,6 +60,7 @@ WorldUiView::~WorldUiView() {
 }
 
 void WorldUiView::draw(const Frame& frame, const RID canvas_item) {
+    ++icon_frame_;
     bar_geometry_.clear();
     identity_quads_.clear();
     area_preview_side_drawn_.reset();

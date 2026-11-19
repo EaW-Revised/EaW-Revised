@@ -200,6 +200,15 @@ void write_catalog(const std::filesystem::path& root) {
   <Model_Name>eawr_scene_plain.alo</Model_Name>
   <Layer_Z_Adjust>invalid</Layer_Z_Adjust>
 </SpaceProp>
+<SpaceProp Name="EAWR_SCENE_PLANET_PARENT">
+  <Model_Name>eawr_scene_planet.alo</Model_Name>
+</SpaceProp>
+<Props_Backdrop Name="EAWR_SCENE_PLANET_DERIVED">
+  <Variant_Of_Existing_Type>EAWR_SCENE_PLANET_PARENT</Variant_Of_Existing_Type>
+</Props_Backdrop>
+<Props_Backdrop Name="EAWR_SCENE_PLANET_UNCLASSED">
+  <Model_Name>eawr_scene_planet.alo</Model_Name>
+</Props_Backdrop>
 <Projectile Name="EAWR_SCENE_PARTICLE_ROUND">
   <Space_Model_Name>eawr_scene_particle.alo</Space_Model_Name>
   <Scale_Factor>3</Scale_Factor>

@@ -53,8 +53,8 @@ choice takes effect when you restart EAWR. An explicit launch flag overrides it.
 | "Could not find Forces of Corruption" | No install with `GameData` and `corruption` was found | Browse to your game folder. Base Empire at War alone is not enough. |
 | "This Forces of Corruption build is not one EAWR has verified" | Your `corruption\StarWarsG.exe` is not the Steam edition EAWR checks | Use the Steam edition. If you want to try another edition, start `EAWR.exe` with `--eawr-allow-unknown-build`; fonts are still validated, and if they cannot be extracted EAWR shows a message and stops. |
 | "Cannot read ..." | The account cannot read a game file | Check the folder's permissions and repair or verify the game files in Steam. |
-| Windows says "Windows protected your PC" | The download is not code-signed, so SmartScreen warns about it | If you downloaded it from the official release page, choose **More info**, then **Run anyway**. You can compare the zip with the `SHA256SUMS.txt` on the release page (`Get-FileHash .\<zip>`). |
-| Windows or your organisation blocks EAWR with no "Run anyway" | Smart App Control, WDAC / AppLocker or a managed-PC policy refuses unsigned programs | EAWR cannot get around that; ask whoever manages the PC, or use another PC. Never turn off security software, Smart App Control or add exclusions for EAWR. |
+| Windows says "Windows protected your PC" | Windows has not seen enough downloads of this file yet. If the release notes say the release is code-signed, the warning names the publisher; if they do not, the download is unsigned and the warning says "Unknown publisher" | If you downloaded it from the official release page, choose **More info**, then **Run anyway**. Check that the publisher (when shown) is the one named in the release notes, and compare the zip with the `SHA256SUMS.txt` on the release page (`Get-FileHash .\<zip>`). |
+| Windows or your organisation blocks EAWR with no "Run anyway" | Smart App Control, WDAC / AppLocker or a managed-PC policy refuses unsigned programs (a signed release is much more likely to pass, but a managed PC can still refuse it) | EAWR cannot get around that; ask whoever manages the PC, or use another PC. Never turn off security software, Smart App Control or add exclusions for EAWR. |
 | Window opens and closes at once | The graphics driver failed | Update the graphics driver; the log named above says why. |
 | Flicker, a frozen picture, a crash on start, or errors about the graphics device, and your drivers are up to date | EAWR draws on a separate render thread by default (measured faster on the tested NVIDIA GPUs); some driver and GPU combinations dislike it | Close EAWR and tell us your GPU and driver in the bug report. |
 
@@ -64,6 +64,16 @@ Offline skirmish needs no network access. LAN and online play open network ports
 whether to allow `Godot_v4.7.2-stable_win64.exe` (the engine in the `godot` folder) on private networks.
 EAWR itself never adds firewall rules, never asks for administrator rights and never changes
 router settings. All players of a match must run the same EAWR version.
+
+## Checking a download
+
+The release page lists a SHA-256 for every zip in `SHA256SUMS.txt`: `Get-FileHash .\<zip>` must print the same value.
+
+When the release notes say the release is code-signed, the programs in the folder (`EAWR.exe`, `EAWR Mods.exe`, the
+mods service and the viewer library) carry a Microsoft-issued signature for the project's legal name. To look: right-click
+`EAWR.exe`, Properties, **Digital Signatures**, Details (it should say the signature is OK and show a timestamp), or run
+`Get-AuthenticodeSignature .\EAWR.exe | Format-List` in PowerShell (`Status : Valid`). The bundled game engine in the
+`godot` folder is not signed: its hash is pinned in `runtime.json` and checked at every start instead.
 
 ## Updating
 

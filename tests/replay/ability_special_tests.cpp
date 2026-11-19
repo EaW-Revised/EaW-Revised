@@ -1899,7 +1899,9 @@ void test_spawned_hero_abilities() {
         }
     }
 
+    for (const auto reduction : {"0.2", "-0.15", "0", "-1.5", "1.5"})
     for (const auto kind : {K::harmonic_bomb, K::weaken_enemy}) for (const bool zero : {false, true}) {
+        if (kind == K::harmonic_bomb && std::string_view(reduction) != "0.2") continue;
         std::vector<std::string> reference;
         for (const auto workers : {1U, 2U, 4U, 8U}) {
             auto initial = setup();
@@ -1920,7 +1922,7 @@ void test_spawned_hero_abilities() {
                 spawned.weaken.on_detonation = true; spawned.weaken.radius = units(120);
                 spawned.weaken.duration_frames = 3; spawned.weaken.categories = 2;
                 spawned.weaken.take_damage_increase = decimal("0.5");
-                spawned.weaken.cause_damage_reduction = decimal("0.2");
+                spawned.weaken.cause_damage_reduction = decimal(reduction);
             }
             tactical::AbilityTable table; table.profiles = {unit_of(plain_type, ordinary)};
             tactical::CombatTable combat;
@@ -1949,7 +1951,7 @@ void test_spawned_hero_abilities() {
             expect(static_cast<bool>(world.submit(command(1, 1, 1, 1, input))), "cooldown input queues for rejection");
             const eawr::platform::ThreadWorkerAdapter executor(workers);
             std::vector<std::string> hashes;
-            bool reduced_shot = false;
+            bool adjusted_shot = false;
             std::uint64_t spawned_projectile = 0;
             for (unsigned frame = 0; frame < 7; ++frame) {
                 const auto step = world.step(executor);
@@ -1973,12 +1975,14 @@ void test_spawned_hero_abilities() {
                     && spawns.front().recipients == std::vector<tactical::WeakenRecipient>{{2, 4}},
                     "weaken admits the different-owner collidable combat recipient and keeps its expiry");
                 for (const auto& projectile : step.value().snapshot->projectiles()) if (projectile.shooter == 2
-                    && projectile.source_damage_factor == math::Fixed::from_raw(one + decimal("-0.2").raw())) reduced_shot = true;
+                    && projectile.source_damage_factor == math::Fixed::from_raw(std::max<std::int64_t>(0,
+                        one - decimal(reduction).raw()))) adjusted_shot = true;
                 if (frame >= 4) expect(spawns.empty(), "detonated metadata releases after countdown or final recipient expiry");
                 if (kind == K::harmonic_bomb && frame == 2) expect(world.durability_state(2)->hull == units(3600), "bomb waits its authored countdown");
                 if (kind == K::harmonic_bomb && frame == 3) expect(world.durability_state(2)->hull < units(3600), "bomb countdown delivers ordinary area damage");
             }
-            if (kind == K::weaken_enemy) expect(reduced_shot, "timed weaken contributes to captured outgoing projectile damage");
+            if (kind == K::weaken_enemy) expect(adjusted_shot,
+                "WHE-62: timed weaken negates signed reduction in outgoing projectile damage");
             const auto record = world.record();
             const auto encoded = tactical::write_replay(record);
             const auto parsed = encoded ? tactical::parse_replay(encoded.value()) : eawr::core::Result<tactical::TacticalReplay>::failure({});

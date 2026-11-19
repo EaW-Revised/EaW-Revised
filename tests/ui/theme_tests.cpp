@@ -272,6 +272,15 @@ void scale_contracts(const Fixture& fixture) {
 }
 
 void texture_contracts(const Fixture& fixture) {
+    auto atlas = atlas_fixture();
+    const auto sibling = model::resolve_ui_texture("i_button_l.dds", &atlas, {});
+    expect(sibling.origin == model::TextureOrigin::atlas && sibling.rectangle.x == 40U,
+           "Texture sibling tolerance: a DDS request resolves an uppercase TGA atlas entry");
+    atlas.entries.push_back({"i_button_l.dds", {140U, 2U, 14U, 12U}, false, false, false});
+    const auto exact = model::resolve_ui_texture("i_button_l.dds", &atlas, {});
+    expect(exact.origin == model::TextureOrigin::atlas && exact.rectangle.x == 140U && !exact.has_alpha,
+           "Exact-name priority: an exact DDS atlas entry outranks its TGA sibling");
+
     const auto theme = fixture.build(model::reference_space({1280U, 720U}));
     const model::ThemeStyle& defaults = theme.defaults;
     expect(defaults.name == "EawrUi" && defaults.base.empty(), "the Default set is the EawrUi base style");

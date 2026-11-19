@@ -127,6 +127,13 @@ struct ClipName final {
 enum class DeathStart : std::uint8_t { clip, pose, removed };
 [[nodiscard]] DeathStart death_start(bool clip_started, bool remove_upon_death) noexcept;
 
+// Hardpoint art (a Model_To_Attach) hung on a bone of a death clone is drawn only while that bone
+// is visible in the clone's pose: the death clip hides the clone's pieces by bone visibility keys
+// (UA-11), and art attached to a hidden bone goes with it (UA-12). Anything that is not a clone's
+// attached art, a bone the pose does not hold, or a pose not yet sampled, shows.
+[[nodiscard]] bool clone_attached_art_shown(bool death_clone, std::optional<std::uint32_t> attach_bone,
+                                            std::span<const BonePose> pose) noexcept;
+
 // How a death clone plays its death clip (DeathBehavior; Death_* tags):
 // Specific_Death_Anim_Type (DIE) once, blended in from the pose it had over
 // `blend_ticks`, then held on its last frame. With a Death_Persistence_Duration

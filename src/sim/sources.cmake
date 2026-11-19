@@ -102,6 +102,8 @@ set(EAWR_SIM_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_abilities.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_object_turn.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_economy.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/session_company.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/session_destruction_survivors.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_tracking.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_world.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/space.cpp"

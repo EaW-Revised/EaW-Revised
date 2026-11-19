@@ -572,7 +572,7 @@ int main(const int argc, char** argv) {
     expect(!t::validate_ability_profile(limits), "WLK: the Lucky damage exemption does not admit an ordinary 600 multiplier");
     limits.abilities.front().kind = lucky;
     expect(t::validate_ability_profile(limits).has_value(), "WLK: shot-only Lucky damage admits its authored 600 multiplier");
-    limits.abilities.front().modifiers.speed = number(65);
+    limits.abilities.front().modifiers.take_damage = number(65);
     expect(!t::validate_ability_profile(limits), "WLK: Lucky's damage exemption preserves the cap on other multiplier kinds");
     const auto baseline = run({}, 1, true);
     expect(baseline.active_lock_roundtrip && baseline.spent_lock_roundtrip,

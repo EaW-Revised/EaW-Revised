@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -377,6 +378,65 @@ void test_multipliers() {
     static_cast<void>(tactical::activate_ability(both.abilities[1], two.slots[1], open_gate, 0));
     expect(tactical::ability_multiplier(both, two, M::speed) == decimal("2.6"), "2 x 1.3 = 2.6");
 
+    // WAB-24: a wide intermediate is necessary for 200 x 200 although the Q24 result fits.
+    auto large = both;
+    for (auto& ability : large.abilities) ability.modifiers.speed = units(200);
+    expect(static_cast<bool>(tactical::validate_ability_profile(large)), "WAB-24: two 200x modes validate");
+    expect(tactical::ability_multiplier(large, two, M::speed) == units(40000), "WAB-24: 200 x 200 is 40000");
+    auto tiny = motion().profiles.front();
+    tiny.max_speed = tiny.acceleration = tiny.deceleration = decimal("0.0125");
+    const auto scaled = tactical::scaled_profile(tiny, units(200));
+    const auto expected_speed = math::multiply(tiny.max_speed, units(200));
+    expect(scaled && expected_speed && scaled.value().max_speed == expected_speed.value()
+        && scaled.value().acceleration == expected_speed.value() && scaled.value().deceleration == expected_speed.value(),
+        "WAB-24: 200x scales maximum speed, acceleration and deceleration without a clamp");
+
+    // Keep both kinds of positive half ties byte-identical to the existing half-away result.
+    for (const auto tail : {1, 3}) {
+        large.abilities[0].modifiers.speed = Fixed::from_raw(one + tail);
+        large.abilities[1].modifiers.speed = Fixed::from_raw(one / 2);
+        expect(tactical::ability_multiplier(large, two, M::speed).raw() == one / 2 + (tail + 1) / 2,
+            "WAB-24: even and odd truncated half ties round away from zero");
+    }
+    const auto limit = std::numeric_limits<std::int64_t>::max()
+        / std::max(tactical::max_motion_rate, tactical::max_motion_coordinate);
+    large.abilities[0].modifiers.speed = Fixed::from_raw(limit);
+    large.abilities[1].modifiers.speed = units(1);
+    expect(static_cast<bool>(tactical::validate_ability_profile(large)), "WAB-24: exact motion envelope edge validates");
+    tiny.max_speed = tiny.acceleration = tiny.deceleration = units(tactical::max_motion_rate);
+    expect(static_cast<bool>(tactical::scaled_profile(tiny, Fixed::from_raw(limit))),
+        "WAB-24: the edge scales even the largest motion input in Q24");
+    tactical::SquadronProfile formation;
+    formation.formation_deceleration = units(tactical::max_motion_coordinate);
+    formation.formation_type_max_speed = units(1);
+    const auto formation_edge = tactical::formation_member_deceleration(formation, units(1), Fixed::from_raw(limit));
+    expect(formation_edge && formation_edge.value().raw() == limit * tactical::max_motion_coordinate,
+        "WAB-24: the edge exactly scales the largest admitted formation deceleration");
+    large.abilities[0].modifiers.speed = Fixed::from_raw(limit + 1);
+    expect(!tactical::validate_ability_profile(large)
+        && !tactical::formation_member_deceleration(formation, units(1), Fixed::from_raw(limit + 1)),
+        "WAB-24: the next raw factor overflows formation deceleration and is refused at load time");
+
+    // All active subsets matter: a later zero cannot hide an unsafe earlier product.
+    large.abilities[0].modifiers.speed = units(32768);
+    large.abilities[1].modifiers.speed = units(32768);
+    auto zero = defend();
+    zero.modifiers.speed = Fixed{};
+    large.abilities.insert(large.abilities.begin() + 1, zero);
+    expect(!tactical::validate_ability_profile(large), "WAB-24: two large factors are refused even with a zero between them");
+    for (auto& ability : large.abilities) ability.modifiers.speed = units(100);
+    expect(static_cast<bool>(tactical::validate_ability_profile(large)), "WAB-24: three 100x factors validate");
+    for (unsigned mask = 0; mask < 8; ++mask) {
+        auto active = tactical::initial_abilities(large);
+        std::int64_t expected = 1;
+        for (unsigned index = 0; index < 3; ++index) {
+            active.slots[index].active = (mask & (1U << index)) != 0;
+            if (active.slots[index].active) expected *= 100;
+        }
+        expect(tactical::ability_multiplier(large, active, M::speed) == units(expected),
+            "WAB-24: every subset of three speed modes has its exact product");
+    }
+
     // AB-21: the weapon delay lengthens a burst's gap; the recharge after it only shortens.
     expect(tactical::scaled_weapon_delay(90, units(3), false) == 270, "S-foils locked: a 90-frame gap takes 270");
     expect(tactical::scaled_weapon_delay(90, units(3), true) == 90, "a full recharge is never lengthened");
@@ -477,6 +537,88 @@ void test_deployment_abilities() {
 
 
 void test_turbo_session() {
+    // WAB-24: exercise the live movement consumer, including deterministic partitioned ticks.
+    std::vector<std::string> large_speed_hashes;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto limits = motion();
+        // The authored maximum speed must sit at or above the motion table's 1/16 floor, which
+        // the session would otherwise raise before the ability scales it.
+        limits.profiles.front().max_speed = decimal("0.0625");
+        limits.profiles.front().acceleration = limits.profiles.front().deceleration = decimal("0.0125");
+        auto modes = abilities({});
+        modes.profiles.front().abilities.front().modifiers.speed = units(200);
+        auto created = tactical::TacticalSession::create(setup(), {}, durability(), limits, std::nullopt, {}, {}, modes);
+        expect(static_cast<bool>(created), "WAB-24: a live 200x speed session is admitted");
+        if (!created) continue;
+        auto session = std::move(created).value();
+        // MV-30 samples rounded Hermite nodes: a single position delta need not equal the
+        // profile's speed exactly. Compare every tick with the established 2x TURBO path
+        // on a 100x larger base, and check the live plan's cruise speed separately.
+        const auto control_speed = math::multiply(decimal("0.0625"), units(100));
+        const auto control_rate = math::multiply(decimal("0.0125"), units(100));
+        const auto expected = math::multiply(decimal("0.0625"), units(200));
+        expect(control_speed && control_rate && expected, "WAB-24: the equivalent control rates are representable");
+        if (!control_speed || !control_rate || !expected) continue;
+        auto control_limits = limits;
+        control_limits.profiles.front().max_speed = control_speed.value();
+        control_limits.profiles.front().acceleration = control_limits.profiles.front().deceleration = control_rate.value();
+        auto control_created = tactical::TacticalSession::create(
+            setup(), {}, durability(), control_limits, std::nullopt, {}, {}, abilities({}));
+        expect(static_cast<bool>(control_created), "WAB-24: the equivalent 2x control session is admitted");
+        if (!control_created) continue;
+        auto control = std::move(control_created).value();
+        expect(static_cast<bool>(session.submit(command(0, 1, 0, 1,
+            tactical::AbilityPayload{tactical::AbilityKind::turbo, tactical::AbilityAction::activate}))),
+            "WAB-24: the 200x ability is explicitly activated");
+        expect(static_cast<bool>(session.submit(command(30, 1, 1, 1, tactical::MovePayload{at(3000, -1500)}))),
+            "WAB-24: the boosted move is accepted");
+        expect(static_cast<bool>(control.submit(command(0, 1, 0, 1,
+            tactical::AbilityPayload{tactical::AbilityKind::turbo, tactical::AbilityAction::activate}))),
+            "WAB-24: the control ability is activated");
+        expect(static_cast<bool>(control.submit(command(30, 1, 1, 1, tactical::MovePayload{at(3000, -1500)}))),
+            "WAB-24: the control move is accepted");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        bool trajectory_diverged = false;
+        for (unsigned tick = 0; tick < 50; ++tick) {
+            const auto stepped = session.step(executor);
+            const auto control_step = control.step(executor);
+            expect(static_cast<bool>(stepped), "WAB-24: the 200x movement tick succeeds");
+            expect(static_cast<bool>(control_step), "WAB-24: the control movement tick succeeds");
+            if (!stepped || !control_step) break;
+            hashes.push_back(stepped.value().state_sha256);
+            if (tick == 0) {
+                const auto state = session.ability_state(1);
+                expect(state && state->slots.size() == 1 && state->slots.front().active,
+                    "WAB-24: the 200x ability is active before the move");
+            }
+            if (!trajectory_diverged && session.units().front().position != control.units().front().position) {
+                trajectory_diverged = true;
+                expect(false, "WAB-24: 200x movement exactly matches 2x movement on a 100x base every tick: tick "
+                    + std::to_string(tick) + " x " + std::to_string(session.units().front().position.x.raw())
+                    + " vs " + std::to_string(control.units().front().position.x.raw()));
+            }
+        }
+        const auto movement = session.motion_state(1);
+        const auto control_movement = control.motion_state(1);
+        const auto start_x = setup().units.front().position.x;
+        expect(hashes.size() == 50, "WAB-24: the 200x run completed every tick");
+        expect(session.units().front().position.x > start_x,
+            "WAB-24: the 200x unit advanced: x " + std::to_string(session.units().front().position.x.raw())
+                + " from " + std::to_string(start_x.raw()));
+        expect(control.units().front().position.x > start_x, "WAB-24: the 2x control unit advanced");
+        std::int64_t top_node_speed = -1;
+        if (movement) for (const auto& node : movement->nodes) top_node_speed = std::max(top_node_speed, node.speed.raw());
+        std::int64_t control_top_speed = -1;
+        if (control_movement) for (const auto& node : control_movement->nodes) control_top_speed = std::max(control_top_speed, node.speed.raw());
+        expect(movement && std::any_of(movement->nodes.begin(), movement->nodes.end(),
+                [&](const auto& node) { return node.speed == expected.value(); }),
+            "WAB-24: a live move plans the exact authored base speed times 200: top node speed raw "
+                + std::to_string(top_node_speed) + ", control " + std::to_string(control_top_speed)
+                + ", expected " + std::to_string(expected.value().raw()));
+        if (large_speed_hashes.empty()) large_speed_hashes = hashes;
+        else expect(hashes == large_speed_hashes, "WAB-24: 200x movement hashes match at 1/2/4/8 workers");
+    }
     // S-17 shape: a move at tick 30, TURBO at tick 60 (AB-24: the move plans again at once).
     const std::vector<tactical::PlayerCommand> plain{command(30, 1, 0, 1, tactical::MovePayload{at(3000, -1500)})};
     auto turbo_commands = plain;

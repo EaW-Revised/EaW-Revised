@@ -469,30 +469,35 @@ std::string jpeg_refusal(const std::span<const std::byte> bytes) {
 }
 
 ThemeTexture resolve_ui_texture(const std::string_view texture, const assets::MegaTexture* atlas,
-                                const StandaloneTextures& standalone) {
+                                const StandaloneTextures& standalone, const bool standalone_first) {
     ThemeTexture result;
     result.texture = std::string(texture);
-    if (atlas != nullptr) {
-        if (const assets::MegaTextureEntry* entry = atlas->find(texture)) {
-            result.origin = TextureOrigin::atlas;
-            result.rectangle = entry->rectangle;
-            result.has_alpha = entry->has_alpha;
-            return result;
-        }
-    }
-    if (standalone) {
-        if (auto path = standalone(texture)) {
+    const auto loose = [&] {
+        if (standalone) if (auto path = standalone(texture)) {
             result.origin = TextureOrigin::standalone;
             result.logical_path = std::move(*path);
-            return result;
+            return true;
         }
-    }
+        return false;
+    };
+    const auto region = [&](const assets::MegaTextureEntry* entry) {
+        if (!entry) return false;
+        result.origin = TextureOrigin::atlas;
+        result.rectangle = entry->rectangle;
+        result.has_alpha = entry->has_alpha;
+        return true;
+    };
+    if (standalone_first && loose()) return result;
+    if (atlas && region(atlas->find(texture))) return result;
+    if (!standalone_first && loose()) return result;
+    // Extend the Texture sibling tolerance deviation only after existing sources miss.
+    if (atlas && region(atlas->find_sibling(texture))) return result;
     result.origin = TextureOrigin::missing;
     return result;
 }
 
 StandaloneTextures vfs_standalone_textures(const vfs::Vfs& filesystem, const bool report_misses) {
-    // The shared asset-name rule (ANR-01): the name as authored, then its stem with the sibling extensions.
+    // ANR-01 plus the named Texture sibling tolerance deviation.
     return [&filesystem, report_misses](const std::string_view texture) -> std::optional<std::string> {
         std::string path = report_misses ? assets::resolve_texture(filesystem, texture, "ui standalone texture")
                                          : assets::probe_texture(filesystem, texture);

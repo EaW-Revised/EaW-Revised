@@ -27,6 +27,15 @@ Nothing here reaches the simulation.
   the faction's `Selection_Blob_RGBA` (green for every FoC faction but the Hutts). In a networked
   game FoC tints it by the player's colour instead (debug build); the owner's skirmish
   footage shows green rings, so the skirmish uses the faction colour.
+- WU-01g (debug build; GSM-01..04). The faction's
+  `Space_Mode_Garrison_Selection_Blob_Material_Name` is resolved and cached for
+  a garrison or indigenous selection, but the space material reader returns the
+  ordinary faction selection handle in both branches. The caller renders only
+  that returned handle, so this authored garrison material does not choose the
+  visible space ring. This is an original return bug, not an unread field. If
+  the ordinary handle has not yet been resolved, this path can return no handle
+  and the caller creates no blob. A per-type material override precedes faction
+  fallback; the land garrison reader has a separate, correct return path.
 - WU-02. The blob is a square lying flat at the unit's position, its side `Select_Box_Scale` x
   `Scale_Factor` (Nebulon-B 300 x 0.7 = 210 units); a type without a positive `Select_Box_Scale`
   (a squadron's container) has none. FoC masks the ring where the unit is drawn (the stencil in
@@ -79,6 +88,16 @@ Nothing here reaches the simulation.
   (WSU-52): the hull percent, or for a type that dies with its destroyable hardpoints (HD-21) the
   lesser of that and the combined destroyable-hardpoint percent. Project policy: the bounds are the
   remake's pick box.
+
+## Authored model bounds
+
+- **WUB-01** (debug build, E7654-01). Live model refresh and setup clone creation
+  inspect `User_Bound_Min` when a hierarchical render model exists. If that vector
+  differs from zero, they install both `User_Bound_Min` and `User_Bound_Max` on the
+  model and recalculate its object-space bounds. A maximum alone does not enable
+  this branch. The original's render-model bounds and the remake's pick-box policy
+  in WU-18 are distinct contracts; this audit supplies no replacement hard
+  collision rule. Per-instance bounds and clone lifecycle support remain a gap.
 
 ## Hero world identity
 
@@ -472,10 +491,34 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
   order's UI path, never through the event queue, so the other players and replays see nothing, and it stacks with
   the hardpoint reticle flash (WU-42). It applies only while the object's model is drawn in tactical mode and the
   object is selectable. Timing, observed on a 30 fps rig recording of a right click on an enemy cruiser: the game's
-  clock moves in whole logical frames and a pulse ends once the elapsed time is strictly past its length, so the
+  clock moves in whole logical frames and a pulse expires when its computed remaining time is nonpositive. Floating
+  point subtraction and render-service rounding can extend a pulse: in the recording the
   stock 0.1 s pulse spans four frames (multipliers 4, 3, 2, 1 of RGB), the three pulses 12 frames (0.4 s); the
-  remake times it on the presented tick clock the same way. One recording: the exact frame counts are unverified
-  at other frame rates.
+  original timing is retained here as evidence; the remake uses the gentler envelope WU-61. One recording:
+  the exact original frame counts are unverified at other frame rates. A read-only debug-build recheck confirms
+  that the clock is elapsed logical frames divided by logical frames per second, so it follows game speed and pause
+  (TM-01/02/07), rather than wall time. WU-61 deliberately retains the owner's real-time clock policy.
+- WU-61 (owner presentation decision; gentle attack feedback). Only a hull-target attack flashes the ship.
+  A hardpoint-target attack keeps its reticle feedback (WU-42, debug-build evidence), with no ship flash.
+  This corrects WU-60's earlier stacking choice; the cruiser recording did not establish hardpoint stacking.
+  The ship feedback uses WU-60's three linear-fade pulses: peak at the start, fading toward normal brightness.
+  Each pulse lasts the authored `GUI_Rapid_Flash_Duration` in wall seconds (stock 0.1 seconds, nominal 10 Hz).
+  This restores the original's authored rate and easing after the owner's follow-up request. The original
+  samples a logical-frame clock and restarts on a render callback at expiry, so observed frame rounding can
+  extend its pulses (WU-60); our unscaled continuous clock keeps the authored cadence independent of frame rate.
+  The stock peak is twice the current hull light RGB, controlled by `order_flash_peak_multiplier`.
+  The original peaks at about four times that light; we use 2.0 because of the owner's photosensitivity concern.
+  The former 1.2 peak was too subtle after the shorter rapid pulses were restored. Weaker authored
+  `GUI_Flash_Level` values reduce the added light proportionally; stronger values cannot exceed this peak.
+  Above a 1000 by 1000 source-unit world bounding footprint, amplitude decreases inversely with its area;
+  area-weighted added light is bounded even on very large hulls. Alpha and colour ratios are unchanged.
+  The brightness cap and footprint scaling are presentation comfort limits requested by the owner.
+  Retrigger admission is a deliberate safety deviation: an attack on a target already flashing, or whose
+  burst ended less than one real second ago, still issues its order but does not restart or extend the flash.
+  The quiet interval runs from the end of the complete three-pulse burst, without being extended by refused
+  repeats. Squadron container/member aliases share one gate; another target has its own independent gate.
+  Unscaled presentation frame time drives it, including during pause and fast-forward, with no simulation tick work
+  and no flash work after the active and admission maps empty.
 - WU-51 (debug build; retail station-upgrade hover). A targetable reticle under the pointer
   immediately shows its hardpoint's `Tooltip_Text`, resolved through the game's text database,
   followed by ` - N%`. N is the nearest integer to 100 times current health divided by maximum
@@ -501,6 +544,19 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
   Missing text uses the established UI-T3 key fallback and records a diagnostic; missing font
   data keeps the project's 7/5-point fallback. The current battle UI uses the English text
   database, like its default tactical HUD language.
+
+- WU-62 (owner presentation requirement; squadron visibility continuity). A squadron icon that
+  returns after fog, screen culling or the cinematic camera starts at its current desired anchor,
+  rather than sliding across the screen from its last drawn position. Ordinary consecutive
+  visible frames retain WSU-34's slide. Arrival still owns its landing anchor (WU-49), and a
+  joined combat icon resumes at its current grid slot (WSU-36). The viewer detects the gap in
+  the existing icon pass; it adds no simulation work or extra scan of hidden units. Fighters,
+  bombers and other squadron identities share this path. Standalone hero identities and unit
+  bracket overlays already project their current world positions without a retained slide.
+  A read-only debug-build recheck (IV-01 to IV-04), consistent with WSU-34 and WFO-34,
+  confirms that squadron HUD render service stays registered across visibility changes and
+  advances its anchor before projection and screen culling. The original keeps tracking while
+  hidden; the first-visible snap is the owner's permitted implementation alternative here.
 
 ## Cases
 

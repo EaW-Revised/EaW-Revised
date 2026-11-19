@@ -15,6 +15,7 @@
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/campaign/starting_forces.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/script/authoritative/galactic_bridge.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -50,6 +51,9 @@ struct EngineContractAccess {
         engine.rebuild_runtime_index();
     }
     static void complete_native(Engine& engine) { engine.service_execution(engine.players_.front()); }
+    static void activation_members(Engine& engine, std::vector<sim::EntityId> members) {
+        engine.players_.front().taskforces.at(1).units = std::move(members);
+    }
     static PlayerAi& execution_fixture(Engine& engine, std::size_t tasks) {
         PlayerAi owner; owner.player = 1; owner.galactic = true;
         owner.functions.push_back({&engine.data_.goals.at("GOAL"), "GOAL", nullptr, {}});
@@ -85,6 +89,56 @@ using ga::Number;
 using eawr::sim::math::Fixed;
 Fixed whole(std::int64_t value) { return Fixed::from_integer(value).value(); }
 using eawr::testing::result_diagnostic::take;
+
+void unnamed_ground_activation() {
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto setup = gc::synthetic_galaxy({});
+        setup.seats.push_back({{3}, 1, gc::SeatKind::ai, 0, false, 0});
+        setup.seats.push_back({{4}, 2, gc::SeatKind::ai, 0, false, 0});
+        setup.seat_control = gc::SeatControlSetup{{{1, {1}, false}, {2, {2}, false}},
+            {{1, gc::FactionControl::human, gc::FactionControl::ai, {}, {}},
+                {2, gc::FactionControl::human, gc::FactionControl::ai, {}, {}}}};
+        const auto player = setup.seats.front().player;
+        const auto actor = setup.fleets.front().members.front().id;
+        const auto planet = setup.fleets.front().orbit;
+        auto session = take(gc::GalacticSession::create(setup));
+        auto world = std::make_shared<ai::GalacticWorld>(ai::GalacticPerceptionSetup{});
+        take(world->bind(session.snapshot(), {}, executor, 0, session.next_entity_id()));
+        auto host = std::make_shared<foc::detail::Host>(); host->ai_world = world; host->view = world->view();
+        ai::Engine engine(host, {}, {}); host->engine = &engine;
+        ai::EngineContractAccess::magic_fixture(engine, player, 1, planet, 1);
+        ai::EngineContractAccess::activation_members(engine, {actor, 999999}); // absent member has no planet
+        auth::ModuleManifest manifest;
+        take(manifest.add("Ground.lua", "function Check(tf) assert(tf.Activate_Ability() == nil) end"));
+        auth::SessionConfig config; config.tick_duration = {1, 30}; config.galactic_clock = true;
+        auto scripts = take(auth::ScriptScheduler::create(config, std::move(manifest)));
+        std::vector<eawr::core::Diagnostic> errors;
+        foc::detail::register_plan_bindings(scripts, host, errors);
+        expect(errors.empty(), "WGCH-167 taskforce activation registers");
+        take(scripts.create_instance(1, "Ground.lua"));
+        auth::ScriptEvent event; event.key = {1, auth::first_simulation_producer, 1, 0};
+        event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Check";
+        event.arguments = {auth::Value{auth::Handle{ai::handle_taskforce, 1}}};
+        take(scripts.submit_event(std::move(event)));
+        auto story = take(auth::ScriptScheduler::create(config, {}));
+        auto bridge = take(auth::ScriptedGalacticSession::create(std::move(session), std::move(scripts), std::move(story)));
+        take(bridge.bind_ground_abilities());
+        const gc::GameCommand dropout{{0, setup.seats.front().seat_id, 1}, gc::SeatLeave{}};
+        auto tick = take(bridge.step(executor, std::span(&dropout, 1)));
+        expect(tick.ai && tick.ai->diagnostics.empty() && bridge.pending_script_commands() == 1,
+            "WGCH-167 unnamed activation stages one request for the present member, without calling the world");
+        tick = take(bridge.step(executor));
+        expect(tick.script_input.size() == 1 && tick.script_input.front().accepted
+            && tick.script_input.front().accepted->key.seat == gc::SeatId{3},
+            "WGCH-167 deferred activation routes through the actor owner's newly active dropout AI seat");
+        if (!tick.script_input.empty() && tick.script_input.front().accepted) {
+            const auto* payload = std::get_if<gc::DeployGroundAbility>(&tick.script_input.front().accepted->payload);
+            expect(payload && payload->actor == actor && payload->planet == planet,
+                "WGCH-167 canonical command preserves member identity and its actual planet");
+        }
+    }
+}
 
 void execution_work_contracts() {
     ai::AiData data; ai::GoalType goal; goal.name = "GOAL"; goal.reachability = "ANY";
@@ -1276,7 +1330,7 @@ void installed() {
 int case_galactic_ai_execution_tests(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
-        else { execution_work_contracts(); immediate_cash_contracts(); native_execution_state(); live_execution_restore(); paid_contracts(); routes(); packed_routes(); admission(); safety(); lua_callbacks(); }
+        else { unnamed_ground_activation(); execution_work_contracts(); immediate_cash_contracts(); native_execution_state(); live_execution_restore(); paid_contracts(); routes(); packed_routes(); admission(); safety(); lua_callbacks(); }
     } catch (const std::exception& exception) { std::cerr << exception.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

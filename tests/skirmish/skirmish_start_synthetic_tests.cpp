@@ -8,6 +8,7 @@
 #include "eawr/sim/math/geometry.hpp"
 #include "eawr/battle/arrival_plan.hpp"
 #include "eawr/sim/tactical/visibility.hpp"
+#include "eawr/sim/tactical/fog_cells.hpp"
 #include "eawr/sim/tactical/types.hpp"
 #include "eawr/units/unit_tables_common.hpp"
 #include "eawr/units/unit_tables_combat.hpp"
@@ -971,11 +972,87 @@ void synthetic_start() {
     dense_placement.type = fog_obstacle.id;
     dense_placement.position = Vec3{whole(300), whole(400), Fixed{}};
     dense_inputs.placements.push_back(dense_placement);
-    const auto dense_rules = skirmish::fog_rules(dense_inputs);
+    const auto dense_rules = skirmish::fog_rules(dense_inputs, skirmish::SpaceFogContext::campaign);
     expect(dense_rules && dense_rules.value() && dense_rules.value()->dense_circles.size() == 1
         && dense_rules.value()->dense_circles.front().centre == Vec3{whole(400), whole(200), Fixed{}}
         && dense_rules.value()->dense_circles.front().radius == whole(400),
         "V-22/WHZ-09: dense map circle uses raw offset/radius, ignoring scale and soft radius");
+    {
+        // Reproduce the live recorder's order: skip placements, bind skipped
+        // types, then construct the recording header from the resulting start.
+        auto skipped_start = start;
+        const auto before = skipped_start.setup.units.size();
+        eawr::core::Diagnostic skipped;
+        skipped.message = "skipped unit type 'Cruiser': synthetic unsupported placement";
+        const std::vector<eawr::core::Diagnostic> diagnostics{skipped};
+        skirmish::drop_skipped_starts(skipped_start, diagnostics);
+        skirmish::bind_skipped_types(skipped_start, skirmish::skipped_type_ids(diagnostics));
+        const auto setup = skirmish::recording_setup(fixture, skipped_start);
+        expect(setup.first_free_entity_id && setup.units.size() < before && !setup.campaign
+            && setup.skirmish && !setup.skirmish->campaign_origin,
+            "skipped skirmish placement records an allocator without campaign origin");
+        tactical::TacticalContent live_content;
+        live_content.fog = skirmish::fog_rules(dense_inputs).value();
+        auto live = tactical::TacticalSession::create(setup, live_content);
+        expect(static_cast<bool>(live), "skirmish with a skipped placement starts with its live fog policy");
+        if (live) {
+            const auto encoded = tactical::write_replay(live.value().record());
+            const auto replay = encoded ? tactical::parse_replay(encoded.value())
+                : eawr::core::Result<tactical::TacticalReplay>::failure(encoded.error());
+            expect(static_cast<bool>(replay), "skipped skirmish live recording round-trips");
+            if (replay) {
+                const auto context = skirmish::replay_fog_context(replay.value().setup);
+                expect(static_cast<bool>(context), "recorded skirmish identity disambiguates its shared allocator");
+                const auto replay_fog = context ? skirmish::fog_rules(dense_inputs, context.value())
+                    : eawr::core::Result<std::optional<tactical::FogRules>>::failure(context.error());
+                expect(replay.value().setup.first_free_entity_id == setup.first_free_entity_id
+                    && context && context.value() == skirmish::SpaceFogContext::skirmish && replay_fog
+                    && replay_fog.value() && replay_fog.value()->dense_circles.empty(),
+                    "viewer and headless replay retain skirmish fog despite the recorded allocator");
+            }
+        }
+    }
+    // V-22: normal skirmish setup does not activate the shared density mask.
+    // Exercise each data flag, independent of type name, and both source locations.
+    for (unsigned flag = 0; flag < 4; ++flag) {
+        auto& hazard = fog_tables.obstacles.back().footprint.hazard;
+        hazard.nebula = flag == 0;
+        hazard.asteroid_field = flag == 1;
+        hazard.impassable_asteroid = flag == 2;
+        hazard.ion_storm = flag == 3;
+        const auto campaign_fog = skirmish::fog_rules(dense_inputs, skirmish::SpaceFogContext::campaign);
+        expect(campaign_fog && campaign_fog.value() && campaign_fog.value()->dense_circles.size() == 1,
+            "V-22/G-V10: campaign retains its previous authored hazard mask");
+        const auto skirmish_fog = skirmish::fog_rules(dense_inputs);
+        expect(skirmish_fog && skirmish_fog.value() && skirmish_fog.value()->dense_circles.empty(),
+            "V-22: skirmish hazard flags do not activate dense fog");
+        if (!skirmish_fog || !skirmish_fog.value()) continue;
+        const std::vector<tactical::Player> players{{1, 0, 1, tactical::player_flag_commandable}};
+        std::vector<std::uint8_t> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            for (const auto source_inside : {false, true}) {
+                tactical::FogCells cells(*skirmish_fog.value(), players);
+                const auto source = source_inside ? at(400, 200) : at(1300, 200);
+                const std::vector<tactical::FogRevealer> revealers{
+                    {1, 1, source, whole(1000), Fixed::from_raw(Fixed::scale / 5)}};
+                expect(static_cast<bool>(cells.advance(0, false, revealers, executor)),
+                    "V-22: full skirmish reveal succeeds");
+                expect(cells.revealed(0, source_inside ? at(1300, 200) : at(400, 200)),
+                    "V-22: a contact at 0.9R appears across the field boundary in either direction");
+                expect(cells.revealed(0, {source.x, whole(1100), Fixed{}})
+                    && !cells.revealed(0, {source.x, whole(1300), Fixed{}}),
+                    "V-22: open-space contacts retain the same normal range cutoff");
+                if (!source_inside) {
+                    std::vector<std::uint8_t> bytes;
+                    cells.append_state(bytes);
+                    if (reference.empty()) reference = bytes;
+                    else expect(bytes == reference, "V-22: skirmish fog equals across 1/2/4/8 workers");
+                }
+            }
+        }
+    }
+    fog_tables.obstacles.back().footprint.hazard = fog_obstacle.footprint.hazard;
     auto& collision_unit = fog_tables.units.front();
     collision_unit.id = "SYNTH_QLU1MOI5PTT3";
     collision_unit.table_order = 10;
@@ -984,12 +1061,12 @@ void synthetic_start() {
     fog_tables.obstacles.back().id = "SYNTH_OIVRHNPFF4K4";
     fog_tables.obstacles.back().table_order = 1;
     dense_inputs.placements.front().type = collision_unit.id;
-    auto collision_fog = skirmish::fog_rules(dense_inputs);
+    auto collision_fog = skirmish::fog_rules(dense_inputs, skirmish::SpaceFogContext::campaign);
     expect(collision_fog && collision_fog.value() && collision_fog.value()->dense_circles.size() == 1
         && collision_fog.value()->dense_circles.front().radius == whole(400),
         "fog uses the earlier obstacle on a unit-obstacle CRC collision");
     fog_tables.obstacles.back().table_order = 20;
-    collision_fog = skirmish::fog_rules(dense_inputs);
+    collision_fog = skirmish::fog_rules(dense_inputs, skirmish::SpaceFogContext::campaign);
     expect(collision_fog && collision_fog.value() && collision_fog.value()->dense_circles.size() == 1
         && collision_fog.value()->dense_circles.front().radius == whole(100),
         "fog uses the earlier unit on a unit-obstacle CRC collision");

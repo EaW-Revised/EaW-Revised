@@ -549,6 +549,29 @@ core::Result<void> read_start_factions(StartInputs& inputs, const data::Catalog&
             }
         }
         const auto resolved = catalog.resolve(name, data::Category::faction);
+        if (resolved) {
+            const auto read_pair = [&](const char* tag, StartFaction::CorruptionPair& pair) -> Result {
+                const auto* field = resolved.value().value(tag);
+                if (!field) return Result::success();
+                data::tag_trace::used(field->value);
+                const auto values = detail::tokens(field->value.raw_text);
+                if (values.size() != pair.size()) return Result::failure(detail::error(diagnostic_codes::input,
+                    "faction corruption multiplier needs two numbers: " + name + "/" + tag));
+                for (std::size_t i = 0; i < pair.size(); ++i) {
+                    const auto value = detail::number(values[i]);
+                    if (!value) return Result::failure(detail::error(diagnostic_codes::input,
+                        "invalid faction corruption multiplier: " + name + "/" + tag));
+                    pair[i] = *value;
+                }
+                return Result::success();
+            };
+            for (const auto& [tag, pair] : std::array{
+                    std::pair{"Corruption_Tactical_Production_Price_Multipliers", &faction.corruption_production_price},
+                    std::pair{"Corruption_Tactical_Production_Time_Multipliers", &faction.corruption_production_time},
+                    std::pair{"Corruption_Tactical_Build_Pad_Price_Multipliers", &faction.corruption_pad_price}}) {
+                if (auto read = read_pair(tag, *pair); !read) return read;
+            }
+        }
         const auto* mapping = resolved ? resolved.value().value("Multiplayer_Beacon_Type") : nullptr;
         if (mapping) {
             data::tag_trace::used(mapping->value);

@@ -169,7 +169,7 @@ NativeActions::NativeActions(gc::GalacticSession& world, std::shared_ptr<ai::Gal
     Placement placement, std::map<gc::PlayerId, sim::math::Fixed> multipliers, GoalResolver resolver, const sim::PartitionExecutor* executor, BaseCost base_cost)
     : world_(world), funding_(std::move(funding)), placement_(std::move(placement)), multipliers_(std::move(multipliers)), goal_resolver_(std::move(resolver)), base_cost_(std::move(base_cost)), executor_(executor), lifetime_(std::make_shared<NativeActions*>(this)) {
     bound().freestore_ = std::make_shared<QualifiedFreestore>([lifetime = lifetime_] { if (*lifetime) (*lifetime)->mark_state_changed(); });
-    for (const auto& player : world_.setup().players) bound().player_scratch_.try_emplace(player.player_id);
+    for (const auto& player : this->setup().players) bound().player_scratch_.try_emplace(player.player_id);
     update_metadata_record();
 }
 bool NativeActions::pending_admission() const noexcept {
@@ -337,7 +337,7 @@ core::Result<gc::GalacticSession::NativeProductionPayment> NativeActions::notice
         const auto pending_goal_ = scratch->second.pending_goal;
         if (!pending_ || pending_->player != input.player || !pending_goal_ || bound().purchases_.contains(input.build))
             return invalid<Payment>("native mark has no unique goal/request mapping");
-        const auto snapshot = world_.snapshot();
+        const auto snapshot = this->snapshot();
         const auto& production = snapshot->production();
         if (!production) return invalid<Payment>("accepted build requires its actual production owner");
         const auto location = std::lower_bound(production->planets.begin(), production->planets.end(), pending_->target,
@@ -366,7 +366,7 @@ core::Result<BillDecision> NativeActions::decide_live_bill(const gc::GalacticSes
     const auto at = bound().purchases_.find(input.build);
     if (at == bound().purchases_.end() || at->second.player != input.player || input.amount.raw() < 0)
         return invalid<BillDecision>("native bill has no reconstructed build/goal mapping");
-    const auto snapshot = world_.snapshot();
+    const auto snapshot = this->snapshot();
     if (!snapshot->production()) return invalid<BillDecision>("native bill requires its actual production owner");
     std::map<gc::PlayerId, std::shared_ptr<const gc::funding::Ledger>> held;
     const BillLedgers ledgers = [&](gc::PlayerId player) -> const gc::funding::Ledger* {
@@ -375,7 +375,7 @@ core::Result<BillDecision> NativeActions::decide_live_bill(const gc::GalacticSes
         return ledger.get();
     };
     auto decided = decide_bill(bill_row(at->second), input, ledgers, snapshot->production()->players);
-    if (decided && !decided.value().refusal.empty()) decided.value().refusal += " tick=" + std::to_string(world_.completed_tick());
+    if (decided && !decided.value().refusal.empty()) decided.value().refusal += " tick=" + std::to_string(this->completed_tick());
     return decided;
 }
 BillRow NativeActions::bill_row(const Purchase& row) {
@@ -409,9 +409,9 @@ core::Result<void> NativeActions::finish_task(sim::EntityId build, bool salvage)
     const auto at = bound().purchases_.find(build);
     if (at == bound().purchases_.end()) return invalid<void>("finished task requires its accepted build mapping");
     auto recipient = at->second.player;
-    for (const auto& producer : world_.snapshot()->production()->planets) for (const auto& queue : producer.queues)
+    for (const auto& producer : this->snapshot()->production()->planets) for (const auto& queue : producer.queues)
         if (std::any_of(queue.begin(), queue.end(), [&](const auto& row) { return row.build_id == build; }))
-            for (const auto& planet : world_.snapshot()->planets()) if (planet.id == producer.planet) recipient = planet.owner;
+            for (const auto& planet : this->snapshot()->planets()) if (planet.id == producer.planet) recipient = planet.owner;
     const auto multiplier = multipliers_.find(recipient);
     if (multiplier == multipliers_.end()) return invalid<void>("finished task requires its refund multiplier");
     auto result = world_.finish_native_production_task(build, salvage, multiplier->second);
@@ -438,7 +438,7 @@ core::Result<sim::EntityId> NativeActions::build_actor(gc::PlayerId player, sim:
     if (found == bound().purchases_.end() || found->second.player != player || !found->second.completed || !found->second.object)
         return invalid<sim::EntityId>("produced assignment requires its completed retained build result");
     const auto object = found->second.object;
-    const auto snapshot = world_.snapshot();
+    const auto snapshot = this->snapshot();
     const auto fleet = std::lower_bound(snapshot->fleets().begin(), snapshot->fleets().end(), object,
         [](const auto& row, auto id) { return row.id < id; });
     if (fleet != snapshot->fleets().end() && fleet->id == object) {
@@ -451,7 +451,7 @@ core::Result<NativeActions::BuildHead> NativeActions::build_head(gc::PlayerId pl
     const auto found = bound().purchases_.find(build);
     if (found == bound().purchases_.end() || found->second.player != player) return invalid<BuildHead>("build head requires its retained player/build association");
     const auto& purchase = found->second;
-    const auto snapshot = world_.snapshot(); const auto& production = snapshot->production();
+    const auto snapshot = this->snapshot(); const auto& production = snapshot->production();
     if (!production) return invalid<BuildHead>("build head production support is unavailable");
     const auto planet = std::lower_bound(production->planets.begin(), production->planets.end(), purchase.producer,
         [](const auto& row, auto id) { return row.planet < id; });
@@ -476,7 +476,7 @@ core::Result<sim::math::Fixed> NativeActions::build_remaining_cost(gc::PlayerId 
     const auto found = bound().purchases_.find(build);
     if (found == bound().purchases_.end() || found->second.player != player) return invalid<sim::math::Fixed>("remaining cost requires its retained player/build association");
     if (found->second.object) return core::Result<sim::math::Fixed>::success({});
-    if (!world_.snapshot()->production()) return generic_build_cost(found->second.requested_type); // WGA-344 support-missing fallback
+    if (!this->snapshot()->production()) return generic_build_cost(found->second.requested_type); // WGA-344 support-missing fallback
     const auto head = build_head(player, build);
     if (!head) return core::Result<sim::math::Fixed>::failure(head.error());
     if (!head.value().entry) return core::Result<sim::math::Fixed>::success({});
@@ -510,7 +510,7 @@ core::Result<ActionReceipt> NativeActions::admit(const ActionRequest& request) {
         gc::FleetId target = request.object;
         bool tracked{};
         for (const auto member : request.members) {
-            const auto snapshot = world_.snapshot();
+            const auto snapshot = this->snapshot();
             if (!snapshot->control() || !snapshot->fleet_control()) return invalid<ActionReceipt>("TaskForce launch requires real containment inputs");
             const gc::SurfaceForce* landed{};
             for (const auto& planet : snapshot->control()->planets) for (const auto& force : planet.landed)
@@ -540,7 +540,7 @@ core::Result<ActionReceipt> NativeActions::admit(const ActionRequest& request) {
         auto target = request.object;
         if (!target) for (const auto member : request.members)
             if (const auto fleet = containing_fleet(request.player, member)) { target = *fleet; break; }
-        const auto snapshot = world_.snapshot();
+        const auto snapshot = this->snapshot();
         const auto retained = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& row) { return row.id == target; });
         if (retained == snapshot->fleets().end() || retained->owner != request.player || !retained->orbit
             || retained->motion.transit || retained->members.empty()) return Result::success({false, 0});
@@ -612,10 +612,10 @@ core::Result<ActionReceipt> NativeActions::admit_paid(const ActionRequest& reque
     return Result::success({accepted.value().admission == gc::ProductionAdmission::allowed, accepted.value().build});
 }
 bool NativeActions::movement_actor_exists(sim::EntityId actor) const {
-    return std::any_of(world_.snapshot()->fleets().begin(), world_.snapshot()->fleets().end(), [&](const auto& fleet) { return fleet.id == actor; });
+    return std::any_of(this->snapshot()->fleets().begin(), this->snapshot()->fleets().end(), [&](const auto& fleet) { return fleet.id == actor; });
 }
 std::optional<gc::FleetId> NativeActions::containing_fleet(gc::PlayerId player, sim::EntityId actor) const {
-    for (const auto& fleet : world_.snapshot()->fleets()) {
+    for (const auto& fleet : this->snapshot()->fleets()) {
         if (fleet.owner != player) continue;
         if (fleet.id == actor || std::any_of(fleet.members.begin(), fleet.members.end(), [&](const auto& member) { return member.id == actor; }))
             return fleet.id;
@@ -623,7 +623,7 @@ std::optional<gc::FleetId> NativeActions::containing_fleet(gc::PlayerId player, 
     return {};
 }
 std::optional<NativeActions::AssemblyLocation> NativeActions::assembly_location(gc::PlayerId player, sim::EntityId actor) const {
-    const auto snapshot = world_.snapshot();
+    const auto snapshot = this->snapshot();
     for (const auto& fleet : snapshot->fleets()) if (fleet.owner == player
         && (fleet.id == actor || std::any_of(fleet.members.begin(), fleet.members.end(), [&](const auto& member) { return member.id == actor; })))
         return AssemblyLocation{fleet.orbit, fleet.id, false, fleet.motion.transit.has_value()};
@@ -644,7 +644,7 @@ core::Result<ActionReceipt> NativeActions::prepare_assembly_actor(gc::PlayerId p
         at = assembly_location(player, actor);
     }
     if (!at || !at->fleet) return Result::success({false, 0});
-    const auto snapshot = world_.snapshot();
+    const auto snapshot = this->snapshot();
     const auto fleet = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& row) { return row.id == at->fleet; });
     if (fleet == snapshot->fleets().end()) return Result::success({false, 0});
     if (separate && actor != fleet->id && fleet->members.size() > 1) {
@@ -665,7 +665,7 @@ core::Result<ActionReceipt> NativeActions::prepare_assembly_actor(gc::PlayerId p
 core::Result<void> NativeActions::land_assembly_arrival(gc::PlayerId player, sim::EntityId actor) {
     const auto at = assembly_location(player, actor);
     if (!at || !at->fleet || at->transit || !at->planet) return core::Result<void>::success();
-    const auto snapshot = world_.snapshot();
+    const auto snapshot = this->snapshot();
     if (!snapshot->fleet_control()) return invalid<void>("assembly arrival requires real transport traits");
     const auto fleet = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& row) { return row.id == at->fleet; });
     if (fleet == snapshot->fleets().end()) return core::Result<void>::success();
@@ -747,7 +747,7 @@ core::Result<void> NativeActions::advance_movement(Movement& movement, bool task
     if (movement.freestore_actor) return advance_freestore_movement(movement);
     if (!movement_provider_ || !conflict_pending_ || !no_hop_ || !admission_pending_)
         return invalid<void>("movement requires its rebuilt path, global conflict and orbit owners");
-    const auto snapshot = world_.snapshot();
+    const auto snapshot = this->snapshot();
     const auto at = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& fleet) {
         return fleet.id == movement.actor;
     });
@@ -769,7 +769,7 @@ core::Result<void> NativeActions::advance_movement(Movement& movement, bool task
     if (movement_frontier_) if (auto bound = movement_frontier_(movement.player, snapshot); !bound) return bound;
     auto copied = movement_provider_(movement.player, *snapshot);
     if (!copied) return core::Result<void>::failure(copied.error());
-    if (!world_.graph()) return invalid<void>("movement has no ordinary world graph");
+    if (!this->graph()) return invalid<void>("movement has no ordinary world graph");
     const auto& input = copied.value();
     gc::PathOptions options;
     options.ai_player = input.ai_player; options.multiplayer = input.multiplayer;
@@ -781,7 +781,7 @@ core::Result<void> NativeActions::advance_movement(Movement& movement, bool task
         || movement.reach == MovementReach::any;
     options.allow_bad_if_no_force = movement.reach == MovementReach::enemy_undefended
         || movement.reach == MovementReach::single_hop_disconnected || movement.reach == MovementReach::any;
-    auto path = gc::find_planet_path(*world_.graph(), at->orbit, movement.destination, input.access, options);
+    auto path = gc::find_planet_path(*this->graph(), at->orbit, movement.destination, input.access, options);
     if (!path) return core::Result<void>::failure(path.error());
     if (path.value().planets.size() < 2) { movement.finished = true; return no_hop(); }
     const auto next = path.value().planets[1];
@@ -811,7 +811,7 @@ core::Result<void> NativeActions::advance_freestore_movement(Movement& movement)
         return invalid<void>("direct freestore movement requires its rebuilt cache and conflict owners");
     if (conflict_pending_()) { movement.advance_requested = true; return core::Result<void>::success(); }
     movement.advance_requested = false;
-    const auto snapshot = world_.snapshot();
+    const auto snapshot = this->snapshot();
     const auto at = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& fleet) { return fleet.id == movement.actor; });
     if (at == snapshot->fleets().end() || !at->orbit || at->motion.transit || at->orbit == movement.destination) {
         movement.finished = true; return core::Result<void>::success();
@@ -834,7 +834,7 @@ core::Result<void> NativeActions::advance_freestore_movement(Movement& movement)
         movement.finished = true; return core::Result<void>::success();
     }
     if (input.planets.front() != at->orbit || input.planets.back() != movement.destination
-        || input.planets[1] == at->orbit || !world_.graph() || !world_.graph()->node(input.planets[1]))
+        || input.planets[1] == at->orbit || !this->graph() || !this->graph()->node(input.planets[1]))
         return invalid<void>("cached freestore route endpoints are unqualified");
     auto admitted = world_.admit_native_fleet(movement.player,
         gc::MoveFleet{movement.actor, {at->orbit, input.planets[1]}, {}}, admission_pending_());
@@ -843,12 +843,12 @@ core::Result<void> NativeActions::advance_freestore_movement(Movement& movement)
     return core::Result<void>::success();
 }
 core::Result<ActionReceipt> NativeActions::admit_movement(const ActionRequest& request) {
-    const auto snapshot = world_.snapshot();
+    const auto snapshot = this->snapshot();
     const auto at = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& fleet) { return fleet.id == request.object; });
     if (at == snapshot->fleets().end() || at->owner != request.player || at->members.empty()
         || !at->orbit || at->motion.transit || (request.taskforce && request.members.empty()))
         return core::Result<ActionReceipt>::success({false, 0});
-    if (!world_.graph() || !world_.graph()->node(request.target) || request.reach > MovementReach::any
+    if (!this->graph() || !this->graph()->node(request.target) || request.reach > MovementReach::any
         || bound().next_movement_ == std::numeric_limits<std::uint64_t>::max())
         return invalid<ActionReceipt>("movement destination, policy or request identity is invalid");
     if (request.kind == ActionKind::raid) {
@@ -880,7 +880,7 @@ core::Result<NativeActions::Movement> NativeActions::poll_movement(std::uint64_t
         NativeActions& owner; Movement& value; Movement previous;
         ~RetainedWrite() { if (value != previous) owner.mark_state_changed(); }
     } retained_write{*this, movement, movement};
-    const auto snapshot = world_.snapshot();
+    const auto snapshot = this->snapshot();
     if (movement.observed_tick != snapshot->completed_tick()) {
         movement.observed_tick = snapshot->completed_tick(); movement.event_cursor = 0;
     }
@@ -896,12 +896,12 @@ core::Result<NativeActions::Movement> NativeActions::poll_movement(std::uint64_t
     if ((movement.freestore_actor || !movement.finished) && movement.advance_requested)
         if (auto advanced = advance_movement(movement, taskforce_has_members); !advanced) return core::Result<Movement>::failure(advanced.error());
     if (!movement.freestore_actor && movement.actor && conflict_pending_ && !conflict_pending_()
-        && std::none_of(world_.snapshot()->fleets().begin(), world_.snapshot()->fleets().end(),
+        && std::none_of(this->snapshot()->fleets().begin(), this->snapshot()->fleets().end(),
         [&](const auto& fleet) { return fleet.id == movement.actor; })) { movement.actor = 0; movement.finished = true; }
     return core::Result<Movement>::success(movement);
 }
 core::Result<void> NativeActions::settle_movement_cursors() {
-    const auto snapshot = world_.snapshot();
+    const auto snapshot = this->snapshot();
     const auto events = snapshot->events().size();
     for (auto& [id, movement] : bound().movements_) {
         if (movement.observed_tick != snapshot->completed_tick() || movement.event_cursor <= events) continue;
@@ -912,7 +912,7 @@ core::Result<void> NativeActions::settle_movement_cursors() {
 }
 core::Result<void> NativeActions::movement_conflict(std::uint64_t request, gc::PlanetId location, bool begin) {
     std::vector<sim::EntityId> orbiting;
-    for (const auto& fleet : world_.snapshot()->fleets()) if (fleet.orbit && fleet.orbit == location) orbiting.push_back(fleet.id);
+    for (const auto& fleet : this->snapshot()->fleets()) if (fleet.orbit && fleet.orbit == location) orbiting.push_back(fleet.id);
     std::sort(orbiting.begin(), orbiting.end());
     return movement_conflict(request, location, begin, orbiting);
 }
@@ -1047,18 +1047,18 @@ core::Result<NativeActions::FreestoreMove> NativeActions::preflight_freestore_mo
     const QualifiedFreestore& store, gc::PlayerId player, sim::EntityId actor, gc::PlanetId destination) const {
     using Result = core::Result<FreestoreMove>;
     // WGA-313: management gate first, reservation is deliberately not read.
-    if (world_.clock().pause_depth) return Result::success(FreestoreMove::refused);
+    if (this->pause_depth()) return Result::success(FreestoreMove::refused);
     if (!admission_pending_) return invalid<FreestoreMove>("freestore movement requires its galactic conflict admission owner");
     if (admission_pending_()) return Result::success(FreestoreMove::refused);
     const auto* facts = store.facts(actor);
-    if (!player || !actor || !destination || !world_.graph() || !world_.graph()->node(destination)
+    if (!player || !actor || !destination || !this->graph() || !this->graph()->node(destination)
         || !facts || !facts->qualified || facts->object.owner != player || facts->dead || facts->deleting
         || !store.contains(player, actor)) return Result::success(FreestoreMove::refused);
     if (!freestore_move_) {
         core::Diagnostic error; error.code = std::string(authoritative::codes::missing_api);
         error.message = std::string(freestore_move_reader_seam); return Result::failure(std::move(error));
     }
-    const auto copied = freestore_move_(player, *facts, *world_.snapshot());
+    const auto copied = freestore_move_(player, *facts, *this->snapshot());
     if (!copied) return Result::failure(copied.error());
     if (!copied.value().actor_valid || !copied.value().source_ai_usable || facts->object.transit)
         return Result::success(FreestoreMove::refused);
@@ -1074,7 +1074,7 @@ core::Result<void> NativeActions::refresh_freestore_movement(sim::EntityId actor
     const auto* facts = bound().freestore_->facts(actor);
     if (!facts) return core::Result<void>::success(); // actual loss has its own notification
     auto row = *facts; row.tracked_movement = tracked;
-    const auto snapshot = world_.snapshot();
+    const auto snapshot = this->snapshot();
     const auto at = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(),
         [&](const auto& value) { return value.id == fleet; });
     if (at != snapshot->fleets().end()) {
@@ -1103,7 +1103,7 @@ core::Result<bool> NativeActions::admit_freestore_move(gc::PlayerId player, sim:
             return core::Result<bool>::failure(refreshed.error());
     }
     if (!fleet) return core::Result<bool>::success(false);
-    const auto snapshot = world_.snapshot();
+    const auto snapshot = this->snapshot();
     const auto at = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& value) { return value.id == *fleet; });
     if (at == snapshot->fleets().end()) return core::Result<bool>::success(false);
     if (at->members.size() > 1 && actor != *fleet) {
@@ -1124,8 +1124,8 @@ core::Result<bool> NativeActions::admit_freestore_move(gc::PlayerId player, sim:
             return core::Result<bool>::failure(refreshed.error());
     }
     Movement movement; movement.player = player; movement.actor = *fleet; movement.destination = destination;
-    movement.freestore_actor = actor; movement.observed_tick = world_.snapshot()->completed_tick();
-    movement.event_cursor = world_.snapshot()->events().size();
+    movement.freestore_actor = actor; movement.observed_tick = this->snapshot()->completed_tick();
+    movement.event_cursor = this->snapshot()->events().size();
     // WGA-385: advance before insertion; a known unsafe/no-hop first advance
     // still returns a successfully created block.
     if (auto advanced = advance_freestore_movement(movement); !advanced) return core::Result<bool>::failure(advanced.error());
@@ -1161,7 +1161,7 @@ core::Result<void> NativeActions::service_freestore_landing(gc::PlayerId player,
     const FreestorePool& pool, const sim::PartitionExecutor& executor) {
     if (!pool.qualified || !pool.qualified_players.contains(player))
         return invalid<void>("automatic landing requires its initialized qualified frontier");
-    const auto& seats = world_.setup().seats;
+    const auto& seats = this->setup().seats;
     const auto owner = std::find_if(seats.begin(), seats.end(), [player](const auto& seat) { return seat.player == player; });
     if (owner == seats.end()) return invalid<void>("automatic landing manager human status unavailable");
     if (owner->kind == gc::SeatKind::human) return core::Result<void>::success();
@@ -1285,12 +1285,12 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
         const auto id = read(), player = read(), goal = read(), price = read(), billed = read(), marked = read(), remaining = read(), orphan = read();
         const auto completed = read(), failed = read(), object = read();
         const auto producer = read(), requested_type = read(), channel = read(), task_finished = read(), salvage = read();
-        if (!producer || !world_.graph() || !world_.graph()->node(producer) || !requested_type
+        if (!producer || !this->graph() || !this->graph()->node(producer) || !requested_type
             || channel > 1 || task_finished > 1 || salvage > 1) return invalid<void>("production task association is invalid");
         if (completed > 1 || failed > 1 || (completed && failed) || (object && (!completed || object >= identity_ceiling())))
             return invalid<void>("production completion reference is invalid: purchase " + std::to_string(id) + " completed " + std::to_string(completed)
                 + " failed " + std::to_string(failed) + " object " + std::to_string(object) + " identity ceiling " + std::to_string(identity_ceiling())
-                + " (world next id " + std::to_string(world_.next_entity_id()) + ")");
+                + " (world next id " + std::to_string(this->next_entity_id()) + ")");
         if (!valid || !id || id <= last || id >= identity_ceiling() || !player || player > std::numeric_limits<gc::PlayerId>::max()
             || !goal || price > (std::uint64_t{1} << 48) || billed > price || marked > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || remaining > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || orphan > 1) return invalid<void>("production identities or amounts are invalid: purchase " + std::to_string(id) + " after " + std::to_string(last) + " player "
                 + std::to_string(player) + " goal " + std::to_string(goal) + " price " + std::to_string(price) + " billed " + std::to_string(billed)
@@ -1316,11 +1316,11 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
         const auto freestore_actor = read(), raid = read();
         if (!valid || !id || id <= last || id >= next_movement || !player || player > std::numeric_limits<gc::PlayerId>::max()
             || actor >= identity_ceiling() || freestore_actor >= identity_ceiling()
-            || raid > 1 || (freestore_actor && (plan_id || taskforce_id || block_id || taskforce || reach || location || raid)) || !world_.graph() || !world_.graph()->node(destination)
-            || (location && !world_.graph()->node(location)) || reach > static_cast<std::uint64_t>(MovementReach::any)
-            || registered > 1 || taskforce > 1 || (taskforce != (taskforce_id != 0)) || finished > 1 || advance > 1 || (!actor && !finished) || tick > world_.snapshot()->completed_tick()
-            || (tick == world_.snapshot()->completed_tick() && cursor > world_.snapshot()->events().size())
-            || std::none_of(world_.setup().players.begin(), world_.setup().players.end(), [&](const auto& p) { return p.player_id == player; }))
+            || raid > 1 || (freestore_actor && (plan_id || taskforce_id || block_id || taskforce || reach || location || raid)) || !this->graph() || !this->graph()->node(destination)
+            || (location && !this->graph()->node(location)) || reach > static_cast<std::uint64_t>(MovementReach::any)
+            || registered > 1 || taskforce > 1 || (taskforce != (taskforce_id != 0)) || finished > 1 || advance > 1 || (!actor && !finished) || tick > this->snapshot()->completed_tick()
+            || (tick == this->snapshot()->completed_tick() && cursor > this->snapshot()->events().size())
+            || std::none_of(this->setup().players.begin(), this->setup().players.end(), [&](const auto& p) { return p.player_id == player; }))
             return invalid<void>("movement identities, policy or listener state are invalid");
         moves.emplace(id, Movement{static_cast<gc::PlayerId>(player), actor, destination, location,
             static_cast<MovementReach>(reach), taskforce != 0, finished != 0, advance != 0, tick, cursor, plan_id, taskforce_id, block_id, registered != 0, freestore_actor, raid != 0}); last = id;
@@ -1329,7 +1329,7 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
     if (!valid || freestore_size != bytes.size() - at) return invalid<void>("production freestore tail framing is invalid");
     const auto freestore_bytes = std::span(bytes).subspan(at, static_cast<std::size_t>(freestore_size));
     QualifiedFreestore staged_freestore;
-    if (auto decoded = staged_freestore.restore(freestore_bytes, identity_ceiling(), world_.setup().players); !decoded) return decoded;
+    if (auto decoded = staged_freestore.restore(freestore_bytes, identity_ceiling(), this->setup().players); !decoded) return decoded;
     if (!staged_freestore.inventory().empty()) {
         if (!freestore_validation_) return invalid<void>("freestore restore requires reconstructed content/lifecycle/reservation validation");
         // The world already shows the actor changes still waiting in the async inbox (a merged-away fleet, a type change):
@@ -1371,11 +1371,11 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
             : dead != ledger->dead_goals.end() ? dead->second.marked : sim::math::Fixed{};
         if (total > marked) return invalid<void>("production obligations exceed restored ledger marks");
     }
-    if (world_.snapshot()->production()) for (const auto& planet : world_.snapshot()->production()->planets)
+    if (this->snapshot()->production()) for (const auto& planet : this->snapshot()->production()->planets)
         for (const auto& queue : planet.queues) for (const auto& entry : queue) {
-            const auto player = std::find_if(world_.snapshot()->production()->players.begin(), world_.snapshot()->production()->players.end(),
+            const auto player = std::find_if(this->snapshot()->production()->players.begin(), this->snapshot()->production()->players.end(),
                 [&](const auto& p) { return p.player == entry.builder; });
-            if (player == world_.snapshot()->production()->players.end()) return invalid<void>("production queue has an unknown player");
+            if (player == this->snapshot()->production()->players.end()) return invalid<void>("production queue has an unknown player");
             if (player->human) continue;
             // The first difference is named with both values: this one check used to say only "disagrees".
             const auto purchase = staged.find(entry.build_id);
@@ -1401,7 +1401,7 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
         }
     mark_build_state_changed();
     // Validation above finishes before any retained owner is replaced.
-    if (auto decoded = bound().freestore_->restore(freestore_bytes, identity_ceiling(), world_.setup().players); !decoded) return decoded;
+    if (auto decoded = bound().freestore_->restore(freestore_bytes, identity_ceiling(), this->setup().players); !decoded) return decoded;
     bound().purchases_ = std::move(staged);
     bound().movements_ = std::move(moves); bound().next_movement_ = next_movement;
     bound().freestore_requests_ = std::move(tracked_actors);
@@ -1429,7 +1429,7 @@ struct NativeActions::ImmediateState final : authoritative::ImmediateEffectState
     std::size_t prepared_births{};
     std::uint64_t freestore_refusals{}; // private additive delta, no shared Lua write
     ImmediateState(std::shared_ptr<NativeActions*> token, gc::GalacticSession::NativeActionShadow shadow, ShadowPlacement builder)
-        : lifetime(std::move(token)), world(std::move(shadow)), placement(std::move(builder)), base((*lifetime)->world_.snapshot()) {}
+        : lifetime(std::move(token)), world(std::move(shadow)), placement(std::move(builder)), base((*lifetime)->snapshot()) {}
     std::unique_ptr<authoritative::ImmediateEffectState> clone() const override { return std::make_unique<ImmediateState>(*this); }
     static std::optional<std::uint64_t> id(const authoritative::Value& value, std::uint32_t kind) {
         const auto* handle = std::get_if<authoritative::Handle>(&value.data);

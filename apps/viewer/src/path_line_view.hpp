@@ -12,11 +12,12 @@
 namespace eawr::presentation::godot_backend {
 
 // PL-01..PL-08 (docs/behaviour/space-path-lines.md): the selected-ship path line. One mesh with one
-// fixed-capacity line surface for the whole fleet, one unshaded alpha-blended material and one draw
+// fixed-capacity triangle surface for the whole fleet, one unshaded alpha-blended material and one draw
 // call, whatever the number of selected ships. The surface is created once; a rebuild writes only the
 // used vertex range in place (no mesh rebuild on the render thread). The line shortens as the ship flies
 // through one material parameter, the presented plan frame, so a frame without a plan or selection
-// change touches no buffer. It reads the shared plans of the latest snapshot; nothing reaches the session.
+// change touches no buffer. PL-09 expands the ribbons on the GPU to a readable pixel width at far zoom.
+// It reads the shared plans of the latest snapshot; nothing reaches the session.
 class PathLineView final {
 public:
     explicit PathLineView(godot::Node3D& host);

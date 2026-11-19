@@ -1013,6 +1013,8 @@ int main(const int argc, char** argv) {
     }
     if (argc == 2 && (std::string_view(argv[1]) == "--name-index-stock" || std::string_view(argv[1]) == "--name-index-mod"))
         return unit_name_index_installed(std::string_view(argv[1]) == "--name-index-mod");
+    if (argc == 2 && (std::string_view(argv[1]) == "--ability-lists-stock" || std::string_view(argv[1]) == "--ability-lists-remake"))
+        return unit_ability_lists_installed(std::string_view(argv[1]) == "--ability-lists-remake");
     if (argc == 2 && (std::string_view(argv[1]) == "--name-index-gc-stock" || std::string_view(argv[1]) == "--name-index-gc-mod"))
         return unit_name_index_gc_start(std::string_view(argv[1]) == "--name-index-gc-mod");
     if (argc == 2 && std::string_view(argv[1]) == "--fire-bones-installed") {
@@ -1234,9 +1236,9 @@ int main(const int argc, char** argv) {
             const auto end = xml.find("</Unit_Abilities_Data>", begin) + std::string_view{"</Unit_Abilities_Data>"}.size();
             const std::string fields = authored
                 ? "<Charge_Up_Seconds>5</Charge_Up_Seconds><Damage_Multiplier>5</Damage_Multiplier>" : "";
-            xml.replace(begin, end - begin, "<Unit_Abilities_Data><Unit_Ability><Type>BLAST</Type>"
+            xml.replace(begin, end - begin, "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>BLAST</Type>"
                 "<Recharge_Seconds>90</Recharge_Seconds><GUI_Activated_Ability_Name>Test_Blast</GUI_Activated_Ability_Name>"
-                "</Unit_Ability></Unit_Abilities_Data><Abilities><Blast_Ability Name=\"Test_Blast\">"
+                "</Unit_Ability></Unit_Abilities_Data><Abilities SubObjectList=\"Yes\"><Blast_Ability Name=\"Test_Blast\">"
                 "<Activation_Style>User_Input</Activation_Style>" + fields + "</Blast_Ability></Abilities>");
             write_fixture(tree.root, xml);
             const auto loaded = load(tree.root, models(-40.0F));

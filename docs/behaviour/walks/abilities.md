@@ -1,5 +1,17 @@
 # Walk: unit abilities in a space battle
 
+## Authored ability-list dispatch
+
+| Rule | Behaviour | Source |
+|---|---|---|
+| WABL-01 | A container with element children is dispatched as a nested list only when its `SubObjectList` attribute is exactly `Yes`. Lower-case `yes`, other boolean spellings, whitespace-padded values and omission do not take that branch. Without this marker the object parser visits the children as ordinary object fields; it does not implicitly construct the enclosing ability list. A childless container does not take the nested-list branch, even with the marker. Independently, a nonempty scalar value other than `TBD` goes through ordinary tag dispatch before the child check; if both dispatch paths apply to an ordinary type, its list is appended twice. | debug build EABL-01: object field and nested-list dispatch; EABL-02: list bindings and value dispatch |
+| WABL-02 | Ordinary repeated `Abilities` and `Unit_Abilities_Data` list dispatches append in authored order. On a `Variant_Of_Existing_Type` overlay, each dispatched block replaces the inherited/current list before adding its rows. An omitted or undispatched block leaves inheritance intact. In particular, an empty, childless marked block does not clear the inherited list through nested-list dispatch. This qualifies WAR-84's list-handler rule with WABL-01's caller gate. | debug build EABL-01/EABL-03: caller gate and both typed list handlers; WAR-84 / G4-AR12 |
+
+The unit-table loaders apply these dispatch rules before decoding the ability
+rows, independent of the unit or mod name. The galactic type loader's separate
+ability-container selector is outside this space-ability change. The ordinary
+field effects of recursively visited children remain owned by their field loaders.
+
 ## Passive retreat prevention evidence
 
 | Rule | Behaviour | Source |
@@ -114,6 +126,15 @@
 |---|---|---|
 | WAB-20 | The multipliers of the unit's active abilities multiply per kind (AB-20). The other services read them:<ul><li>the weapon delay (AB-21);</li><li>shield regeneration and its interval (AB-22);</li><li>energy regeneration and its interval (AB-23);</li><li>speed, acceleration and deceleration (AB-24, AB-33).</li></ul>No M2 ability changes the diminishing-firepower flag (AB-25). The other ability kinds FoC authors are outside the roster and are refused at load (AB-26). No M2 unit has two abilities, so no two power modes combine in M2. | debug build; AB-20 to AB-26 |
 | WAB-21 | While the ion shot is on, the Y-wing craft fire only the override projectile, only at the target (AB-66 and AB-67). | debug build; AB-66, AB-67 |
+| WAB-24 | **Large speed modifiers.** `Mod_Multiplier` parses a floating-point value without a 64 ceiling. The ordinary active-mode product has no upper clamp and scales maximum speed, acceleration and deceleration (AB-24). The remake accepts nonnegative speed modifiers whose aggregate fits the Q24 motion-input envelope: raw factor at most `INT64_MAX / max(max_motion_rate, max_motion_coordinate)`. This covers ordinary motion rates and formation-member deceleration, whose admitted input reaches the coordinate bound and whose preceding speed ratio is at most one. Validation multiplies only factors above one, in authored order, excluding Lucky Shot; this bounds every active subset and intermediate, including combinations where an inactive reduction or zero would otherwise hide an overflow. Speed composition uses checked wide intermediates and preserves positive half-away rounding. This is a project representation bound, not an original-game limit; later upgrade/combat factors retain their own checked arithmetic and the planner retains its existing rate support bound. | debug build EAMC-01; project numeric support |
+
+The remaining shared ceiling of 64 is a separate numeric-support gap: non-speed ordinary
+modifiers, `BLAST` damage, the shield-leech damage contribution, concentrate-fire's target
+damage contribution, signed weaken-effect cause-damage reduction, and
+`Full_Salvo_Weapon_Delay_Multiplier` retain it. The debug-build
+ordinary parser and getter impose no such ceiling; the checked nested damage validators
+also impose no upper ceiling (shield leech requires a positive value). Raising these limits
+requires their own damage, timer and composition checks; WAB-24 changes only speed.
 
 ### Autofire and scripts
 

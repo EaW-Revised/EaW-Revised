@@ -1,5 +1,6 @@
 #include "galactic_ai_lane_inbox.hpp"
 #include "eawr/sim/galactic/events.hpp"
+#include "../script/foc/galactic_ai_outbox_state.hpp"
 #include "eawr/script/foc/galactic_ai_state.hpp"
 
 #include <algorithm>
@@ -873,6 +874,54 @@ core::Result<std::size_t> GalacticAiStageLosses::restore_prefix(std::span<const 
     }
     if (in.bad) return fail_losses("framing is invalid");
     losses_ = std::move(staged); ++generation_;
+    return core::Result<std::size_t>::success(in.at);
+}
+namespace {
+constexpr std::string_view finished_window_tag = "eawr-gcai-finished-window";
+constexpr std::uint64_t finished_window_version = 1; // v1 (async step 3b): a window finished and not adopted yet
+template<class T> core::Result<T> finished_fail(std::string message) {
+    core::Diagnostic error; error.code = "EAWR-GCAI-ASYNC-0007";
+    error.message = "galactic AI finished window: " + std::move(message);
+    return core::Result<T>::failure(std::move(error));
+}
+} // namespace
+core::Result<void> encode_finished_window(std::vector<std::uint8_t>& bytes, std::uint64_t adopt_at,
+    const ga::OutboxBatch::Contents& batch, const std::optional<GalacticAiBillingPublication>& publication) {
+    auto batch_bytes = ga::encode_outbox_batch(batch);
+    if (!batch_bytes) return core::Result<void>::failure(batch_bytes.error());
+    put(bytes, finished_window_tag.size()); bytes.insert(bytes.end(), finished_window_tag.begin(), finished_window_tag.end());
+    put(bytes, finished_window_version); put(bytes, adopt_at);
+    put(bytes, batch_bytes.value().size()); bytes.insert(bytes.end(), batch_bytes.value().begin(), batch_bytes.value().end());
+    put(bytes, publication ? 1U : 0U);
+    if (publication) if (auto saved = encode_publication(bytes, *publication); !saved) return saved;
+    return core::Result<void>::success();
+}
+core::Result<std::size_t> restore_finished_window_prefix(std::span<const std::uint8_t> bytes, const ga::AsyncSchedule& schedule,
+    std::optional<GalacticAiFinishedWindow>& out) {
+    bool ours{};
+    if (!bytes.empty()) {
+        Reader probe{bytes};
+        ours = probe.word() == finished_window_tag.size() && !probe.bad && bytes.size() - probe.at >= finished_window_tag.size()
+            && std::equal(finished_window_tag.begin(), finished_window_tag.end(), bytes.begin() + static_cast<std::ptrdiff_t>(probe.at));
+    }
+    if (!ours) { out.reset(); return core::Result<std::size_t>::success(0); }
+    Reader in{bytes};
+    in.word(); in.at += finished_window_tag.size();
+    if (in.word() != finished_window_version) return finished_fail<std::size_t>("unsupported version");
+    GalacticAiFinishedWindow window;
+    window.adopt_at = in.word();
+    const auto batch_size = in.count(1);
+    if (in.bad) return finished_fail<std::size_t>("framing is invalid");
+    auto batch = ga::decode_outbox_batch(bytes.subspan(in.at, static_cast<std::size_t>(batch_size)), schedule);
+    if (!batch) return core::Result<std::size_t>::failure(batch.error());
+    window.batch = std::move(batch).value(); in.at += static_cast<std::size_t>(batch_size);
+    if (in.flag()) {
+        auto publication = decode_publication(in);
+        if (!publication) return finished_fail<std::size_t>("invalid publication");
+        window.publication = std::move(*publication);
+    }
+    if (in.bad) return finished_fail<std::size_t>("framing is invalid");
+    out = std::move(window);
     return core::Result<std::size_t>::success(in.at);
 }
 } // namespace eawr::campaign

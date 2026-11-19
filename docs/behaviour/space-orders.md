@@ -329,7 +329,8 @@ Evidence tags HO-nn are opaque IDs from the FoC debug build; their map stays pri
   the nearest wins; data: no default set lists hardpoint types). Open only for sets swapped in at run
   time (the AI's hit-and-run; attack-move if the engine applies its set: unverified).
 - **OR-U8** FoC's acknowledgement for a hardpoint attack is a per-hardpoint-type speech line, which is not
-  modelled. The target unit's flash is modelled for every attack order (WU-60).
+  modelled. A hull-target attack gently flashes the target unit; a hardpoint-target attack keeps only
+  its reticle feedback (WU-42, WU-61).
 - **OR-U9** The AI's `Attack_Target` hardpoint argument is not bound (no shipped plan runs it).
 - **OR-U10** Whether the reticle is also clickable while the pointer is over the icon of a squadron
   whose craft overlap it, and what a left click on a reticle selects, rest on WU-41's project choice.

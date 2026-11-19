@@ -183,7 +183,7 @@ class UnitCensusTests(unittest.TestCase):
         self.assertEqual(statuses("Combat_Bonus_Ability", {"Activation_Style": ["Space_Automatic"],
             "Movement_Speed_Bonus_Percentage": ["0.25"]}), "implemented")
         self.assertEqual(statuses("Combat_Bonus_Ability", {"Activation_Style": ["Space_Automatic"],
-            "Fire_Range_Bonus_Percentage": [".15"]}), "partial")
+            "Fire_Range_Bonus_Percentage": [".15"]}), "implemented")
         self.assertEqual(statuses("Starbase_Upgrade_Ability", {"Activation_Style": ["Skirmish_Automatic"]}), "implemented")
         self.assertEqual(statuses("Income_Stream_Mod_Ability", {"Income_Multiplier": ["1.25"]}), "missing")
         self.assertEqual(statuses("Income_Stream_Mod_Ability", {"Income_Multiplier": ["1.2"],
@@ -198,10 +198,10 @@ class UnitCensusTests(unittest.TestCase):
         self.assertEqual(statuses("Force_Healing_Ability", {"Activation_Style": ["Space_Automatic"]},
             cls="SpaceBuildable", collision=False), "partial")
         self.assertEqual(statuses("Force_Healing_Ability", {"Activation_Style": ["Skirmish_Automatic"]},
-            cls="SpaceBuildable", collision=False), "missing")
+            cls="SpaceBuildable", collision=False), "partial")
         self.assertEqual(statuses("Force_Healing_Ability", {}, cls="SpaceBuildable", collision=False), "missing")
         self.assertEqual(statuses("Combat_Bonus_Ability", {"Activation_Style": ["Space_Automatic"]},
-            cls="UniqueUnit", collision=False), "missing")
+            cls="UniqueUnit", collision=False), "partial")
 
     def test_underworld_ground_modifier_is_outside_the_space_census(self):
         ability = {"handler": "Income_Stream_Mod_Ability",

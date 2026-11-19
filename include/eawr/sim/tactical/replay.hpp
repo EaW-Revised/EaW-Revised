@@ -80,6 +80,7 @@ struct ReplaySkirmishSetup final {
     ReplayMatchOptions match;
     std::uint32_t victory_condition{};
     std::vector<ReplayLobbySlot> slots;
+    bool campaign_origin{}; // selected-force campaign entry; independent of allocator and optional campaign rules
     bool operator==(const ReplaySkirmishSetup&) const = default;
 };
 
@@ -111,6 +112,7 @@ struct CampaignUpgrade {
     friend bool operator==(const CampaignUpgrade&, const CampaignUpgrade&) = default;
 };
 struct CampaignBattleSetup {
+    bool corrupted{}; // WGCH-204/205: conflict location, retained by child replays/checkpoints
     math::Fixed corruption_price_multiplier{math::Fixed::from_raw(math::Fixed::scale)};
     std::vector<EconomyPlayer> players;
     std::vector<CampaignReserve> reserves; // ascending persistent ID

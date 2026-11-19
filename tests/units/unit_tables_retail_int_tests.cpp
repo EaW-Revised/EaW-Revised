@@ -19,7 +19,7 @@ namespace {
 using namespace unit_tables_test_support;
 struct Case { std::string_view text; std::optional<std::int32_t> expected; };
 constexpr Case cases[] = {
-    {"2.7", 2}, {" 5", 5}, {"-3", -3}, {"abc", 0}, {"", std::nullopt},
+    {"2.7", 2}, {" 5", 5}, {"-2", -2}, {"-3", -3}, {"abc", 0}, {"", std::nullopt},
     {"99999999999", 2147483647}, {"TBD", std::nullopt}, {"-99999999999", (-2147483647 - 1)},
     {"+12tail", 12}, {"-0.5", 0}, {"1e3", 1}, {"0x10", 0}, {"70000", 70000}, {"1.0", 1}
 };
@@ -45,7 +45,7 @@ void boundary(const Case& test) {
             "Build_Limit_Lifetime_For_All_Allies", "Build_Limit_Current_For_All_Allies"})
         fields += tag(name, "7") + tag(name, test.text);
     fields += tag("Faction_Anim_Subindex", "Neutral, " + std::string(test.text));
-    fields += "<Abilities><Laser_Defense_Ability Name=\"IntDefense\">"
+    fields += "<Abilities SubObjectList=\"Yes\"><Laser_Defense_Ability Name=\"IntDefense\">"
         + tag("Laser_Beam_Frames", test.text) + "</Laser_Defense_Ability></Abilities>";
     append(xml, "<SpaceUnit Name=\"Test_Frigate\">", "</SpaceUnit>", fields);
     append(xml, "<SpaceUnit Name=\"Test_Frigate\">", "</Unit_Abilities_Data>",
@@ -166,6 +166,34 @@ void appearance_contexts() {
     }
 }
 
+void negative_reserves() {
+    for (const auto count : {-2, std::numeric_limits<std::int32_t>::min()}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string original = "<Reserve_Spawned_Units_Tech_0>Test_Squadron, -1</Reserve_Spawned_Units_Tech_0>";
+        const auto at = xml.find(original);
+        expect(at != std::string::npos, "FL-02: fixture has its authored reserve");
+        if (at == std::string::npos) continue;
+        xml.replace(at, original.size(), tag("Reserve_Spawned_Units_Tech_0", "Test_Squadron, " + std::to_string(count)));
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        const auto* station = loaded.tables ? loaded.tables->find("Skirmish_Test_Base") : nullptr;
+        expect(station && station->spawner && station->spawner->reserves.size() == 1
+            && station->spawner->reserves.front().count == count,
+            "FL-02: negative reserves retain their signed XML value");
+        if (!loaded.tables) continue;
+        const auto motion = eawr::units::motion_table(*loaded.tables);
+        expect(static_cast<bool>(motion), "FL-02: negative reserves pass the complete motion-table load boundary");
+        if (!motion) continue;
+        for (unsigned tech = 0; tech < 6; ++tech) {
+            const auto* profile = motion.value().squadrons.find_spawner_at_tech(
+                eawr::assets::object_type_crc("Skirmish_Test_Base"), 1, tech);
+            expect(profile && profile->entries.size() == 1 && profile->entries.front().reserve == count,
+                "FL-02: negative reserve survives tech fallback and profile validation");
+        }
+    }
+}
+
 }
 
 int main() {
@@ -174,5 +202,6 @@ int main() {
         boundary(test);
     }
     appearance_contexts();
+    negative_reserves();
     return unit_tables_test_support::failures == 0 ? 0 : 1;
 }

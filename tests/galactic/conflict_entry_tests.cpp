@@ -262,8 +262,12 @@ void queued_pending_alerts() {
     }
 }
 void contracts() {
-    const auto tables = synthetic_tables();
-    const auto inputs = synthetic_inputs(tables);
+    auto tables = synthetic_tables();
+    tables.units.back().footprint.space_obstacle = true;
+    tables.units.back().footprint.obstacle_radius = whole(400);
+    tables.units.back().footprint.hazard.nebula = true;
+    auto inputs = synthetic_inputs(tables);
+    inputs.map_extents = std::pair<std::uint32_t, std::uint32_t>{0x464b2000U, 0x464b2000U};
     const auto fixture = fixture_for(inputs);
     campaign::ConflictRecord record; record.id = 90; record.invader = 1; record.defender = 2;
     record.map_identity = inputs.map; record.station = 45; record.station_type = skirmish::type_id("Station");
@@ -293,6 +297,24 @@ void contracts() {
     auto rebuilt_content = campaign::conflict_entry_content(setup, inputs);
     expect(static_cast<bool>(rebuilt_content), "export reconstructs content from its metadata");
     if (!rebuilt_content) return;
+    expect(!setup.campaign && !tables.campaign_scene,
+        "generic selected-force campaign has no optional campaign extensions");
+    const auto encoded = tactical::write_replay({setup, 1, {}, {}});
+    const auto decoded = encoded ? tactical::parse_replay(encoded.value())
+        : core::Result<tactical::TacticalReplay>::failure(encoded.error());
+    const auto replay_context = decoded ? skirmish::replay_fog_context(decoded.value().setup)
+        : core::Result<skirmish::SpaceFogContext>::failure(decoded.error());
+    expect(decoded && decoded.value().setup.skirmish->campaign_origin && replay_context
+        && replay_context.value() == skirmish::SpaceFogContext::campaign,
+        "generic campaign records explicit origin for both replay fog binders");
+    auto ambiguous = setup;
+    ambiguous.skirmish->campaign_origin = false;
+    expect(!skirmish::replay_fog_context(ambiguous),
+        "old selected-force replay without explicit origin is refused rather than guessed as skirmish");
+    expect(entry.content.fog && entry.content.fog->dense_circles.size() == 1,
+        "generic campaign entry retains its authored dense mask");
+    expect(rebuilt_content.value().fog && rebuilt_content.value().fog->dense_circles.size() == 1,
+        "generic campaign replay retains its authored dense mask");
     expect(entry.content.economy.pads.neutral == 3 && entry.content.economy.pads.capture.size() == 1
         && rebuilt_content.value().economy.pads == entry.content.economy.pads,
         "campaign and exported child both retain neutral-pad capture content");

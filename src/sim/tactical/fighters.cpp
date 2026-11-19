@@ -97,7 +97,8 @@ core::Result<void> validate_squadron_table(const SquadronTable& table) {
             return invalid(label + ": entry and bay counts must fit in uint32");
         }
         for (const auto& entry : spawner.entries) {
-            if (entry.starting < 0 || entry.reserve < unlimited_reserve) {
+            // FL-02: every negative authored reserve means unlimited, not only -1.
+            if (entry.starting < 0) {
                 return invalid(label + ": negative spawn count");
             }
             if (entry.reserve >= 0 && entry.starting > std::numeric_limits<std::int32_t>::max() - entry.reserve) {

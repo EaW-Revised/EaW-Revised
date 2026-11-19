@@ -146,6 +146,11 @@ struct SetupRow final {
     std::string faction;
 };
 
+// WSS-63: a start has an emblem only when every occupied human/AI row assigned
+// to that team names the same faction. Empty and mixed starts retain their number.
+[[nodiscard]] std::string_view setup_preview_faction(std::span<const SetupRow> occupied,
+                                                    std::uint32_t team) noexcept;
+
 // R-SETUP-01 and WSS-16 to WSS-18: what keeps Start from working, in the order the retail checks are
 // listed (at least two players, at least two teams, one faction per team; the order between checks
 // that fail together is not verified).

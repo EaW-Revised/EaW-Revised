@@ -51,6 +51,83 @@ def build_mod(directory, scene):
 
 @unittest.skipUnless(RUNTIME and GAME_ROOT, "requires the GPU route and installed FoC data")
 class StoryLetterboxRuntime(unittest.TestCase):
+    def test_authored_text_reveal_rate_reaches_wrapped_labels(self):
+        sys.path.insert(0, str(ROOT))
+        from tools.inventory.corpus import Corpus
+
+        for rate in (0, 4):
+            with self.subTest(rate=rate):
+                directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-text-reveal-"))
+                mod = build_mod(directory, "in")
+                xml = mod / "Data" / "XML"
+                constants = ET.fromstring(Corpus(GAME_ROOT).read_effective("foc", "data/xml/gameconstants.xml").data)
+                constants.find("Text_Reveal_Rate").text = str(rate)
+                ET.ElementTree(constants).write(xml / "GameConstants.xml", encoding="utf-8")
+                plots = ET.parse(xml / PLOTS)
+                ET.SubElement(plots.getroot(), "Active_Plot").text = "EAWR_Reveal.xml"
+                plots.write(xml / PLOTS, encoding="utf-8")
+                (xml / "EAWR_Reveal.xml").write_text('''<Story>
+<Event Name="EAWR_REVEAL"><Event_Type>STORY_AI_NOTIFICATION</Event_Type><Event_Param2>EAWR_REVEAL</Event_Param2>
+<Reward_Type>SCREEN_TEXT</Reward_Type><Reward_Param1>EAWR_synthetic_reveal_text_with_enough_units_to_wrap_over_several_lines</Reward_Param1>
+<Reward_Param2>-1</Reward_Param2></Event>
+<Event Name="EAWR_IMMEDIATE"><Event_Type>STORY_AI_NOTIFICATION</Event_Type><Event_Param2>EAWR_IMMEDIATE</Event_Param2>
+<Reward_Type>SCREEN_TEXT</Reward_Type><Reward_Param1>EAWR_immediate</Reward_Param1>
+<Reward_Param2>-1</Reward_Param2><Reward_Param5>0</Reward_Param5></Event></Story>''', encoding="utf-8")
+                (mod / "Data" / "Scripts" / "Story" / (MODULE + ".lua")).write_text('''function Base_Definitions() end
+function main()
+    for i = 1, 5 do coroutine.yield(true) end
+    Story_Event("EAWR_REVEAL")
+    Story_Event("EAWR_IMMEDIATE")
+    while true do coroutine.yield(true) end
+end
+''', encoding="utf-8")
+                facts = directory / "labels.json"
+                driver = directory / "driver.gd"
+                driver.write_text('''extends SceneTree
+var age = 0.0
+var admitted = -1.0
+func _initialize():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func _process(delta):
+    age += delta
+    var overlay = root.find_child("galactic_story_text", true, false)
+    var rows = []
+    if overlay:
+        for node in overlay.find_children("*", "Label", true, false):
+            if node.text.begins_with("EAWR"):
+                rows.append({"text": node.text, "visible": node.visible_characters})
+    if rows.size() >= 2 and admitted < 0.0:
+        admitted = age
+    if admitted >= 0.0 and age - admitted >= 0.6:
+        var file = FileAccess.open(%s, FileAccess.WRITE)
+        file.store_string(JSON.stringify(rows))
+        file.close()
+        quit()
+    elif age > 90.0:
+        quit(3)
+    return false
+''' % json.dumps(str(facts).replace("\\", "/")), encoding="utf-8")
+                command = [os.environ["EAWR_GODOT_EXECUTABLE"], "--render-thread", "separate", "--resolution", "1280x720",
+                           "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+                           "--eawr-galactic", CAMPAIGN, "--eawr-game-root", GAME_ROOT, "--eawr-mod-root", str(mod),
+                           "--eawr-galactic-paused", "no", "--eawr-audio", "off"]
+                result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=180, check=False)
+                log = result.stdout + result.stderr
+                (directory / "viewer.log").write_text(log, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, log)
+                self.assertNotIn("ERROR:", log)
+                rows = json.loads(facts.read_text(encoding="utf-8"))
+                reveal = next(row for row in rows if row["text"].startswith("EAWR_synthetic"))
+                immediate = next(row for row in rows if row["text"] == "EAWR_immediate")
+                self.assertEqual(immediate["visible"], len(immediate["text"]))
+                if rate == 0:
+                    self.assertEqual(reveal["visible"], 0)
+                else:
+                    self.assertGreaterEqual(reveal["visible"], 2)
+                    self.assertLess(reveal["visible"], len(reveal["text"]))
+
     def view(self, scene):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-story-letterbox-"))
         mod = build_mod(directory, scene)

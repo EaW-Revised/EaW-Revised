@@ -1,5 +1,6 @@
 #include "scene_test_support.hpp"
 #include "eawr/scene/space_population.hpp"
+#include "eawr/presentation/space/environment_scene.hpp"
 
 namespace eawr::tests::scene_tests {
 
@@ -383,6 +384,62 @@ void scene_contracts() {
                == std::vector<std::size_t>({1, 0, 0, 0}), "fewer placements than workers are counted");
 
     scene_issue_contracts(tree, catalog, records, map, input, scene, serial_bytes);
+
+    // SG-CLS-01: the environment claims by model family, even when neither
+    // the element nor its ancestry names a SpaceProp. Session candidates use
+    // the original record, before their synthetic live-scene identity exists.
+    const auto claim_bytes = ted({
+        {"EAWR_SCENE_PLANET_PARENT", std::array<float, 3>{0, 0, 0}, {}},
+        {"EAWR_SCENE_PLANET_DERIVED", std::array<float, 3>{0, 0, 0}, {}},
+        {"EAWR_SCENE_PLANET_UNCLASSED", std::array<float, 3>{0, 0, 0}, {}},
+        {"EAWR_SCENE_PLAIN", std::array<float, 3>{0, 0, 0}, {}},
+    });
+    auto claim_source = source;
+    claim_source.stored_size = claim_bytes.size();
+    auto claim_map = eawr::assets::load_map(claim_bytes, claim_source, types);
+    expect(static_cast<bool>(claim_map), "record-claim TED loads");
+    if (claim_map) {
+        const auto derived = catalog.resolve("EAWR_SCENE_PLANET_DERIVED");
+        const auto unclassed = catalog.resolve("EAWR_SCENE_PLANET_UNCLASSED");
+        expect(derived && derived.value().type_name == "SpaceProp"
+                   && derived.value().class_origin == "ancestor:SpaceProp",
+               "mod label chains to a SpaceProp-class parent");
+        expect(unclassed && unclassed.value().type_name == "Props_Backdrop"
+                   && unclassed.value().class_origin == "unclassed",
+               "arbitrary backdrop label has neither a class nor a SpaceProp prefix");
+        Assets claim_assets;
+        claim_assets.models.emplace("data/art/models/eawr_scene_planet.alo", model({"Planet.fx"}, "", {}));
+        claim_assets.files.insert("data/art/models/eawr_scene_planet.alo");
+        auto claim_input = input;
+        claim_input.map = &claim_map.value();
+        claim_input.access = claim_assets.access();
+        const auto claim_scene = eawr::scene::build(claim_input);
+        std::vector<std::uint32_t> environment_records;
+        const std::vector<std::uint32_t> session_candidates{0, 1, 2, 3};
+        for (const auto& placed : claim_scene.placements) {
+            const auto found = claim_assets.models.find(placed.model_path);
+            if (found != claim_assets.models.end()
+                && eawr::presentation::space::environment_family(found->second)
+                    != eawr::presentation::space::EnvironmentFamily::none) {
+                environment_records.push_back(placed.record_ordinal);
+            }
+        }
+        expect(environment_records == std::vector<std::uint32_t>({0, 1, 2}),
+               "actual planet-family models claim all three labels and leave the ordinary model alone");
+        using Owner = eawr::scene::SpaceRecordOwner;
+        std::vector<std::uint32_t> session_records;
+        for (const auto record : session_candidates) {
+            if (eawr::scene::space_record_owner(record, environment_records, session_candidates) == Owner::session)
+                session_records.push_back(record);
+        }
+        expect(session_records == std::vector<std::uint32_t>({3}),
+               "no planet record is both environment-owned and session-owned");
+        expect(eawr::scene::space_record_owner(0, environment_records, {}) == Owner::environment
+                   && eawr::scene::space_record_owner(3, environment_records, {}) == Owner::map,
+               "environment claims also exclude static population without a session");
+        expect(eawr::scene::space_record_owner(std::nullopt, environment_records, session_candidates) == Owner::map,
+               "spawned units without a map record are not suppressed, including record zero");
+    }
 
     const auto height_bytes = ted({
         {"EAWR_SCENE_BACKGROUND", std::array<float, 3>{3.0F, 4.0F, -4500.0F}, {336.0F, 336.0F, 0.0F}},

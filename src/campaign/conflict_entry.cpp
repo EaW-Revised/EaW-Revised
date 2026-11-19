@@ -35,7 +35,9 @@ core::Result<tactical::TacticalContent> conflict_entry_content(const tactical::T
     for (const auto& slot : setup.skirmish->slots) if (slot.human) humans.push_back(slot.player);
     auto bound = skirmish::session_content(*inputs.tables, humans, spawn_policy);
     if (!bound) return core::Result<tactical::TacticalContent>::failure(bound.error());
-    auto fog = skirmish::fog_rules(inputs);
+    // Selected-force campaign entry also supports ordinary spawn tables and no
+    // optional campaign rules extension; neither changes the battle's fog policy.
+    auto fog = skirmish::fog_rules(inputs, skirmish::SpaceFogContext::campaign);
     if (!fog) return core::Result<tactical::TacticalContent>::failure(fog.error());
     tactical::TacticalContent content;
     content.load_notes = std::move(bound.value().load_notes);
@@ -175,6 +177,7 @@ core::Result<ConflictEntry> build_conflict_entry(const ConflictRecord& record,
     for (const auto& unit : start.units) start.setup.units.push_back(unit.state);
     start.setup.first_free_entity_id = next;
     start.setup.skirmish = skirmish::recording_setup(selected_fixture, start).skirmish;
+    start.setup.skirmish->campaign_origin = true;
     // Background owner bindings are not commandable lobby seats (SKSU contract).
     std::erase_if(start.setup.skirmish->slots, [&](const auto& slot) {
         return slot.player != record.invader && slot.player != record.defender;

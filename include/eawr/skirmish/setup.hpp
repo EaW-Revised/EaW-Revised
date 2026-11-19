@@ -5,7 +5,9 @@
 #include "eawr/sim/seat.hpp"
 
 #include <memory>
+#include <span>
 #include <string>
+#include <string_view>
 
 namespace eawr::skirmish {
 
@@ -58,8 +60,21 @@ struct SetupMapQuery final {
 struct SetupFaction final {
     std::string name;
     std::string text_id;
+    std::string preview_icon; // WSS-63: resolved Multiplayer_Map_Preview_Icon atlas name.
+    bool neutral{};           // #7842: Is_Neutral; only the drop-down list reads it (setup_factions_for_map).
 };
 [[nodiscard]] std::vector<SetupFaction> setup_factions(const data::Catalog& catalog);
+// #7842 (owner-approved deviation from the original's unfiltered WSS-13 list): the factions a skirmish setup offers
+// for one map. `factions` is setup_factions() (Is_Playable); a neutral one is dropped here, only from the list: start,
+// admission and removal still go by Is_Playable alone. A faction stays when the map can start
+// it, that is when any team of the map lists it as a station candidate (SetupTeam::factions); a legacy map offers every
+// faction to both teams (WSS-19), so it lists them all. Catalog order is kept. With no map, or when the map lists none
+// (a map the setup refuses anyway), the whole list is returned so a combo is never empty. Player, AI, team and LAN rows
+// share this one helper; a row keeps its faction when it is still listed (see keep_listed_faction).
+[[nodiscard]] std::vector<SetupFaction> setup_factions_for_map(std::span<const SetupFaction> factions, const SetupMap* map);
+// The index to show in a faction combo after its list changed from `previous` (the combo's old selection by name, may be
+// empty) to `listed`: the same faction when still listed, else `fallback` clamped into the list, -1 for an empty list.
+[[nodiscard]] int keep_listed_faction(std::span<const SetupFaction> listed, std::string_view previous, std::size_t fallback);
 
 // Map headers and battle setups use different enum encodings; never cast between them.
 [[nodiscard]] constexpr assets::MapKind setup_map_kind(const sim::tactical::BattleDomain domain) noexcept {

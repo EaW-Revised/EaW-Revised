@@ -518,6 +518,12 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
     const fs::path next_action = state_dir / "next-action.json";
     const fs::path running_state = state_dir / "game-running.json";
     const fs::path launch_result = state_dir / "launch-result.json";
+    // Several manager windows may share instance 1. Their watchdog channels must never overwrite
+    // each other's status or requests, even though their profiles live under the same user-data root.
+    const fs::path watchdog_dir = state_dir / ("watchdog-" + std::to_string(self.pid) + "-" + self.start_time);
+    fs::create_directories(watchdog_dir, error);
+    if (error) return context.fail("EAWR cannot create its process watchdog channel: " + error.message());
+    runner.configure_watchdog(watchdog_dir, !options.no_dialogs);
     const auto select_profile_id = [&](const std::string* id) -> bool {
         if (!id || !portable_profile_id(*id)) return false;
         const fs::path profile = options.user_data / "mods" / "profiles" / path_from_utf8(*id + ".json");
@@ -594,8 +600,12 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
             }
         }
         if (!manager) refresh_depth_prepass();
-        const std::vector<std::wstring> args = manager
+        std::vector<std::wstring> args = manager
             ? mods_arguments(options.launcher_dir, godot, project, game_root, next_action) : godot_arguments(inputs);
+        if (manager && !runner.watchdog_token().empty()) {
+            args.insert(args.end(), {L"--eawr-watchdog", (watchdog_dir / "watchdog.json").wstring(),
+                                    L"--eawr-watchdog-token", widen_ascii(runner.watchdog_token())});
+        }
         log.line("starting " + path_to_utf8(godot));
 
         // The log of a GAME child (the manager is never named here): instance 1 uses the first user:// folder as before,
@@ -637,13 +647,15 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
             const ChildResult game = runner.run_monitored(godot, godot_arguments(inputs), options.launcher_dir, {}, publish);
             game_environment(false);
             if (published) fs::remove(running_state, io_error);
+            if (runner.session_closed()) return;
             if (published && io_error) live_error = context.fail("EAWR cannot clear the running game state: " + io_error.message());
             if (!game.started) context.fail("EAWR could not start the game: " + game.error, godot_log);
             else if (game.exit_code != 0) {
-                std::string reason = failure_from_report(inputs.report);
+                std::string reason = game.exit_code == kExitGpuReset ? "The game stopped: GPU reset." : failure_from_report(inputs.report);
                 if (reason.empty() && game.seconds < kEarlyExitSeconds)
                     reason = "The game stopped right after starting (exit code " + std::to_string(game.exit_code) + ").";
-                if (!reason.empty()) context.fail(reason, godot_log);
+                if (game.exit_code == kExitGpuReset) log.line(reason); // The still-open manager presents the result.
+                else if (!reason.empty()) context.fail(reason, godot_log);
             }
             // A request from the game must not relaunch the already-open manager.
             fs::remove(next_action, io_error);
@@ -672,6 +684,7 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
             child = manager ? runner.run_monitored(godot, args, options.launcher_dir, poll_manager, {})
                             : runner.run(godot, args, options.launcher_dir);
         }
+        if (runner.session_closed()) return kExitOk;
         if (live_error) return live_error;
         if (!child.started) {
             if (manager) return context.fail("EAWR could not start the mod manager: " + child.error);
@@ -683,6 +696,23 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
         error.clear();
         fs::remove(next_action, error);
         if (error) return context.fail("EAWR cannot consume the launch request: " + error.message());
+        if (manager && child.exit_code == 0 && action) {
+            const auto* kind = action->string_member("action");
+            if (kind && *kind == "apply-update") {
+                const auto* executable = action->string_member("executable");
+                const auto* arguments = action->member("arguments");
+                if (!executable || executable->empty() || !arguments || arguments->kind != JsonValue::Kind::array
+                    || arguments->array.size() > 1024) return context.fail("The update restart request is invalid.");
+                std::vector<std::wstring> command;
+                for (const auto& argument : arguments->array) {
+                    if (argument.kind != JsonValue::Kind::string) return context.fail("The update restart request is invalid.");
+                    command.push_back(path_from_utf8(argument.string).wstring());
+                }
+                if (!runner.start_detached(path_from_utf8(*executable), command, options.launcher_dir))
+                    return context.fail("The update helper could not be started. Start EAWR Mods again to continue.");
+                return kExitOk;
+            }
+        }
         log.line(std::string(manager ? "the mod manager" : "the game") + " exited with code "
                  + std::to_string(child.exit_code) + " after " + std::to_string(child.seconds) + " s");
         if (manager && child.exit_code != 0) {
@@ -694,7 +724,7 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
         if (child.exit_code != 0) {
             // The viewer's report names a startup failure at any time (first-run provisioning can take minutes). Without one, only an
             // exit right after starting is shown; a crash after a long session has nothing to explain and stays in the log.
-            std::string reason = failure_from_report(inputs.report);
+            std::string reason = child.exit_code == kExitGpuReset ? "The game stopped: GPU reset." : failure_from_report(inputs.report);
             if (reason.empty() && child.seconds < kEarlyExitSeconds) {
                 reason = "The game stopped right after starting (exit code " + std::to_string(child.exit_code) + ").";
             }

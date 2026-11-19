@@ -219,7 +219,7 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
                 const auto* definition = catalog.find(*layer, data::Category::game_object);
                 if (!definition) throw std::runtime_error("selection category authoring layer unavailable");
                 for (const auto& node : definition->root.children) {
-                    if (ai::upper_case(node.name) == ai::upper_case(tag) && !data::retail::is_placeholder(node.raw_text))
+                    if (data::retail::object_tag_matches(node.name, tag) && !data::retail::is_placeholder(node.raw_text))
                         result = bits(node.raw_text, object.object_id + " " + std::string(tag), result);
                 }
             }

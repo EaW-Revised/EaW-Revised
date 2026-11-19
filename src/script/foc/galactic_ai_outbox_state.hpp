@@ -35,5 +35,8 @@ struct DecodedOutboxState {
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> encode_outbox_state(const IntentOutbox&, std::uint64_t ai_ticks);
 // allow_tail: bytes after the outbox state are returned in `tail` instead of refused.
 [[nodiscard]] core::Result<DecodedOutboxState> decode_outbox_state(std::span<const std::uint8_t>, bool allow_tail = false);
+// Async step 3b: a finished batch the world has not adopted yet (the runtime's finished-window block), in the slice form above.
+[[nodiscard]] core::Result<std::vector<std::uint8_t>> encode_outbox_batch(const OutboxBatch::Contents&);
+[[nodiscard]] core::Result<OutboxBatch::Contents> decode_outbox_batch(std::span<const std::uint8_t>, const AsyncSchedule&);
 
 } // namespace eawr::script::foc::galactic_ai

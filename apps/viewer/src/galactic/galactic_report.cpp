@@ -336,6 +336,29 @@ void GalacticMode::State::write_report_production(std::ostringstream& output) co
                << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
     }
     output << "]}";
+    output << ",\n  \"planet_hover_panel\": {\"planet\": " << planet_hover_id
+           << ", \"visible\": " << (planet_hover_tooltip && planet_hover_tooltip->is_visible_in_tree() ? "true" : "false")
+           << ", \"builds\": " << planet_hover_builds
+           << ", \"name\": " << json(planet_hover_title ? planet_hover_title->get_text().utf8().get_data() : "")
+           << ", \"description\": " << json(planet_hover_description ? planet_hover_description->get_text().utf8().get_data() : "")
+           << ", \"income\": " << json(planet_hover_income ? planet_hover_income->get_text().utf8().get_data() : "")
+           << ", \"badge_resolved\": " << (planet_hover_badge && planet_hover_badge->get_texture().is_valid() ? "true" : "false")
+           << ", \"rect\": [" << planet_hover_rect.position.x << ", " << planet_hover_rect.position.y
+           << ", " << planet_hover_rect.size.x << ", " << planet_hover_rect.size.y << "]"
+           << ", \"space_max\": " << planet_hover_levels.space_max << ", \"space_filled\": " << planet_hover_levels.space_filled
+           << ", \"ground_max\": " << planet_hover_levels.ground_max << ", \"ground_filled\": " << planet_hover_levels.ground_filled
+           << ", \"pips\": [";
+    if (planet_hover_tooltip && planet_hover_tooltip->is_visible_in_tree()) for (std::size_t i = 0; i < planet_hover_pips.size(); ++i) {
+        const auto& pip = planet_hover_pips[i];
+        const auto rect = pip.image->get_global_rect();
+        const auto tint = pip.image->get_modulate();
+        output << (i ? ", " : "") << "{\"row\": " << pip.row << ", \"filled\": " << (pip.filled ? "true" : "false")
+               << ", \"texture\": " << json(planet_hover_pip_names[pip.row])
+               << ", \"resolved\": " << (pip.image->get_texture().is_valid() ? "true" : "false")
+               << ", \"tint\": [" << tint.r << ", " << tint.g << ", " << tint.b << ", " << tint.a
+               << "], \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
+    }
+    output << "]}";
     // #7177: the hero status icons' tooltip (WGSI-8).
     output << ",\n  \"hero_tooltip\": {\"planet\": " << hero_hover_planet << ", \"kind\": " << static_cast<int>(hero_hover_kind)
            << ", \"visible\": " << (hero_tooltip && hero_tooltip->is_visible_in_tree() ? "true" : "false") << ", \"cells\": [";
@@ -806,7 +829,7 @@ void GalacticMode::State::write_report_planet_hud(std::ostringstream& output) co
                << ", \"space\": " << optional_number(facts.space_level)
                << ", \"structures\": " << optional_number(facts.structures)
                << ", \"control\": " << optional_number(facts.political_control)
-               << ", \"hover\": " << json(galactic_view::unverified_intelligence_text(facts)) << "}";
+               << "}";
     }
     output << "], \"level_pips\": [";
     std::size_t pips_written{};

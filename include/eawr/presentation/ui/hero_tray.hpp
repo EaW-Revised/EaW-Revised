@@ -27,7 +27,6 @@ inline constexpr std::size_t hero_tray_capacity = 11;
 
 struct HeroTrayPolicy {
     std::size_t capacity{hero_tray_capacity}; // WHE-71: entries shown per side (6 + 5); the oldest are left out
-    bool include_generic_heroes{false};       // U-12: a generic hero (Is_Generic_Hero) gets an icon
     bool hostile_requires_sight{false};       // U-12: retail shows an unseen, fogged hostile hero at once (capture 10-20)
     bool contained_requires_bars{false};      // U-12: a carried hero only when its carrier displays contained bars
     bool list_carried_heroes{true};           // WHE-44/45: a carried hero's icon stands for its carrier
@@ -39,6 +38,7 @@ struct HeroTypeFlags {
     bool named_hero{};
     bool generic_hero{};
     bool contained_bars{}; // Display_Contained_Hero_Grab_Bars on the carrier type
+    bool show_hero_head{}; // WHE-80: explicit portrait admission, including generic heroes
 };
 // Sorted by `type`; lookups do not allocate.
 class HeroTypeTable final {

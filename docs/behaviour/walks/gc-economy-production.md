@@ -1129,3 +1129,23 @@ journal/payload integrity are also unchanged.
 The synthetic contracts exercise effective values and emitted notes, actual
 session creation/stepping, and 1/2/4/8 equality after an entire force pass is
 omitted. Stock acceptance additionally requires replay76 and the stock GC pair.
+
+### Authored orbital mining profile qualification (WGEP-10/94)
+
+The economic reader and preparation adapter admit `Planet_Income_Bonus_Ability`
+on an arbitrary `SpaceUnit`, including an inherited variant. A synthetic mod
+fixture authors percentage 0.375, absolute 1.5 and mining-colony multiplier 1.25;
+its live source contributes 6.5625 on basic income 10 at a mining colony and 5.25 at
+an ordinary planet. Ownership loss removes that source's effect, recapture adds
+it once, relocation uses the destination's basic income and colony flag, and
+battle loss removes the source. The same installed-data test prepares the stock
+mining structure from its XML and exercises capture and recapture. Both paths
+compare canonical continuation hashes on 1/2/4/8 workers.
+
+This qualifies the existing class-independent arithmetic and source lifecycle;
+it adds no simulation behavior. Both the SpaceUnit and SpecialStructure nested
+`@Name` rows are partial for the applied ability family and numeric profile;
+the authored name has no qualified identity-dependent consumer. The adapter
+retains one mining profile per object type, with no multiple-name stacking
+contract. External enable/cancel and
+retail restoration delivery remain `income_external_lifecycle` above.

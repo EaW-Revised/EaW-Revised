@@ -897,7 +897,7 @@ void setup_contract(const std::filesystem::path& fixtures) {
             "<Container Name=\"Policy_Hero\"><Is_Named_Hero>yes</Is_Named_Hero></Container>"
             "<Container Name=\"Policy_Derived\"><Variant_Of_Existing_Type>Policy_Hero</Variant_Of_Existing_Type></Container>"
             "<HeroUnit Name=\"Policy_Not_Hero\"><Is_Named_Hero>no</Is_Named_Hero></HeroUnit>"
-            "<SpaceUnit Name=\"Policy_Owner\"><Abilities><Lucky_Shot_Attack_Ability Name=\"Policy_Super\"/></Abilities></SpaceUnit>"
+            "<SpaceUnit Name=\"Policy_Owner\"><Abilities SubObjectList=\"Yes\"><Lucky_Shot_Attack_Ability Name=\"Policy_Super\"/></Abilities></SpaceUnit>"
             "<UpgradeObject Name=\"Policy_Super\"><Is_Skirmish_Tactical_Super_Weapon>yes</Is_Skirmish_Tactical_Super_Weapon></UpgradeObject>"
             "</Objects>";
         const eawr::vfs::MountSpec mount{.layer_id = "synthetic-mod", .data_root = directory,
@@ -1077,10 +1077,11 @@ void setup_contract(const std::filesystem::path& fixtures) {
         std::ofstream(directory / "xml/factions.xml")
             << "<Factions>"
                "<Faction Name=\"Rebel\"><Is_Playable>Yes</Is_Playable><Text_ID>TEXT_REBEL</Text_ID></Faction>"
-               "<Faction Name=\"Empire\"><Is_Playable>Yes</Is_Playable></Faction>"
+               "<Faction Name=\"Empire\"><Is_Playable>Yes</Is_Playable><Multiplayer_Map_Preview_Icon></Multiplayer_Map_Preview_Icon></Faction>"
                "<Faction Name=\"Pirates\"><Is_Playable>No</Is_Playable><Create_Player_In_Multiplayer_Games>Yes</Create_Player_In_Multiplayer_Games></Faction>"
                "<Faction Name=\"Unmarked\"></Faction>"
                "<Faction Name=\"Alpha_Fleet\"><Is_Playable>Yes</Is_Playable><Text_ID>TEXT_ALPHA</Text_ID>"
+               "<Multiplayer_Map_Preview_Icon>  CUSTOM_ALPHA.TGA  </Multiplayer_Map_Preview_Icon>"
                "<Is_Debug_Switchable_To>No</Is_Debug_Switchable_To></Faction>"
                "<Faction Name=\"Derived_Fleet\"><Variant_Of_Existing_Type>Alpha_Fleet</Variant_Of_Existing_Type></Faction>"
                "<Faction Name=\"Bare_Fleet\"><Is_Playable>No</Is_Playable></Faction>"
@@ -1089,7 +1090,11 @@ void setup_contract(const std::filesystem::path& fixtures) {
         std::ofstream(directory / "xml/factions_more.xml")
             << "<Factions>"
                "<Faction Name=\"Bare_Fleet\"><Is_Playable>Yes</Is_Playable></Faction>"
-               "<Faction Name=\"Zed_Fleet\"><Is_Playable>Yes</Is_Playable></Faction>"
+               "<Faction Name=\"Zed_Fleet\"><Is_Playable>Yes</Is_Playable>"
+               "<Variant_Of_Existing_Type>Alpha_Fleet</Variant_Of_Existing_Type>"
+               "<Text_ID></Text_ID>"
+               "<Multiplayer_Map_Preview_Icon>CUSTOM_ZED.TGA</Multiplayer_Map_Preview_Icon></Faction>"
+               "<Faction Name=\"Minor_Neutral\"><Is_Playable>Yes</Is_Playable><Is_Neutral>Yes</Is_Neutral></Faction>"
                "</Factions>";
         const eawr::vfs::MountSpec mount{.layer_id = "synthetic-factions", .data_root = directory,
             .loose_logical_prefix = "data", .active_archives = {}};
@@ -1101,11 +1106,53 @@ void setup_contract(const std::filesystem::path& fixtures) {
             const auto factions = skirmish::setup_factions(loaded.value().catalog);
             std::vector<std::string> names;
             for (const auto& faction : factions) names.push_back(faction.name);
-            expect(names == std::vector<std::string>{"Rebel", "Empire", "Alpha_Fleet", "Derived_Fleet", "Zed_Fleet"},
-                "WSS-12/13: playable catalog factions in data order, with no name list, count limit or debug-switch gate");
-            expect(factions.size() == 5 && factions[0].text_id == "TEXT_REBEL" && factions[1].text_id.empty()
+            expect(names == std::vector<std::string>{"Rebel", "Empire", "Alpha_Fleet", "Derived_Fleet", "Zed_Fleet", "Minor_Neutral"},
+                "WSS-12/13: playable catalog factions in data order, with no name list, count limit or debug-switch gate;"
+                " start and admission still see a neutral playable faction (#7842 changes the list only)");
+            expect(factions.size() == 6 && factions.back().neutral && !factions.front().neutral,
+                "#7842: setup_factions records Is_Neutral without dropping the faction");
+            const std::vector<std::string> listed_names{"Rebel", "Empire", "Alpha_Fleet", "Derived_Fleet", "Zed_Fleet"};
+            {
+                // #7842: the list a map can start (owner-approved deviation from the unfiltered WSS-13 list).
+                const auto offered = [&](const skirmish::SetupMap* map) {
+                    std::vector<std::string> out;
+                    for (const auto& entry : skirmish::setup_factions_for_map(factions, map)) out.push_back(entry.name);
+                    return out;
+                };
+                skirmish::SetupMap marker_map;
+                marker_map.metadata.new_markers = true;
+                marker_map.teams = {{0, {"Rebel", "Zed_Fleet"}, std::nullopt}, {1, {"empire", "Rebel"}, std::nullopt}};
+                expect(offered(&marker_map) == std::vector<std::string>{"Rebel", "Empire", "Zed_Fleet"},
+                    "#7842: a marker map lists the union of its teams' station candidates, case-insensitively, in catalog order");
+                skirmish::SetupMap legacy_map;
+                legacy_map.metadata.new_markers = false;
+                for (std::uint32_t team = 0; team < 2; ++team) {
+                    legacy_map.teams.push_back({team, {}, std::nullopt});
+                    for (const auto& entry : factions) legacy_map.teams.back().factions.push_back(entry.name);
+                }
+                expect(offered(&legacy_map) == listed_names,
+                    "#7842: a map that offers every faction to both teams lists them all, but never a neutral one");
+                expect(offered(nullptr) == listed_names, "#7842: with no map every playable, non-neutral faction is listed");
+                skirmish::SetupMap refused_map;
+                refused_map.unavailable = "This map has fewer than two supported station teams.";
+                expect(offered(&refused_map) == listed_names, "#7842: a map that lists no faction leaves the full list, never an empty combo");
+                std::vector<skirmish::SetupFaction> listed = skirmish::setup_factions_for_map(factions, &marker_map);
+                expect(skirmish::keep_listed_faction(listed, "Zed_Fleet", 0) == 2
+                    && skirmish::keep_listed_faction(listed, "ZED_FLEET", 0) == 2,
+                    "#7842: a row keeps its faction when the new list still has it (case-insensitive)");
+                expect(skirmish::keep_listed_faction(listed, "Alpha_Fleet", 1) == 1
+                    && skirmish::keep_listed_faction(listed, "", 0) == 0
+                    && skirmish::keep_listed_faction(listed, "Alpha_Fleet", 9) == 2,
+                    "#7842: a faction no longer listed falls back to the row default, clamped into the list");
+                expect(skirmish::keep_listed_faction(std::span<const skirmish::SetupFaction>{}, "Rebel", 0) == -1, "#7842: an empty list selects nothing");
+            }
+            expect(factions.size() == 6 && factions[0].text_id == "TEXT_REBEL" && factions[1].text_id.empty()
                 && factions[2].text_id == "TEXT_ALPHA" && factions[3].text_id == "TEXT_ALPHA",
                 "WSS-12: captions come from the resolved Text_ID, inherited when a variant omits it");
+            expect(factions.size() == 6 && factions[0].preview_icon.empty() && factions[1].preview_icon.empty()
+                && factions[2].preview_icon == "CUSTOM_ALPHA.TGA" && factions[3].preview_icon == "CUSTOM_ALPHA.TGA"
+                && factions[4].preview_icon == "CUSTOM_ZED.TGA",
+                "WSS-63: authored preview atlas names are trimmed, inherited and overridden; absent/empty stays empty");
             for (const auto& translated : {std::u16string(u"Republic"), std::u16string(u"Alliance")}) {
                 eawr::data::ui::TextDatabase database;
                 database.entries.push_back({eawr::data::ui::text_key_crc("TEXT_REBEL"), "TEXT_REBEL", translated});
@@ -1172,9 +1219,9 @@ void setup_contract(const std::filesystem::path& fixtures) {
                         expect(caption == eawr::data::ui::to_utf8(lookup.text(entry.text_id)),
                             "stock list caption equals the single-player setup caption");
                 }
-                expect(captions == std::vector<std::string>{"Rebel Alliance", "Empire", "Alpha Fleet", "Alpha Fleet", "Zed_Fleet"},
+                expect(captions == std::vector<std::string>{"Rebel Alliance", "Empire", "Alpha Fleet", "Alpha Fleet", "Zed_Fleet", "Minor_Neutral"},
                     "stock names stay right: a faction without text keeps its identity, the rest show their text");
-                expect(names == std::vector<std::string>{"Rebel", "Empire", "Alpha_Fleet", "Derived_Fleet", "Zed_Fleet"},
+                expect(names == std::vector<std::string>{"Rebel", "Empire", "Alpha_Fleet", "Derived_Fleet", "Zed_Fleet", "Minor_Neutral"},
                     "faction identities behind the list are unchanged");
             }
             // WSS-LAN: host and peers key the roster on the catalog ordinals of scene::faction_order.

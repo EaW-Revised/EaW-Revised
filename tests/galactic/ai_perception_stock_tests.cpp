@@ -800,6 +800,16 @@ std::string producer_preparation_contracts(unsigned workers) {
         const auto later = deferred.bind_publication(cut, publication, executor, frame + 1, 100);
         expect(later && deferred.copy_input() != kept && deferred.copy_input()->clocks.synchronization == frame + 1,
             "a bind at a later frame publishes a new input");
+        // The same frame with another publication, or another snapshot, is not the bound cut: each publishes a new input.
+        const auto bound_frame = frame + 1;
+        const auto at_frame = deferred.copy_input();
+        const auto other = std::make_shared<const ai::GalacticConnectivity>();
+        const auto republished = deferred.bind_publication(cut, other, executor, bound_frame, 100);
+        expect(republished && deferred.copy_input() != at_frame, "another publication at the same frame publishes a new input");
+        const auto before_snapshot = deferred.copy_input();
+        const auto next_cut = make_snapshot();
+        const auto rebound = deferred.bind_publication(next_cut, other, executor, bound_frame, 100);
+        expect(rebound && deferred.copy_input() != before_snapshot, "another snapshot at the same frame publishes a new input");
     }
     return trace.str();
 }

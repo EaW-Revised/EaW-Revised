@@ -870,6 +870,34 @@ void native_journal_disk() {
         expect(!gc::write_replay(replay), "native effect journal refuses noncanonical owner sequence");
     }
 }
+void window_reads() {
+    auto world = take(gc::GalacticSession::create(fixture()));
+    auto input_setup = fixture(); input_setup.fleets.clear(); input_setup.movement->contents.clear();
+    auto input = take(gc::GalacticSession::create(std::move(input_setup)));
+    struct Reader final : ga::NativeActions::WorldReader {
+        const gc::GalacticSession& input;
+        explicit Reader(const gc::GalacticSession& value) : input(value) {}
+        std::shared_ptr<const gc::GalacticSnapshot> snapshot() const override { return input.snapshot(); }
+        const gc::PlanetGraph* graph() const override { return nullptr; }
+        const gc::GalacticSetup& setup() const override { return input.setup(); }
+        std::uint64_t completed_tick() const override { return input.completed_tick(); }
+        eawr::sim::EntityId next_entity_id() const override { return 123456; }
+        std::uint64_t pause_depth() const override { return 1; }
+    } reader(input);
+    ga::NativeActions actions(world, std::make_shared<ai::GalacticFunding>(), {}, {});
+    expect(actions.containing_fleet(1, 20) == 10, "unbound native reads see the live fleet");
+    expect(actions.bind_world_reader(&reader) == nullptr, "window input is initially unbound");
+    expect(actions.snapshot() == input.snapshot() && !actions.containing_fleet(1, 20),
+        "native actor queries use the window snapshot even when the live world differs");
+    expect(actions.next_entity_id() == 123456 && actions.identity_ceiling() == 123456,
+        "native identity readers use the window frontier");
+    const ga::QualifiedFreestore store;
+    expect(take(actions.preflight_freestore_move(store, 1, 20, 2)) == ga::NativeActions::FreestoreMove::refused,
+        "window pause input gates movement before an absent admission owner");
+    expect(actions.bind_world_reader(nullptr) == &reader && actions.snapshot() == world.snapshot()
+        && actions.containing_fleet(1, 20) == 10 && actions.next_entity_id() == world.next_entity_id(),
+        "leaving the window restores live native reads");
+}
 void contracts() {
     std::string baseline;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
@@ -1192,6 +1220,7 @@ int case_galactic_ai_movement_tests(int argc, char** argv) {
         return 1;
     }
     try {
+        window_reads();
         if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
         else { raid_script_and_movement(); raid_native_disk(); shared_movement_block(); movement_associations(); taskforce_containment(); invasion_queue_disk(); invasion_retention(); equal_owner_invasion_block(); summary_hold_survives_undefended_resume(); native_journal_disk(); contracts(); changed_path(); bribed_traversal_without_owner(); skipped_arrival_polls(); arrival_then_conflict_before_poll(); packed_remnant_hash(); native_management_gate(); population_memo_equality(); }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

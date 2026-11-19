@@ -168,10 +168,11 @@ using StandaloneTextures = std::function<std::optional<std::string>(std::string_
 // the same lookup, no EAWR-ASSET-NAME-0001 line and no degradation-ledger entry.
 [[nodiscard]] StandaloneTextures vfs_standalone_textures(const vfs::Vfs& filesystem, bool report_misses = true);
 
-// A UI texture name resolved as a kit slot's is: the mega-texture entry, then a
-// standalone file; `missing` when neither has it (no diagnostic is recorded).
+// Exact atlas, standalone exact/retry, then atlas sibling tolerance. Legacy loose-only
+// shell meshes set standalone_first to preserve their full-image source when present.
+// Returns missing when none has it; no diagnostic is recorded.
 [[nodiscard]] ThemeTexture resolve_ui_texture(std::string_view texture, const assets::MegaTexture* atlas,
-                                              const StandaloneTextures& standalone);
+                                              const StandaloneTextures& standalone, bool standalone_first = false);
 
 // Limits for a standalone mod JPEG, checked before any decoder allocates:
 // the file size and the frame's pixel count (the same 8192^2 page budget as

@@ -18,6 +18,26 @@ using namespace eawr::viewer::galactic;
 
 int case_galactic_planet_hud_tests() {
     {
+        PlanetHudFacts facts;
+        facts.space_capacity = 5; facts.ground_capacity = 8;
+        facts.space_level = 3; facts.ground_structure_count = 6;
+        // Hidden values cannot fill either row, even if a caller supplies populated payload.
+        assert((planet_hover_levels(facts, 2, 4) == PlanetHoverLevels{5, 0, 8, 0}));
+        facts.space_level_known = true;
+        assert((planet_hover_levels(facts, 2, 4) == PlanetHoverLevels{5, 3, 8, 0}));
+        facts.ground_level_known = true;
+        assert((planet_hover_levels(facts, 2, 4) == PlanetHoverLevels{5, 3, 8, 6}));
+        facts.ground_capacity.reset(); facts.space_capacity.reset();
+        assert((planet_hover_levels(facts, 3, 6) == PlanetHoverLevels{3, 3, 6, 6}));
+        assert(!facts.ground_capacity && !facts.space_capacity); // Fallback never modifies shared consumers.
+        assert(planet_hover_levels(facts, 99, 8).space_max == 5);
+        facts.ground_level = 2; facts.ground_structure_count = 5;
+        assert(planet_hover_levels(facts, 5, 8).ground_filled == 5); // Count structures, not the ground base level.
+        facts.space_level = 99; facts.ground_structure_count = 99;
+        assert((planet_hover_levels(facts, 3, 6) == PlanetHoverLevels{3, 3, 6, 6}));
+        assert((planet_hover_levels(facts, std::nullopt, std::nullopt) == PlanetHoverLevels{}));
+    }
+    {
         eawr::data::ui::CommandBarComponent filter;
         filter.name = "synthetic_filter"; filter.groups = {"fIlTeR_Space"};
         assert(is_command_filter(filter));
@@ -299,6 +319,20 @@ int case_galactic_planet_hud_tests() {
     payload.planet = 7; payload.ground_level = 4; payload.space_level = 2;
     payload.landed_transports = {{1, 1, false, false}, {2, 1, false, false},
         {3, 1, false, false}, {4, 1, true, false}, {0, 1, false, false}};
+    eawr::sim::galactic::PlanetProduction production;
+    production.planet = 7;
+    eawr::sim::galactic::ProductionObject structure;
+    structure.domain = eawr::sim::galactic::ProductionDomain::ground;
+    structure.kind = eawr::sim::galactic::ProductionKind::structure;
+    production.objects = {structure, structure};
+    assert(!observed_hud_facts(observation, &payload, &production, 1).ground_structure_count);
+    observation.knowledge.ground_level = true;
+    const auto bases = observed_hud_facts(observation, &payload, &production, 1);
+    assert(bases.ground_structure_count == 2 && !bases.structures);
+    observation.knowledge.ground_level = false; observation.knowledge.structures = true;
+    const auto identities = observed_hud_facts(observation, &payload, &production, 1);
+    assert(identities.structures == 2 && !identities.ground_structure_count);
+    observation.knowledge.structures = false;
     auto discovered = observed_hud_facts(observation, &payload, nullptr, 1, 75.0, 190.0);
     assert(!discovered.landed_companies);
     observation.knowledge.ground_count = true;
@@ -644,11 +678,19 @@ int case_galactic_planet_hud_tests() {
         // #6756: the same rule for the weather icon components (card header, opened map): only atlas entries draw.
         eawr::assets::MegaTexture atlas;
         atlas.entries.push_back({"i_pa_weather_sun.tga", {0, 0, 64, 64}, true, false, false});
-        assert(command_bar_icon_in_atlas(&atlas, "i_pa_weather_sun.tga"));
-        assert(command_bar_icon_in_atlas(&atlas, "I_PA_Weather_Sun.TGA"));
-        assert(!command_bar_icon_in_atlas(&atlas, "Loadscreens/Ground_Empire_10.png"));
-        assert(!command_bar_icon_in_atlas(&atlas, ""));
-        assert(!command_bar_icon_in_atlas(nullptr, "i_pa_weather_sun.tga"));
+        CommandBarIconAtlasCache cache;
+        assert(command_bar_icon_in_atlas(&atlas, "i_pa_weather_sun.tga", cache));
+        assert(command_bar_icon_in_atlas(&atlas, "I_PA_Weather_Sun.TGA", cache));
+        assert(command_bar_icon_in_atlas(&atlas, "i_pa_weather_sun.dds", cache));
+        assert(!command_bar_icon_in_atlas(&atlas, "missing.dds", cache));
+        const auto cached_names = cache.size();
+        atlas.entries.push_back({"missing.tga", {0, 0, 64, 64}, true, false, false});
+        assert(!command_bar_icon_in_atlas(&atlas, "missing.dds", cache));
+        assert(cache.size() == cached_names); // A per-frame miss never repeats the sibling search.
+        cache.clear();
+        assert(command_bar_icon_in_atlas(&atlas, "missing.dds", cache));
+        assert(!command_bar_icon_in_atlas(&atlas, "", cache));
+        assert(!command_bar_icon_in_atlas(nullptr, "i_pa_weather_sun.tga", cache));
         // #6756: a text component's authored Scale sizes its glyphs.
         assert(scaled_glyph_pixels(12, 0.7F) == 8 && scaled_glyph_pixels(12, 1.0F) == 12 && scaled_glyph_pixels(1, 0.1F) == 1);
         // #6756: the Planet Info dialog's weather picture swaps the first four characters for the loading prefix.

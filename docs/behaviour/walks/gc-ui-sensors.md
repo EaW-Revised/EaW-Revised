@@ -32,6 +32,23 @@ tactical handoff stop at WGM-07..38 and WGM-39..82. AI context stops at
 [the AI walk](gc-ai.md), WGA-06..08, WGA-18 and WGA-55. Checkpoint contents belong
 to the session/save walk; this walk names the state its consumers need.
 
+## Planet hover faction-art consumer trace
+
+The 2026-11-18 debug-build trace below describes the generic legacy icon-grid
+consumer. Retail captures H-R01/H-R02 instead show the ordinary command-bar
+planet encyclopedia in WGUI-188. The remake implements that observed panel;
+it does not display the generic grid or claim its faction texture tags applied.
+`Big_Fleet_Color` remains unapplied.
+
+| Rule | Observed contract | Evidence |
+|---|---|---|
+| WGUI-184 | The faction icon loader resolves each nonempty authored ground-base, ground-transport, starbase and fleet icon name to its corresponding 2D texture; missing names are not replaced by another faction's art. The planet hover icon grid uses the planet's apparent faction for every icon texture, even where a base/transport/fleet owner is separately looked up. Its ground-base row uses the faction ground-base texture; its fleet row uses the faction fleet texture. The latter draws five positions, counting orbiting fleet objects that are locally visible, and uses zero filled positions when fleet-size knowledge is absent. It counts fleet objects, not ships. The ground row draws the current maximum ground-base level and dims RGB by half before the icon at the current level; alpha is retained. The fleet row likewise dims before the icon at the admitted count. | debug build G6-T02; faction icon loader, planet-hover composition, texture getters and base-capacity getter |
+| WGUI-185 | The complete grid also has an apparent-political-control faction-badge row; a five-position landed-transport row using the faction ground-transport texture; and a starbase row using the faction starbase texture. Political badges use the authored `MaximumPoliticalControl` count, filled up to the magnitude of the observer-admitted signed apparent control (a fractional final position is filled); zero control dims the entire row. A faction with `Is_Neutral` stops after one badge. Political badges begin at logical row 1/column 0; ground-base icons at row 2/column 0 and transports at row 2/column 6; starbase icons at row 3/column 0 and fleets at row 3/column 6. Transport fill is zero without ground-force-size knowledge. Each group resets the apparent faction's ordinary colour-resolver result before applying its half-RGB unfilled tint. A base-capacity getter without a planetary state caps the authored land-structure maximum at five; with a planetary state it returns that state's current maximum and asserts that it is at most five. The starbase capacity is the authored maximum without planetary state; with state it is the current maximum, at least the authored maximum and at most five. | debug build G6-T02; complete planet-hover producer and ground-base capacity getter |
+| WGUI-186 | Generic tooltip icon cells use the selected font's sample `W` width and sample string height. Each icon is sized to that cell and stores the supplied integer column/row. The frame expands to cover each inserted icon. This is a font-cell grid, not the construction/hero tooltip's 44-unit portrait grid. | debug build G6-T02; tooltip icon insertion |
+| WGUI-187 | The inspected large fleet command-button colourization selects authored component alternate textures by the configured faction sides or raid capability; it does not call the faction fleet-texture getter. The general faction colour resolver selects ordinary, local-player or enemy colours according to the profile/tutorial context: without a controllable local player use ordinary `Color`; otherwise tutorial or the red/green profile selects `Player_Color` for the local faction and `Enemy_Color` for other playable nonneutral factions. Neutral and nonplayable nonneutral factions retain ordinary colour. It does not read `Big_Fleet_Color`. The tag table confirms a colour-field parser for `Big_Fleet_Color`, but this bounded trace (planet tooltip, large fleet buttons, colour resolver and named getter search) establishes no positive reader of that field. It remains explicitly unapplied; a direct reader elsewhere is not excluded. | debug build G6-T02; bounded negative consumer trace |
+
+| WGUI-188 | The ordinary galactic planet-name hover opens a rich encyclopedia at the fixed left advisor anchor, growing upward. The header shows the contribution badge when nonzero, the overview faction emblem, localized planet name, admitted income and weather icon; the body shows the planet type's localized encyclopedia text. A separator precedes space pips, then ground pips. Space positions use the maximum station level (live planetary capacity, authored `Max_Space_Base` without state, at most five); ground positions use the current maximum special-structure slots (authored `Special_Structures_Land` without state), without the generic grid's five-position ground cap. Space fill uses the current station level only with station-level knowledge. Ground fill uses the current count of ground special structures only with ground-base-level knowledge, independently of permission to identify those structures; neither row counts fleets or transports. Ownership knowledge selects the owner's ordinary pip colour, otherwise Neutral colour. Unknown quantities fill zero. The ordinary icon helper requests scale 1.5; empty pips halve RGB and retain opacity. In the aligned retail pip pixels the fully white source texels become RGB (54,134,242) on known owned Coruscant and (50,50,50) on unknown enemy Yavin, half the Neutral colour (100,100,100). The header requests scale-one emblem art and reserves a separate weather/header-separator row before the description. The remake reads pip art from the `g_space_level_pips` / `g_ground_level_pips` alternate-texture authoring and the mounted command-bar atlas. Coruscant's authored maxima are 5 space / 8 ground, matching H-R01; enemy Yavin's are 3 / 6, matching H-R02, whose unknown rows remain unfilled. The observed ordinary panel and these pip entries do not resolve through the absent legacy faction icon names. The panel is retained by planet, admitted-facts digest, UI scale, resolution and fixed anchor; unchanged frames perform no text building, font measurement, texture lookups or child reconstruction. A pointer move restarts admission; ending hover hides the panel. | retail FoC H-R01/H-R02, 2026-11-18, GTX 970, stock Equal Footing as Empire, fog enabled, Coruscant and enemy Yavin 4; debug build H-D01, ordinary planet encyclopedia and pip composition; effective stock planet and command-bar authoring |
+
 ## Frame schedule clarification
 
 The [galactic frame schedule](../galactic-frame-service-schedule.md) narrows
@@ -81,6 +98,19 @@ are ownership; space/ground level; income; fleet presence/count/contents; ground
 count/contents; structures; political control/breakdown; production; minor/major
 stealth heroes; income breakdown; strongest ship; force-sensitive heroes;
 superweapons. No tactical fog-cell grid or last-seen model is substituted here.
+
+The debug-build follow-up on 2026-11-18 (G6-N01) confirms that default
+ownership/fleet-presence knowledge does **not** grant discovery. A new planet
+starts undiscovered; campaign startup explicitly reveals the authored local
+home planet. The local intelligence refresh installs its faction default and
+combines modifiers without setting discovery. WGUI-01..04/107 supply the
+separate ordinary reveal rules. Thus a foreign planet outside those rules can
+retain the undiscovered model alternate **2** from WGUI-05 while its starting
+fleet is known to a Rebel or Underworld observer. Fleet-marker admission remains
+the independent visibility/presence check in WGUI-28; fleet knowledge is not an
+additional discovery seed. G6-N01 rechecks initialization, reveal writes,
+intelligence refresh and model selection; it is a static debug-build trace,
+not a new retail capture.
 
 ## Spy/probe intelligence effects
 

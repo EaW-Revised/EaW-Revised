@@ -305,7 +305,7 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
             ++count;
         }
         auto& sample = gripper.icon_samples[(count - 1) % gripper.icon_samples.size()];
-        sample = {shown, frame.live->presented_tick(), {}, false, false};
+        sample = {shown, frame.live->presented_tick(), {}, false, false, {}, {}, false, false};
         return sample;
     };
     for (auto& [squadron, gripper] : grippers_) {
@@ -332,6 +332,8 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
         auto [anchor, inserted] = grippers_.try_emplace(squadron);
         auto& gripper = anchor->second;
         auto& icon_sample = sample_icon(gripper);
+        icon_sample.admitted = true;
+        const bool resumed = inserted || gripper.last_drawn_frame + 1 != icon_frame_;
         if (inserted) gripper.motion.position = at;
         const auto cell = grid_.cell_of(squadron);
         const bool idle_grid = container != nullptr && container->squadron_idle_anchor.has_value();
@@ -339,6 +341,12 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
         if (idle_grid) {
             const auto& idle = *container->squadron_idle_anchor;
             desired = {to_float(idle.x), to_float(idle.y), to_float(idle.z)};
+        }
+        // WU-62: never resume the visible slide from an anchor retained through
+        // fog, cinematic UI suppression or screen culling. Reuse this icon pass.
+        if (resumed) {
+            gripper.motion.position = desired;
+            gripper.motion.speed = 0.0F;
         }
         std::optional<Vec3> landing;
         if (container != nullptr && container->arrival_exit) {
@@ -366,6 +374,7 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
                     const auto pick = frame.ray(anchor_screen);
                     if (const auto world = pick ? frame.scene->point_at_height(*pick, at[2]) : std::nullopt) {
                         desired = *world;
+                        if (resumed) gripper.motion.position = desired;
                         if (ui::settle_squadron_icon(gripper.motion, desired, gripper_snap_distance_,
                                                     gripper.settled_cell.has_value())) {
                             gripper.settled_cell = cell;
@@ -379,7 +388,7 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
         }
         gripper.desired = desired;
         gripper.idle = idle_grid;
-        if (!arrival_owns_anchor && !inserted) {
+        if (!arrival_owns_anchor && !resumed) {
             float fastest = 0.0F;
             float thrust = 0.0F;
             bool leader = true;
@@ -467,6 +476,10 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
                 icon_sample.screen = *screen;
                 icon_sample.drawn = true;
                 icon_sample.grid = grid_screen.has_value();
+                icon_sample.anchor = gripper.motion.position;
+                icon_sample.desired = desired;
+                icon_sample.resumed = resumed;
+                gripper.last_drawn_frame = icon_frame_;
                 if (arrival_sample != nullptr) arrival_sample->drawn = true;
             }
         }

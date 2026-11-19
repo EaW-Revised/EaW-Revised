@@ -241,6 +241,59 @@ std::optional<IntentRecord> get_record(Reader& in) {
     if (in.failed() || !request) return std::nullopt;
     return IntentRecord{std::move(*request), first, next, first_invasion, next_invasion};
 }
+// The slices of the outbox state and of a finished batch share one form.
+core::Result<void> put_slices(Writer& out, std::span<const OutboxSlice> slices) {
+    out.u32(static_cast<std::uint32_t>(slices.size()));
+    for (const auto& slice : slices) {
+        out.u64(slice.snapshot_tick); out.u32(slice.virtual_tick); out.u64(slice.apply_tick);
+        out.u32(static_cast<std::uint32_t>(slice.intents.size()));
+        for (const auto& intent : slice.intents) { out.u32(intent.player); put_record(out, intent.record); }
+        out.u32(static_cast<std::uint32_t>(slice.commands.size()));
+        for (const auto& command : slice.commands) {
+            out.u64(command.tick); out.u64(command.issuer); out.u64(command.sequence); out.text(command.verb);
+            put_value(out, authoritative::Value{command.arguments}, 0);
+        }
+        if (out.bytes.size() > max_state_bytes) return fail<void>("pending work exceeds the state limit");
+    }
+    return core::Result<void>::success();
+}
+core::Result<std::vector<OutboxSlice>> get_slices(Reader& in, const AsyncSchedule& schedule) {
+    using Result = core::Result<std::vector<OutboxSlice>>;
+    const auto count = in.u32();
+    if (in.failed() || count > max_slices) return fail<std::vector<OutboxSlice>>("invalid header");
+    std::vector<OutboxSlice> slices;
+    std::uint64_t previous_apply{};
+    for (std::uint32_t index = 0; index < count; ++index) {
+        OutboxSlice slice;
+        slice.snapshot_tick = in.u64(); slice.virtual_tick = in.u32(); slice.apply_tick = in.u64();
+        if (in.failed() || slice.virtual_tick == 0 || slice.virtual_tick > schedule.batch_ticks
+            || slice.apply_tick != apply_tick(schedule, slice.snapshot_tick, slice.virtual_tick)
+            || (index != 0 && slice.apply_tick < previous_apply))
+            return fail<std::vector<OutboxSlice>>("slice timing differs from the schedule");
+        previous_apply = slice.apply_tick;
+        const auto intents = in.u32();
+        if (in.failed() || in.remaining() < intents) return fail<std::vector<OutboxSlice>>("truncated intents");
+        for (std::uint32_t i = 0; i < intents; ++i) {
+            const auto player = in.u32();
+            auto record = get_record(in);
+            if (!record || in.failed()) return fail<std::vector<OutboxSlice>>("invalid intent");
+            slice.intents.push_back(PlayerIntent{player, std::move(*record), {}});
+        }
+        const auto commands = in.u32();
+        if (in.failed() || in.remaining() < commands) return fail<std::vector<OutboxSlice>>("truncated commands");
+        for (std::uint32_t i = 0; i < commands; ++i) {
+            authoritative::ScriptCommand command;
+            command.tick = in.u64(); command.issuer = in.u64(); command.sequence = in.u64(); command.verb = in.text();
+            auto arguments = get_value(in, 0);
+            const auto* list = std::get_if<authoritative::ValueList>(&arguments.data);
+            if (in.failed() || !list) return fail<std::vector<OutboxSlice>>("invalid command");
+            command.arguments = *list;
+            slice.commands.push_back(std::move(command));
+        }
+        slices.push_back(std::move(slice));
+    }
+    return Result::success(std::move(slices));
+}
 } // namespace
 
 core::Result<std::vector<std::uint8_t>> encode_outbox_state(const IntentOutbox& outbox, std::uint64_t ai_ticks) {
@@ -248,18 +301,7 @@ core::Result<std::vector<std::uint8_t>> encode_outbox_state(const IntentOutbox& 
         Writer out;
         out.u32(outbox_state_version); out.u32(outbox.schedule().batch_ticks); out.u32(outbox.schedule().apply_delay);
         out.u64(ai_ticks); out.u64(outbox.frontier().id); out.u64(outbox.frontier().invasion); out.u64(outbox.lane_floor());
-        out.u32(static_cast<std::uint32_t>(outbox.pending_slices().size()));
-        for (const auto& slice : outbox.pending_slices()) {
-            out.u64(slice.snapshot_tick); out.u32(slice.virtual_tick); out.u64(slice.apply_tick);
-            out.u32(static_cast<std::uint32_t>(slice.intents.size()));
-            for (const auto& intent : slice.intents) { out.u32(intent.player); put_record(out, intent.record); }
-            out.u32(static_cast<std::uint32_t>(slice.commands.size()));
-            for (const auto& command : slice.commands) {
-                out.u64(command.tick); out.u64(command.issuer); out.u64(command.sequence); out.text(command.verb);
-                put_value(out, authoritative::Value{command.arguments}, 0);
-            }
-            if (out.bytes.size() > max_state_bytes) return fail<std::vector<std::uint8_t>>("pending work exceeds the state limit");
-        }
+        if (auto put = put_slices(out, outbox.pending_slices()); !put) return core::Result<std::vector<std::uint8_t>>::failure(put.error());
         return core::Result<std::vector<std::uint8_t>>::success(std::move(out.bytes));
     } catch (const std::exception& error) {
         return fail<std::vector<std::uint8_t>>(error.what());
@@ -272,41 +314,38 @@ core::Result<DecodedOutboxState> decode_outbox_state(std::span<const std::uint8_
     if (in.u32() != outbox_state_version) return fail<DecodedOutboxState>("unsupported version");
     state.schedule.batch_ticks = in.u32(); state.schedule.apply_delay = in.u32();
     state.ai_ticks = in.u64(); state.frontier.id = in.u64(); state.frontier.invasion = in.u64(); state.floor = in.u64();
-    const auto slices = in.u32();
-    if (in.failed() || !state.schedule.batch_ticks || slices > max_slices) return fail<DecodedOutboxState>("invalid header");
-    std::uint64_t previous_apply{};
-    for (std::uint32_t index = 0; index < slices; ++index) {
-        OutboxSlice slice;
-        slice.snapshot_tick = in.u64(); slice.virtual_tick = in.u32(); slice.apply_tick = in.u64();
-        if (in.failed() || slice.virtual_tick == 0 || slice.virtual_tick > state.schedule.batch_ticks
-            || slice.apply_tick != apply_tick(state.schedule, slice.snapshot_tick, slice.virtual_tick)
-            || (index != 0 && slice.apply_tick < previous_apply))
-            return fail<DecodedOutboxState>("slice timing differs from the schedule");
-        previous_apply = slice.apply_tick;
-        const auto intents = in.u32();
-        if (in.failed() || in.remaining() < intents) return fail<DecodedOutboxState>("truncated intents");
-        for (std::uint32_t i = 0; i < intents; ++i) {
-            const auto player = in.u32();
-            auto record = get_record(in);
-            if (!record || in.failed()) return fail<DecodedOutboxState>("invalid intent");
-            slice.intents.push_back(PlayerIntent{player, std::move(*record), {}});
-        }
-        const auto commands = in.u32();
-        if (in.failed() || in.remaining() < commands) return fail<DecodedOutboxState>("truncated commands");
-        for (std::uint32_t i = 0; i < commands; ++i) {
-            authoritative::ScriptCommand command;
-            command.tick = in.u64(); command.issuer = in.u64(); command.sequence = in.u64(); command.verb = in.text();
-            auto arguments = get_value(in, 0);
-            const auto* list = std::get_if<authoritative::ValueList>(&arguments.data);
-            if (in.failed() || !list) return fail<DecodedOutboxState>("invalid command");
-            command.arguments = *list;
-            slice.commands.push_back(std::move(command));
-        }
-        state.slices.push_back(std::move(slice));
-    }
+    if (in.failed() || !state.schedule.batch_ticks) return fail<DecodedOutboxState>("invalid header");
+    auto slices = get_slices(in, state.schedule);
+    if (!slices) return core::Result<DecodedOutboxState>::failure(slices.error());
+    state.slices = std::move(slices).value();
     if (in.failed() || (in.remaining() != 0 && !allow_tail)) return fail<DecodedOutboxState>("trailing or missing bytes");
     state.tail.assign(bytes.begin() + static_cast<std::ptrdiff_t>(in.at), bytes.end());
     return core::Result<DecodedOutboxState>::success(std::move(state));
+}
+
+core::Result<std::vector<std::uint8_t>> encode_outbox_batch(const OutboxBatch::Contents& batch) {
+    try {
+        Writer out;
+        out.u64(batch.snapshot_tick); out.u64(batch.frontier.id); out.u64(batch.frontier.invasion); out.u64(batch.floor);
+        if (auto put = put_slices(out, batch.slices); !put) return core::Result<std::vector<std::uint8_t>>::failure(put.error());
+        return core::Result<std::vector<std::uint8_t>>::success(std::move(out.bytes));
+    } catch (const std::exception& error) {
+        return fail<std::vector<std::uint8_t>>(error.what());
+    }
+}
+
+core::Result<OutboxBatch::Contents> decode_outbox_batch(std::span<const std::uint8_t> bytes, const AsyncSchedule& schedule) {
+    Reader in{bytes};
+    OutboxBatch::Contents batch;
+    batch.snapshot_tick = in.u64(); batch.frontier.id = in.u64(); batch.frontier.invasion = in.u64(); batch.floor = in.u64();
+    if (in.failed() || !schedule.batch_ticks) return fail<OutboxBatch::Contents>("invalid finished batch header");
+    auto slices = get_slices(in, schedule);
+    if (!slices) return core::Result<OutboxBatch::Contents>::failure(slices.error());
+    batch.slices = std::move(slices).value();
+    for (const auto& slice : batch.slices)
+        if (slice.snapshot_tick != batch.snapshot_tick) return fail<OutboxBatch::Contents>("finished batch slice of another window");
+    if (in.failed() || in.remaining() != 0) return fail<OutboxBatch::Contents>("trailing or missing finished batch bytes");
+    return core::Result<OutboxBatch::Contents>::success(std::move(batch));
 }
 
 } // namespace eawr::script::foc::galactic_ai

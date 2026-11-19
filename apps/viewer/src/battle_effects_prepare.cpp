@@ -393,7 +393,7 @@ void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const si
                     looks.hardpoint_contact_bones.push_back(mesh == model.value()->meshes.end() || mesh->bone < 0
                         ? 0U : static_cast<std::uint32_t>(mesh->bone));
                 }
-                if (!looks.asteroid_hits.empty()) looks.asteroid_collision = space::make_shield_collision_mesh(
+                if (!looks.asteroid_hits.empty() || !looks.shield_hits.empty()) looks.asteroid_collision = space::make_shield_collision_mesh(
                     collision_triangles(*model.value(), looks.shield_mesh));
             } else {
                 unresolved_.push_back("model " + type.model_path + ": " + core::format_diagnostic(model.error()));

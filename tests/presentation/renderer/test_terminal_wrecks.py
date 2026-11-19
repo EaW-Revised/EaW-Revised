@@ -673,10 +673,14 @@ class TerminalWrecks(unittest.TestCase):
         functions = [function(animation_path, signature) for signature in (
             'void SpacePopulation::pose_units(', 'bool SpacePopulation::pose_live_turrets(')]
         functions.append(function('apps/viewer/src/space_populate.cpp',
+                                  'bool SpacePopulation::attached_art_shown('))
+        functions.append(function('apps/viewer/src/space_populate.cpp',
                                   'void SpacePopulation::refresh_instances('))
         visibility = function('include/eawr/presentation/space/population_index.hpp',
                               '[[nodiscard]] bool prepare_population_visibility(')
-        harness = POSE_HARNESS.replace('__VISIBILITY__', visibility).replace('__FUNCTIONS__', '\n'.join(functions))
+        clone_art = function('src/presentation/animation/unit_clips.cpp', 'bool clone_attached_art_shown(')
+        harness = (POSE_HARNESS.replace('__VISIBILITY__', visibility).replace('__CLONE_ART__', clone_art)
+                   .replace('__FUNCTIONS__', '\n'.join(functions)))
         with tempfile.TemporaryDirectory(prefix='eawr-pose-workers-') as temp:
             directory = Path(temp)
             cpp = directory / 'pose_workers.cpp'

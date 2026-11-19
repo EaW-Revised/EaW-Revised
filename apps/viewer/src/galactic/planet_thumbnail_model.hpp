@@ -34,7 +34,9 @@ struct PreparedPlanetModel final {
     std::optional<std::array<float, 6>> bounds;
 };
 
+// `alternate` is the surface alternate the map draws for the object (WGUI-05: 2 for an undiscovered planet's
+// grid shell, else 0); untagged surfaces always draw.
 [[nodiscard]] PreparedPlanetModel prepare_planet_thumbnail_model(const vfs::Vfs& filesystem, const std::string& logical_path,
-    const presentation::lighting::Environment& environment);
+    int alternate, const presentation::lighting::Environment& environment);
 
 } // namespace eawr::presentation::godot_backend::galactic_detail

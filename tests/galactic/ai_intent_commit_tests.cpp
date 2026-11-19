@@ -977,6 +977,27 @@ void outbox_state() {
     expect(!ga::decode_outbox_state(wrong), "an unknown version is refused");
     auto timing = bytes; timing[8] = 31; // apply_delay 30 -> 31: the slice apply ticks no longer follow the schedule
     expect(!ga::decode_outbox_state(timing), "slice timing that differs from the schedule is refused");
+
+    // Async step 3b: the same batch as a lane batch finished and not adopted yet. Its saved form reloads to the same bytes (hooks
+    // derived again), and adopting it gives the outbox the batch built inline.
+    ga::OutboxBatch::Contents finished{decoded.slices[0].snapshot_tick, decoded.frontier, decoded.floor, decoded.slices};
+    const auto batch_bytes = take(ga::encode_outbox_batch(finished));
+    auto batch_back = take(ga::decode_outbox_batch(batch_bytes, A));
+    expect(batch_back.snapshot_tick == finished.snapshot_tick && batch_back.frontier == finished.frontier && batch_back.floor == 1000
+        && batch_back.slices.size() == 2 && take(ga::encode_outbox_batch(batch_back)) == batch_bytes, "a finished batch saves and reloads");
+    ga::OutboxBatch waiting(A);
+    derived = 0;
+    waiting.bind_hooks([&](gc::PlayerId, const Shadow::IntentRecord&) { ++derived; return ga::IntentHooks{}; });
+    waiting.restore_closed(std::move(batch_back));
+    expect(waiting.closed() && !waiting.open() && waiting.intents() == 9 && derived == 9 && waiting.holds_slice(finished.snapshot_tick, 2)
+        && waiting.lowest_invasion() == start.invasion, "a reloaded finished batch is closed, holds its slices and derives its hooks");
+    ga::IntentOutbox adopted(A);
+    adopted.adopt(waiting.take());
+    expect(!waiting.active() && take(ga::encode_outbox_state(adopted, 123)) == bytes, "adopting the finished batch gives the inline outbox");
+    auto other_snapshot = batch_bytes; other_snapshot[0] ^= 1;
+    expect(!ga::decode_outbox_batch(other_snapshot, A), "a slice of another snapshot tick is refused");
+    auto batch_trailing = batch_bytes; batch_trailing.push_back(0);
+    expect(!ga::decode_outbox_batch(batch_trailing, A), "trailing bytes after a finished batch are refused");
 }
 
 void deferred_lane() {

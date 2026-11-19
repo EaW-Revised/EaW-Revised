@@ -219,6 +219,10 @@ void WorldUiView::write_report(std::ostream& output) const {
             output << (index == first_icon ? "" : ", ") << "{\"frame\": " << sample.frame
                    << ", \"tick\": " << sample.tick << ", \"drawn\": " << (sample.drawn ? "true" : "false")
                    << ", \"grid\": " << (sample.grid ? "true" : "false")
+                   << ", \"resumed\": " << (sample.resumed ? "true" : "false")
+                   << ", \"admitted\": " << (sample.admitted ? "true" : "false")
+                   << ", \"anchor\": [" << sample.anchor[0] << ", " << sample.anchor[1] << ", " << sample.anchor[2] << "]"
+                   << ", \"desired\": [" << sample.desired[0] << ", " << sample.desired[1] << ", " << sample.desired[2] << "]"
                    << ", \"screen\": [" << sample.screen[0] << ", " << sample.screen[1] << "]}";
         }
         output << "]}";

@@ -677,7 +677,12 @@ void UnitCombat::ship_target() {
                 state_.direct = false;
                 return;
             }
-            if (!hostile(*current) || !visible_to_me(*current)) {
+            // FT-01/FO-03/OR-23: fog does not cancel the team's explicit hardpoint
+            // during its approach. R-08 still tests visibility on every firing attempt.
+            const bool approaching_hardpoint = unit_.approaching_ordered_hardpoint && state_.direct
+                && !current->in_limbo && stealth_targetable(*current)
+                && standing_hardpoint(*current, state_.attack_hardpoint) != nullptr;
+            if (!hostile(*current) || (!visible_to_me(*current) && !approaching_hardpoint)) {
                 state_.attack_target = invalid_entity_id;
                 state_.attack_hardpoint = no_hardpoint;
                 state_.direct = false;

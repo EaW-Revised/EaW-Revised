@@ -81,7 +81,6 @@ public:
     bool is_departure(const SeatInput& input) const override;
     bool is_rejoin(const SeatInput& input) const override;
     bool checkpoint_requested() const override;
-    void set_save_host(sim::SeatId host) { save_host_ = host; }
     [[nodiscard]] std::vector<std::uint8_t> checkpoint_network_state() const { return clock_state(); }
     [[nodiscard]] core::Result<void> restore_network_state(std::span<const std::uint8_t>);
 
@@ -116,7 +115,6 @@ private:
     std::vector<sim::SeatId> clock_refusals_;
     std::vector<sim::galactic::Seat> roster_; // tick-zero seats, ascending seat identity
     bool debug_commands_{};
-    std::optional<sim::SeatId> save_host_;
     EngineSource engine_source_;
     std::optional<campaign::GameTick> last_tick_;
     std::vector<core::Diagnostic> refused_;

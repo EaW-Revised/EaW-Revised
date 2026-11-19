@@ -50,7 +50,12 @@
 - **FL-02** (research E75-02) The first service builds one entry per `Starting_Spawned_Units_Tech_0`
   row: at most its count alive at once, and its count plus the matching
   `Reserve_Spawned_Units_Tech_0` count (0 when absent) to launch in all; a negative reserve never
-  runs out. The first service may launch at once.
+  runs out. This means **every** negative signed reserve, including `-2`, rather than only
+  the stock `-1`: preserve the authored count when loading and accept it at the squadron-table
+  boundary. The hangar uses its internal unlimited sentinel when initializing live bookkeeping.
+  The remake's replacement accounting uses this same sign test under WPR-56: an unlimited
+  prior profile has no finite consumption to subtract from the replacement's budget.
+  Starting counts remain subject to their separate nonnegative validation. The first service may launch at once.
 - **FL-03** (research E75-03, EWSL-05/07; debug build E6234-01) A service launches only when the next-spawn frame has come and a
   fighter bay stands: a destroyed destroyable bay no longer launches, and a spawner without a
   standing bay launches nothing. The space eligibility check does not reject a disabled bay:
@@ -1038,3 +1043,36 @@ fixture's exact starting slots.
   (debug build): a squadron in a moving-against-moving slowdown is skipped when the deviance is
   recomputed; a destination that enforces top speed sets every member to its own maximum, with no
   deviance at all; an escort's forward offset is averaged into the squadron's.
+
+
+## FL-20: Generic mod-label hangar coverage
+
+**FL-20 (current source audit; WSL-11/12, FL-13 and SG-CLS-01; HSA-01).**
+The shared physical `SPAWN_SQUADRON` loader reads all six authored starting and
+reserve columns from the resolved type, independently of its XML element label.
+Ordinary skirmish builds owner-tech profiles using the first nonempty starting
+column at or below that tech; reserves independently choose their first nonempty
+column before matching the starting type. Negative reserves remain unlimited.
+This qualifies loaded ship, craft and station hangars with valid launch content,
+not every map-only object or a logical container merely authoring a list.
+
+An empty selected tier already retries after an owner tech change, covered by the
+existing station-garrison contract for the closed empty-tier retry work (legacy EAWR-6306). A populated hangar retains its
+selected tier. The separate same-frame publication question remains with the
+frame-service programme: general FC-28 cadence and FD-21 queue order do not by
+themselves qualify which owner-tech change a first or retried setup observes.
+This audit adds no service pass or timing change. The FL-13 object flag continues
+to suppress authored garrisons on marker-created multiplayer stations; it does
+not suppress ordinary carriers or the separate free starting-company mechanism.
+
+## FL-21: Team creation reads its sizes from the creating type
+
+**FL-21 (debug build, 2026-11-18; FL-06).** Team creation takes the creating
+(purchased or placed) type and reads both `Max_Squad_Size` and `Create_Team_Type`
+from that same type; the team container type it then creates is only the output
+of `Create_Team_Type`, and creation never reads a size from it. A container type
+that is referenced solely as a `Create_Team_Type` therefore ignores an authored
+`Max_Squad_Size` during creation. Mods that copy the size onto such team containers
+change nothing; the size on the creating type decides the chunking (FL-06). A
+container type used directly as a creating type is not covered by this rule and
+stays unclaimed.

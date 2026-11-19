@@ -87,6 +87,7 @@ void session_detail::Tick::sync_radar_creations(const UnitStage& staged, const E
 }
 
 void session_detail::Tick::track_victory_change(const UnitState* before, const UnitState* after, const bool evaluate) {
+    if (!before && after) born_entity_ids_.push_back(after->entity_id);
     const auto& roster = radar_roster_ ? *radar_roster_ : impl_->radar_roster;
     auto slots = after ? impl_->radar_slots(after->type_id) : std::vector<std::size_t>{};
     if ((before && roster.contains(before->entity_id)) || !slots.empty()) {

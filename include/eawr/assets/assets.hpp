@@ -214,8 +214,10 @@ struct MegaTexture final {
     std::string backing_page_stem;
     std::vector<MegaTextureEntry> entries;
 
-    // ASCII case-insensitive; the final duplicate matches engine/LSP lookup.
+    // ASCII case-insensitive exact name; the final duplicate wins.
     [[nodiscard]] const MegaTextureEntry* find(std::string_view name) const noexcept;
+    // Texture sibling tolerance deviation; excludes the authored name. May allocate.
+    [[nodiscard]] const MegaTextureEntry* find_sibling(std::string_view name) const;
 };
 
 // A parsed MTD directory bound to the decoded backing page that supplied its

@@ -97,6 +97,128 @@ static int paired(bool shadow) {
 // WST-03 (#1906): a Space_Automatic Battlefield_Modifier_Ability's Stealth_Duration_Multiplier loads
 // as (multiplier - 1) for the owner and, with Apply_To_All_Allies, its allies; a multiplier of 1 or a
 // ground style adds nothing. The upgrade becomes buyable, and the modifier binds content identity.
+static int mode_ineligible_upgrades() {
+    namespace t = eawr::sim::tactical;
+    namespace sk = eawr::skirmish;
+    const auto dir = std::filesystem::temp_directory_path() / ("eawr-upgrade-modes-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    write(dir/"XML/GameObjectFiles.xml", "<Game_Object_Files><File>probe.xml</File></Game_Object_Files>");
+    write(dir/"XML/FactionFiles.xml", "<Faction_Files><File>factions.xml</File></Faction_Files>");
+    write(dir/"XML/factions.xml", "<Factions><Faction Name=\"Probe_Faction\"/></Factions>");
+    const auto bonus = [](const std::string& style) {
+        return "<Combat_Bonus_Ability Name=\"Defence\"><Activation_Style>" + style
+            + "</Activation_Style><Applicable_Unit_Types>Probe_Station</Applicable_Unit_Types>"
+              "<Defense_Bonus_Percentage>0.15</Defense_Bonus_Percentage><Stacking_Category>3</Stacking_Category></Combat_Bonus_Ability>";
+    };
+    const auto unknown = [](const std::string& style) {
+        return "<Unimplemented_Ability><Activation_Style>" + style + "</Activation_Style></Unimplemented_Ability>";
+    };
+    // Review reproduction: this recognized handler was admitted on BASE even with a
+    // ground activation style. An unknown sibling must preserve that admission.
+    // WRB-05 prunes switches without a loaded redirect handler, supplied below.
+    const std::string enable = "<Enable_Ability Name=\"EnableProbe\"><Activation_Style>Ground_Automatic</Activation_Style>"
+        "<Ability_Name>ProbeAbility</Ability_Name><Applicable_Unit_Types>Probe_Receiver</Applicable_Unit_Types></Enable_Ability>";
+    const std::vector<std::pair<std::string, std::string>> definitions{
+        {"Ground_Defence", bonus("Ground_Automatic")},
+        {"Space_Defence", bonus("Space_Automatic")},
+        {"Ground_Unknown", unknown("gRoUnD_aUtOmAtIc")},
+        {"Galactic_Unknown", unknown("Galactic_Automatic")},
+        {"Space_Unknown", unknown("Space_Automatic")},
+        {"Event_Unknown", unknown("User_Input")},
+        {"Invalid_Unknown", unknown("Invalid_Style")},
+        {"Default_Unknown", unknown("")},
+        {"Mixed_Unknown", bonus("Ground_Automatic") + unknown("Space_Automatic")},
+        {"Mixed_Defence", bonus("Ground_Automatic") + bonus("Space_Automatic")},
+        {"Two_Ineligible", bonus("Ground_Automatic") + unknown("Galactic_Automatic")},
+        {"Two_Ground", bonus("Ground_Automatic") + unknown("Ground_Automatic")},
+        {"Ground_Enable", enable},
+        {"Mixed_Enable_Space", enable + unknown("Space_Automatic")},
+        {"Mixed_Enable_Event", enable + unknown("User_Input")},
+        {"Mixed_Enable_Default", enable + unknown("")},
+        {"Mixed_Enable_Missing", enable + "<Unimplemented_Ability/>"},
+        {"Mixed_Enable_Invalid", enable + unknown("Invalid_Style")},
+    };
+    std::string menu, objects;
+    for (const auto& [name, abilities] : definitions) {
+        menu += "," + name;
+        objects += "<UpgradeObject Name=\"" + name + "\"><Behavior>DUMMY_UPGRADE</Behavior><Affiliation>Probe_Faction</Affiliation>"
+            "<Tactical_Build_Cost_Multiplayer>1000</Tactical_Build_Cost_Multiplayer><Tactical_Build_Time_Seconds>1</Tactical_Build_Time_Seconds>"
+            "<Tactical_Production_Queue>Tactical_Upgrades</Tactical_Production_Queue><Abilities SubObjectList=\"Yes\">"
+            + abilities + "</Abilities></UpgradeObject>";
+    }
+    write(dir/"XML/probe.xml", "<Objects><SpaceBuildable Name=\"Probe_Station\"><Affiliation>Probe_Faction</Affiliation>"
+        "<Tactical_Buildable_Objects_Multiplayer>Probe_Faction" + menu + "</Tactical_Buildable_Objects_Multiplayer></SpaceBuildable>"
+        "<SpaceUnit Name=\"Probe_Receiver\"><Abilities SubObjectList=\"Yes\">"
+        "<Redirect_Blaster_Ability Name=\"ProbeAbility\"><Activation_Style>Space_Automatic</Activation_Style>"
+        "</Redirect_Blaster_Ability></Abilities></SpaceUnit>" + objects + "</Objects>");
+    const std::array mounts{eawr::vfs::MountSpec{"synthetic", dir, "data", {}}};
+    auto vfs = eawr::vfs::Vfs::mount(mounts); if (!vfs) return 2;
+    auto catalog = eawr::data::load_catalog(vfs.value(), eawr::data::Profile::foc); if (!catalog) return 2;
+    eawr::units::LoadInput input; input.catalog = &catalog.value().catalog; input.filesystem = &vfs.value(); input.types = {"Probe_Station", "Probe_Receiver"};
+    auto loaded = eawr::units::load_unit_tables(input); if (!loaded) return 2;
+    auto& tables = loaded.value();
+    for (const auto& tag : {"Tactical_Build_Time_Multiplier", "Space_Elevated_Vulnerability_Factor",
+        "Space_Elevated_Vulnerability_Duration", "Space_Reinforcement_Collision_Check_Distance"})
+        tables.constants.scalars.push_back({tag, std::string_view(tag) == "Space_Elevated_Vulnerability_Factor" ? Fixed{} : Fixed::from_raw(Fixed::scale), {}});
+    auto rules = sk::economy_rules({}, {}, tables); if (!rules) return 2;
+    const auto faction = sk::faction_id("Probe_Faction");
+    const auto station = sk::type_id("Probe_Station");
+    const auto* offers = rules.value().menu(station, faction); if (!offers) return 2;
+    int failures = 0;
+    const auto expect = [&](const bool okay, const std::string& label) { if (!okay) { ++failures; std::cerr << label << '\n'; } };
+    const auto* receiver = tables.find("Probe_Receiver");
+    expect(receiver && std::any_of(receiver->special_abilities.begin(), receiver->special_abilities.end(),
+        [](const auto& ability) { return ability.kind == t::SpecialAbilityKind::redirect_blaster && ability.name == "ProbeAbility"; }),
+        "enable fixture has a supported recipient handler before upgrade admission");
+    for (const auto& definition : definitions) {
+        const auto& name = definition.first;
+        const bool ground_only = name == "Ground_Defence" || name == "Ground_Unknown" || name == "Two_Ground" || name == "Ground_Enable";
+        const bool defence = name == "Space_Defence" || name == "Mixed_Defence";
+        const bool mixed_enable = name.starts_with("Mixed_Enable_");
+        const bool supported = defence || mixed_enable;
+        const auto* offer = offers->find(sk::type_id(name));
+        const auto* profile = rules.value().upgrade(sk::type_id(name));
+        expect(offer && offer->available == supported, name + " mode-based admission");
+        expect(offer && (ground_only ? offer->disabled_reason == "Only works in ground battles"
+            : offer->disabled_reason != "Only works in ground battles"), name + " truthful mode tooltip");
+        expect(profile && (defence ? profile->bonuses.size() == 1 : profile->bonuses.empty()), name + " only eligible defence bonuses survive");
+        if (mixed_enable) {
+            const auto* unit = tables.find(name);
+            expect(offer && offer->disabled_reason.empty() && unit && unit->production.ability_enables.size() == 1
+                && profile && profile->ability_enables.size() == 1, name + " preserves BASE recognized effect and admission");
+        }
+        if (ground_only) {
+            const auto* unit = tables.find(name);
+            expect(offer && !offer->available && unit
+                && unit->ground_only_abilities == unit->inactive_abilities.size(), name + " all authored handlers are ground-only");
+        }
+    }
+    auto economy = rules.value();
+    economy.players = {{1, Fixed::from_raw(5000 * Fixed::scale), 25, false, {}, 1, 1}};
+    t::TacticalSetup setup; setup.seed = 7541; setup.players = {{1, 0, faction, 1}};
+    setup.units = {{1, station, 1, {}, eawr::sim::math::identity_quat(), {}}};
+    auto session = t::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+    expect(static_cast<bool>(session), "mode-ineligible purchase session creates");
+    if (session) {
+        const auto upgrade = sk::type_id("Ground_Defence");
+        expect(static_cast<bool>(session.value().submit({{0, 1, 0}, {1}, t::BuyPayload{upgrade}})), "mode-ineligible buy submits");
+        eawr::sim::InlineExecutor executor;
+        bool rejected = false;
+        for (int frame = 0; frame < 33; ++frame) {
+            const auto step = session.value().step(executor);
+            expect(static_cast<bool>(step), "mode-ineligible purchase steps");
+            if (!step) break;
+            rejected = rejected || std::any_of(step.value().snapshot->events().begin(), step.value().snapshot->events().end(),
+                [](const auto& event) { return event.kind == t::EventKind::order_rejected; });
+        }
+        const auto ledger = session.value().ledgers();
+        expect(rejected, "ground-only purchase is rejected");
+        expect(!ledger.empty() && ledger[0].credits == Fixed::from_raw(5000 * Fixed::scale), "ground-only purchase spends no credits");
+        expect(!ledger.empty() && ledger[0].completed.empty(), "ground-only purchase creates no held upgrade");
+    }
+    eawr::testing::remove_temp_directory(dir);
+    return failures ? 1 : 0;
+}
+
 static int cloaking() {
     const auto dir=std::filesystem::temp_directory_path() / ("eawr-cloaking-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     write(dir/"XML/GameObjectFiles.xml","<Game_Object_Files><File>probe.xml</File></Game_Object_Files>");
@@ -524,6 +646,7 @@ static int collision_projection_contract() {
 
 int main(int argc,char** argv) {
     if(argc>1&&std::string_view(argv[1])=="--stock") return stock_contract();
+    if (mode_ineligible_upgrades() != 0) return 1;
     if (collision_projection_contract() != 0) { std::cerr << "collision projection contract failed\n"; return 1; }
     if (economy_builder_rows_contract() != 0) return 1;
     if (economy_defaults_contract() != 0) { std::cerr << "economy defaults contract failed\n"; return 1; }

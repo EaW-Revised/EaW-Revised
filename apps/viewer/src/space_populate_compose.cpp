@@ -40,6 +40,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         return false;
     }
     const data::Catalog& catalog = *options_.catalog;
+    environment_records_.assign(environment_records.begin(), environment_records.end());
     map_placements_ = map.placements.size();
     composed_ = false;
     auto owner = std::make_shared<ComposeOwner>(renderer, map, filesystem, camera,
@@ -62,8 +63,8 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
     for (scene::SpacePlacementDecision& decision : decisions_) {
         const auto record = scene_->placements[decision.scene_ordinal].record_ordinal;
         if (suppress_removed_space_placement(options_.battle_start, record, decision)) continue;
-        if (std::find(options_.session_records.begin(), options_.session_records.end(), record)
-            == options_.session_records.end()) continue;
+        if (scene::space_record_owner(record, environment_records, options_.session_records)
+            != scene::SpaceRecordOwner::session) continue;
         decision.role = scene::SpaceRole::not_drawable;
         decision.drawn_surfaces.clear();
         decision.hardpoints.clear();

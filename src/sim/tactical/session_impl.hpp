@@ -409,6 +409,30 @@ public:
         TacticalSession::PlacementWork* placement_work{};
     };
 
+    enum class CompanyPlacement { exact, reinforcement };
+    // A birth request carries placement/lifecycle choices, never admission. Pool, cap,
+    // hero and command policy belong to the caller. Failures abort the enclosing tick;
+    // units, craft/mind journals and lifecycle lists are published only by its commit.
+    struct CompanySpawn {
+        UnitState prototype;
+        math::Fixed yaw{};
+        CompanyPlacement placement{CompanyPlacement::exact};
+        bool arrival{};
+        bool vulnerable{};
+        bool create_teams{true};
+        std::optional<std::span<const TypeId>> members;
+        std::uint32_t max_squad_size{10};
+        std::uint32_t population{};
+        std::uint32_t scan_delay{};
+        EntityId persistent_root{};
+    };
+    struct CompanyBirth {
+        EntityId root{};
+        std::vector<EntityId> created;
+    };
+    [[nodiscard]] core::Result<CompanyBirth> spawn_company(const CompanySpawn& request,
+        UnitStage& units, EconomyStage& stage, std::uint64_t tick);
+
     [[nodiscard]] PlayerEconomy* ledger_of(std::vector<PlayerEconomy>& staged_ledgers, const PlayerId id) const;
     // LC-42..51 (#5894), session_land.cpp and session_land_reinforce.cpp.
     // LC-43..45: every member position of the company laid out at `point` is placeable, enabled by an allied point and

@@ -59,6 +59,7 @@
 #include "ui/theme_builder.hpp"
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/label.hpp>
+#include <godot_cpp/classes/line2d.hpp>
 #include <godot_cpp/classes/v_box_container.hpp>
 #include <godot_cpp/classes/button.hpp>
 #include "galactic_audio.hpp"
@@ -322,6 +323,10 @@ struct GalacticMode::State final {
     std::optional<assets::MegaTextureAtlas> command_atlas;
     std::unique_ptr<UiTextures> command_textures;
     std::map<std::string, godot::Ref<godot::Texture2D>, std::less<>> command_texture_cache;
+    std::map<std::string, godot::Ref<godot::Texture2D>, std::less<>> command_atlas_texture_cache;
+    galactic_view::CommandBarIconAtlasCache command_icon_atlas_cache;
+    std::map<std::pair<std::string, bool>, godot::Ref<godot::Texture2D>> shell_texture_cache;
+    godot::Ref<godot::Texture2D> shell_placeholder;
     std::vector<core::LoadNote> pending_texture_notes; // published at the next HUD update
     data::ui::CommandBarCatalog command_catalog;
     data::ui::ShellAnchors command_anchors;
@@ -459,6 +464,32 @@ struct GalacticMode::State final {
     galactic_view::ObjectId hero_hover_planet{};
     galactic_view::PlanetStatusIcon hero_hover_kind{};
     void service_hero_tooltip();
+    godot::Control* planet_hover_tooltip{};
+    godot::Label* planet_hover_title{};
+    godot::Label* planet_hover_description{};
+    godot::Label* planet_hover_income{};
+    godot::TextureRect* planet_hover_badge{};
+    godot::Line2D* planet_hover_leader{};
+    struct PlanetHoverPip final { godot::TextureRect* image{}; unsigned row{}; bool filled{}; };
+    std::vector<PlanetHoverPip> planet_hover_pips;
+    std::array<std::string, 2> planet_hover_pip_names;
+    std::set<std::pair<std::string, std::string>> planet_hover_missing;
+    galactic_view::PlanetHoverLevels planet_hover_levels;
+    struct PlanetHoverKey final {
+        galactic_view::ObjectId planet{};
+        std::uint64_t facts{};
+        std::uint32_t width{}, height{};
+        double scale{};
+        godot::Vector2 anchor;
+        friend bool operator==(const PlanetHoverKey&, const PlanetHoverKey&) = default;
+    };
+    std::optional<PlanetHoverKey> planet_hover_key;
+    std::uint64_t planet_hover_builds{};
+    galactic_view::ObjectId planet_hover_id{};
+    std::uint64_t planet_hover_since{};
+    godot::Vector2 planet_hover_position, planet_hover_target;
+    godot::Rect2 planet_hover_rect;
+    void service_planet_hover();
     std::optional<std::size_t> current_pip;
     bool clock_controls_enabled{};
     bool fast_forward_controls_enabled{}; // TM-04: off with several humans, also in a LAN match
@@ -560,6 +591,8 @@ struct GalacticMode::State final {
     std::size_t choice_page{};
     galactic_view::ObjectId choice_planet{};
     [[nodiscard]] godot::Ref<godot::Texture2D> command_texture(std::string_view name);
+    [[nodiscard]] godot::Ref<godot::Texture2D> missing_shell_texture();
+    [[nodiscard]] godot::Ref<godot::Texture2D> shell_texture(std::string_view name, bool standalone_first = true);
     [[nodiscard]] godot::Ref<godot::Texture2D> radar_view_texture(std::string_view name);
     // Same lookup for a probe whose miss is an expected, handled fallback (no unresolved-texture warning).
     [[nodiscard]] godot::Ref<godot::Texture2D> command_texture_optional(std::string_view name);

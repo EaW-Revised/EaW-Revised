@@ -6,6 +6,7 @@
 #include "eawr/presentation/audio/announcements.hpp"
 #include "eawr/presentation/audio/command_cues.hpp"
 #include "eawr/presentation/audio/hardpoint_loss.hpp"
+#include "eawr/presentation/audio/unit_loss.hpp"
 #include "eawr/presentation/audio/health_warning.hpp"
 #include "eawr/presentation/live/unit_fade.hpp"
 
@@ -106,6 +107,37 @@ void hardpoint_loss() {
     expect(queue.admit({{&competing, {}}}, random).result == Result::overlap,
         "BA-64: authored shared overlap group throttles different Calamari responses");
     expect(queue.size() == 1, "BA-64: refused warnings do not queue retries");
+}
+
+void unit_losses() {
+    audio::SfxRegistry registry;
+    std::vector<std::string> problems;
+    registry.add("Structure_Lost", std::vector<Field>{{"Is_3D", "No"}, {"Is_2D", "Yes"},
+        {"Samples", "synthetic.wav"}, {"Overlap_Test", "Shared_Advisor"}}, problems);
+    registry.add("Ship_Lost", std::vector<Field>{{"Is_3D", "No"}, {"Is_2D", "Yes"},
+        {"Samples", "synthetic.wav"}, {"Overlap_Test", "Shared_Advisor"}}, problems);
+    const std::map<int, const audio::SfxEvent*> authored{
+        {11, registry.find("Structure_Lost")}, {12, registry.find("Ship_Lost")}, {13, nullptr}};
+    struct Loss { int owner{}, type{}; std::uint64_t count{}; };
+    const std::array losses{Loss{2, 11, 1}, Loss{1, 11, 2}, Loss{1, 12, 1},
+        Loss{1, 13, 1}, Loss{1, 99, 1}, Loss{1, 11, 0}};
+    audio::EventQueue queue;
+    audio::Random random(7);
+    std::vector<std::string> requested;
+    std::vector<Result> admitted;
+    audio::present_unit_losses(losses, 1,
+        [&authored](int type) -> const audio::SfxEvent* {
+            const auto found = authored.find(type);
+            return found == authored.end() ? nullptr : found->second;
+        }, [&](const audio::SfxEvent* cue) {
+            requested.push_back(cue->name);
+            admitted.push_back(queue.admit({{cue, {}}}, random).result);
+        });
+    expect(requested == std::vector<std::string>{"Structure_Lost", "Structure_Lost", "Ship_Lost"},
+        "BA-65: only local losses request their authored type cue, once per loss, absent cues stay silent");
+    expect(admitted.size() == 3 && admitted[1] == Result::instance_limit && admitted[2] == Result::overlap,
+        "BA-65: loss warnings share ordinary authored instance and overlap throttling");
+    expect(queue.size() == 1, "BA-65: refused loss requests add no retry queue");
 }
 
 void registry_and_presets() {
@@ -1424,6 +1456,7 @@ int main() {
     registry_and_presets();
     health_warnings();
     hardpoint_loss();
+    unit_losses();
     event_lifecycle();
     gift_sample_variants();
     deferred_sample_readiness();

@@ -120,6 +120,22 @@ struct OrderFlash {
     double pulse_seconds{0.1};
     static constexpr int pulses = 3; // WU-60: the pulse count is fixed by the game, not authored
 };
+// WU-61: deliberate presentation safety policy: an uninterrupted burst, then one
+// real second of quiet. Refused orders never extend or restart this gate.
+class OrderFlashGate {
+public:
+    [[nodiscard]] bool ready() const noexcept { return remaining_seconds_ <= 0.0; }
+    bool try_start(const OrderFlash& flash) {
+        if (!ready() || !(flash.pulse_seconds > 0.0) || !std::isfinite(flash.pulse_seconds)) return false;
+        remaining_seconds_ = flash.pulse_seconds * OrderFlash::pulses + 1.0;
+        return true;
+    }
+    void advance(const double delta) {
+        if (std::isfinite(delta) && delta > 0.0) remaining_seconds_ = std::max(0.0, remaining_seconds_ - delta);
+    }
+private:
+    double remaining_seconds_{};
+};
 inline OrderFlash load_order_flash(const vfs::Vfs& filesystem) {
     auto document = data::load_document(filesystem, "data/xml/gameconstants.xml");
     if (!document) diagnostic("gameconstants.xml", core::format_diagnostic(document.error()));
@@ -127,19 +143,24 @@ inline OrderFlash load_order_flash(const vfs::Vfs& filesystem) {
     return {read<1>(root, "GUI_Flash_Level", {3.0F})[0], // xml-fallback: GUI_Flash_Level; load: apps/viewer/src/presentation_constants.hpp#load_order_flash
             read<1, double>(root, "GUI_Rapid_Flash_Duration", {0.1})[0]}; // xml-fallback: GUI_Rapid_Flash_Duration; load: apps/viewer/src/presentation_constants.hpp#load_order_flash
 }
-// WU-60: the light-scale multiplier of RGB `elapsed` seconds after the order. The game's clock moves in whole
-// logical frames and a pulse ends once the elapsed time is strictly past its length, so a pulse lasts the whole
-// frames that cover `pulse_seconds` (4 frames for the stock 0.1 s at 30 per second); it starts at 1 + level and falls
-// linearly to 1 on its last frame, then restarts; none after the third. Empty once the flash is over.
-inline std::optional<float> order_flash_multiplier(const OrderFlash& flash, const double elapsed) {
-    constexpr double frames_per_second = static_cast<double>(sim::tactical::logical_frames_per_second);
-    if (!(flash.pulse_seconds > 0.0) || elapsed < 0.0) return {};
-    const auto frame = static_cast<std::int64_t>(std::floor(elapsed * frames_per_second + 1.0e-9));
-    const auto pulse_frames = static_cast<std::int64_t>(std::floor(flash.pulse_seconds * frames_per_second + 1.0e-9)) + 1;
-    if (frame >= pulse_frames * OrderFlash::pulses) return {};
-    const double remaining = std::max(0.0, flash.pulse_seconds - static_cast<double>(frame % pulse_frames) / frames_per_second)
-        / flash.pulse_seconds;
-    return static_cast<float>(1.0 + static_cast<double>(flash.level) * remaining);
+// WU-61: one comfort control for the stock hull peak; the original peaks at 4x.
+inline constexpr double order_flash_peak_multiplier = 2.0;
+
+// WU-60/61: authored rapid cadence and linear fade, with the owner's brightness limits.
+inline std::optional<float> order_flash_multiplier(const OrderFlash& flash, const double elapsed,
+        const double footprint_half_area = 0.0) {
+    if (!(flash.pulse_seconds > 0.0) || !std::isfinite(flash.pulse_seconds)
+        || !std::isfinite(flash.level) || !std::isfinite(elapsed) || elapsed < 0.0) return {};
+    const double period = flash.pulse_seconds;
+    if (elapsed / period >= OrderFlash::pulses) return {};
+    const double phase = std::fmod(elapsed, period) / period;
+    const double wave = 1.0 - phase;
+    // Cap the peak below the original; reduce it inversely with the hull's world footprint above
+    // a 1000 x 1000 source-unit box. This bounds area-weighted added light on large hulls.
+    const double area_scale = 250000.0 / std::max(250000.0, footprint_half_area);
+    const double amplitude = std::clamp(static_cast<double>(flash.level) / OrderFlash{}.level, 0.0, 1.0)
+        * (order_flash_peak_multiplier - 1.0) * area_scale;
+    return static_cast<float>(1.0 + amplitude * wave);
 }
 
 } // namespace eawr::presentation::godot_backend::presentation_constants

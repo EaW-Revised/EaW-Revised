@@ -11,6 +11,7 @@
 #include <iostream>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -169,6 +170,31 @@ void test_death_start() {
     expect(clips::death_start(false, false) == clips::DeathStart::pose, "no clip without Remove_Upon_Death: kept posed");
 }
 
+void test_clone_attached_art() {
+    // UA-12, the BFC / Remake Star Destroyer clone: the clone type lists a dummy-art hardpoint whose
+    // Model_To_Attach (a whole hull) hangs on the bone `Decal_Attach_04`; the DIE clip hides that bone
+    // at its last frame and the art must go with it, or the hull stays on the map.
+    std::vector<clips::BonePose> pose(3);
+    pose[0].visible = true;   // root
+    pose[1].visible = true;   // a piece bone
+    pose[2].visible = true;   // the attach bone, before the clip hides it
+    constexpr std::uint32_t attach_bone = 2U;
+    expect(clips::clone_attached_art_shown(true, attach_bone, pose), "a clone's art shows while its bone is visible");
+    pose[2].visible = false;  // the DIE clip's last frame
+    expect(!clips::clone_attached_art_shown(true, attach_bone, pose),
+           "a clone's art leaves with its bone: no hull is left on the map");
+    pose[1].visible = false;
+    pose[2].visible = true;
+    expect(clips::clone_attached_art_shown(true, attach_bone, pose), "another bone hidden does not hide the art");
+    pose[2].visible = false;
+    expect(clips::clone_attached_art_shown(false, attach_bone, pose),
+           "a live ship's art is gated by its hardpoint state, not by bone visibility");
+    expect(clips::clone_attached_art_shown(true, std::nullopt, pose), "art without an attach bone shows");
+    expect(clips::clone_attached_art_shown(true, 7U, pose), "a bone the pose does not hold shows");
+    expect(clips::clone_attached_art_shown(true, attach_bone, std::span<const clips::BonePose>{}),
+           "a clone not yet sampled shows its art");
+}
+
 // One bone moving along x from 0 to 10 over one playable frame at 1 fps; its
 // bind pose sits at the origin.
 std::optional<clips::Player> synthetic_death_player() {
@@ -228,6 +254,7 @@ int main() {
     test_death_clone_type();
     test_death_frame();
     test_death_start();
+    test_clone_attached_art();
     test_sample_death_frame();
     if (failures != 0) {
         std::cerr << failures << " unit clip contract(s) failed\n";

@@ -77,6 +77,7 @@ void foc_fleet(bool formation_only = false, bool fire_bones_only = false);
 void foc_formation_deceleration(eawr::units::LoadInput input);
 void unit_name_index_contracts();
 int unit_name_index_installed(bool mod);
+int unit_ability_lists_installed(bool mod);
 int unit_name_index_gc_start(bool mod);
 
 struct TempTree final {

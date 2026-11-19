@@ -567,17 +567,17 @@ int installed(bool release, const std::filesystem::path& directory, bool benchma
                 galactic_learning_gate::probe(directory / "learning.json"), human_encounter_only, hash_baseline,
                 !benchmark && !human_encounter_only && !hash_baseline);
             report.write(std::cout);
-            // W1 floors A (owner, 11-07) for digest_mature (the benchmark run), async, seed 42. The first base (main e536b8302)
-            // stopped at galactic frame 9900 because of #6337 (the lane stage lost an actor the world still wrote); with that fixed the
-            // run reaches the full 27000-frame budget, and the base below is that run (#6337, 11-12).
+            // W1 floors A for digest_mature, async, seed 42. Measured at main a7fecba11381 on 11-18 after the
+            // WGA-496 startup-order correction (#7415): starting free-store delivery precedes AI initialization.
+            // The former 11-12 trajectory predates that corrected startup order.
             // Floors: builds 10 % (min 2); expansions, attacks, defences and battles within 2; movements 10 %; maximum tech exact;
             // first tech-3 frame within 300.
             bool floors = true;
             if (benchmark) {
                 struct FloorBase { eawr::sim::galactic::PlayerId id; std::uint64_t started, completed, expansions, attacks, defences, movements;
                     std::int64_t tech; std::uint64_t tech3; };
-                constexpr std::array<FloorBase, 2> floor_base{{{1, 132, 105, 17, 29, 9, 1218, 3, 25924}, {2, 66, 58, 10, 13, 23, 1766, 5, 5164}}};
-                constexpr std::uint64_t base_frames = 27000, base_battles = 42;
+                constexpr std::array<FloorBase, 2> floor_base{{{1, 86, 81, 3, 5, 0, 403, 3, 20749}, {2, 86, 78, 2, 4, 1, 464, 5, 5164}}};
+                constexpr std::uint64_t base_frames = 27000, base_battles = 9;
                 const auto within = [](std::uint64_t value, std::uint64_t base, std::uint64_t floor_value) {
                     return (value > base ? value - base : base - value) <= floor_value;
                 };

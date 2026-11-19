@@ -76,7 +76,8 @@ The [roadmap](plan/backlog.md) and [phase plans](plan/) say what comes next.
 ## Play it (Windows)
 
 You need your own FoC installation and a graphics card with Vulkan or Direct3D 12 support. The release
-is not code-signed, so Windows may warn about the download; the player guide inside the zip explains it.
+is code-signed only when its release notes say so; either way Windows may warn about a new download until it has seen enough
+downloads of it. The player guide inside the zip explains the warning and how to check the signature and the checksum.
 
 1. Download `eaw-revised-<version>-windows-x64-player.zip` from
    [Releases](https://github.com/EaW-Revised/EaW-Revised/releases), compare it with `SHA256SUMS.txt`, and extract the

@@ -7,6 +7,7 @@
 #include "eawr/script/numeric/lua_number.hpp"
 #include "../script/foc/galactic_ai_actions.hpp"
 #include "../script/foc/galactic_ai_intent_refusal.hpp"
+#include "../script/foc/galactic_ai_outbox.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -259,4 +260,18 @@ private:
     Rows rows_;
     std::weak_ptr<FaultObserver> fault_observer_; // never saved
 };
+// Async step 3b: a window the lane finished and the world has not adopted yet. The world adopts it at the start of the AI tick
+// `adopt_at` (H), before that tick applies or publishes anything: the batch joins the outbox, the publication (with the window's
+// diagnostics and load notes) the billing view. With no adoption delay the world adopts each part as the window ends and none
+// waits. Saved after the stage losses; nothing while no window waits.
+struct GalacticAiFinishedWindow {
+    std::uint64_t adopt_at{};
+    script::foc::galactic_ai::OutboxBatch::Contents batch;
+    std::optional<GalacticAiBillingPublication> publication;
+};
+[[nodiscard]] core::Result<void> encode_finished_window(std::vector<std::uint8_t>& bytes, std::uint64_t adopt_at,
+    const script::foc::galactic_ai::OutboxBatch::Contents& batch, const std::optional<GalacticAiBillingPublication>& publication);
+// Reads its own block from the front (none: no window waits) and says how many bytes it used.
+[[nodiscard]] core::Result<std::size_t> restore_finished_window_prefix(std::span<const std::uint8_t> bytes,
+    const script::foc::galactic_ai::AsyncSchedule& schedule, std::optional<GalacticAiFinishedWindow>& out);
 } // namespace eawr::campaign

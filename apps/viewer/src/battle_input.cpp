@@ -69,6 +69,8 @@ void BattleInput::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
     world_ui_settings_ = ui::world_ui_settings(filesystem);
     for (const auto& diagnostic : world_ui_settings_.diagnostics) note(diagnostic);
     world_ui_->prepare(filesystem, catalog, live, shaders);
+    hero_catalog_ = &catalog;
+    heroes_tables_ = nullptr;
     cursor_.prepare(filesystem);
     beacon_delay_ = ui::beacon_place_delay(filesystem);
     // O-2: use the authored prop through the ordinary XML/model/material path.

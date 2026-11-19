@@ -377,10 +377,11 @@ core::Result<bool> UnitCombat::admit_manual(const CombatUnit& target, const std:
             <= slot->manual_turret->yaw_extent.raw();
     } else points = pointable(posed, midpoint, target.position);
     const auto distance = squared(midpoint, target.position, RangeMetric::planar);
-    const auto minimum = squared({}, {slot->manual_min_range, {}, {}}, RangeMetric::planar);
+    const bool minimum_ok = slot->min_range.raw() <= 0
+        || math::detail::compare(distance, squared({}, {slot->min_range, {}, {}}, RangeMetric::planar)) >= 0;
     const auto reach = take(math::add(this->fire_reach(*slot), soft_radius.value_or(target_soft_radius(world_.motion, target))));
     const bool accepted = points && within_range(midpoint, target.position, reach, RangeMetric::planar)
-        && math::detail::compare(distance, minimum) >= 0;
+        && minimum_ok;
     if (error_) return core::Result<bool>::failure(*error_);
     return core::Result<bool>::success(accepted);
 }

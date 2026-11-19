@@ -185,6 +185,8 @@ struct TextureAudit final {
     std::size_t references{};
     bool in_atlas{};
     bool standalone{};
+    std::string atlas_texture; // Stored name; retained so an ANR-01 retry is visible in the audit.
+    bool atlas_sibling{};
 };
 
 // Acceptance evidence: what parses, resolves, or is listed as unresolved.

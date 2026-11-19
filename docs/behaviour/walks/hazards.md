@@ -63,7 +63,8 @@ collision flag alone does not override hostility (WHZ-51).
 ## Scope and entry points
 
 At creation, an obstacle registers a stationary prediction with the tactical
-tracking system. Fog initialization builds a shared dense-cell map. Movement
+tracking system. The optional dense-fog initializer builds a shared dense-cell map;
+normal space-skirmish activation follows visibility V-22. Movement
 searches query the tracking system; fighters query their avoidance interface.
 These are separate consumers of the same placed type.
 
@@ -156,7 +157,7 @@ derive one universal order from the section order here.
   filter was all categories (WHZ-06/07). Field damage remains independently gated
   by WHZ-10..14; no runtime wall or pushback is added (WMV-04).
 - **WHZ-09** (**debug build**, EHZ-38, EHZ-39; IS-07/IS-08, G-V2;
-  **data**) Outside the map editor, fog initialization clears one shared dense
+  **data**) The inspected fog initializer, outside the map editor, clears one shared dense
   bit grid, then ORs circles for obstacles with any of the four hazard flags
   and `SPACE_OBSTACLE`. Its center is position plus the **raw, unrotated**
   `Space_Obstacle_Offset`; its radius is raw `Space_Obstacle_Radius`, without
@@ -165,7 +166,11 @@ derive one universal order from the section order here.
   wherever the revealer stands: authored M2 value 0.2, code default 0.5.
   `DesiredSpaceFOWCellSize` is 100 in stock data; normal range's minimum is 10
   (visibility owns its rounding). Overlaps are a boolean union, not multiplied
-  reductions. Dynamic rebuilds after movement/destruction are U-03.
+  reductions. This describes the shared kernel, not proof that normal skirmish
+  setup activates it: runtime controls show full sensor range through asteroid
+  fields and ion nebulas (visibility V-22, V22-R1..R5). The remake separates skirmish policy from
+  campaign entry; campaign activation remains visibility G-V10. Dynamic rebuilds
+  after movement/destruction are U-03.
 
 ### Asteroid damage: every logical frame on affected units
 
@@ -199,8 +204,8 @@ derive one universal order from the section order here.
   hardpoint-selection implementation and resulting damage/death rules. Play
   optional `SFXEvent_Damaged_By_Asteroid`; hit-particle placement samples model
   collision geometry, preferring shield geometry when available, and offsets
-  the surface point by **0.1** along its normal (code). Particle choices come
-  from `Asteroid_Damage_Hit_Particles` using synchronized random selection.
+  the surface point by **0.1** along its normal (code). WHZ-73 qualifies the
+  damage-result-dependent particle list and attachment branch.
 
 The WHZ-14 ordinary route was checked again against the debug build (EHZ-65).
 Selection draws a start index over the complete hardpoint list only if at least
@@ -489,6 +494,18 @@ walks; “satellite” does not imply a new environmental damage algorithm.
   of one pixel. The remake unions analytic ellipse scanlines; exact integer
   fringe quantization and exceptional model-bound variants remain U-07.
 
+- **WHZ-73** (**debug build**, E7654-02; WHZ-14) The ordinary damage result
+  decides which asteroid-hit particle list to draw from: a hit wholly absorbed
+  by the shield uses `Shield_Hit_Particles`; other hits use
+  `Asteroid_Damage_Hit_Particles`. Only the shield-list branch reads the chosen
+  particle's `Particle_Attach_To_Collision`. When true it keeps the sampled
+  contact transform relative to the victim's root and follows that victim;
+  otherwise the effect stays in world space. An attachment flag on an ordinary
+  asteroid damage particle does not enter this attachment branch. The remake
+  uses the immutable hit feedback and existing contact ownership, without
+  advancing simulation random streams; list choice follows BP-64's presentation
+  mix. The existing geometry sampler and other particle hosts remain separate.
+
 ## Comparison with existing behavior notes
 
 | Existing rules | Result of this walk |
@@ -522,7 +539,7 @@ claim that our land trigger is implemented.
 | WHZ-06 | `src/sim/tactical/pathfind_search_internal.hpp` and `src/sim/tactical/pathfind_sliced.cpp`, configuration/`next_try` match default all-filter moves; custom destination filters are not exposed | same for normal moves | custom filters belong to orders/AI |
 | WHZ-07 | pathfinder `linear_expansion_cost`, `next_try` already implement penalties and filtered hazard bits | same | prerequisite G-2 |
 | WHZ-08 | `src/sim/tactical/fighters_motion.cpp`, `avoid` (WSQ-35) | same interface | prerequisite G-1/G-2 for new map solids |
-| WHZ-09 | `src/sim/tactical/fog_cells.cpp` has no dense obstacle map or multiplier application | missing | G-8 |
+| WHZ-09 | Shared dense-cell kernel implemented; activation follows visibility V-22, with campaign entry preserved pending G-V10 | conditional | G-8 | Dense-cell kernel and geometry implemented; normal skirmish activation corrected by visibility V-22 runtime controls. Campaign activation remains G-V10. | M | visibility V-22 / G-V10 |
 | WHZ-10 | no per-type asteroid service/layer gates | missing | G-3 |
 | WHZ-11 | no asteroid point-query or scalar gates | missing | G-3 |
 | WHZ-12 | no per-field probability/damage loop | missing | G-3 |

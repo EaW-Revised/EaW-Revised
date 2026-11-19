@@ -55,6 +55,7 @@ struct Fixed { int value{}; static constexpr int scale = 256; int raw() const { 
 namespace animation {
 using Matrix = std::array<float,16>;
 struct BonePose { Matrix skin_asset{}, model_asset{}; bool visible = true; };
+__CLONE_ART__
 struct Pose { std::vector<BonePose> bones; };
 struct Player {
     mutable std::atomic<unsigned> calls{};
@@ -195,7 +196,7 @@ struct SpacePopulation {
     };
     struct HardpointGate {
         enum class Art { hull,attached_model,damage_decal };
-        std::size_t decision{},hardpoint{}; Art art=Art::hull;
+        std::size_t decision{},hardpoint{}; Art art=Art::hull; std::optional<std::uint32_t> bone{};
     };
     struct Piece {
         sim::RenderInstance instance;
@@ -258,7 +259,7 @@ struct SpacePopulation {
     std::map<std::size_t,std::size_t> idle_live_ships_;
     std::vector<std::uint8_t> diagnostic_fighters_;
     bool diagnostic_fighter(std::size_t ship) const noexcept { return ship < diagnostic_fighters_.size() && diagnostic_fighters_[ship] != 0; }
-    std::vector<bool> live_retired_;
+    std::vector<bool> live_retired_, live_death_clone_;
     std::vector<AnimatedInstance> animated_instances_;
     std::vector<std::vector<animation::BonePose>> contact_bones_;
     std::vector<std::string> upload_failures_;
@@ -275,6 +276,7 @@ struct SpacePopulation {
     std::uint64_t instance_count_{},attachments_drawn_{},shield_shells_shown_{},stealth_shells_shown_{};
     void pose_units(GodotRenderer&,std::uint32_t,const particles::StepExecutor*);
     bool pose_live_turrets(GodotRenderer&,std::span<const LivePose>,std::span<const LiveClipPose>,const particles::StepExecutor*);
+    bool attached_art_shown(const GatedInstance&) const;
     void refresh_instances(const particles::StepExecutor*);
 };
 __FUNCTIONS__
@@ -460,6 +462,27 @@ int main() {
         v.blast_meshes_shown_.clear(); v.shield_shells_shown_=v.stealth_shells_shown_=0;
         serial_visibility.refresh_instances(nullptr); v.refresh_instances(&executor);
         same_visibility(v,serial_visibility); assert(v.piece_counts_.data()==counts_data);
+        {
+            // UA-12: a death clone's attached art leaves with its hidden attach bone, serial and on workers;
+            // a live ship's art is gated by its hardpoint state alone.
+            auto clone_population=[] {
+                SpacePopulation p; p.live_shown_={true,true}; p.live_death_clone_={true,false};
+                p.hardpoint_states_={{scene::HardpointState::intact}}; p.contact_bones_.resize(2);
+                for(auto& bones:p.contact_bones_) bones.resize(3);
+                p.contact_bones_[0][2].visible=false; p.contact_bones_[1][2].visible=false;
+                for(unsigned ship=0;ship<2;++ship) {
+                    SpacePopulation::Piece art; art.instance={ship+1,ship+500}; art.live=ship;
+                    art.gate=SpacePopulation::HardpointGate{0,0,SpacePopulation::HardpointGate::Art::attached_model,2U};
+                    p.pieces_.push_back(art);
+                }
+                return p;
+            };
+            auto serial_clone=clone_population(); serial_clone.refresh_instances(nullptr);
+            assert(serial_clone.instances_.size()==1 && serial_clone.instances_[0].entity_id==2);
+            auto worker_clone=clone_population(); worker_clone.refresh_instances(&executor); same_visibility(worker_clone,serial_clone);
+            serial_clone.contact_bones_[0][2].visible=true; serial_clone.refresh_instances(nullptr);
+            assert(serial_clone.instances_.size()==2);
+        }
         auto fallback=visibility_population(); fallback.refresh_instances(&failed); same_visibility(fallback,visibility);
         fallback.pieces_.clear(); fallback.refresh_instances(&executor);
         assert(fallback.instances_.empty() && fallback.piece_visibility_.empty() && fallback.attachments_drawn_==0);

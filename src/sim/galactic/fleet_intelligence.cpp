@@ -89,6 +89,8 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
         if (visible) planets.emplace_back(row.planet, &row);
     }
     seal(planets);
+    for (const auto& [planet, row] : planets)
+        if (row->knowledge.fleet_presence) output.presence_planets.push_back(planet);
     FlatTable<TypeId, const FleetDisplayType*> types;
     types.reserve(traits.size());
     for (const auto& row : traits) types.emplace_back(row.type, &row);

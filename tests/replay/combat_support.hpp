@@ -68,6 +68,7 @@ void test_noncollidable_opportunity_target();
 void test_zero_cone();
 void test_fire_bone_cone();
 void test_randomized_fire_bones();
+void test_hardpoint_min_range();
 void test_launcher_cone();
 void test_object_turret();
 void test_hardpoint_turret();

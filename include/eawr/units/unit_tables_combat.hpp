@@ -48,6 +48,7 @@ struct Weapon final {
     std::optional<std::uint32_t> pulse_count;
     std::optional<Fixed> pulse_delay_seconds;
     std::optional<Fixed> range;              // Fire_Range_Distance (hardpoint weapons only)
+    std::optional<Fixed> min_range;          // Fire_Min_Range_Distance; absent means zero (WWP-20)
     std::optional<Fixed> cone_width_degrees; // Fire_Cone_Width
     std::optional<Fixed> cone_height_degrees;
     std::string damage_type;                 // authored Damage_Type, empty when absent

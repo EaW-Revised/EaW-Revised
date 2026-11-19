@@ -34,6 +34,7 @@ public:
         bool teletype{true};
         std::optional<std::array<float, 3>> colour; // three authored numbers; the widget maps them to a colour
         Style style{Style::plain};
+        std::uint64_t identity{}; // transient display generation; repeated keys restart reveal
     };
 
     // One presentation event of this seat. Returns whether it was one of this class's (objectives or screen text).
@@ -113,6 +114,9 @@ private:
         if (const auto teletype = number(at(4))) line.teletype = *teletype != 0.0;
         line.colour = colour(at(5));
         line.style = style(at(6));
+        // WGP-129: exact-key replacement; case-distinct keys remain independent.
+        std::erase_if(lines_, [&](const Line& existing) { return existing.text_id == id; });
+        line.identity = ++identity_;
         if (lines_.size() >= max_lines) lines_.erase(lines_.begin());
         lines_.push_back(std::move(line));
     }
@@ -150,6 +154,7 @@ private:
     std::vector<sim::galactic::story::Objective> objectives_;
     bool visible_{true};
     std::vector<Line> lines_;
+    std::uint64_t identity_{};
 };
 
 } // namespace eawr::viewer::galactic

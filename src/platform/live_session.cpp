@@ -191,7 +191,8 @@ std::size_t LiveEventLog::record_bytes(const LiveTickEvents& record) noexcept {
         + record.asteroid_impacts.size() * sizeof(tactical::AsteroidImpact)
         + record.base_attacks.size() * sizeof(LiveBaseAttack)
         + record.hardpoint_losses.size() * sizeof(LiveHardpointLoss)
-        + record.damage_changes.size() * sizeof(tactical::DamageChange);
+        + record.damage_changes.size() * sizeof(tactical::DamageChange)
+        + record.unit_losses.size() * sizeof(tactical::BattleLoss);
     for (const auto& loss : record.hardpoint_losses) bytes += loss.standing.size() * sizeof(std::uint32_t);
     return bytes;
 }
@@ -200,6 +201,17 @@ void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std:
     const std::span<const tactical::TypeId> base_types, const std::span<const tactical::DamageChange> damage_changes) {
     LiveTickEvents kept{snapshot.completed_tick(), {}, {}, {asteroid_impacts.begin(), asteroid_impacts.end()}, {}, {}};
     kept.damage_changes.assign(damage_changes.begin(), damage_changes.end());
+    // BA-65 / WBF-45: the append-only loss ledger is ordered by delivery tick.
+    // Copy only the new suffix (logarithmic lookup, no live-world or lifetime scan).
+    if (snapshot.completed_tick() > 0) {
+        const auto losses = snapshot.losses();
+        const auto tick = snapshot.completed_tick() - 1;
+        const auto first = std::lower_bound(losses.begin(), losses.end(), tick,
+            [](const auto& loss, const std::uint64_t value) { return loss.tick < value; });
+        const auto last = std::upper_bound(first, losses.end(), tick,
+            [](const std::uint64_t value, const auto& loss) { return value < loss.tick; });
+        kept.unit_losses.assign(first, last);
+    }
     bool ability_input = false;
     for (const tactical::Event& event : snapshot.events()) {
         if (presented(event)) kept.events.push_back(event);
@@ -267,7 +279,7 @@ void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std:
     ability_due_ticks_.erase(ability_due_ticks_.begin(), ability_due_ticks_.upper_bound(tick));
     // WHE-63: accepted instant commands likewise need their frame retained, without
     // adding an authoritative event or scanning every unit for presentation state.
-    if (ability_input || ability_due || !kept.events.empty() || !kept.combat_events.empty() || !kept.asteroid_impacts.empty() || !kept.base_attacks.empty() || !kept.damage_changes.empty()) {
+    if (ability_input || ability_due || !kept.events.empty() || !kept.combat_events.empty() || !kept.asteroid_impacts.empty() || !kept.base_attacks.empty() || !kept.damage_changes.empty() || !kept.unit_losses.empty()) {
         if (record_bytes(kept) > bounds_.bytes) {
             // Larger than the whole bound: dropped at once, the older ticks kept.
             if (!dropped_from_) dropped_from_ = kept.tick;
@@ -276,6 +288,7 @@ void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std:
             kept.events.shrink_to_fit();
             kept.combat_events.shrink_to_fit();
             kept.damage_changes.shrink_to_fit();
+            kept.unit_losses.shrink_to_fit();
             kept.asteroid_impacts.shrink_to_fit();
             kept.base_attacks.shrink_to_fit();
             kept.hardpoint_losses.shrink_to_fit();

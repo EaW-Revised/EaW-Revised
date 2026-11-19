@@ -145,6 +145,7 @@ LoadingScreenContent loading_screen_content(const LoadingScreenInput& input) {
     out.weather = lookup(tag("Describe_Weather"));
     out.terrain = lookup(tag("Describe_Terrain"));
     out.population = lookup(tag("Describe_Population"));
+    out.wildlife = lookup(tag("Describe_Wildlife"));
     // BLD-04: the pictures are the planet's own.
     out.native_icon = tag("Native_Icon_Name");
     if (const std::string weather_icon = tag("Encyclopedia_Weather_Icon"); !weather_icon.empty()) {

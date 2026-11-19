@@ -669,6 +669,38 @@ void test_event_log_keeps_hardpoint_loss() {
         "BA-64/WSD-04: removed self-destructing parent excludes an earlier same-tick hardpoint loss");
 }
 
+void test_event_log_keeps_unit_losses() {
+    using eawr::platform::LiveEventLog;
+    const auto losses = std::make_shared<const std::vector<tactical::BattleLoss>>(
+        std::vector<tactical::BattleLoss>{{1, 10, 2, 1, 1}, {1, 20, 2, 1, 8},
+            {2, 30, 1, 1, 8}, {1, 40, 2, 1, 9}});
+    const auto snapshot = [&](const std::uint64_t completed) {
+        return tactical::TacticalSnapshot(completed, {}, {}, {}, {}, {}, std::nullopt,
+            {}, {}, {}, {}, {}, {}, losses);
+    };
+    LiveEventLog log({.ticks = 100, .bytes = 4096});
+    log.record(snapshot(9));
+    const auto held = log.after(0, 70);
+    expect(held.ticks.size() == 1 && held.ticks.front().unit_losses
+        == std::vector<tactical::BattleLoss>{(*losses)[1], (*losses)[2]},
+        "BA-65: retain only this tick's ordered losses, without live instances or visible poses");
+    expect(log.after(9, 70).ticks.empty(), "BA-65: journal cursor consumes loss warnings once");
+    const auto bytes = sizeof(eawr::platform::LiveTickEvents) + 2 * sizeof(tactical::BattleLoss);
+    expect(log.bytes() == bytes, "BA-65: retained losses count against the journal bound");
+    LiveEventLog bounded({.ticks = 100, .bytes = bytes - 1});
+    bounded.record(snapshot(9));
+    expect(bounded.bytes() == 0 && bounded.after(0, 9).lost_through == 9,
+        "BA-65: oversized loss record reports a gap");
+    log.record(snapshot(10));
+    const auto next = log.after(9, 10);
+    expect(next.ticks.size() == 1 && next.ticks.front().unit_losses
+        == std::vector<tactical::BattleLoss>{(*losses)[3]},
+        "BA-65: cumulative ledger does not replay previous tick losses");
+    LiveEventLog initial({.ticks = 100, .bytes = 4096});
+    initial.record(snapshot(0));
+    expect(initial.size() == 0, "BA-65: initial snapshot cannot underflow the delivery tick");
+}
+
 void test_event_log_keeps_sparse_ability_frames() {
     using eawr::platform::LiveEventLog;
     const auto snapshot = [](const std::uint64_t tick, std::vector<tactical::AbilitySpawnState> spawns) {
@@ -924,6 +956,16 @@ void test_victory_outcome() {
         for (const auto& event : decided->events()) reported = reported || event.kind == tactical::EventKind::victory;
     }
     expect(reported, "the deciding tick's snapshot has the victory event");
+    std::size_t loss_count = 0;
+    bool loss_retained = false;
+    for (const auto& record : session.events_after(0, 6).ticks) {
+        loss_count += record.unit_losses.size();
+        for (const auto& loss : record.unit_losses)
+            loss_retained = record.tick == 4 && loss.tick == 3 && loss.owner == 2
+                && loss.type == 40 && loss.count == 1;
+    }
+    expect(loss_count == 1 && loss_retained,
+        "BA-65: a real station kill publishes one loss cue at its completed death tick");
     if (!latest || !latest->outcome()) return;
     const auto end_tick = latest->outcome()->end_tick;
     session.halt_at(end_tick);
@@ -1744,6 +1786,7 @@ int main(const int argc, const char* const argv[]) {
     test_event_log_keeps_pad_audio_events();
     test_event_log_keeps_base_attack_metadata();
     test_event_log_keeps_hardpoint_loss();
+    test_event_log_keeps_unit_losses();
     test_event_log_keeps_sparse_ability_frames();
     test_event_log_gap_stays_in_the_asked_range();
     test_real_time_records_its_replay(argv[1]);

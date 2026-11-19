@@ -218,6 +218,10 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         if (!planetary_target && !within_range(midpoint, aim->point, reach, RangeMetric::planar)) {
             return false;
         }
+        // WWP-20: the inclusive lower bound uses the pre-lead aim point, without target-radius padding.
+        if (!own_weapon && weapon.min_range.raw() > 0
+            && math::detail::compare(squared(midpoint, aim->point, RangeMetric::planar),
+                squared({}, {weapon.min_range, {}, {}}, RangeMetric::planar)) < 0) return false;
         // WWP-47: the weapon takes its next muzzle and advances the index before the launch can fail
         // on its lead or cone (debug build), so a rejected shot still uses its muzzle up.
         if (muzzled) state_.weapons[slot].next_muzzle = static_cast<std::uint32_t>((muzzle_index + 1) % weapon.muzzles.size());

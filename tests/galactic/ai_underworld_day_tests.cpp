@@ -39,6 +39,10 @@ namespace cp = eawr::campaign;
 namespace gc = eawr::sim::galactic;
 using namespace galactic_test;
 
+struct MissingWorkshopMod : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 std::filesystem::path game_root() {
     auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
     if (!root) throw std::runtime_error("installed campaign gate requires EAWR_EAW_GAME_ROOT");
@@ -53,11 +57,29 @@ struct Result {
 Result run(std::uint64_t ticks, std::size_t workers, std::string_view campaign_name, bool report, bool probe = false, bool observe = true) {
     eawr::gc_profile::enabled.store(observe);
     const auto root = game_root();
+    const auto mod_id = eawr::testing::environment("EAWR_AI_DAY_MOD_ID");
+    std::vector<eawr::vfs::LayerRoot> layers;
+    if (mod_id) {
+        std::vector<std::filesystem::path> roots;
+        if (const auto workshop = eawr::testing::environment("EAWR_WORKSHOP_ROOT")) roots.emplace_back(*workshop);
+        if (const auto mod = eawr::testing::environment("EAWR_REMAKE_MOD_ROOT")) roots.push_back(std::filesystem::path(*mod).parent_path());
+        roots.push_back(root.parent_path().parent_path() / "workshop" / "content" / "32470");
+        roots.push_back(root.parent_path() / "workshop" / "content" / "32470");
+        roots.push_back(root.parent_path().parent_path() / "mods" / "workshop" / "content" / "32470");
+        for (const auto& workshop : roots) {
+            std::error_code unreadable;
+            if (std::filesystem::is_directory(workshop / *mod_id, unreadable) && !unreadable) {
+                layers = eawr::vfs::mod_chain_roots(workshop / *mod_id); break;
+            }
+        }
+        if (layers.empty()) throw MissingWorkshopMod("AI day requires installed workshop mod " + *mod_id);
+    }
+    layers.emplace_back("expansion", root / "corruption" / "Data");
+    layers.emplace_back("base", root / "GameData" / "Data");
     std::vector<eawr::vfs::MountSpec> mounts;
-    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
-        mounts.push_back(must(eawr::vfs::resolve_manifest_mount(id, root / folder / "Data")).mount);
+    for (auto& layer : must(eawr::vfs::resolve_manifest_chain(layers))) mounts.push_back(std::move(layer.mount));
     auto files = must(eawr::vfs::Vfs::mount(mounts));
-    const auto loaded = must(eawr::data::load_catalog(files, eawr::data::Profile::foc));
+    const auto loaded = must(eawr::data::load_catalog(files, mod_id ? eawr::data::Profile::remake : eawr::data::Profile::foc));
     const auto data = must(eawr::data::galactic::load_galactic_data(files, loaded.catalog));
     const auto types = eawr::units::galactic_type_table(loaded.catalog);
     const auto* source = data.campaign(campaign_name);
@@ -223,6 +245,15 @@ Result run(std::uint64_t ticks, std::size_t workers, std::string_view campaign_n
     }
     for (const auto& [player, peak] : peak_credits) result.counters[names[player] + ".peak_credits"] = static_cast<std::uint64_t>(std::max<std::int64_t>(peak, 0));
     for (const auto& [player, credits] : final_credits) result.counters[names[player] + ".final_credits"] = static_cast<std::uint64_t>(std::max<std::int64_t>(credits, 0));
+    // WGCH-167: successful AI submissions, excluding the startup corruption on
+    // owned planets. Counts the ordinary ability host, not plan success labels.
+    if (const auto* abilities = root_owner.game()->galaxy().ability_state())
+        for (const auto& usage : abilities->corruption_usage) {
+            std::uint64_t total{};
+            for (const auto uses : usage.uses) total += uses;
+            result.counters[names[usage.player] + ".corruptions"] = total;
+            if (report) std::cout << "UW_DAY corruption player=" << names[usage.player] << " started=" << total << std::endl;
+        }
     if (const auto engine = observed->runtimes.front().engine.lock()) {
         const auto refusals = engine->galactic_refusals();
         result.refusal_rows = refusals.size();
@@ -261,6 +292,8 @@ int main_run(int argc, char** argv) {
     // Seed 1, 4 workers, 5400 ticks. Thresholds are about half of what the fixed AI did in the observation run and far
     // from the unfixed baseline (no structures, no starbase, credits 8000 -> 10960 by this tick).
     const auto count = [&](const std::string& key) { const auto found = base.counters.find(key); return found == base.counters.end() ? std::uint64_t{} : found->second; };
+    if (argc > 3 && std::string_view(argv[3]) == "corruption")
+        galactic_test::expect(count("Underworld.corruptions") > 0, "AI corruption plan starts corruption in the ordinary stock campaign");
     if (campaign == "Sandbox_Equal_Footing_Empire") {
         galactic_test::expect(count("Underworld.unavailable_budgets") == 0, "no Underworld budget equation ends unavailable");
         galactic_test::expect(count("Underworld.started.SpecialStructure") >= 4, "Underworld starts structures it authored");
@@ -276,4 +309,8 @@ int main_run(int argc, char** argv) {
     return galactic_test::failures == 0 ? 0 : 1;
 }
 } // namespace
-int case_galactic_ai_underworld_day_tests(int argc, char** argv) { try { return main_run(argc, argv); } catch (const std::exception& error) { std::cerr << error.what() << std::endl; return 1; } }
+int case_galactic_ai_underworld_day_tests(int argc, char** argv) {
+    try { return main_run(argc, argv); }
+    catch (const MissingWorkshopMod& error) { std::cout << "SKIPPED: " << error.what() << std::endl; return 77; }
+    catch (const std::exception& error) { std::cerr << error.what() << std::endl; return 1; }
+}

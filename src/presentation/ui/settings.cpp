@@ -67,6 +67,7 @@ struct IntField final {
 constexpr int speed_last = speed_step_count - 1;
 // DEV-9: the stamp line of a settings file written with the radar default ON (see parse_settings).
 constexpr std::string_view fit_radar_stamp_key = "migrate.fit_radar_default_on";
+constexpr std::string_view selection_stamp_key = "migrate.selection_hotkeys_default_on";
 constexpr int scroll_last = scroll_stop_count - 1;
 
 const IntField fields[] = {
@@ -322,6 +323,15 @@ std::string selection_chord_for(const char letter, const bool ctrl) {
 }
 
 bool selection_chord_usable(const std::string_view chord) noexcept {
+    if (chord.find("Mouse ") != std::string_view::npos) {
+        auto button = chord;
+        for (const auto prefix : {std::string_view("Ctrl+"), std::string_view("Shift+"), std::string_view("Alt+")})
+            if (button.starts_with(prefix)) button.remove_prefix(prefix.size());
+        if (!button.starts_with("Mouse ")) return false;
+        button.remove_prefix(6);
+        const auto number = parse_int(button);
+        return number && *number >= 4 && !button.empty() && button.front() != '0' && button.front() != '+';
+    }
     const bool ctrl = chord.starts_with("Ctrl+");
     const std::string_view letter = ctrl ? chord.substr(5) : chord;
     if (letter.size() != 1 || letter[0] < 'A' || letter[0] > 'Z') return false;
@@ -330,6 +340,16 @@ bool selection_chord_usable(const std::string_view chord) noexcept {
 
 SelectionChordStatus selection_chord_status(const PlayerSettings& settings, const std::size_t action,
     const std::string_view chord) noexcept {
+    auto button = chord;
+    for (const auto prefix : {std::string_view("Ctrl+"), std::string_view("Shift+"), std::string_view("Alt+")})
+        if (button.starts_with(prefix)) button.remove_prefix(prefix.size());
+    if (action < selection_commands.size() && button.starts_with("Mouse ")) {
+        if (button == "Mouse 1" || button == "Mouse 2") return SelectionChordStatus::mouse_reserved;
+        // PI-9: the camera owns middle drag/click, including modified presses.
+        if (button == "Mouse 3") return SelectionChordStatus::camera;
+        if (!selection_chord_usable(chord)) return SelectionChordStatus::malformed;
+        return chord == selection_key(settings, 1 - action) ? SelectionChordStatus::duplicate : SelectionChordStatus::ok;
+    }
     const bool ctrl = chord.starts_with("Ctrl+");
     const std::string_view letter = ctrl ? chord.substr(5) : chord;
     if (action >= selection_commands.size() || letter.size() != 1 || letter[0] < 'A' || letter[0] > 'Z')
@@ -337,6 +357,22 @@ SelectionChordStatus selection_chord_status(const PlayerSettings& settings, cons
     if (!selection_chord_usable(chord)) return SelectionChordStatus::reserved;
     if (chord == selection_key(settings, 1 - action)) return SelectionChordStatus::duplicate;
     return SelectionChordStatus::ok;
+}
+
+std::string selection_mouse_chord_for(const int button, const bool shift, const bool ctrl, const bool alt) {
+    if (button < 1) return {};
+    return std::string(ctrl ? "Ctrl+" : "") + (shift ? "Shift+" : "") + (alt ? "Alt+" : "")
+        + "Mouse " + std::to_string(button);
+}
+
+std::optional<std::size_t> selection_mouse_action(const PlayerSettings& settings, const int button,
+    const bool shift, const bool ctrl, const bool alt, const bool meta, const bool free_camera) {
+    if (!settings.selection_hotkeys || meta || free_camera || button < 4) return std::nullopt;
+    if (selection_key(settings, 0) == selection_key(settings, 1)) return std::nullopt;
+    const auto chord = selection_mouse_chord_for(button, shift, ctrl, alt);
+    for (std::size_t action = 0; action < selection_commands.size(); ++action)
+        if (selection_key(settings, action) == chord) return action;
+    return std::nullopt;
 }
 
 std::string_view selection_key(const PlayerSettings& settings, const std::size_t action) noexcept {
@@ -448,6 +484,7 @@ std::string serialize_settings(const PlayerSettings& settings) {
     }
     // DEV-9: every file written by a build whose radar default is ON carries this stamp, so a stored radar value is trusted.
     text += std::string(fit_radar_stamp_key) + "=1\n";
+    text += std::string(selection_stamp_key) + "=1\n";
     for (std::size_t slot = 0; slot < detail_slot_count; ++slot) {
         text += detail_key(slot) + "=" + std::to_string(settings.video.detail[slot]) + "\n";
     }
@@ -513,6 +550,10 @@ SettingsLoad parse_settings(const std::string_view text) {
         const std::string key(trim(line.substr(0, equals)));
         const std::string_view value = trim(line.substr(equals + 1));
         if (key == fit_radar_stamp_key) { fit_radar_stamped = true; continue; }
+        if (key == selection_stamp_key) {
+            load.settings.selection_hotkeys_migration_pending = value != "1";
+            continue;
+        }
         if (key == "revised_layer_path") {
             if (!value.empty()) load.settings.revised_layer_path = std::string(value);
             else load.settings.revised_layer_path.reset();
@@ -596,6 +637,10 @@ SettingsLoad parse_settings(const std::string_view text) {
         // stored value cannot be told from a choice: it is reset once (the next save stamps the file).
         load.settings.gameplay.fit_radar_to_galaxy = PlayerSettings{}.gameplay.fit_radar_to_galaxy;
         load.notes.emplace_back("gameplay.fit_radar_to_galaxy reset once to its new default (on)");
+    }
+    if (load.settings.selection_hotkeys_migration_pending && !load.settings.selection_hotkeys) {
+        load.settings.selection_hotkeys = true;
+        load.settings.selection_hotkeys_authored = false;
     }
     // The separate SS field marks a new-format High (8x). Without it, High meant 4x plus SS2.
     if (legacy_high && !explicit_supersampling) load.settings.video.render_profile = RenderProfileSetting::medium;

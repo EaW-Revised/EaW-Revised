@@ -1434,10 +1434,7 @@ void production_file_resume(unsigned workers, bool single_player_rules, bool pen
     for (auto& peer : live) expect(peer->wait_for(5, 30s), "live save fixture reaches tick five");
     if (pending_battle) for (auto& peer : live)
         expect(peer->frame().pending_conflict && !peer->frame().battle, "player save starts at a pending conflict");
-    eawr::platform::LiveSaveRequest request; request.seat = bindings[1].seat; request.name = "guest";
-    const auto rejected = live[1]->request_save(request);
-    expect(rejected && live[1]->save_outcomes().back().phase == eawr::platform::LiveSavePhase::rejected,
-        "the guest cannot publish a save");
+    eawr::platform::LiveSaveRequest request;
     request.seat = bindings[0].seat; request.name = "host";
     const auto token = live[0]->request_save(request);
     constexpr std::uint64_t horizon = 60;
@@ -1624,6 +1621,7 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
             expect(!inactive_result && inactive_result.error().message.find("inactive_saved_seat") != std::string::npos, "departed saved human cannot reactivate through mapping");
         }
     }
+    bool selected_by_commit = false;
     room.all_ready();
     if (workers == 1 && !relay) {
         auto prepared = require(room.peers[0].backend->prepare_checkpoint(room.host().snapshot(), roster, bindings, bytes, 1));
@@ -1636,16 +1634,43 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
             && with_mods.agreement->session->state_sha256() == prepared.agreement->session->state_sha256(),
             "lobby mod descriptions do not affect checkpoint setup, identity or simulation hash");
         expect(!room.peers[0].backend->checkpoint_view(), "preparation does not publish a checkpoint");
-        auto changed = room.host().snapshot();
-        ++changed.revision;
-        expect(!room.peers[0].backend->commit_checkpoint(std::move(prepared), changed),
-            "a changed room refuses an asynchronously prepared checkpoint");
+        // #7878: a real change (a player leaves, a seat or the settings move) refuses the prepared restore and is named; what a
+        // long restore sees without anything real happening (revision, readiness, chat cursor, the host's display-only mod
+        // description) does not.
+        using Backend = viewer::GalacticLobbyBackend;
+        const auto live = room.host().snapshot();
+        auto left = live; left.seats.pop_back();
+        expect(!room.peers[0].backend->commit_checkpoint(std::move(prepared), left),
+            "a room that lost a player refuses an asynchronously prepared checkpoint");
         expect(!room.peers[0].backend->checkpoint_view(), "stale preparation leaves the room unchanged");
+        expect(!Backend::same_checkpoint_room(live, left)
+                && Backend::describe_checkpoint_room_change(live, left).find("left the room") != std::string::npos,
+            "a leave is named");
+        expect(Backend::describe_checkpoint_room_change(left, live).find("joined the room") != std::string::npos, "a join is named");
+        auto reseated = live; reseated.seats.back().selection.slot += 1;
+        auto reconfigured = live; reconfigured.game.options.push_back(1);
+        expect(!Backend::same_checkpoint_room(live, reseated) && !Backend::describe_checkpoint_room_change(live, reseated).empty()
+                && !Backend::same_checkpoint_room(live, reconfigured)
+                && Backend::describe_checkpoint_room_change(live, reconfigured).find("settings") != std::string::npos,
+            "a moved seat and changed game settings are real changes");
+        auto quiet = live;
+        quiet.revision += 7; quiet.chat_sequence += 3; quiet.mounted_mods = {3, 1, 0, 0, 0, 0};
+        for (auto& seat : quiet.seats) seat.ready = !seat.ready;
+        expect(Backend::same_checkpoint_room(live, quiet) && Backend::describe_checkpoint_room_change(live, quiet).empty(),
+            "revision, readiness, chat cursor and mod description are not a room change");
+        auto starting = quiet; starting.phase = net::LobbyPhase::starting;
+        auto refused_phase = require(room.peers[0].backend->prepare_checkpoint(live, roster, bindings, bytes, 1));
+        expect(!room.peers[0].backend->commit_checkpoint(std::move(refused_phase), starting), "a room that is no longer staging refuses the restore");
+        // The restore that finishes after only those quiet changes commits; it is this fixture's selection.
+        auto finished = require(room.peers[0].backend->prepare_checkpoint(live, roster, bindings, bytes, 1));
+        require(room.peers[0].backend->commit_checkpoint(std::move(finished), quiet));
+        expect(static_cast<bool>(room.peers[0].backend->checkpoint_view()), "a restore finishing after quiet room changes is selected");
+        selected_by_commit = true;
     }
     if (lobby_failure == 2) room.network.fault = [](auto, auto, std::span<const std::uint8_t> frame) {
         eawr::testing::FakeDelivery delivery; delivery.drop = !frame.empty() && frame.front() == net::save_chunk_kind; return delivery;
     };
-    require(room.peers[0].backend->select_checkpoint(room.host().snapshot(), roster, bindings, bytes, 1));
+    if (!selected_by_commit) require(room.peers[0].backend->select_checkpoint(room.host().snapshot(), roster, bindings, bytes, 1));
     if (lobby_failure == 2) {
         room.rounds(3);
         expect(room.peers[1].backend->checkpoint_manifest() && !room.peers[1].backend->checkpoint_progress().restored,

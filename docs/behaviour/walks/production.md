@@ -37,6 +37,34 @@ reads. Its raw index stays private. No new retail recording is claimed.
 
 ## Entry points
 
+### Mod-authored production coverage
+
+| Rule | Behaviour | Source |
+|---|---|---|
+| WPR-79 | The four build limits in WPR-33 belong to the purchase type, including a squadron or upgrade. The current space-skirmish menu adapter transfers all four limits for every resolved purchase type into the same eligibility and command-bar visibility consumers. It also selects a squadron's `Space_Override_Population_Value` before sharing its population among its members (PU-21). These consumers already exist; a class-specific registry TODO does not establish a missing implementation. Galactic production is outside this source audit. | debug build WP-10/11 and current consumer audit |
+| WPR-80 | `Build_Time_Reduced_By_Multiple_Factories` changes planetary production duration only when planetary data is present: count completed required special structures and divide by at least one (WGEP-34). The tactical queue duration path does not read this flag. Its presence on a space unit or squadron does not add a space-skirmish factory multiplier. | debug build EMC-01/02; WGEP-34 |
+| WPR-81 | `Size_Value` and `Required_Timeline` are recognized unsigned object-definition fields, each initialized to zero and preserved when a type is copied. The debug build has no gameplay reader for either field: the whole-image instruction-operand audit finds only type initialization and copy operations for their storage, and neither tactical nor planetary production eligibility reads them. Authoring either tag therefore adds no size or timeline gate to a space-skirmish purchase. This is parsed but unused data, rather than an absent XML tag. | debug build EMC-03/04/05 |
+| WPR-82 | `Tactical_Build_Start_Lower_Z` is a recognized floating-point object-definition field, initialized to zero and preserved when a type is copied. The whole-image instruction-operand audit finds no reader beyond that copy. It does not lower a construction child or animate its height. The construction service's stored vertical increment does not establish a consumer of this tag. | debug build EMC-06; WBP-17 |
+| WPR-83 | Faction `Space_Skirmish_Unit_Buy_Credits` is recognized and initialized to zero, but has no reader in the whole-image instruction-operand audit. It supplies neither starting cash nor a tactical purchase budget. The separately read GameConstants `Skirmish_Buy_Credits` belongs to the pre-battle force-building dialog; it is not this unused faction field and does not replace WPR-01's ordinary starting balance. | debug build EMC-07/08; WSS-52 |
+| WPR-84 | A created physical object with a positive `Reinforcement_Prevention_Radius` registers as a reinforcement modifier without a station or XML-element-name restriction. WR-22 queries that object's own type and position. The current space-skirmish adapter likewise emits a profile for each loaded physical type and the placement predicate checks its live instances. This covers loaded physical `SecondaryStructure`, `SpecialStructure`, `SpaceBuildable` and `UniqueUnit` objects. Logical squadron containers and map-only objects outside the live unit-table closure are separate consumers, not established by this audit. | debug build EMC-09; WR-22; current consumer audit |
+
+The current consumer audit follows `load_production` in the unit-table loader,
+`economy_rules` in the skirmish setup adapter, `production_allowed` in the tactical
+economy and `build_option_state` in command-bar presentation. Population selection
+uses `population_in_space`; deployment divides the selected purchase population
+among squadron members. The existing unit-table integer and population cases,
+station-production cases and production UI cases cover those generic consumers.
+The opaque EMC evidence index remains in ignored research output.
+
+Mod element labels such as `SkirmishSpaceUnit`, `SkirmishSquadron`, `FlagshipUnit`
+and `FlagshipTemplate` follow [SG-CLS-01](../mod-object-class.md). The same menu
+adapter applies their resolved tactical price, time, prerequisites and population;
+it does not branch on these element names. `Tech_Level` also reaches the generic
+AI metadata and PL-20 candidate weighting. WPR-33 still excludes it from tactical
+purchase permission. This is WPR-79's source audit, limited to loaded producers
+and AI candidates; it makes no claim about other galactic consumers or every mod
+type being reachable from a skirmish roster.
+
 ### Command-bar visibility
 
 The read-only debug-build menu trace distinguishes a type's visibility from its
@@ -415,6 +443,28 @@ ability subset. This does not disable its ordinary weapons or upgrade bonuses.
 | WPR-53 | Station replacement lifetime of attack targets and other non-held references. Still unverified: Station upgrade explicitly transfers held upgrades and hardpoint state before destroying the old station. Arbitrary non-held attack/reference observers depend on later detach callbacks, which are not exhaustively traced by that replacement body. | EUS-25 |
 | WPR-57 | Arbitrary non-death holder deletion and holder-search order (mod/campaign boundary). Still unverified: The stock no-eligible-holder branch is already sourced. Arbitrary non-death deletion and alternate-holder search ordering require their deletion/search callers; these mod/campaign boundaries remain deferred outside stock M2. | EUS-25 |
 
+## WPR-78: Ground-only upgrade cards in space
+
+**WPR-78 (debug build; project presentation policy).** An upgrade object's nested
+abilities obey ordinary mode admission. `Activation_Style=Ground_Automatic`
+admits land and excludes space, both at initial automatic activation and when
+notifying a source about newly created recipients. Purchased upgrade objects
+have no exception. Enabling a handler also repeats this mode check. Consequently
+a ground-automatic defence or recharge bonus bought during a space battle does
+not affect the battle. This conclusion comes from the debug build's mode gate,
+activation-style conversion and enum mapping, initial activation and recipient
+notification paths; it is not a retail damage capture.
+
+The owner's presentation policy keeps an upgrade greyed out and unbuyable in
+space when every authored nested effect is `Ground_Automatic` and it has no
+other supported upgrade effect or ordinary unit ability. Its tooltip says
+**Only works in ground battles**. A rejected purchase spends no credits and
+creates no held upgrade. Missing, unrecognised, event or mixed-mode styles do
+not establish this ground-only explanation. A supported space effect keeps
+its ordinary admission. The rule uses the upgrade's authored activation style,
+without a unit-name list or a new layer tag. Ground bonus consumers and the
+generic recharge formula remain separate work.
+
 ## Tactical upgrade dock: retail observations
 
 This dock belongs with the shared research and station replacement rules above;
@@ -435,3 +485,45 @@ Captures remain private.
 | WPR-75 | In the observed sequence the allied pending level-up is first and the later local research is below it. Once the level-up completes, the surviving ordinary-research icon closes up to the first row. A later local level-up appears below that completed icon and disappears again on cancel. In 1v1, armor researched before reactors remains above reactors after both complete, despite reactors preceding armor in the station's authored menu. | Retail capture, 2026-10-20. These cases follow acquisition order, but do not establish the full sorting rule for arbitrary upgrade types or mixed owners. |
 | WPR-76 | Hovering the completed armor icon opens the normal encyclopedia panel near the lower-left HUD, with the upgrade name, class and bonus description. A single left click and a single right click on that icon, after panning away from the selected station, leave the camera and selected station unchanged. | Retail capture, 2026-10-20. Double click and clicks on an in-progress entry remain unverified. |
 | WPR-77 | The dock is present in space 1v1 as well as 2v2, so a teammate is not required for it to appear. It is also present in land 1v1: Survival Training bought normally at the barracks appears at the same right-edge anchor with a 6% label, then remains without that label on completion. | Retail capture, 2026-10-20, space Coruscant and land Naboo, local Empire. Land 2v2 and other factions were not separately captured. |
+
+
+## WPR-85: Generic space purchase adapter coverage
+
+**WPR-85 (current source audit; WPR-33 and SG-CLS-01 interfaces).** Loaded
+non-pad tactical purchase entries share the same decoder and menu adapter for
+`Tactical_Build_Cost_Multiplayer`, `Tactical_Build_Time_Seconds`,
+`Tactical_Build_Prerequisites`, the four `Build_Limit_*` fields,
+`Population_Value` and `Space_Override_Population_Value`. The price, duration,
+limits, prerequisites and space population choice are not limited by the
+XML element label. Limits and prerequisites also reach the shared eligibility
+predicate and purchase-card state. An arbitrary mod label still needs a valid
+resolved type, production closure and eligible offer; this audit does not load
+all map-only objects or make unsupported types buyable. Pad purchasing keeps
+its separate WBP-11/12/15 contract, and GC production remains separate.
+
+`Build_Tab_Space_Units` additionally has the existing MAT-15 attract consumer:
+the placed setup lists loaded types with the flag, and qualifying destruction
+returns the purchase identity to its owner's pool. This does not apply to an
+ordinary skirmish. Galactic command-bar filtering and the legacy pre-battle
+force-building dialog are distinct consumers, so that class coverage remains
+partial even where the attract path is implemented.
+
+
+## WPR-86: Unused object metadata across mod labels
+
+**WPR-86 (debug build; MUM-01/02).** `Size_Value` and
+`Required_Timeline` are parsed object-type metadata with initialization and
+copying, but no gameplay reader in the whole-image field audit. That result
+is independent of the XML element label, including story props and indigenous
+units. Neither field supplies a tactical size, purchase eligibility or timeline
+rule. Recognition and authored mod uses do not establish an applied consumer.
+
+The remaining generic adapter audit keeps the same boundaries as WPR-85:
+multiplayer faction-grouped menus admit loaded ordinary producers independently
+of their label (WPR-33/WBP-33), while completed-child targets require a loaded
+under-construction behavior and a valid resolved target (WBP-06/18). The shared
+space audio preparation likewise reads ranking and production speech from the
+resolved loaded type. Ranking applies to category-admitted physical speakers
+(BA-20), with squadrons resolved to their leading live craft (BA-24); ordinary
+local production notifications use SND-35/38. These source checks neither load
+map-only types nor qualify separate galactic, land or logical-root consumers.

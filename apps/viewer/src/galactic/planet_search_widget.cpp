@@ -8,6 +8,8 @@
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/input_event_key.hpp>
+#include <godot_cpp/classes/input_event_mouse.hpp>
+#include <godot_cpp/classes/input_event_mouse_button.hpp>
 #include <godot_cpp/classes/item_list.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
 #include <godot_cpp/classes/texture_rect.hpp>
@@ -19,6 +21,7 @@
 #include <locale>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace eawr::presentation::godot_backend {
 using namespace godot;
@@ -52,17 +55,57 @@ const std::locale& search_locale() {
 
 bool PlanetSearchWidget::visible() const { return root_ && root_->is_visible(); }
 
+bool PlanetSearchWidget::pointer_inside() const {
+    return visible() && pointer_ && dialog_ && dialog_->frame
+        && Rect2(Vector2{}, dialog_->frame->get_size()).has_point(
+            dialog_->frame->get_global_transform_with_canvas().affine_inverse().xform(*pointer_));
+}
+
+void PlanetSearchWidget::pointer_left() {
+    pointer_.reset();
+    if (visible()) sync_focus();
+}
+
+void PlanetSearchWidget::observe_pointer(const Ref<InputEvent>& event) {
+    if (!visible()) return;
+    if (const auto* mouse = Object::cast_to<InputEventMouse>(event.ptr())) {
+        pointer_ = mouse->get_position();
+    }
+    // PS-05: reconcile crossings before GUI dispatch; explicit focus outside
+    // survives until the pointer next enters and leaves the finder.
+    sync_focus();
+}
+
+void PlanetSearchWidget::sync_focus() {
+    if (!edit_ || !list_) return;
+    const bool inside = pointer_inside();
+    if (inside) {
+        if (!edit_->has_focus() && !list_->has_focus()) edit_->grab_focus();
+    } else if (pointer_was_inside_) {
+        if (auto* focused = root_->get_viewport()->gui_get_focus_owner(); focused && root_->is_ancestor_of(focused))
+            focused->release_focus();
+    }
+    pointer_was_inside_ = inside;
+}
+
 void PlanetSearchWidget::close() {
     if (root_) root_->hide();
     if (edit_) edit_->release_focus();
     if (list_) list_->release_focus();
+    pointer_was_inside_ = false;
 }
 
 void PlanetSearchWidget::open(GalacticMode::State& state) {
+    const bool was_visible = visible();
     state_ = &state;
     if (!state.planet_search_layout || !state.hud || !state.battle_dialog_builder) return;
+    pointer_ = state.hud->get_viewport()->get_mouse_position();
     if (!root_) {
-        root_ = memnew(EawrUiModalLayer);
+        auto* mask = memnew(EawrUiHitMask);
+        mask->set_hit_test([this](double x, double y) {
+            return dialog_ && dialog_->frame && dialog_->frame->get_global_rect().has_point(Vector2(x, y));
+        });
+        root_ = mask;
         root_->set_name("PlanetSearch");
         root_->set_z_index(20);
         state.hud->add_child(root_);
@@ -71,7 +114,7 @@ void PlanetSearchWidget::open(GalacticMode::State& state) {
     root_->show();
     if (!dialog_ || size_ != state.hud->get_size()) rebuild();
     if (!edit_ || !list_) { close(); return; }
-    edit_->set_text("");
+    if (!was_visible) edit_->set_text("");
     dirty_ = true;
     service(state);
     edit_->grab_focus();
@@ -108,6 +151,18 @@ void PlanetSearchWidget::rebuild() {
     list_->connect("item_clicked", callable_mp_static(+[](int64_t row, Vector2, int64_t button, int64_t self) {
         if (button == MOUSE_BUTTON_LEFT) reinterpret_cast<PlanetSearchWidget*>(self)->choose(row);
     }).bind(reinterpret_cast<int64_t>(this)));
+    // PS-02: disabled rows retain their grey styling and cannot select a planet, but a native click
+    // still positions the camera. ItemList does not emit item_clicked for a disabled item.
+    list_->connect("gui_input", callable_mp_static(+[](Ref<InputEvent> event, int64_t self) {
+        const auto* button = Object::cast_to<InputEventMouseButton>(event.ptr());
+        if (!button || !button->is_pressed() || button->get_button_index() != MOUSE_BUTTON_LEFT) return;
+        auto* widget = reinterpret_cast<PlanetSearchWidget*>(self);
+        const auto row = widget->list_->get_item_at_position(button->get_position(), true);
+        if (row >= 0 && widget->list_->is_item_disabled(row)) {
+            widget->choose(row);
+            widget->list_->accept_event();
+        }
+    }).bind(reinterpret_cast<int64_t>(this)));
     list_->set_max_columns(1);
     list_->set_text_overrun_behavior(TextServer::OVERRUN_TRIM_ELLIPSIS);
     list_->set_clip_contents(true);
@@ -133,9 +188,13 @@ void PlanetSearchWidget::key(const Ref<InputEvent>& event) {
     int64_t row = selected.is_empty() ? -1 : selected[0];
     if (code == KEY_ENTER || code == KEY_KP_ENTER) { if (!pressed->is_echo()) choose(row); return; }
     if (matches_.empty()) return;
-    row = std::clamp<int64_t>(row + (code == KEY_DOWN ? 1 : -1), 0, static_cast<int64_t>(matches_.size()) - 1);
-    list_->select(static_cast<int32_t>(row));
-    list_->ensure_current_is_visible();
+    const int direction = code == KEY_DOWN ? 1 : -1;
+    for (row += direction; row >= 0 && row < list_->get_item_count(); row += direction) {
+        if (!list_->is_item_selectable(static_cast<int32_t>(row))) continue;
+        list_->select(static_cast<int32_t>(row));
+        list_->ensure_current_is_visible();
+        break;
+    }
 }
 
 void PlanetSearchWidget::choose(const int64_t row) {
@@ -145,10 +204,12 @@ void PlanetSearchWidget::choose(const int64_t row) {
     // change between drawing this list and the native input event.
     const auto planets = state_->input_planets();
     const auto found = std::find_if(planets.begin(), planets.end(), [id](const auto& planet) { return planet.id == id; });
-    if (found == planets.end() || !found->discovered || state_->galaxy_modal_open()
+    if (found == planets.end() || state_->galaxy_modal_open()
         || state_->tactical || state_->loading || state_->tour || state_->map_input.gates.selection_locked
         || state_->map_input.gates.tutorial_locked || !state_->map_input.gates.world_allowed()) return;
-    auto effect = state_->map_input.select(planets, id, state_->seat_flight().state());
+    auto effect = galactic_view::SelectionEffects{};
+    if (found->discovered) effect = state_->map_input.select(planets, id, state_->seat_flight().state());
+    else { effect.accepted = true; effect.target = id; } // Camera only; never publish hidden selection.
     if (!effect.accepted) return;
     effect.position = true; // exactly the Page Up/Down camera-to-planet path
     // PS-06: the box stays open with its filter, selection and scroll; only Close or Escape closes it.
@@ -195,13 +256,27 @@ void PlanetSearchWidget::refresh() {
     for (const auto& name : index_.entries()) {
         if (name.folded.find(query) == std::string::npos) continue;
         const auto picture = pictures_.find(name.id);
-        const auto texture = state_->planet_search_layout->picture && picture != pictures_.end()
-            ? (picture->second.empty() ? placeholder_ : state_->command_texture(picture->second))
-            : (state_->planet_search_layout->picture ? placeholder_ : Ref<Texture2D>{});
+        Ref<Texture2D> texture;
+        if (state_->planet_search_layout->picture) {
+            texture = name.discovered && picture != pictures_.end() && !picture->second.empty()
+                ? state_->command_texture(picture->second) : placeholder_;
+        }
         // The row already shows its whole name: no hover tooltip repeating it beside the cursor.
-        list_->set_item_tooltip_enabled(list_->add_item(String::utf8(name.name.c_str()), texture), false);
+        const auto row = list_->add_item(String::utf8(name.name.c_str()), texture, name.discovered);
+        list_->set_item_tooltip_enabled(row, false);
+        list_->set_item_disabled(row, !name.discovered);
+        if (!name.discovered) {
+            const auto color = list_->get_theme_color("font_color");
+            const auto grey = color.get_luminance();
+            list_->set_item_custom_fg_color(row, Color(grey, grey, grey, color.a * 0.5F));
+            // PS-02: the list halves a disabled row's picture, and the one-pixel grid of the hidden shell covers only a
+            // few percent of a row-sized cell, so it fades to a dark dot. Cancel the halving and lift the grid back
+            // to the blue wireframe the map draws (alpha gain; the tint keeps the grid blue after the lift).
+            list_->set_item_icon_modulate(row, Color(0.55F, 0.78F, 1.0F, 8.0F));
+        }
     }
-    if (!matches_.empty()) list_->select(0);
+    for (int32_t row = 0; row < list_->get_item_count(); ++row)
+        if (list_->is_item_selectable(row)) { list_->select(row); break; }
     dirty_ = false;
 }
 
@@ -221,23 +296,28 @@ void PlanetSearchWidget::service(GalacticMode::State& state) {
     const auto size = dialog_->frame->get_size();
     dialog_->frame->set_position({std::max(0.0F, size_.x - size.x - layout.inset_x * scale),
         std::clamp(layout.inset_y * scale, 0.0F, std::max(0.0F, size_.y - size.y))});
+    sync_focus();
     std::vector<galactic_view::PlanetSearchEntry> names;
+    std::unordered_map<std::uint64_t, const galactic_view::PlanetView*> metadata;
+    metadata.reserve(state.galaxy->planets.size());
+    for (const auto& planet : state.galaxy->planets) metadata.emplace(planet.id, &planet);
     for (const auto& planet : state.input_planets()) {
-        if (!planet.discovered) continue;
         const auto fact = state.hud_facts.find(planet.id);
         if (fact == state.hud_facts.end()) continue;
-        const auto& name = fact->second.display_name;
-        names.push_back({planet.id, name, utf8(String::utf8(name.c_str()).to_lower()), true});
-        if (!pictures_.contains(planet.id) && state.audio_catalog) {
+        const auto source = metadata.find(planet.id);
+        if (source == metadata.end()) continue;
+        std::string_view label;
+        if (state.content) if (const auto art = state.content->art.find(planet.id); art != state.content->art.end())
+            label = art->second.label;
+        const auto name = galactic_view::planet_search_name(planet.discovered, fact->second.display_name,
+            label, source->second->name);
+        names.push_back({planet.id, name, utf8(String::utf8(name.c_str()).to_lower()), planet.discovered});
+        if (planet.discovered && !pictures_.contains(planet.id) && state.audio_catalog) {
             // A mod may supply a 2D GUI/encyclopedia icon. Stock planet data
             // usually supplies only a model; those rows use the provider seam.
             std::string icon;
-            const auto source = std::find_if(state.galaxy->planets.begin(), state.galaxy->planets.end(),
-                [&](const auto& row) { return row.id == planet.id; });
-            if (source != state.galaxy->planets.end()) {
-                const auto type = state.audio_catalog->resolve(source->name, data::Category::game_object);
-                if (type) if (const auto* value = type.value().value("Icon_Name")) icon = core::trim(value->value.raw_text, core::xml_whitespace);
-            }
+            const auto type = state.audio_catalog->resolve(source->second->name, data::Category::game_object);
+            if (type) if (const auto* value = type.value().value("Icon_Name")) icon = core::trim(value->value.raw_text, core::xml_whitespace);
             pictures_.emplace(planet.id, std::move(icon));
         }
     }
@@ -258,17 +338,18 @@ void PlanetSearchWidget::service(GalacticMode::State& state) {
         auto rect = list_->get_item_rect(row, true);
         rect.position.y -= scroll;
         if (rect.get_end().y <= 0 || rect.position.y >= list_->get_size().y) continue;
+        const bool hidden = list_->is_item_disabled(row);
         if (layout.picture) {
             const auto id = matches_[static_cast<std::size_t>(row)];
             const auto picture = pictures_.find(id);
             Ref<Texture2D> texture;
-            if (picture != pictures_.end() && !picture->second.empty()) texture = state.command_texture(picture->second);
+            if (!hidden && picture != pictures_.end() && !picture->second.empty()) texture = state.command_texture(picture->second);
             else if (state.planet_search_thumbnails) texture = state.planet_search_thumbnails->thumbnail(id, height);
             if (texture.is_null()) texture = placeholder_;
             // Retain the provider's texture itself, so live textures keep updating.
             list_->set_item_icon(row, texture);
         }
-        if (!layout.emblem) continue;
+        if (hidden || !layout.emblem) continue; // Hidden rows show the map shell, never a faction emblem.
         if (used == emblems_.size()) {
             auto* icon = memnew(TextureRect);
             icon->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);

@@ -7,7 +7,7 @@ effects, galactic music and event sounds, the campaign setup screens, the
 save/load menus, the battle loading screen, the battle summary seen from a
 campaign and the campaign end. It records the debug build, the effective stock
 XML and the dialog resources inspected on 2026-10-07. The earlier rows claim no retail observation; WGP-42 separately identifies the supplied reference reviewed for the wave-6 camera request. Evidence IDs EGP-01..20 resolve to private research kept outside the
-committed tree.
+committed tree. Camera-reader qualification GCR-E01..04 is a separate private debug-build evidence set.
 
 The original gap census below records the initial implementation baseline.
 Later sections identify their comparison bases separately; the presentation
@@ -56,7 +56,7 @@ These neighbours own the inside of their subjects; this walk links them:
 
 | ID | Rule | Source |
 | --- | --- | --- |
-| WGP-04 | A planet draws `Galactic_Model_Name` at `Galactic_Position` scaled by `Scale_Factor`, with its idle animation looping (`Loop_Idle_Anim_00` yes on all 65 stock entries) and `Pre_Lit` no. Stock: **64** planets plus the backdrop, **37** distinct planet models, scale **1.8** on 50 planets, every position at Z **10** (the scroll plane, WGUI-57). `Mouse_Collide_Override_Sphere_Radius` (stock mostly **19.77**) is the pick sphere; `Name_Adjust` and `Show_Name` place the name label. The alternate model index is WGUI-05/60. `Facing_Adjust` is registry foc-ignores. The reader of `Camera_Aligned` (yes on every planet) is U-02. | XML EGP-15; registry EGP-15 |
+| WGP-04 | A planet draws `Galactic_Model_Name` at `Galactic_Position` scaled by `Scale_Factor`, with its idle animation looping (`Loop_Idle_Anim_00` yes on all 65 stock entries) and `Pre_Lit` no. Stock: **64** planets plus the backdrop, **37** distinct planet models, scale **1.8** on 50 planets, every position at Z **10** (the scroll plane, WGUI-57). `Mouse_Collide_Override_Sphere_Radius` (stock mostly **19.77**) is the pick sphere; `Name_Adjust` and `Show_Name` place the name label. The alternate model index is WGUI-05/60. `Facing_Adjust` is registry foc-ignores. `Camera_Aligned` (yes on every planet) schedules ordinary transform refresh, without a camera-facing planet rotation (WGP-199). | XML EGP-15; registry EGP-15 |
 | WGP-05 | Planet geometry colour uses the planet's **apparent** faction for the local observer (WGUI-08), not its actual owner: primary colour = faction `Color`; secondary = faction `Display_Font_Color`, or white **255,255,255,255** when the caller asks for the plain variant. | debug build EGP-03 |
 | WGP-06 | The planet icon update reads the apparent faction. A null apparent faction changes nothing (the previous colours and icon stay). Otherwise it records that faction as the icon faction, sets the geometry colours as WGP-05 (secondary = `Display_Font_Color`), sets the command-bar planet affiliation icon to the faction's `Icon_Name` and marks the icon as present in the world. | debug build EGP-03 |
 | WGP-07 | The planet behaviour's per-faction fleet-icon add is **empty** in the inspected build: it looks up three factions by name and draws nothing. Orbit fleet markers therefore come only from the HUD (WGUI-28, WGUI-92), not from a model attached to the planet. | debug build EGP-08 |
@@ -329,7 +329,7 @@ have no row.
 | ID | Unsettled fact | Settles it |
 | --- | --- | --- |
 | U-01 | Closed: layer routing, draw order and nonworld camera depth interval are WGP-01a/01b | Debug-build EGP-19/20; targeted render, scene-selection and model-insertion receipts cited in those rows. No retail capture is claimed. |
-| U-02 | Readers of `Camera_Aligned`, planet label placement, `GUI_Planet_Flash_Level` / `_Fade_Duration` (the selection model is settled by WGP-09) | Read planet model set-up and highlight code |
+| U-02 | Planet label placement, `GUI_Planet_Flash_Level` / `_Fade_Duration` (the selection model is settled by WGP-09) | Read planet model set-up and highlight code |
 | U-03 | When the destroyed planet model replaces the live model | Read the destroyed-flag readers; staged Death Star destruction capture |
 | U-04 | A `Visible_Line_Name` with no matching style, texture/spark defaults, the zoom value's source, the parse of the comma-less colour, when lines are retyped | Read the route constructor and line callers; capture lines across ownership changes at overview and focused zoom |
 | U-05 | Fleet model override condition, galactic jump/arrival sounds and visuals | Read fleet model selection and the jump start; capture a Death Star fleet and a fleet jump |
@@ -1278,8 +1278,33 @@ substitute for that request. No synthetic mission notice is published here.
 | --- | --- | --- |
 | WGP-193 | Successful planet destruction first applies ruins and refreshes the planet model, then requests the shared ability audiovisual effects. This request is unconditional on local ownership. The target sound uses `SFXEvent_Target_Affected`; a 3D event uses the target position, while a 2D event has no positional attachment. The target particle uses `Target_Particle_Effect` and the target object; the shared particle path can use an authored usable bone, otherwise the target origin. Particle scene selection follows WGP-01b, scaling follows the resolved particle `Scale_Factor`, and `Particle_Lifetime_Frames` uses 30 frames per second before the BP-16 detach/drain lifecycle. | debug build EGP-21; WGCH-115; WGP-01b/03/08; BP-16 |
 | WGP-194 | The galactic map starts two GUI events itself, named by no XML tag: `Planet_Dialog_Appears` when a revealed planet becomes the selection, and `GUI_Zoom` for each planet zoom, **both directions** (wheel and the command-bar zoom button alike; the button's own `Click_SFX` is empty). Waveform matching of a recorded debug-build session found `PM_Planet_Popup.wav` at every selection and `GUI_Zoom2.wav` at every zoom in and out (correlation above 0.99); `GUI_Planet_Menu`/`GUI_Planet_Mouse_Over` samples do not match those actions. Both events are stock `Preset_GUI` events (2D, GUI category, maximum three instances) with their own gains. **Ours:** the selection cue plays on an accepted selection change (a repeated click on the already selected planet was not established, so it is silent); the zoom cue plays once per accepted inward or outward camera flight (a counter on the planet camera, so wheel, button, toggle and key cannot double-dispatch); opening or closing the planet map panel inside the focused view, refused or no-op zoom requests and the scripted start focus play nothing, because the capture did not establish them. Both go through the ordinary unforced event admission (preset inheritance, category and instance limits, `Localize` gain). | debug build, owner capture on the planet-select sound ticket (legacy EAWR-4440); effective XML; WGP-184 |
-| WGP-195 | The per-planet display refresh places the planet name label by projecting the planet's own position to the screen and adding only the label component's own horizontal offset from the dialog; the other per-planet items (fleets, transports, ability slots, corruption text, ring, credits, base level, weather, special ability, status icons) are placed by the same projected point. A bounded read of that placement call tree (about 400 functions to depth three) and of every getter on the object type (about 840) finds no reader of the planet type's `Name_Adjust` tag and no getter for it, so the tag is parsed but not consumed on any inspected placement path. This is negative evidence for the inspected paths only: a direct field read elsewhere is not excluded, so the tag stays unapplied rather than FoC-ignored. Our label at the planet position with an unused parsed value matches the inspected path. | debug build; WGP-04 |
-| WGP-196 | The planet type's `GUI_Model_Name` has no named getter among the object type's getters and no reference in the planet display placement call tree (WGP-195). Its consumer, if any, is a model-preview path that this bounded read did not reach; no placement, fade, flash or lighting rule in the inspected galactic planet display uses it. It stays unapplied pending a located reader. | debug build; WGP-195 |
+| WGP-195 | The 2026-11-18 tag-table trace confirms `Name_Adjust` binds a vector parser on the planet type. The per-planet display refresh places the planet name label by projecting the planet's own position to the screen and adding only the label component's own horizontal offset from the dialog; the other per-planet items (fleets, transports, ability slots, corruption text, ring, credits, base level, weather, special ability, status icons) are placed by the same projected point. A bounded read of that placement call tree (about 400 functions to depth three) and of every getter on the object type (about 840) finds no reader of the planet type's `Name_Adjust` tag and no getter for it, so the tag is parsed but not consumed on any inspected placement path. This is negative evidence for the inspected paths only: a direct field read elsewhere is not excluded, so the tag stays unapplied rather than FoC-ignored. Our label at the planet position with an unused parsed value matches the inspected path. | debug build; WGP-04 |
+| WGP-196 | The 2026-11-18 tag-table trace confirms `GUI_Model_Name` binds a string parser on the planet type. It has no named getter among the object type's getters and no reference in the planet display placement call tree (WGP-195). Its consumer, if any, is a model-preview path that this bounded read did not reach; no placement, fade, flash or lighting rule in the inspected galactic planet display uses it. It stays unapplied pending a located reader. | debug build; WGP-195 |
+
+### Authored tutorial text reveal
+
+| ID | Rule and implementation boundary | Source |
+| --- | --- | --- |
+| WGP-197 | `Text_Reveal_Rate` controls tutorial overlay reveal in wide-character units per wall second. GFC-40 owns the clock, per-wrapped-line progress, predecessor admission and 1023-unit displayed-prefix bound. WGP-129 owns exact-key replacement and the nonteletype full-text path. The viewer wraps the final localized text before revealing it, retains progress across unrelated objective changes, restarts it on same-key replacement and converts UTF-16 units to whole display characters without drawing half a surrogate pair. A zero authored rate keeps teletype text unrevealed; no stock rate is substituted for other authored values. Missing or nonfinite data leaves the rate unavailable and uses the pre-existing full-text presentation as a recovery policy. | debug build; GFC-40; WGP-129 |
+
+The story overlay remains partial presentation: its fixed column and font are
+placeholder chrome, not the authored tutorial component. Subtitle preference,
+type-name formatting, text sounds and category colours are not completed by
+the rate binding. Finite-line expiry still uses the existing widget elapsed-time
+adapter rather than GFC-39's admitted logical render delta; this change does not
+qualify that separate clock. Other listbox teletype consumers are outside this
+binding. Reveal is transient viewer state and does not change canonical state.
+
+### Planet wildlife description
+
+| ID | Rule and implementation boundary | Source |
+| --- | --- | --- |
+| WGP-198 | `Describe_Wildlife` is a planet localization key, independent of `Describe_Weather`, `Describe_Terrain` and `Describe_Population`. The debug-build getter has callers in both the planet-information dialog and the battle loading dialog. The viewer retains effective inherited authoring, localizes it with the other planet-information metadata and displays its own section in Planet Info; battle loading binds the separate wildlife caption. An absent key contributes no text. The Planet Info metadata adapter also leaves unresolved translations empty, matching its existing description policy; the loading dialog retains its existing missing-key diagnostic/display policy. | debug build getter and both dialog caller references; WGP-31; BLD-03 |
+
+The wildlife binding does not change the focused planet card's separate
+`Encyclopedia_Text` rows (GPI-08), and does not substitute the weather description
+for wildlife. Planet Info retains its existing layout; the getter/caller trace
+does not constitute a new rendered-layout comparison.
 
 EGP-21 is the private planet-destruction application and common target-effect
 walk (`out/research/gc-6251-effects/decompile/index.json`, plus the common
@@ -1306,3 +1331,24 @@ Owner-side audiovisual fields and other ability handlers are also outside this
 target-effect binding. The authored-parameter contract changes both target
 references, particle scale, lifetime and layer; the live destruction case checks
 single delivery, a refused repeat, sound delivery and final resource release.
+
+
+### Camera-facing interpretation qualification
+
+| ID | Rule and implementation boundary | Source |
+| --- | --- | --- |
+| WGP-199 | A true planet `Camera_Aligned` registers its object for the ordinary transform refresh in WFO-25. That refresh rebuilds position and display-facing rotations, adds the normal model-space quarter-turn, applies resolved scale, refreshes the model, shadow and bounds, and invokes the planet icon-billboard callback. It reads no camera pose; the planet callback is a no-op in the inspected build. This flag therefore supplies no visible camera/framing effect or camera-facing whole-planet rotation. The registry exclusion covers that interpretation only: it does not claim the flag is unparsed or that refresh scheduling is absent. The viewer continues its ordinary planet transform submission and shared model-billboard service. | debug build GCR-E01; WFO-25; WGP-04 |
+| WGP-200 | `Camera_Distance`, `Camera_Shift_X` and `Camera_Shift_Y` are parsed campaign metadata. Member-read qualification found their construction/reset writes and metadata-copy reads, but no gameplay camera reader: the single-precision and address-taking matches belonged to other object types. This is a sourced **no reader found by member-read scan** exclusion, not a claim that the metadata is unparsed or never copied. It extends WGP-74/92's inspected overview/initialization/preview boundary without inventing a camera offset or distance. | debug build GCR-E02/04; WGP-74/92 |
+| WGP-201 | Member-read qualification found no camera consumer of `Starting_Galactic_Camera_Position`, `Galactic_Zoom_Acceleration`, `Max_Galactic_Zoom_Distance`, `Max_Galactic_Zoom_Speed`, `Min_Galactic_Zoom_Speed` or `Galactic_Zoom_In_Station_Offset`. Matching member accesses were initialization, the positive-control zoom-light reader or unrelated object fields; functions loading the constants object supplied no reads of these fields, and direct relative-address field references were absent. This is a sourced **no reader found by member-read scan** exclusion. Ordinary overview, flights and station placement continue WGP-41/91/92/186; these fields do not supply a new clamp, speed, acceleration, initial pose or station anchor. | debug build GCR-E03/04; WGP-41/91/92/186 |
+
+GCR-E04 scans the inspected debug build's complete code section against the
+parsed member locations, with its runtime function-range index, and checks
+the candidate object types through decompilation. Campaign qualification
+inspects the scalar single-precision and address-taking matches; constants
+qualification also filters functions loading the known constants-object base
+and checks direct relative-address field references. A known consumed zoom-light
+field is the positive control. These are bounded negative findings: computed
+offsets, pointer aliases through memory and uninspected indirect paths remain
+outside the proof. An absent named getter alone is not evidence of an exclusion.
+The scheduling detail of WGP-199 stays within
+[WFO-25's existing manager slot](frame-order.md); no new camera cadence is inferred.

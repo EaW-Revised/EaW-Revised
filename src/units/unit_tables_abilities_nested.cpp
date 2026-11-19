@@ -20,7 +20,7 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
     // WLAB-01 (#3238): a land object keeps the authored rows of the whole vocabulary; the projectile and object requests of
     // the space kinds (barrage target, override and spawned projectiles) belong to the later land groups, not to this load.
     const bool land = input_.domain == sim::tactical::BattleDomain::land;
-    if (const auto* data = object.single("Unit_Abilities_Data")) {
+    for (const auto* data : object.ability_lists("Unit_Abilities_Data")) {
         for (const auto& node : data->children) {
             if (!iequals(node.name, "Unit_Ability")) continue;
             data::tag_trace::used(node);
@@ -381,7 +381,7 @@ bool Loader::load_special_ability(UnitType& unit, const std::string& name, const
 }
 
 void Loader::load_land_income_abilities(Object& object, UnitType& unit) {
-    for (const auto* abilities : object.list("Abilities", report_)) {
+    for (const auto* abilities : object.ability_lists("Abilities")) {
         for (const auto& node : abilities->children) {
             if (!iequals(node.name, "Income_Stream_Ability") && !iequals(node.name, "Income_Stream_Mod_Ability")) continue;
             std::string name;
@@ -401,7 +401,7 @@ void Loader::load_land_income_abilities(Object& object, UnitType& unit) {
 // value; the unauthored default was not read, a reading); only an automatic style is serviced (the walk gives Ground_Automatic).
 // A value that cannot be a row is reported and the type keeps none. A second block of the kind is reported and ignored.
 void Loader::load_land_weapon_swap(Object& object, UnitType& unit) {
-    for (const auto* abilities : object.list("Abilities", report_)) {
+    for (const auto* abilities : object.ability_lists("Abilities")) {
         for (const auto& node : abilities->children) {
             if (!iequals(node.name, "Permanent_Weapon_Swap_Ability")) continue;
             const AbilityFields child_text{node};
@@ -432,7 +432,7 @@ void Loader::load_land_weapon_swap(Object& object, UnitType& unit) {
 }
 
 void Loader::load_nested_abilities(Object& object, UnitType& unit) {
-    for (const auto* abilities : object.list("Abilities", report_)) {
+    for (const auto* abilities : object.ability_lists("Abilities")) {
         for (const auto& node : abilities->children) {
             std::string name;
             for (const auto& attribute : node.attributes) {
@@ -444,6 +444,13 @@ void Loader::load_nested_abilities(Object& object, UnitType& unit) {
             unit.inactive_abilities.push_back(node.name + (name.empty() ? "" : " " + name));
             // #530: a skirmish station's income stream and its bonus (PU-02 to PU-04).
             const AbilityFields child_text{node};
+            // WPR-78: retain authored mode metadata for the whole-upgrade menu decision.
+            // Decoding remains unchanged, including handlers alongside unknown effects.
+            if (input_.domain == sim::tactical::BattleDomain::space
+                && (iequals(unit.xml_type, "UpgradeObject") || has_behavior(object, "DUMMY_UPGRADE"))
+                && iequals(child_text("Activation_Style"), "Ground_Automatic")) {
+                ++unit.ground_only_abilities;
+            }
             load_bounty_ability(unit, child_text);
             load_cluster_bomb_ability(unit, name, child_text);
             load_buzz_droids_ability(unit, name, child_text);

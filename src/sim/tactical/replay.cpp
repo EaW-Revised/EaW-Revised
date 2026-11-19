@@ -229,6 +229,10 @@ core::Result<void> detail::apply_battle_control_policy(TacticalSetup& setup, con
 }
 
 core::Result<void> validate_setup(const TacticalSetup& setup) {
+    if (setup.skirmish && setup.skirmish->campaign_origin && !setup.first_free_entity_id) {
+        return fail<void>(diagnostic_codes::invalid_setup,
+            "selected-force campaign origin requires its shared allocator boundary", {});
+    }
     if (setup.domain != BattleDomain::space && setup.domain != BattleDomain::land) {
         return fail<void>(diagnostic_codes::invalid_setup, "unknown tactical battle domain", {});
     }

@@ -269,7 +269,7 @@ void test_selection_layer_config() {
         ui::apply_selection_config(removed_layer, no_layer);
         expect(removed_layer.selection_hotkeys && !removed_layer.selection_hotkeys_authored,
             "SH-03 removing the layer restores the project default after an unrelated save");
-        auto saved = ui::parse_settings("eawr-settings 1\nkeyboard.selection_hotkeys=0\nkey.SELECT_OWN_ALL=Ctrl+U\n").settings;
+        auto saved = ui::parse_settings("eawr-settings 1\nmigrate.selection_hotkeys_default_on=1\nkeyboard.selection_hotkeys=0\nkey.SELECT_OWN_ALL=Ctrl+U\n").settings;
         ui::apply_selection_config(saved, filesystem.value());
         expect(!saved.selection_hotkeys && ui::selection_key(saved, 0) == "Ctrl+U", "SH-03 player overrides XML enable and key");
         saved.keys.clear();
@@ -285,8 +285,15 @@ void test_selection_layer_config() {
     if (off_files) {
         ui::PlayerSettings untouched;
         ui::apply_selection_config(untouched, off_files.value());
-        expect(!untouched.selection_hotkeys && !untouched.selection_hotkeys_authored,
-            "an explicit XML No overrides the new project default");
+        expect(untouched.selection_hotkeys && untouched.selection_hotkeys_authored,
+            "an unstamped profile migrates an old installed XML No to ON");
+        auto migrated = ui::parse_settings(ui::serialize_settings(untouched)).settings;
+        ui::apply_selection_config(migrated, off_files.value());
+        expect(migrated.selection_hotkeys, "migrated XML No stays ON after saving the stamp and restarting");
+        auto stamped = ui::parse_settings("eawr-settings 1\nmigrate.selection_hotkeys_default_on=1\n").settings;
+        ui::apply_selection_config(stamped, off_files.value());
+        expect(!stamped.selection_hotkeys && !stamped.selection_hotkeys_authored,
+            "a stamped profile still admits a new XML opt-out");
     }
     testing::remove_temp_directory(root);
     vfs::Vfs absent;
@@ -363,6 +370,64 @@ void test_selection_hotkeys() {
         && !ui::selection_action(settings, 'Q', false, false, false), "bindings persist and old keys stop firing");
     settings.keys["SELECT_OWN_ALL"] = "Ctrl+U";
     expect(!ui::selection_action(settings, 'U', false, true, false), "hand-edited duplicates fail closed");
+}
+
+void test_selection_mouse_bindings() {
+    ui::PlayerSettings settings;
+    for (const int button : {3, 4, 5, 6, 12}) {
+        for (const bool ctrl : {false, true}) for (const bool shift : {false, true}) for (const bool alt : {false, true}) {
+            const auto chord = ui::selection_mouse_chord_for(button, shift, ctrl, alt);
+            if (button == 3) {
+                expect(ui::selection_chord_status(settings, 0, chord) == ui::SelectionChordStatus::camera,
+                    "middle mouse conflicts with camera for every modifier combination");
+                expect(!ui::set_selection_key(settings, 0, chord), "camera binding stays reserved");
+                continue;
+            }
+            expect(ui::set_selection_key(settings, 0, chord), "mouse chord captures");
+            const auto reloaded = ui::parse_settings(ui::serialize_settings(settings)).settings;
+            expect(ui::selection_key(reloaded, 0) == chord, "mouse chord survives save/load");
+            expect(ui::selection_mouse_action(reloaded, button, shift, ctrl, alt) == 0, "mouse chord dispatches");
+            expect(!ui::selection_mouse_action(reloaded, button, !shift, ctrl, alt)
+                && !ui::selection_mouse_action(reloaded, button, shift, !ctrl, alt)
+                && !ui::selection_mouse_action(reloaded, button, shift, ctrl, !alt), "mouse modifiers match exactly");
+            expect(!ui::selection_mouse_action(reloaded, button, shift, ctrl, alt, true)
+                && !ui::selection_mouse_action(reloaded, button, shift, ctrl, alt, false, true), "meta and free camera suppress mouse bindings");
+            expect(ui::selection_chord_status(reloaded, 1, chord) == ui::SelectionChordStatus::duplicate,
+                "mouse duplicate conflicts like a key");
+        }
+    }
+    for (const int button : {1, 2})
+        expect(ui::selection_chord_status(settings, 0, ui::selection_mouse_chord_for(button, true, true, true))
+            == ui::SelectionChordStatus::mouse_reserved, "selection and order buttons reserved");
+    for (const auto chord : {"Mouse 0", "Mouse 04", "Mouse -4", "Mouse +4", "Mouse 4junk", "Alt+Ctrl+Mouse 4", "Meta+Mouse 4"})
+        expect(!ui::selection_chord_usable(chord), "malformed mouse chords rejected");
+    settings.selection_hotkeys = false;
+    expect(!ui::selection_mouse_action(settings, 12, true, true, true), "disabled feature suppresses mouse");
+    settings.keys.clear();
+    expect(ui::selection_key(settings, 0) == "Ctrl+Q" && ui::selection_key(settings, 1) == "Q", "reset retains original defaults");
+}
+
+void test_selection_hotkeys_migration() {
+    expect(ui::PlayerSettings{}.selection_hotkeys, "new install enables selection hotkeys");
+    const auto legacy = ui::parse_settings("eawr-settings 1\nkeyboard.selection_hotkeys=0\nkey.SELECT_OWN_ALL=Mouse 4\n");
+    expect(legacy.settings.selection_hotkeys && !legacy.settings.selection_hotkeys_authored,
+        "unstamped OFF is discarded once");
+    expect(legacy.notes.empty() && ui::selection_key(legacy.settings, 0) == "Mouse 4",
+        "valid legacy settings migrate without parse diagnostics and preserve bindings");
+    const auto text = ui::serialize_settings(legacy.settings);
+    expect(text.find("migrate.selection_hotkeys_default_on=1\n") != std::string::npos,
+        "every save writes the selection default stamp");
+    expect(text.find("keyboard.selection_hotkeys=0") == std::string::npos, "legacy OFF override is dropped");
+    auto current = ui::parse_settings(text).settings;
+    expect(current.selection_hotkeys && !current.selection_hotkeys_migration_pending, "saved migration stays ON");
+    current.selection_hotkeys = false;
+    current.selection_hotkeys_authored = true;
+    auto off = ui::parse_settings(ui::serialize_settings(current)).settings;
+    ui::apply_selection_config(off, vfs::Vfs{});
+    expect(!off.selection_hotkeys && off.selection_hotkeys_authored, "new authored OFF survives saving and XML loading");
+    const auto stamped = ui::parse_settings("eawr-settings 1\nkeyboard.selection_hotkeys=0\nmigrate.selection_hotkeys_default_on=1\n");
+    expect(!stamped.settings.selection_hotkeys && stamped.settings.selection_hotkeys_authored,
+        "stamp after value also preserves explicit OFF");
 }
 
 void test_performance_deviations() {
@@ -544,7 +609,7 @@ void test_tweaks_saved_choices() {
     expect(missing.selection_hotkeys && !missing.selection_hotkeys_authored
         && missing.gameplay.hover_owner_names == 1 && missing.gameplay.animated_loading_background
         && missing.gameplay.space_pauses_galactic, "missing tweak keys receive the new defaults");
-    const auto saved = ui::parse_settings("eawr-settings 1\nkeyboard.selection_hotkeys=0\n"
+    const auto saved = ui::parse_settings("eawr-settings 1\nmigrate.selection_hotkeys_default_on=1\nkeyboard.selection_hotkeys=0\n"
         "gameplay.hover_owner_names=0\ngameplay.animated_loading_background=0\n"
         "gameplay.space_pauses_galactic=0\nkey.STOP=X\n").settings;
     expect(!saved.selection_hotkeys && saved.selection_hotkeys_authored
@@ -1171,6 +1236,8 @@ int main() {
     test_selection_layer_config();
     test_revised_settings();
     test_selection_hotkeys();
+    test_selection_mouse_bindings();
+    test_selection_hotkeys_migration();
     test_performance_deviations();
     test_online_settings();
     test_performance_thread_settings();

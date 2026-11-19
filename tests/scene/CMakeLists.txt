@@ -1,5 +1,5 @@
 add_executable(scene_tests scene_asset_state_tests.cpp scene_build_tests.cpp scene_issue_tests.cpp scene_tests.cpp)
-target_link_libraries(scene_tests PRIVATE eawr::scene eawr::platform)
+target_link_libraries(scene_tests PRIVATE eawr::scene eawr::platform eawr::presentation)
 target_compile_features(scene_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(scene_tests)
 add_test(NAME scene_contracts COMMAND scene_tests)

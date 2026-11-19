@@ -119,6 +119,8 @@ core::Result<std::shared_ptr<Manager>> Manager::create(LifecycleSetup setup, Cap
         return Result::failure(lifecycle_error("galactic AI service periods must be positive synchronization frames"));
     impl->state.service_periods = setup.service_periods;
     if (setup.schedule.batch_ticks == 0) return Result::failure(lifecycle_error("galactic AI batches need at least one virtual tick"));
+    if (setup.schedule.adopt_delay > std::min(setup.schedule.batch_ticks, setup.schedule.apply_delay))
+        return Result::failure(lifecycle_error("galactic AI window output is adopted after the next window or its first apply"));
     impl->schedule = setup.schedule;
     impl->data = std::move(data).value();
     impl->capabilities = std::move(capabilities);

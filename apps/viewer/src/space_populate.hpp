@@ -446,6 +446,8 @@ private:
         std::size_t decision{};
         std::size_t hardpoint{};
         Art art{Art::attached_model};
+        // An attached model's bone in its owner's skeleton; a death clone's clip can hide it (UA-12).
+        std::optional<std::uint32_t> bone{};
     };
     struct GatedInstance final {
         sim::RenderInstance instance;
@@ -463,6 +465,8 @@ private:
         std::optional<bool> blast_charged{}; // BP-74: false=buildup, true=charged
         std::optional<std::array<std::uint8_t, 3>> colour; // immutable compose tint, restored on slot reuse
     };
+    // False while a death clone's pose hides the bone this piece's attached model hangs on (UA-12).
+    [[nodiscard]] bool attached_art_shown(const GatedInstance& piece) const;
     void rebuild_piece_index();
     void append_piece_index(std::size_t first_piece, std::size_t first_clip);
     void refresh_instances(const particles::StepExecutor* workers = nullptr);
@@ -661,6 +665,7 @@ private:
     std::size_t live_released_assets_{};
     std::size_t session_records_skipped_{};
     std::vector<std::uint32_t> skipped_session_records_;
+    std::vector<std::uint32_t> environment_records_; // retained for later arrival composition
     // Historical compose assignments: reports are also written after release.
     std::vector<std::vector<sim::AssetId>> hull_surface_assets_;
     // The debug object's XML type and placed yaw (its marker's own yaw).

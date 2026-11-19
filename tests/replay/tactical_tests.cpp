@@ -661,6 +661,16 @@ void test_skirmish_setup_format(const std::string& fixtures) {
     if (!written) return;
     const auto parsed = tactical::parse_replay(written.value());
     expect(parsed && parsed.value() == replay, "SKSU round-trips roles, map, palette, fleet and every match field");
+    auto campaign = replay;
+    campaign.setup.skirmish->campaign_origin = true;
+    expect(!tactical::write_replay(campaign), "SKSU campaign origin requires a shared allocator boundary");
+    campaign.setup.first_free_entity_id = campaign.setup.units.back().entity_id + 1;
+    const auto campaign_bytes = tactical::write_replay(campaign);
+    const auto campaign_decoded = campaign_bytes ? tactical::parse_replay(campaign_bytes.value())
+        : eawr::core::Result<tactical::TacticalReplay>::failure(campaign_bytes.error());
+    expect(campaign_decoded && campaign_decoded.value() == campaign
+        && !campaign_decoded.value().setup.campaign,
+        "SKSU explicit campaign origin round-trips independently of optional campaign rules");
     auto custom = replay;
     custom.setup.skirmish->map = "data/custommaps/recorded.ted";
     expect(static_cast<bool>(tactical::validate_setup(custom.setup)), "custom-map SKSU passes shared setup validation for LAN handoff");
@@ -705,7 +715,8 @@ void test_skirmish_setup_format(const std::string& fixtures) {
     };
     const std::size_t flags = 112U + 2U + metadata.map.size() + 2U + metadata.map_sha256.size();
     rejects(112, 255, "oversized SKSU string rejects before allocation");
-    rejects(flags, 32, "unknown SKSU match flag rejects");
+    rejects(flags, 32, "SKSU campaign origin without an allocator rejects");
+    rejects(flags, 64, "unknown SKSU match flag rejects");
     rejects(flags + 16U, 127, "out-of-range signed tech value rejects");
     const std::size_t victory = flags + 60U + 2U + metadata.match.win_condition.size()
         + 2U + metadata.match.tactical_win_condition.size();

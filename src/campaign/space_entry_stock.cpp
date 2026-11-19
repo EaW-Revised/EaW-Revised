@@ -1201,6 +1201,13 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
     entry.value().conflict.upgrades = record.upgrades;
     if (!snapshot.player_economy()) return fail<ResolvedConflictEntry>("missing live campaign ledger");
     SpaceRuleInputs rules;
+    // WGCH-204/205: copy the location state at child creation, never consult a paused parent in battle.
+    if (const auto* corruption = snapshot.economy_corruption()) {
+        const auto location = std::find_if(corruption->planets.begin(), corruption->planets.end(),
+            [&](const auto& row) { return row.planet == record.planet; });
+        rules.corrupted = location != corruption->planets.end()
+            && location->corruption != gc::corruption_fixture::Type::none;
+    }
     rules.reserve_order = prepared.value().reserve_order;
     std::map<sim::EntityId, tt::UnitState> reserve_carriers;
     for (const auto& rider : input.riders) {

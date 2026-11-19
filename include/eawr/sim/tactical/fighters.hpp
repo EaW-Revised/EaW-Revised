@@ -30,8 +30,8 @@ inline constexpr std::int64_t max_spin_seconds = 60;
 // Fails with EAWR-SIM-0305 unless type IDs strictly increase in each list, speeds, rates and
 // distances and the side errors are in [0, max_motion_rate] (max speed, turn and thrust positive), a spin-away
 // chance is in [0, 1] and its time in [0, max_spin_seconds], a squadron lists
-// at least one member with one normalized offset each, spawner entry/bay counts fit uint32, counts are
-// nonnegative (a reserve may be unlimited_reserve), finite starting plus reserve fits in int32,
+// at least one member with one normalized offset each, spawner entry/bay counts fit uint32, starting counts
+// are nonnegative (any negative reserve is unlimited), finite starting plus reserve fits in int32,
 // and points lie within max_motion_coordinate.
 [[nodiscard]] core::Result<void> validate_squadron_table(const SquadronTable& table);
 

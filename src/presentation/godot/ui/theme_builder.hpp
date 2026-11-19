@@ -36,6 +36,7 @@
 #include <string_view>
 #include <string>
 #include <vector>
+#include <utility>
 
 namespace eawr::presentation::godot_backend {
 
@@ -60,6 +61,8 @@ public:
     // the scale; null for none, missing or unreadable slots (see problems()).
     [[nodiscard]] godot::Ref<godot::Texture2D> texture(const presentation::ui::ThemeTexture& slot, double scale_x,
                                                        double scale_y);
+    // Optional cosmetic fallback; explicit none slots still stay empty.
+    void set_missing_fallback(godot::Ref<godot::Texture2D> texture) { missing_fallback_ = std::move(texture); }
     // The empty marker texture.
     [[nodiscard]] godot::Ref<godot::Texture2D> empty();
     // Standalone textures that could not be read, one line each.
@@ -72,6 +75,7 @@ private:
     std::map<std::string, godot::Ref<godot::Image>> standalone_;
     std::map<std::string, godot::Ref<godot::ImageTexture>> cache_;
     godot::Ref<godot::ImageTexture> empty_;
+    godot::Ref<godot::Texture2D> missing_fallback_;
     std::vector<std::string> problems_;
 };
 

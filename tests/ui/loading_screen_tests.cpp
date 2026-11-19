@@ -108,6 +108,7 @@ void screen_content() {
 <Planet Name="Coruscant"><Text_ID> TEXT_NAME </Text_ID>
 <Describe_Population>TEXT_POP</Describe_Population><Describe_Terrain>TEXT_TER</Describe_Terrain>
 <Describe_Weather>TEXT_WEA</Describe_Weather><Describe_History>TEXT_HIS</Describe_History>
+<Describe_Wildlife>TEXT_WILDLIFE</Describe_Wildlife>
 <Describe_Tactical>TEXT_TER</Describe_Tactical><Describe_Advantage>TEXT_POP</Describe_Advantage>
 <Native_Icon_Name>load_royal_guard.tga</Native_Icon_Name>
 <Encyclopedia_Weather_Icon>i_pa_weather_sun.tga</Encyclopedia_Weather_Icon></Planet>
@@ -126,6 +127,7 @@ void screen_content() {
     const auto bytes = text_file({{"TEXT_PREPARE_FOR_SPACE_BATTLE", u"Space Battle at"},
                                   {"TEXT_PREPARE_FOR_LAND_BATTLE", u"Land Battle at"}, {"TEXT_NAME", u"Coruscant"},
                                   {"TEXT_POP", u"Human"}, {"TEXT_TER", u"Urban"}, {"TEXT_WEA", u"Clear"},
+                                  {"TEXT_WILDLIFE", u"Synthetic wildlife"},
                                   {"TEXT_HIS", u"The center of the universe."}, {"MTKNOWN", u"Mission heading"},
                                   {"MBKNOWN", u"Mission body"}, {"TEXT_UNRELATED_BRIEFING", u"Valid corruption briefing"}});
     assets::Source source;
@@ -147,7 +149,7 @@ void screen_content() {
            "BLC-05: a skirmish battle uses the skirmish dialog and the planet its map names");
     expect(content.title == "Space Battle at Coruscant", "BLC-05: the title is the battle text and the planet's name");
     expect(content.history == "The center of the universe." && content.weather == "Clear" && content.terrain == "Urban"
-               && content.population == "Human",
+               && content.population == "Human" && content.wildlife == "Synthetic wildlife",
            "BLC-05: the texts are the planet's Describe_* keys through the text database");
     expect(content.native_icon == "load_royal_guard.tga" && content.weather_icon == "load_weather_sun.tga"
                && content.overlay_icon == "load_overlay.tga" && content.map_icon == "data/art/textures/_mp_space_coruscant.dds",

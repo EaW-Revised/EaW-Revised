@@ -180,3 +180,9 @@ events and snapshots against its frozen baseline on 1/2/4/8 workers. A verified
 installed-data Windows job may select `^installed_replay_recording$` to regenerate
 and validate only this group; it is labelled `batch-only` and is excluded from
 routine PR checks.
+
+## GC AI production exactness
+
+For GC AI changes, compare the stock synchronized-day output against a BASE run: its final hash, delivery tallies and deterministic observation rows are the production-exactness receipt. Replay76 covers tactical/skirmish fixtures and does not exercise the GC AI. The delayed-adoption day tests compare all eleven delivery tallies against an in-process stock day: adopt1 also compares the full hash, while adoptK compares the galaxy hash because its unadopted finished window is hashed in the full state. Both keep full-hash equality across 1/2/4/8 workers. These heavy rows are batch-only and are selected explicitly for final validation; the full-window adoption delay requires every P4 save to hold finished output and resumes each save on 1/2/4/8 workers.
+
+The test-only inline `IntentOutbox` batch API has two views while a batch is open: `frontier()`, `lane_floor()`, `slices()`, `pending_intents()` and `holds_*` include that batch, whereas `pending_slices()` and `next_apply_tick()` expose adopted slices only. `encode_outbox_state` uses those adopted slices alongside the frontier and floor readers, so callers must end the batch before encoding a complete inline outbox. Its `sink()` wrapper also advances the cache generation when an intent is dropped outside a virtual tick; generation is an invalidation token, not an accepted-intent count. Production builds a separate lane-owned `OutboxBatch` and adopts its closed contents at the adoption tick.

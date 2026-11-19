@@ -222,6 +222,7 @@ void GalacticMode::State::open_planet_info() {
     section({}, planet->info.weather);
     section({}, planet->info.population);
     section({}, planet->info.terrain);
+    section({}, planet->info.wildlife);
     planet_info_dialog->show();
 }
 
@@ -286,14 +287,7 @@ bool GalacticMode::State::build_fleet_hud() {
     // The shell's alternate index is the focused planet's terrain index, not the faction (GHUD-S rows).
     const auto look = presentation::ui::hud_shell(fleet_anchors, command_catalog, command_faction, true);
     for (const auto& mesh : look.meshes) {
-        const auto path = presentation::ui::vfs_standalone_textures(*filesystem)(mesh.texture);
-        if (!path) { failure = "fleet shell texture is absent: " + mesh.texture; return false; }
-        auto texture = assets::load_texture(*filesystem, *path);
-        if (!texture) { failure = core::format_diagnostic(texture.error()); return false; }
-        std::string why;
-        auto pixels = texture_image(texture.value(), why);
-        if (pixels.is_null()) { failure = why; return false; }
-        setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles, mesh.alternate});
+        setup.meshes.push_back({mesh.blend, shell_texture(mesh.texture), mesh.triangles, mesh.alternate});
     }
     fleet_organize->setup(std::move(setup), nullptr);
     mask->set_hit_test([this](double x, double y) {

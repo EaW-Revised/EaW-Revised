@@ -1,5 +1,6 @@
 """PS-01..06 and PS-08: real text, keyboard and pointer input and the live row pictures, at 1080p and ultrawide."""
 import json
+import math
 import os
 import pathlib
 import shutil
@@ -36,6 +37,11 @@ func tap(code, unicode_value = 0, control = false):
         event.unicode = unicode_value if down else 0
         event.pressed = down
         Input.parse_input_event(event)
+func hover(point):
+    var motion = InputEventMouseMotion.new()
+    motion.position = point
+    motion.global_position = point
+    root.push_input(motion, true)
 func click(point):
     # Rectangles are in the fixed viewport, which may be letterboxed inside
     # the rig's smaller desktop window. Deliver native GUI events in that space.
@@ -55,10 +61,14 @@ func pictures(list, label):
     # Every onscreen row's icon is a cell of the live atlas; save each cell for the eye check and
     # count the cells the planet actually covers (alpha), so an empty or squared-off cell fails.
     var atlas_rows = 0
+    var expected = 0
     var covered = []
     for row in range(list.item_count):
         var rect = list.get_item_rect(row, true)
+        rect.position.y -= list.get_v_scroll_bar().value
+        if rect.end.y <= 0: continue
         if rect.position.y >= list.size.y: break
+        expected += 1
         var icon = list.get_item_icon(row)
         if not (icon is AtlasTexture): continue
         atlas_rows += 1
@@ -79,8 +89,8 @@ func pictures(list, label):
         for corner in [Vector2i(0, 0), Vector2i(image.get_width() - 1, 0), Vector2i(0, image.get_height() - 1),
                 Vector2i(image.get_width() - 1, image.get_height() - 1)]:
             corners += 1 if image.get_pixelv(corner).a > 0.1 else 0
-        covered.append({"row": row, "edge": image.get_width(), "opaque": float(opaque) / float(image.get_width() * image.get_height()), "span": span, "corners": corners})
-    facts["pictures_" + label] = {"atlas_rows": atlas_rows, "cells": covered}
+        covered.append({"row": row, "edge": image.get_width(), "opaque": float(opaque) / float(image.get_width() * image.get_height()), "span": span, "corners": corners, "hidden": list.is_item_disabled(row)})
+    facts["pictures_" + label] = {"atlas_rows": atlas_rows, "expected": expected, "cells": covered}
 func _process(delta):
     elapsed += delta
     var edit = root.find_child("IDC_PLANET_SEARCH_TEXT", true, false)
@@ -91,7 +101,13 @@ func _process(delta):
     elif stage == 1 and elapsed > 15.0:
         assert(edit != null and edit.is_visible_in_tree(), "Ctrl+F did not open the XML dialog")
         assert(list.item_count > 1)
+        hover(edit.get_global_rect().get_center())
         facts["all_count"] = list.item_count
+        # Browse to the first normal row for the ordinary-picture coverage.
+        var first = 0
+        while first < list.item_count and not list.is_item_selectable(first): first += 1
+        assert(first < list.item_count)
+        list.get_v_scroll_bar().value = list.get_item_rect(first, true).position.y
         facts["initial_selected"] = Array(list.get_selected_items())
         facts["icon_size"] = [list.fixed_icon_size.x, list.fixed_icon_size.y]
         facts["font_height"] = list.get_theme_font("font").get_height(list.get_theme_font_size("font_size"))
@@ -105,6 +121,10 @@ func _process(delta):
         stage = 10
     elif stage == 10 and elapsed > 18.0:
         # PS-08: by now the onscreen rows' models have decoded and uploaded (one per frame).
+        facts["emblems"] = 0
+        for child in list.get_children():
+            if child is TextureRect and child.is_visible_in_tree() and child.texture != null:
+                facts["emblems"] += 1
         pictures(list, "a")
         stage = 11
     elif stage == 11 and elapsed > 19.0:
@@ -125,7 +145,9 @@ func _process(delta):
         stage = 13
         elapsed = 18.5
     elif stage == 13 and elapsed > 19.0:
-        var query = list.get_item_text(list.item_count - 1).to_lower()
+        var last = list.item_count - 1
+        while last >= 0 and not list.is_item_selectable(last): last -= 1
+        var query = list.get_item_text(last).to_lower()
         facts["query"] = query
         # Native character events, including any localized Unicode glyphs.
         for character in query:
@@ -156,6 +178,7 @@ func _process(delta):
         tap(KEY_F, 0, true)
         stage = 4
     elif stage == 4 and elapsed > 22.0:
+        hover(edit.get_global_rect().get_center())
         facts["reopened"] = edit.is_visible_in_tree() and edit.text.is_empty()
         tap(KEY_ESCAPE)
         stage = 5
@@ -164,8 +187,11 @@ func _process(delta):
         tap(KEY_F, 0, true)
         stage = 6
     elif stage == 6 and elapsed > 24.0:
-        facts["clicked_name"] = list.get_item_text(0)
-        click(list.get_global_transform() * list.get_item_rect(0, true).get_center())
+        var first = 0
+        while first < list.item_count and not list.is_item_selectable(first): first += 1
+        facts["clicked_name"] = list.get_item_text(first)
+        list.get_v_scroll_bar().value = list.get_item_rect(first, true).position.y
+        click(list.get_global_transform() * (list.get_item_rect(first, true).get_center() - Vector2(0, list.get_v_scroll_bar().value)))
         # The native click applies both selection and camera synchronously.
         # Freeze this pick frame before shutdown writes the report: private
         # desktops cannot supply a reliable OS cursor for later edge scrolling.
@@ -225,6 +251,13 @@ func sample(label):
         row["pictures_draw_calls"] += RenderingServer.viewport_get_render_info(view.get_viewport_rid(),
             RenderingServer.VIEWPORT_RENDER_INFO_TYPE_VISIBLE, RenderingServer.VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME)
     samples[label].append(row)
+func hover_search():
+    var edit = root.find_child("IDC_PLANET_SEARCH_TEXT", true, false)
+    if edit == null: return
+    var motion = InputEventMouseMotion.new()
+    motion.position = edit.get_global_rect().get_center()
+    motion.global_position = motion.position
+    root.push_input(motion, true)
 func _process(delta):
     elapsed += delta
     # Wall time between frames (the Performance monitors refresh about once a second and hide spikes).
@@ -241,6 +274,7 @@ func _process(delta):
             stage = 1
             elapsed = 14.0
     elif stage == 1 and elapsed > 18.0:
+        hover_search()
         for view in pictures():
             if view != null: RenderingServer.viewport_set_measure_render_time(view.get_viewport_rid(), true)
         facts["rows"] = list.item_count
@@ -320,6 +354,13 @@ func tap(code, control = false, unicode_value = 0):
         event.unicode = unicode_value if down else 0
         event.pressed = down
         Input.parse_input_event(event)
+func hover_search():
+    var edit = root.find_child("IDC_PLANET_SEARCH_TEXT", true, false)
+    if edit == null: return
+    var motion = InputEventMouseMotion.new()
+    motion.position = edit.get_global_rect().get_center()
+    motion.global_position = motion.position
+    root.push_input(motion, true)
 func _process(delta):
     elapsed += delta
     var list = root.find_child("IDC_PLANET_SEARCH_RESULTS", true, false)
@@ -335,6 +376,7 @@ func _process(delta):
         stage = 1
         elapsed = 14.0
     elif stage == 1 and elapsed > 15.0:
+        hover_search()
         for character in queries[index]: tap(character.to_upper().unicode_at(0), false, character.unicode_at(0))
         stage = 2
         elapsed = 14.0
@@ -431,7 +473,7 @@ func _process(delta):
             root.get_texture().get_image().get_region(Rect2i(list.get_global_rect())).save_png(directory + "/rows.png")
             for row in onscreen(list):
                 var icon = list.get_item_icon(row)
-                var entry = {"row": row, "name": list.get_item_text(row), "atlas": icon is AtlasTexture,
+                var entry = {"row": row, "name": list.get_item_text(row), "selectable": list.is_item_selectable(row), "atlas": icon is AtlasTexture,
                     "first_frame": first.get(row, -1)}
                 if icon is AtlasTexture:
                     var image = icon.get_image()
@@ -466,8 +508,257 @@ func _process(delta):
 '''
 
 
+FOCUS_HIDDEN_DRIVER = '''extends SceneTree
+var elapsed = 0.0
+var stage = 0
+var directory = %s
+var facts = {}
+var clip_frame = 0
+var next_clip = 0.0
+var held_icons = []
+func _initialize(): call_deferred("start")
+func start():
+    root.content_scale_factor = 1.0
+    root.content_scale_aspect = Window.CONTENT_SCALE_ASPECT_KEEP
+    root.content_scale_size = Vector2i(1920, 1080)
+    root.content_scale_mode = Window.CONTENT_SCALE_MODE_VIEWPORT
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func key(code, down, unicode_value = 0, control = false):
+    var event = InputEventKey.new()
+    event.keycode = code
+    event.physical_keycode = code
+    event.unicode = unicode_value if down else 0
+    event.ctrl_pressed = control
+    event.pressed = down
+    Input.parse_input_event(event)
+    # Same-frame boundary checks must observe delivery before the next pointer event.
+    Input.flush_buffered_events()
+func tap(code, unicode_value = 0, control = false):
+    key(code, true, unicode_value, control)
+    key(code, false, 0, control)
+func hover(point):
+    var motion = InputEventMouseMotion.new()
+    motion.position = point
+    motion.global_position = point
+    root.push_input(motion, true)
+func click(point):
+    hover(point)
+    for down in [true, false]:
+        var event = InputEventMouseButton.new()
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.position = point
+        event.global_position = point
+        event.pressed = down
+        root.push_input(event, true)
+func query(edit, text):
+    click(edit.get_global_rect().get_center())
+    edit.select_all()
+    for character in text: tap(character.to_upper().unicode_at(0), character.unicode_at(0))
+func shot(label): root.get_texture().get_image().save_png(directory + "/" + label + ".png")
+func _process(delta):
+    elapsed += delta
+    var edit = root.find_child("IDC_PLANET_SEARCH_TEXT", true, false)
+    var list = root.find_child("IDC_PLANET_SEARCH_RESULTS", true, false)
+    if stage == 0 and elapsed > 11.0:
+        Input.warp_mouse(Vector2(960, 400))
+        stage = -1
+    elif stage == -1 and elapsed > 12.0:
+        tap(KEY_F, 0, true)
+        tap(KEY_X, 120)
+        edit = root.find_child("IDC_PLANET_SEARCH_TEXT", true, false)
+        facts["outside_open_text"] = edit.text
+        stage = 1
+    elif stage == 1 and elapsed > 13.0:
+        assert(edit != null and edit.is_visible_in_tree())
+        facts["outside_open_held_text"] = edit.text
+        facts["outside_open_held_focus"] = edit.has_focus()
+        hover(edit.get_global_rect().get_center())
+        stage = 2
+    elif stage == 2 and elapsed > 14.0:
+        query(edit, "naboo")
+        stage = 3
+    elif stage == 3 and elapsed > 15.0:
+        facts["hidden_count"] = list.item_count
+        facts["hidden_text"] = list.get_item_text(0) if list.item_count else ""
+        facts["hidden_disabled"] = list.item_count == 1 and list.is_item_disabled(0)
+        facts["hidden_selectable"] = list.item_count == 1 and list.is_item_selectable(0)
+        facts["hidden_icon"] = list.item_count == 1 and list.get_item_icon(0) != null
+        facts["hidden_color"] = Array([list.get_item_custom_fg_color(0).r, list.get_item_custom_fg_color(0).g, list.get_item_custom_fg_color(0).b]) if list.item_count else []
+        facts["hidden_emblems"] = 0
+        for child in list.get_children():
+            if child is TextureRect and child.is_visible_in_tree(): facts["hidden_emblems"] += 1
+        shot("hidden-naboo")
+        if list.item_count: click(list.get_global_transform() * list.get_item_rect(0, true).get_center())
+        tap(KEY_ENTER)
+        stage = 4
+    elif stage == 4 and elapsed > 16.0:
+        facts["hidden_selection"] = Array(list.get_selected_items())
+        hover(edit.get_global_rect().get_center())
+        query(edit, "bespin")
+        stage = 5
+    elif stage == 5 and elapsed > 19.0:
+        tap(KEY_ENTER)
+        shot("keys-inside")
+        hover(Vector2(960, 400))
+        tap(KEY_X, 120)
+        facts["outside_immediate_text"] = edit.text
+        hover(edit.get_global_rect().get_center())
+        tap(KEY_X, 120)
+        facts["inside_immediate_text"] = edit.text
+        tap(KEY_BACKSPACE)
+        hover(Vector2(960, 400))
+        stage = 6
+    elif stage == 6 and elapsed > 20.0:
+        facts["outside_focus"] = edit.has_focus() or list.has_focus()
+        key(KEY_W, true, 119)
+        stage = 7
+    elif stage == 7 and elapsed > 21.0:
+        key(KEY_W, false)
+        facts["outside_text"] = edit.text
+        shot("keys-outside-camera-moved")
+        tap(KEY_F, 0, true)
+        facts["reopen_text"] = edit.text
+        tap(KEY_X, 120)
+        facts["reopen_typed_text"] = edit.text
+        tap(KEY_BACKSPACE)
+        hover(edit.get_global_rect().get_center())
+        stage = 8
+    elif stage == 8 and elapsed > 22.0:
+        tap(KEY_X, 120)
+        facts["inside_text"] = edit.text
+        tap(KEY_BACKSPACE)
+        query(edit, "")
+        # select_all plus Backspace clears the filter without any direct text mutation.
+        tap(KEY_BACKSPACE)
+        stage = 9
+    elif stage == 9 and elapsed > 25.0:
+        if elapsed >= next_clip:
+            shot("spin-" + str(clip_frame).pad_zeros(3))
+            clip_frame += 1
+            next_clip = elapsed + 0.2
+        if elapsed > 35.0:
+            facts["open_after_pan"] = edit.is_visible_in_tree()
+            hover(Vector2(960, 400))
+            tap(KEY_SPACE)
+            stage = 10
+    elif stage == 10 and elapsed > 36.0:
+        for row in range(list.item_count):
+            var icon = list.get_item_icon(row)
+            if icon is AtlasTexture: held_icons.append(hash(icon.get_image().get_data()))
+        shot("spin-paused-start")
+        stage = 11
+    elif stage == 11 and elapsed > 38.0:
+        facts["paused_icons_before"] = held_icons
+        facts["paused_icons_after"] = []
+        for row in range(list.item_count):
+            var icon = list.get_item_icon(row)
+            if icon is AtlasTexture: facts["paused_icons_after"].append(hash(icon.get_image().get_data()))
+        shot("spin-paused-end")
+        var file = FileAccess.open(directory + "/input.json", FileAccess.WRITE)
+        file.store_string(JSON.stringify(facts))
+        file.close()
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+        stage = 12
+    return false
+'''
+
+
 @unittest.skipUnless(support.RUNTIME and support.GAME_ROOT, "requires the GPU viewer and installed data")
 class GalacticPlanetSearchRuntime(unittest.TestCase):
+    def test_focus_hidden_rows_and_spin_parity(self):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-finder-focus-hidden-spin-"))
+        layer = directory / "layer"
+        xml = layer / "Data/XML"
+        xml.mkdir(parents=True)
+        shutil.copyfile(support.ROOT / "tools/revised_planet_search/RevisedPlanetSearch.xml", xml / "RevisedPlanetSearch.xml")
+        (xml / "CampaignFiles.xml").write_text('<Campaign_Files><File>FinderFixture.xml</File></Campaign_Files>', encoding="utf-8")
+        (xml / "FinderFixture.xml").write_text('''<Campaigns><Campaign Name="FinderFixture">
+<Locations>Bespin, Tatooine, Naboo</Locations><Starting_Active_Player>Empire</Starting_Active_Player>
+<Planet_Auto_Reveal>False</Planet_Auto_Reveal>
+<Home_Location>Empire, Bespin</Home_Location>
+<Starting_Forces>Empire, Bespin, Empire_Star_Base_1</Starting_Forces>
+<Starting_Forces>Empire, Tatooine, Empire_Star_Base_1</Starting_Forces>
+</Campaign></Campaigns>''', encoding="utf-8")
+        settings = directory / "settings.txt"
+        settings.write_text("eawr-settings 1\nkeyboard.camera_wasd=1\nrevised_layer_enabled=1\nrevised_layer_path=" + layer.as_posix() + "\n", encoding="utf-8")
+        script = directory / "input.gd"
+        script.write_text(FOCUS_HIDDEN_DRIVER % json.dumps(directory.as_posix()), encoding="utf-8")
+        report = directory / "report.json"
+        result = subprocess.run([
+            os.environ["EAWR_GODOT_EXECUTABLE"], "--render-thread", "separate", "--resolution", "1920x1080",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(script), "--",
+            "--eawr-galactic", "FinderFixture", "--eawr-game-root", support.GAME_ROOT,
+            "--eawr-mod-root", str(layer), "--eawr-settings-file", str(settings), "--eawr-report", str(report),
+            "--eawr-galactic-paused", "no", "--eawr-galactic-dismiss-story", "yes",
+            "--eawr-galactic-zoom-timing", "yes", "--eawr-lighting", "sh", "--eawr-environment", "map", "--eawr-shadows", "on"],
+            cwd=support.ROOT, capture_output=True, text=True, timeout=180, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        facts = json.loads((directory / "input.json").read_text(encoding="utf-8"))
+        data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(facts["outside_open_text"], "x", "Ctrl+F outside must focus the finder before the next key")
+        self.assertEqual(facts["outside_open_held_text"], "x", facts)
+        self.assertTrue(facts["outside_open_held_focus"], "explicit focus must survive subsequent frames outside")
+        self.assertEqual(facts["reopen_text"], "bespin", "Ctrl+F on an open finder must preserve its filter")
+        self.assertEqual(facts["reopen_typed_text"], "bespinx", "Ctrl+F must restore focus outside an open finder")
+        self.assertEqual(facts["hidden_count"], 1, facts)
+        self.assertEqual(facts["hidden_text"], "Naboo", facts)
+        self.assertTrue(facts["hidden_disabled"], facts)
+        self.assertFalse(facts["hidden_selectable"], facts)
+        self.assertTrue(facts["hidden_icon"], facts)
+        self.assertEqual(facts["hidden_emblems"], 0, facts)
+        self.assertEqual(facts["hidden_selection"], [], facts)
+        self.assertEqual(len(set(facts["hidden_color"])), 1, facts)
+        self.assertEqual(facts["outside_immediate_text"], "bespin", "the first key after leaving must reach the game before the next frame")
+        self.assertEqual(facts["inside_immediate_text"], "bespinx", "the first key after re-entering must reach the finder before the next frame")
+        self.assertFalse(facts["outside_focus"], facts)
+        self.assertEqual(facts["outside_text"], "bespin", facts)
+        self.assertEqual(facts["inside_text"], "bespinx", facts)
+        self.assertTrue(facts["open_after_pan"], facts)
+        self.assertTrue(data["paused"], data)
+        self.assertEqual(len(facts["paused_icons_before"]), 3, facts)
+        self.assertEqual(facts["paused_icons_before"], facts["paused_icons_after"], "row pictures must hold on the paused galaxy clock")
+        self.assertEqual(data["planet_search"]["picks"], 2, "hidden click positions the camera; Enter still skips it")
+        picked = next(p for p in data["planets"] if p["id"] == data["planet_search"]["last_pick"])
+        self.assertEqual(picked["name"].lower(), "bespin")
+        target = data["camera"]["target"]
+        self.assertGreater(math.hypot(target[0] - picked["position"][0], target[2] + picked["position"][1]), 1.0,
+                           "W outside the finder must pan the camera away from the selected planet")
+        # Actual renderer palettes, sampled on the same animation clock. Rotation is invariant under
+        # the thumbnail's static framing transform; compare both magnitude and direction by basis.
+        def angle(a, b):
+            vectors = []
+            for matrix in (a, b):
+                basis = [matrix[i:i + 3] for i in (0, 3, 6)]
+                vectors.append([[v / math.sqrt(sum(x*x for x in col)) for v in col] for col in basis])
+            trace = sum(sum(x*y for x, y in zip(ca, cb)) for ca, cb in zip(*vectors))
+            return math.degrees(math.acos(max(-1, min(1, (trace - 1) / 2))))
+        rates = {}
+        for planet in ("Bespin", "Tatooine"):
+            pid = next(p["id"] for p in data["planets"] if p["name"] == planet)
+            samples = [s for s in data["planet_search_pictures"]["spin_samples"] if s["planet"] == pid]
+            self.assertTrue(samples, (planet, data["planet_search_pictures"]))
+            moving = []
+            for entry in samples:
+                a, b = entry["samples"]
+                seconds = b["clock"] - a["clock"]
+                if seconds < 2: continue
+                row_rate, map_rate = (angle(a[k], b[k]) / seconds for k in ("row", "map"))
+                if row_rate < 0.1: continue
+                self.assertAlmostEqual(row_rate, map_rate, delta=0.02, msg=str(entry))
+                self.assertGreater(map_rate, 1.0, "the parity probe must exercise visible rotation")
+                for sample in (a, b):
+                    for x, y in zip(sample["row"], sample["map"]):
+                        self.assertAlmostEqual(x, y, delta=0.0001, msg=str(entry))
+                moving.append({"bone": entry["bone"], "row_deg_s": row_rate, "map_deg_s": map_rate})
+            self.assertTrue(moving, (planet, samples))
+            rates[planet] = moving
+        (directory / "spin-rates.json").write_text(json.dumps(rates, indent=2), encoding="utf-8")
+        print("Finder focus/hidden/spin evidence", directory, json.dumps(rates))
+
     def check_search(self, width, height, mod_root=None, campaign="Sandbox_Equal_Footing_Underworld", extra_query=""):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-planet-search-"))
         layer = directory / "layer"
@@ -519,8 +810,14 @@ class GalacticPlanetSearchRuntime(unittest.TestCase):
         self.assertLess(y + h, height * 0.8, "search overlaps the radar/command-bar band")
         # PS-08: live pictures on the onscreen rows, framed inside their cells (the cost probe covers the closed box).
         pictures = facts["pictures_b"]
-        self.assertGreaterEqual(pictures["atlas_rows"], min(4, facts["all_count"]), facts)
+        self.assertGreaterEqual(pictures["expected"], 1, facts)
+        self.assertEqual(pictures["atlas_rows"], min(16, pictures["expected"]), facts)
         for cell in pictures["cells"]:
+            if cell["hidden"]:
+                # A hidden planet row draws the map shell wireframe: thin lines, so no filled body, but drawn.
+                self.assertGreater(cell["span"], 0.3, ("the hidden row wireframe is missing from its cell", cell))
+                self.assertEqual(cell["corners"], 0, ("a cell corner is covered: clipping or an opaque square", cell))
+                continue
             self.assertGreater(cell["opaque"], 0.05, ("the planet body is missing from its cell", cell))
             self.assertLess(cell["opaque"], 0.95, ("the cell is squared off rather than a framed planet", cell))
             self.assertEqual(cell["corners"], 0, ("a cell corner is covered: clipping or an opaque square", cell))
@@ -534,8 +831,10 @@ class GalacticPlanetSearchRuntime(unittest.TestCase):
                 self.assertGreaterEqual(cell["span"], 0.6, ("a system row's drawn extent does not fill its cell", cell))
                 self.assertEqual(cell["corners"], 0, ("a system row spills or clips", cell))
         live = data["planet_search_pictures"]
-        # Only the galaxy map's own material-plan gaps may fail: the map draws nothing for those objects either (#7552).
-        self.assertEqual([row for row in live["failures"] if not row["cause"].startswith("no legacy selector")], [], live)
+        # PS-09 closes the nebula material gap; other unsupported galaxy materials remain diagnosed.
+        self.assertEqual([row for row in live["failures"]
+                          if not row["cause"].startswith("no legacy selector")
+                          or row["cause"] == "no legacy selector for Nebula.fx"], [], live)
         # Planets that share a model share one upload.
         self.assertGreaterEqual(live["uploads"], len({row["model"] for row in live["shown"]}), live)
         self.assertGreaterEqual(len(live["shown"]), 1, live)
@@ -645,7 +944,8 @@ class GalacticPlanetSearchRuntime(unittest.TestCase):
         self.assertGreaterEqual(summary["planets"], 100, summary)
         print("PS-08 cost A/B", json.dumps({"pictures": summary, "no_pictures": control}))
 
-    def eye_check(self, queries, mod_root=None, campaign="Sandbox_Equal_Footing_Underworld", width=1920, height=1080):
+    def eye_check(self, queries, mod_root=None, campaign="Sandbox_Equal_Footing_Underworld", width=1920, height=1080,
+                  require_model=None):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-planet-pictures-eye-"))
         layer = directory / "layer"
         (layer / "Data/XML").mkdir(parents=True)
@@ -667,6 +967,15 @@ class GalacticPlanetSearchRuntime(unittest.TestCase):
         self.assertEqual(result.returncode, 0, log)
         facts = json.loads((directory / "eye.json").read_text(encoding="utf-8"))
         data = json.loads(report.read_text(encoding="utf-8"))
+        if require_model:
+            models = [model for model in data["models"] if model["logical_path"].lower().endswith(require_model.lower())]
+            self.assertEqual(len(models), 1, (require_model, models))
+            surfaces = models[0]["surfaces"]
+            self.assertEqual(len(surfaces), 6, surfaces)
+            self.assertTrue(all(surface["status"] == "drawn" for surface in surfaces), surfaces)
+            self.assertEqual({surface["alternate"] for surface in surfaces}, {0, 1}, surfaces)
+            self.assertEqual({surface["shader"].lower() for surface in surfaces},
+                             {"planet_shim_closeup.fx", "meshadditive_citylights_closeup.fx", "meshadditive.fxo"})
         print("PS-08 eye", json.dumps({"queries": facts["queries"], "pictures": data["planet_search_pictures"]}))
         for row in facts["queries"]:
             self.assertTrue(row["names"], ("the eye-check query found no row", row))
@@ -724,6 +1033,22 @@ class GalacticPlanetSearchRuntime(unittest.TestCase):
         # Test input for the large-campaign mod (Remake 4.0): its multi-body sectors, clusters, nebulae and systems.
         chain = os.environ["EAWR_REMAKE_MOD_ROOT"]
         self.eye_check(["sector", "cluster", "nebula", "kessel"], mod_root=chain, campaign=self.large_campaign(chain))
+
+    @unittest.skipUnless(os.environ.get("EAWR_REMAKE_MOD_ROOT"), "requires a mod host (--NeedsMod)")
+    def test_eye_check_nebula_picture(self):
+        # Test input: a listed nebula has no other co-located drawable model to hide a routing failure.
+        chain = os.environ["EAWR_REMAKE_MOD_ROOT"]
+        facts = self.eye_check(["utegetu"], mod_root=chain, campaign=self.large_campaign(chain))
+        self.assertGreater(facts["queries"][0]["cells"], 0, "the nebula must use its model rather than the placeholder")
+
+    @unittest.skipUnless(os.environ.get("EAWR_REMAKE_MOD_ROOT"), "requires a mod host (--NeedsMod)")
+    def test_eye_check_closeup_body_and_city_lights(self):
+        # Installed-data identity belongs to the test, never to material selection.
+        remake = pathlib.Path(os.environ["EAWR_REMAKE_MOD_ROOT"]).parent / "3689306867"
+        self.assertTrue((remake / "Data/Xml/GameObjectFiles.xml").is_file(), "the host lacks the Remake 5 fixture")
+        facts = self.eye_check(["coruscant"], mod_root=remake, campaign="Campaign_Standard_Empire",
+                               require_model="w_planet_gc_coruscant.alo")
+        self.assertGreater(facts["queries"][0]["cells"], 0, "the complete body/lights model needs a finder picture")
 
     def test_search_at_1080p(self):
         self.check_search(1920, 1080)

@@ -147,6 +147,212 @@ int main() {
 '''
 
 class PreparedCampaignViewContracts(unittest.TestCase):
+    def test_every_source_reaches_environment_record_admission(self):
+        """Execute the production binders and composition admission, with GPU work stubbed."""
+        toolchain = select_toolchain()
+        if toolchain is None:
+            self.skipTest('requires C++ compiler')
+        def read(name):
+            return (ROOT / name).read_text(encoding='utf-8')
+        def block(source, signature):
+            begin = source.index(signature)
+            opening = source.index('{', begin)
+            depth = 1
+            end = opening + 1
+            while depth:
+                depth += (source[end] == '{') - (source[end] == '}')
+                end += 1
+            return source[begin:end]
+        replay = read('apps/viewer/src/battle_source_replay.cpp')
+        local = read('apps/viewer/src/battle_source_local.cpp')
+        borrowed = read('apps/viewer/src/battle_source_borrowed.cpp')
+        population = read('apps/viewer/src/space_populate_arrivals.cpp')
+        policy = read('src/scene/space_population.cpp')
+        native = extract_function(replay, 'bool BattleSourceState::prepare_native(')
+        borrowed_method = extract_function(borrowed, 'bool BattleSourceState::prepare_borrowed(')
+        methods = (native + '\n' + borrowed_method).replace('BattleSourceState::', 'LiveSessionView::').replace(
+            'const live_session::PreparedBattle&', 'const PreparedBattle&').replace(
+            '    auto& placed_ships_ = draw_bindings_->placed_ships;\n', '')
+        local_loop = block(local, 'for (const battle::StartUnit& unit : start_->units)')
+        replay_loop = block(replay, 'for (const tactical::UnitState& unit : setup.units)')
+        local_metadata = next(line.strip() for line in local.splitlines() if line.strip().startswith('start_ ='))
+        replay_metadata = next(line.strip() for line in replay.splitlines()
+                               if 'start_ = std::move(start)' in line)
+        # Keep the native early dispatch verbatim; the ordinary replay's loader is
+        # outside this contract, but its actual actor-binding loop runs below.
+        native_dispatch = block(replay, 'if (replay->setup.native_scene)')
+        guard = extract_function(population, 'bool SpacePopulation::classify_arrival(').split(
+            '    const bool live =', 1)[0] + '    return false; // reached model composition\n}'
+        ownership = '\n'.join(extract_function(policy, signature) for signature in (
+            'SpaceRecordOwner space_record_owner(', 'SpaceRecordOwner space_live_record_owner('))
+        start_accessor = block(read('apps/viewer/src/live_session_view.hpp'),
+                               'const battle::BattleStart* start_data()')
+        option_lines = [line.strip() for line in read('apps/viewer/src/map_mode_ready_population.cpp').splitlines()
+                        if '.battle_start =' in line]
+        self.assertEqual(len(option_lines), 2)  # environment and population share this start
+        assignments = '\n'.join('population.options_.battle_start ' + line.split('.battle_start', 1)[1].rstrip(',') + ';'
+                                for line in option_lines)
+        harness = HARNESS[:HARNESS.index('int main()')]
+        harness = harness.replace(
+            'std::vector<UnitState> units; };', 'std::vector<UnitState> units; bool skirmish=false, native_scene=false; };')
+        harness = harness.replace('namespace sim { namespace tactical',
+                                  'namespace sim { using EntityId=unsigned; constexpr EntityId invalid_entity_id=0; namespace tactical')
+        harness = harness.replace('struct StartUnit { tactical::UnitState state; std::string type; };',
+                                  'enum class UnitRole { station, placed, map_object };\n'
+                                  'struct StartUnit { tactical::UnitState state; std::string type; '
+                                  'UnitRole role=UnitRole::station; unsigned record=0; int yaw_degrees=0; };')
+        harness = harness.replace('namespace battle {',
+                                  'namespace battle { using StartUnit=skirmish::StartUnit; '
+                                  'using StartPlayer=skirmish::StartPlayer; using BattleStart=skirmish::SkirmishStart; '
+                                  'using UnitRole=skirmish::UnitRole;')
+        harness = harness.replace('namespace live { int instance_yaw_degrees', r'''
+namespace data { enum class Category { game_object }; struct Catalog {
+ struct Resolved { explicit operator bool() const { return true; } int value() const { return 0; } int error() const { return 0; } };
+ Resolved resolve(const std::string&, Category) const { return {}; }
+}; }
+namespace vfs { struct Vfs {}; }
+std::string tag_text(int, const char*) { return {}; }
+namespace core { std::string format_diagnostic(int) { return {}; }
+namespace load_profile { void slot_composed(const char*,const std::string&) {} void unit_spawned(const std::string&) {} } }
+namespace scene {
+enum class SpaceRecordOwner : std::uint8_t { map, environment, session };
+__OWNERSHIP__
+}
+namespace live { bool map_prop_fog_bound(const std::string&,const std::string&) { return false; }
+int instance_yaw_degrees''')
+        harness = harness.replace('std::optional<std::array<std::uint8_t,3>> team_colour;',
+                                  'std::optional<std::array<std::uint8_t,3>> team_colour; '
+                                  'std::optional<unsigned> colour_record; bool death_clone=false;')
+        harness = harness.replace('}; };\n    using PlacedUnit', r'''};
+ const data::Catalog* catalog{}; const battle::BattleStart* battle_start{};
+ std::vector<PlacedShip> placed_ships; std::vector<unsigned> session_records;
+ }; Options options_;
+ struct ComposeContext { int renderer=0,map=0,filesystem=0,camera=0; std::span<const unsigned> environment_records;
+ int cache=0,input=0,resolve=0; };
+ std::vector<bool> live_death_clone_;
+ bool classify_arrival(ComposeContext&,std::size_t);
+    using PlacedUnit''')
+        harness = harness.replace('bool prepare_borrowed(std::string& failure);', r'''
+ bool colorization_enabled_=true;
+ std::vector<unsigned> session_records_,unfogged_map_props_;
+ __START_ACCESSOR__
+ bool bind_local(const skirmish::SkirmishStart& authored,std::string& failure) {
+  data::Catalog catalog;
+  struct { std::optional<skirmish::SkirmishStart> start; } prepared{authored};
+  auto* local=&prepared;
+  __LOCAL_METADATA__
+  __LOCAL_LOOP__
+  return true;
+ }
+ bool bind_ordinary_replay(const tactical::TacticalSetup& setup,const skirmish::SkirmishStart& authored,std::string& failure) {
+  data::Catalog catalog; std::map<unsigned,std::string> names{{10,"Ship"},{20,"MapObject"}};
+  std::map<unsigned,std::array<std::uint8_t,3>> faction_colours;
+  std::optional<skirmish::SkirmishStart> start=authored;
+  __REPLAY_METADATA__
+  __REPLAY_LOOP__
+  return true;
+ }
+ bool prepare_native_replay(std::optional<tactical::TacticalReplay>,const vfs::Vfs&,const data::Catalog&,std::string&);
+ bool prepare_borrowed(std::string& failure);''')
+        harness = harness.replace('__VALIDATE__', '')
+        # This unrelated wrapper only exists in the reused fixture scaffold.
+        begin = harness.index(' bool prepare_replay(std::string& failure) {')
+        end = harness.index('\n};\n__METHOD__', begin)
+        harness = harness[:begin] + harness[end:]
+        harness = harness.replace('__METHOD__', methods)
+        for key, value in {'__OWNERSHIP__': ownership, '__START_ACCESSOR__': start_accessor,
+                           '__LOCAL_LOOP__': local_loop, '__REPLAY_LOOP__': replay_loop,
+                           '__LOCAL_METADATA__': local_metadata, '__REPLAY_METADATA__': replay_metadata}.items():
+            harness = harness.replace(key, value)
+        harness += r'''
+namespace live_session { using PreparedBattle=LiveSessionView::PreparedBattle; }
+namespace campaign {
+LiveSessionView::PreparedBattle prepared;
+struct NativeResult { explicit operator bool() const { return true; }
+ LiveSessionView::PreparedBattle& value() const { return prepared; } int error() const { return 0; } };
+NativeResult load_standalone_space_replay(const tactical::TacticalReplay&,const vfs::Vfs&,const data::Catalog&) { return {}; }
+}
+bool LiveSessionView::prepare_native_replay(std::optional<tactical::TacticalReplay> replay,
+ const vfs::Vfs& filesystem,const data::Catalog& catalog,std::string& failure) {
+ __NATIVE_DISPATCH__
+ return false;
+}
+__GUARD__
+int main() {
+ auto prepared=std::make_shared<LiveSessionView::PreparedBattle>();
+ prepared->tables={{{"Ship"}},"prepared"};
+ prepared->start=skirmish::SkirmishStart{};
+ auto& start=*prepared->start;
+ start.players={{{4,7,11},skirmish::Colour{{1,2,3}}}};
+ start.units={{{100,20,4,{}} ,"MapObject",battle::UnitRole::map_object,0},
+              {{101,20,4,{}} ,"MapObject",battle::UnitRole::map_object,7},
+              {{103,10,4,{}} ,"Ship",battle::UnitRole::station,7},
+              {{104,20,4,{}} ,"MapObject",battle::UnitRole::placed,7},
+              {{105,20,4,{}} ,"MapObject",battle::UnitRole::map_object,3}};
+ prepared->replay.setup.content_identity="prepared";
+ prepared->replay.setup.players={{4,7,11}};
+ for(const auto& unit:start.units) prepared->replay.setup.units.push_back(unit.state);
+ prepared->replay.setup.units.push_back({102,10,4,{}}); // spawned: no authored record
+ prepared->replay.setup.native_scene=true;
+ campaign::prepared=*prepared;
+ for(int route=0;route<4;++route) {
+  LiveSessionView view; view.options_={prepared,4}; std::string failure;
+  bool ok=false;
+  if(route==0) {
+   ok=view.bind_local(start,failure);
+   SpacePopulation::Options::PlacedShip spawned; spawned.live_entity=102;
+   view.placed_ships_.push_back(spawned);
+  }
+  if(route==1) ok=view.bind_ordinary_replay(prepared->replay.setup,start,failure);
+  if(route==2) ok=view.prepare_native_replay(prepared->replay,{}, {},failure);
+  if(route==3) ok=view.prepare_borrowed(failure);
+  if(!ok) { std::cerr<<"binder failed route "<<route<<": "<<failure; return 1; }
+  std::vector<unsigned> identities;
+  for(const auto& ship:view.placed_ships_) identities.push_back(ship.live_entity);
+  std::sort(identities.begin(),identities.end());
+  if(identities!=std::vector<unsigned>{100,101,102,103,104,105}) return 3;
+  struct { LiveSessionView* live_session; } state{&view};
+  SpacePopulation population; data::Catalog catalog; population.options_.catalog=&catalog;
+  __START_OPTIONS__
+  population.options_.placed_ships=view.placed_ships_;
+  population.live_death_clone_.resize(view.placed_ships_.size());
+  const std::vector<unsigned> records{0,7};
+  SpacePopulation::ComposeContext context; context.environment_records=records;
+  for(std::size_t i=0;i<view.placed_ships_.size();++i) {
+   const auto entity=view.placed_ships_[i].live_entity;
+   const bool claimed=population.classify_arrival(context,i);
+   const bool expected=entity==100 || entity==101 || entity==104;
+   if(claimed!=expected) { std::cerr<<"ownership failed route "<<route<<" entity "<<entity; return 2; }
+  }
+ }
+ std::cout<<"local, ordinary replay, native replay, borrowed campaign: exclusive record admission\n";
+}
+'''
+        harness = harness.replace('__NATIVE_DISPATCH__', native_dispatch).replace('__GUARD__', guard).replace(
+            '__START_OPTIONS__', assignments)
+        with tempfile.TemporaryDirectory(prefix='eawr-record-claim-') as temp:
+            directory = Path(temp)
+            cpp, exe = directory / 'claims.cpp', directory / ('claims.exe' if os.name == 'nt' else 'claims')
+            cpp.write_text(harness, encoding='utf-8')
+            compile_fixture(toolchain, cpp, exe)
+            ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            # Sensitivity: removing the actual pre-composition guard must expose
+            # the duplicate for the first real bound map actor.
+            unguarded = harness.replace(guard, guard[:guard.index('    if (scene::space_live_record_owner(')]
+                                       + '    return false;\n}')
+            cpp.write_text(unguarded, encoding='utf-8')
+            compile_fixture(toolchain, cpp, exe)
+            ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(ran.returncode, 2, ran.stdout + ran.stderr)
+            # The former native/borrowed hole must also be observable: retaining
+            # the guard but dropping the real native start handoff fails route 2.
+            cpp.write_text(harness.replace('    start_ = battle.start;', ''), encoding='utf-8')
+            compile_fixture(toolchain, cpp, exe)
+            ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(ran.returncode, 2, ran.stdout + ran.stderr)
+            self.assertIn('route 2', ran.stderr)
+
     def test_missing_preview_colours_keep_visible_models_and_report_a_note(self):
         toolchain = select_toolchain()
         if toolchain is None:

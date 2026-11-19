@@ -207,8 +207,15 @@ in order:
 
 - Map logical path and lower-case map SHA-256 as strings.
 - A uint32 disabled-policy word with the same four bits as tag 1; bit 4 additionally
-  enables random events. The four policy bits must agree with tag 1 (or its absent,
-  all-enabled default).
+  enables random events. Bit 5 (`0x20`, campaign-origin) explicitly marks a selected-force
+  campaign entry, including one without optional campaign rules. It requires the shared
+  allocator boundary; that boundary alone does not mark campaign origin because skirmish
+  skip filtering can also set it. Replay fog binding uses the explicit marker or campaign
+  rules, preserving the skirmish policy after skipped placements. The four policy bits
+  must agree with tag 1 (or its absent, all-enabled default). Other bits are refused.
+  Content loaders refuse an older shared-allocator SKSU header with neither explicit
+  campaign origin/rules nor the match identity emitted by current skirmish recorders;
+  re-export it with the current build instead of guessing its fog policy.
 - Seven int64 values: Q24 credits, start tech, max tech, game timer, win integer,
   auto resolve, Q24 win float. The five integral match fields must fit int32.
 - Win condition and tactical win condition as strings. The second field is
@@ -1403,11 +1410,13 @@ departure 8 and beacon rules 9. Campaign setup, carried-object metadata and cine
 seats use tags 10, 11 and 12 respectively. Writers emit every enabled tag in
 increasing order; the existing replay container versions 2/3/4/5 are unchanged.
 
-Campaign setup tag 10 uses payload version 5 without a reserve order and version 6
-with an explicit reserve order. Each account stores its Q24 AI build-time multiplier
+Campaign setup tag 10 uses payload version 7 without a reserve order and version 8
+with an explicit reserve order. A uint32 location flag immediately follows the payload
+version (0 uncorrupted, 1 corrupted); other values are rejected. This copied flag
+survives child replays and checkpoints independently of the retained parent. Each account stores its Q24 AI build-time multiplier
 immediately after its credit multiplier. Replay and checkpoint loading retain this
 recorded production scale when rebinding campaign economy rules. Payload versions
-3/4 are rejected; ordinary skirmish recordings omit this tag and retain their bytes.
+3 through 6 are rejected; ordinary skirmish recordings omit this tag and retain their bytes.
 
 Tag 13, `ATRC` (MAT-15, coordinator-reserved), marks the main-menu demo battle's pool return
 (docs/behaviour/main-menu-attract.md). Its body is a uint32 version (1), a uint32 count and

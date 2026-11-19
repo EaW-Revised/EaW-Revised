@@ -496,7 +496,7 @@ void test_manual_contracts() {
     weapon.requires_manual_target = true;
     weapon.pulse_count = 1;
     weapon.min_recharge_hundredths = weapon.max_recharge_hundredths = 100;
-    weapon.manual_min_range = units(100);
+    weapon.min_range = units(100);
     weapon.manual_cooldown_frames = 3600;
     weapon.shot.emplace();
     weapon.shot->speed = units(7); weapon.shot->damage = units(6000);
@@ -536,6 +536,9 @@ void test_manual_contracts() {
     own.rocket_attack = false;
     weapon.fire_in_rocket_mode = true;
     enemy.position = at(104, 0); expect(!admitted(), "MC-01: below minimum range is refused");
+    weapon.min_range = units(-100);
+    expect(admitted(), "WWP-20: a negative authored minimum also disables the manual lower bound");
+    weapon.min_range = units(100);
     enemy.position = at(705, 0); expect(admitted(), "MC-01: inclusive maximum range");
     enemy.position = at(706, 0); expect(!admitted(), "MC-01: beyond maximum range is refused");
     enemy.position = at(500, 0); enemy.visible_to = 2; expect(!admitted(), "MC-01: fogged target refused");
@@ -1225,16 +1228,19 @@ void test_validation() {
             if (field == 0) profile.max_attack_distance = value;
             else if (field == 1) weapon.range = value;
             else if (field == 2) weapon.shot->max_travel = value;
-            else { weapon.range = units(1000000000); weapon.manual_min_range = value; }
+            else { weapon.range = units(1000000000); weapon.min_range = value; }
         };
         set_range(units(999999999));
         expect(static_cast<bool>(tactical::validate_combat(ranged)), "large finite range scalars are admitted independently");
-        if (field != 3) {
-            set_range(Fixed::from_raw(std::numeric_limits<std::int64_t>::max()));
-            expect(static_cast<bool>(tactical::validate_combat(ranged)), "range admission covers the nonnegative Q24 domain");
+        set_range(Fixed::from_raw(std::numeric_limits<std::int64_t>::max()));
+        expect(static_cast<bool>(tactical::validate_combat(ranged)), "range admission covers the nonnegative Q24 domain");
+        if (field == 3) {
+            set_range(Fixed::from_raw(std::numeric_limits<std::int64_t>::min()));
+            expect(static_cast<bool>(tactical::validate_combat(ranged)), "WWP-20: minimum admits the signed Q24 domain");
         }
         set_range(Fixed::from_raw(-1));
-        expect(!tactical::validate_combat(ranged), "negative range scalars remain invalid");
+        expect(static_cast<bool>(tactical::validate_combat(ranged)) == (field == 3),
+            "WWP-20: minimum is signed; negative upper range scalars remain invalid");
     }
     auto geometry = table();
     geometry.profiles.front().weapons.front().fire_a.x = units(tactical::max_combat_distance + 1);
@@ -1617,6 +1623,7 @@ int main(int argc, char** argv) {
     test_zero_cone();
     test_fire_bone_cone();
     test_randomized_fire_bones();
+    test_hardpoint_min_range();
     test_launcher_cone();
     test_object_turret();
     test_hardpoint_turret();

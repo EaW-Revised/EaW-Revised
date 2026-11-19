@@ -30,7 +30,7 @@ ui::HeroTypeTable types() {
     ui::HeroTypeTable table;
     table.add({vader, true, false, false});
     table.add({tyber, true, false, false});
-    table.add({generic, false, true, false});
+    table.add({generic, false, true, false, true});
     table.add({frigate, false, false, true});
     table.finish();
     return table;
@@ -296,15 +296,30 @@ void test_fog_policy_applies_to_the_hostile_tray_only() {
     expect(f.roster.hostile.empty(), "the fog policy can require sight");
 }
 
-void test_generic_heroes_follow_the_policy() {
+void test_generic_hero_heads_and_company_transport() {
     Fixture f;
-    f.instances = {instance(2, generic, me)};
-    f.visible = {2};
+    constexpr tactical::TypeId hidden_generic = 401, explicit_head = 402;
+    f.types_.add({hidden_generic, false, true, false, false});
+    f.types_.add({explicit_head, false, false, false, true});
+    f.types_.finish();
+    auto carrier = instance(10, gunship, me, 0.5);
+    auto generic_rider = rider(11, generic, 10);
+    generic_rider.named_hero = false;
+    generic_rider.generic_hero = true;
+    carrier.contained = {generic_rider, rider(12, hidden_generic, 10)};
+    f.instances = {instance(2, generic, me), instance(3, hidden_generic, me),
+                   instance(4, vader, me), instance(5, explicit_head, me), carrier};
     f.collect();
-    expect(f.roster.friendly.empty(), "a generic hero is not listed by default");
-    f.policy.include_generic_heroes = true;
-    f.collect();
-    expect(f.roster.friendly.size() == 1, "the policy can list generic heroes");
+    expect(f.roster.friendly.size() == 4, "WHE-80: named or explicit head admits a portrait; generic alone does not");
+    const auto& carried = f.roster.friendly.front();
+    expect(carried.hero == 11 && carried.represented == 10 && carried.type == generic,
+        "a generic company rider supplies its own portrait and represents its unflagged transport");
+    expect(carried.health == 0.5F, "the generic rider uses transport health");
+    expect(f.roster.friendly.back().hero == 2 && f.roster.friendly.back().represented == 2,
+        "a standalone generic head represents itself");
+    ClickEffects effects;
+    effects.click(f, 11, false, false, false);
+    expect(effects.selection.units() == std::vector<sim::EntityId>{10}, "a generic rider portrait selects its transport");
 }
 
 void test_capacity_and_duplicates() {
@@ -388,7 +403,7 @@ int main() {
     test_current_roster_rebinds_and_removes_heroes();
     test_nested_riders_and_contained_bar_gate();
     test_fog_policy_applies_to_the_hostile_tray_only();
-    test_generic_heroes_follow_the_policy();
+    test_generic_hero_heads_and_company_transport();
     test_capacity_and_duplicates();
     test_coop_squadron_heroes_share_one_icon();
     test_automatic_highlight();

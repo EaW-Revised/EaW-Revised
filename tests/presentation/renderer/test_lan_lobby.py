@@ -67,8 +67,14 @@ class LanLobbyStructure(unittest.TestCase):
         roster = source.split("void EawrLanLobby::refresh_staging_roster(", 1)[1].split(
             "void EawrLanLobby::", 1)[0]
         faction_list = roster.split("std::vector<std::string> factions;", 1)[1].split("impl.row_states.clear();", 1)[0]
-        self.assertIn("skirmish::setup_factions(*resources.content->catalog)", faction_list)
+        # #7842: the combo list is the shared per-map helper over the playable catalog (the local setup uses it too).
+        self.assertIn("lobby_factions(impl, resources)", roster)
+        self.assertIn("for (const auto& entry : listed_factions) factions.push_back(entry.name);", faction_list)
         self.assertNotIn("if (map", faction_list)
+        helper = (SRC / "lan_lobby_screen_internal.hpp").read_text(encoding="utf-8")
+        helper = helper.split("lobby_factions(const ImplT& impl", 1)[1].split("} // namespace lan_lobby_detail", 1)[0]
+        self.assertIn("skirmish::setup_factions(*resources.content->catalog)", helper)
+        self.assertIn("skirmish::setup_factions_for_map(all, map)", helper)
         faction_control = roster.split("if (faction != nullptr)", 1)[1].split("if (colour != nullptr)", 1)[0]
         self.assertNotIn("add_item(text(row.faction))", faction_control)
 

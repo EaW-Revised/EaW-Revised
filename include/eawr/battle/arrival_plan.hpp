@@ -15,7 +15,7 @@ namespace eawr::sim::tactical { struct EconomyRules; }
 namespace eawr::battle {
 
 enum class ArrivalSource : std::uint8_t {
-    launch, purchase, reinforcement_pool, station_spawn, ability_object
+    launch, purchase, reinforcement_pool, station_spawn, ability_object, destruction_survivor
 };
 
 // Ordered contributions to a type's simultaneous demand. Separate sources add;

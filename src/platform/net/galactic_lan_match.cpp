@@ -203,13 +203,11 @@ public:
         }
         adapter_->bind_executor(context.executor);
         if (!save_service_ready_) {
-            adapter_->set_save_host(options_.seats.front().seat);
             auto* game = &context.game;
             if (!recovery_adapter_ && !game->network_resume_state().empty())
                 if (auto restored = adapter_->restore_network_state(game->network_resume_state()); !restored)
                     return end_with_failure(restored.error());
             net::CheckpointCallbacks callbacks;
-            callbacks.host = 0; // The transport roster uses options_.seats order; front is peer zero.
             callbacks.capture = [this, game](const auto& sequences) -> core::Result<net::CheckpointProof> {
                 if (!active_save_) return core::Result<net::CheckpointProof>::failure(
                     make_diagnostic(net::session_errors::options, "save capture has no accepted request"));
@@ -232,13 +230,13 @@ public:
                 auto boundary = game->history_frontier();
                 if (!boundary) return core::Result<void>::failure(boundary.error());
                 game->schedule_history_rebase(std::move(boundary).value());
-                if (transport_.self() == 0 && active_save_)
+                if (active_save_ && active_save_->producer == local_seat())
                     agreed_save_ = platform::AgreedGameSave{*active_save_, game->completed_tick(), std::move(captured_save_), {}};
                 captured_save_.clear(); active_save_.reset();
                 return core::Result<void>::success();
             };
             callbacks.refused = [this, game](core::Diagnostic error) {
-                if (transport_.self() == 0 && active_save_) {
+                if (active_save_ && active_save_->producer == local_seat()) {
                     const bool busy = error.code == net::session_errors::capture_busy;
                     publish_failed_save(platform::AgreedGameSave{*active_save_, game->completed_tick(), {}, std::move(error), busy});
                 }
@@ -298,8 +296,10 @@ public:
                 "the galaxy adapter completed a tick without publishing it"));
             for (const auto& event : tick->save_events) {
                 if (event.kind != galactic::GalacticEventKind::save_requested) continue;
-                if (session_->checkpoint_pending()) active_save_ = event;
-                else if (transport_.self() == 0) publish_failed_save(platform::AgreedGameSave{event, context.game.completed_tick(), {},
+                // Any human seat may request a save. One barrier runs at a time: a request that lands while another is
+                // in flight is the same on every peer, and only its own producer retries it.
+                if (session_->checkpoint_pending() && !active_save_) active_save_ = event;
+                else if (event.producer == local_seat()) publish_failed_save(platform::AgreedGameSave{event, context.game.completed_tick(), {},
                     make_diagnostic(net::session_errors::capture_busy, "Save failed: a roster or timing agreement overlaps capture."), true});
             }
             if (acceptance_) acceptance_->observe(context.game, *tick,
@@ -356,7 +356,8 @@ public:
 
     [[nodiscard]] bool may_save(sim::SeatId seat) const noexcept {
         const std::lock_guard lock(mutex_);
-        return view_.phase != GalacticLanPhase::ended && transport_.self() == 0 && !options_.seats.empty() && seat == options_.seats.front().seat;
+        return view_.phase != GalacticLanPhase::ended && transport_.self() < options_.seats.size()
+            && options_.seats[transport_.self()].may_submit && seat == options_.seats[transport_.self()].seat;
     }
     [[nodiscard]] std::optional<platform::AgreedGameSave> take_agreed_save() {
         // A busy refusal is retried once the transition that caused it has settled, not on every tick of a long one.

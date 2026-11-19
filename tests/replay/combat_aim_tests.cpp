@@ -18,6 +18,88 @@
 
 namespace combat_test_support {
 
+void test_hardpoint_min_range() {
+    namespace detail = tactical::detail;
+    detail::CombatWorld world;
+    const std::vector<tactical::Player> owners{{1, 1, 1, tactical::player_flag_commandable},
+        {2, 2, 2, tactical::player_flag_commandable}};
+    const std::vector<tactical::SnapshotPlayer> relationships{{1, 1, false}, {2, 2, false}};
+    world.players = owners; world.relationships = relationships; world.seed = 777; world.frame = 11;
+    tactical::CombatProfile source, victim;
+    victim.hardpoints.push_back({0, at(0, 0), true});
+    auto gun = ion();
+    gun.min_range = units(100);
+    gun.cone_width = gun.cone_height = units(360);
+    gun.fire_a = at(20, 0); gun.fire_b = at(40, 0);
+    source.weapons = {gun};
+    tactical::CombatState state;
+    state.attack_target = 2; state.direct = true;
+    state.weapons.resize(1); state.weapons.front().pulses_left = 2;
+    detail::CombatUnit self, target;
+    self.id = 1; self.owner = self.team = 1; self.profile = &source; self.combat = &state;
+    self.position = at(10, 0);
+    self.transform = math::to_matrix(math::identity_quat(), self.position).value();
+    target.id = 2; target.owner = target.team = 2; target.visible_to = 1; target.profile = &victim;
+    const auto attempt = [&](const Fixed x, const bool expected) {
+        target.position = target.previous_position = {x, {}, units(80)};
+        target.transform = math::to_matrix(math::identity_quat(), target.position).value();
+        world.units = {self, target};
+        tactical::CombatRandom random(world.seed, world.frame, 1, 0);
+        detail::combat_detail::UnitCombat service(world, world.units.front());
+        expect(service.attempt(0, 2, random) == expected, "WWP-20: inclusive planar minimum gates each attempt");
+        expect(random.draws() == (expected ? 1U : 0U), "WWP-20: minimum rejection precedes muzzle draws");
+    };
+    attempt(Fixed::from_raw(units(140).raw() - 1), false);
+    attempt(units(140), true);
+    attempt(Fixed::from_raw(units(140).raw() + 1), true);
+    // The aim point is the selected hardpoint, rather than the target centre or a muzzle endpoint.
+    victim.hardpoints.front().position = at(-20, 0);
+    attempt(units(150), false);
+    victim.hardpoints.front().position = at(20, 0);
+    attempt(units(130), true);
+    victim.hardpoints.front().position = {};
+    source.weapons.front().min_range = {};
+    attempt(units(80), true);
+    source.weapons.front().min_range = units(-100);
+    attempt(units(80), true);
+    tactical::TargetFootprint footprint;
+    footprint.radius = units(200);
+    target.footprint = &footprint;
+    source.weapons.front().min_range = units(100);
+    attempt(units(130), false); // Target radius cannot relax the lower bound.
+    source.weapons.front().range = units(50);
+    attempt(units(140), true); // Radius still extends the upper bound beyond nominal range.
+
+    auto content = table();
+    auto& weapon = content.profiles.front().weapons.front();
+    weapon.min_range = units(300);
+    const auto initial = setup({unit(1, shooter_type, 1, at(0, 0)),
+        unit(2, bomber_type, 2, at(200, 0)), unit(3, shooter_type, 1, at(-200, 0))});
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto value = session(initial, content);
+        expect(static_cast<bool>(value.submit({{0, 1, 1}, {1, 3}, tactical::AttackPayload{2}})),
+            "WWP-20: minimum-range session accepts direct orders");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        unsigned near_shots = 0, far_shots = 0;
+        for (unsigned tick = 0; tick < 150; ++tick) {
+            const auto step = value.step(executor);
+            expect(static_cast<bool>(step), "WWP-20: minimum-range partitioned session succeeds");
+            if (!step) return;
+            hashes.push_back(step.value().state_sha256 + step.value().snapshot->sha256());
+            for (const auto& event : step.value().snapshot->combat_events()) {
+                if (event.kind != tactical::CombatEventKind::weapon_fired) continue;
+                if (event.shooter == 1) ++near_shots;
+                if (event.shooter == 3) ++far_shots;
+            }
+        }
+        expect(near_shots == 0 && far_shots > 0, "WWP-20: only the hardpoint outside minimum range fires");
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "WWP-20: nonzero minimum is identical on 1/2/4/8 workers");
+    }
+}
+
 void test_randomized_fire_bones() {
     namespace detail = tactical::detail;
     detail::CombatWorld world;

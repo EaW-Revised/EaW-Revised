@@ -105,6 +105,12 @@ DeathStart death_start(const bool clip_started, const bool remove_upon_death) no
     return remove_upon_death ? DeathStart::removed : DeathStart::pose;
 }
 
+bool clone_attached_art_shown(const bool death_clone, const std::optional<std::uint32_t> attach_bone,
+                              const std::span<const BonePose> pose) noexcept {
+    if (!death_clone || !attach_bone || *attach_bone >= pose.size()) return true;
+    return pose[*attach_bone].visible;
+}
+
 std::optional<std::string> death_clone_type(const std::span<const std::string> entries) {
     for (const std::string_view damage : {std::string_view("Damage_Normal"), std::string_view("Damage_Misc")}) {
         for (const std::string& entry : entries) {

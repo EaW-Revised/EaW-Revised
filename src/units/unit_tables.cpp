@@ -192,6 +192,7 @@ void Loader::link() {
                 profile::Counter::projectile_index_steps);
         };
         for (auto& unit : tables_.units) {
+            for (auto& survivor : unit.destruction_survivors) survivor.type_index = unit_index(survivor.type);
             if (unit.cluster_bomb) unit.cluster_bomb->projectile_index = projectile_index(unit.cluster_bomb->bomb_type);
             for (const auto& projectile : unit.death_projectiles)
                 unit.death_projectile_indices.push_back(projectile_index(projectile));

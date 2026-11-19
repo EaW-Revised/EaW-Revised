@@ -393,6 +393,7 @@ void session_detail::Tick::scan_member_targets_partition(const std::size_t& part
         auto unit = view.units[index];
         unit.combat = &input;
         unit.squadron_idle = false;
+        unit.approaching_ordered_hardpoint = player_attack && state.approach;
         output.enabled = frame.scans && view.frame >= state.next_scan_frame;
         const auto target = state.formation ? state.formation->attack_target : invalid_entity_id;
         output.destination = target;
@@ -432,6 +433,9 @@ core::Result<void> session_detail::Tick::prepare_weapon_targets(std::vector<Live
                     unit.combat = &*weapon_inputs[index];
                     unit.squadron_idle = weapon_idle[index];
                 }
+                const auto& team = minds.read(squadron->second);
+                unit.approaching_ordered_hardpoint = team.approach && team.target == unit.combat->attack_target
+                    && team.target_hardpoint == unit.combat->attack_hardpoint;
                 const auto notification = acquired.find(squadron->second);
                 const auto self = crafts.find(unit.id);
                 if (notification != acquired.end() && self != crafts.end() && self->second.chase_until <= tick + 1) {

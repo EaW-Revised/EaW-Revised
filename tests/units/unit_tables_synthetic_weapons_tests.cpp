@@ -1,6 +1,7 @@
 #include "unit_tables_support.hpp"
 #include "unit_tables_synthetic_fixtures.hpp"
 #include "eawr/skirmish/start.hpp"
+#include "eawr/sim/tactical/fighters.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -12,6 +13,50 @@
 #include <vector>
 
 namespace unit_tables_test_support {
+void hardpoint_min_range_loading() {
+    std::optional<eawr::units::UnitTables> defaults;
+    for (const std::string value : {"", "0", "125.5", "1200", "TBD", "invalid", "-1"}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string old = "HP_Test_Laser";
+        for (auto at = xml.find(old); at != std::string::npos; at = xml.find(old, at + 1))
+            xml.replace(at, old.size(), "HP_Min_Range_Variant");
+        write_fixture(tree.root, xml);
+        std::string points{hardpoints_xml};
+        if (!value.empty()) points.insert(points.find("</HardPoint>"),
+            "<Fire_Min_Range_Distance>" + (value == "1200" ? std::string{"125.5"} : value)
+                + "</Fire_Min_Range_Distance>");
+        points.insert(points.find("</HardPoints>"),
+            std::string{"<HardPoint Name=\"HP_Min_Range_Variant\"><Variant_Of_Existing_Type>HP_Test_Laser</Variant_Of_Existing_Type>"}
+                + (value == "1200" ? "<Fire_Min_Range_Distance>1200</Fire_Min_Range_Distance>" : "") + "</HardPoint>");
+        write(tree.root / "XML" / "eawr_hardpoints.xml", points);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "WWP-20: inherited minimum-range fixture loads");
+        if (!loaded.tables) continue;
+        const auto* type = loaded.tables->find("Test_Frigate");
+        if (!type || type->hardpoints.empty() || !type->hardpoints.front().weapon) {
+            expect(false, "WWP-20: inherited weapon retained");
+            continue;
+        }
+        const auto expected = value == "125.5" ? Fixed::from_raw(raw(125) + Fixed::scale / 2)
+            : value == "1200" ? Fixed::from_raw(raw(1200)) : value == "-1" ? Fixed::from_raw(raw(-1)) : Fixed{};
+        expect(type->hardpoints.front().weapon->min_range.value_or(Fixed{}) == expected,
+            "WWP-20: inherited authored minimum survives without scaling or clamping");
+        const auto combat = eawr::units::combat_table(*loaded.tables);
+        expect(static_cast<bool>(combat), "WWP-20: signed minimum binds, including values above nominal maximum");
+        if (combat) {
+            const auto* profile = combat.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+            expect(profile && !profile->weapons.empty() && profile->weapons.front().min_range == expected,
+                "WWP-20: combat receives the effective minimum");
+        }
+        if (value.empty()) defaults = *loaded.tables;
+        if (defaults) expect((eawr::units::content_identity(*defaults) == eawr::units::content_identity(*loaded.tables))
+                == (expected == Fixed{}), "WWP-20: semantic minimum binds identity; absent and zero are equivalent");
+        if (value == "invalid") expect(has_row(loaded.tables->unresolved, "HP_Min_Range_Variant", "Fire_Min_Range_Distance"),
+            "WWP-20: malformed minimum reports the authored field");
+    }
+}
+
 void randomized_fire_bone_loading() {
     std::optional<eawr::units::UnitTables> defaults;
     for (const std::string value : {"", "Yes", "No", "invalid", "TBD"}) {
@@ -230,6 +275,7 @@ void mass_driver_type() {
 }
 
 void hero_company_tables() {
+    for (const bool default_team_transport : {false, true})
     for (const auto hero_class : {std::string_view{"HeroUnit"}, std::string_view{"GenericHeroUnit"}}) {
         TempTree tree;
         auto xml = units_xml("3600", "Unit_Select_Test");
@@ -253,10 +299,16 @@ void hero_company_tables() {
             "<Is_Named_Hero>yes</Is_Named_Hero><SpaceBehavior>FIGHTER_LOCOMOTOR, TARGETING, REVEAL</SpaceBehavior>"
             + purchase + close
             + "<HeroCompany Name=\"Fighter_Company\"><Affiliation>Rebel</Affiliation><Is_Named_Hero>yes</Is_Named_Hero>"
-            "<Company_Transport_Unit>Test_Fighter</Company_Transport_Unit><Company_Units>Ground_Hero</Company_Units>"
+            "<Company_Transport_Unit>" + std::string(default_team_transport ? "Default_Transport" : "Test_Fighter")
+            + "</Company_Transport_Unit><Company_Units>Ground_Hero</Company_Units>"
             + purchase + "</HeroCompany>"
             + open + "Ground_Hero\"><Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>"
             "<Is_Named_Hero>yes</Is_Named_Hero><SpaceBehavior>REVEAL</SpaceBehavior>" + purchase + close);
+        if (default_team_transport) xml.insert(xml.rfind("</"),
+            "<UniqueUnit Name=\"Default_Transport_Base\"><Variant_Of_Existing_Type>Test_Fighter</Variant_Of_Existing_Type>"
+            "<SpaceBehavior>FIGHTER_LOCOMOTOR, REVEAL</SpaceBehavior><Create_Team>Yes</Create_Team></UniqueUnit>"
+            "<UniqueUnit Name=\"Default_Transport\"><Variant_Of_Existing_Type>Default_Transport_Base</Variant_Of_Existing_Type>"
+            "</UniqueUnit>");
         write_fixture(tree.root, xml);
         write(tree.root / "XML" / "FactionFiles.xml", "<Faction_Files><File>hero_factions.xml</File></Faction_Files>");
         write(tree.root / "XML" / "hero_factions.xml", "<Factions><Faction Name=\"Rebel\" /></Factions>");
@@ -272,9 +324,13 @@ void hero_company_tables() {
             "WHE-SQ-02: inherited standalone hero keeps its ship hull, weapons and hero identity without SpaceHero category");
         expect(fighter && fighter->hull == Fixed::from_raw(raw(60)) && fighter->kind == UnitKind::craft,
             "WHE-SQ-02: directly purchased fighter hero keeps its fighter body");
-        expect(rider && !rider->hull && company && company->deployed_space_type == "Test_Fighter"
+        const auto transport_name = default_team_transport ? "Default_Transport" : "Test_Fighter";
+        expect(rider && !rider->hull && company && company->deployed_space_type == transport_name
             && company->creates_carried_heroes,
             "WHE-07/49: hero without a space locomotor remains carried even with an inherited model and health");
+        const auto* transport = loaded.tables->find(transport_name);
+        expect(transport && transport->hull && !has_row(loaded.tables->unresolved, "Fighter_Company", "Create_Team_Type"),
+            "WHE-49/WHE-SQ-02: company closure loads its transport even without an explicit creation team");
         namespace t = eawr::sim::tactical;
         namespace sk = eawr::skirmish;
         const auto motion = eawr::units::motion_table(*loaded.tables);
@@ -301,7 +357,10 @@ void hero_company_tables() {
         }
         economy.value().income.clear();
         economy.value().players = {{1, Fixed::from_raw(raw(10000)), 100, false, {}}};
-        auto session = t::TacticalSession::create(start.setup, {}, {}, {}, {}, {}, {}, {}, economy.value());
+        const auto health = eawr::units::durability_table(*loaded.tables);
+        expect(static_cast<bool>(health), "WHE-49: transport durability binds");
+        if (!health || !motion) continue;
+        auto session = t::TacticalSession::create(start.setup, {}, health.value(), motion.value(), {}, {}, {}, {}, economy.value());
         expect(static_cast<bool>(session), "WPR-33: hero purchase session creates");
         if (!session) { std::cerr << session.error().message << '\n'; continue; }
         std::uint64_t sequence{};
@@ -323,6 +382,53 @@ void hero_company_tables() {
             expect(std::count(ledgers.front().pool.begin(), ledgers.front().pool.end(), sk::type_id(name)) == 1,
                 "WPR-33: each eligible hero purchase completes once under its logical identity");
         }
+        if (!default_team_transport) continue;
+        auto& world = session.value();
+        const auto advance = [&](const std::uint64_t until) {
+            while (world.completed_tick() < until) {
+                const auto stepped = world.step(executor);
+                expect(static_cast<bool>(stepped), "WHE-49: default transport lifecycle advances");
+                if (!stepped) break;
+            }
+        };
+        const auto buy_company = [&](const std::uint64_t tick) {
+            expect(static_cast<bool>(world.submit({{tick, 1, sequence++}, {1}, t::BuyPayload{sk::type_id("Fighter_Company")}})),
+                "WPR-33: replacement/duplicate company purchase submits");
+        };
+        // A pooled purchase already counts towards the limit, before deployment.
+        buy_company(95);
+        expect(static_cast<bool>(world.submit({{96, 1, sequence++}, {},
+            t::ReinforcePayload{sk::type_id("Fighter_Company"), point(1000, 0, 0)}})),
+            "WHE-49: company deploy request submits");
+        advance(98);
+        const auto deployed = world.units();
+        const auto found = std::find_if(deployed.begin(), deployed.end(), [](const auto& unit) {
+            return unit.purchase_type == eawr::skirmish::type_id("Fighter_Company");
+        });
+        expect(found != deployed.end() && found->type_id == sk::type_id("Default_Transport")
+            && found->contained.size() == 1 && found->contained.front().named_hero,
+            "WHE-49: default-team transport appears with its logical purchase and carried hero");
+        expect(world.ledgers().front().credits == Fixed::from_raw(raw(9700))
+            && world.ledgers().front().queues[0].empty() && world.ledgers().front().pool.size() == 2,
+            "WPR-33: duplicate pooled purchase is refused and deployment charges no second price");
+        if (found == deployed.end()) continue;
+        const auto id = found->entity_id;
+        expect(world.craft_state(id).has_value() && std::any_of(world.squadrons().begin(), world.squadrons().end(),
+            [id](const auto& group) { return group.container == id && group.members == std::vector<eawr::sim::EntityId>{id}; }),
+            "WHE-SQ-02: company-selected default transport has its self-represented fighter group");
+        buy_company(98);
+        advance(270); // let the fighter finish its arrival before ordinary damage
+        expect(world.ledgers().front().queues[0].empty(), "WPR-33: live transport retains the current company limit");
+        expect(static_cast<bool>(world.submit({{270, 1, sequence++}, {id}, t::DamagePayload{Fixed::from_raw(raw(1000))}})),
+            "WHE-50: destroy default-team transport");
+        advance(271);
+        buy_company(271);
+        advance(310);
+        const auto after = world.units();
+        expect(std::none_of(after.begin(), after.end(), [id](const auto& unit) { return unit.entity_id == id; })
+            && world.ledgers().front().credits == Fixed::from_raw(raw(9600))
+            && std::count(world.ledgers().front().pool.begin(), world.ledgers().front().pool.end(), sk::type_id("Fighter_Company")) == 1,
+            "WHE-38/40: death releases the company limit for one paid rebuild without automatic respawn");
     }
     for (const auto& [base_tag, variant_tag, expected] : {
         std::tuple{std::string{}, std::string{}, true},
@@ -904,7 +1010,7 @@ void manual_weapon_loading() {
         return weapon.hardpoint == 0;
     });
     expect(slot != guns->weapons.end() && slot->requires_manual_target && slot->manual_cooldown_frames == 3600
-        && slot->manual_min_range == Fixed{} && slot->shot
+        && slot->min_range == Fixed{} && slot->shot
         && slot->shot->appearance_delay_frames == 15,
         "MC-08: 120-second player cooldown and 15-frame appearance delay retain authored values; stock minimum defaults zero");
     const auto identity = eawr::units::content_identity(*loaded.tables);
@@ -987,10 +1093,10 @@ void cluster_bomb_inputs() {
     auto xml = units_xml("3600", "Unit_Select_Test");
     const auto begin = xml.find("<Unit_Abilities_Data");
     const auto end = xml.find("</Unit_Abilities_Data>", begin) + std::string_view{"</Unit_Abilities_Data>"}.size();
-    xml.replace(begin, end - begin, R"xml(<Unit_Abilities_Data><Unit_Ability>
+    xml.replace(begin, end - begin, R"xml(<Unit_Abilities_Data SubObjectList="Yes"><Unit_Ability>
         <Type>CLUSTER_BOMB</Type><Recharge_Seconds>50</Recharge_Seconds><Supports_Autofire>True</Supports_Autofire>
         <GUI_Activated_Ability_Name>Test_Cluster</GUI_Activated_Ability_Name><Effective_Radius>999</Effective_Radius>
-        </Unit_Ability></Unit_Abilities_Data><Abilities><Cluster_Bomb_Ability Name="Test_Cluster">
+        </Unit_Ability></Unit_Abilities_Data><Abilities SubObjectList="Yes"><Cluster_Bomb_Ability Name="Test_Cluster">
         <Activation_Style>User_Input</Activation_Style><Bomb_Type>Proj_Test_Small</Bomb_Type>
         <Number_Of_Bombs>12</Number_Of_Bombs><Detonation_Time_In_Secs>1.5</Detonation_Time_In_Secs>
         </Cluster_Bomb_Ability></Abilities>)xml");
@@ -1023,7 +1129,7 @@ void barrage_inputs() {
     auto xml = units_xml("3600", "Unit_Select_Test");
     const auto begin = xml.find("<Unit_Abilities_Data");
     const auto end = xml.find("</Unit_Abilities_Data>", begin) + std::string_view{"</Unit_Abilities_Data>"}.size();
-    xml.replace(begin, end - begin, R"xml(<Unit_Abilities_Data><Unit_Ability>
+    xml.replace(begin, end - begin, R"xml(<Unit_Abilities_Data SubObjectList="Yes"><Unit_Ability>
         <Type>BARRAGE</Type><Expiration_Seconds>10</Expiration_Seconds><Recharge_Seconds>40</Recharge_Seconds>
         <Mod_Multiplier>FIRE_RATE_MULTIPLIER, 3f</Mod_Multiplier>
         <Projectile_Types_Override>Proj_Test_Small</Projectile_Types_Override>

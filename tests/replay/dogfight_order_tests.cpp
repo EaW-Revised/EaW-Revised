@@ -13,6 +13,149 @@
 
 namespace dogfight_test_support {
 
+// OR-22/23/25: stock TIE-bomber flight and torpedo timing, with synthetic frigate
+// geometry to distinguish an explicit far attachment from both autonomous choices.
+void test_bomber_hardpoint_approach() {
+    for (const std::string variant : {"far", "fogged", "other-destroyed", "moving", "in-range", "ordered-destroyed",
+             "fog-lost", "autonomous"}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            const auto label = "bomber hardpoint " + variant + "/" + std::to_string(workers);
+            const bool fogged = variant == "fogged";
+            const bool moving = variant == "moving";
+            const bool lost = variant == "ordered-destroyed";
+            const bool fog_lost = variant == "fog-lost";
+            const bool autonomous = variant == "autonomous";
+            tactical::TacticalSetup setup;
+            setup.seed = seed;
+            setup.players = players();
+            const auto start = variant == "in-range" || autonomous ? -300 : -1500;
+            setup.units = {unit(10, trio_type, empire, at(start, 0)),
+                unit(11, craft_type, empire, at(start, 0)), unit(12, craft_type, empire, at(start - 20, 20)),
+                unit(13, craft_type, empire, at(start - 20, -20)), unit(14, craft_type, empire, at(start - 40, 0)),
+                unit(20, frigate_type, rebel, at(0, 0))};
+            setup.squadrons = {{10, {11, 12, 13, 14}}};
+            auto flight = motion();
+            auto& bomber = flight.squadrons.craft.front();
+            bomber.max_speed = units(3);
+            bomber.min_speed = units(2);
+            bomber.rate_of_turn = Fixed::from_raw(one * 13 / 10);
+            bomber.lift = units(3);
+            bomber.thrust = units(1);
+            bomber.roll_rate = units(3);
+            bomber.bank_angle = units(30);
+            bomber.strafe_distance = units(500);
+            auto& team = flight.squadrons.squadrons.front();
+            team.members.push_back(craft_type);
+            team.offsets.push_back(at(-40, 0));
+            if (moving) {
+                tactical::MotionProfile ship;
+                ship.type_id = frigate_type;
+                ship.max_speed = ship.acceleration = ship.deceleration = units(1);
+                ship.rate_of_turn = units(90);
+                ship.turn_in_place_slowdown = units(1);
+                flight.profiles = {ship};
+            }
+            auto health = durability(1000000);
+            health.damage.emplace();
+            health.damage->shield_recharge_frames = 30;
+            tactical::HardpointProfile point;
+            point.role = tactical::HardpointRole::weapon;
+            point.destroyable = true;
+            point.max_health = units(100000);
+            health.profiles.back().hardpoints = {point, point, point};
+            auto guns = combat();
+            // 0 is nearest, 1 is highest ranked, and the ordered 2 is neither.
+            guns.priority_sets.front().hardpoint_ranks = {units(1000), units(2), units(1), units(3)};
+            auto& weapon = guns.profiles.front().weapons.front();
+            weapon.range = units(700);
+            weapon.min_recharge_hundredths = weapon.max_recharge_hundredths = 800;
+            weapon.pulse_count = 2;
+            weapon.pulse_delay_frames = 4;
+            weapon.cone_width = weapon.cone_height = units(30);
+            auto& frigate = guns.profiles.back();
+            frigate.hardpoints = {{0, at(-80, 0), true, 1}, {1, at(0, -60), true, 2}, {2, at(80, 40), true, 3}};
+            frigate.collision = tactical::CollisionBox{at(-100, -100, -100), at(100, 100, 100)};
+            frigate.aimed_routes = {0, 1, 2};
+            const auto reveal = fog_lost ? 100 : (fogged ? 900 : 8000);
+            std::vector<tactical::SensorProfile> sight{{craft_type, units(reveal)},
+                {trio_type, units(reveal)}, {frigate_type, units(8000)}};
+            if (fog_lost) {
+                // A short reveal radius can still contact the ship as the craft fly past.
+                // Disable both friendly reveal sources to keep this loss control fogged.
+                sight[0].reveals = sight[1].reveals = false;
+            }
+            auto made = tactical::TacticalSession::create(setup, sight, health, flight, std::nullopt, guns);
+            expect(static_cast<bool>(made), label + ": session builds");
+            if (!made) continue;
+            auto session = std::move(made).value();
+            if (!autonomous) expect(static_cast<bool>(session.submit({{0, empire, 1}, {10}, tactical::AttackPayload{20, 2}})),
+                label + ": order submits");
+            if (moving) expect(static_cast<bool>(session.submit({{0, rebel, 1}, {20}, tactical::MovePayload{at(1200, 0)}})),
+                label + ": target move submits");
+            if (variant == "other-destroyed" || lost) expect(static_cast<bool>(session.submit({{50, empire, 2}, {20},
+                tactical::DamagePayload{units(100000), lost ? 2U : 0U}})), label + ": destruction submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            bool kept = true, aimed = true, hit = true, fell_back = false, released = false;
+            std::set<EntityId> shooters, hitters;
+            for (int tick = 0; tick < 1500; ++tick) {
+                const auto step = session.step(executor);
+                expect(static_cast<bool>(step), label + ": step succeeds");
+                if (!step) break;
+                if (workers == 1) reference.push_back(step.value().state_sha256);
+                else expect(static_cast<std::size_t>(tick) < reference.size() && step.value().state_sha256 == reference[tick],
+                    label + ": hashes match one worker");
+                if (fog_lost) {
+                    for (const auto& instance : step.value().snapshot->instances()) {
+                        if (instance.entity_id == 20) expect((instance.visible_to & 1U) == 0,
+                            label + ": the loss control remains fogged to the attacking player");
+                    }
+                }
+                // FO-03: the command reaches the craft in their next service.
+                if (step.value().completed_tick == 1) continue;
+                const auto state = session.squadron_state(10);
+                const bool standing = !lost || step.value().completed_tick <= 50;
+                for (const EntityId id : {EntityId{11}, EntityId{12}, EntityId{13}, EntityId{14}}) {
+                    const auto craft = session.combat_state(id);
+                    const bool retains = craft && craft->attack_target == 20 && craft->direct && craft->attack_hardpoint == 2;
+                    if (autonomous) {
+                        kept = kept && craft && !craft->direct && craft->attack_hardpoint != 2;
+                    } else if (fog_lost && state && !state->approach && state->target == 0) {
+                        released = true;
+                        kept = kept && craft && !craft->direct && craft->attack_hardpoint == tactical::no_hardpoint;
+                    } else if (standing && !retains) {
+                        if (kept) std::cout << label << " first loss tick=" << step.value().completed_tick << " craft=" << id
+                            << " target=" << (craft ? craft->attack_target : 0) << " direct=" << (craft && craft->direct)
+                            << " hardpoint=" << (craft ? craft->attack_hardpoint : tactical::no_hardpoint)
+                            << " team-hardpoint=" << (state ? state->target_hardpoint : tactical::attack_hull) << '\n';
+                        kept = false;
+                    }
+                }
+                for (const auto& event : step.value().snapshot->combat_events()) {
+                    if (event.target != 20 || event.shooter < 11 || event.shooter > 14) continue;
+                    if (event.kind == tactical::CombatEventKind::weapon_fired) {
+                        shooters.insert(event.shooter);
+                        if (standing) aimed = aimed && event.target_hardpoint == (autonomous ? 1U : 2U);
+                        else fell_back = fell_back || event.target_hardpoint != 2;
+                    }
+                    if (event.kind == tactical::CombatEventKind::projectile_hit && standing) {
+                        hitters.insert(event.shooter);
+                        hit = hit && event.target_hardpoint == (autonomous ? 1U : 2U);
+                    }
+                }
+            }
+            expect(kept, label + ": every craft preserves the active order and clears it when lost");
+            expect(aimed && hit, label + ": every shot and hit names the standing ordered hardpoint");
+            if (fog_lost) expect(released && shooters.empty() && hitters.empty(),
+                label + ": fog still blocks fire and ends an approach that never reveals its target");
+            else expect(shooters.size() == 4 && (lost || hitters.size() == 4), label + ": all four bombers fire and hit");
+            expect(!lost || fell_back, label + ": destroying the ordered hardpoint permits fallback");
+            std::cout << label << " kept=" << kept << " aimed=" << aimed << " hit=" << hit
+                << " shooters=" << shooters.size() << " hitters=" << hitters.size() << '\n';
+        }
+    }
+}
+
 // the rebels then order 20 onto hardpoint 1 of the empire frigate 40. The service turns 20 back
 // on squadron 10 (FD-04, its target no longer a craft of a squadron), and the ordered hardpoint
 // would name a hardpoint of another target: neither the squadron's state nor its craft's weapons

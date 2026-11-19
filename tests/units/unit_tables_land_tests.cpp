@@ -63,6 +63,7 @@ std::string land_xml() {
 </GroundInfantry>
 <Container Name="Land_Trooper_Team"><LandBehavior>LAND_TEAM_CONTAINER_LOCOMOTOR, GARRISON_UNIT</LandBehavior><Garrison_Category>Infantry</Garrison_Category><Garrison_Value>2</Garrison_Value><Max_Speed> .8 </Max_Speed></Container>
 <GroundVehicle Name="Land_Walker">
+  <Tactical_Bribe_Cost>400</Tactical_Bribe_Cost>
   <Create_Team>No</Create_Team>
   <MovementClass>Walker</MovementClass>
   <LandBehavior>WALKER_LOCOMOTOR</LandBehavior>
@@ -70,6 +71,8 @@ std::string land_xml() {
 </GroundVehicle>
 <GroundVehicle Name="Land_Hero_Walker"><Variant_Of_Existing_Type>Land_Walker</Variant_Of_Existing_Type></GroundVehicle>
 <HeroUnit Name="Land_Hero">
+  <Bribe_Modifier_On_Corrupted_Planets>0.75</Bribe_Modifier_On_Corrupted_Planets>
+  <Bribe_Modifier_On_Uncorrupted_Planets>1.25</Bribe_Modifier_On_Uncorrupted_Planets>
   <Is_Named_Hero>Yes</Is_Named_Hero>
   <Unique_Ground_Unit>Land_Hero_Walker</Unique_Ground_Unit>
 </HeroUnit>
@@ -931,7 +934,7 @@ void land_pad_rows() {
   <Tactical_Build_Cost_Multiplayer>850</Tactical_Build_Cost_Multiplayer>
   <Tactical_Build_Time_Seconds>23</Tactical_Build_Time_Seconds><Tactical_Health>200</Tactical_Health></GroundBuildable>
 <GroundStructure Name="Done_Child"><Tactical_Health>200</Tactical_Health>
-  <Abilities><Income_Stream_Ability Name="Income"><Base_Income_Value>45</Base_Income_Value>
+  <Abilities SubObjectList="Yes"><Income_Stream_Ability Name="Income"><Base_Income_Value>45</Base_Income_Value>
     <Base_Interval_In_Secs>5</Base_Interval_In_Secs></Income_Stream_Ability></Abilities></GroundStructure>
 )xml");
     write_fixture(tree.root, xml);
@@ -1167,6 +1170,30 @@ void land_capture_influence() {
 }
 
 void land_companies() {
+    {
+        eawr::units::UnitType briber, target;
+        target.tactical_bribe_cost = Fixed::from_integer(400).value();
+        briber.bribe_corrupted_modifier = Fixed::from_decimal("0.75").value();
+        briber.bribe_uncorrupted_modifier = Fixed::from_decimal("1.25").value();
+        expect(eawr::units::tactical_bribe_cost(briber, target, true).value() == Fixed::from_integer(300).value(),
+            "WGCH-205: corrupted bribe applies the authored 0.75 modifier");
+        expect(eawr::units::tactical_bribe_cost(briber, target, false).value() == Fixed::from_integer(500).value()
+            && eawr::units::tactical_bribe_cost(briber, target).value() == Fixed::from_integer(400).value(),
+            "WGCH-205: uncorrupted pair and no-parent branch stay distinct");
+        for (const auto raw : {-Fixed::scale, std::int64_t{0}, Fixed::scale}) {
+            target.tactical_bribe_cost = Fixed::from_raw(raw);
+            expect(eawr::units::tactical_bribe_cost(briber, target, true).value() == Fixed{},
+                "WGCH-205: target bribe cost must exceed one");
+        }
+        target.tactical_bribe_cost.reset();
+        expect(eawr::units::tactical_bribe_cost(briber, target, true).value() == Fixed{}, "missing target price is not bribable");
+        target.tactical_bribe_cost = Fixed::from_integer(400).value();
+        briber.bribe_corrupted_modifier.reset();
+        expect(eawr::units::tactical_bribe_cost(briber, target, true).value() == *target.tactical_bribe_cost,
+            "missing briber modifier is neutral");
+        briber.bribe_corrupted_modifier = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+        expect(!eawr::units::tactical_bribe_cost(briber, target, true), "bribe-cost overflow refuses without wrapping");
+    }
     using eawr::units::plan_land_company;
     {
         eawr::units::LandGarrisonData host, entrant;
@@ -1187,9 +1214,42 @@ void land_companies() {
     write_fixture(tree.root, with_land);
     write(tree.root / "XML" / "MovementClassTypeDefs.xml",
         "<MovementClassType><Infantry>Clear | ModSurface</Infantry><ModHover>Clear | Water</ModHover></MovementClassType>");
+    // LCGA-01: a mod-style structure uses either spelling and resolved authored order.
+    struct AliasCase { std::string_view fields; std::string_view expected; };
+    for (const auto& test : std::array<AliasCase, 7>{{
+        {"<Garrison_Category>Infantry</Garrison_Category>", "Infantry"},
+        // Minimal category authoring observed in an installed space-structure mod sample.
+        {"<Space_Or_Garrison_Category>Capital</Space_Or_Garrison_Category>", "Capital"},
+        {"<Space_Or_Garrison_Category>Vehicle</Space_Or_Garrison_Category>", "Vehicle"},
+        {"<Garrison_Category>Infantry</Garrison_Category><Space_Or_Garrison_Category>Vehicle</Space_Or_Garrison_Category>", "Vehicle"},
+        {"<Space_Or_Garrison_Category>Vehicle</Space_Or_Garrison_Category><Garrison_Category>Infantry</Garrison_Category>", "Infantry"},
+        {"<Space_Or_Garrison_Category>Vehicle</Space_Or_Garrison_Category><Garrison_Category>TBD</Garrison_Category>", "Vehicle"},
+        {"<Variant_Of_Existing_Type>Mod_Static</Variant_Of_Existing_Type><Space_Or_Garrison_Category>Vehicle</Space_Or_Garrison_Category>", "Vehicle"},
+    }}) {
+        auto xml = with_land;
+        xml.insert(xml.rfind("</Objects>"), "<SpecialStructure Name=\"Mod_Alias_Host\"><LandBehavior>GARRISON_STRUCTURE</LandBehavior>"
+            + std::string(test.fields) + "</SpecialStructure>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load_types(tree.root, BattleDomain::land, {}, {"Mod_Alias_Host"});
+        expect(loaded.tables && loaded.tables->land_static_objects.size() == 1,
+            "LCGA-01: mod alias host loads");
+        if (loaded.tables && loaded.tables->land_static_objects.size() == 1)
+            expect(loaded.tables->land_static_objects.front().garrison.categories == std::vector<std::string>{std::string(test.expected)},
+                "LCGA-01: both spellings share scalar order, placeholders and variant precedence");
+    }
+    write_fixture(tree.root, with_land);
     const auto land = load_types(tree.root, BattleDomain::land, land_types);
     if (!land.tables) return;
     const auto& tables = *land.tables;
+    const auto loaded_briber = std::find_if(tables.units.begin(), tables.units.end(), [](const auto& row) { return row.id == "Land_Hero"; });
+    const auto loaded_target = std::find_if(tables.units.begin(), tables.units.end(), [](const auto& row) { return row.id == "Land_Walker"; });
+    expect(loaded_briber != tables.units.end() && loaded_target != tables.units.end()
+        && eawr::units::tactical_bribe_cost(*loaded_briber, *loaded_target, true).value() == Fixed::from_integer(300).value(),
+        "WGCH-205: ground target cost and hero modifiers feed the query without a production menu");
+    auto repriced_bribe = tables;
+    repriced_bribe.units.front().tactical_bribe_cost = Fixed::from_integer(99).value();
+    expect(eawr::units::content_identity(repriced_bribe) != eawr::units::content_identity(tables),
+        "bribe prices bind into content identity");
     expect(tables.land_static_objects.size() == 3, "land scene object types decode separately from companies");
     if (tables.land_static_objects.size() == 3) {
         const auto& prop = tables.land_static_objects[0];

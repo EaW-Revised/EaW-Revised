@@ -1132,7 +1132,7 @@ std::optional<core::Result<void>> execute_economy_transfers(auto& impl, const Pl
                     if (child == nullptr || child->constructed != unit.type_id) continue;
                     // WBP-31: this is the generic current-mode UC cost, independent
                     // of health and any adjusted pad debit. Stock skirmish uses MP cost.
-                    const auto amount = math::multiply(option.price, sale->percentage);
+                    const auto amount = math::multiply(impl.setup.campaign ? child->price : option.price, sale->percentage);
                     if (!amount) return Void::failure(amount.error());
                     if (amount.value().raw() > 0) {
                         const auto whole = amount.value().raw() / math::Fixed::scale
@@ -1202,14 +1202,15 @@ std::optional<core::Result<void>> execute_economy_production(auto& impl, const P
         if (!executing_pad && impl.fog && !impl.fog->revealed(static_cast<std::size_t>(builder - impl.setup.players.data()), pad->second.state.position)) {
             return finish(RejectReason::cannot_produce);
         }
-        if (!player->ai && ledger->credits < child->price) return finish(RejectReason::insufficient_credits);
+        const auto price = impl.setup.campaign ? option->price : child->price;
+        if (!player->ai && ledger->credits < price) return finish(RejectReason::insufficient_credits);
         if (!player->ai && !executing_pad) {
             // WBP-09: schedule the human event; WBP-10 rechecks after command delivery.
             stage.pad_requests.push_back(command);
             return finish(RejectReason::none);
         }
         // WBP-10: debit precedes creation and has no cancellation/refund transaction.
-        if (!player->ai) ledger->credits = math::Fixed::from_raw(ledger->credits.raw() - child->price.raw());
+        if (!player->ai) ledger->credits = math::Fixed::from_raw(ledger->credits.raw() - price.raw());
         const auto* health = impl.durability.find(child->type);
         const auto seconds = !player->ai ? child->seconds
             : scaled_ai_seconds(child->seconds, player->ai_build_time_multiplier);
@@ -1286,95 +1287,6 @@ std::optional<core::Result<void>> execute_economy_production(auto& impl, const P
     return std::nullopt;
 }
 
-core::Result<void> execute_reinforcement_deployment(auto& impl, auto& staged, auto& stage,
-    Event& event, const std::uint64_t tick, const TypeId deployed, const std::uint32_t population,
-    const auto* squadron, const auto* solo, const auto& point, const auto& direction,
-    const auto& rotation, const auto& arrival_yaw, auto& add) {
-    using Void = core::Result<void>;
-    if (squadron == nullptr || solo != nullptr) {
-        // PL-08: a single ship is created on the point without a search, so it may overlap.
-        const auto* footprint = impl.economy.footprint_of(deployed);
-        const math::Vec3 raised{point.x, point.y, footprint != nullptr ? footprint->layer_z : math::Fixed{}};
-        auto added = add(deployed, raised, rotation.value(), population_share(population, 1), true);
-        if (!added) return Void::failure(added.error());
-        event.unit = added.value();
-        if (solo != nullptr && squadron != nullptr) {
-            auto flight = launch_state(direction.value(), math::Fixed{});
-            if (!flight) return Void::failure(flight.error());
-            stage.crafts[added.value()] = flight.value();
-            SquadronState order;
-            order.container = added.value();
-            order.squadron_type = deployed;
-            order.roster = {added.value()};
-            order.anchor = raised;
-            order.next_scan_frame = tick + arrival_frames;
-            stage.minds.emplace(added.value(), std::move(order));
-            stage.squadrons.push_back(Squadron{added.value(), {added.value()}});
-        }
-    } else {
-        // PL-08: each craft is searched from the point (start angle 0) on the plane and, when
-        // nothing within the distance is free, put on the point itself; it is then raised by its
-        // own height (LZ-01). Every live unit with a placement box blocks, and so does each craft
-        // already placed. The team container follows its craft and holds the point afterwards.
-        const auto& facing = direction.value();
-        std::vector<PlacementBox> blockers;
-        for (const auto& [other_id, other] : staged) {
-            static_cast<void>(other_id);
-            auto blocked = impl.block_placement(other.state, blockers);
-            if (!blocked) return blocked;
-        }
-        std::vector<EntityId> members;
-        math::Fixed layer_z{};
-        const auto craft_count = static_cast<std::uint32_t>(squadron->members.size());
-        for (std::size_t member = 0; member < squadron->members.size(); ++member) {
-            const auto* craft = impl.motion.squadrons.find_craft(squadron->members[member]);
-            const auto height = craft != nullptr ? craft->layer_z : math::Fixed{};
-            if (member == 0) layer_z = height;
-            const auto* footprint = impl.economy.footprint_of(squadron->members[member]);
-            math::Vec3 at = point;
-            if (footprint != nullptr && footprint->box) {
-                const FreeSpaceSearch search{point, *footprint->box, math::Fixed{}};
-                auto found = find_free_space(search, blockers);
-                if (!found) return Void::failure(found.error());
-                if (found.value()) at = *found.value();
-                auto bounds = blocker_bounds(*footprint->box, at, arrival_yaw);
-                if (!bounds) return Void::failure(bounds.error());
-                blockers.push_back(bounds.value());
-            }
-            const auto x = at.x;
-            const auto y = at.y;
-            auto flight = launch_state(facing, math::Fixed{});
-            if (!flight) return Void::failure(flight.error());
-            auto turned = craft_rotation(flight.value());
-            if (!turned) return Void::failure(turned.error());
-            auto added = add(squadron->members[member], math::Vec3{x, y, height}, turned.value(),
-                population_share(population, craft_count));
-            if (!added) return Void::failure(added.error());
-            stage.crafts[added.value()] = flight.value();
-            members.push_back(added.value());
-        }
-        // FL-06: one authored purchase may produce several teams, all after its craft.
-        for (std::size_t begin = 0; begin < members.size();) {
-            const auto count = std::min<std::size_t>(members.size() - begin, squadron->max_squad_size);
-            auto container = add(deployed, math::Vec3{point.x, point.y, layer_z}, math::identity_quat(), 0, true);
-            if (!container) return Void::failure(container.error());
-            SquadronState order;
-            order.container = container.value();
-            order.squadron_type = deployed;
-            order.roster.assign(members.begin() + begin, members.begin() + begin + count);
-            order.anchor = math::Vec3{point.x, point.y, layer_z};
-            order.formation = SquadronFormationState{order.anchor, invalid_entity_id, true, true, false}; // WMV-18
-            order.next_scan_frame = tick + arrival_frames;
-            stage.minds.emplace(container.value(), std::move(order));
-            stage.squadrons.push_back(Squadron{container.value(),
-                std::vector<EntityId>(members.begin() + begin, members.begin() + begin + count)});
-            if (begin == 0) event.unit = container.value();
-            begin += count;
-        }
-    }
-    return Void::success();
-}
-
 core::Result<void> execute_economy_reinforcement(auto& impl, const PlayerCommand& command, const std::uint64_t tick,
     auto& staged, auto& stage, PlayerEconomy* ledger, const std::optional<EconomyPlayer>& player, auto& finish,
     Event& event, const CollisionWorld* collisions) {
@@ -1446,49 +1358,22 @@ core::Result<void> execute_economy_reinforcement(auto& impl, const PlayerCommand
     UnitState attribution{0, deployed, issuer};
     if (auto assigned = impl.attribute_output(attribution, preferred, pool_token); !assigned)
         return finish(RejectReason::cannot_produce);
-    // PU-34, PU-35: a new unit at the start of its lane, arriving at `exit`.
-    std::vector<EntityId> created_defaults;
-    const auto add = [&](const TypeId type, const math::Vec3& exit, const math::Quat& facing,
-                         const std::int64_t share, const bool root = false) -> core::Result<EntityId> {
-        if (stage.next_id == invalid_entity_id) {
-            return core::Result<EntityId>::failure(
-                detail::diagnostic(diagnostic_codes::resource_limit, context + "stable ID space exhausted"));
-        }
-        const auto persistent = campaign_reserve != nullptr && root;
-        const auto id = persistent ? campaign_reserve->id : stage.next_id;
-        if (staged.find(id) != staged.end()) return core::Result<EntityId>::failure(
-            detail::diagnostic(diagnostic_codes::invalid_setup, context + "reserve identity already exists"));
-        const ArrivalState arrival{0, exit, direction.value()};
-        auto start = arrival_position(arrival);
-        if (!start) return core::Result<EntityId>::failure(start.error());
-        UnitState state{id, type, issuer, start.value(), facing, {}};
-        state.control = attribution.control;
-        state.controller_seat = attribution.controller_seat;
-        staged.emplace(id, impl.new_unit(state, tick));
-        created_defaults.push_back(id);
-        impl.adjust_owned(staged.at(id).state, true);
-        // WR-32/41: a squadron's craft receive the modifier; its container does not.
-        if ((impl.motion.squadrons.find_squadron(type) == nullptr || impl.motion.squadrons.find_craft(type) != nullptr)
-            && impl.economy.vulnerability_frames != 0 && impl.economy.vulnerability.raw() != 0) {
-            staged.at(id).arrival_vulnerable_until = tick + 1 + impl.economy.vulnerability_frames;
-        }
-        stage.arrivals.emplace(id, arrival);
-        // FL-12: only an authored hangar on the deployed type creates a spawner.
-        if (impl.motion.squadrons.find_spawner(type, issuer) != nullptr) stage.born_spawners.push_back(id);
-        if (share > 0) stage.shares.emplace(id, PopulationShare{issuer, share});
-        if (impl.economy.earner_stream(type) != nullptr) stage.earners.emplace_back(id, issuer); // PU-02
-        if (!persistent) stage.next_id = id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : id + 1;
-        return core::Result<EntityId>::success(id);
-    };
-    // PL-08: the arrival point is on the plane (height 0). A created unit is then raised by its
-    // type's Layer_Z_Adjust (LZ-01): a single ship here, each squadron craft below.
-    const math::Vec3 point{reinforce.position.x, reinforce.position.y, {}};
-    const auto* squadron = impl.motion.squadrons.find_squadron(deployed);
-    const auto* solo = impl.motion.squadrons.find_craft(deployed);
-    if (auto deployed_result = execute_reinforcement_deployment(impl, staged, stage, event, tick,
-        deployed, population, squadron, solo, point, direction, rotation, arrival_yaw, add); !deployed_result)
-        return deployed_result;
-    if (auto defaults = impl.request_creation_defaults(created_defaults, staged, stage, tick); !defaults) return defaults;
+    // Admission and arrival policy stay with reinforcement; company creation only
+    // applies these explicit choices to the staged births (PL-08, PU-34/35).
+    attribution.position = {reinforce.position.x, reinforce.position.y, {}};
+    attribution.rotation = rotation.value();
+    typename std::remove_reference_t<decltype(impl)>::CompanySpawn request;
+    request.prototype = attribution;
+    request.yaw = arrival_yaw;
+    request.placement = std::remove_reference_t<decltype(impl)>::CompanyPlacement::reinforcement;
+    request.arrival = true;
+    request.vulnerable = true;
+    request.population = population;
+    request.scan_delay = arrival_frames;
+    request.persistent_root = campaign_reserve != nullptr ? campaign_reserve->id : invalid_entity_id;
+    auto birth = impl.spawn_company(request, staged, stage, tick);
+    if (!birth) return Void::failure(birth.error());
+    event.unit = birth.value().root;
     if (campaign_reserve != nullptr && (campaign_reserve->purchase_type != 0 || !campaign_reserve->contained.empty())) {
         auto& carrier = staged.at(event.unit).state;
         impl.adjust_owned(carrier, false);

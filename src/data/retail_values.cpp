@@ -44,7 +44,7 @@ constexpr std::array<TagRule, 5> list_rules{{
     std::vector<const XmlNode*> result;
     for (const auto& child : layer.root.children) {
         // A nested record has its value in child nodes, rather than scalar text.
-        if (ascii_iequals(child.name, tag) && (!child.children.empty() || !is_placeholder(child.raw_text))) {
+        if (object_tag_matches(child.name, tag) && (!child.children.empty() || !is_placeholder(child.raw_text))) {
             result.push_back(&child);
         }
     }
@@ -52,6 +52,19 @@ constexpr std::array<TagRule, 5> list_rules{{
 }
 
 } // namespace
+
+bool object_tag_matches(const std::string_view authored, const std::string_view requested) noexcept {
+    // LCGA-01: both spellings address one mask; matching keeps the authored traversal order.
+    constexpr std::array<std::pair<std::string_view, std::string_view>, 1> aliases{{
+        {"Space_Or_Garrison_Category", "Garrison_Category"},
+    }};
+    if (ascii_iequals(authored, requested)) return true;
+    for (const auto& [alias, field] : aliases) {
+        if ((ascii_iequals(authored, alias) && ascii_iequals(requested, field))
+            || (ascii_iequals(authored, field) && ascii_iequals(requested, alias))) return true;
+    }
+    return false;
+}
 
 bool is_placeholder(const std::string_view text) noexcept {
     const auto value = stripped(text);

@@ -655,8 +655,48 @@ def counts(registry: dict[str, Any]) -> tuple[dict[str, int], dict[tuple[str, st
     return dict(by_status), dict(by_area)
 
 
+def foc_class_names(inventory: dict[str, Any]) -> set[str]:
+    """The ASCII-folded object classes the FoC XML itself authors: every other class is a mod's own element label."""
+    return {class_name for class_name, _tag in load_universe(inventory)}
+
+
+def class_agnostic_tags(registry: dict[str, Any], foc_classes: set[str]) -> set[str]:
+    """The folded tags whose FoC rows are applied or partial and read without any class restriction.
+
+    A mod label is only a name (docs/behaviour/mod-object-class.md, SG-CLS-01/02/03): the loader reads a tag from
+    the object whatever its element is called. So a tag inherits when it has an applied or partial row on a FoC class
+    and none of those rows names a type (`types`), leaves one out (`missing_types`) or is cited without a code
+    location; one restricted row on the tag keeps every label pair at its own status."""
+    agnostic: set[str] = set()
+    restricted: set[str] = set()
+    for row in registry["rows"]:
+        if row["status"] not in ("applied", "partial") or not any(ascii_fold(c) in foc_classes for c in row["classes"]):
+            continue
+        tag = ascii_fold(row["tag"])
+        targets = row.get("applied", [])
+        if not targets or row.get("missing_types") or any(target.get("types") for target in targets):
+            restricted.add(tag)
+        else:
+            agnostic.add(tag)
+    return agnostic - restricted
+
+
+def inherited_label_pairs(registry: dict[str, Any], foc_classes: set[str]) -> list[tuple[str, str]]:
+    """(label, tag) pairs that are todo only because the label is not a FoC class name, in registry order.
+
+    This is a computed view: the registry keeps each pair's own `todo` row. A pair is listed when its class is not
+    authored by the FoC XML and its tag is class-agnostic by `class_agnostic_tags`."""
+    agnostic = class_agnostic_tags(registry, foc_classes)
+    pairs = []
+    for row in registry["rows"]:
+        if row["status"] != "todo" or ascii_fold(row["tag"]) not in agnostic:
+            continue
+        pairs.extend((label, row["tag"]) for label in row["classes"] if ascii_fold(label) not in foc_classes)
+    return pairs
+
+
 def render(registry: dict[str, Any], universe: dict[tuple[str, str], UniverseRow] | None = None,
-           top_todo: int = 40) -> str:
+           top_todo: int = 40, foc_classes: set[str] | None = None) -> str:
     by_status, by_area = counts(registry)
     total = sum(by_status.values())
     lines = [
@@ -697,6 +737,20 @@ def render(registry: dict[str, Any], universe: dict[tuple[str, str], UniverseRow
         tickets[row["ticket"]] += len(row["classes"])
     lines += ["", "## Todo by ticket (pairs)", "", "| Ticket | Pairs |", "|---|---|"]
     lines += [f"| #{ticket} | {count} |" for ticket, count in sorted(tickets.items())]
+    if foc_classes is not None:
+        inherited = inherited_label_pairs(registry, foc_classes)
+        by_tag: dict[str, list[str]] = defaultdict(list)
+        for label, tag in inherited:
+            by_tag[tag].append(label)
+        lines += ["", "## Mod labels that inherit a class-agnostic tag", "",
+                  f"{len(inherited)} of the todo pairs are on a mod's own element label (not a FoC class name) and a tag "
+                  "that the FoC rows apply with no type restriction. The loader reads such a tag whatever the element "
+                  "is called (SG-CLS-01), so these pairs are covered by the tag's applied row. They keep their `todo` rows "
+                  "in the JSON; this is a view, not a status.", ""]
+        if by_tag:
+            lines += ["| Tag | Labels | Examples |", "|---|---|---|"]
+            for tag, labels in sorted(by_tag.items(), key=lambda item: (-len(item[1]), ascii_fold(item[0])))[:top_todo]:
+                lines.append(f"| `{tag}` | {len(labels)} | {', '.join(sorted(labels, key=ascii_fold)[:3])} |")
     if universe is not None:
         weighted = []
         for row in todo:
@@ -860,7 +914,7 @@ def render_command(args: argparse.Namespace) -> int:
     if problems:
         print_problems(problems)
         return 1
-    write_text(args.out, render(registry, universe))
+    write_text(args.out, render(registry, universe, foc_classes=foc_class_names(load_inventory(args.inventory))))
     print(f"tag_registry: wrote {args.out}")
     return 0
 

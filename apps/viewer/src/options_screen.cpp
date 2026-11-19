@@ -26,6 +26,7 @@
 #include <godot_cpp/classes/color_rect.hpp>
 #include <godot_cpp/classes/global_constants.hpp>
 #include <godot_cpp/classes/input_event_key.hpp>
+#include <godot_cpp/classes/input_event_mouse_button.hpp>
 #include <godot_cpp/classes/item_list.hpp>
 #include <godot_cpp/classes/line_edit.hpp>
 #include <godot_cpp/classes/os.hpp>
@@ -501,7 +502,7 @@ void EawrOptionsScreen::rebuild_page() {
             label.rect = {12, top + 40 + static_cast<int>(action) * 34, service.rect.width / 2 - 18, 20};
             service.controls.push_back(label);
             bind.id_name = action == 0 ? "IDC_SELECTION_ALL_KEY" : "IDC_SELECTION_SCREEN_KEY";
-            bind.text = capturing_ == action ? "Press a key..." : keyboard_key_label(model::selection_key(draft_, action));
+            bind.text = capturing_ == action ? "Press key / mouse..." : keyboard_key_label(model::selection_key(draft_, action));
             bind.rect = {service.rect.width / 2, top + 36 + static_cast<int>(action) * 34, service.rect.width / 2 - 12, 26};
             service.controls.push_back(bind);
         }
@@ -515,7 +516,7 @@ void EawrOptionsScreen::rebuild_page() {
         service.controls.push_back(defaults);
         data::DialogControl status;
         status.statement = "LTEXT"; status.id_name = "IDC_SELECTION_KEYS_STATUS";
-        status.text = selection_message_.empty() ? "Click a binding, then press its key." : selection_message_;
+        status.text = selection_message_.empty() ? "Click a binding, then press a key or mouse button." : selection_message_;
         status.rect = {12, top + 146, service.rect.width - 24, 20};
         status.style = {"WS_VISIBLE"}; service.controls.push_back(status);
     }
@@ -1225,7 +1226,7 @@ void EawrOptionsScreen::wire_page() {
     case Page::keyboard: {
         for (const char* id : {"IDC_SELECTION_ALL_KEY", "IDC_SELECTION_SCREEN_KEY"}) {
             if (has(id)) state.controls[id]->set_tooltip_text(text(
-                "Click, then press a letter (with Ctrl if you like). Esc cancels. Keys other commands use are refused."));
+                "Click, then press a key or mouse button. Mouse buttons support Ctrl/Shift/Alt. Esc cancels. Reserved inputs are refused."));
         }
         if (auto* combo = Object::cast_to<EawrUiCombo>(state.controls["IDC_CAMERA_KEYS"])) {
             combo->clear();
@@ -2002,17 +2003,16 @@ void EawrOptionsScreen::open_page(const Page target) {
 
 void EawrOptionsScreen::begin_capture(const std::size_t action) {
     capturing_ = action;
-    selection_message_ = "Press the new key (Esc cancels).";
+    selection_message_ = "Press a key or mouse button (Esc cancels).";
     rebuild_page();
 }
 
 void EawrOptionsScreen::end_capture() { capturing_.reset(); }
 
 // The one place a pressed key becomes a binding: the real key path and the scripted `key:` step both land here.
-void EawrOptionsScreen::capture_key(const char letter, const bool ctrl) {
+void EawrOptionsScreen::capture_chord(const std::string& chord) {
     if (!capturing_) return;
     const std::size_t action = *capturing_;
-    const std::string chord = model::selection_chord_for(letter, ctrl);
     switch (model::selection_chord_status(draft_, action, chord)) {
     case model::SelectionChordStatus::ok:
         model::set_selection_key(draft_, action, chord);
@@ -2022,6 +2022,14 @@ void EawrOptionsScreen::capture_key(const char letter, const bool ctrl) {
     case model::SelectionChordStatus::duplicate:
         selection_message_ = keyboard_key_label(chord) + " is already used by the other selection key.";
         notes_.push_back("Selection binding conflict: choose a different key for each action.");
+        end_capture();
+        break;
+    case model::SelectionChordStatus::mouse_reserved:
+        selection_message_ = "Left and right mouse buttons are used for selecting and orders";
+        end_capture();
+        break;
+    case model::SelectionChordStatus::camera:
+        selection_message_ = keyboard_key_label(chord) + " is used by the camera; press a different button.";
         end_capture();
         break;
     default:
@@ -2036,15 +2044,48 @@ void EawrOptionsScreen::capture_key(const char letter, const bool ctrl) {
 
 bool EawrOptionsScreen::press_key(const std::string& chord) {
     if (!shown_ || !capturing_) return false;
+    if (chord.find("Mouse ") != std::string::npos) {
+        auto suffix = std::string_view(chord);
+        const bool ctrl = suffix.starts_with("Ctrl+");
+        if (ctrl) suffix.remove_prefix(5);
+        const bool shift = suffix.starts_with("Shift+");
+        if (shift) suffix.remove_prefix(6);
+        const bool alt = suffix.starts_with("Alt+");
+        if (alt) suffix.remove_prefix(4);
+        if (!suffix.starts_with("Mouse ")) return false;
+        suffix.remove_prefix(6);
+        int number{};
+        const auto [end, error] = std::from_chars(suffix.data(), suffix.data() + suffix.size(), number);
+        if (error != std::errc{} || end != suffix.data() + suffix.size() || number < 1 || number > 28) return false;
+        Ref<InputEventMouseButton> mouse;
+        mouse.instantiate();
+        mouse->set_button_index(static_cast<MouseButton>(number <= 3 ? number : number + 4));
+        mouse->set_pressed(true);
+        mouse->set_ctrl_pressed(ctrl);
+        mouse->set_shift_pressed(shift);
+        mouse->set_alt_pressed(alt);
+        _input(mouse);
+        return true;
+    }
     const bool ctrl = chord.starts_with("Ctrl+");
     const std::string letter = ctrl ? chord.substr(5) : chord;
     if (letter.size() != 1 || letter[0] < 'A' || letter[0] > 'Z') return false;
-    capture_key(letter[0], ctrl);
+    capture_chord(model::selection_chord_for(letter[0], ctrl));
     return true;
 }
 
 void EawrOptionsScreen::_input(const Ref<InputEvent>& event) {
     if (!shown_) return;
+    const Ref<InputEventMouseButton> mouse = event;
+    if (mouse.is_valid() && capturing_ && !confirm_open()) {
+        get_viewport()->set_input_as_handled();
+        if (!mouse->is_pressed()) return;
+        const int number = selection_mouse_number(static_cast<int>(mouse->get_button_index()));
+        if (number == 0 || mouse->is_meta_pressed()) return;
+        capture_chord(model::selection_mouse_chord_for(number, mouse->is_shift_pressed(),
+            mouse->is_ctrl_pressed(), mouse->is_alt_pressed()));
+        return;
+    }
     const Ref<InputEventKey> key = event;
     if (key.is_null() || !key->is_pressed() || key->is_echo()) return;
     if (capturing_ && !confirm_open()) {
@@ -2066,7 +2107,7 @@ void EawrOptionsScreen::_input(const Ref<InputEvent>& event) {
             rebuild_page();
             return;
         }
-        capture_key(static_cast<char>('A' + (physical - KEY_A)), key->is_ctrl_pressed());
+        capture_chord(model::selection_chord_for(static_cast<char>('A' + (physical - KEY_A)), key->is_ctrl_pressed()));
         return;
     }
     if (key->get_keycode() != KEY_ESCAPE) return;

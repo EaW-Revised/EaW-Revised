@@ -206,6 +206,7 @@ void GalacticMode::State::update_hud() {
     service_selection_cursor();
     const auto labels_timer = measure_frame(FramePhase::hud_labels);
     update_planet_labels();
+    service_planet_hover();
 }
 
 void GalacticMode::State::reset_label_placement() {
@@ -494,10 +495,8 @@ void GalacticMode::State::update_planet_labels() {
                 const auto text = String::utf8(name.c_str()).to_upper();
                 if (label.get_text() != text) { label.set_text(text); content_changed = true; }
                 auto selected_font = font;
-                String tooltip;
                 if (observation != hud_facts.end()) {
                     const auto& facts = observation->second;
-                    tooltip = String::utf8(galactic_view::unverified_intelligence_text(facts).c_str());
                     const auto alternatives = style.list(data::ui::Field::alternate_font_name);
                     std::size_t frame = 0;
                     if (name_size_thresholds && facts.ground_level_known && facts.structures) {
@@ -507,7 +506,6 @@ void GalacticMode::State::update_planet_labels() {
                     if (frame < alternatives.size()) selected_font = hud_fonts->font(hud_fonts->resolve(
                         {alternatives[frame], name_font.point_size}, "english"));
                 }
-                if (label.get_tooltip_text() != tooltip) { label.set_tooltip_text(tooltip); content_changed = true; }
                 // Theme overrides invalidate native shaping/layout even when a
                 // clock-only publication supplies the same visible name style.
                 if (!label.has_theme_font_override("font") || label.get_theme_font("font") != selected_font) {
@@ -607,8 +605,14 @@ Ref<Texture2D> GalacticMode::State::command_texture_optional(const std::string_v
 }
 
 Ref<Texture2D> GalacticMode::State::command_atlas_texture(const std::string_view name) {
-    if (!galactic_view::command_bar_icon_in_atlas(command_atlas ? &command_atlas->directory : nullptr, name)) return {};
-    return command_texture_optional(name);
+    if (!command_atlas || !command_textures || name.empty()) return {};
+    if (const auto found = command_atlas_texture_cache.find(name); found != command_atlas_texture_cache.end()) return found->second;
+    // These weather/bonus slots explicitly require atlas art, even if a mod ships
+    // a full-screen loose image with the same name. Cache both hits and misses.
+    const auto slot = presentation::ui::resolve_ui_texture(name, &command_atlas->directory, {});
+    const auto texture = command_textures->texture(slot, 1.0, 1.0);
+    command_atlas_texture_cache.emplace(std::string(name), texture);
+    return texture;
 }
 
 Ref<Texture2D> GalacticMode::State::command_texture_lookup(const std::string_view name, const bool warn_if_missing) {
@@ -616,14 +620,40 @@ Ref<Texture2D> GalacticMode::State::command_texture_lookup(const std::string_vie
     if (const auto cached = command_texture_cache.find(name); cached != command_texture_cache.end()) return cached->second;
     auto slot = presentation::ui::resolve_ui_texture(name,
         command_atlas ? &command_atlas->directory : nullptr,
-        presentation::ui::vfs_standalone_textures(*filesystem, warn_if_missing));
-    // Publish missing required textures at the next HUD update; optional probes stay silent.
-    if (warn_if_missing && slot.origin == presentation::ui::TextureOrigin::missing) {
+        presentation::ui::vfs_standalone_textures(*filesystem, false));
+    const auto texture = command_textures->texture(slot, 1.0, 1.0);
+    // Missing and undecodable art share the existing unresolved-texture note.
+    if (warn_if_missing && texture.is_null()) {
         UtilityFunctions::push_warning(String::utf8(("unresolved mounted UI texture: " + std::string(name)).c_str()));
         pending_texture_notes.push_back(galactic_view::unresolved_ui_texture_note(name));
     }
-    const auto texture = command_textures->texture(slot, 1.0, 1.0);
     command_texture_cache.emplace(std::string(name), texture);
+    return texture;
+}
+
+Ref<Texture2D> GalacticMode::State::missing_shell_texture() {
+    if (shell_placeholder.is_null()) {
+        const auto image = Image::create_empty(2, 2, false, Image::FORMAT_RGBA8);
+        image->fill(Color(0.2F, 0.2F, 0.2F, 1.0F));
+        image->set_pixel(0, 0, Color(1, 0, 1, 1));
+        image->set_pixel(1, 1, Color(1, 0, 1, 1));
+        shell_placeholder = ImageTexture::create_from_image(image);
+    }
+    return shell_placeholder;
+}
+
+Ref<Texture2D> GalacticMode::State::shell_texture(const std::string_view name, const bool standalone_first) {
+    const auto key = std::make_pair(std::string(name), standalone_first);
+    if (const auto found = shell_texture_cache.find(key); found != shell_texture_cache.end()) return found->second;
+    const auto slot = presentation::ui::resolve_ui_texture(name, command_atlas ? &command_atlas->directory : nullptr,
+        presentation::ui::vfs_standalone_textures(*filesystem, false), standalone_first);
+    auto texture = command_textures->texture(slot, 1.0, 1.0);
+    if (texture.is_null()) {
+        UtilityFunctions::push_warning(String::utf8(("unresolved mounted UI texture: " + std::string(name)).c_str()));
+        pending_texture_notes.push_back(galactic_view::unresolved_ui_texture_note(name));
+        texture = missing_shell_texture();
+    }
+    shell_texture_cache.emplace(key, texture);
     return texture;
 }
 
@@ -976,7 +1006,7 @@ void GalacticMode::State::update_planet_bonus_icon(const galactic_view::ObjectId
     const auto facts = hud_facts.find(id);
     // The atlas lookup is only needed while the layer is on (the style hides everything otherwise).
     const bool in_atlas = bonus_layer_visible
-        && galactic_view::command_bar_icon_in_atlas(command_atlas ? &command_atlas->directory : nullptr, icon);
+        && galactic_view::command_bar_icon_in_atlas(command_atlas ? &command_atlas->directory : nullptr, icon, command_icon_atlas_cache);
     const auto style = galactic_view::planet_bonus_icon_style(bonus_layer_visible, icon, in_atlas, alpha,
         facts == hud_facts.end() ? nullptr : &facts->second.name_colour);
     if (!style.visible) return;
@@ -1007,7 +1037,7 @@ void GalacticMode::State::update_planet_weather_icon(const galactic_view::Object
     // WGFI-1: the weather icon follows the same filter bit as the bonus icon, sits at the planet's point plus the `g_weather`
     // offset and is never tinted (the original colours only the bonus icon); a name outside the command-bar atlas draws nothing.
     const bool in_atlas = bonus_layer_visible
-        && galactic_view::command_bar_icon_in_atlas(command_atlas ? &command_atlas->directory : nullptr, icon);
+        && galactic_view::command_bar_icon_in_atlas(command_atlas ? &command_atlas->directory : nullptr, icon, command_icon_atlas_cache);
     constexpr galactic_view::Rgb untinted{1.0F, 1.0F, 1.0F};
     const auto style = galactic_view::planet_bonus_icon_style(bonus_layer_visible, icon, in_atlas, alpha, &untinted);
     if (!style.visible) return;
@@ -1349,6 +1379,13 @@ void GalacticMode::State::build_command_bar_tooltip() {
         cell.icon = hero_tooltip_image();
     }
     hero_tooltip->hide();
+    // WGUI-188: the ordinary planet encyclopedia is retained separately from unit/build hover.
+    planet_hover_tooltip = memnew(Control);
+    planet_hover_tooltip->set_name("GalacticPlanetHoverPanel");
+    planet_hover_tooltip->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+    planet_hover_tooltip->set_z_index(10);
+    hud->add_child(planet_hover_tooltip);
+    planet_hover_tooltip->hide();
 }
 
 void GalacticMode::State::build_command_bar_advisor(const data::ui::TextDatabase* text) {
@@ -1491,14 +1528,7 @@ bool GalacticMode::State::build_command_bar_shell() {
         UtilityFunctions::push_warning(String::utf8(summary.c_str()));
     }
     for (const auto& mesh : look.meshes) {
-        std::string why;
-        const auto path = presentation::ui::vfs_standalone_textures(*filesystem)(mesh.texture);
-        if (!path) { failure = "galactic shell texture is absent: " + mesh.texture; return false; }
-        auto texture = assets::load_texture(*filesystem, *path);
-        if (!texture) { failure = core::format_diagnostic(texture.error()); return false; }
-        auto pixels = texture_image(texture.value(), why);
-        if (pixels.is_null()) { failure = why; return false; }
-        setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles, {}});
+        setup.meshes.push_back({mesh.blend, shell_texture(mesh.texture), mesh.triangles, {}});
     }
     command_meshes = setup.meshes.size();
     command_bar->setup(std::move(setup), nullptr);
@@ -1976,10 +2006,20 @@ bool GalacticMode::State::build_command_bar() {
         .value_or(presentation::ui::HudFaction::underworld);
     auto atlas = assets::load_mega_texture_atlas(*filesystem,
         presentation::ui::command_bar_mega_texture(command_catalog));
-    if (!atlas) { failure = core::format_diagnostic(atlas.error()); return false; }
-    command_atlas.emplace(std::move(atlas).value());
+    if (atlas) command_atlas.emplace(std::move(atlas).value());
+    else {
+        UtilityFunctions::push_warning(String::utf8(core::format_diagnostic(atlas.error()).c_str()));
+        pending_texture_notes.push_back(galactic_view::unresolved_ui_texture_note(
+            presentation::ui::command_bar_mega_texture(command_catalog)));
+        command_atlas.emplace();
+    }
+    command_atlas_texture_cache.clear();
+    command_icon_atlas_cache.clear();
+    shell_texture_cache.clear();
     command_textures = std::make_unique<UiTextures>(*command_atlas, *filesystem);
-    if (!command_textures->page_failure().empty()) { failure = command_textures->page_failure(); return false; }
+    if (!command_textures->page_failure().empty()) {
+        UtilityFunctions::push_warning(String::utf8(command_textures->page_failure().c_str()));
+    }
     build_command_bar_tooltip();
     auto text = data::ui::load_language_text_database(*filesystem, "english");
     build_command_bar_advisor(text ? &text.value() : nullptr);

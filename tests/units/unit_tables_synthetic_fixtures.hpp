@@ -11,6 +11,7 @@ void restriction_list_edges();
 void ion_stun_content_errors();
 void manual_weapon_loading();
 void randomized_fire_bone_loading();
+void hardpoint_min_range_loading();
 void hardpoint_turret_loading();
 void special_weapon_classification();
 void cluster_bomb_inputs();

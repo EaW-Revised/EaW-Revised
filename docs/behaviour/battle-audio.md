@@ -282,6 +282,21 @@ publish their actual transitions before presentation can request these cues.
 | BA-62 | Each arriving ship or squadron craft requests its owner's faction `SFXEvent_Arrive_From_Hyperspace` at logical arrival frame 35, spatially on the object. Human and AI owners use the same route; the squadron container adds no extra sound. Retain the pose and visibility at frame 35 so late presentation still applies the ordinary fog and voice rules. | WR-37; WPR-40 |
 | BA-63 | A local reinforcement command refused for lack of population room plays `SFXEvent_Tactical_Unit_Cap_Reached`. The local population becoming full plays `SFXEvent_Tactical_Pop_Cap_Reached` once until room becomes available again; the type-less room query costs one population. Buying or pooling a unit does not reserve population. | debug build WP-A02/A03, retained in ignored research; WR-02/05/16 |
 | BA-64 | Hardpoint destruction warns only the local owner while the parent lives, excluding self-destruct. A weapon loss with no weapons standing prefers `SFXEvent_Hardpoint_All_Weapons_Destroyed`; absent that cue, or while another weapon class stands, the last loss of a class uses its `SFXEvent_Hardpoint_Destroyed` entry. Derived blank entries clear inherited cues. These are ordinary WAV SFX requests, subject to authored overlap/instance and voice admission, with no separate timer or speech-stream retry queue. The bounded presentation journal retains ownership, type and standing hardpoints before snapshot eviction. | WCC-63; SND-31; debug build, destruction and SFX admission cross-check; synthetic audio and journal contracts |
+| BA-65 | A unit's death requests its authored `SFXEvent_Unit_Lost` only for its exact local owner, independently of selection, visibility, camera, spin-away or the lifetime of its death effects. Space structures use the same type lookup as ships. This is an ordinary unattached SFX request after the kill sequence, with authored instance/overlap admission and no additional cooldown or retry. The bounded presentation journal retains the completed tick's ordered type/owner loss rows before snapshot eviction, outside canonical state. | SND-32; WCC-70; fresh debug-build kill caller and type lookup cross-check; synthetic listener/admission and journal contracts |
+
+`SFXEvent_Unit_Under_Attack` has a recognized event-reference parser entry,
+but its type-level space caller remains unverified (SND-U04). A fresh symbol
+lookup found only the distinct faction base-announcement accessors, whose
+SND-40 handler uses its own global timer and faction event. That does not prove
+that the type tag has no caller. Keep it unwired until a field-read/caller sweep
+settles its eligibility and throttle; substituting the faction warning would
+give an authored type cue an unsupported trigger.
+
+The BA-25 acknowledgement and BA-64 loss warning use the same authored type
+lookup for loaded space structures, including `SpecialStructure`, as for ships
+and stations. The debug-build callers impose no XML-class restriction.
+`SFXEvent_Attack_Hardpoint` belongs to the selected speaker's order acknowledgement,
+not to a hardpoint firing: weapon fire uses BA-14's `Fire_SFXEvent` / `SFXEvent_Fire`.
 
 ### Announcements and streamed speech
 
@@ -504,3 +519,8 @@ faction and exact captured type, preserves first-match and blank-match silence,
 and gives an allied previous owner's loss precedence. The cue has no position.
 Build-pad HUD capture/loss playback remains a separate request. Space capture
 and the local battle camera are covered; land and enemy-control cues remain open.
+
+
+### Mod sound-tag spelling audit
+
+**BA-88:** The common object-definition parser has no entry for the exact root spellings `SFXEvent_Barrage`, `SFXEvent_Patrol`, `SFXEvent_Spawn`, `SFXEvent_Move_Into_Asteroids` or `SFXEvent_Enemy_Damaged_Health_Critical_Warnin`, nor for `Projectile_SFXEvent_Detonate_Reduced_By_Shield`, `Projectile_SFXEvent_Shield_Detonate` or `Projectile_SFXEvent_Detonate_Blueuced_By_Armor`. A different object class does not turn these spellings into aliases. BA-15 retains the plain detonation for a fully shield-absorbed contact and the distinct authored armor-reduction cue. `SFXEvent_Ambient_Loop` does have an event-reference parser entry; its unresolved continuous attachment remains SND-U05, so it is not part of the ignored-spelling correction. Evidence: fresh debug-build object-definition parser-table audit, with the accepted ambient-loop entry as a control.

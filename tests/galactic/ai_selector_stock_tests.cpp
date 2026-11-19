@@ -627,6 +627,34 @@ int main(int argc, char** argv) {
                 "unknown selection category is reported while the inherited mask survives");
         }
         {
+            // LCGA-01: run both spellings through the actual catalog/AI consumer.
+            const auto& target = content->types.begin()->second;
+            const auto cleared = must(eawr::data::with_overrides(loaded.catalog, std::array{
+                eawr::data::ValueOverride{target.name, "Garrison_Category", {}},
+                eawr::data::ValueOverride{target.name, "Space_Or_Garrison_Category", {}}}));
+            // Minimal category authoring observed in an installed space-structure mod sample.
+            const auto sample_catalog = must(eawr::data::with_overrides(cleared, std::array{
+                eawr::data::ValueOverride{target.name, "Space_Or_Garrison_Category", {"Capital"}}}));
+            const auto sample = must(cp::prepare_ai_selection_content(fs, sample_catalog, data, types, planned));
+            expect(sample->types.at(content->types.begin()->first).garrison_categories == previous_bits("Capital"),
+                "LCGA-01: mod sample retains the authored Capital mask");
+            for (const auto& fields : std::vector<std::vector<std::pair<std::string, std::string>>>{
+                {{"Garrison_Category", "Fighter"}},
+                {{"Space_Or_Garrison_Category", "Fighter"}},
+                {{"Garrison_Category", "Capital"}, {"Space_Or_Garrison_Category", "Fighter"}},
+                {{"Space_Or_Garrison_Category", "Capital"}, {"Garrison_Category", "Fighter"}},
+                {{"Space_Or_Garrison_Category", "Fighter"}, {"Garrison_Category", "TBD"}},
+                {{"Space_Or_Garrison_Category", "Fighter"}, {"Garrison_Category", "UNRESOLVED_ALIAS_CATEGORY"}},
+            }) {
+                std::vector<eawr::data::ValueOverride> overrides;
+                for (const auto& [tag, value] : fields) overrides.push_back({target.name, tag, {value}});
+                const auto modified = must(eawr::data::with_overrides(cleared, overrides));
+                const auto selected = must(cp::prepare_ai_selection_content(fs, modified, data, types, planned));
+                expect(selected->types.at(content->types.begin()->first).garrison_categories == previous_bits("Fighter"),
+                    "LCGA-01: AI aliases preserve order, placeholders and invalid-mask recovery");
+            }
+        }
+        {
             const auto company = std::find_if(content->types.begin(), content->types.end(),
                 [](const auto& entry) { return entry.second.company && entry.second.original && !entry.second.original->company_transport.empty(); });
             expect(company != content->types.end(), "stock company with transport available");

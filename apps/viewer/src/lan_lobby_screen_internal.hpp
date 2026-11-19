@@ -21,6 +21,7 @@
 #include "ui/kit.hpp"
 #include "ui/message_box_view.hpp"
 #include "ui/theme_builder.hpp"
+#include "ui/staging_preview.hpp"
 
 #include "eawr/assets/assets.hpp"
 #include "eawr/core/build_identity.hpp"
@@ -232,6 +233,22 @@ inline constexpr const char* prompt_cancel_button = "EAWR_LOBBY_PROMPT_CANCEL";
 
 [[nodiscard]] inline std::uint32_t now_ms() { return static_cast<std::uint32_t>(Time::get_singleton()->get_ticks_msec()); }
 
+// #7842: the faction combos' list for the map this lobby shows (the host's pick, else the map the host offered):
+// skirmish::setup_factions_for_map, the helper the local setup screen uses. A template so it can name the private nested types.
+template <class ImplT, class ResourcesT>
+[[nodiscard]] inline std::vector<skirmish::SetupFaction> lobby_factions(const ImplT& impl, const ResourcesT& resources) {
+    const skirmish::SetupMap* map = nullptr;
+    if (impl.host && impl.map_index >= 0 && static_cast<std::size_t>(impl.map_index) < resources.maps.size())
+        map = &resources.maps[static_cast<std::size_t>(impl.map_index)];
+    if (!impl.host && impl.offered && impl.offered->map) {
+        for (const skirmish::SetupMap& candidate : resources.maps) {
+            if (candidate.path == *impl.offered->map) map = &candidate;
+        }
+    }
+    const auto all = skirmish::setup_factions(*resources.content->catalog);
+    return skirmish::setup_factions_for_map(all, map);
+}
+
 } // namespace lan_lobby_detail
 using namespace lan_lobby_detail;
 
@@ -369,6 +386,7 @@ struct EawrLanLobby::PageState final {
     std::map<std::string, Control*> controls;
     EawrLobbyGameList* game_list{};
     TextureRect* preview{};
+    StagingPreview start_icons;
     std::map<std::string, ColorRect*> accept_icons;
     std::size_t chat_drawn{};
     // New chat lines were added: the list scrolls to the end once its layout has caught up.
@@ -520,6 +538,13 @@ struct EawrLanLobby::Impl final {
     bool checkpoint_applied{};
     std::uint64_t checkpoint_request{};
     std::uint64_t checkpoint_request_active{};
+    // #7878: a restore that ended because the room really changed (a player joined or left, the settings moved) is applied again
+    // by itself once the seat assignment is fitted to the new room, a few times at most; the request id tells an automatic run
+    // from one the host started, and the sentence says what changed.
+    std::uint64_t checkpoint_reapply_request{}, checkpoint_auto_request{};
+    unsigned checkpoint_reapplies{};
+    std::string checkpoint_room_change;
+    std::string checkpoint_kept_problem; // the room-change sentence to show again after the lobby refit cleared the panel line
 };
 
 namespace lan_lobby_detail {

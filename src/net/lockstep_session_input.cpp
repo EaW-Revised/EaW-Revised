@@ -322,13 +322,13 @@ std::vector<Received> LockstepSession::take_early_checkpoint(std::uint64_t epoch
 core::Result<void> LockstepSession::abort_checkpoint(std::string message, bool broadcast, bool busy) {
     if (!checkpoint_) return core::Result<void>::success();
     const auto epoch = checkpoint_->epoch;
-    if (broadcast && self_ != checkpoint_callbacks_->host) {
+    if (broadcast && self_ != checkpoint_->leader) {
         // A peer can request refusal, but cannot withdraw its proof or decide
         // locally: the host may already have committed and sent its release.
         if (!checkpoint_->refusal_requested) {
             checkpoint_->refusal_requested = true;
             Bytes frame{checkpoint_release_kind}; append(frame, epoch, 8); append(frame, 0, 1);
-            const auto host = checkpoint_callbacks_->host;
+            const auto host = checkpoint_->leader;
             if (transport_->link(host) != LinkState::closed) {
                 auto sent = transport_->send(host, frame);
                 if (!sent && transport_->link(host) != LinkState::closed) return sent;
@@ -347,7 +347,7 @@ core::Result<void> LockstepSession::abort_checkpoint(std::string message, bool b
 }
 core::Result<void> LockstepSession::begin_checkpoint() {
     if (!checkpoint_callbacks_ || !checkpoint_callbacks_->capture || !checkpoint_callbacks_->commit
-        || checkpoint_callbacks_->host >= seats_.size())
+        || seats_.empty())
         return refused<void>(session_errors::options, "save barrier callbacks are incomplete");
     const auto epoch = adapter_->completed_tick();
     if (!epoch) return refused<void>(session_errors::admission, "save barrier requires a completed trigger tick");
@@ -359,8 +359,14 @@ core::Result<void> LockstepSession::begin_checkpoint() {
         barrier.voters[peer] = timing_voter(peer);
         if (!barrier.voters[peer]) barrier.drains[peer] = epoch;
     }
+    // The leader is the lowest peer whose departure has not executed by the trigger tick: the executed departures are
+    // ordered by the sealed input, so every peer derives the same leader (unlike the local agreement/mesh flags that
+    // timing_voter also reads). A peer that locally already treats that leader as gone refuses and the save retries.
+    barrier.leader = self_;
+    for (PeerIndex peer = 0; peer < seats_.size(); ++peer)
+        if (!departed_[peer]) { barrier.leader = peer; break; }
     barrier.drains[self_] = drain; checkpoint_ = std::move(barrier);
-    if (agreement_ || held_ || resync_ || timing_ || (mesh_ && mesh_->running())) {
+    if (agreement_ || held_ || resync_ || timing_ || (mesh_ && mesh_->running()) || !checkpoint_->voters[checkpoint_->leader]) {
         // The host may already have refused this epoch (it reaches the trigger tick first, and its timing
         // transition spans ours): that refusal sits in the early queue and settles the barrier here. Without
         // it a non-host peer would wait for a refusal that was sent before the barrier existed.
@@ -430,7 +436,7 @@ core::Result<void> LockstepSession::receive_checkpoint(const Received& received)
         previous = drain;
     } else if (kind == checkpoint_cutoff_kind) {
         std::uint64_t cutoff{};
-        if (received.from != checkpoint_callbacks_->host || !read(body, cutoff, 8) || !body.empty()
+        if (received.from != checkpoint_->leader || !read(body, cutoff, 8) || !body.empty()
             || cutoff < *barrier.drains[self_] || cutoff > epoch + input_horizon()
             || cutoff > options_.final_tick_count || (barrier.cutoff && *barrier.cutoff != cutoff))
             return refused<void>(session_errors::malformed, "invalid host save cutoff");
@@ -444,12 +450,12 @@ core::Result<void> LockstepSession::receive_checkpoint(const Received& received)
     } else if (kind == checkpoint_release_kind) {
         std::uint64_t success{};
         if (!read(body, success, 1) || success > 1 || !body.empty()
-            || (success && received.from != checkpoint_callbacks_->host))
+            || (success && received.from != checkpoint_->leader))
             return refused<void>(session_errors::malformed, "invalid save release");
         if (!success) {
-            if (received.from == checkpoint_callbacks_->host)
+            if (received.from == checkpoint_->leader)
                 return abort_checkpoint("the host refused capture agreement", false, true);
-            if (self_ != checkpoint_callbacks_->host)
+            if (self_ != checkpoint_->leader)
                 return refused<void>(session_errors::malformed, "save refusal request is not addressed to the host");
             return abort_checkpoint("a peer could not capture or agree", true, true);
         }
@@ -465,7 +471,7 @@ core::Result<bool> LockstepSession::service_checkpoint() {
     };
     auto& barrier = *checkpoint_;
     const auto finish = [&]() -> core::Result<bool> {
-        if (self_ == checkpoint_callbacks_->host && !barrier.release) {
+        if (self_ == barrier.leader && !barrier.release) {
             Bytes frame{checkpoint_release_kind}; append(frame, barrier.epoch, 8); append(frame, 1, 1);
             if (auto sent = broadcast_checkpoint(frame); !sent) return core::Result<bool>::failure(sent.error());
             barrier.release = true;
@@ -478,7 +484,7 @@ core::Result<bool> LockstepSession::service_checkpoint() {
     };
     // Only a host release resolves the barrier. An unresolvable hold ends the
     // session via its normal connection-loss route, without a history decision.
-    const auto host = checkpoint_callbacks_->host;
+    const auto host = barrier.leader;
     if (self_ != host && !barrier.release
         && (!timing_voter(host) || transport_->link(host) == LinkState::closed))
         return core::Result<bool>::failure(connection_loss(host, "save barrier unresolved: host connection lost"));
@@ -498,7 +504,7 @@ core::Result<bool> LockstepSession::service_checkpoint() {
         return core::Result<bool>::failure(connection_loss(host, "save barrier unresolved: host connection lost"));
     if (barrier.proofs_matched) return finish();
     if (barrier.refusal_requested) return core::Result<bool>::success(true);
-    if (self_ == checkpoint_callbacks_->host
+    if (self_ == barrier.leader
         && last_now_.value_or(0) - barrier.since_ms >= options_.completeness_timeout_ms)
         return refuse_save("capture agreement timed out");
     if (agreement_ || held_ || resync_ || timing_ || (mesh_ && mesh_->running()))
@@ -508,7 +514,7 @@ core::Result<bool> LockstepSession::service_checkpoint() {
         if (peer != self_ && barrier.voters[peer] && transport_->link(peer) == LinkState::closed)
             return refuse_save("a required peer stream closed");
     }
-    if (self_ == checkpoint_callbacks_->host && !barrier.cutoff
+    if (self_ == barrier.leader && !barrier.cutoff
         && std::all_of(barrier.drains.begin(), barrier.drains.end(), [](const auto& value) { return value.has_value(); })) {
         std::uint64_t cutoff = barrier.epoch;
         for (const auto& drain : barrier.drains) cutoff = std::max(cutoff, *drain);

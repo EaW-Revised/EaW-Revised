@@ -7,6 +7,7 @@
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/string.hpp>
@@ -21,9 +22,9 @@ namespace {
 using godot::RenderingServer;
 
 // PL-04: unshaded, alpha blended, no depth test and no culling (the original draws the line over
-// ships and scenery). The plan frame rides in UV.x; a vertex with a negative frame is unused and is sent
-// far outside the view (writing POSITION would replace the whole default transform), so the surface keeps
-// its fixed capacity. `presented` is the plan frame the ships have
+// ships and scenery). PL-09 expands each segment in screen space in the vertex shader: no camera
+// polling or buffer uploads on zoom. The other endpoint rides in CUSTOM0.xyz, the plan frame in UV.x,
+// and UV.y encodes the side (+/-) and endpoint (1/2). `presented` is the plan frame the ships have
 // reached: the part of a line before it is gone (PL-06).
 constexpr const char* path_line_shader = R"GODOT(
 shader_type spatial;
@@ -33,8 +34,30 @@ uniform float presented = 0.0;
 varying float plan_frame;
 void vertex() {
     plan_frame = UV.x;
+    vec4 point = MODELVIEW_MATRIX * vec4(VERTEX, 1.0);
+    vec4 other = MODELVIEW_MATRIX * vec4(CUSTOM0.xyz, 1.0);
+    // Clip a crossing segment before projecting it; an endpoint behind the eye must not flip
+    // the ribbon or produce a full-screen triangle. Fully hidden/unused segments are degenerate.
+    if (point.z > -0.01 && other.z < -0.01) {
+        point = mix(point, other, (-0.01 - point.z) / (other.z - point.z));
+    }
+    if (other.z > -0.01 && point.z < -0.01) {
+        other = mix(other, point, (-0.01 - other.z) / (point.z - other.z));
+    }
+    vec4 clip = PROJECTION_MATRIX * point;
+    vec4 end_clip = PROJECTION_MATRIX * other;
+    vec2 direction = (end_clip.xy / max(end_clip.w, 0.001)
+        - clip.xy / max(clip.w, 0.001)) * VIEWPORT_SIZE;
+    direction *= abs(UV.y) > 1.5 ? -1.0 : 1.0;
+    vec2 normal = vec2(-direction.y, direction.x) / max(length(direction), 0.001);
+    float width = mix(1.0, 2.5, smoothstep(1000.0, 1900.0, length(point.xyz)));
+    clip.xy += normal * sign(UV.y) * width / VIEWPORT_SIZE * clip.w;
+    POSITION = clip;
     if (UV.x < -0.5) {
-        VERTEX = vec3(0.0, 1.0e9, 0.0);
+        POSITION = vec4(2.0, 2.0, 2.0, 1.0);
+    }
+    if (point.z > -0.01 && other.z > -0.01) {
+        POSITION = vec4(2.0, 2.0, 2.0, 1.0);
     }
 }
 void fragment() {
@@ -54,7 +77,7 @@ double wall_seconds() {
 
 PathLineView::PathLineView(godot::Node3D& host) : builder_() {
     if (host.get_world_3d().is_valid()) scenario_ = host.get_world_3d()->get_scenario();
-    capacity_ = builder_.caps().max_segments * 2;
+    capacity_ = builder_.caps().max_segments * 6;
 }
 
 PathLineView::~PathLineView() { release(); }
@@ -84,8 +107,11 @@ bool PathLineView::create_surface() {
     // The whole capacity exists from the start, every vertex unused (frame -1).
     godot::PackedVector3Array positions;
     godot::PackedVector2Array frames;
+    godot::PackedFloat32Array endpoints;
     positions.resize(capacity_);
     frames.resize(capacity_);
+    endpoints.resize(static_cast<int64_t>(capacity_) * 4);
+    endpoints.fill(0);
     for (std::uint32_t index = 0; index < capacity_; ++index) {
         positions.set(index, godot::Vector3());
         frames.set(index, godot::Vector2(-1.0F, 0.0F));
@@ -94,18 +120,22 @@ bool PathLineView::create_surface() {
     arrays.resize(godot::Mesh::ARRAY_MAX);
     arrays[godot::Mesh::ARRAY_VERTEX] = positions;
     arrays[godot::Mesh::ARRAY_TEX_UV] = frames;
+    arrays[godot::Mesh::ARRAY_CUSTOM0] = endpoints;
     mesh_ = rendering->mesh_create();
-    rendering->mesh_add_surface_from_arrays(mesh_, RenderingServer::PRIMITIVE_LINES, arrays, godot::Array(),
-        godot::Dictionary(), RenderingServer::ARRAY_FLAG_USE_DYNAMIC_UPDATE);
+    const auto flags = RenderingServer::ARRAY_FLAG_USE_DYNAMIC_UPDATE |
+        (static_cast<uint64_t>(RenderingServer::ARRAY_CUSTOM_RGBA_FLOAT) << RenderingServer::ARRAY_FORMAT_CUSTOM0_SHIFT);
+    rendering->mesh_add_surface_from_arrays(mesh_, RenderingServer::PRIMITIVE_TRIANGLES, arrays, godot::Array(),
+        godot::Dictionary(), flags);
     rendering->mesh_surface_set_material(mesh_, 0, material_);
     // Lines move with the world, far outside the initial all-zero bounds.
     rendering->mesh_set_custom_aabb(mesh_, godot::AABB(godot::Vector3(-1.0e5F, -1.0e5F, -1.0e5F), godot::Vector3(2.0e5F, 2.0e5F, 2.0e5F)));
-    const std::uint32_t format = static_cast<std::uint32_t>(static_cast<int64_t>(rendering->mesh_get_surface(mesh_, 0)["format"]));
+    const auto format = static_cast<uint64_t>(static_cast<int64_t>(rendering->mesh_get_surface(mesh_, 0)["format"]));
     vertex_stride_ = rendering->mesh_surface_get_format_vertex_stride(format, static_cast<int32_t>(capacity_));
     attribute_stride_ = rendering->mesh_surface_get_format_attribute_stride(format, static_cast<int32_t>(capacity_));
     attribute_offset_ = rendering->mesh_surface_get_format_offset(format, static_cast<int32_t>(capacity_), godot::Mesh::ARRAY_TEX_UV);
     // The writer below knows the plain float layout; any other layout leaves the overlay off.
-    if (vertex_stride_ != 12 || attribute_stride_ != 8 || attribute_offset_ != 0) {
+    const auto endpoint_offset = rendering->mesh_surface_get_format_offset(format, static_cast<int32_t>(capacity_), godot::Mesh::ARRAY_CUSTOM0);
+    if (vertex_stride_ != 12 || attribute_stride_ != 24 || attribute_offset_ != 0 || endpoint_offset != 8) {
         usable_ = false;
         release();
         return false;
@@ -121,34 +151,46 @@ bool PathLineView::create_surface() {
 void PathLineView::upload() {
     auto* rendering = RenderingServer::get_singleton();
     const auto vertices = builder_.vertices();
-    const auto used = static_cast<std::uint32_t>(vertices.size());
+    const auto used = static_cast<std::uint32_t>(vertices.size() / 2) * 6;
     // The written range: the used vertices, then the unused tail of the last upload, hidden again.
     const std::uint32_t count = std::max(used, written_);
     if (count > 0) {
         godot::PackedByteArray positions, frames;
         positions.resize(static_cast<int64_t>(count) * 12);
-        frames.resize(static_cast<int64_t>(count) * 8);
+        frames.resize(static_cast<int64_t>(count) * 24);
         auto* position_bytes = positions.ptrw();
         auto* frame_bytes = frames.ptrw();
         for (std::uint32_t index = 0; index < count; ++index) {
             float position[3]{};
             float frame[2]{-1.0F, 0.0F};
+            float endpoint[4]{};
             if (index < used) {
+                constexpr std::uint32_t ends[]{0, 1, 0, 0, 1, 1};
+                constexpr float sides[]{-1.0F, -2.0F, 1.0F, 1.0F, -2.0F, 2.0F};
+                const auto corner = index % 6;
+                const auto first = (index / 6) * 2;
+                const auto& vertex = vertices[first + ends[corner]];
+                const auto& other = vertices[first + 1 - ends[corner]];
                 // Render basis (x, z, -y).
-                position[0] = vertices[index].x;
-                position[1] = vertices[index].z;
-                position[2] = -vertices[index].y;
-                frame[0] = vertices[index].frame;
+                position[0] = vertex.x;
+                position[1] = vertex.z;
+                position[2] = -vertex.y;
+                frame[0] = vertex.frame;
+                frame[1] = sides[corner];
+                endpoint[0] = other.x;
+                endpoint[1] = other.z;
+                endpoint[2] = -other.y;
             }
             std::memcpy(position_bytes + static_cast<std::size_t>(index) * 12, position, 12);
-            std::memcpy(frame_bytes + static_cast<std::size_t>(index) * 8, frame, 8);
+            std::memcpy(frame_bytes + static_cast<std::size_t>(index) * 24, frame, 8);
+            std::memcpy(frame_bytes + static_cast<std::size_t>(index) * 24 + 8, endpoint, 16);
         }
         rendering->mesh_surface_update_vertex_region(mesh_, 0, 0, positions);
         rendering->mesh_surface_update_attribute_region(mesh_, 0, 0, frames);
         ++uploads_;
     }
     written_ = used;
-    drawn_segments_ = used / 2;
+    drawn_segments_ = used / 6;
     uploaded_generation_ = builder_.generation();
     presented_set_ = -1.0e9F; // the base frame may have moved
 }

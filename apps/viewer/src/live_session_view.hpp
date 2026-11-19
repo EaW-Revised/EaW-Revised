@@ -760,7 +760,7 @@ private:
         std::map<sim::EntityId, std::array<float, 3>>& visual_scales);
     void apply_frame_shield_flashes(BattleScene& population,
         GodotRenderer& renderer,
-        const std::map<sim::EntityId, std::array<float, 3>>& visual_scales);
+        const std::map<sim::EntityId, std::array<float, 3>>& visual_scales, double delta);
     void publish_frame_instances(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
         BattleScene& population,
         GodotRenderer& renderer,
@@ -929,9 +929,11 @@ private:
     std::array<float, 3> max_shield_flash_scale_{1.0F, 1.0F, 1.0F};
     std::map<sim::EntityId, double> shield_flash_start_;
     // WU-60: the local player's attack order flashes its target (a squadron: every member). Per craft or ship, the
-    // presented tick the flash started at; empty (no per-frame work) while no flash runs.
+    // elapsed unscaled render seconds, independent of game speed/pause. WU-61 gates are keyed by squadron root or hull;
+    // both maps empty (no per-frame work) after the last burst and its quiet interval finish.
     presentation_constants::OrderFlash order_flash_constants_;
-    std::map<sim::EntityId, double> order_flash_start_;
+    std::map<sim::EntityId, double> order_flash_elapsed_;
+    std::map<sim::EntityId, presentation_constants::OrderFlashGate> order_flash_gates_;
     std::uint64_t order_flashes_started_{};
     std::uint64_t order_flash_samples_{};
     float max_order_flash_multiplier_{1.0F};
@@ -1175,6 +1177,8 @@ private:
     std::set<sim::tactical::TypeId> land_structure_types_;
     std::vector<std::uint32_t> land_session_records_; // #6992: map records of the structures the session draws
     std::set<std::pair<sim::tactical::PlayerId, sim::tactical::TypeId>> launch_demand_;
+    std::set<std::pair<sim::tactical::PlayerId, sim::tactical::TypeId>> survivor_demand_;
+    void prepare_survivor_slots(const vfs::Vfs&, const data::Catalog&);
     bool launch_demand_valid_{};
     [[nodiscard]] bool launch_demanded(sim::tactical::PlayerId owner, sim::tactical::TypeId type);
     [[nodiscard]] bool container_without_slot(sim::tactical::TypeId type) const;

@@ -42,17 +42,23 @@ namespace cp = eawr::campaign;
 
 // Behaviour tests run the production schedule (K = 15, D = 30). EAWR_GCAI_TEST_SCHEDULE=reference runs the same test
 // on the synchronous reference (K = 1, D = 0), the comparison arm for a test that may assume per-tick effects.
+// EAWR_GCAI_TEST_SCHEDULE=adopt1 (async step 3b) runs the production schedule with the world adopting each window's output one
+// AI tick after the window (adopt_delay 1), so a save can fall between a window's finish and its adoption.
+// adoptK keeps the finished output for a whole window, covering every tick in the save sweeps.
 [[nodiscard]] inline eawr::script::foc::galactic_ai::AsyncSchedule test_schedule() {
 #ifdef _WIN32
     char* value{}; std::size_t size{};
-    const bool reference = !_dupenv_s(&value, &size, "EAWR_GCAI_TEST_SCHEDULE") && value && std::string_view(value) == "reference";
+    const std::string name = !_dupenv_s(&value, &size, "EAWR_GCAI_TEST_SCHEDULE") && value ? value : "";
     std::free(value);
 #else
     const char* value = std::getenv("EAWR_GCAI_TEST_SCHEDULE");
-    const bool reference = value && std::string_view(value) == "reference";
+    const std::string name = value ? value : "";
 #endif
-    return reference ? eawr::script::foc::galactic_ai::synchronous_reference_schedule
-                     : eawr::script::foc::galactic_ai::standard_async_schedule;
+    if (name == "reference") return eawr::script::foc::galactic_ai::synchronous_reference_schedule;
+    auto schedule = eawr::script::foc::galactic_ai::standard_async_schedule;
+    if (name == "adopt1") schedule.adopt_delay = 1;
+    if (name == "adoptK") schedule.adopt_delay = schedule.batch_ticks;
+    return schedule;
 }
 namespace gc = eawr::sim::galactic;
 namespace ga = eawr::script::foc::galactic_ai;

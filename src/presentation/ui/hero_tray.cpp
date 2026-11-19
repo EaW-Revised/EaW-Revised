@@ -22,8 +22,9 @@ namespace tactical = sim::tactical;
         [](const tactical::AbilityStatus& ability) { return ability.supports_autofire && ability.autofire; });
 }
 
-[[nodiscard]] bool listed(const HeroTypeFlags* flags, const HeroTrayPolicy& policy) noexcept {
-    return flags != nullptr && (flags->named_hero || (policy.include_generic_heroes && flags->generic_hero));
+[[nodiscard]] bool listed(const HeroTypeFlags* flags) noexcept {
+    // WHE-80: generic identity alone grants no portrait; an explicit head does.
+    return flags != nullptr && (flags->named_hero || flags->show_hero_head);
 }
 
 [[nodiscard]] bool seen(const std::span<const sim::EntityId> visible, const sim::EntityId entity) noexcept {
@@ -72,7 +73,7 @@ void collect_heroes(const HeroCollectInput& input, const HeroTrayPolicy& policy,
     for (const tactical::TacticalInstance& instance : input.instances) {
         // Cheap rejection first: an object with neither a hero type nor riders is nothing to the tray.
         const HeroTypeFlags* own = input.types->find(instance.type_id);
-        const bool hero = listed(own, policy);
+        const bool hero = listed(own);
         if (!hero && (!policy.list_carried_heroes || instance.contained.empty())) continue;
         const bool allied = tactical::players_allied(input.players, input.local, instance.owner);
         const bool hostile = !allied && tactical::players_hostile(input.players, input.local, instance.owner);
@@ -88,7 +89,7 @@ void collect_heroes(const HeroCollectInput& input, const HeroTrayPolicy& policy,
         walk_riders(instance.contained, [&](const tactical::CarriedObject& rider) {
             // WHE-45: a carried hero's icon uses the carrier's health (its parent container's fraction).
             // A rider has no live ability state of its own, so it is never highlighted (WHE-46).
-            if (!listed(input.types->find(rider.type_id), policy)) return;
+            if (!listed(input.types->find(rider.type_id))) return;
             add(side, {rider.entity_id, instance.entity_id, rider.type_id, instance.owner, health, false}, input.squadron_of);
         });
     }

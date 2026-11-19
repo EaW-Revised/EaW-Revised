@@ -20,6 +20,7 @@ struct BuiltPendingBattleHud {
     const data::ui::CommandBarCatalog&, FontProvider&, presentation::ui::HudFaction faction,
     godot::Vector2 size, bool single,
     const std::function<godot::Ref<godot::Texture2D>(std::string_view)>& texture,
+    const std::function<godot::Ref<godot::Texture2D>(std::string_view)>& shell_texture,
     const std::function<std::string(std::string_view)>& text,
     const std::function<void(const std::string&)>& sound = {});
 }

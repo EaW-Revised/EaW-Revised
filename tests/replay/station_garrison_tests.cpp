@@ -7,6 +7,7 @@
 #include "eawr/platform/sim_workers.hpp"
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <string>
 
 namespace station_upgrade_test_support {
@@ -258,7 +259,67 @@ void test_hangar_tech_setup() {
     }
 }
 
+t::MotionTable free_garrison_motion();
+t::DurabilityTable free_garrison_health();
+
+void test_unlimited_to_finite_hangar_replacement() {
+    std::vector<std::size_t> reference_counts;
+    for (const auto reserve : {-1, -2, std::numeric_limits<std::int32_t>::min()}) {
+        std::vector<std::string> hashes;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto initial = setup();
+            std::erase_if(initial.units, [](const auto& unit) { return unit.entity_id == 2; });
+            auto motion = free_garrison_motion();
+            for (auto& hangar : motion.squadrons.spawners) {
+                hangar.entries.front().starting = 2;
+                hangar.entries.front().reserve = hangar.type_id == 40 ? reserve : 2;
+                hangar.delay_frames = 1;
+            }
+            auto made = t::TacticalSession::create(initial, {}, free_garrison_health(), motion,
+                std::nullopt, {}, {}, {}, economy());
+            expect(static_cast<bool>(made), "FL-02: unlimited-to-finite station fixture creates");
+            if (!made) return;
+            auto world = std::move(made).value();
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            const auto advance = [&](const std::uint64_t until) {
+                while (world.completed_tick() < until) {
+                    const auto tick = world.completed_tick();
+                    if (workers != 1) world.scramble_storage_for_testing();
+                    const auto stepped = world.step(executor);
+                    expect(static_cast<bool>(stepped), "FL-02: unlimited-to-finite upgrade steps");
+                    if (!stepped) return;
+                    const auto hash = world.state_sha256();
+                    if (workers == 1) hashes.push_back(hash);
+                    else expect(tick < hashes.size() && hash == hashes[tick],
+                        "FL-02: negative-reserve upgrades agree on 1/2/4/8 workers");
+                }
+            };
+            advance(100);
+            expect(world.squadrons().size() == 2, "FL-02: old unlimited hangar launches its two starting squads");
+            expect(static_cast<bool>(world.submit(buy(100, 1, 0, 1, 91))), "FL-02: finite replacement upgrade submits");
+            advance(150);
+            expect(account(world, 1).tech_level == 2 && world.squadrons().size() == 2,
+                "FL-02: finite upgrade retains the two old squads");
+            for (unsigned round = 0; round < 3; ++round) {
+                std::vector<eawr::sim::EntityId> craft;
+                for (const auto& squadron : world.squadrons())
+                    craft.insert(craft.end(), squadron.members.begin(), squadron.members.end());
+                expect(static_cast<bool>(world.submit({{world.completed_tick(), 1, round + 1U}, craft,
+                    t::DamagePayload{whole(10000)}})), "FL-02: retained or replacement squad losses submit");
+                advance(world.completed_tick() + 100);
+                const auto count = world.squadrons().size();
+                expect(count == (round < 2 ? 2U : 0U),
+                    "FL-02/WPR-56: an old unlimited reserve leaves the new finite budget at four launches");
+                if (reserve == -1 && workers == 1) reference_counts.push_back(count);
+                else expect(count == reference_counts[round],
+                    "FL-02: -2 and INT32_MIN upgrade budgets match authored -1");
+            }
+        }
+    }
+}
+
 void test_hangar_replacement() {
+    test_unlimited_to_finite_hangar_replacement();
     for (const bool disabled : {false, true}) for (const bool reordered : {false, true}) for (const auto reserve : {-1, 0, 2}) {
       std::vector<std::string> hashes;
       for (const auto workers : {1U, 2U, 4U, 8U}) {

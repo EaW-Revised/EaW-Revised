@@ -230,6 +230,45 @@ converted from milliseconds to seconds.
 The general tooltip exclusion table for ability kinds, unusual mixed rosters, and
 population text recolouring on exceptional over-cap states remain named seams.
 
+## Mod-label coverage and inactive preview fields
+
+- **HUD-MOD-01 (debug build, HUD-E01).** `GUI_Velocity`, `GUI_Distance`,
+  `GUI_Angles` and `GUI_X_Rot` are accepted object-definition fields, but have no
+  active presentation consumer in the reviewed build. The typed tag table,
+  initialization and copy routines, and a whole-image instruction-operand audit
+  establish only stored defaults and copies. The vector's address is taken only
+  for initialization and copying; unrelated integer constants at the same
+  displacements are not field readers. Authoring these values therefore does
+  not establish a missing tactical model preview. This finding does not extend
+  to `GUI_Model_Name` or other nearby tags. Registry `foc-ignores` here means
+  parsed storage without an observable consumer, rather than an unknown tag.
+
+- **HUD-MOD-02 (current consumer audit; SG-CLS-01, L-7 and P-1).** The shared
+  tactical card and encyclopedia readers resolve effective `Icon_Name` and
+  `Text_ID` by registered type identity, without an XML element-name whitelist.
+  The existing consumers therefore cover loaded space objects authored under
+  mod labels such as `FlagshipUnit` and `SkirmishSquadron`, including inheritance
+  and icon overrides. This is coverage of those HUD consumers, not proof that
+  every authored object enters the battle or that all other modes apply the
+  fields. Space world-head coverage likewise follows WU-47/48 for a loaded
+  standalone hero or the first admitted carried hero; stacked carried heads and
+  objects outside the loaded closure retain their separate gaps.
+  The existing effective-type `GUI_Bracket_Size` reader similarly selects
+  WU-11's bracket artwork without introducing another class-specific reader.
+
+- **HUD-MOD-03 (debug build, HUD-E02).** The audited `GUI_Row` accessor is called
+  by galactic production refresh, inside its galactic-mode branch. Its presence
+  does not establish an additional space-skirmish production layout consumer.
+  Existing WGUI-91 coverage and the independently tracked WBP-36 pad interface
+  retain their own scope.
+
+- **HUD-MOD-04 (debug build, HUD-E03).** `GUI_Offset`, `GUI_Bracket_Width` and
+  `GUI_Bracket_Height` have no entries in the object-definition parser table.
+  Exact tag-table and defined-name lookups find none of these names. They do not
+  configure tactical brackets; the recognized `GUI_Bracket_Size` is a separate
+  field with its own WU-11 consumer. SG-CLS-01's common parser makes this finding
+  independent of the authored object element label.
+
 ## Unverified
 
 - Only a one-card retail still exists: several groups, a stacked `x<n>` card, a shield bar and a

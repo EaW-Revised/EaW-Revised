@@ -246,17 +246,29 @@ struct PlayerSettings final {
     SelectionConfig selection_config;
     bool selection_hotkeys_authored{};
     bool selection_hotkeys{true}; // SH-01: player and layer opt-outs still win.
+    // Load provenance, consumed by the XML default migration; not an effective preference.
+    bool selection_hotkeys_migration_pending{true};
     // Command name -> key text overrides of the keyboard pages. Empty keeps the project's
     // keys; SH-01 writes only its two feature-specific binding overrides.
     std::map<std::string, std::string> keys;
 
-    friend bool operator==(const PlayerSettings&, const PlayerSettings&) = default;
+    friend bool operator==(const PlayerSettings& a, const PlayerSettings& b) {
+        return a.revised_layer_enabled == b.revised_layer_enabled && a.revised_layer_path == b.revised_layer_path
+            && a.audio == b.audio && a.video == b.video && a.gameplay == b.gameplay && a.network == b.network
+            && a.camera_wasd == b.camera_wasd && a.selection_config == b.selection_config
+            && a.selection_hotkeys_authored == b.selection_hotkeys_authored
+            && a.selection_hotkeys == b.selection_hotkeys && a.keys == b.keys;
+    }
 };
 
-// SH-01: a selection chord is one physical letter, optionally with Ctrl ("Q", "Ctrl+Y"); the
-// dispatcher matches exactly these. Chords the command, camera and ability maps already use are reserved.
+// SH-01: physical letters optionally use Ctrl; Mouse N chords may use Ctrl/Shift/Alt.
+// Chords the command, camera and ability maps already use are reserved.
 inline constexpr std::array<std::string_view, 2> selection_commands{"SELECT_OWN_ALL", "SELECT_OWN_SCREEN"};
-enum class SelectionChordStatus : std::uint8_t { ok, malformed, reserved, duplicate };
+enum class SelectionChordStatus : std::uint8_t { ok, malformed, reserved, duplicate, camera, mouse_reserved };
+// Mouse numbering excludes wheel directions: middle is 3, side buttons start at 4.
+[[nodiscard]] std::string selection_mouse_chord_for(int button, bool shift, bool ctrl, bool alt);
+[[nodiscard]] std::optional<std::size_t> selection_mouse_action(const PlayerSettings&, int button,
+    bool shift, bool ctrl, bool alt, bool meta = false, bool free_camera = false);
 // The chord text a pressed physical letter stands for ("" when it is not A-Z).
 [[nodiscard]] std::string selection_chord_for(char letter, bool ctrl);
 // Shape and reservation only (what an XML default must satisfy).

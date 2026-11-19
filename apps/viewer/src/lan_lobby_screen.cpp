@@ -413,7 +413,7 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
         auto choice = local->selection;
         auto* combo = EAWR_CONTROL(EawrUiCombo, gadget); if (!combo) return;
         if (gadget == "IDC_PLAYER_FACTION_" + suffix) {
-            const auto factions = skirmish::setup_factions(*resources_->content->catalog);
+            const auto factions = lobby_factions(*impl_, *resources_);
             if (index < 0 || static_cast<std::size_t>(index) >= factions.size()) return;
             choice.faction = factions[static_cast<std::size_t>(index)].name;
         }
@@ -487,7 +487,7 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
         }
     } else if (record != impl.selection.slots.end()) {
         if (field == "IDC_PLAYER_FACTION") {
-            const auto factions = skirmish::setup_factions(*resources.content->catalog);
+            const auto factions = lobby_factions(impl, resources);
             if (index < 0 || static_cast<std::size_t>(index) >= factions.size()) return;
             record->faction = factions[static_cast<std::size_t>(index)].name;
         } else if (field == "IDC_PLAYER_TEAM") {

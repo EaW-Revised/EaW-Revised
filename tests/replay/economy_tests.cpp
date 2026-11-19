@@ -370,6 +370,46 @@ void test_reserved_reinforcement() {
     }
 }
 
+// Failed births must not publish a partial company, its craft/minds, an arrival,
+// a consumed pool token or the advanced allocator. Retrying the same tick exercises
+// destruction of the craft/mind journals after some members have been staged.
+void test_company_birth_transaction() {
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto start = setup();
+        start.first_free_entity_id = std::numeric_limits<sim::EntityId>::max() - 1;
+        auto content = rules();
+        for (auto& menu : content.menus) for (auto& option : menu.options)
+            option.build_frames = option.ai_build_frames = 1;
+        auto made = tactical::TacticalSession::create(start, sensors, {}, motion(), std::nullopt, {}, {}, {}, content);
+        expect(static_cast<bool>(made), "company transaction fixture creates");
+        if (!made) return;
+        auto world = std::move(made).value();
+        expect(static_cast<bool>(world.submit(buy(0, human, 0, human_station, squadron_type))),
+            "company transaction purchase submits");
+        step_to(world, 3);
+        expect(ledger(world, human)->pool == std::vector<tactical::TypeId>{squadron_type},
+            "company transaction starts with one pooled company");
+        expect(static_cast<bool>(world.submit(reinforce(3, human, 1, squadron_type, at(-2000, 1000)))),
+            "company transaction deployment submits");
+        const auto before = world.canonical_state_bytes();
+        const auto checkpoint = world.save_checkpoint_state();
+        const auto published = world.snapshot();
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        for (unsigned attempt = 0; attempt < 2; ++attempt) {
+            const auto failed = world.step(executor);
+            expect(!failed && failed.error().code == tactical::diagnostic_codes::resource_limit,
+                "company transaction exhausts IDs after staging craft");
+            const auto after = world.save_checkpoint_state();
+            expect(world.completed_tick() == 3 && world.snapshot() == published
+                && world.canonical_state_bytes() == before && checkpoint && after && checkpoint.value() == after.value(),
+                "failed company creation preserves committed state, checkpoint and snapshot on retry");
+            expect(world.arrivals().empty() && ledger(world, human)->pool == std::vector<tactical::TypeId>{squadron_type}
+                && world.next_entity_id() == *start.first_free_entity_id,
+                "failed company creation preserves pool, arrivals and allocator");
+        }
+    }
+}
+
 void test_campaign_reserve_publication() {
     std::vector<std::string> baseline;
     for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
@@ -992,6 +1032,7 @@ int main(const int argc, char** argv) {
     test_validation();
     test_reserved_reinforcement();
     test_campaign_reserve_publication();
+    test_company_birth_transaction();
     test_rotated_reinforcement();
     if (failures != 0) {
         std::cerr << failures << " economy check(s) failed\n";

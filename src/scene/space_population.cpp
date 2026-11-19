@@ -1,4 +1,5 @@
 #include "eawr/scene/space_population.hpp"
+#include "eawr/battle/start.hpp"
 
 #include <algorithm>
 
@@ -45,6 +46,29 @@ namespace {
 }
 
 } // namespace
+
+SpaceRecordOwner space_record_owner(const std::optional<std::uint32_t> map_record,
+    const std::span<const std::uint32_t> environment_records,
+    const std::span<const std::uint32_t> session_records) noexcept {
+    if (!map_record) return SpaceRecordOwner::map;
+    if (std::find(environment_records.begin(), environment_records.end(), *map_record)
+        != environment_records.end()) return SpaceRecordOwner::environment;
+    if (std::find(session_records.begin(), session_records.end(), *map_record)
+        != session_records.end()) return SpaceRecordOwner::session;
+    return SpaceRecordOwner::map;
+}
+
+SpaceRecordOwner space_live_record_owner(const sim::EntityId entity, const battle::BattleStart* start,
+    const std::span<const std::uint32_t> environment_records) noexcept {
+    if (!environment_records.empty() && start && entity != sim::invalid_entity_id) {
+        const auto authored = std::find_if(start->units.begin(), start->units.end(),
+            [entity](const auto& unit) { return unit.state.entity_id == entity; });
+        if (authored != start->units.end()
+            && (authored->role == battle::UnitRole::placed || authored->role == battle::UnitRole::map_object))
+            return space_record_owner(authored->record, environment_records, {});
+    }
+    return SpaceRecordOwner::map;
+}
 
 LiveUnitTags live_unit_tags(const data::EffectiveObject& object, const ObjectResolver& resolve) {
     LiveUnitTags tags;

@@ -71,6 +71,25 @@ void game_types() {
            "SSC-04: the rows' captions are the game-type keys");
 }
 
+void preview_factions() {
+    using Rows = std::vector<ui::SetupRow>;
+    expect(ui::setup_preview_faction(Rows{}, 0).empty(), "WSS-63: an unassigned start has no emblem");
+    Rows rows{{7, "Custom_Fleet"}, {1, "Other_Fleet"}, {7, "Custom_Fleet"}, {2, "Third_Fleet"}};
+    expect(ui::setup_preview_faction(rows, 7) == "Custom_Fleet",
+        "WSS-63: human and AI teammates agree independently of row and team order");
+    expect(ui::setup_preview_faction(rows, 1) == "Other_Fleet"
+        && ui::setup_preview_faction(rows, 2) == "Third_Fleet"
+        && ui::setup_preview_faction(rows, 0).empty(), "WSS-63: starts resolve independently for every team");
+    rows.push_back({7, "Conflicting_Fleet"});
+    rows.push_back({7, "Custom_Fleet"});
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        expect(ui::setup_preview_faction(rows, 7).empty(),
+            "WSS-63: a mixed team never takes the first or last matching row's emblem");
+        std::rotate(rows.begin(), rows.begin() + 1, rows.end());
+    }
+    expect(ui::setup_preview_faction(Rows{{0, ""}}, 0).empty(), "WSS-63: no faction leaves no emblem");
+}
+
 void blockers() {
     using Rows = std::vector<ui::SetupRow>;
     expect(ui::setup_blocker(Rows{}) == ui::SetupBlocker::too_few_players, "SSC-05: no rows is too few players");
@@ -279,6 +298,7 @@ void corpus() {
 int main() {
     captions();
     game_types();
+    preview_factions();
     blockers();
     start_refusals();
     advanced_options();

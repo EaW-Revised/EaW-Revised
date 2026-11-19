@@ -56,6 +56,8 @@ namespace eawr::units {
 [[nodiscard]] core::Result<CollisionBounds> prepare_galactic_collision_bounds(const assets::Model&);
 
 struct UnitType final {
+    std::optional<Fixed> tactical_bribe_cost;
+    std::optional<Fixed> bribe_corrupted_modifier, bribe_uncorrupted_modifier; // WGCH-205
     std::optional<Fixed> bounty_sp{}, bounty_mp{}; // WGCH-65: negative means category fallback
     using ObjectTurret = table_rows::ObjectTurret;
     std::string id;
@@ -204,6 +206,7 @@ struct UnitType final {
     // modelled through `production`, the radar stays off (SK-31):
     // element name and Name attribute.
     std::vector<std::string> inactive_abilities;
+    std::size_t ground_only_abilities{}; // WPR-78: authored upgrade nodes excluded from space by Ground_Automatic
     SpaceFootprint footprint; // #71
     std::optional<Spawner> spawner;
     std::vector<SquadronMember> members;
@@ -295,6 +298,17 @@ struct UnitType final {
     bool replenish_via_members{}; // WHE-70: TEAM dispatches this ability to its members.
     bool ability_team_dispatch{}; // FS-52: authored TEAM behavior routes default requests
     bool redirect_damage_to_teammates{};
+    struct DestructionSurvivor {
+        std::string type;
+        Fixed weight{};
+        std::uint32_t type_index{no_index};
+        bool operator==(const DestructionSurvivor&) const = default;
+    };
+    std::vector<DestructionSurvivor> destruction_survivors;
+    std::int32_t survivor_minimum{1}, survivor_maximum{1};
+    std::optional<Fixed> survivor_flyout_distance;
+    BonePoint survivor_bay;
+    bool survivor_ejection{};
     // WNO-29: authored order, resolved independently of ordinary weapons.
     std::vector<std::string> death_projectiles{};
     std::vector<std::uint32_t> death_projectile_indices{};
@@ -398,6 +412,11 @@ struct UnitNameIndex final {
     std::size_t built_for{};
     bool operator==(const UnitNameIndex&) const noexcept { return true; }
 };
+
+// WGCH-205: absent location means no galactic parent; only target costs above one are bribable.
+// The conversion handler is separate from this data/query seam.
+[[nodiscard]] core::Result<Fixed> tactical_bribe_cost(const UnitType& briber, const UnitType& target,
+    std::optional<bool> corrupted_location = std::nullopt);
 
 struct UnitTables final {
     sim::tactical::BattleDomain domain{sim::tactical::BattleDomain::space}; // BF-2: which variant of the domain tags was read

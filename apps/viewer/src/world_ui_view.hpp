@@ -330,10 +330,14 @@ private:
         std::array<float, 2> screen{};
         bool drawn{};
         bool grid{};
+        std::array<float, 3> anchor{}, desired{};
+        bool resumed{};
+        bool admitted{};
     };
     struct Gripper final {
         ui::SquadronIconAnchor motion{};
         ui::Vec3f desired{};
+        std::uint64_t last_drawn_frame{};
         bool idle{}; // WSU-34: idle-grid ownership, not the craft locomotor's idle state.
         std::optional<ui::CombatCell> settled_cell;
         std::array<GridSample, 256> grid_samples{};
@@ -346,6 +350,7 @@ private:
         std::size_t arrival_samples_dropped{};
     };
     std::map<sim::EntityId, Gripper> grippers_;
+    std::uint64_t icon_frame_{};
     std::size_t grid_icons_{};
     std::size_t max_grid_icons_{};
     std::vector<std::string> unresolved_;

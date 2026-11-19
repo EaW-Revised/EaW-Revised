@@ -671,6 +671,59 @@ class ShardTests(Fixture):
         self.assertEqual({path: path.read_bytes() for path in before}, before)
 
 
+class InheritedLabelTests(unittest.TestCase):
+    """A mod's own element label inherits a tag only when every FoC row of the tag is applied without a restriction."""
+
+    FOC = {"spaceunit", "miscobject"}
+
+    @staticmethod
+    def row(tag: str, classes: list[str], status: str, **extra) -> dict:
+        return {"tag": tag, "classes": classes, "status": status, "area": "movement", "ticket": 1, **extra}
+
+    def registry(self) -> dict:
+        return registry(
+            self.row("Space_Obstacle_Radius", ["SpaceUnit"], "applied", applied=[applied("radius", types=[])]),
+            self.row("Space_Obstacle_Radius", ["MiscObject"], "todo"),
+            self.row("Space_Obstacle_Radius", ["Props_Space_Nebula", "Yoden_SpaceProp"], "todo"),
+            self.row("Space_Layer", ["SpaceUnit"], "applied", applied=[applied("layer", types=["ship"])]),
+            self.row("Space_Layer", ["Props_Space_Nebula"], "todo"),
+            self.row("Layer_Z_Adjust", ["SpaceUnit"], "partial", applied=[applied("z")], missing_types=["ship"]),
+            self.row("Layer_Z_Adjust", ["Props_Space_Nebula"], "todo"),
+            self.row("Max_Speed", ["SpaceUnit"], "applied", applied=[applied()]),
+            self.row("Max_Speed", ["Props_Space_Nebula"], "foc-ignores", evidence="DB-NOTAG"),
+            self.row("Junk_Tag", ["SpaceUnit"], "todo"),
+            self.row("Junk_Tag", ["Props_Space_Nebula"], "todo"),
+            self.row("Mixed", ["SpaceUnit"], "applied", applied=[applied("a")]),
+            self.row("Mixed", ["MiscObject"], "applied", applied=[applied("b", types=["ship"])]),
+            self.row("Mixed", ["Props_Space_Nebula"], "todo"),
+        )
+
+    def test_only_unrestricted_applied_tags_are_class_agnostic(self) -> None:
+        self.assertEqual(tr.class_agnostic_tags(self.registry(), self.FOC), {"space_obstacle_radius", "max_speed"})
+
+    def test_only_todo_pairs_on_mod_labels_move(self) -> None:
+        pairs = tr.inherited_label_pairs(self.registry(), self.FOC)
+        self.assertEqual(pairs, [("Props_Space_Nebula", "Space_Obstacle_Radius"),
+                                 ("Yoden_SpaceProp", "Space_Obstacle_Radius")])
+
+    def test_foc_classes_never_inherit(self) -> None:
+        pairs = tr.inherited_label_pairs(self.registry(), self.FOC)
+        self.assertNotIn(("MiscObject", "Space_Obstacle_Radius"), pairs)
+
+    def test_render_reports_the_view_without_changing_statuses(self) -> None:
+        value = self.registry()
+        before = copy.deepcopy(value)
+        with_view = tr.render(value, None, foc_classes=self.FOC)
+        self.assertEqual(value, before)
+        self.assertIn("2 of the todo pairs are on a mod's own element label", with_view)
+        self.assertIn("| `Space_Obstacle_Radius` | 2 | Props_Space_Nebula, Yoden_SpaceProp |", with_view)
+        self.assertNotIn("Mod labels that inherit", tr.render(value, None))
+        self.assertEqual(tr.counts(value), tr.counts(before))
+
+    def test_foc_class_names_come_from_the_foc_inventory_only(self) -> None:
+        self.assertEqual(tr.foc_class_names(INVENTORY), {"spaceunit", "goals", "guidialogs"})
+
+
 class CheckedInRegistryTests(unittest.TestCase):
     def test_galactic_shard_owns_campaign_planet_and_trade_route(self) -> None:
         root = tr.load_shard(tr.DEFAULT_STATUSES)

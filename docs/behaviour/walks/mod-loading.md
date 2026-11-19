@@ -71,6 +71,12 @@ Hardpoint category policy is tracked separately (legacy EAWR-1442); the original
 name thresholds need safe compatibility validation (legacy EAWR-1443). Useful unknown
 tag diagnostics should remain in the scope census (legacy EAWR-793).
 
+## Hardpoint and object field admission
+
+| Rule | Original behaviour | Evidence | Remake comparison |
+|---|---|---|---|
+| HPA-01 | Object-definition and hardpoint fields have separate typed name tables. Entry loading dispatches to the table for that scope; an unknown nonempty key has no typed destination or fallback into the other scope. `Fire_Category_Restrictions` and `Fire_Inaccuracy_Distance` register only for hardpoints, so authoring them directly on `TransportUnit`, `UniqueUnit` or `Props_Story` does not configure an object weapon. Conversely, object-definition `Projectile_Types` does not configure a `HardPoint`; its valid projectile field is `Fire_Projectile_Type`. | Debug build: both entry readers, scope-specific table dispatch and failed-key lookup; ET-T053 and ET-T060. | **same** for these misplaced fields: they remain inert. Object weapons use their own registered data, including `Targeting_Fire_Inaccuracy`; ordinary hardpoints keep their separate category, scatter and projectile consumers. This rule establishes no general policy for unrelated unknown fields. |
+
 ## Lua lookup
 
 | ID | FoC rule | Source | Ours today and module |
@@ -132,6 +138,27 @@ limits:
 No universal supported-mod size follows from these separate bounds. Measure
 definition count, admitted script bytes, decoded assets, live entity/hardpoint
 counts and peak memory separately.
+
+## Additional hardpoint editor annotations
+
+| Rule | Original behaviour | Evidence | Remake comparison |
+|---|---|---|---|
+| HPE-02 | Runtime hardpoint field conversion uses the child element's text. For the fields below, `Editor_Ignore`, `Editor_Mod_Addition` and `Editor_Mod_Multiplication` attributes do not disable the element or transform its value. Boolean, integer and float conversion use text directly; category/float lists and string sequences tokenize the same text. These attributes remain editor metadata even when their text is a valid runtime number. | Debug build: hardpoint entry mapping, typed scalar and list conversion, and separate exact-name XML attribute lookup; ET-T060, ML-51 and ML-53. | **same** visible result: ordinary runtime field loading applies no editor arithmetic or suppression. Each field's own inheritance, parsing and tactical consumer rules remain separate. |
+
+This rule covers the additional audited attribute pairs below. It does not
+establish that arbitrary XML attributes are ignored.
+
+| Hardpoint field | Ignored editor attributes |
+|---|---|
+| `Allow_Opportunity_Fire_When_Idle`, `Allow_Opportunity_Fire_When_Targeting` | `Editor_Ignore` |
+| `Fire_Category_Restrictions` | `Editor_Ignore` |
+| `Fire_Inaccuracy_Distance` | `Editor_Ignore`, `Editor_Mod_Addition`, `Editor_Mod_Multiplication` |
+| `Fire_Max_Recharge_Seconds`, `Fire_Min_Recharge_Seconds` | `Editor_Ignore`, `Editor_Mod_Addition` |
+| `Fire_Min_Range_Distance` | `Editor_Ignore` |
+| `Fire_Pulse_Count`, `Fire_Pulse_Delay_Seconds` | `Editor_Ignore`, `Editor_Mod_Multiplication` |
+| `Fire_Range_Distance` | `Editor_Ignore`, `Editor_Mod_Addition` |
+| `Randomize_Between_Fire_Bones` | `Editor_Ignore` |
+| `Turret_Elevate_Extent_Degrees`, `Turret_Rotate_Extent_Degrees` | `Editor_Ignore` |
 
 ## Evidence and unresolved qualification
 
@@ -309,3 +336,17 @@ For space-battle mod compatibility, the five highest-impact follow-ups are:
 
 This ranking concerns mods loaded into the space battle. It does not make
 post-M2 compatibility fixes prerequisites for the existing stock M2 milestone.
+
+## Hardpoint editor annotations
+
+- **HPE-01** (debug build, HPE-E01) `Editor_Mod_Multiplication` on
+  `Fire_Range_Distance`, `Fire_Min_Recharge_Seconds` and `Fire_Max_Recharge_Seconds`
+  is an editor annotation, not a runtime multiplier. The hardpoint entry passes
+  the child tag and its text to the typed field mapping; these three fields use
+  the float reader, which converts only that text and never queries attributes.
+  The XML reader stores attributes separately and retrieves them only by an
+  explicitly requested name. Therefore an authored annotation leaves the field's
+  effective runtime value unchanged. This says nothing about element values,
+  inheritance, ability range modifiers or weapon delay modifiers, which keep
+  their own consumers. The scoped annotation is retained as XML metadata and
+  classified `foc-ignores` in the tag registry.

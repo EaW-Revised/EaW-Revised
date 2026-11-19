@@ -81,6 +81,41 @@ int unit_name_index_installed(const bool mod) {
     return failures == 0 ? 0 : 1;
 }
 
+int unit_ability_lists_installed(const bool mod) {
+    Installed installed;
+    if (const int status = mount_installed(mod, installed)) return status;
+    auto filesystem = eawr::vfs::Vfs::mount(installed.specs);
+    if (!filesystem) { std::cerr << eawr::core::format_diagnostic(filesystem.error()) << '\n'; return 1; }
+    auto catalog = eawr::data::load_catalog(filesystem.value(), installed.profile);
+    if (!catalog) { std::cerr << eawr::core::format_diagnostic(catalog.error()) << '\n'; return 1; }
+    eawr::scene::VfsAssetCache cache(filesystem.value());
+    eawr::units::LoadInput input;
+    input.catalog = &catalog.value().catalog;
+    input.filesystem = &filesystem.value();
+    input.model = cache.access().model;
+    input.types = {"Y_Wing_Squadron_Container"};
+    auto tables = eawr::units::load_unit_tables(input);
+    if (!tables) { std::cerr << eawr::core::format_diagnostic(tables.error()) << '\n'; return 1; }
+    const auto* unit = tables.value().find("Y_Wing_Squadron_Container");
+    expect(unit != nullptr, "WABL-01: installed team container loads");
+    if (!unit) return 1;
+    if (mod) {
+        expect(unit->production.combat_bonuses.size() == 1
+            && unit->production.combat_bonuses.front().name == "Black_Squadron_Vader_Combat_Bonus",
+            "WABL-02: Remake childless marked container preserves its inherited combat bonus");
+    } else {
+        expect(unit->abilities.size() == 1 && unit->abilities.front().type == "ION_CANNON_SHOT",
+            "WABL-01: stock list dispatch retains the authored ion-shot button");
+        expect(unit->special_abilities.size() == 1
+            && unit->special_abilities.front().name == "Y_Wing_Container_Ion_Cannon_Shot",
+            "WABL-02: stock variant list replaces the base handler list");
+    }
+    std::cout << "ability-list installed contract: " << (mod ? "remake" : "stock")
+              << " buttons " << unit->abilities.size() << " handlers " << unit->special_abilities.size()
+              << " combat bonuses " << unit->production.combat_bonuses.size() << '\n';
+    return failures == 0 ? 0 : 1;
+}
+
 // GC Start shape: the unit-table load a prepared campaign shares between its preparation steps (the same types and LoadInput
 // as the live game session), for the stock Sandbox campaign or the Remake chain.
 int unit_name_index_gc_start(const bool mod) {

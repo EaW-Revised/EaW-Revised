@@ -430,7 +430,20 @@ sim::tactical::MapBox map_box_of_extents(const std::optional<std::pair<std::uint
 
 sim::tactical::MapBox map_box(const StartInputs& inputs) { return map_box_of_extents(inputs.map_extents); }
 
-core::Result<std::optional<sim::tactical::FogRules>> fog_rules(const StartInputs& inputs) {
+core::Result<SpaceFogContext> replay_fog_context(const sim::tactical::TacticalSetup& setup) {
+    using ContextResult = core::Result<SpaceFogContext>;
+    if (setup.campaign || (setup.skirmish && setup.skirmish->campaign_origin))
+        return ContextResult::success(SpaceFogContext::campaign);
+    // Current skirmish recorders always bind match identity, including skips.
+    // Old selected-force headers carried only the allocator; do not guess their origin.
+    if (setup.skirmish && setup.first_free_entity_id && !setup.match_identity)
+        return ContextResult::failure(detail::error(diagnostic_codes::input,
+            "replay shared allocator has no explicit campaign origin or skirmish match identity; re-export with the current build"));
+    return ContextResult::success(SpaceFogContext::skirmish);
+}
+
+core::Result<std::optional<sim::tactical::FogRules>> fog_rules(const StartInputs& inputs,
+    const SpaceFogContext context) {
     using FogResult = core::Result<std::optional<sim::tactical::FogRules>>;
     if (!inputs.map_extents) return FogResult::success(std::nullopt);
     const auto width = detail::q24_from_binary32_bits(inputs.map_extents->first);
@@ -457,8 +470,9 @@ core::Result<std::optional<sim::tactical::FogRules>> fog_rules(const StartInputs
     rules.cells_wide = cells(*width);
     rules.cells_tall = cells(*height);
     rules.ramp_down_step = step.value();
-    // V-22 / WHZ-09: fog initialization uses raw, unrotated obstacle circles.
-    if (inputs.tables != nullptr) {
+    // V-22: normal skirmish setup retains full sight through asteroid fields and ion nebulas.
+    // Keep campaign's previous WHZ-09 mask until its activation has a runtime control.
+    if (context == SpaceFogContext::campaign && inputs.tables != nullptr) {
         const units::FootprintTypeSelection selection(*inputs.tables);
         for (const auto& placement : inputs.placements) {
             if (!placement.position) continue;

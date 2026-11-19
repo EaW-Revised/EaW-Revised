@@ -203,7 +203,8 @@ struct BuiltinText final {
     std::string_view key;
     std::u16string_view value;
 };
-constexpr std::array<BuiltinText, 22> builtin_texts{{
+constexpr std::array<BuiltinText, 23> builtin_texts{{
+    {"TEXT_EAWR_HIDDEN_PLANET", u"Hidden planet"},
     // ADR-020 project caption; an authored language database overrides this default.
     {"TEXT_EAWR_GIFT_UNITS", u"Gift"},
     {"TEXT_EAWR_TWEAKS", u"Tweaks"},

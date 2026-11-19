@@ -10,6 +10,7 @@
 #include "hangar_warm_plan.hpp"
 #include "restored_roster_warm.hpp"
 #include "reserve_warm_plan.hpp"
+#include "destruction_survivor_warm.hpp"
 #include "eawr/presentation/godot/device_budget.hpp"
 
 #include "eawr/platform/live_ai.hpp"
@@ -70,6 +71,7 @@ std::string_view source_label(const battle::ArrivalSource source) {
         case battle::ArrivalSource::reinforcement_pool: return "reinforcement_pool";
         case battle::ArrivalSource::station_spawn: return "station_spawn";
         case battle::ArrivalSource::ability_object: return "ability_object";
+        case battle::ArrivalSource::destruction_survivor: return "destruction_survivor";
     }
     return "unknown";
 }
@@ -398,6 +400,7 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
             for (std::size_t index = 0; index < holders; ++index) add_slot(object, anchor, owner.colour, 0, true);
         }
     }
+    prepare_survivor_slots(filesystem, catalog);
     // #458: each slot's death clone, set up like a start unit's (the clones used to be planned
     // for the start units only, so a craft launched after tick zero died without one). The
     // clone's clip variant is drawn from the slot's own entity, as the craft's ID is not known
@@ -410,6 +413,53 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
             slot.clone = launch_clones_.size();
             launch_clones_.push_back(std::move(*clone));
         }
+    }
+}
+
+void LiveSessionView::prepare_survivor_slots(const vfs::Vfs& filesystem, const data::Catalog& catalog) {
+    survivor_demand_.clear();
+    if (options_.land || !combat() || !setup_) return;
+    std::map<tactical::TypeId, std::string> names;
+    for (const auto& type : tables_->units) names.emplace(battle::type_id(type.id), type.id);
+    std::vector<SurvivorWarmType> types;
+    for (const auto& source : combat()->profiles) {
+        if (!source.destruction_survivors || !names.contains(source.type_id)) continue;
+        const auto& profile = *source.destruction_survivors;
+        SurvivorWarmType type{names.at(source.type_id), profile.minimum, profile.maximum, {}, profile.ejection};
+        for (const auto& choice : profile.choices) {
+            if (choice.type == 0 || choice.weight.raw() <= 0) continue;
+            SurvivorWarmChoice target{choice.affiliations, {}};
+            if (choice.company) {
+                for (const auto member : choice.members) if (names.contains(member)) target.bodies.push_back(names.at(member));
+            } else if (names.contains(choice.type)) target.bodies.push_back(names.at(choice.type));
+            if (!target.bodies.empty()) type.choices.push_back(std::move(target));
+        }
+        types.push_back(std::move(type));
+    }
+    std::vector<SurvivorWarmPlayer> players;
+    for (const auto& player : setup_->players) players.push_back({player.player_id, player.faction_id});
+    std::vector<SurvivorWarmSeed> seeds;
+    for (const auto& unit : start_->units) seeds.push_back({unit.state.owner, unit.type, 1, unit.state.entity_id});
+    for (const auto& slot : launch_slots_) seeds.push_back({slot.station_owner, placed_ships_[slot.ship].object_id, 1, 0});
+    auto expanded = plan_survivor_warm(players, types, seeds, options_.warm_launches);
+    for (const auto& key : expanded.admitted) survivor_demand_.emplace(key.first, battle::type_id(key.second));
+    for (const auto& demand : expanded.plan.rows) {
+        if (demand.simultaneous_maximum == 0) continue;
+        battle::StartUnit anchor;
+        if (const auto near = std::find_if(start_->units.begin(), start_->units.end(),
+            [&](const auto& unit) { return unit.state.entity_id == demand.anchor; }); near != start_->units.end()) anchor = *near;
+        anchor.state.owner = demand.owner;
+        const auto owner = std::find_if(start_->players.begin(), start_->players.end(),
+            [&](const auto& player) { return player.player.player_id == demand.owner; });
+        const auto existing = static_cast<std::size_t>(std::count_if(launch_slots_.begin(), launch_slots_.end(), [&](const auto& slot) {
+            return slot.station_owner == demand.owner && slot.required_station == 0
+                && placed_ships_[slot.ship].object_id == demand.type;
+        }));
+        for (auto count = existing; count < demand.simultaneous_maximum; ++count)
+            add_launch_slot(filesystem, catalog, demand.type, anchor,
+                owner != start_->players.end() ? owner->colour : std::optional<battle::LobbyColour>{}, 0, false,
+                source_label(demand.source));
+        arrival_slots_.plan.rows.push_back(demand);
     }
 }
 
@@ -863,13 +913,14 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
     // #6992: a structure a land pad completes into appears after tick zero without a planned slot. Like a launch it is
     // drawn in the frame it appears (a pad's owner is looking at it); only the load-time recipe note below stays launch-only.
     const bool structure = options_.land && land_structure_types_.contains(type);
+    const bool survivor = !options_.land && survivor_demand_.contains({owner, type});
     // A launched craft must be drawn in the frame it launches: planned launches are exempt from the per-frame
     // arrival budget (their count is bounded by the plan's simultaneous maximum; warm_launches sets how many are
     // composed at load). Only purchases and reinforcement pools wait for the budget.
     if (!arrival_slots_.population || !arrival_slots_.renderer || !arrival_slots_.filesystem || !arrival_slots_.catalog
-        || (!launch && !structure && !arrival_slots_.remaining) || arrival_slots_.failed.contains({owner, type}) || !tables_ || !start_)
+        || (!launch && !structure && !survivor && !arrival_slots_.remaining) || arrival_slots_.failed.contains({owner, type}) || !tables_ || !start_)
         return std::nullopt;
-    if (!(setup_ && setup_->campaign) && !structure
+    if (!(setup_ && setup_->campaign) && !structure && !survivor
         && !launch && (!arrival_slots_.purchases.contains({owner, type}) || !arrivals_.contains(entity))) return std::nullopt;
     const units::UnitType* named = nullptr;
     if (const auto indexed = presentation_types_.find(type); indexed != presentation_types_.end()) named = indexed->second;
@@ -883,6 +934,7 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
     // The warm pass's own recipe reads before Begin are planned work, not fallbacks.
     if (launch && !warm_recipe_read_) note_preload_fallback(owner, named->id,
         launch_demanded(owner, type) ? "capacity_exhausted" : "unplanned_roster");
+    if (survivor && phase_ == Phase::running) note_preload_fallback(owner, named->id, "survivor_capacity_exhausted");
     const auto growth_started = std::chrono::steady_clock::now();
     struct ReadScope final {
         std::uint64_t& total;
@@ -895,11 +947,11 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
             total += bytes;
             frame += bytes;
         }
-    } reads{arrival_slots_.launch_read_bytes, arrival_slots_.frame_launch_read_bytes, launch};
+    } reads{arrival_slots_.launch_read_bytes, arrival_slots_.frame_launch_read_bytes, launch || survivor};
     FrameTimer growth_timer(trace_frames_ ? &arrival_slots_.growth_ms : nullptr, true);
     std::optional<core::load_profile::DetailScope> slot_phase; // detail only: which part of this step the time goes to
     slot_phase.emplace(core::load_profile::Phase::slot_prologue);
-    if (!launch && !structure) --arrival_slots_.remaining; // deterministic work budget, independent of elapsed frame time
+    if (!launch && !structure && !survivor) --arrival_slots_.remaining; // deterministic work budget, independent of elapsed frame time
     // Projectile pools append model slots independently. Keep this metadata indexed by
     // the population's actual slots before adding a hull and its death clone.
     const auto composed = arrival_slots_.population->placed_units();
@@ -926,8 +978,9 @@ std::optional<std::size_t> LiveSessionView::grow_launch_slot(const sim::EntityId
     slot_phase.emplace(core::load_profile::Phase::slot_launch_slot);
     add_launch_slot(*arrival_slots_.filesystem, *arrival_slots_.catalog, named->id, anchor,
         colour != start_->players.end() ? colour->colour : std::optional<battle::LobbyColour>{}, 0, proxy_owner,
-        source_label(launch ? battle::ArrivalSource::launch : battle::ArrivalSource::purchase));
-    core::load_profile::slot_grown(launch ? "launch" : "purchase");
+        source_label(survivor ? battle::ArrivalSource::destruction_survivor
+            : launch ? battle::ArrivalSource::launch : battle::ArrivalSource::purchase));
+    core::load_profile::slot_grown(survivor ? "destruction_survivor" : launch ? "launch" : "purchase");
     const auto slot_index = launch_slots_.size() - 1;
     slot_phase.emplace(core::load_profile::Phase::slot_death_clone);
     if (auto clone = prepare_death_clone(*arrival_slots_.filesystem, *arrival_slots_.catalog, first_ship, entity)) {

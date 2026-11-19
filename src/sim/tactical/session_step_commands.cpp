@@ -484,6 +484,7 @@ core::Result<void> session_detail::Tick::abilities_tracking() {
     if (buying) {
         const auto counted = impl_->count_owned(moving, executor);
         if (!counted) return core::Result<void>::failure(counted.error());
+        count_destruction_birth_ownership();
         production_census_visits += moving.size();
     }
     mark("staged_map_build", true);
@@ -1063,6 +1064,10 @@ Event session_detail::Tick::destruction_event(const std::uint64_t event_tick, co
         if (affects_gate) set_special_hardpoint_gate(unit.owner, false);
     }
     if (kind == EventKind::unit_destroyed) {
+        if (impl_->setup.domain == BattleDomain::space && !loss_ids_.contains(unit.entity_id)
+            && !destruction_birth_error_) {
+            if (auto born = create_destruction_survivors(unit); !born) destruction_birth_error_ = born.error();
+        }
         // WHE-41/50: sparse ordered destruction, members before their contained team.
         // These limbo identities were never admitted to the victory or spatial census.
         const auto destroy_rider = [&](auto&& self, const CarriedObject& rider) -> void {

@@ -96,7 +96,7 @@ targeting reads (V-09); presentation still draws F-01.
 | Rule | Behaviour | Source |
 |---|---|---|
 | V-21 | `Multisample_FOW_Check` adds the four corners and four edge midpoints of the yaw-oriented hard coordination box to the position sample. Positive `Custom_Hard_XExtent` and `Custom_Hard_YExtent` override model collision half extents independently; both extents take `Scale_Factor`. The box centre is the position plus `Custom_Hard_XExtent_Offset` and `Custom_Hard_YExtent_Offset`, rotated by yaw but unscaled; it does not use the model box centre. Without a model or both positive custom extents, the type has zero extents. Deployed extents and ideal team boxes are outside the current space roster. | debug build (sample points, hard box construction and type extents); effective XML |
-| V-22 | Dense fog is a shared boolean union of midpoint circles initialized from map placements with `SPACE_OBSTACLE` and any nebula, asteroid-field, impassable-asteroid or ion-storm flag. Circle centre is position plus raw unrotated `Space_Obstacle_Offset`; radius is raw `Space_Obstacle_Radius`. Neither scale nor custom soft radius applies. Ordinary reveal first floors the full range to 10, multiplies it by `Dense_FOW_Reveal_Range_Multiplier` (default 0.5), then rounds each range separately to cells. Full-radius coverage applies only to normal destination cells, reduced-radius coverage only to dense ones, wherever the revealer stands. Overlaps do not multiply reductions. Releasing a circle releases exactly those selected holds. | debug build (reveal ranges and destination-cell selection); WHZ-09; effective XML |
+| V-22 | Normal space-skirmish setup retains full sensor reveal range through asteroid fields and ion nebulas (V22-R1..R5). Hazard membership does not itself activate a dense mask on this path. The shared optional dense-cell kernel remains available: its mask is the boolean union of raw, unrotated obstacle circles; full range applies to normal destination cells and `Dense_FOW_Reveal_Range_Multiplier` (default 0.5) to dense destination cells, independently of the source location. Each range rounds separately after the normal 10-unit floor; overlaps do not multiply reductions and release removes the same holds. This kernel does not prove its activation by normal skirmish setup. Campaign-launched battles retain the previous authored mask pending G-V10. | debug-build runtime captures (normal skirmish setup, 2026-11-17); shared kernel inspection; WHZ-09; effective XML |
 | V-23 | A reveal source changing owner immediately releases its previous circle for the old owner's allied players and marks its current circle for the new owner's allied players. This refresh does not require movement. Old-team values linger under V-15 after their holds are released; overlapping reveal sources retain their independent holds. | debug build (ownership notification releases old allied holds and reveals to new allies); WNO-23/35 |
 | V-24 | A revealer whose service is disabled keeps the circle it holds (disabling is a counter, not a release) until its service marks again or it leaves the session. An arriving reinforcement marks at its drop point when created and keeps that circle through arrival frame 119 (WR-49, WR-39). | debug build (reveal behaviour service, behaviour service counter); WR-49 |
 
@@ -106,6 +106,27 @@ row buffer and assign rows through the partition executor; later snapshots and v
 the same grid. No reveal changes an allied observer's grid unless the script requests that
 observer separately. The existing fog model represents held cells at 255 immediately (V-11);
 the debug build's initial reveal ramp is part of that existing approximation.
+
+### Space-skirmish field controls (2026-11-17)
+
+All controls entered through normal single-player skirmish setup with fog on, rather than
+the direct map loader. Lua staged stationary, invulnerable subjects, suspended AI and
+prevented opportunity fire; V22-R5 additionally disabled all fire on both subjects. Other
+nearby friendly revealers were moved away; bases remained remote from the subjects. Captures retained
+positions before and after; these are model-visibility observations, not internal fog-byte
+queries. Private PNGs and staging receipts accompany the issue evidence.
+
+| Evidence | Staging | Observed |
+|---|---|---|
+| V22-R1 | Polus: enemy inside an asteroid field; scout outside at 1500, 900, 400 and 150 units. Effective reveal range 1000, authored dense multiplier 0.2. | Absent at 1500; visible at 900, 400 and 150. This follows the full-range control pattern, subject to the fire-suppression limit below. |
+| V22-R2 | Same ships in open space at 1500, 1100 and 900. | Absent at 1500 and 1100; visible at 900. The field retains the open-space cutoff. |
+| V22-R3 | Both ships inside one asteroid circle, 400 then 900 apart; then source inside and target outside, 900 apart. | Visible in all three controls, including the source-inside case. |
+| V22-R4 | Mining pad inside a field: far fogged, near, then re-fogged. | Model draws throughout. Fogged hover/click gives no tooltip or selection; right click gives ordinary ground movement. Near control opens the build palette; the same hit point fails after re-fogging. Near control also changes ownership, so this is not an ownership-only comparison. |
+| V22-R5 | Endor: enemy at the centre of an ion nebula; same 1000-range scout at 1500, 900 and 150. Both subjects have all fire disabled. | Absent at 1500; visible at 900 and 150. The nebula and ion-storm flags do not cause reduced sensor sight in this setup path. |
+
+The asteroid series used opportunity-fire suppression only and did not independently
+exclude every firing flash. V22-R5 repeats the range test in an ion nebula with all fire
+disabled to exclude firing reveal (V-19).
 
 ### Candidate order
 
@@ -173,9 +194,10 @@ and through a written and parsed replay v3, with identical hashes and digests.
 |---|---|---|
 | G-V1 | Resolved by V-21: flagged objects use the hard box's corners and edge midpoints as well as their position. | The station boundary now matches the sourced multisample rule. |
 | G-V8 | V-19 now uses the loaded model collision box for firing reveals. Animated changes to that box remain unmodelled. | An animated model can flash a slightly different circle in FoC. |
-| G-V2 | Resolved by V-22 and WHZ-09: destination dense cells use the revealer's multiplier. The initialized mask remains static after hazard movement/destruction, the hazard walk's U-03. | Static skirmish hazards use the sourced reduced reveal range. |
+| G-V2 | Dense-kernel activation was previously inferred too broadly. V-22 runtime controls supersede reduced reveal for normal space skirmish. Static-mask updates after hazard movement/destruction remain WHZ U-03 only where that mask is active. | Space-skirmish hazard flags no longer activate reduced sensor sight. |
+| G-V10 | Dense-mask activation in campaign-launched space battles is unverified. Campaign entry explicitly preserves the previous authored hazard mask pending a separate runtime control. | The skirmish correction does not establish campaign behaviour. |
 | G-V9 | Remembered model retirement still samples its saved centre (FW-27), whereas current live visibility uses V-21. | A remembered station can remain until its centre clears after a box sample has already cleared. |
-| G-V3 | `Initial_State_Visible_Under_FOW`, `Last_State_Visible_Under_FOW` and `Visible_On_Radar_When_Fogged` on stations and map structures show some fogged objects in retail. They are not modelled. | Presentation may hide a fogged station or pad that retail draws. |
+| G-V3 | Resolved: fog-memory model admission follows `Initial_State_Visible_Under_FOW` and `Last_State_Visible_Under_FOW` (FW-25..29); radar admission follows `Visible_On_Radar_When_Fogged` (WNO-41..44). A fogged pad can draw while remaining unpickable, as V22-R4 confirms. | Drawing from memory grants no selection, tooltip or capture-target bypass. |
 | G-V4 | Team-shared coverage (V-04, V-05) is confirmed by the debug build (AU-44). | None in M2 (one versus one). |
 | G-01 | Target scans follow the retail collector order since the target collection order and fighter approach work (targeting CO rules); what stays open is the targeting note's G-01. | An individual frame's equal-priority choice can still differ from retail's. |
 | G-V5 | The `Y-Wing` craft authors `REVEAL` (600), so by V-01 each Y-wing reveals on its own besides its squadron's 1000 container; the debug build shows no rule that suppresses a craft's reveal inside a team. RO-1 recorded X-Wing and TIE Fighter squadrons only. | Needs a runtime check (a Y-Wing squadron staging). If retail suppresses it, the Y-wing craft reveal more here. |

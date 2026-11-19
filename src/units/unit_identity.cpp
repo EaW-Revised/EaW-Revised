@@ -77,6 +77,10 @@ void encode(Encoder& out, const Weapon& weapon) {
     if (weapon.pulse_count) out.u32(*weapon.pulse_count);
     out.fixed(weapon.pulse_delay_seconds);
     out.fixed(weapon.range);
+    if (weapon.min_range.value_or(Fixed{}) != Fixed{}) {
+        out.text("weapon-min-range-v1");
+        out.fixed(weapon.min_range);
+    }
     out.fixed(weapon.cone_width_degrees);
     out.fixed(weapon.cone_height_degrees);
     out.text(weapon.damage_type);
@@ -295,6 +299,15 @@ void encode(Encoder& out, const UnitType& unit) {
         out.fixed(turret.yaw_extent);
         out.fixed(turret.pitch_extent);
         out.flag(turret.xy_only);
+    }
+    if (!unit.destruction_survivors.empty()) {
+        out.text("destruction-survivors-v1");
+        out.each(unit.destruction_survivors, [&](const UnitType::DestructionSurvivor& row) {
+            out.text(row.type); out.fixed(row.weight); out.u32(row.type_index);
+        });
+        out.u32(static_cast<std::uint32_t>(unit.survivor_minimum));
+        out.u32(static_cast<std::uint32_t>(unit.survivor_maximum));
+        out.fixed(unit.survivor_flyout_distance); encode(out, unit.survivor_bay); out.flag(unit.survivor_ejection);
     }
     if (!unit.death_projectiles.empty()) {
         out.text("death-projectiles-v1");
@@ -1028,6 +1041,15 @@ void encode_production_campaign_extensions(Encoder& out, const UnitTables& table
                 out.fixed(bonus.multiplier);
                 out.flag(bonus.all_allies);
             });
+        });
+    }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const auto& unit) {
+            return unit.tactical_bribe_cost || unit.bribe_corrupted_modifier || unit.bribe_uncorrupted_modifier;
+        })) {
+        out.text("tactical-bribe-cost-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id); out.fixed(unit.tactical_bribe_cost);
+            out.fixed(unit.bribe_corrupted_modifier); out.fixed(unit.bribe_uncorrupted_modifier);
         });
     }
     if (tables.campaign_scene) {

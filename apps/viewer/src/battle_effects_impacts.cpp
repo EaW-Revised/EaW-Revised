@@ -201,7 +201,8 @@ void BattleEffects::after_step(LiveEffect& effect, const particles::EffectFrameS
     particles_ += advanced.particles;
     effect.age += elapsed;
     if (effect.log < spawn_log_.size() && contact_samples_.size() < 8192
-        && (spawn_log_[effect.log].key.starts_with("damage_hit:") || spawn_log_[effect.log].key.starts_with("shield_hit:"))) {
+        && (spawn_log_[effect.log].key.starts_with("damage_hit:") || spawn_log_[effect.log].key.starts_with("shield_hit:")
+            || spawn_log_[effect.log].key.starts_with("asteroid:") || spawn_log_[effect.log].key.starts_with("asteroid_shield_hit:"))) {
         contact_samples_.push_back({samples_, effect.handle, spawn_log_[effect.log].key, effect.age, effect.contact,
             effect.frame, advanced.has_bounds, scale(add(advanced.bounds_min, advanced.bounds_max), 0.5F), effect.detached});
     }
@@ -836,15 +837,20 @@ bool BattleEffects::present_reached_effects(const std::span<const platform::Live
             const auto seen = last_seen_.find(impact.target);
             if (seen == last_seen_.end()) continue;
             const auto found = types_.find(seen->second.type);
-            if (found == types_.end() || found->second.asteroid_hits.empty()) continue;
+            if (found == types_.end()) continue;
             const auto& look = found->second;
+            // WHZ-73: the damage result selects the list; only the shield branch attaches to the victim.
+            const bool shield = impact.outcome.shield_absorbed;
+            const auto& choices = shield ? look.shield_hits : look.asteroid_hits;
+            if (choices.empty()) continue;
             tactical::CombatEvent key;
             key.tick = record.tick;
             key.shooter = impact.hit.source;
             key.target = impact.target;
             key.target_hardpoint = impact.hit.hardpoint;
             const auto seed = live::hit_event_key(key);
-            const auto& particle_name = look.asteroid_hits[live::hit_particle_pick(seed, live::HitParticleList::damage, look.asteroid_hits.size())];
+            const auto& particle_name = choices[live::hit_particle_pick(seed,
+                shield ? live::HitParticleList::shield : live::HitParticleList::damage, choices.size())];
             auto place = seen->second.position;
             space::Vec3d direction{0.0, 0.0, 1.0};
             const auto& triangles = look.asteroid_collision.triangles;
@@ -869,8 +875,9 @@ bool BattleEffects::present_reached_effects(const std::span<const platform::Live
                 }
             }
             const auto* particle = particle_type(particle_name);
-            const auto axes = space::shield_hit_axes(direction, particle != nullptr && particle->attached_to_collision);
-            if (!process_spawn(particle_name, place, {vec(axes.x), vec(axes.y), vec(axes.z)}, "asteroid", record.tick)) return false;
+            const auto axes = space::shield_hit_axes(direction, shield && particle != nullptr && particle->attached_to_collision);
+            if (!process_spawn(particle_name, place, {vec(axes.x), vec(axes.y), vec(axes.z)},
+                    shield ? "asteroid_shield_hit" : "asteroid", record.tick, shield ? impact.target : 0U)) return false;
         }
         for (const tactical::Event& event : record.events) {
             const FighterEffectScope fighter_scope(event.unit);

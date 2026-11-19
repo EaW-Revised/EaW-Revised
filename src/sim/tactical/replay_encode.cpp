@@ -18,7 +18,8 @@ namespace {
     const auto& match = setup.match;
     const SkirmishMatchPolicy policy{match.allow_heroes, match.allow_superweapons,
         match.free_starting_units, match.pre_built_base};
-    sim::detail::append_u32(bytes, policy.disabled_flags() | (match.allow_random_events ? 16U : 0U));
+    sim::detail::append_u32(bytes, policy.disabled_flags() | (match.allow_random_events ? 16U : 0U)
+        | (setup.campaign_origin ? 32U : 0U));
     sim::detail::append_i64(bytes, match.credits.raw());
     for (const auto value : {match.start_tech, match.max_tech, match.game_timer, match.win_integer, match.auto_resolve})
         sim::detail::append_i64(bytes, value);
@@ -139,7 +140,8 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
     }
     if (replay.setup.campaign) {
         const auto& binding = *replay.setup.campaign;
-        sim::detail::append_u32(campaign, binding.reserve_order.empty() ? 5U : 6U);
+        sim::detail::append_u32(campaign, binding.reserve_order.empty() ? 7U : 8U);
+        sim::detail::append_u32(campaign, binding.corrupted ? 1U : 0U);
         sim::detail::append_i64(campaign, binding.corruption_price_multiplier.raw());
         sim::detail::append_u32(campaign, static_cast<std::uint32_t>(binding.players.size()));
         for (const auto& p : binding.players) {

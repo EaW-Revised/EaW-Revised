@@ -175,6 +175,7 @@ struct Planet {
     std::string describe_advantage{};
     // The Planet Info dialog texts (Describe_*; text keys, presentation only).
     std::string describe_tactical{}, describe_history{}, describe_weather{}, describe_terrain{}, describe_population{};
+    std::string describe_wildlife{};
     std::vector<std::string> encyclopedia_text{};
     // Corruption_N_Success_Speech_Event / _Bink_Hologram_Name for choice slots 1..3 (WGCH-09/128; presentation only).
     std::array<std::string, 3> corruption_success_speech_event{}, corruption_success_hologram_name{};

@@ -110,6 +110,7 @@ struct CombatUnit {
     std::optional<math::Fixed> fixed_inaccuracy{};
     math::Fixed object_fire_rate{math::Fixed::from_raw(math::Fixed::scale)};
     bool target_prepared{};       // WSQ-42/43: member targeting has already run before team sharing
+    bool approaching_ordered_hardpoint{}; // FT-01/OR-23: the team's explicit approach still holds this target
     bool sensor_jammed{}; // WPJ-10: supplied by the recipient-stamping owner
     bool stealth_on{};        // WST-10: its own cloak is on: no target scans (R-05)
     bool stealth_invisible{}; // WST-09: hidden from enemies that cannot target stealth units

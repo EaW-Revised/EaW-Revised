@@ -98,7 +98,7 @@ int main() {
         view.economy_.players.push_back({owner, 25});
         if (!__EMPTY_START__ && owner != __EMPTY_OWNER__) {
             view.start_->units.push_back({{100 + owner, skirmish::type_id("Station"), owner, {}}, {}, "Station"});
-            view.start_->units.back().state.position.x.raw = static_cast<int>(owner * 100);
+            view.start_->units.back().state.position.x.value = static_cast<int>(owner * 100);
         }
     }
     // Installed Aggressor identity and costs: a plain hull, population 4; Underworld cap 25.
@@ -346,7 +346,7 @@ int main() {
         view.economy_.players.push_back({owner, 25});
         if (owner == 8) continue;
         view.start_->units.push_back({{100 + owner, skirmish::type_id("Station"), owner, {}}, {}, "Station"});
-        view.start_->units.back().state.position.x.raw = static_cast<int>(owner * 100);
+        view.start_->units.back().state.position.x.value = static_cast<int>(owner * 100);
     }
     view.start_->units.push_back({{200, skirmish::type_id("Pad"), 0, {}}, {}, "Pad"});
     view.economy_.pads.points = {skirmish::type_id("Pad")};

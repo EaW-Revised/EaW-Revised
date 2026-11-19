@@ -1,0 +1,135 @@
+# Code signing of a release, on the dedicated signing host only (tools/release/signing_host/README.md).
+# Never runs on GitHub-hosted runners, on pull requests or on a schedule. A maintainer starts it by hand; the
+# `release-signing` environment makes the repository owner approve every run, and its Azure account values live there
+# as environment variables (no secret exists: the Azure login is a federated OIDC credential bound to this
+# environment). In release mode the job signs only archives that a maintainer dropped on the host and that match the
+# SHA-256 named in the request, for a tag that exists in this repository as an annotated tag. In test mode it signs
+# only a file named eawr-signing-test.exe (a throwaway binary, never a release artifact) to prove the route.
+name: Sign release
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: release signs the dropped release archives; test signs only eawr-signing-test.exe
+        required: true
+        type: choice
+        default: release
+        options: [release, test]
+      tag:
+        description: Release mode - tag whose archives were dropped on the signing host (for example v0.3.6)
+        required: false
+        type: string
+      sums_sha256:
+        description: Release mode - SHA-256 of the dropped SHA256SUMS.txt (the maintainer computes it before the drop)
+        required: false
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: sign-release
+  cancel-in-progress: false
+jobs:
+  sign:
+    name: Sign (${{ inputs.mode }})
+    # Only a manual run from main. This line and the first step guard against a mistake; they cannot stop a workflow
+    # file copied to another branch and edited, because that copy brings its own version of both. What does stop it:
+    # (1) the `release-signing` environment allows deployments from main only (repository setting), and (2) the job
+    # guard on the signing host, which the runner calls before any step and which a workflow cannot change
+    # (tools/release/signing_host/README.md, "The job guard").
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' }}
+    runs-on: [self-hosted, linux, eawr-signing]
+    environment: release-signing
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      MODE: ${{ inputs.mode }}
+      TAG: ${{ inputs.tag }}
+      SUMS_SHA256: ${{ inputs.sums_sha256 }}
+      SIGNING_ENDPOINT: ${{ vars.SIGNING_ENDPOINT }}
+      SIGNING_ACCOUNT: ${{ vars.SIGNING_ACCOUNT }}
+      SIGNING_PROFILE: ${{ vars.SIGNING_PROFILE }}
+      SIGNING_SUBJECT: ${{ vars.SIGNING_SUBJECT }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      DROP_ROOT: /srv/eawr-signing/drop
+    steps:
+      - name: Refuse to run anywhere but main
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF" = "refs/heads/main" ] || { echo "signing runs only from refs/heads/main" >&2; exit 1; }
+          [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || { echo "signing runs only on workflow_dispatch" >&2; exit 1; }
+          [ "$GITHUB_WORKFLOW_REF" = "${GITHUB_REPOSITORY}/.github/workflows/sign-release.yml@refs/heads/main" ] || { echo "not the main copy of this workflow" >&2; exit 1; }
+          if [ "$MODE" = release ]; then
+            [ -n "${SIGNING_SUBJECT:-}" ] || { echo "release mode needs SIGNING_SUBJECT (the expected signer name) in the environment" >&2; exit 1; }
+          fi
+
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Check the release request
+        if: ${{ inputs.mode == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]] || { echo "not a release tag" >&2; exit 1; }
+          [[ "$SUMS_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "not a SHA-256" >&2; exit 1; }
+          refs=$(git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}" "refs/tags/${TAG}^{}")
+          # An annotated tag lists the tag object and, peeled, its commit; a lightweight tag lists one line.
+          [ "$(printf '%s\n' "$refs" | grep -c .)" -eq 2 ] || { echo "the tag is missing or not annotated" >&2; exit 1; }
+          test -d "$DROP_ROOT/inbox/$TAG" || { echo "nothing dropped for $TAG" >&2; exit 1; }
+          rm -rf "$DROP_ROOT/work/$TAG" "$DROP_ROOT/outbox/$TAG"
+          mkdir -p "$DROP_ROOT/work/$TAG" "$DROP_ROOT/outbox/$TAG"
+
+      - name: Plan
+        if: ${{ inputs.mode == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/release/sign_release.py plan "$DROP_ROOT/inbox/$TAG" --tag "$TAG" --sums-sha256 "$SUMS_SHA256"
+
+      - name: Sign
+        if: ${{ inputs.mode == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/release/sign_release.py sign "$DROP_ROOT/inbox/$TAG" --out "$DROP_ROOT/work/$TAG/signed" \
+            --tag "$TAG" --sums-sha256 "$SUMS_SHA256"
+
+      - name: Finish
+        if: ${{ inputs.mode == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/release/sign_release.py finish "$DROP_ROOT/inbox/$TAG" --signed "$DROP_ROOT/work/$TAG/signed" \
+            --out "$DROP_ROOT/outbox/$TAG"
+
+      - name: Verify
+        if: ${{ inputs.mode == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/release/sign_release.py verify "$DROP_ROOT/inbox/$TAG" --final "$DROP_ROOT/outbox/$TAG" \
+            --require-osslsigncode --subject "$SIGNING_SUBJECT"
+
+      - name: Sign the test binary
+        if: ${{ inputs.mode == 'test' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$DROP_ROOT/inbox/signing-test/eawr-signing-test.exe" || { echo "drop eawr-signing-test.exe in inbox/signing-test/ first" >&2; exit 1; }
+          rm -rf "$DROP_ROOT/outbox/signing-test"
+          python3 tools/release/sign_release.py sign-test "$DROP_ROOT/inbox/signing-test/eawr-signing-test.exe" \
+            --out "$DROP_ROOT/outbox/signing-test"
+
+      - name: Clear the work area
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          # TAG was validated only in release mode
+          if [ "$MODE" = release ] && [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]]; then rm -rf "$DROP_ROOT/work/$TAG"; fi

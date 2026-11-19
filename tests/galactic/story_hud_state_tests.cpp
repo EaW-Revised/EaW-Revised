@@ -1,5 +1,6 @@
 #include "galactic/story_hud_state.hpp"
 #include "galactic/story_text_state.hpp"
+#include "galactic/text_reveal.hpp"
 #include "eawr/platform/live_story_feed.hpp"
 
 #ifdef NDEBUG
@@ -21,6 +22,53 @@ st::ConsumerRequest control(std::string reward, std::string value) { return {st:
 } // namespace
 
 int case_galactic_story_hud_state_tests() {
+    {
+        // WGP-197 / GFC-40: independent authored rate, ordered wrapped lines,
+        // wall-time progress, the display cap and UTF-16 units.
+        eawr::data::XmlNode constants;
+        assert(!text_reveal_rate(constants));
+        eawr::data::XmlNode rate;
+        rate.name = "Text_Reveal_Rate"; rate.raw_text = " 7.5 ";
+        constants.children.push_back(rate);
+        assert(text_reveal_rate(constants) == 7.5F);
+        constants.children.front().raw_text = "nan";
+        assert(!text_reveal_rate(constants));
+        constants.children.front().raw_text = "0";
+        assert(text_reveal_rate(constants) == 0.0F);
+        constants.children.front().raw_text = "+19";
+        assert(text_reveal_rate(constants) == 19.0F);
+        constants.children.front().raw_text = "12junk";
+        assert(!text_reveal_rate(constants));
+        TextReveal reveal;
+        const std::array<std::size_t, 3> lengths{3, 4, 2000};
+        reveal.begin(lengths, true, 10.0F);
+        reveal.advance(10.5F, 4.0F);
+        assert(reveal.visible(0) == 2 && reveal.visible(1) == 0 && reveal.visible(2) == 0);
+        reveal.advance(11.0F, 4.0F);
+        assert(reveal.visible(0) == 3 && reveal.visible(1) == 0);
+        reveal.advance(12.0F, 4.0F);
+        assert(reveal.visible(1) == 4 && reveal.visible(2) == 0);
+        reveal.advance(512.0F, 4.0F);
+        assert(reveal.lines()[2].progress == 2000.0F && reveal.visible(2) == 1023);
+        reveal.advance(10.0F, 4.0F);
+        assert(reveal.visible(0) == 3 && reveal.visible(1) == 4 && reveal.visible(2) == 1023);
+        reveal.begin(lengths, false, 10.0F);
+        reveal.advance(11.0F, -100.0F);
+        assert(reveal.visible(2) == 2000);
+        reveal.begin(lengths, true, 10.0F);
+        reveal.advance(20.0F, 0.0F);
+        assert(reveal.visible(0) == 0);
+        reveal.advance(19.0F, 2.0F); // no unsigned wrap on a backwards clock
+        assert(reveal.visible(0) == 0);
+        assert(wide_length(U"a\U0001f680b") == 4);
+        assert(wide_prefix(U"a\U0001f680b", 2) == 1 && wide_prefix(U"a\U0001f680b", 3) == 2);
+        const std::array<std::size_t, 3> empty_line{0, 1, 2};
+        reveal.begin(empty_line, true, 10.0F);
+        reveal.advance(11.0F, 1.0F);
+        assert(reveal.visible(1) == 1 && reveal.visible(2) == 0);
+        reveal.advance(12.0F, 1.0F);
+        assert(reveal.visible(1) == 1 && reveal.visible(2) == 1);
+    }
     {
         // A flash pulses for three 0.5 s periods, peaks half-way through each, then leaves and is reported finished once.
         StoryHudState hud;
@@ -186,6 +234,8 @@ int case_galactic_story_hud_state_tests() {
             return view.apply({1, st::ConsumerRequest{Consumer::text, "SCREEN_TEXT", std::move(parameters)}});
         };
         assert(text({"TEXT_A", "", "", "", "", "", ""}) && view.lines().size() == 1 && view.lines()[0].seconds_left == 5.0 && view.lines()[0].teletype);
+        const auto first_identity = view.lines()[0].identity;
+        assert(text({"TEXT_A", "", "", "", "", "", ""}) && view.lines().size() == 1 && view.lines()[0].identity != first_identity);
         assert(text({"TEXT_B", "-1", "", "", "0", "1 0.5 0", "Hint"}) && view.lines()[1].seconds_left < 0.0 && !view.lines()[1].teletype
             && view.lines()[1].colour && (*view.lines()[1].colour)[1] == 0.5F && view.lines()[1].style == StoryTextState::Style::hint);
         assert(text({"TEXT_C", "2", "", "", "", "1 2", "task"}) && !view.lines()[2].colour && view.lines()[2].style == StoryTextState::Style::task);

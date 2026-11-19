@@ -27,6 +27,27 @@ void audit_contracts() {
                                          [](const ui::TextureAudit& entry) { return entry.texture == "i_standalone.tga"; });
     expect(standalone != audit.textures.end() && standalone->standalone && !standalone->in_atlas,
            "standalone texture is found by the probe");
+    auto sibling_catalog = catalog;
+    sibling_catalog.skin.default_textures.slots.push_back({"Sibling", "i_button_blank.dds", 0});
+    sibling_catalog.skin.default_textures.slots.push_back({"Absent", "i_truly_absent.dds", 0});
+    const auto sibling_audit = ui::audit_dialog_catalog(sibling_catalog, atlas, text, probe);
+    const auto sibling = std::find_if(sibling_audit.textures.begin(), sibling_audit.textures.end(),
+        [](const auto& entry) { return entry.texture == "i_button_blank.dds"; });
+    expect(sibling != sibling_audit.textures.end() && sibling->in_atlas && sibling->atlas_sibling
+        && sibling->atlas_texture == "i_button_blank.tga",
+        "audit records the stored atlas name and distinguishes sibling-only resolution");
+    const auto exact = std::find_if(sibling_audit.textures.begin(), sibling_audit.textures.end(),
+        [](const auto& entry) { return entry.texture == "i_button_blank.tga"; });
+    expect(exact != sibling_audit.textures.end() && exact->in_atlas && !exact->atlas_sibling,
+        "case-insensitive exact atlas matches are not sibling retries");
+    expect(sibling_audit.unresolved_textures == std::vector<std::string>{"i_missing.tga", "i_truly_absent.dds"},
+        "audit still reports truly absent authored stems after sibling resolution");
+    const auto loose_audit = ui::audit_dialog_catalog(sibling_catalog, atlas, text,
+        [](std::string_view name) { return name == "i_button_blank.dds"; });
+    const auto loose_match = std::find_if(loose_audit.textures.begin(), loose_audit.textures.end(),
+        [](const auto& entry) { return entry.texture == "i_button_blank.dds"; });
+    expect(loose_match != loose_audit.textures.end() && loose_match->standalone && !loose_match->in_atlas,
+        "audit preserves loose replacement priority over atlas sibling");
     expect(audit.unresolved_fonts.size() == 2U, "fonts without a face or size are listed");
     expect(audit.font_faces.at("Face-Medium") == 10U && audit.font_faces.at("Face-Bold") == 3U,
            "resolved faces are counted per control");
@@ -132,6 +153,8 @@ void corpus_contracts() {
     for (const auto& texture : audit.textures) {
         in_atlas += texture.in_atlas ? 1U : 0U;
         standalone += texture.standalone ? 1U : 0U;
+        if (texture.atlas_sibling)
+            std::cout << "  atlas sibling: " << texture.texture << " -> " << texture.atlas_texture << '\n';
     }
     std::cout << "dialog catalogue corpus: " << value.script.source.source_id << ", "
               << value.symbols.source.source_id << ", " << value.skin.source.source_id << '\n'

@@ -22,6 +22,39 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 
+def playable_factions(game_root, mod_root=None):
+    """#7842: the faction names the effective installed XML marks Is_Playable and not Is_Neutral, read independently."""
+    from tools.inventory.corpus import Corpus
+    corpus = Corpus(game_root, mod_root)
+    profile = "remake" if mod_root else "foc"
+
+    def read(path):
+        source = corpus.read_effective(profile, path)
+        if source is None:
+            raise AssertionError("missing effective file: " + path)
+        return source.data
+
+    def flag(node, tag):
+        return (node.findtext(tag) or "").strip().casefold() in ("true", "yes", "1")
+
+    names = set()
+    for file in ET.fromstring(read("Data/XML/FactionFiles.xml")).iter("File"):
+        for row in ET.fromstring(read("Data/XML/" + file.text.strip())):
+            if row.tag == "Faction" and flag(row, "Is_Playable") and not flag(row, "Is_Neutral"):
+                names.add(row.attrib["Name"].casefold())
+    return names
+
+
+def map_offer(stdout):
+    """(new_markers, distinct faction names the selected map's teams name) from the viewer's setup report."""
+    found = re.search(r"EAWR setup map factions: new_markers=(\d) teams=(.*)", stdout)
+    if found is None:
+        raise AssertionError(stdout[-3000:])
+    offered = {name.casefold() for team in found.group(2).strip().split(";") if ":" in team
+               for name in team.split(":", 1)[1].split(",") if name}
+    return found.group(1) == "1", offered
+
+
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT"),
                      "requires the viewer GPU lane and installed game data")
 class SkirmishSetupGpu(unittest.TestCase):
@@ -665,9 +698,13 @@ class SkirmishSetupGpu(unittest.TestCase):
             credit_edits(result.stdout, low, high, value)
             factions = re.search(r"EAWR setup factions: count=(\d+) items=(.*)", result.stdout)
             self.assertIsNotNone(factions, result.stdout[-3000:])
-            # Stock FoC lists exactly its three playable factions.
+            # Stock FoC lists exactly its three playable factions: its maps' stations name all three (#7842).
             self.assertEqual(int(factions.group(1)), 3)
             self.assertEqual(int(factions.group(1)), len(factions.group(2).strip().split("|")))
+            new_markers, offered = map_offer(result.stdout)
+            expected = playable_factions(os.environ["EAWR_EAW_GAME_ROOT"])
+            self.assertEqual(expected, {"rebel", "empire", "underworld"})
+            self.assertEqual(offered if new_markers else expected, expected)
             slots = re.findall(r"EAWR setup slot (\d+): active=(\d) faction=(.*?) team=(.*)", result.stdout)
             open_rows = [row for row in slots if row[1] == "0"]
             self.assertTrue(open_rows, result.stdout[-6000:])
@@ -745,8 +782,9 @@ class SkirmishSetupGpu(unittest.TestCase):
             self.assertGreater((output / "bounded.options.png").stat().st_size, 10000)
 
     @unittest.skipUnless(os.environ.get("EAWR_REMAKE_MOD_ROOT"), "requires the Remake mod")
-    def test_remake_chain_lists_every_playable_faction(self):
-        """#4660: the mounted Remake chain offers 4+ playable factions, not the three station-candidate ones."""
+    def test_remake_chain_lists_the_factions_the_map_can_start(self):
+        """#7842 (replaces #4660's every-playable-faction list): the mounted Remake chain offers the playable,
+        non-neutral factions its selected map can start."""
         with tempfile.TemporaryDirectory(prefix="setup-factions-") as temporary:
             output = Path(os.environ.get("EAWR_SETUP_EYECHECK", temporary)).resolve()
             output.mkdir(parents=True, exist_ok=True)
@@ -763,8 +801,18 @@ class SkirmishSetupGpu(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout[-6000:])
             factions = re.search(r"EAWR setup factions: count=(\d+) items=(.*)", result.stdout)
             self.assertIsNotNone(factions, result.stdout[-3000:])
-            self.assertGreaterEqual(int(factions.group(1)), 4, factions.group(2))
             self.assertEqual(int(factions.group(1)), len(factions.group(2).strip().split("|")))
+            # #7842: exactly the playable, non-neutral factions the selected map can start (every playable
+            # faction on a legacy map that offers all), never a neutral or unplayable one.
+            expected = playable_factions(os.environ["EAWR_EAW_GAME_ROOT"], os.environ["EAWR_REMAKE_MOD_ROOT"])
+            new_markers, offered = map_offer(result.stdout)
+            self.assertTrue(offered <= expected, offered - expected)
+            self.assertEqual(int(factions.group(1)), len(offered) if new_markers else len(expected), result.stdout[-3000:])
+            if new_markers:
+                # The Remake marker types list five stations: the stock three plus CIS and Republic. Hapan, the
+                # Dummy_n placeholders, Rebel_Story and the rest have no station and must not be listed.
+                self.assertEqual(offered, {"rebel", "empire", "underworld", "cis", "republic"}, result.stdout[-3000:])
+                self.assertEqual(int(factions.group(1)), 5)
 
     def test_nondefault_policy_replay_binds_recorded_purchase_content(self):
         with tempfile.TemporaryDirectory(prefix="replay-policy-") as temporary:
@@ -909,7 +957,7 @@ class SkirmishSetupGpu(unittest.TestCase):
                          trace.name, replay.name):
                 (output / name).unlink(missing_ok=True)
             result = subprocess.run([
-                os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720", "--render-thread", "separate",
                 "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-skirmish-setup",
                 "--eawr-setup-test", "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
                 "--eawr-load-bench-starts", str(starts),
@@ -929,7 +977,7 @@ class SkirmishSetupGpu(unittest.TestCase):
             self.assertRegex(result.stdout, r"EAWR setup captions: \d+ keys; missing: 0(?!\d)")
             if starts == 1:
                 self.assertIn("EAWR setup custom map list: true; empty: true; start disabled: true", result.stdout)
-                self.assertIn("EAWR setup official map list: true; maps: 24; preview starts: 2", result.stdout)
+                self.assertIn("EAWR setup official map list: true; maps: 24; preview starts: 2; preview emblems: 2", result.stdout)
             data = json.loads(report.read_text(encoding="utf-8"))
             live = data["live_session"]
             self.assertEqual(live["start_map"], "data/art/maps/_mp_space_kessel.ted")

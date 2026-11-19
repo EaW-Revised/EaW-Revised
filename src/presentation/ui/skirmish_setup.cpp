@@ -179,6 +179,17 @@ double setup_credits_button_step(const SetupCreditsRange range) noexcept {
     return static_cast<double>(span) / static_cast<double>(std::max<std::int64_t>(1, span / 1000));
 }
 
+std::string_view setup_preview_faction(const std::span<const SetupRow> occupied,
+                                     const std::uint32_t team) noexcept {
+    const std::string* faction = nullptr;
+    for (const auto& row : occupied) {
+        if (row.team != team) continue;
+        if (!faction) faction = &row.faction;
+        else if (*faction != row.faction) return {};
+    }
+    return faction ? std::string_view(*faction) : std::string_view{};
+}
+
 SetupBlocker setup_blocker(const std::span<const SetupRow> occupied) {
     if (occupied.size() < 2U) return SetupBlocker::too_few_players;
     std::map<std::uint32_t, std::set<std::string>> factions;

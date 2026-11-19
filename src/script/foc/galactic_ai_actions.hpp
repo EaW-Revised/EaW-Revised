@@ -56,6 +56,21 @@ void apply_bill_row(BillRow&, const BillEffect&);
 class NativeActions final : public Actions, public TrackedStateContributor {
     struct BoundState;
 public:
+    // The window owns this read view; admissions still use the session's native barrier.
+    class WorldReader {
+    public:
+        virtual ~WorldReader() = default;
+        [[nodiscard]] virtual std::shared_ptr<const gc::GalacticSnapshot> snapshot() const = 0;
+        [[nodiscard]] virtual const gc::PlanetGraph* graph() const = 0;
+        [[nodiscard]] virtual const gc::GalacticSetup& setup() const = 0;
+        [[nodiscard]] virtual std::uint64_t completed_tick() const = 0;
+        [[nodiscard]] virtual sim::EntityId next_entity_id() const = 0;
+        [[nodiscard]] virtual std::uint64_t pause_depth() const = 0;
+    };
+    // Bound only for the body scope, cleared before its window input is released.
+    const WorldReader* bind_world_reader(const WorldReader* reader) noexcept {
+        return std::exchange(world_reader_, reader);
+    }
     // Serial root phase: per-key purchase/movement undo, moved result scratch,
     // scalar cursors and the qualified freestore's sparse savepoint. World and
     // funding have separate participants; restore them before native goals.
@@ -310,7 +325,7 @@ public:
     [[nodiscard]] core::Result<ai::GalacticBuildStatus> build_status(gc::PlayerId, sim::EntityId build) const;
     [[nodiscard]] core::Result<sim::EntityId> build_actor(gc::PlayerId, sim::EntityId build) const;
     [[nodiscard]] core::Result<sim::math::Fixed> generic_build_cost(gc::TypeId type) const;
-    [[nodiscard]] std::shared_ptr<const gc::GalacticSnapshot> snapshot() const { return world_.snapshot(); }
+    [[nodiscard]] std::shared_ptr<const gc::GalacticSnapshot> snapshot() const { return world_reader_ ? world_reader_->snapshot() : world_.snapshot(); }
     // W1 S6 (async lane): a sink that takes a runtime load note raised inside the AI window (published with it and appended by
     // the world at its apply tick). False: not taken, the note goes to the world at once.
     using LoadNoteSink = std::function<bool(core::LoadNote&)>;
@@ -327,7 +342,7 @@ public:
         world_.add_runtime_load_notes(std::span<const core::LoadNote>(&note, 1));
     }
     // Direct native actions can allocate after the AI perception view was bound.
-    [[nodiscard]] sim::EntityId next_entity_id() const noexcept { return world_.next_entity_id(); }
+    [[nodiscard]] sim::EntityId next_entity_id() const { return world_reader_ ? world_reader_->next_entity_id() : world_.next_entity_id(); }
     struct BuildHead {
         gc::PlanetId producer{};
         gc::ProductionDomain channel{};
@@ -369,7 +384,7 @@ public:
     void bind_invasion_pending(std::function<bool(std::uint64_t)> pending) { invasion_pending_ = std::move(pending); }
     [[nodiscard]] bool invasion_pending(std::uint64_t request) const { return invasion_pending_ && invasion_pending_(request); }
     [[nodiscard]] sim::EntityId lane_floor() const { return lane_floor_ ? lane_floor_() : sim::EntityId{}; }
-    [[nodiscard]] sim::EntityId identity_ceiling() const { return std::max(world_.next_entity_id(), identity_ceiling_ ? identity_ceiling_() : sim::EntityId{}); }
+    [[nodiscard]] sim::EntityId identity_ceiling() const { return std::max(next_entity_id(), identity_ceiling_ ? identity_ceiling_() : sim::EntityId{}); }
     [[nodiscard]] bool qualified_freestore_available() const noexcept { return static_cast<bool>(freestore_validation_); }
     [[nodiscard]] std::span<const sim::EntityId> created(gc::PlayerId) const noexcept;
 private:
@@ -402,6 +417,11 @@ private:
     [[nodiscard]] core::Result<ActionReceipt> admit_movement(const ActionRequest&);
     [[nodiscard]] core::Result<void> refresh_freestore_movement(sim::EntityId, gc::FleetId, bool tracked);
     gc::GalacticSession& world_;
+    const WorldReader* world_reader_{};
+    [[nodiscard]] const gc::PlanetGraph* graph() const { return world_reader_ ? world_reader_->graph() : world_.graph(); }
+    [[nodiscard]] const gc::GalacticSetup& setup() const { return world_reader_ ? world_reader_->setup() : world_.setup(); }
+    [[nodiscard]] std::uint64_t completed_tick() const { return world_reader_ ? world_reader_->completed_tick() : world_.completed_tick(); }
+    [[nodiscard]] std::uint64_t pause_depth() const { return world_reader_ ? world_reader_->pause_depth() : world_.clock().pause_depth; }
     std::shared_ptr<ai::GalacticFunding> funding_;
     Placement placement_;
     ReconciliationPlacement reconciliation_placement_;

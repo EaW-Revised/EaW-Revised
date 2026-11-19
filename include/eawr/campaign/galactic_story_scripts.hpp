@@ -111,6 +111,10 @@ public:
     [[nodiscard]] std::string fingerprint() const;
     [[nodiscard]] core::Result<script::authoritative::ScriptScheduler> create_scheduler(
         script::authoritative::SessionConfig) const;
+    // The attachments the actor records ask for, in actor order (a pure function of the records and this content).
+    [[nodiscard]] core::Result<std::vector<script::authoritative::ObjectScript>> attachments(
+        std::span<const sim::galactic::CensusObject>, const sim::PartitionExecutor&) const;
+    // attachments(), then the scheduler's reconcile of them.
     [[nodiscard]] core::Result<std::vector<script::authoritative::ScriptDiagnostic>> reconcile(
         script::authoritative::ScriptScheduler&, std::span<const sim::galactic::CensusObject>,
         const sim::PartitionExecutor&) const;

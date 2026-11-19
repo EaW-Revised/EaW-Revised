@@ -21,7 +21,23 @@
 // deliberately plain: every placement with a renderable model is drawn,
 // except catalog-flagged markers (never visible in game) and nebula or
 // background objects, which the space environment composition owns.
+namespace eawr::battle { struct BattleStart; }
 namespace eawr::scene {
+
+// SG-CLS-01: draw ownership follows the original map record, regardless of
+// the XML element or resolved class. Environment claims take precedence over
+// session candidates; a spawned unit without a map record has neither claim.
+enum class SpaceRecordOwner : std::uint8_t { map, environment, session };
+[[nodiscard]] SpaceRecordOwner space_record_owner(
+    std::optional<std::uint32_t> map_record,
+    std::span<const std::uint32_t> environment_records,
+    std::span<const std::uint32_t> session_records) noexcept;
+
+// Use the final start metadata shared by local, replay and borrowed sources.
+// No source-specific provenance field can be lost before live composition.
+[[nodiscard]] SpaceRecordOwner space_live_record_owner(
+    sim::EntityId entity, const battle::BattleStart* start,
+    std::span<const std::uint32_t> environment_records) noexcept;
 
 // MD-06/WAB-75: a mesh-free projectile or unit model may draw through resolved particle proxies.
 [[nodiscard]] bool drawable_projectile_effects(const Placement& placement) noexcept;

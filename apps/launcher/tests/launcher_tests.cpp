@@ -497,6 +497,16 @@ public:
     std::function<void(const std::function<void()>&, const std::function<bool(unsigned)>&)> on_monitored;
     std::optional<fs::path> current_appdata;                    // what set_appdata last asked for
     std::vector<std::optional<fs::path>> appdata_at_start;      // the APPDATA redirect in force at each child start
+    bool detached = false;
+    fs::path detached_exe;
+    std::vector<std::wstring> detached_args;
+
+    bool start_detached(const fs::path& program, const std::vector<std::wstring>& arguments, const fs::path&) override {
+        detached = true;
+        detached_exe = program;
+        detached_args = arguments;
+        return true;
+    }
 
     void set_appdata(const std::optional<fs::path>& folder) override { current_appdata = folder; }
 
@@ -907,6 +917,35 @@ void test_flow_stay_open_failures() {
         const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
         CHECK_CONTAINS(text, R"("status":"failed")");
         CHECK(!f.ui.errors.empty());
+    }
+}
+
+void test_gpu_reset_and_update_handoff() {
+    {
+        FlowFixture f;
+        auto options = f.options();
+        options.game_root = f.game;
+        f.runner.result.exit_code = kExitGpuReset;
+        f.runner.result.seconds = 1000; // A GPU reset is explained even after a long game.
+        CHECK(f.run(options) == kExitGpuReset);
+        CHECK(f.ui.errors.size() == 1);
+        CHECK_CONTAINS(f.ui.errors.front(), "GPU reset");
+    }
+    {
+        FlowFixture f;
+        auto options = f.options();
+        options.game_root = f.game;
+        options.mods = true;
+        write_file(f.package / "launcher/project.godot", "manager");
+        write_file(f.package / "eawr_mods_service.exe", "service");
+        f.runner.on_monitored = [&](const auto&, const auto&) {
+            write_file(f.user_data / "launcher/next-action.json",
+                       R"({"action":"apply-update","executable":"synthetic runtime","arguments":["--headless","--script","helper path"]})");
+        };
+        CHECK(f.run(options) == kExitOk);
+        CHECK(f.runner.detached);
+        CHECK(f.runner.detached_exe == fs::path("synthetic runtime"));
+        CHECK(f.runner.detached_args == std::vector<std::wstring>({L"--headless", L"--script", L"helper path"}));
     }
 }
 
@@ -2154,6 +2193,7 @@ int main(int argc, char** argv) {
     test_stale_running_state_at_start();
     test_flow_stay_open();
     test_flow_stay_open_failures();
+    test_gpu_reset_and_update_handoff();
     test_flow_launch_loop_invalid();
     test_flow_launch_loop_profile_traversal();
     test_flow_launch_loop_explicit_safe_render_thread();

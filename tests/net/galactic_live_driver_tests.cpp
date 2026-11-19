@@ -1787,6 +1787,95 @@ void presentation_barrier_is_refused() {
         "a lockstep presentation barrier is refused before starting a thread");
 }
 
+// #7853: any human seat saves, and a campaign whose host departed can still be saved by a survivor.
+void load_and_continue(const galactic::GalacticSetup& setup, const std::filesystem::path& directory, const std::string& name,
+    const std::string& label) {
+    std::ifstream input(directory / (name + ".eawrsave"), std::ios::binary);
+    std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+    expect(!bytes.empty(), label + "the save file exists");
+    if (bytes.empty()) return;
+    const auto saved = require(eawr::checkpoint::parse_checkpoint(bytes));
+    const auto resume = require(eawr::checkpoint::inspect_game_resume(saved));
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    auto restored = require(eawr::checkpoint::load_game_checkpoint(bytes, eawr::checkpoint::game_identities(setup), {}, executor));
+    net::GalacticAdapterOptions options; options.clock_policy = net::GalacticClockPolicy::limited;
+    net::GalacticSessionAdapter adapter(restored.session, executor, options);
+    require(adapter.restore_network_state(resume.network_state));
+    for (int step = 0; step < 3; ++step) {
+        require(adapter.install(std::vector<net::SeatInput>{}));
+        require(adapter.step());
+    }
+    expect(adapter.completed_tick() == resume.completed_tick + 3, label + "the loaded save continues");
+}
+
+void guest_saves_with_the_host_present() {
+    auto setup = policy_setup(); galactic_test::mark_multiplayer(setup);
+    const auto directory = std::filesystem::temp_directory_path() / ("eawr-gc-guest-save-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct RemoveAtExit {
+        std::filesystem::path path;
+        ~RemoveAtExit() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+    } remove_directory{directory};
+    Pair pair(setup, {2, 2}, LiveGameSession::Pacing::driven, 3000, 0);
+    std::filesystem::create_directories(directory);
+    pair.start(0, [&](auto& options) { options.saves.directory = (directory / "host").string(); });
+    pair.start(1, [&](auto& options) { options.saves.directory = (directory / "guest").string(); });
+    expect(pair.run_to(5), "guest save fixture starts");
+    pair.order(0, galactic::DebugSetPlanetOwner{setup.planets[3].id, 1});
+    eawr::platform::LiveSaveRequest request; request.seat = pair.humans[1]; request.name = "guest";
+    const auto token = pair.lives[1]->request_save(request);
+    expect(token != 0 && pair.lives[1]->save_outcomes().back().phase != eawr::platform::LiveSavePhase::rejected,
+        "a guest seat may request a save");
+    expect(pair.run_to(60), "the save barrier releases and both peers continue");
+    expect(pair.lives[1]->wait_save(token, 10s), "the guest's disk job settles");
+    const auto outcomes = pair.lives[1]->save_outcomes();
+    expect(outcomes.size() == 1 && outcomes.front().phase == eawr::platform::LiveSavePhase::completed,
+        "the guest publishes its own save");
+    expect(pair.lives[0]->save_outcomes().empty(), "the host publishes nothing for a guest's request");
+    expect(pair.lives[0]->tick_hashes() == pair.lives[1]->tick_hashes(), "a guest save keeps both peers in digest agreement");
+    expect(!pair.lives[0]->failure() && !pair.lives[1]->failure(), "a guest save fails neither peer");
+    // The host saves afterwards the same way.
+    request.seat = pair.humans[0]; request.name = "host";
+    const auto host_token = pair.lives[0]->request_save(request);
+    expect(pair.run_to(110) && pair.lives[0]->wait_save(host_token, 10s), "host and guest saves both work in one match");
+    expect(pair.lives[0]->tick_hashes() == pair.lives[1]->tick_hashes(), "two saves keep both peers in digest agreement");
+    load_and_continue(setup, directory / "guest", "guest", "guest save: ");
+    load_and_continue(setup, directory / "host", "host", "host save: ");
+}
+
+void guest_saves_after_the_host_drops() {
+    auto setup = policy_setup(); galactic_test::mark_multiplayer(setup);
+    const auto directory = std::filesystem::temp_directory_path() / ("eawr-gc-orphan-save-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct RemoveAtExit {
+        std::filesystem::path path;
+        ~RemoveAtExit() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+    } remove_directory{directory};
+    Pair pair(setup, {2, 2}, LiveGameSession::Pacing::driven, 3000, 0);
+    std::filesystem::create_directories(directory);
+    pair.start(0);
+    pair.start(1, [&](auto& options) { options.saves.directory = (directory / "guest").string(); });
+    expect(pair.run_to(20), "host-drop fixture runs");
+    pair.lives[0]->stop();
+    {
+        const std::lock_guard lock(pair.pipes.mutex);
+        pair.pipes.open_[0] = false;
+    }
+    pair.lives[1]->advance_to(70);
+    expect(pair.lives[1]->wait_for(70, 30s) && !pair.lives[1]->failure(), "the guest survives the host's departure");
+    eawr::platform::LiveSaveRequest request; request.seat = pair.humans[1]; request.name = "orphan";
+    const auto token = pair.lives[1]->request_save(request);
+    expect(token != 0 && pair.lives[1]->save_outcomes().back().phase != eawr::platform::LiveSavePhase::rejected,
+        "the surviving guest may request a save");
+    pair.lives[1]->advance_to(120);
+    expect(pair.lives[1]->wait_for(120, 30s) && !pair.lives[1]->failure(), "the guest keeps running through the save barrier");
+    expect(pair.lives[1]->wait_save(token, 10s), "the survivor's disk job settles");
+    const auto outcomes = pair.lives[1]->save_outcomes();
+    expect(outcomes.size() == 1 && outcomes.front().phase == eawr::platform::LiveSavePhase::completed,
+        "a survivor saves the campaign after the host dropped");
+    load_and_continue(setup, directory / "guest", "orphan", "survivor save: ");
+}
+
 void saves_are_agreed() {
     for (const auto workers : {1U, 2U, 4U, 8U}) for (const bool disk_failure : {false, true}) {
         auto setup = policy_setup(); galactic_test::mark_multiplayer(setup);
@@ -1810,10 +1899,6 @@ void saves_are_agreed() {
         pair.start(1, [&](auto& options) { options.saves.directory = (directory / "joiner").string(); options.saves.mounted_mods = joiner_mods; });
         host_mods.entries.clear();
         expect(pair.run_to(5), "save agreement fixture starts");
-        eawr::platform::LiveSaveRequest nonhost; nonhost.seat = pair.humans[1]; nonhost.name = "joiner";
-        const auto refused = pair.lives[1]->request_save(nonhost);
-        expect(refused != 0 && pair.lives[1]->save_outcomes().back().phase == eawr::platform::LiveSavePhase::rejected,
-            "only the host admits a player save");
         // Both seats already own future input; no accepted command may be lost
         // or serialized as the host's private queue while capture drains it.
         pair.order(0, galactic::DebugSetPlanetOwner{setup.planets[3].id, 1});
@@ -2842,6 +2927,49 @@ struct RecoveryPeers {
     std::vector<std::string> logs; // diagnostic lines of every peer, in step order (one thread)
     std::uint64_t now{};
 };
+// #7853: three peers, the host drops; both survivors derive the same barrier leader, one saves and the file loads.
+void three_peer_survivor_saves_after_host_drop() {
+    RecoveryPeers rig(3, 1);
+    rig.run(20);
+    rig.pipes.open_[0] = false;
+    const auto survivors_run = [&](const std::uint64_t target, std::span<const LiveGameOrder> orders = {}) {
+        for (unsigned round = 0; round < 10'000; ++round) {
+            for (std::uint32_t peer = 1; peer < 3; ++peer)
+                rig.step(peer, rig.games[peer]->completed_tick() < target, peer == 2 && round == 0 ? orders : std::span<const LiveGameOrder>{});
+            if (rig.games[1]->completed_tick() >= target && rig.games[2]->completed_tick() >= target) {
+                for (unsigned drain = 0; drain < 4; ++drain) for (std::uint32_t peer = 1; peer < 3; ++peer) rig.step(peer, false);
+                return;
+            }
+        }
+        throw std::runtime_error("survivors did not reach " + std::to_string(target));
+    };
+    survivors_run(120);
+    expect(!rig.games[1]->galaxy().seats()[0].active && !rig.games[2]->galaxy().seats()[0].active,
+        "both survivors applied the host's departure");
+    const std::vector<LiveGameOrder> save{LiveGameOrder{{3}, galactic::SaveRequest{1, false, false, false}, {}}};
+    std::optional<eawr::platform::AgreedGameSave> agreed;
+    for (unsigned round = 0; round < 4000 && !agreed; ++round) {
+        for (std::uint32_t peer = 1; peer < 3; ++peer)
+            rig.step(peer, true, peer == 2 && round == 0 ? std::span<const LiveGameOrder>(save) : std::span<const LiveGameOrder>{});
+        agreed = rig.drivers[2]->take_agreed_save();
+        expect(!rig.drivers[1]->take_agreed_save(), "only the requesting survivor receives the save");
+    }
+    expect(agreed.has_value() && !agreed->failure && !agreed->bytes.empty(), "the requesting survivor receives the agreed save");
+    survivors_run(rig.games[1]->completed_tick() + 40);
+    expect(rig.games[1]->state_sha256() == rig.games[2]->state_sha256(), "survivors agree after the save barrier");
+    if (!agreed || agreed->bytes.empty()) return;
+    const auto saved = require(eawr::checkpoint::parse_checkpoint(agreed->bytes));
+    const auto resume = require(eawr::checkpoint::inspect_game_resume(saved));
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    eawr::checkpoint::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none;
+    auto restored = require(eawr::checkpoint::load_game_checkpoint(agreed->bytes, eawr::checkpoint::game_identities(rig.setup), load, executor));
+    net::GalacticAdapterOptions options; options.clock_policy = net::GalacticClockPolicy::limited;
+    net::GalacticSessionAdapter adapter(restored.session, executor, options);
+    require(adapter.restore_network_state(resume.network_state));
+    for (int step = 0; step < 3; ++step) { require(adapter.install(std::vector<net::SeatInput>{})); require(adapter.step()); }
+    expect(adapter.completed_tick() == resume.completed_tick + 3, "the survivor's save loads and continues");
+}
+
 void default_hash_window_contracts() {
     expect(viewer::GalacticLanOptions{}.exchange_every == 150, "GC driver uses the shared five-second cadence");
     expect(viewer::GalacticLanOptions{}.deferred_compare == net::default_deferred_compare && net::default_deferred_compare,
@@ -3220,7 +3348,11 @@ void live_recovery_protocol_contracts() {
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--save-barrier") {
-            saves_are_agreed(); return galactic_test::checker.finish();
+            saves_are_agreed();
+            guest_saves_with_the_host_present();
+            guest_saves_after_the_host_drops();
+            three_peer_survivor_saves_after_host_drop();
+            return galactic_test::checker.finish();
         }
         if (argc == 2 && std::string_view(argv[1]) == "--deferred") {
             deferred_gc_recovery_contracts(); return galactic_test::checker.finish();
@@ -3278,6 +3410,9 @@ int main(int argc, char** argv) {
         conflicting_options_are_refused();
         presentation_barrier_is_refused();
         saves_are_agreed();
+        guest_saves_with_the_host_present();
+        guest_saves_after_the_host_drops();
+        three_peer_survivor_saves_after_host_drop();
         recovered_owner_publishes_at_boundary();
         driver_cannot_outlive_its_session();
         completed_match_idles_until_session_end();

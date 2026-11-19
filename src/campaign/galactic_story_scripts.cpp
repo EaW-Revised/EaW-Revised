@@ -7,6 +7,7 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include "galactic_story_random.hpp"
+#include "eawr/core/gc_profile.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/script/authoritative/galactic_bridge.hpp"
@@ -491,6 +492,13 @@ core::Result<auth::ScriptScheduler> GalacticObjectScripts::create_scheduler(auth
 core::Result<std::vector<auth::ScriptDiagnostic>> GalacticObjectScripts::reconcile(
     auth::ScriptScheduler& scheduler, std::span<const sim::galactic::CensusObject> actors,
     const sim::PartitionExecutor& executor) const {
+    auto objects = attachments(actors, executor);
+    if (!objects) return core::Result<std::vector<auth::ScriptDiagnostic>>::failure(objects.error());
+    return scheduler.reconcile_objects(std::move(objects).value());
+}
+
+core::Result<std::vector<auth::ObjectScript>> GalacticObjectScripts::attachments(
+    std::span<const sim::galactic::CensusObject> actors, const sim::PartitionExecutor& executor) const {
     // Actor identities are session-unique. Reserve a separate RNG/instance
     // namespace from the AI and story hosts for each retained actor.
     constexpr std::uint64_t first_object_instance = std::uint64_t{1} << 40;
@@ -507,16 +515,17 @@ core::Result<std::vector<auth::ScriptDiagnostic>> GalacticObjectScripts::reconci
                     first_object_instance + actor.id, script->second};
             }
         });
-    if (!prepared) return core::Result<std::vector<auth::ScriptDiagnostic>>::failure(prepared.error());
+    if (!prepared) return core::Result<std::vector<auth::ObjectScript>>::failure(prepared.error());
     std::vector<auth::ObjectScript> objects;
     for (auto& proposal : proposals) if (proposal) objects.push_back(std::move(*proposal));
-    return scheduler.reconcile_objects(std::move(objects));
+    return core::Result<std::vector<auth::ObjectScript>>::success(std::move(objects));
 }
 
 core::Result<auth::ServiceReport> GalacticObjectScripts::service(
     auth::ScriptScheduler& scheduler, const std::uint64_t frame, const sim::PartitionExecutor& executor) const {
     using Result = core::Result<auth::ServiceReport>;
     if (auto clock = scheduler.set_galactic_frame(frame); !clock) return Result::failure(clock.error());
+    std::optional<gc_profile::Scope> admission_scope(std::in_place, gc_profile::Phase::obj_admission);
     const auto attachments = scheduler.object_scripts();
     const auto active = scheduler.instances();
     struct Due { bool pump{}, first{}; std::optional<script::numeric::LuaNumber> rate; core::Diagnostic error; };
@@ -550,10 +559,11 @@ core::Result<auth::ServiceReport> GalacticObjectScripts::service(
         event.target = id; event.kind = auth::ScriptEvent::Kind::pump;
         if (auto submitted = scheduler.submit_event(event); !submitted) return Result::failure(submitted.error());
     }
+    admission_scope.reset();
     auth::ServiceOptions options;
     options.time_tick = frame;
     options.host_paced = [](std::uint64_t) { return true; };
-    auto result = scheduler.service(executor, options);
+    auto result = gc_profile::timed(gc_profile::Phase::obj_service, [&] { return scheduler.service(executor, options); });
     if (!result) return result;
     const auto remaining = scheduler.instances();
     for (std::size_t index = 0; index < due.size(); ++index) {
@@ -783,11 +793,28 @@ public:
         }
         const auto snapshot = world.snapshot();
         if (!snapshot) return core::Result<auth::ServiceReport>::failure(problem("object scripts require a world snapshot"));
-        auto attached = content_->reconcile(scheduler, snapshot->actor_records(), executor);
-        if (!attached) return core::Result<auth::ServiceReport>::failure(attached.error());
+        // The scheduler keeps an attachment whose instance, object, generation and module equal a desired one, and adds only
+        // desired attachments it does not hold. When the desired list is exactly the attachments the scheduler holds, its
+        // reconcile therefore removes nothing, creates nothing and reports nothing: skip it. The list is rebuilt every tick.
+        std::vector<auth::ScriptDiagnostic> diagnostics;
+        {
+            gc_profile::Scope reconcile_scope(gc_profile::Phase::obj_reconcile);
+            auto desired = content_->attachments(snapshot->actor_records(), executor);
+            if (!desired) return core::Result<auth::ServiceReport>::failure(desired.error());
+            auto& wanted = desired.value();
+            std::sort(wanted.begin(), wanted.end(), [](const auto& a, const auto& b) { return a.instance < b.instance; });
+            const auto held = scheduler.object_scripts(); // ascending by instance
+            const bool unchanged = std::equal(wanted.begin(), wanted.end(), held.begin(), held.end(), [](const auto& a, const auto& b) {
+                return a.instance == b.instance && a.object == b.object && a.generation == b.generation && a.module == b.module;
+            });
+            if (!unchanged) {
+                auto attached = scheduler.reconcile_objects(std::move(wanted));
+                if (!attached) return core::Result<auth::ServiceReport>::failure(attached.error());
+                diagnostics = std::move(attached).value();
+            }
+        }
         auto result = content_->service(scheduler, world.clock().galactic_frame, executor);
         if (!result) return result;
-        auto diagnostics = std::move(attached).value();
         result.value().diagnostics.insert(result.value().diagnostics.begin(),
             std::make_move_iterator(diagnostics.begin()), std::make_move_iterator(diagnostics.end()));
         return result;

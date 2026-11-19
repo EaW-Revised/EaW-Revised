@@ -101,6 +101,13 @@ bool SpacePopulation::is_marker(const std::uint64_t scene_ordinal) const {
     });
 }
 
+bool SpacePopulation::attached_art_shown(const GatedInstance& piece) const {
+    if (!piece.gate || piece.gate->art != HardpointGate::Art::attached_model || !piece.live) return true;
+    const std::size_t ship = *piece.live;
+    if (ship >= live_death_clone_.size() || ship >= contact_bones_.size()) return true;
+    return animation::clone_attached_art_shown(live_death_clone_[ship], piece.gate->bone, contact_bones_[ship]);
+}
+
 void SpacePopulation::rebuild_piece_index() {
     piece_index_.rebuild(live_decisions_.size(), pieces_, live_clip_instances_, [](const GatedInstance& piece) {
         return !piece.shield && !piece.cloak && (!piece.gate || piece.gate->art != HardpointGate::Art::attached_model);
@@ -147,7 +154,7 @@ void SpacePopulation::refresh_instances(const particles::StepExecutor* workers) 
                 const bool visible = gate.art == HardpointGate::Art::attached_model ? art.attached_model
                     : gate.art == HardpointGate::Art::damage_decal ? art.damage_decal
                     : hardpoint_states_[gate.decision][gate.hardpoint] != scene::HardpointState::destroyed;
-                if (!visible) continue;
+                if (!visible || !attached_art_shown(piece)) continue;
                 if (gate.art == HardpointGate::Art::attached_model) attachment_marks_.mark(gate.decision, gate.hardpoint);
             }
             instances_.push_back(piece.instance);
@@ -181,7 +188,7 @@ void SpacePopulation::refresh_instances(const particles::StepExecutor* workers) 
                 const bool gate_visible = gate.art == HardpointGate::Art::attached_model ? art.attached_model
                     : gate.art == HardpointGate::Art::damage_decal ? art.damage_decal
                     : hardpoint_states_[gate.decision][gate.hardpoint] != scene::HardpointState::destroyed;
-                if (!gate_visible) return false;
+                if (!gate_visible || !attached_art_shown(piece)) return false;
             }
             return true;
         };

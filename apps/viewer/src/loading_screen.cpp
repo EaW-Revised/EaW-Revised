@@ -409,6 +409,7 @@ bool EawrLoadingScreen::build_layout(const Vector2 size) {
             else if (gadget.id == "IDC_STATIC_WEATHER") fill(content.weather);
             else if (gadget.id == "IDC_STATIC_TERRAIN") fill(content.terrain);
             else if (gadget.id == "IDC_STATIC_NATIVE") fill(content.population);
+            else if (gadget.id == "IDC_STATIC_WILDLIFE") fill(content.wildlife);
             else if (gadget.id == bar_gadget) layout.bar = Object::cast_to<EawrUiBar>(gadget.control);
             else if (gadget.id == begin_gadget) layout.begin = Object::cast_to<EawrUiButton>(gadget.control);
             else if (gadget.id == "IDC_LIST_REFERENCE") layout.history = Object::cast_to<EawrUiList>(gadget.control);
@@ -727,6 +728,7 @@ std::string EawrLoadingScreen::report_json() const {
         output << ", \"dialog\": " << json(content->dialog) << ", \"title\": " << json(content->title)
                << ", \"planet\": " << json(content->planet) << ", \"weather\": " << json(content->weather)
                << ", \"terrain\": " << json(content->terrain) << ", \"population\": " << json(content->population)
+               << ", \"wildlife\": " << json(content->wildlife)
                << ", \"history_chars\": " << content->history.size()
                << ", \"tactical_chars\": " << content->tactical.size()
                << ", \"advantage_chars\": " << content->advantage.size()

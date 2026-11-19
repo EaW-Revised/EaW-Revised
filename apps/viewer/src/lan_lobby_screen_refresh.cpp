@@ -331,10 +331,11 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
     if (signature != impl.rows_signature) {
         impl.rows_signature = signature;
         state.loading = true;
-        // WSS-12/13: every playable catalog faction, as the setup screen lists them; a map whose stations
-        // cannot start a pick refuses it at Start (project limit), it does not hide the entry.
+        // #7842: the factions this map can start, as the local setup screen lists them (one shared helper).
+        const auto listed_factions = lobby_factions(impl, resources);
         std::vector<std::string> factions;
-        for (const auto& entry : skirmish::setup_factions(*resources.content->catalog)) factions.push_back(entry.name);
+        for (const auto& entry : listed_factions) factions.push_back(entry.name);
+        bool faction_repaired = false;
         impl.row_states.clear();
         for (std::size_t index = 0; index < dialog_rows; ++index) {
             const model::StagingRow& row = rows[index];
@@ -426,8 +427,18 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
                     faction->add_item(text(model::faction_display_name(*resources.content->catalog,
                         resources.text ? &*resources.text : nullptr, value)));
                 }
-                for (std::size_t item = 0; item < factions.size(); ++item) {
-                    if (factions[item] == row.faction) faction->select(static_cast<int>(item));
+                // #7842: the same faction when the map still lists it (case-insensitive), else the row default; the
+                // host writes a changed pick back so the lobby state never keeps a faction its combo no longer shows.
+                const int shown = skirmish::keep_listed_faction(listed_factions, row.faction, index == 0 ? 0U : 1U);
+                if (shown >= 0) faction->select(shown);
+                if (impl.host && filled && shown >= 0 && !row.faction.empty()
+                    && !same_ci(factions[static_cast<std::size_t>(shown)], row.faction)) {
+                    const auto record = std::find_if(impl.selection.slots.begin(), impl.selection.slots.end(),
+                        [&](const auto& slot) { return slot.slot == index + 1; });
+                    if (record != impl.selection.slots.end()) {
+                        record->faction = factions[static_cast<std::size_t>(shown)];
+                        faction_repaired = true;
+                    }
                 }
                 faction->set_disabled(!choices_editable || factions.empty());
             }
@@ -493,7 +504,16 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
             }
             impl.row_states.push_back(std::move(row_state));
         }
+        if (faction_repaired) {
+            impl.rows_signature.clear();
+            static_cast<void>(publish_staging_selection());
+        }
         // The preview follows the map.
+        if (map == nullptr) {
+            impl.preview_path.clear();
+            state.start_icons.clear();
+            if (state.preview) state.preview->set_texture(Ref<ImageTexture>());
+        }
         if (state.preview != nullptr && map != nullptr && impl.preview_path != map->path) {
             impl.preview_path = map->path;
             Ref<Image> image;
@@ -513,7 +533,21 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
                 }
             }
             state.preview->set_texture(image.is_valid() ? ImageTexture::create_from_image(image) : Ref<ImageTexture>());
+            state.start_icons.rebuild(*state.preview, *map, *resources.content->filesystem,
+                skirmish::setup_factions(*resources.content->catalog),
+                resources.atlas ? &*resources.atlas : nullptr, resources.textures.get());
         }
+        std::vector<StagingPreviewSeat> preview_seats;
+        for (const auto& row : rows) {
+            if (!row.occupied() || !row.team) continue;
+            Color backing(0.01F, 0.01F, 0.02F, 0.85F);
+            if (row.colour < resources.palette.size()) {
+                const auto& rgb = resources.palette[row.colour].rgb;
+                backing = Color(rgb[0] / 510.0F, rgb[1] / 510.0F, rgb[2] / 510.0F, 0.95F);
+            }
+            preview_seats.push_back({*row.team, row.faction, backing});
+        }
+        state.start_icons.update(preview_seats);
         state.loading = false;
     }
 }

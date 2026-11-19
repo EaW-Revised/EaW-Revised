@@ -147,6 +147,13 @@ public:
         sim::galactic::MpRoster, std::vector<net::SetupSeat>,
         std::shared_ptr<const std::vector<std::uint8_t>>, std::uint64_t epoch) const;
     [[nodiscard]] core::Result<void> commit_checkpoint(PreparedCheckpoint, const net::LobbySnapshot&);
+    // #7878: whether two snapshots are the same room for a saved-campaign restore: the room, host, game settings and the seat
+    // bindings (peer, seat, player, slot). The revision, readiness, display-only mod description and chat cursor change while a
+    // long restore runs and do not affect the restored setup, so they never count as a room change.
+    [[nodiscard]] static bool same_checkpoint_room(const net::LobbySnapshot&, const net::LobbySnapshot&);
+    // What changed between two snapshots that are not the same restore room, in a short sentence the host can read ("Bau Catan
+    // left the room."). Empty when they are the same room.
+    [[nodiscard]] static std::string describe_checkpoint_room_change(const net::LobbySnapshot& before, const net::LobbySnapshot& after);
     // No file access or owner mutation; returns the saved faction/seat facts for assignment.
     [[nodiscard]] core::Result<CheckpointCandidate> inspect_checkpoint(std::span<const std::uint8_t>) const;
     // PR3 seam: host supplies original saved campaign roster and an explicit logical-seat

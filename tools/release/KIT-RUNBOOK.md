@@ -61,8 +61,8 @@ The delivered kit gets a sidecar `<kit>.zip.manifest.json` beside `.zip` and `.z
 Check a delivered kit with
 `python tools/release/kit_manifest.py verify <kit>.zip.manifest.json --zip <kit>.zip --folder <kit folder> --repo <checkout> --expect-base <commit> --require-finish`.
 
-**What this does not prove.** The manifest is hash-pinned, not signed (signing is out of scope, as for the rest of the unsigned
-release policy). It catches accidental or partial edits, and `--repo` checks it against git objects: the kit commit, its
+**What this does not prove.** The manifest is hash-pinned, not signed (owner test kits are never code-signed; releases are signed after this
+stage by the separate signing flow in docs/releasing.md, "Code signing"). It catches accidental or partial edits, and `--repo` checks it against git objects: the kit commit, its
 tree, its parent, the files it changed and every payload blob. Someone who can rewrite the manifest, the zip and the sums together
 can still produce a set that verifies for a player they built themselves, so keep delivered kits where only you can write, and pin
 the commit you expect with `--expect-base`. The `host` section is host-attested: the client compares the download with the
@@ -79,7 +79,7 @@ must prove, and `kit_manifest.py verify --release` refuses it unless all of it h
   the tag object, the commit and the signature state (`plan.release.signature`): `unsigned` for an annotated tag without a signature
   (no key is needed; owner decision 2026-11-11, as for v0.3.0), `good` for a signed tag whose signature `git verify-tag` accepts. A tag
   that carries a signature which does not verify is refused, and so is a lightweight tag. Git tag signing is separate from the code
-  signing of the binaries, which stays outside this pipeline.
+  signing of the binaries, which runs after finish (docs/releasing.md, "Code signing").
 - **Tooling from a later commit.** The cut and finish normally run the tagged commit's own scripts. A reviewed tool fix made after the
   tag can be used instead: run the cut from a clean checkout of the later commit (the plan records it as `orchestrator.tooling_commit`,
   with the hashes of the orchestrating files; "clean" means no tracked change and no untracked file anywhere under `tools/release`,

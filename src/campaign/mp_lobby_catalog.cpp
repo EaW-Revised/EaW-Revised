@@ -123,10 +123,10 @@ sim::galactic::MpLobbyCampaign make_row(const data::galactic::GalacticData& data
         // A single-player entry names its human faction; every other faction is an AI seat.
         const bool playable = faction.is_playable.value_or(false) && !neutral
             && (multiplayer || upper(faction.name) == upper(campaign.starting_active_player));
-        // GCMP-AI-01/03: the controller an AI seat on this row acquires, as the start selects it (galactic_ai_runtime).
-        const bool assigned = std::any_of(campaign.ai_player_control.begin(), campaign.ai_player_control.end(),
-            [&](const auto& pair) { return upper(pair.faction) == upper(faction.name); });
-        const bool ai_controller = !neutral && ((multiplayer && faction.is_playable.value_or(false)) || assigned);
+        // The controller an AI seat on this row acquires, as the start selects it; a seat the start refuses still counts.
+        const auto choice = ai_controller_choice(data, campaign,
+            multiplayer ? CampaignRulesFlavour::multiplayer : CampaignRulesFlavour::single_player, faction.name);
+        const bool ai_controller = !choice.type.empty() || !choice.missing.empty();
         row.factions.push_back({next, next, 0, faction.name, playable, neutral, ai_controller});
     }
     return row;
@@ -179,6 +179,21 @@ std::string solo_difficulty_entry(const data::galactic::GalacticData& data, cons
     const auto row = make_row(data, *authored, authored->is_multiplayer.value_or(false));
     const auto entries = campaign_difficulties(data, *authored, row.factions, authored->is_multiplayer.value_or(false), ai_levels);
     return entries[index].empty() ? std::string(stock[index]) : entries[index];
+}
+
+AiControllerChoice ai_controller_choice(const data::galactic::GalacticData& data, const data::galactic::Campaign& campaign,
+    const CampaignRulesFlavour rules, const std::string_view faction_name) {
+    const auto* faction = data.faction(faction_name);
+    if (!faction) return {{}, "AI faction relations"};
+    if (faction->is_neutral.value_or(false)) return {};
+    if (rules == CampaignRulesFlavour::multiplayer && faction->is_playable.value_or(false)) {
+        if (faction->basic_ai.empty()) return {{}, "multiplayer playable faction Basic_AI"};
+        return {faction->basic_ai, {}};
+    }
+    const auto assignment = std::find_if(campaign.ai_player_control.begin(), campaign.ai_player_control.end(),
+        [&](const auto& row) { return upper(row.faction) == upper(faction_name); });
+    if (assignment == campaign.ai_player_control.end()) return {};
+    return {assignment->name, {}};
 }
 
 CampaignRulesFlavour campaign_rules_flavour(const data::galactic::Campaign& campaign) noexcept {

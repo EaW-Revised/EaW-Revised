@@ -477,6 +477,7 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
         const audio::SfxEvent* unit_fire = event(tag(value, "SFXEvent_Fire"), where);
         sounds.special_ready = event(tag(value, "SFXEvent_Special_Weapon_Ready"), where);
         sounds.death = event(tag(value, "Death_SFXEvent_Start_Die"), where);
+        sounds.unit_lost = event(tag(value, "SFXEvent_Unit_Lost"), where);
         sounds.spin_death = event(tag(value, "Spin_Away_On_Death_SFXEvent_Start_Die"), where);
         sounds.asteroid_damage = event(tag(value, "SFXEvent_Damaged_By_Asteroid"), where);
         sounds.health_warning = {

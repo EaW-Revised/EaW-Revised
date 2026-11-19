@@ -75,6 +75,10 @@ struct ObservedFleetPresence {
 };
 struct FleetIntelligence {
     std::vector<ObservedFleetPresence> presence;
+    // Planets the observer currently sees with fleet-presence knowledge, whether or not a fleet still orbits them. The
+    // advisor's battle result line asks the planet's visibility at resolution, not for a surviving fleet (legacy #7805).
+    // Sorted by planet id.
+    std::vector<PlanetId> presence_planets;
     std::vector<ObservedFleet> cards;
     // Deterministic work receipts: no fleet x planet scan or hidden recomputation.
     std::size_t observation_rows{}, fleets_examined{}, members_examined{};

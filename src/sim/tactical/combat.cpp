@@ -138,6 +138,18 @@ core::Result<void> validate_combat(const CombatTable& table) {
     for (std::size_t index = 0; index < profiles->size(); ++index) {
         const auto& profile = (*profiles)[index];
         const auto name = "type " + std::to_string(profile.type_id) + ": ";
+        if (profile.destruction_survivors) {
+            math::Fixed total;
+            if (profile.destruction_survivors->choices.size() > max_units)
+                return invalid(name + "too many destruction survivor choices");
+            for (const auto& choice : profile.destruction_survivors->choices) {
+                if (choice.members.size() > max_units || (choice.company && choice.create_team && choice.max_squad_size == 0))
+                    return invalid(name + "invalid destruction survivor company size");
+                const auto sum = math::add(total, choice.weight);
+                if (choice.weight.raw() < 0 || !sum) return invalid(name + "invalid destruction survivor weights");
+                total = sum.value();
+            }
+        }
         if (!distance_ok(profile.passive_missile_shield_radius)
             || std::llabs(profile.ranged_target_z_adjust.raw()) > max_combat_distance * one_raw) {
             return invalid(name + "projectile defence radius or height out of range");
@@ -178,7 +190,6 @@ core::Result<void> validate_combat(const CombatTable& table) {
                 || weapon.max_recharge_hundredths > max_recharge_hundredths || weapon.pulse_count == 0
                 || weapon.pulse_delay_frames > max_recharge_hundredths || !point_in_bounds(weapon.fire_a)
                 || !point_in_bounds(weapon.fire_b) || !axes_ok(weapon.fire_axes, false)
-                || !range_ok(weapon.manual_min_range) || weapon.manual_min_range > weapon.range
                 || weapon.manual_cooldown_frames > 108000
                 || weapon.full_salvo_delay.raw() < 0 || weapon.full_salvo_delay.raw() > max_ability_multiplier * one_raw
                 || weapon.ai_combat_power.raw() < 0 || weapon.ai_combat_power.raw() > max_weapon_combat_power * one_raw) {

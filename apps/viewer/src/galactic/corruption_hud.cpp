@@ -97,13 +97,7 @@ bool GalacticMode::State::build_corruption_hud() {
         presentation::ui::ShellOrigin::centre);
     const auto look = presentation::ui::hud_shell(corruption_menu.anchors, command_catalog, command_faction);
     for (const auto& mesh : look.meshes) {
-        const auto path = presentation::ui::vfs_standalone_textures(*filesystem)(mesh.texture);
-        if (!path) { failure = "corruption shell texture is absent: " + mesh.texture; return false; }
-        auto texture = assets::load_texture(*filesystem, *path);
-        if (!texture) { failure = core::format_diagnostic(texture.error()); return false; }
-        std::string why; auto pixels = texture_image(texture.value(), why);
-        if (pixels.is_null()) { failure = why; return false; }
-        setup.meshes.push_back({mesh.blend, ImageTexture::create_from_image(pixels), mesh.triangles, {}});
+        setup.meshes.push_back({mesh.blend, shell_texture(mesh.texture), mesh.triangles, {}});
     }
     corruption_menu.panel->setup(std::move(setup), nullptr);
     for (const auto& anchor : corruption_menu.anchors.anchors()) {

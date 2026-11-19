@@ -34,7 +34,7 @@ constexpr std::array<std::pair<std::string_view, std::string_view>, 9> original_
 
 void registry_contracts() {
     const auto registry = legacy::registry();
-    check(registry.size() == 20,
+    check(registry.size() == 22,
         "the registry includes skinned families and the missing-effect placeholder");
     const std::vector<std::tuple<std::string_view, std::string_view, std::string_view, bool, bool, bool>> expected{
         {"MeshAdditive.fx", "t0", "t0_p0", false, true, false},
@@ -57,6 +57,8 @@ void registry_contracts() {
         {"MeshShield.fxo", "t0", "t0_p0", false, true, false},
         {"MeshShieldFarseer.fxo", "sph_t3", "sph_t3_p0", false, true, false},
         {"Planet_Deathstar.fx", "sph_t3", "sph_t3_p0", true, false, true},
+        {"Planet_Shim_Closeup.fx", "sph_t3", "sph_t3_p0", true, false, true},
+        {"MeshAdditive_CityLights_Closeup.fx", "t0", "t0_p0", false, true, false},
     };
     for (std::size_t index = 0; index < expected.size() && index < registry.size(); ++index) {
         const auto& [program, technique, pass_name, opaque, transparent, shadows] = expected[index];
@@ -230,6 +232,21 @@ void source_contracts() {
     check(!legacy::reads_effect_time(planet), "zero cloud scroll requires no effect-clock writes");
     planet.bindings.back().value = std::string("invalid.tga");
     check(!rejection(planet).empty(), "cloud scroll is a finite scalar rather than a sampler");
+    for (const legacy::Family* family : {&legacy::galactic_closeup::body_family,
+             &legacy::galactic_closeup::lights_family}) {
+        auto closeup = selector(*family, admitted_pass(*family));
+        check(!rejection(closeup).empty(), "closeup families refuse absent auxiliary textures");
+        for (const auto& texture : family->binding_textures)
+            closeup.bindings.push_back({std::string(texture.name), std::string("invented.tga")});
+        check(rejection(closeup).empty() && legacy::reads_effect_time(closeup),
+            "closeup families admit complete textures and the default cloud clock");
+        closeup.bindings.push_back({"CloudScrollRate", 0.0F});
+        check(!legacy::reads_effect_time(closeup), "stationary closeup clouds need no clock writes");
+        closeup.bindings.back().value = -0.75F;
+        check(legacy::reads_effect_time(closeup), "authored negative cloud rates remain animated");
+        closeup.bindings.push_back({"CloudVisibility", std::string("invalid.tga")});
+        check(!rejection(closeup).empty(), "closeup cloud visibility rejects a sampler-shaped value");
+    }
     const auto& offset = legacy::mesh_additive_offset::shader_source;
     check(offset.find("render_mode unshaded, fog_disabled, blend_add, depth_draw_never,") != std::string_view::npos
             && offset.find("eawr_offset_uv = UV + eawr_uv_offset;") != std::string_view::npos
@@ -266,10 +283,12 @@ void selector_contracts() {
         if (family.program == "MeshBumpSpecGlowColorize.fx") {
             exact.bindings.push_back({"SpecularTexture", std::string("specular.tga")});
         }
-        if (family.program == "Planet_Deathstar.fx") {
+        if (family.program == "Planet_Deathstar.fx" || family.program == "Planet_Shim_Closeup.fx") {
             exact.bindings.push_back({"CloudTexture", std::string("cloud.tga")});
             exact.bindings.push_back({"CloudNormalTexture", std::string("cloud-normal.tga")});
         }
+        if (family.program == "MeshAdditive_CityLights_Closeup.fx")
+            exact.bindings.push_back({"CloudTexture", std::string("cloud.tga")});
         check(rejection(exact).empty(), name + " exact selector validates with its minimal bindings");
         check(legacy::shader_source(exact).has_value(), name + " exact selector selects its adapter source");
 

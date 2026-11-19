@@ -7,6 +7,8 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -476,6 +478,46 @@ void billing_view_isolates_fiscal_refusal() {
     expect(once.first(2, fault) && !once.first(2, fault) && once.first(3, fault) && once.first(2, other) && !once.first(2, other),
         "a refusal is said once per player and refusal");
 }
+// Async step 3b: a window finished and not adopted is saved as its own tagged block after the stage losses, and only while one waits.
+void finished_window_save() {
+    using Fixed = eawr::sim::math::Fixed;
+    const auto schedule = ga::standard_async_schedule;
+    ga::OutboxBatch::Contents batch{45, {9000, 300}, 812, {}};
+    for (const std::uint32_t virtual_tick : {1U, 3U}) {
+        ga::OutboxSlice slice; slice.snapshot_tick = 45; slice.virtual_tick = virtual_tick;
+        slice.apply_tick = ga::apply_tick(schedule, 45, virtual_tick);
+        batch.slices.push_back(std::move(slice));
+    }
+    cp::GalacticAiBillingPublication publication{75, 4, {{1, budget(Fixed::from_raw(12 * Fixed::scale))}}, {}, {}, {}, {}, {}, {}, {}};
+    publication.diagnostics.push_back("window note");
+    std::vector<std::uint8_t> bytes{1, 2, 3}; // what came before (the stage losses) stays untouched
+    expect(static_cast<bool>(cp::encode_finished_window(bytes, 46, batch, publication)), "a finished window saves");
+    expect(bytes[0] == 1 && bytes[1] == 2 && bytes[2] == 3, "the block is appended");
+    const auto block = std::span<const std::uint8_t>(bytes).subspan(3);
+    std::optional<cp::GalacticAiFinishedWindow> window;
+    const auto used = cp::restore_finished_window_prefix(block, schedule, window);
+    expect(used && used.value() == block.size() && window && window->adopt_at == 46 && window->batch.snapshot_tick == 45
+        && window->batch.frontier.id == 9000 && window->batch.frontier.invasion == 300 && window->batch.floor == 812
+        && window->batch.slices.size() == 2 && window->batch.slices[1].virtual_tick == 3 && window->publication
+        && window->publication->visible_at == 75 && window->publication->log_cut == 4 && window->publication->diagnostics.size() == 1,
+        "the finished window reloads whole");
+    std::vector<std::uint8_t> again;
+    expect(cp::encode_finished_window(again, window->adopt_at, window->batch, window->publication)
+        && again == std::vector<std::uint8_t>(block.begin(), block.end()), "a reloaded finished window saves the same bytes");
+    std::vector<std::uint8_t> bare;
+    expect(static_cast<bool>(cp::encode_finished_window(bare, 46, batch, std::nullopt)), "a finished window without a publication saves");
+    std::optional<cp::GalacticAiFinishedWindow> no_publication;
+    const auto bare_used = cp::restore_finished_window_prefix(bare, schedule, no_publication);
+    expect(bare_used && bare_used.value() == bare.size() && no_publication && !no_publication->publication, "and reloads without one");
+    std::optional<cp::GalacticAiFinishedWindow> none = std::move(window);
+    const std::vector<std::uint8_t> nothing;
+    const auto none_used = cp::restore_finished_window_prefix(nothing, schedule, none);
+    expect(none_used && none_used.value() == 0 && !none,
+        "no block means no finished window (a save made without an adoption delay)");
+    auto truncated = std::vector<std::uint8_t>(block.begin(), block.end()); truncated.pop_back();
+    std::optional<cp::GalacticAiFinishedWindow> refused;
+    expect(!cp::restore_finished_window_prefix(truncated, schedule, refused), "a truncated finished window is refused");
+}
 } // namespace
 
 int case_galactic_ai_lane_inbox_tests() {
@@ -487,6 +529,7 @@ int case_galactic_ai_lane_inbox_tests() {
         billing_view_isolates_fiscal_refusal();
         story_globals_split();
         stage_losses_reconcile();
+        finished_window_save();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;
 }

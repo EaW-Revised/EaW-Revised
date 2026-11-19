@@ -116,7 +116,7 @@ void foc_fleet(const bool formation_only, const bool fire_bones_only) {
     auto hero_input = input;
     hero_input.types = {"Han_Solo_Team_Space_MP", "Sundered_Heart", "Rogue_Squadron_Space", "Home_One",
             "Boba_Fett_Team_Space_MP", "Darth_Team_Space_MP", "Admonitor_Star_Destroyer", "Accuser_Star_Destroyer",
-            "Bossk_Team_Space_MP", "IG88_Team_Space_MP", "The_Peacebringer", "Captain_Piet"};
+            "Bossk_Team_Space_MP", "IG88_Team_Space_MP", "The_Peacebringer", "Captain_Piet", "Luke_Team"};
     // The pinned M2 roster has Rebel/Empire stations; an explicit purchase closure
     // also covers the Underworld companies without expanding that fixture's roster.
     const auto hero_loaded = eawr::units::load_unit_tables(hero_input);
@@ -134,6 +134,11 @@ void foc_fleet(const bool formation_only, const bool fire_bones_only) {
             std::string("WHE-49: company conversion: ") + purchase);
     }
     if (hero_loaded) {
+        const auto* luke = hero_loaded.value().find("Luke_Team");
+        const auto* transport = hero_loaded.value().find("Luke_XWing");
+        expect(luke && luke->deployed_space_type == "Luke_XWing" && transport && transport->hull
+            && transport->kind == UnitKind::craft,
+            "WHE-49/WHE-SQ-02: stock company closure loads its default-team fighter transport");
         for (const auto* name : {"Boba_Fett", "Captain_Piet"}) {
             const auto* carried = hero_loaded.value().find(name);
             expect(carried && !carried->hull && carried->model_path.empty(),

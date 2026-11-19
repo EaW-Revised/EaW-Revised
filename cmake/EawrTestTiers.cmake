@@ -115,6 +115,7 @@ set(EAWR_MOD_DATA_TESTS
     tactical_deploy_squad_mod
     unit_remake_combat_guard
     unit_remake_ally_shipyard
+    unit_ability_lists_remake
     unit_tables_name_index_mod
     unit_tables_name_index_gc_mod
     animation_real_unit_samples

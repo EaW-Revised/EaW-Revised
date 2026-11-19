@@ -298,6 +298,43 @@ flight described by WMV-01..WMV-03 and FM-01..FM-08.
   group contract traces slot error before and after binding correction limits; original-game
   group settling remains unverified against retail.
 
+- **WMV-45** (debug build, E7647-01..03) `Mass` is a velocity retention factor
+  in a separate inertial flight controller: after thrust, speed limiting and lateral
+  braking, the controller multiplies its velocity by the authored mass. Its debug
+  assertions require a value between zero and one. `Begin_Turn_Towards_Distance`
+  belongs to that controller's steering toward a point. Neither getter has an
+  ordinary layered-path or craft-flight caller. Adding either value to MV-01's
+  path acceleration would therefore change the wrong controller. The alternate
+  controller, including its throttle, brake and steering state, is not implemented;
+  its coverage stays open rather than claiming that the original ignores the tags.
+- **WMV-46** (debug build, E7647-01..03) `Stopped_Rate_Of_Turn` supplies the
+  walking controller's stationary turn rate and walking/jetpack turn animation
+  playback. A nonpositive value falls back to `Max_Rate_Of_Turn`; the animation
+  multiplier is the resulting positive rate divided by positive
+  `Rotation_Animation_Speed`, or one otherwise. The getter and animation-multiplier
+  cross-references contain no ordinary ship or craft flight consumer. Authoring
+  the tag on a space class does not replace WMV-03's turn rate.
+- **WMV-47** (debug build, E7647-01/02) `Min_Speed_Fraction_For_Turn` is read
+  only by the path corner annotation described in WLPA-90. That routine returns
+  before reading movement values unless the active mode is land. The tag has no
+  ordinary space-flight consumer; the remaining land corner merge/shift and
+  unadapted land-object gaps stay open.
+
+- **WMV-51** (debug build, E7647-09) `SpaceLocomotorFacingLookaheadAcc`
+  advances the facing lookahead toward the type's `MaxFacingLookAheadFrames`
+  limit during bomber flight over land. The getter's only consumers are in that
+  land flight controller; its name does not establish ordinary space ship or craft
+  flight support. Land bomber coverage remains separate.
+- **WMV-52** (debug build, E7647-09) `Movement_Directions_Count` selects
+  facing and travel direction for the walking controller. Counts above one choose
+  among evenly spaced directions, one keeps the object's forward direction, and
+  nonpositive values retain the requested facing or travel vector. Both getter
+  consumers belong to walking; authoring the tag on a space unit does not quantize
+  ordinary ship or craft steering. Land walking coverage remains separate.
+
+The private E7647 receipts are a fresh accessor cross-reference and caller review.
+They establish consumer boundaries, not an original-game runtime measurement.
+
 | Tag | Ordinary ship flight | Craft flight | Other reviewed consumer |
 |---|---|---|---|
 | `Max_Thrust` | ignored | speed step (FM-05) | optional attack positioning, WMV-40 |
@@ -307,6 +344,9 @@ flight described by WMV-01..WMV-03 and FM-01..FM-08.
 | `OverrideDeceleration` | deceleration (MV-01) | ignored | formation upkeep, WMV-42 |
 | `Minimum_Follow_Distance` | ignored | following separation (WSQ-33) | none in ship flight |
 | `Out_Of_Combat_Defense_Adjustment` | ignored | defense modifier (DG-26) | projectile damage reads the maintained modifier |
+| `Mass`, `Begin_Turn_Towards_Distance` | ignored | ignored | alternate inertial controller, WMV-45; not implemented |
+| `Stopped_Rate_Of_Turn` | ignored | ignored | walking and turn animation, WMV-46 |
+| `Min_Speed_Fraction_For_Turn` | ignored | ignored | land path corners, WMV-47 |
 
 ### XML tags this subsystem reads
 
@@ -333,17 +373,58 @@ Presentation tag coverage (legacy EAWR-653). `deferred` movement-constant covera
 `Rotate_Formation_Facing_Moves`, `Short_Range_Attack_Formation_Coefficient`. The two side errors
 matter only to formations of several members (land, squadron escorts, WMV-12).
 
+### Formation tag spelling
+
+- **WMV-54** (debug build, E7649-01; DB-NOTAG) The whole-image tag-table,
+  identifier and formatting-template scan contains no parser spelling for
+  `WaitsForFormationFormup`, `Use_Smooth_Formation_Movement` or
+  `FormationPriority`. Authored occurrences therefore do not enable a form-up
+  wait, a smoothing controller or a priority input. This applies to the newly
+  audited space-class rows as well as the earlier ignored rows. The separately
+  spelled `Formation_Priority` is parsed; its consumer boundary remains a
+  different question below. No replacement toggle is added for an ignored name.
+
 ### Formation priority consumer boundary
 
-A targeted debug-build check found that the ordinary combatant getter reduces
-`Formation_Priority` to zero or one, while the squadron getter returns the authored
-integer. The inspected space formation paths for member admission, composition
-changes, destination mapping, initialization and movement properties did not
-establish a consumer of either getter. The checked member-order comparator uses
-other properties. This bounded caller inspection does not prove that the tag is
-unused elsewhere and does not establish a numeric space slot-order rule; the
-coverage row remains unchanged pending a qualified consumer in the movement tag
-coverage work (legacy EAWR-649).
+- **WMV-55** (debug build, E7649-02) Auto-resolve sorts its queued combatants by
+  decreasing formation priority. Its ordinary object representation reduces
+  authored `Formation_Priority` to zero or one; company and squadron representations
+  preserve the signed integer. The same auto-resolve lineup reads `Is_Escort` to
+  distinguish primary and escort combatants. The virtual dispatch for both reads
+  is matched independently to the corresponding type accessors. This is an
+  auto-resolve consumer, separate from physical tactical slot assignment and a
+  launched squadron's escort order. The inspected space formation paths for member
+  admission, composition changes, destination mapping, initialization and movement
+  properties still establish no numeric priority rule. Coverage stays deferred for
+  auto-resolve implementation and remaining mode/representation qualification;
+  this bounded caller review does not claim universal absence elsewhere.
+
+### Land formation order boundary
+
+- **WMV-56** (debug build, E7649-03) `FormationOrder` is an unsigned key for the
+  land coordinator's same-order destination grouping. The other getter callers
+  compare the key for a same-formation collision offset exchange: identical types
+  pass that compatibility helper, while different types need equal keys and
+  mutually fitting hard extents plus formation spacing. The collision manager is
+  constructed or restored only by land mode. These are the getter's complete
+  caller paths; none supplies a numeric space slot order. Land grouping and
+  collision implementation remain separate gaps.
+
+### Land obstacle tag boundary
+
+- **WOB-01** (debug build, E7654-02) `Obstacle_Width`, `Obstacle_Height`,
+  `Obstacle_X_Offset`, `Obstacle_Y_Offset` and `Obstacle_Proxy_Type` are read
+  through type-level accessors whose only callers are the land obstacle
+  behavior's occupy and release paths, the wall behavior's occupy and release
+  paths, and the terrain-texture modification behavior's post-load fixup (the
+  proxy-type and vertical-extent accessors are read by the land obstacle
+  behavior alone). The occupy path asserts
+  the land sub-game-mode, fetches the land terrain and marks passability cells;
+  the wall path reads the land mode and the cell array; the terrain-texture
+  path reads the land mode. A space battle has no such consumer, so authoring
+  these tags on a ship, transport or space dummy type changes nothing in space.
+  Land static initialization stays tracked by its own partial rows. This bounded
+  caller review covers the type-level accessors only.
 
 ## Settled questions from the unverified sweep
 

@@ -155,6 +155,7 @@ diagnostics::MemoryCapacity SpacePopulation::memory_capacity() const {
     result.vector("population", "live_identity", live_identity_);
     result.vector("population", "options_placed_ships", options_.placed_ships);
     result.vector("population", "options_session_records", options_.session_records);
+    result.vector("population", "environment_records", environment_records_);
     std::uint64_t bones = 0, geometry = 0, parked = 0, fog = 0, asset_lists = 0;
     for (const auto& row : contact_bones_) bones += diagnostics::MemoryCapacity::bytes(row);
     for (const auto& entry : held_clips_) bones += diagnostics::MemoryCapacity::bytes(entry.second.bones);

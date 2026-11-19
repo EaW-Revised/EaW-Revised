@@ -151,6 +151,11 @@ struct StartFaction final {
     std::array<std::string, 2> standalone_special_weapons{}; // WSW-01/02: faction A/B mappings.
     std::optional<sim::tactical::TacticalSetup::BeaconRule> beacon{};
     bool can_control_planets{}; // WGT-121: independent of Is_Playable.
+    // WGCH-204: authored pair order is corrupted, uncorrupted. Pad time is not a reader (WBP-11).
+    using CorruptionPair = std::array<Fixed, 2>;
+    CorruptionPair corruption_production_price{Fixed::from_raw(Fixed::scale), Fixed::from_raw(Fixed::scale)};
+    CorruptionPair corruption_production_time{Fixed::from_raw(Fixed::scale), Fixed::from_raw(Fixed::scale)};
+    CorruptionPair corruption_pad_price{Fixed::from_raw(Fixed::scale), Fixed::from_raw(Fixed::scale)};
 };
 
 struct FactionForces final {
@@ -391,7 +396,12 @@ struct AiLandEconomy final {
 // extents centred on the origin (Coruscant: 130 x 130 cells of 100 from (-6500, 6500), as
 // recorded), in cells of DesiredSpaceFOWCellSize, at most 512 a side, serviced every 16 frames
 // with the SpaceFOWRegrowTime ramp. None when the map declares no extents.
-[[nodiscard]] core::Result<std::optional<sim::tactical::FogRules>> fog_rules(const StartInputs& inputs);
+// V-22: skirmish captures establish the active density policy independently of the shared
+// dense-cell kernel. Campaign entry retains its previous policy pending its own observation.
+enum class SpaceFogContext { skirmish, campaign };
+[[nodiscard]] core::Result<SpaceFogContext> replay_fog_context(const sim::tactical::TacticalSetup& setup);
+[[nodiscard]] core::Result<std::optional<sim::tactical::FogRules>> fog_rules(const StartInputs& inputs,
+    SpaceFogContext context = SpaceFogContext::skirmish);
 // WDF-05: the space map's box for the fighter grids, its low corner at minus half the declared
 // extents about the origin (the box the fog grid and the playable bounds span, PU-31). A map that
 // declares no usable extents gives the world origin.

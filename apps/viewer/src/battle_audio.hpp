@@ -204,6 +204,7 @@ private:
         const audio::SfxEvent* retreat_cancel{}; // SFXEvent_Retreat_Cancel (RP-03)
         const audio::SfxEvent* retreat_jump{};   // SFXEvent_Retreat_Engines_Jump (FC-R05)
         const audio::SfxEvent* death{};
+        const audio::SfxEvent* unit_lost{};
         const audio::SfxEvent* spin_death{};
         const audio::SfxEvent* asteroid_damage{};
         audio::HealthWarningCues health_warning;

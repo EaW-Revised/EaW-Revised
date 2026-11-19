@@ -95,6 +95,7 @@ void load_planets(const Catalog& catalog, GalacticData& data) {
         planet.describe_weather = record.text("Describe_Weather");
         planet.describe_terrain = record.text("Describe_Terrain");
         planet.describe_population = record.text("Describe_Population");
+        planet.describe_wildlife = record.text("Describe_Wildlife");
         planet.encyclopedia_text = record.names("Encyclopedia_Text");
         for (std::size_t slot = 0; slot < planet.corruption_success_speech_event.size(); ++slot) {
             const auto prefix = "Corruption_" + std::to_string(slot + 1) + "_Success_";

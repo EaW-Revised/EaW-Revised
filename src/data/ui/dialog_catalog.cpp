@@ -561,8 +561,14 @@ CatalogAudit audit_dialog_catalog(const DialogCatalog& catalog, const assets::Me
     count(catalog.skin.default_textures);
     for (const auto& set : catalog.skin.texture_overrides) count(set);
     for (auto& [key, entry] : textures) {
-        entry.in_atlas = atlas.find(entry.texture) != nullptr;
-        entry.standalone = !entry.in_atlas && standalone && standalone(entry.texture);
+        const auto* match = atlas.find(entry.texture);
+        entry.standalone = !match && standalone && standalone(entry.texture);
+        if (!match && !entry.standalone) match = atlas.find_sibling(entry.texture);
+        if (match) {
+            entry.in_atlas = true;
+            entry.atlas_texture = match->name;
+            entry.atlas_sibling = !iequals(entry.texture, match->name);
+        }
         if (!entry.in_atlas && !entry.standalone) audit.unresolved_textures.push_back(entry.texture);
         audit.textures.push_back(entry);
     }

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -124,5 +126,42 @@ private:
     std::uint64_t frame_{};
     std::uint64_t generation_{};
 };
+
+// PS-08: a picture member's resident identity is its model and the surface alternate the map draws for it
+// (WGUI-05: an undiscovered campaign planet with a grid shell draws alternate 2). Alternate 0 keeps the plain
+// model path, so a member that changes alternate (discovery) is a different resident and rebinds its row.
+[[nodiscard]] inline std::string thumbnail_model_key(const std::string& model, int alternate) {
+    return alternate == 0 ? model : model + "#alt" + std::to_string(alternate);
+}
+
+// PS-08 framing from the placed drawn extent [low, high] of a row's members (pivot at the origin). The largest
+// half-extent fills the cell around the extent's centre. A lone turning model is centred on its pivot: when the
+// pivot lies inside the extent, the per-axis reach from it; when outside, the farthest corner from the pivot, so
+// no idle pose about that pivot leaves the cell.
+struct ThumbnailExtent final {
+    std::array<float, 3> centre{};
+    float radius{};
+};
+[[nodiscard]] inline ThumbnailExtent thumbnail_extent(const std::array<float, 3>& low, const std::array<float, 3>& high,
+                                                      bool lone_turning) {
+    ThumbnailExtent result;
+    bool pivot_inside = true;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        result.centre[axis] = (low[axis] + high[axis]) * 0.5F;
+        pivot_inside = pivot_inside && low[axis] <= 0.0F && high[axis] >= 0.0F;
+    }
+    if (lone_turning && !pivot_inside) {
+        float squared = 0.0F;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const float reach = std::max(std::abs(low[axis]), std::abs(high[axis]));
+            squared += reach * reach;
+        }
+        return {{}, std::sqrt(squared)};
+    }
+    if (lone_turning) result.centre = {};
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        result.radius = std::max({result.radius, std::abs(low[axis] - result.centre[axis]), std::abs(high[axis] - result.centre[axis])});
+    return result;
+}
 
 } // namespace eawr::viewer::galactic

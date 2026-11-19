@@ -513,7 +513,23 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
     // the M2 plans never block on it, so the remake returns nil.
     method("Activate_Ability", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
-        if (taskforce == nullptr || arguments.size() < 2 || as_text(arguments[1]) == nullptr) return none();
+        if (taskforce == nullptr) return none();
+        // WGCH-130/167: unnamed galactic activation uses each member's authored
+        // ground abilities at its containing planet, including transported heroes.
+        // Keep the request value-owned: the async outbox releases it to the
+        // ordinary command barrier, where ownership and location are rechecked.
+        if (arguments.size() == 1 && host->ai_world && host->ai_world->goal_mode() == "GALACTIC") {
+            const auto* plan = host->engine->plan(taskforce->plan);
+            const auto* world = dynamic_cast<const ai::GalacticWorld*>(host->ai_world.get());
+            if (!plan || !world) return none();
+            for (const auto member : taskforce->units) {
+                if (const auto planet = world->containing_planet(member))
+                    context.issue_command("galactic.ground_ability", {handle(handle_player, plan->player),
+                        handle(handle_game_object, member), handle(handle_game_object, *planet)});
+            }
+            return none();
+        }
+        if (arguments.size() < 2 || as_text(arguments[1]) == nullptr) return none();
         const std::string ability = upper(*as_text(arguments[1]));
         for (const sim::EntityId id : taskforce->units) {
             if (const ViewUnit* unit = host->view->find(id)) {

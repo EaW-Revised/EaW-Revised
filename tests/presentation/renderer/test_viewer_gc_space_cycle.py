@@ -93,6 +93,7 @@ var source = Vector2.ZERO
 var target = Vector2.ZERO
 var pathfinder_seen = false
 var ready_msec = 0
+var hud_age = 0.0
 var viewport: SubViewport
 func _initialize():
     # Leave wall-clock time for native discovery/focus and fleet input before frame-20 Move.
@@ -144,9 +145,19 @@ func _process(delta):
         if fleet_stage == 5: pointer(source + Vector2(24, 0), true, true)
         if fleet_stage == 7: pointer(target, true, true)
         if fleet_stage == 9: pointer(target, false, false)
-    if root.find_child("CampaignSpaceBattleReady", true, false) == null:
+    var battle = root.find_child("CampaignSpaceBattleReady", true, false)
+    if battle == null:
         return false
     Engine.max_fps = 60
+    # Child creation precedes Begin and the arrival cinematic. Only send native
+    # gestures once its playable HUD stays visible; arrival deliberately drops input.
+    var hud = battle.find_child("EawrTacticalHudMask", true, false)
+    if hud == null or not hud.is_visible_in_tree():
+        hud_age = 0.0
+        return false
+    hud_age += min(delta, 0.1)
+    if hud_age < 0.5:
+        return false
     age += min(delta, 0.1)
     if index < actions.size() and age > actions[index][0]:
         var action = actions[index]
@@ -177,7 +188,7 @@ func _process(delta):
         quit()
     return false
 ''' % (json.dumps(actions), json.dumps(target.as_posix()), json.dumps(target.as_posix())), encoding="utf-8")
-            result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--render-thread", "separate", "--resolution", "1280x720",
                 "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
                 *arguments, "--eawr-game-root", support.GAME_ROOT,
                 "--eawr-lighting", "sh", "--eawr-shadows", "on", "--eawr-environment", "map",
@@ -226,9 +237,34 @@ func _process(delta):
             from campaign_space_cases import commander_campaign_arguments
         directory = Path(tempfile.mkdtemp(prefix="eawr-gc-commander-"))
         report = directory / "report.json"
+        capture = directory / "commander.png"
+        driver = directory / "input.gd"
+        # Observe the heads in ordinary play. The completed retreat cinematic
+        # hides world UI and clears its current icon rows before final teardown.
+        driver.write_text('''extends SceneTree
+var hud_age = 0.0
+func _initialize():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func _process(delta):
+    var battle = root.find_child("CampaignSpaceBattleReady", true, false)
+    if battle == null:
+        return false
+    var hud = battle.find_child("EawrTacticalHudMask", true, false)
+    if hud == null or not hud.is_visible_in_tree():
+        hud_age = 0.0
+        return false
+    hud_age += min(delta, 0.1)
+    if hud_age > 1.0:
+        root.get_texture().get_image().save_png(%s)
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''' % json.dumps(capture.as_posix()), encoding="utf-8")
         result = subprocess.run([
-            os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
-            "--path", str(support.ROOT / "apps/viewer/project"), "--",
+            os.environ["EAWR_GODOT_EXECUTABLE"], "--render-thread", "separate", "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
             *commander_campaign_arguments(support.GAME_ROOT, directory),
             "--eawr-game-root", support.GAME_ROOT, "--eawr-lighting", "sh",
             "--eawr-shadows", "on", "--eawr-environment", "map",
@@ -246,15 +282,15 @@ func _process(delta):
         self.assertTrue(all(row["carrier_type"] == "Nebulon_B_Frigate" for row in riders), riders)
         self.assertTrue(all(row["reveal_raw"] * 2 == row["base_reveal_raw"] * 3 for row in riders), riders)
         self.assertIn("Generic_Fleet_Commander_Rebel", json.dumps(tactical["world_ui"]))
-        self.assertTrue((directory / "space-cycle" / "tactical.png").is_file())
-        print("commander GC lit capture:", directory / "space-cycle" / "tactical.png")
+        self.assertTrue(capture.is_file())
+        print("commander GC lit capture:", capture)
 
     def cycle(self, mode, resize=None, arrival=None):
         directory = Path(tempfile.mkdtemp(prefix="eawr-gc-space-cycle-"))
         report, capture = directory / "report.json", directory / "returned.png"
         began = time.monotonic()
         result = subprocess.run([
-            os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            os.environ["EAWR_GODOT_EXECUTABLE"], "--render-thread", "separate", "--resolution", "1280x720",
             "--path", str(support.ROOT / "apps/viewer/project"), "--",
             *qualified_campaign_arguments(mode),
             "--eawr-game-root", support.GAME_ROOT,

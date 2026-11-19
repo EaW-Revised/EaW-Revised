@@ -1,6 +1,7 @@
 #include <variant>
 #include "../support/env.hpp"
 #include "../support/result.hpp"
+#include "../support/temp_dir.hpp"
 #include "galactic_support.hpp"
 #include "eawr/sim/galactic/income.hpp"
 #include "eawr/sim/tactical/combat.hpp"
@@ -13,10 +14,13 @@
 #include "restore_patch.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <chrono>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -70,6 +74,83 @@ gc::GalacticSetup setup() {
 }
 gc::GameCommand buy(std::uint64_t tick, std::uint64_t sequence) {
     return {{tick, {1}, sequence}, gc::ProductionCommand{1, 2000, gc::ProductionAction::buy, gc::ProductionDomain::ground, 0, {}}};
+}
+// WGEP-10: exercise authored profiles through live gathering, not only the formula.
+void authored_mining_lifecycle(gc::EconomicType profile, bool space_unit,
+    Fixed colony_bonus, Fixed ordinary_bonus = {}) {
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        auto config = setup();
+        profile.type = space_unit ? 1000 : 2000;
+        config.income->types = {profile}; config.income->sources.clear();
+        if (space_unit) config.fleets.resize(1);
+        else {
+            config.fleets.clear();
+            config.production->planets[0].objects = {{60000, 2000, 1, {},
+                gc::ProductionDomain::ground, gc::ProductionKind::structure}};
+        }
+        auto game = take(gc::GalacticSession::create(config));
+        const auto actual = [&](std::size_t index) {
+            const auto& rows = game.snapshot()->economy_input_generation()->income;
+            expect(rows && rows->size() == config.planets.size(), "authored mining publishes all planet totals");
+            return rows ? rows->at(index).second : Fixed{};
+        };
+        const auto colony_total = take(eawr::sim::math::add(f(10), colony_bonus));
+        expect(actual(0) == colony_total, "authored mining profile reaches the current mining-colony planet");
+        std::vector<std::string> hashes;
+        take(game.submit(owner(0, {1}, 1, 1, 2)));
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(actual(0) == f(10), "ownership loss removes the nonplanet source's bonus");
+        take(game.submit(owner(1, {1}, 2, 1, 1)));
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(actual(0) == colony_total, "ownership gain restores the same authored source exactly once");
+        if (space_unit) {
+            take(game.submit(orbit(2, {1}, 3, config.fleets.front().id, 3)));
+            hashes.push_back(take(game.step(pool)).state_hash.get());
+            expect(actual(0) == f(10) && actual(2) == take(eawr::sim::math::add(f(10), ordinary_bonus)),
+                "SpaceUnit mining follows its current planet and destination colony flag");
+            const auto retained = game.snapshot();
+            const std::vector<eawr::sim::EntityId> losses{config.fleets.front().members.front().id};
+            take(game.apply_battle_losses(losses));
+            expect(actual(2) == f(10), "destroying the SpaceUnit removes its unique income source");
+            expect(retained->economy_input_generation()->income->at(2).second
+                == take(eawr::sim::math::add(f(10), ordinary_bonus)), "previous publication retains the former source amount");
+            hashes.push_back(take(game.step(pool)).state_hash.get());
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "authored mining ownership and location lifecycle is equal on 1/2/4/8 workers");
+    }
+}
+void mod_space_mining() {
+    const auto root = std::filesystem::temp_directory_path() / ("eawr-mod-mining-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{root};
+    std::filesystem::create_directories(root / "XML");
+    const auto write = [&](std::string_view name, std::string_view text) { std::ofstream(root / "XML" / name) << text; };
+    write("GameObjectFiles.xml", "<Game_Object_Files><File>Mod_Income.xml</File></Game_Object_Files>");
+    write("HardpointDataFiles.xml", "<Hard_Point_Files/>"); write("FactionFiles.xml", "<Faction_Files/>");
+    write("CampaignFiles.xml", "<Campaign_Files/>"); write("SFXEventFiles.xml", "<SFXEvent_Files/>");
+    write("TradeRouteFiles.xml", "<Trade_Route_Files/>");
+    write("Mod_Income.xml", R"xml(<Types><SpaceUnit Name="Mod_Income_Ship"><Abilities SubObjectList="Yes">
+      <Planet_Income_Bonus_Ability Name="Mod_Income"><Percentage_Income_Modifier>0.375</Percentage_Income_Modifier>
+      <Absolute_Income_Modifier>1.5</Absolute_Income_Modifier><Additional_Multiplier_On_Mining_Colonies>1.25</Additional_Multiplier_On_Mining_Colonies>
+      <Initially_Enabled>Yes</Initially_Enabled><Activation_Style>Galactic_Automatic</Activation_Style>
+      </Planet_Income_Bonus_Ability></Abilities></SpaceUnit>
+      <SpaceUnit Name="Mod_Inherited_Income"><Variant_Of_Existing_Type>Mod_Income_Ship</Variant_Of_Existing_Type></SpaceUnit></Types>)xml");
+    const std::array mounts{eawr::vfs::MountSpec{"mod", root, "data", {}}};
+    const auto filesystem = take(eawr::vfs::Vfs::mount(mounts));
+    const auto catalog = take(eawr::data::load_catalog(filesystem, eawr::data::Profile::foc));
+    const auto economics = eawr::units::galactic_economic_table(catalog.catalog);
+    const auto types = eawr::units::galactic_type_table(catalog.catalog);
+    for (const auto name : {"Mod_Income_Ship", "Mod_Inherited_Income"}) {
+        const auto at = std::find_if(economics.types.begin(), economics.types.end(),
+            [name](const auto& row) { return row.name == name; });
+        expect(at != economics.types.end() && at->object_class == "SpaceUnit", "mod SpaceUnit and inherited profile load");
+        if (at == economics.types.end()) continue;
+        const auto profile = take(eawr::campaign::prepare_economic_type(*at, 1000, {}, types, {}));
+        authored_mining_lifecycle(profile, true, d("6.5625"), d("5.25"));
+    }
 }
 void math_rules() {
     expect(take(gc::mining_income_bonus(f(100), f(2), {}, false, d("1.5"))) == f(200), "WGEP-10 two is plus 200 percent");
@@ -779,6 +860,11 @@ void installed_data() {
     expect(hypori != economy.types.end() && hypori->reductions[0].initially_enabled == true
         && hypori->reductions[0].activation_style == "Galactic_Automatic", "WGEP-93 stock omitted activation uses specific constructor defaults");
     const auto types = eawr::units::galactic_type_table(catalog.catalog);
+    if (mine != economy.types.end()) {
+        const auto profile = take(eawr::campaign::prepare_economic_type(*mine, 2000, {}, types, {}));
+        authored_mining_lifecycle(profile, false, f(30));
+        std::cout << "stock authored mining ownership lifecycle ran on 1/2/4/8 workers\n";
+    }
     std::vector<eawr::campaign::EconomicTypeBinding> bindings;
     for (const auto& type : types.types) bindings.push_back({type.name, static_cast<gc::TypeId>(bindings.size() + 1)});
     const auto maw = std::find_if(economy.types.begin(), economy.types.end(), [](const auto& row) { return row.name == "The_Maw"; });
@@ -1228,7 +1314,7 @@ void malformed_service_restore() {
 }
 } // namespace
 int case_galactic_income_tests() {
-    try { malformed_service_restore(); math_rules(); filters(); planet_reduction_cards(); technology_price_planets(); technology_price_callbacks(); lifecycle_and_queues(); replay_checkpoint(); installed_data(); publication_cache(); political_income_retention(); land_return_publication();
+    try { mod_space_mining(); malformed_service_restore(); math_rules(); filters(); planet_reduction_cards(); technology_price_planets(); technology_price_callbacks(); lifecycle_and_queues(); replay_checkpoint(); installed_data(); publication_cache(); political_income_retention(); land_return_publication();
         gathered_reduction_categories(); nested_sources(); ruined_income_readers(); income_memos_follow_inputs(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures ? 1 : 0;

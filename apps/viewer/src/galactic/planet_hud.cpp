@@ -145,12 +145,30 @@ PlanetHudFacts observed_hud_facts(const sim::galactic::ObservedPlanet& observati
         result.ground_capacity = production->ground_slots;
         result.space_capacity = production->maximum_space_level;
         result.unit_capacity = static_cast<std::int64_t>(production->maximum_ground_forces);
-        if (result.structures_known) result.structures = static_cast<std::size_t>(std::count_if(
+        if (result.structures_known || result.ground_level_known) {
+            const auto count = static_cast<std::size_t>(std::count_if(
             production->objects.begin(), production->objects.end(), [](const auto& object) {
                 return object.domain == sim::galactic::ProductionDomain::ground
                     && object.kind == sim::galactic::ProductionKind::structure;
             }));
+            if (result.structures_known) result.structures = count;
+            if (result.ground_level_known) result.ground_structure_count = count;
+        }
     }
+    return result;
+}
+
+PlanetHoverLevels planet_hover_levels(const PlanetHudFacts& facts, const std::optional<std::int64_t> space_max,
+    const std::optional<std::int64_t> ground_max) {
+    PlanetHoverLevels result;
+    // The live starbase maximum is validated at five; keep the same bound for authored-only fallback.
+    result.space_max = std::clamp<std::int64_t>(facts.space_capacity.value_or(space_max.value_or(0)), 0, 5);
+    result.ground_max = std::max<std::int64_t>(0, facts.ground_capacity.value_or(ground_max.value_or(0)));
+    if (facts.space_level_known && facts.space_level)
+        result.space_filled = std::clamp(*facts.space_level, std::int64_t{0}, result.space_max);
+    if (facts.ground_level_known && facts.ground_structure_count)
+        result.ground_filled = static_cast<std::int64_t>(std::min<std::size_t>(*facts.ground_structure_count,
+            static_cast<std::size_t>(result.ground_max)));
     return result;
 }
 
@@ -312,7 +330,7 @@ std::uint64_t label_placement_digest(const PlanetHudFacts& facts) {
     digest.add(production_activity(facts));
     digest.add(facts.ground_level); digest.add(facts.space_level);
     digest.add(facts.ground_capacity); digest.add(facts.space_capacity);
-    digest.add(facts.structures); digest.add(facts.political_control);
+    digest.add(facts.structures); digest.add(facts.ground_structure_count); digest.add(facts.political_control);
     digest.add(facts.political_breakdown_known); digest.add(facts.structures_known);
     digest.add(facts.ground_level_known); digest.add(facts.space_level_known);
     digest.add(facts.corrupted); digest.add(facts.local_benefits_from_corruption);
@@ -474,8 +492,13 @@ std::vector<double> status_row_centres(const double origin_x, const std::vector<
     return centres;
 }
 
-bool command_bar_icon_in_atlas(const assets::MegaTexture* atlas, const std::string_view icon) noexcept {
-    return atlas != nullptr && !icon.empty() && atlas->find(icon) != nullptr;
+bool command_bar_icon_in_atlas(const assets::MegaTexture* atlas, const std::string_view icon,
+                               CommandBarIconAtlasCache& cache) {
+    if (!atlas || icon.empty()) return false;
+    if (const auto found = cache.find(icon); found != cache.end()) return found->second;
+    const bool present = atlas->find(icon) || atlas->find_sibling(icon);
+    cache.emplace(std::string(icon), present);
+    return present;
 }
 
 int corruption_transition_percent(const float fraction) noexcept {

@@ -60,10 +60,44 @@ std::vector<SetupFaction> setup_factions(const data::Catalog& catalog) {
         if (!playable || !detail::retail_flag(playable->value.raw_text, false)) continue;
         SetupFaction faction;
         faction.name = name;
+        // #7842: recorded for the drop-down list only; start, admission and removal still go by Is_Playable alone.
+        const auto* neutral = resolved.value().value("Is_Neutral");
+        if (neutral) data::tag_trace::used(neutral->value);
+        faction.neutral = neutral && detail::retail_flag(neutral->value.raw_text, false);
         if (const auto* id = resolved.value().value("Text_ID")) faction.text_id = detail::trim(id->value.raw_text);
+        if (const auto* icon = resolved.value().value("Multiplayer_Map_Preview_Icon")) {
+            data::tag_trace::used(icon->value);
+            faction.preview_icon = detail::trim(icon->value.raw_text);
+        }
         result.push_back(std::move(faction));
     }
     return result;
+}
+
+std::vector<SetupFaction> setup_factions_for_map(const std::span<const SetupFaction> factions, const SetupMap* const map) {
+    // A neutral faction (pirates, minor powers) holds no player seat, whatever its Is_Playable says.
+    std::vector<SetupFaction> listable;
+    for (const auto& faction : factions) if (!faction.neutral) listable.push_back(faction);
+    if (map == nullptr) return listable;
+    std::vector<SetupFaction> result;
+    for (const auto& faction : listable) {
+        const bool startable = std::any_of(map->teams.begin(), map->teams.end(), [&](const SetupTeam& team) {
+            return std::any_of(team.factions.begin(), team.factions.end(), [&](const std::string& name) {
+                return detail::iequals(name, faction.name);
+            });
+        });
+        if (startable) result.push_back(faction);
+    }
+    if (result.empty()) return listable;
+    return result;
+}
+
+int keep_listed_faction(const std::span<const SetupFaction> listed, const std::string_view previous, const std::size_t fallback) {
+    if (listed.empty()) return -1;
+    for (std::size_t index = 0; index < listed.size(); ++index) {
+        if (!previous.empty() && detail::iequals(listed[index].name, previous)) return static_cast<int>(index);
+    }
+    return static_cast<int>(std::min(fallback, listed.size() - 1));
 }
 
 bool setup_map_eligible(const assets::Map& map, const SetupMapQuery& query) {
@@ -168,8 +202,8 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
                 SetupTeam side{*team, {}, spawns[*team]};
                 for (const auto& candidate : p->marker_for) {
                     for (const auto& faction : detail::tokens(candidate.affiliation)) {
-                        // Both setup and LAN validate against this playable-only, canonical list.
-                        // Station support still never limits the dropdown itself (WSS-12/13).
+                        // Both setup and LAN validate against this playable, non-neutral, canonical list. A faction no
+                        // team of the map names is left out of the dropdown by setup_factions_for_map (#7842, DEV-27).
                         const auto playable = std::find_if(playable_factions.begin(), playable_factions.end(),
                             [&](const auto& playable_entry) { return detail::iequals(playable_entry.name, faction); });
                         if (playable != playable_factions.end()

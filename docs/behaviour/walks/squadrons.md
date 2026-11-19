@@ -546,11 +546,14 @@ The [fighter and AI coverage audit](../tag-coverage-fighters-ai.md) qualifies
 `Container/Squadron_Formation_Error_Tolerance` and `Container/Squadron_Offsets` as
 `deferred` for hero-team dispatch (TCFA-04), rather than stale applied rows:
 the existing unit-table reads are in the Squadron loader, not the Container body path.
-Marked `todo` in `docs/tag-coverage/statuses.json`: `Container/Idle_Chase_Range` and
-`SpaceUnit/Idle_Chase_Range` presentation tag coverage (legacy EAWR-653),
-`Container/Guard_Chase_Range`, `Container/Attack_Move_Response_Range`,
-`Container/Autonomous_Move_Extension_Vs_Attacker`, `Container/Max_Speed`, `Container/Min_Speed`
-Movement tag coverage (legacy EAWR-649), `Container/Targeting_Max_Attack_Distance` combat tag coverage (legacy EAWR-650).
+`Idle_Chase_Range`, `Guard_Chase_Range` and `Attack_Move_Response_Range` are movement
+coverage rows with a partial `Container`/`SpaceUnit` scope: loaded fighter-locomotor
+bodies read them and target preparation consumes their formation diversion allowance
+(FT-02, WHE-SQ-02). Ordinary nonfighter ships and Container team dispatch remain open;
+a Squadron loader read does not establish that Container path.
+Remaining movement gaps include `Container/Autonomous_Move_Extension_Vs_Attacker`,
+`Container/Max_Speed` and `Container/Min_Speed` (legacy EAWR-649).
+`Container/Targeting_Max_Attack_Distance` retains its separate combat coverage (legacy EAWR-650).
 The same audit retains `foc-ignores` for `SpaceUnit/Number_per_Squadron` and
 `Squadron/Is_Bomber` (TCFA-14), scopes `SpaceUnit/Squadron_Capacity` to galactic
 packing (TCFA-03), keeps `Squadron/Max_Squad_Size` partial for results scoring

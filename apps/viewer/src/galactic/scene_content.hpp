@@ -27,6 +27,8 @@ struct DestructionEffectArt final {
     const data::Catalog&, std::string_view source_type, std::string_view ability_name);
 
 struct PlanetArt final {
+    // WGUI-188: hover-only fallback when live capacities are absent.
+    std::optional<std::int64_t> ground_capacity, space_capacity;
     SceneLayer layer{SceneLayer::world};
     std::string idle_animation;
     std::string land_tactical_map;
@@ -89,6 +91,8 @@ template <typename Members, typename Lookup>
 
 [[nodiscard]] PlanetAbilityMetadata planet_ability_metadata(const data::galactic::Planet& planet,
     const data::ui::TextDatabase* text, std::vector<std::string>& diagnostics);
+[[nodiscard]] PlanetInfoMetadata planet_info_metadata(const data::galactic::Planet& planet,
+    const data::ui::TextDatabase* text);
 
 // The observer adapter supplies an apparent faction. A missing observation is
 // deliberately different from observing the Neutral faction (WGP-06).

@@ -330,6 +330,25 @@ def handler_needs(row, mechanic, need):
         "BLAST": (["WHE-35", "WHE-36"], 946),
         "STEALTH": (["WHE-37"], 946),
     }
+    # UC-03: reviewed runtime consumers, rather than the original power-mode-only
+    # dispatch list. These verdicts retain the existing tracking ownership.
+    services = {
+        "HUNT": ("partial", "Patrol destinations, leader service and coordinated attack-moves exist. WAB G-1 still lacks on-fire cadence, camera bounds and full queued/uninterruptible-order state.", ("WAB-50", "WAB-54", "WAB-56")),
+        "CONCENTRATE_FIRE": ("partial", "Named activation recruits same-owner attackers and installs source/category target defense and speed effects. WAB-36 retains command-stage autofire instead of targeting-stage activation; ordinary queued ability-range approach remains unmodelled.", ("WHE-24", "WHE-25", "WAB-36")),
+        "ENERGY_WEAPON": ("partial", "Named beam admission, hardpoint selection, per-frame direct damage and release exist. WHE U-09 retains timer scaling and simultaneous cancellation/source-loss qualification; beam audio remains deferred.", ("WHE-26", "WHE-57", "WHE-58", "WHE-59")),
+        "TRACTOR_BEAM": ("partial", "Named beam admission, source/category speed reduction, held state and release exist. WHE U-09 retains the locomotor exclusion, timer scaling and simultaneous cancellation/source-loss qualification.", ("WHE-27", "WHE-57", "WHE-58", "WHE-60")),
+        "WEAKEN_ENEMY": ("partial", "Point spawning, detonation and timed source/category damage and defense contributions exist, including signed damage reductions. WHE U-10 retains the cancellation and activation boundary qualification.", ("WHE-28", "WHE-61", "WHE-62")),
+        "HARMONIC_BOMB": ("partial", "Source-position spawning, authored countdown, area-blast handoff and recharge exist. Harmonic cancellation and AI autofire remain WHE U-10.", ("WHE-29", "WHE-61", "WHE-62")),
+        "REPLENISH_WINGMEN": ("partial", "Member-dispatched replenishment preserves survivors, appends authored escorts and conditionally recharges. Automatic activation policy and deletion/service races remain WHE U-08; a container declaration is display data.", ("WHE-30", "WHE-63", "WHE-64", "WHE-70")),
+        "SENSOR_JAMMING": ("partial", "Named manual and automatic handlers stamp recipients, refresh combat-automatic counters and keep independent holder registrations. Cross-object ordering remains FD-75 and manager reapplication after nebula exit remains UFS-38.", ("WHE-31", "WHE-32", "WJM-01", "WJM-02", "WJM-03", "WJM-04")),
+        "CORRUPT_SYSTEMS": ("partial", "Point activation, recipient collection, shield drain, fixed inaccuracy and expiry recharge exist. The native IG-2000 script adapter retains an unverified relative service phase (WHE-67).", ("WHE-33", "WHE-34", "WHE-65", "WHE-66", "WHE-67", "WHE-69")),
+        "STEALTH": ("implemented", "Named cloak activation, independent duration, detection and hostile visibility gates exist; held battlefield upgrades modify cloak duration. Other handler and lifecycle needs remain separate.", ("WST-01", "WST-03", "WST-04", "WST-08", "WST-13")),
+        "BUZZ_DROIDS": ("partial", "The team container admits point requests and creates the swarm; squadron-listed craft do not receive a duplicate local slot, while eligible solo craft retain one. Movement admission, cancellation and marker detach remain WAB-U1/UFS-21; negative authored-data recovery remains WAB-70.", ("WAB-70", "WAB-71", "WAB-77")),
+        "LASER_DEFENSE": ("partial", "Named point defence selects and removes eligible shots and publishes authored beams and sound. First-service and object-script phase remain unverified (WLD-03/10); the lightning particle remains presentation-later.", ("WLD-01", "WLD-03", "WLD-10", "WLD-12")),
+        "FULL_SALVO": ("partial", "Timed activation scales the authored hardpoint weapon delay without changing damage, range or targeting. Q24 versus float rounding retains the WAB U-01 timing boundary; same-named nested autofire fallback remains unmodelled (WAB-84).", ("WAB-80", "WAB-81", "WAB-82", "WAB-84")),
+        "SELF_DESTRUCT": ("partial", "Authored countdown, movement-stop control, owner destruction and optional spawned blast exist. A type-authored self-destruct clip and the same-named nested autofire fallback remain unmodelled (WSD-11/12).", ("WSD-01", "WSD-02", "WSD-11", "WSD-12")),
+        "LEECH_SHIELDS": ("partial", "Named target/range admission and shield-transfer beam service exist with source-specific termination. WLS-03 and WHD-02 retain the recharge/source-loss boundary and WAB-36 retains command-stage autofire.", ("WLS-01", "WLS-03", "WHD-02", "WAB-36")),
+    }
     for ability in row["unit_abilities"]:
         kind = ability["type"]
         ids, ticket = type_rules.get(kind, (["UC-03"], 760))
@@ -398,11 +417,16 @@ def handler_needs(row, mechanic, need):
                      "src/sim/tactical/session_abilities.cpp#refresh_damage_modes"), ("WHE-22", "WHE-51", "WHE-52"))
             if unsupported:
                 add("ability-other-modifiers", "Unsupported ability modifiers", "partial",
-                    "The loader omits the whole ability when any authored modifier has no consumer rather than exposing a partially supported button.",
+                    "Recognized modifiers are applied; unknown modifier names are ignored without discarding the ability. Those authored effects have no supported consumer (AB-26).",
                     ("src/units/unit_abilities.cpp#ability_table",), ("WHE-22",), 938)
             add("ability-plan-events", "Ability ready/finished plan events", "partial",
                 "Countdown services exist; the ability walk identifies missing AI plan notifications.",
                 ("src/sim/tactical/abilities.cpp#expire_abilities", "src/script/foc/ai_taskforces.cpp#service_taskforce_events"), ("WAB-34",), None, "S")
+        elif kind in services:
+            status, reason, rules = services[kind]
+            add("unit-ability:" + kind, kind + " ability", status, reason,
+                ("src/units/unit_abilities.cpp#ability_table", "src/sim/tactical/abilities.cpp#ability_service",
+                 "src/sim/tactical/session_cmd_abilities.cpp#apply_ability"), rules, ticket)
         else:
             add("unit-ability:" + kind, kind + " ability", "missing",
                 "Not in the supported simulation dispatch; the loader skips unsupported kinds. UC-03 records data-only handlers whose complete original service remains unverified.",
@@ -416,35 +440,70 @@ def handler_needs(row, mechanic, need):
         ids, ticket = special_rules.get(handler, (["UC-03"], 760))
         if handler == "Cluster_Bomb_Ability":
             add("special-handler:" + handler, handler + " handler", "partial",
-                "Named User_Input handler launches the authored ring and countdown; MC30 script autofire cadence remains unsourced.",
+                "Named User_Input handler launches the authored ring and countdown. MC30 previous-sample autofire follows FS-29/FC-57/58 and FD-47; travel/countdown fidelity and the post-movement proximity seam remain UFS-27.",
                 ("src/units/unit_tables_profiles.cpp#load_abilities", "src/sim/tactical/session_step_commands.cpp#apply_ability"),
-                ("WCB-01", "WCB-02", "WCB-03"))
+                ("WCB-01", "WCB-02", "WCB-03", "FS-29", "FC-57", "FC-58", "FD-47"))
             continue
         implemented = handler == "Ion_Cannon_Shot_Attack_Ability"
         partial = handler == "Income_Stream_Ability"
         reason = ("Team ion-shot state and projectile override are applied." if implemented else
-                  "Station additive income exists; completed mine live ownership and allied recipient lifecycle are absent." if partial else
+                  "Station and completed-mine streams pay using live ownership, named enablement and authored allied/owner sharing. Held automatic upgrades pay on the next income pass. WIS-02 retains hit-absorption/pre-hit deviations, WIS-03/04 lack Special_Attack/User_Input starts, and U-BP-1/3 retain completion-race/allied observation qualification." if partial else
                   "The special handler has no complete tactical service for this object. Handler parameters alone do not implement it; UC-03 marks data-only service semantics unverified.")
         code = ["src/units/unit_tables_profiles.cpp#load_abilities", "src/units/unit_abilities.cpp#ability_table"]
+        if handler == "Income_Stream_Ability":
+            code += ["src/sim/tactical/session_step_economy.cpp#economy"]
+            ids += ["WPR-15", "WPR-16", "WBP-23", "WIS-01", "WIS-02", "WIS-03", "WIS-04", "WIS-05"]
+        service_handlers = {
+            "Concentrate_Fire_Attack_Ability": "CONCENTRATE_FIRE", "Energy_Weapon_Attack_Ability": "ENERGY_WEAPON",
+            "Tractor_Beam_Attack_Ability": "TRACTOR_BEAM", "Sensor_Jamming_Ability": "SENSOR_JAMMING",
+            "Corrupt_Systems_Ability": "CORRUPT_SYSTEMS", "Stealth_Ability": "STEALTH",
+            "Buzz_Droids_Ability": "BUZZ_DROIDS",
+        }
+        if handler in service_handlers:
+            status, reason, rules = services[service_handlers[handler]]
+            implemented, partial = status == "implemented", status == "partial"
+            ids = list(rules)
+            code += ["src/sim/tactical/abilities.cpp#ability_service", "src/sim/tactical/session_cmd_abilities.cpp#apply_ability"]
+        if handler in {"Redirect_Blaster_Ability", "Enable_Ability"}:
+            partial = True
+            reason = "Named enable upgrades and hit-time redirect/block reactions exist with source-specific effects. WRB-05 retains holder-station-loss and absent-enabled-default qualification; WRB-07's turn-to-face option is not modelled."
+            ids = ["WRB-01", "WRB-05", "WRB-07", "WRB-10"]
+        if handler == "Enable_Radar_Ability":
+            implemented = True
+            reason = "Automatic named radar permission applies to the owner or authored allies, honors comm-array locks, and withdraws only the removed source. Radar permission remains separate from fog and contact visibility."
+            ids = ["WRAD-01", "WRAD-02", "WRAD-03", "WRAD-04", "WHD-05"]
+        if handler == "Battlefield_Modifier_Ability" and styles == ["Space_Automatic"]:
+            supported = {"Activation_Style", "Initially_Enabled", "Apply_To_All_Allies", "Stacking_Category",
+                         "Enable_Special_Weapons", "Reverse_Application_Logic", "Stealth_Duration_Multiplier"}
+            unsupported = sorted(set(ability["fields"]) - supported)
+            implemented, partial = not unsupported, bool(unsupported)
+            reason = "Held battlefield upgrades apply source/category cloak-duration changes and authored special-weapon unlocks; removal withdraws the source."
+            if unsupported:
+                reason += " Other authored battlefield effects require separate consumers: " + ", ".join(unsupported) + "."
+            code += ["src/units/unit_tables_abilities_bonuses.cpp#load_bonus_abilities", "src/skirmish/economy.cpp#economy_rules"]
+            ids = ["WST-03", "WSW-07"]
         if handler == "Blast_Ability" and row["id"] == "The_Peacebringer":
             partial = True
             reason = "Peacebringer named user-input handler applies charge polls, shared charged-shot count, authored direct multiplier, phase particles and activation audio. Ordinary target, cooldown and health gates remain; empty stock phase effects have no substitutes. FD-56 broader inter-object order and UFS-30 exceptional callback policy remain deferred."
             code += ["src/sim/tactical/session_abilities.cpp#service_blast", "src/sim/tactical/combat_fire.cpp#attempt",
                      "apps/viewer/src/battle_effects_impacts.cpp#blast_phase", "apps/viewer/src/battle_audio_events.cpp#blast_activate"]
-        if handler == "Force_Healing_Ability" and styles == ["Skirmish_Automatic"]:
-            reason = ("Skirmish_Automatic mine self-repair has no complete tactical service. "
-                      "The headline missing status rolls up this mine direct unit alongside the partial space automatic satellite service; "
-                      "handler parameters alone do not implement mine repair (UC-03).")
-        if handler == "Force_Healing_Ability" and styles == ["Space_Automatic"]:
+        if handler == "Force_Healing_Ability" and styles in (["Space_Automatic"], ["Skirmish_Automatic"], ["Combat_Automatic"], ["Global_Automatic"]):
             add("special-handler:" + handler, handler.replace("_", " "), "partial",
                 "Automatic space healing selects eligible allies by healing-health fraction and repairs live hardpoints or hull, "
                 "with authored pulse effects. Stable query ties, competing healers, outside-centre bounds and the late damage phase "
-                "remain inferred adapters; exceptional lifecycle interfaces remain UFS-28. Other activation modes are outside this consumer.",
+                "remain inferred adapters; exceptional lifecycle interfaces remain UFS-28. Authored tactical automatic modes, including mine self-repair, are admitted; stock inherited mine observations remain U-BP-8.",
                 ("src/units/unit_tables_profiles.cpp#load_abilities", "src/sim/tactical/session_abilities.cpp#service_healing",
                  "src/sim/tactical/durability.cpp#heal_health", "apps/viewer/src/live_session_frame.cpp#observe_frame_ability_lights"),
-                tuple("WSH-%02d" % index for index in range(1, 9)), 2275)
+                tuple("WSH-%02d" % index for index in range(1, 11)), 2275)
             continue
         upgrade = row["class"].lower() == "upgradeobject"
+        if handler == "Income_Stream_Mod_Ability" and not upgrade:
+            targets = {v.strip().lower() for v in ability["fields"].get("Target_Stream_Source", []) if v.strip()}
+            if targets <= {row["id"].lower()} and "Income_Additive_Value" in ability["fields"]:
+                implemented = True
+                reason = "A source-local additive income bonus is projected into its own stream, with named enablement and authored automatic-mode admission; it does not imply a general cross-source modifier service."
+                code += ["src/skirmish/economy.cpp#economy_rules", "src/sim/tactical/session_step_economy.cpp#economy"]
+                ids += ["WPR-11", "WPR-16"]
         if upgrade and handler == "Starbase_Upgrade_Ability" and styles == ["Skirmish_Automatic"]:
             implemented = True
             reason = "Completed station upgrades replace the logical station, carry held objects, queues and references, raise allied tech and open the next authored menu."
@@ -472,13 +531,16 @@ def handler_needs(row, mechanic, need):
                     reason += " Authored effects remain unsupported: " + ", ".join(unsupported) + "."
                 code += ["src/skirmish/economy.cpp#economy_rules", "src/sim/tactical/session_economy.cpp#service_income_modifiers",
                          "src/sim/tactical/economy.cpp#modified_income_per_frame"]
-        elif upgrade and handler == "Combat_Bonus_Ability" and styles == ["Space_Automatic"]:
+        elif handler == "Combat_Bonus_Ability" and styles in (["Space_Automatic"], ["Combat_Automatic"]):
             supported = {"Activation_Style", "Applicable_Unit_Types", "Applicable_Unit_Categories", "Stacking_Category",
                          "Health_Bonus_Percentage", "Damage_Bonus_Percentage", "Energy_Pool_Bonus_Percentage",
-                         "Shield_Bonus_Percentage", "Defense_Bonus_Percentage", "Movement_Speed_Bonus_Percentage"}
+                         "Shield_Bonus_Percentage", "Defense_Bonus_Percentage", "Movement_Speed_Bonus_Percentage",
+                         "Fire_Range_Bonus_Percentage", "Initially_Enabled", "Specific_Faction"}
             unsupported = sorted(set(ability["fields"]) - supported)
-            implemented, partial = not unsupported, bool(unsupported)
-            reason = "Held upgrade profiles apply allied health, damage, energy, shield, defense and movement bonuses with stacking categories."
+            implemented, partial = upgrade and not unsupported, not upgrade or bool(unsupported)
+            reason = ("Held upgrade profiles apply allied health, damage, energy, shield, defense, movement and hardpoint fire-range bonuses with signed stacking categories and separate health loss/gain adjustment." if upgrade else
+                      "Automatic command sources apply source/category bonuses with authored owner/type/category filters. WHE U-07 retains recharge/build-time consuming formulas and simultaneous source-death/refresh qualification.")
+            ids += ["WHE-53", "WHE-54", "WHE-55", "WCB-04"]
             if unsupported:
                 reason += " Authored effects remain unsupported: " + ", ".join(unsupported) + ". Purchase admission does not prove these effects."
             code += ["src/skirmish/economy.cpp#economy_rules", "src/sim/tactical/session_economy.cpp#profile_bonuses",
@@ -512,17 +574,19 @@ def handler_needs(row, mechanic, need):
             ("src/skirmish/economy.cpp#economy_rules", "src/sim/tactical/session_step_economy.cpp#economy",
              "src/sim/tactical/session_step_economy.cpp#station_upgrades"), ("WPR-50", "WPR-52"), 540, "L")
     if behaviours & {"CAPTURE_POINT", "TACTICAL_BUILD_OBJECTS", "TACTICAL_UNDER_CONSTRUCTION"} or any(a["route"] in ("pad_menu", "constructed") for a in row["acquisition"]):
-        add("pad-lifecycle", "Captured pad construction and completed combat objects", "missing",
-            "Damageable construction, replacement/parent links and capture ownership are absent; satellites require admission as ordinary combat units.",
-            ("src/skirmish/start.cpp#build_start",), ("WBP-01", "WBP-09", "WBP-18", "WBP-21"), 541, "L")
+        add("pad-lifecycle", "Captured pad construction and completed combat objects", "partial",
+            "Live pads admit damageable construction, completion with carried health fraction, linked combat children and live-builder ownership. Deferred respawn and controller/default activation are applied. U-BP-1 retains cross-object projectile/completion ordering and U-BP-5 wider direct-parent deletion policy.",
+            ("src/skirmish/start.cpp#build_start", "src/sim/tactical/session_step_economy.cpp#pad_lifecycle",
+             "src/sim/tactical/pads.cpp#respawn_after_death"), ("WBP-01", "WBP-09", "WBP-18", "WBP-19", "WBP-43", "WBP-49"), 541, "L")
     if "TACTICAL_SELL" in behaviours:
         add("satellite-sale", "Satellite sale and empty-pad preservation", "missing",
             "The exact-owner sell/refund/parent-link path is a build-pad walk gap.", (), ("WBP-30", "WBP-32"), 998)
     if "SPAWN_SQUADRON" in behaviours:
         higher_tech = any(re.fullmatch(r"(?:Starting|Reserve)_Spawned_Units_Tech_[1-9]", t["tag"]) for t in row["special_tags"])
         add("carrier-service", "Carrier launch and reserve replacement", "partial" if higher_tech else "implemented",
-            "Tech_0 launch/reserve service exists. Additional authored tech lists are ignored by load_spawner; per-unit need status identifies only objects authoring these lists.",
-            ("src/units/unit_tables_profiles.cpp#load_spawner", "src/sim/tactical/fighters_spawner.cpp#service_spawner"), ("FL-03", "UC-04"), 651)
+            "Authored Tech_0..5 lists load and owner technology selects the hangar tier; an empty tier retries after technology changes while a populated tier is retained. Manual deployment shares readiness/reserve service. Same-frame technology-change ordering remains an unsourced FD seam; high-tech users retain partial status.",
+            ("src/units/unit_tables_profiles.cpp#load_spawner", "src/sim/tactical/fighters_spawner.cpp#service_spawner",
+             "src/sim/tactical/session_step_fighters.cpp#hangar_lifecycle"), ("FL-03", "FL-18", "WSL-11", "UC-04"), 651)
     if "ASTEROID_FIELD_DAMAGE" in behaviours:
         add("asteroid-damage", "Asteroid contact damage service", "implemented",
             "Opted-in frigate/capital layers service center-XY contact every frame with independent field rolls and ordinary hardpoint damage; failed layer/locomotor/scalar gates retain cached contact.",
@@ -536,7 +600,11 @@ def handler_needs(row, mechanic, need):
         add("behaviour:LURE", "LURE service", "implemented",
             "The partitioned target service stages authored per-craft pulses and commits enemy-team attack orders in ascending craft order.",
             ("src/sim/tactical/session_step_commands.cpp#lure",), ("WLU-02", "WLU-03", "WLU-04", "WLU-05", "WLU-06", "WLU-07"))
-    for behaviour in behaviours & {"SELF_DESTRUCT", "DUMMY_DESTROY_AFTER_SPECIAL_WEAPON_FIRED", "BOMB", "PROXIMITY_MINE"}:
+    if "SELF_DESTRUCT" in behaviours:
+        status, reason, rules = services["SELF_DESTRUCT"]
+        add("behaviour:SELF_DESTRUCT", "SELF DESTRUCT service", status, reason,
+            ("src/sim/tactical/session_step_commands.cpp#ability_phase",), rules)
+    for behaviour in behaviours & {"DUMMY_DESTROY_AFTER_SPECIAL_WEAPON_FIRED", "BOMB", "PROXIMITY_MINE"}:
         add("behaviour:" + behaviour, behaviour.replace("_", " ") + " service", "unknown",
             "Data opts into this behaviour, but the walks do not establish the complete handler service for this roster. Requires a targeted debug-build read before claiming fidelity.", (), ("UC-03",))
     for locomotor in row["locomotors"]:

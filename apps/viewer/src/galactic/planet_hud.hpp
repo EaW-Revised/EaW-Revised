@@ -3,6 +3,7 @@
 #include "galaxy_view.hpp"
 
 #include "eawr/sim/galactic/commands.hpp"
+#include "eawr/sim/galactic/fleet_intelligence.hpp"
 #include "eawr/data/ui/shell_anchors.hpp"
 #include "eawr/core/load_note.hpp"
 
@@ -12,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <map>
 #include <span>
 #include <string>
 #include <string_view>
@@ -256,6 +258,8 @@ struct PlanetHudFacts final {
     // #680/#682: source breakdown and visible income are separate publications.
     bool political_breakdown_known{};
     bool structures_known{}, ground_level_known{}, space_level_known{};
+    // WGUI-188: quantity admitted by ground-base-level knowledge, independently of structure identity knowledge.
+    std::optional<std::size_t> ground_structure_count;
     // GHUDL-15: the planet's own corruption state and the local faction's
     // corruption benefit select the status-row corruption icon.
     bool corrupted{}, local_benefits_from_corruption{};
@@ -284,6 +288,15 @@ struct PlanetHudFacts final {
     std::optional<double> actual_income = {});
 // Named text adapter: localized detail wording/layout remains GPH-01's seam.
 [[nodiscard]] std::string unverified_intelligence_text(const PlanetHudFacts& facts);
+
+struct PlanetHoverLevels final {
+    std::int64_t space_max{}, space_filled{}, ground_max{}, ground_filled{};
+    friend bool operator==(const PlanetHoverLevels&, const PlanetHoverLevels&) = default;
+};
+// WGUI-188: current station level / current ground structure count, each under its own base-level knowledge gate.
+// Live capacity wins; authored capacity is a local fallback and never changes the shared HUD facts.
+[[nodiscard]] PlanetHoverLevels planet_hover_levels(const PlanetHudFacts&, std::optional<std::int64_t> space_max,
+    std::optional<std::int64_t> ground_max);
 
 struct QueueComponent final {
     std::string type;
@@ -472,7 +485,10 @@ struct BonusIconStyle final { bool visible{}; Rgb tint{}; };
 // and in the planet card header) is set from the command-bar mega texture, so a name that is not an entry of it draws
 // nothing, whatever other texture the mod ships under that name (a mod may author a full-screen loading picture there).
 // A missing atlas holds no entry.
-[[nodiscard]] bool command_bar_icon_in_atlas(const assets::MegaTexture* atlas, std::string_view icon) noexcept;
+using CommandBarIconAtlasCache = std::map<std::string, bool, std::less<>>;
+// Cache belongs to one mounted atlas; clear it when that atlas changes.
+[[nodiscard]] bool command_bar_icon_in_atlas(const assets::MegaTexture* atlas, std::string_view icon,
+                                            CommandBarIconAtlasCache& cache);
 
 // #6756: a text component's authored Scale sizes its glyphs (the Remake chain's population readout authors 0.7): the
 // glyph raster height at the natural size, scaled and rounded, never below one pixel; no scale (1) keeps the natural size.

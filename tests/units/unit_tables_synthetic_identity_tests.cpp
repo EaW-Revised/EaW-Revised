@@ -172,7 +172,7 @@ static void income_authoring_contracts() {
         const std::string upgrade = std::string(R"(<UpgradeObject Name="Income_Upgrade"><Affiliation>Rebel</Affiliation>
             <Tactical_Health>1</Tactical_Health><Tactical_Build_Cost_Multiplayer>1</Tactical_Build_Cost_Multiplayer>
             <Tactical_Build_Time_Seconds>1</Tactical_Build_Time_Seconds><Tactical_Production_Queue>Tactical_Upgrades</Tactical_Production_Queue>
-            <Abilities><Income_Stream_Mod_Ability Name="Upgrade_Income"><Target_Stream_Source>Skirmish_Test_Base</Target_Stream_Source>
+            <Abilities SubObjectList="Yes"><Income_Stream_Mod_Ability Name="Upgrade_Income"><Target_Stream_Source>Skirmish_Test_Base</Target_Stream_Source>
             <Income_Multiplier>2</Income_Multiplier><Initially_Enabled>)") + enabled
             + "</Initially_Enabled></Income_Stream_Mod_Ability></Abilities></UpgradeObject>";
         xml.insert(xml.find("</Objects>"), upgrade);
@@ -345,7 +345,7 @@ void content_identity() {
     const std::string modifier_tags = R"(
       <Previous_Upgrade_Level_Type>Test_Base</Previous_Upgrade_Level_Type>
       <Next_Upgrade_Level_Type> Test_Next_Upgrade </Next_Upgrade_Level_Type>
-      <Abilities><Income_Stream_Mod_Ability Name="Fixture_Income_Mod">
+      <Abilities SubObjectList="Yes"><Income_Stream_Mod_Ability Name="Fixture_Income_Mod">
         <Target_Stream_Source>Skirmish_Test_Base</Target_Stream_Source>
         <Activation_Style>Space_Automatic</Activation_Style>
         <Affects_All_Allied_Sources>Yes</Affects_All_Allied_Sources>
@@ -396,7 +396,7 @@ void content_identity() {
     command_xml.insert(command_xml.find(fighter_tag) + fighter_tag.size(), R"(
       <Unique_Space_Unit>Test_Frigate</Unique_Space_Unit>
       <Unique_Ground_Unit>Test_Fighter</Unique_Ground_Unit>
-      <Abilities><Combat_Bonus_Ability Name="Fixture_Command">
+      <Abilities SubObjectList="Yes"><Combat_Bonus_Ability Name="Fixture_Command">
         <Activation_Style>Space_Automatic</Activation_Style>
         <Specific_Faction>Empire</Specific_Faction><Stacking_Category>3</Stacking_Category>
         <Applicable_Unit_Types>Test_Frigate</Applicable_Unit_Types>

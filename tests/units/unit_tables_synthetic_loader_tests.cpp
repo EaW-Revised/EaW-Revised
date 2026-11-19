@@ -2,6 +2,7 @@
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/sim/tactical/damage.hpp"
+#include "eawr/sim/tactical/pathfind.hpp"
 #include "eawr/units/content_selection.hpp"
 #include "unit_tables_synthetic_fixtures.hpp"
 
@@ -20,7 +21,299 @@
 #include <vector>
 
 namespace unit_tables_test_support {
+namespace {
+
+void template_durability_tables() {
+    // SG-CLS-02: a mod label does not interrupt inherited body health or armor.
+    for (const bool override_values : {false, true}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        xml.insert(xml.rfind("</Objects>"), std::string{R"xml(
+<Template Name="Hull_Template">
+  <Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>
+  <Tactical_Health>80</Tactical_Health><Armor_Type>Armor_Test</Armor_Type>
+</Template>
+<SpaceUnit Name="Template_Body">
+  <Variant_Of_Existing_Type>Hull_Template</Variant_Of_Existing_Type>
+)xml"} + (override_values
+            ? "<Tactical_Health>120</Tactical_Health><Armor_Type>Armor_Fighter</Armor_Type>" : "") + R"xml(
+</SpaceUnit>
+<Template Name="Unclassed_Body">
+  <Tactical_Health>40</Tactical_Health><Armor_Type>Armor_Test</Armor_Type>
+</Template>
+<TransportUnit Name="Transport_Body">
+  <Variant_Of_Existing_Type>Hull_Template</Variant_Of_Existing_Type>
+  <Tactical_Health>100</Tactical_Health>
+</TransportUnit>
+<Template Name="Template_Squadron">
+  <Variant_Of_Existing_Type>Hull_Template</Variant_Of_Existing_Type>
+  <Squadron_Units>Test_Fighter, 2</Squadron_Units>
+</Template>)xml");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F), "Normal_Default",
+            eawr::sim::tactical::BattleDomain::space,
+            {"Hull_Template", "Template_Body", "Unclassed_Body", "Transport_Body", "Template_Squadron"});
+        expect(loaded.tables.has_value(), "SG-CLS-02: custom-label durability fixture loads");
+        if (!loaded.tables) continue;
+        const auto durability = eawr::units::durability_table(*loaded.tables);
+        expect(durability && durability.value().damage, "SG-CLS-02: authored durability and armor rules bind");
+        if (!durability || !durability.value().damage) continue;
+        const auto indices = eawr::units::damage_type_index(*loaded.tables);
+        for (const std::string_view id : {"Hull_Template", "Template_Body", "Unclassed_Body", "Transport_Body"}) {
+            const auto* profile = durability.value().find(eawr::assets::object_type_crc(id));
+            expect(profile != nullptr, "SG-CLS-02: admitted body has durability independent of its element label");
+            if (!profile) continue;
+            const bool overridden = id == "Template_Body" && override_values;
+            const auto health = id == "Unclassed_Body" ? 60 : id == "Transport_Body" ? 150 : overridden ? 180 : 120;
+            expect(profile->max_hull == Fixed::from_raw(raw(health)),
+                "SG-CLS-02: inherited or overridden health reaches the scaled live hull maximum");
+            expect(profile->armor_type == indices.armor(overridden ? "Armor_Fighter" : "Armor_Test"),
+                "SG-CLS-02: inherited or overridden armor reaches the live profile");
+            auto state = eawr::sim::tactical::full_durability(*profile);
+            eawr::sim::tactical::Hit hit;
+            hit.amount = Fixed::from_raw(raw(10));
+            hit.damage_type = indices.damage("Damage_Turbolaser");
+            hit.projectile = true;
+            hit.shield_damage = false;
+            hit.allow_diminishing_firepower = false;
+            const auto result = eawr::sim::tactical::apply_hit(*profile, *durability.value().damage, state, hit, 1);
+            expect(result && state.hull == Fixed::from_raw(raw(health - (overridden ? 10 : 5))),
+                "SG-CLS-02: the authored armor changes actual projectile hull damage");
+        }
+        expect(!durability.value().find(eawr::assets::object_type_crc("Template_Squadron")),
+            "SG-CLS-02: a template resolving as Squadron still has no pooled hull profile");
+    }
+}
+
+void subobject_list_tables() {
+    const auto blocks = [](const std::string_view attribute, const int value) {
+        const auto text = std::to_string(value);
+        return "<Unit_Abilities_Data" + std::string(attribute) + "><Unit_Ability><Type>HUNT</Type>"
+            "<Recharge_Seconds>" + text + "</Recharge_Seconds></Unit_Ability></Unit_Abilities_Data>"
+            "<Abilities" + std::string(attribute) + "><Income_Stream_Ability Name=\"Stream_" + text + "\">"
+            "<Base_Income_Value>" + text + "</Base_Income_Value><Base_Interval_In_Secs>10</Base_Interval_In_Secs>"
+            "</Income_Stream_Ability></Abilities>";
+    };
+    const auto fixture = [](const std::string& base, const std::string& variant) {
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const auto begin = xml.find("<Unit_Abilities_Data", xml.find("<SpaceUnit Name=\"Test_Frigate\">"));
+        const auto end = xml.find("</Unit_Abilities_Data>", begin) + std::string_view{"</Unit_Abilities_Data>"}.size();
+        xml.replace(begin, end - begin, base);
+        xml.insert(xml.rfind("</Objects>"), "<UniqueUnit Name=\"List_Variant\">"
+            "<Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>" + variant + "</UniqueUnit>");
+        return xml;
+    };
+    for (const std::string_view attribute : {"", " SubObjectList=\"Yes\"", " SubObjectList=\"yes\"",
+        " SubObjectList=\"YES\"", " SubObjectList=\"True\"", " SubObjectList=\"1\"",
+        " SubObjectList=\"No\"", " SubObjectList=\" Yes \""}) {
+        TempTree tree;
+        write_fixture(tree.root, fixture(blocks(attribute, 3), {}));
+        const auto loaded = load(tree.root, models(-40.0F));
+        const auto* unit = loaded.tables ? loaded.tables->find("Test_Frigate") : nullptr;
+        const bool enabled = attribute == " SubObjectList=\"Yes\"";
+        expect(unit && unit->abilities.size() == (enabled ? 1U : 0U)
+            && unit->production.income.size() == (enabled ? 1U : 0U),
+            "WABL-01: both ability containers require the exact Yes attribute to decode nested rows");
+        if (enabled && unit && !unit->abilities.empty() && !unit->production.income.empty()) {
+            expect(unit->abilities.front().recharge_seconds == Fixed::from_raw(raw(3))
+                && unit->production.income.front().base_value == Fixed::from_raw(raw(3)),
+                "WABL-01: dispatched rows reach the timer and income consumers");
+        }
+    }
+    for (const bool marked : {false, true}) {
+        TempTree tree;
+        auto authored = blocks(marked ? " SubObjectList=\"Yes\"" : "", 3);
+        for (const std::string_view tag : {"<Unit_Abilities_Data", "<Abilities"}) {
+            authored.insert(authored.find('>', authored.find(tag)) + 1, "dispatch");
+        }
+        write_fixture(tree.root, fixture(authored, {}));
+        const auto loaded = load(tree.root, models(-40.0F));
+        const auto* unit = loaded.tables ? loaded.tables->find("Test_Frigate") : nullptr;
+        const auto count = marked ? 2U : 1U;
+        expect(unit && unit->abilities.size() == count && unit->production.income.size() == count,
+            "WABL-01: scalar and nested-list dispatch are independent calls in an ordinary type");
+    }
+    for (const std::string& variant : {std::string{}, blocks("", 7), blocks(" SubObjectList=\"No\"", 7),
+        std::string{"<Abilities SubObjectList=\"Yes\"/><Unit_Abilities_Data SubObjectList=\"Yes\"/>"}}) {
+        TempTree tree;
+        write_fixture(tree.root, fixture(blocks(" SubObjectList=\"Yes\"", 3), variant));
+        const auto loaded = load(tree.root, models(-40.0F), "Normal_Default",
+            eawr::sim::tactical::BattleDomain::space, {"List_Variant"});
+        const auto* unit = loaded.tables ? loaded.tables->find("List_Variant") : nullptr;
+        expect(unit && unit->abilities.size() == 1 && unit->production.income.size() == 1,
+            "WABL-02: omitted, unmarked, false and childless variant blocks preserve inherited abilities");
+        if (unit && !unit->abilities.empty() && !unit->production.income.empty()) {
+            expect(unit->abilities.front().recharge_seconds == Fixed::from_raw(raw(3))
+                && unit->production.income.front().base_value == Fixed::from_raw(raw(3)),
+                "WABL-02: ignored variant contents cannot replace inherited data");
+        }
+    }
+    for (const bool marked_wrapper : {false, true}) {
+        TempTree tree;
+        const auto wrapper = std::string{"<Wrapper"} + (marked_wrapper ? " SubObjectList=\"Yes\">" : ">")
+            + blocks(" SubObjectList=\"Yes\"", 3) + "</Wrapper>";
+        write_fixture(tree.root, fixture(wrapper, {}));
+        const auto loaded = load(tree.root, models(-40.0F));
+        const auto* unit = loaded.tables ? loaded.tables->find("Test_Frigate") : nullptr;
+        expect(unit && unit->abilities.size() == (marked_wrapper ? 0U : 1U)
+            && unit->production.income.size() == (marked_wrapper ? 0U : 1U),
+            "WABL-01: ordinary wrappers recurse but another marked list owns its children");
+    }
+    {
+        TempTree tree;
+        write_fixture(tree.root, fixture(blocks(" SubObjectList=\"Yes\"", 3)
+                + blocks(" SubObjectList=\"Yes\"", 5),
+            blocks(" SubObjectList=\"Yes\"", 7) + blocks(" SubObjectList=\"Yes\"", 9)));
+        const auto loaded = load(tree.root, models(-40.0F), "Normal_Default",
+            eawr::sim::tactical::BattleDomain::space, {"List_Variant"});
+        const auto* base = loaded.tables ? loaded.tables->find("Test_Frigate") : nullptr;
+        const auto* variant = loaded.tables ? loaded.tables->find("List_Variant") : nullptr;
+        expect(base && base->abilities.size() == 2 && base->production.income.size() == 2,
+            "WABL-02: ordinary repeated list blocks append in authored order");
+        expect(variant && variant->abilities.size() == 1 && variant->production.income.size() == 1,
+            "WABL-02: each dispatched variant block replaces the previous list");
+        if (variant && !variant->abilities.empty() && !variant->production.income.empty()) {
+            expect(variant->abilities.front().recharge_seconds == Fixed::from_raw(raw(9))
+                && variant->production.income.front().base_value == Fixed::from_raw(raw(9)),
+                "WABL-02: the last dispatched variant block supplies both lists");
+        }
+    }
+}
+
+void signed_weaken_reduction_tables() {
+    for (const auto reduction : {"-0.15", "0", "0.2", "-1.5", "1.5"}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+        const auto begin = xml.find("<Unit_Abilities_Data", ship);
+        const auto end = xml.find("</Unit_Abilities_Data>", begin);
+        xml.replace(begin, end + std::string_view{"</Unit_Abilities_Data>"}.size() - begin,
+            "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>WEAKEN_ENEMY</Type>"
+            "<Spawned_Object_Type>Proj_Test_Small</Spawned_Object_Type>"
+            "<Recharge_Seconds>20</Recharge_Seconds><Effective_Radius>1000</Effective_Radius>"
+            "</Unit_Ability></Unit_Abilities_Data>");
+        const std::string opening = "<Projectile Name=\"Proj_Test_Small\">";
+        xml.insert(xml.find(opening) + opening.size(),
+            "<Projectile_Weaken_Enemy_On_Detonation>Yes</Projectile_Weaken_Enemy_On_Detonation>"
+            "<Projectile_Weaken_Enemy_Radius>300</Projectile_Weaken_Enemy_Radius>"
+            "<Projectile_Weaken_Enemy_Duration_Seconds>15</Projectile_Weaken_Enemy_Duration_Seconds>"
+            "<Projectile_Weaken_Enemy_Cause_Damage_Reduction_Percent>" + std::string(reduction)
+            + "</Projectile_Weaken_Enemy_Cause_Damage_Reduction_Percent>"
+            "<Projectile_Weaken_Enemy_Targets_Category_Mask>Frigate</Projectile_Weaken_Enemy_Targets_Category_Mask>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "WHE-62: signed weaken reduction XML loads");
+        if (!loaded.tables) continue;
+        const auto abilities = eawr::units::ability_table(*loaded.tables);
+        const auto* hero = abilities ? abilities.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+        expect(hero && hero->abilities.size() == 1 && hero->abilities.front().spawned.has_value(),
+            "WHE-62: signed reduction retains its owning unit and ability");
+        if (!hero || hero->abilities.empty() || !hero->abilities.front().spawned) continue;
+        expect(hero->abilities.front().spawned->weaken.cause_damage_reduction == Fixed::from_decimal(reduction).value(),
+            "WHE-62: authored reduction keeps its sign without clamping");
+    }
+}
+} // namespace
+
 void synthetic_tables() {
+    template_durability_tables();
+    subobject_list_tables();
+    signed_weaken_reduction_tables();
+    // AV-05: XML overrides must reach the collision query, independently on each axis.
+    for (const auto& [tags, expected_x, expected_y] : std::array{
+        std::tuple{"", 20, 40},
+        std::tuple{"<Custom_Hard_XExtent>3</Custom_Hard_XExtent>", 6, 40},
+        std::tuple{"<Custom_Hard_YExtent>4</Custom_Hard_YExtent>", 20, 8},
+        std::tuple{"<Custom_Hard_XExtent>3</Custom_Hard_XExtent><Custom_Hard_YExtent>4</Custom_Hard_YExtent>", 6, 8}}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string scale = "<Scale_Factor>0.70</Scale_Factor>";
+        xml.replace(xml.find(scale), scale.size(), "<Scale_Factor>2</Scale_Factor>");
+        const std::string opening = "<SpaceUnit Name=\"Test_Frigate\">";
+        xml.insert(xml.find(opening) + opening.size(),
+            "<Variant_Of_Existing_Type>Hard_Extent_Parent</Variant_Of_Existing_Type>");
+        xml.insert(xml.find('>') + 1, "<SpaceUnit Name=\"Hard_Extent_Parent\">" + std::string(tags) + "</SpaceUnit>");
+        write_fixture(tree.root, xml);
+        auto assets = models(-40.0F);
+        eawr::assets::Mesh mesh;
+        mesh.name = "COLLISIONBOX";
+        mesh.collidable = true;
+        mesh.bone = 0;
+        mesh.bounds_min = {-10, -20, -5};
+        mesh.bounds_max = {10, 20, 5};
+        assets.at("data/art/models/test_frigate.alo").meshes.push_back(mesh);
+        const auto loaded = load(tree.root, assets);
+        expect(static_cast<bool>(loaded.tables), "AV-05: hard-extent fixture loads");
+        if (!loaded.tables) continue;
+        const auto motion = eawr::units::motion_table(*loaded.tables);
+        const auto* footprint = motion ? motion.value().footprint(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+        expect(footprint && footprint->x_extent == Fixed::from_raw(raw(expected_x))
+            && footprint->y_extent == Fixed::from_raw(raw(expected_y))
+            && footprint->radius == Fixed::from_raw(raw(80)),
+            "AV-05: inherited hard extents override each model axis, scale once and preserve the soft radius");
+        if (!footprint) continue;
+        const auto tracked = eawr::sim::tactical::tracking_leaf(1, *footprint, {}, {});
+        expect(static_cast<bool>(tracked), "AV-05: XML hard extents enter live tracking");
+        if (!tracked) continue;
+        eawr::sim::tactical::TrackingLayerView layer;
+        layer.windows = {{tracked.value()}};
+        for (const bool x_axis : {true, false}) {
+            eawr::sim::tactical::LinearQuery query;
+            query.start = {Fixed::from_raw(raw(x_axis ? 12 : 0)), Fixed::from_raw(raw(x_axis ? 0 : 12))};
+            query.end = query.start;
+            query.end_frame = Fixed::from_raw(raw(1));
+            query.facing = {Fixed::from_raw(raw(1)), Fixed{}};
+            const auto hit = eawr::sim::tactical::find_linear_collision(layer, 90, query);
+            const auto extent = x_axis ? expected_x : expected_y;
+            expect(hit && hit.value() == (extent > 12 ? eawr::sim::tactical::collision_static : 0),
+                "AV-05: authored X and Y extents independently change the live collision verdict");
+        }
+    }
+    for (const bool structure : {false, true}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string marker = "<SpaceUnit Name=\"Test_Frigate\">";
+        const auto start = xml.find(marker);
+        xml.insert(start + marker.size(),
+            "<Destruction_Survivors>Survivor_Extra, 0.25, Survivor_Land_Only, 0.5, Test_Squadron, 0.25</Destruction_Survivors>"
+            "<Minimum_Destruction_Survivor_Count>4</Minimum_Destruction_Survivor_Count>"
+            "<Maximum_Destruction_Survivor_Count>2</Maximum_Destruction_Survivor_Count>"
+            "<Spawned_Squadron_Location_Bones>HP_E_BONE, Unused_Bone</Spawned_Squadron_Location_Bones>"
+            "<Spawned_Squadron_Location_Flyout_Distances>123, 987</Spawned_Squadron_Location_Flyout_Distances>");
+        if (structure) {
+            const auto end = xml.find("</SpaceUnit>", start);
+            xml.replace(end, std::string_view{"</SpaceUnit>"}.size(), "</SpecialStructure>");
+            xml.replace(start, marker.size(), "<SpecialStructure Name=\"Test_Frigate\">");
+        }
+        xml.insert(xml.find("</Objects>"),
+            "<SpaceUnit Name=\"Survivor_Extra\"><Variant_Of_Existing_Type>Test_Fighter</Variant_Of_Existing_Type></SpaceUnit>"
+            "<GroundInfantry Name=\"Survivor_Land_Only\"><Land_Model_Name>unused</Land_Model_Name></GroundInfantry>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "DS-01/05: space survivor dependency fixture loads");
+        if (!loaded.tables) continue;
+        const auto* source = loaded.tables->find("Test_Frigate");
+        const auto* extra = loaded.tables->find("Survivor_Extra");
+        const auto combat = eawr::units::combat_table(*loaded.tables);
+        const auto* profile = combat ? combat.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+        expect(source && extra && source->destruction_survivors.size() == 3 && profile && profile->destruction_survivors,
+            "DS-01: both assigned classes resolve survivor-only dependencies");
+        if (source && profile && profile->destruction_survivors) {
+            const auto& survivors = *profile->destruction_survivors;
+            expect(survivors.minimum == 4 && survivors.maximum == 2 && survivors.choices.size() == 3
+                && survivors.choices[0].type == eawr::assets::object_type_crc("Survivor_Extra")
+                && survivors.choices[1].type == 0 && survivors.choices[1].weight == Fixed::from_raw(raw(1) / 2),
+                "DS-01/02/05: signed bounds and unplaceable weight survive binding");
+            expect(survivors.choices[2].company && survivors.choices[2].members.size() == 3,
+                "DS-05: company expansion resolves mode-placeable member bodies");
+            expect(survivors.flyout_distance == Fixed::from_raw(raw(123)) && survivors.bay_direction.has_value(),
+                "DS-07: first authored flyout distance and bone bind to the sim");
+            auto changed = *loaded.tables;
+            for (auto& unit : changed.units) if (unit.id == "Test_Frigate") unit.survivor_maximum = 5;
+            expect(eawr::units::content_identity(changed) != eawr::units::content_identity(*loaded.tables),
+                "survivor authoring participates in optional content identity");
+        }
+    }
     // PL-01: optional immutable presentation input, with the viewer's existing boolean tokens.
     for (const std::string_view value : {"", "false", "true", "YES", "1", "0"}) {
         TempTree tree;
@@ -727,7 +1020,7 @@ void synthetic_tables() {
         auto xml = units_xml("3600", "Unit_Select_Test");
         const auto begin = xml.find("<Unit_Abilities_Data");
         const auto end = xml.find("</Unit_Abilities_Data>", begin) + std::string_view{"</Unit_Abilities_Data>"}.size();
-        xml.replace(begin, end - begin, R"xml(<Unit_Abilities_Data><Unit_Ability>
+        xml.replace(begin, end - begin, R"xml(<Unit_Abilities_Data SubObjectList="Yes"><Unit_Ability>
             <Type>TURBO</Type><Expiration_Seconds>10</Expiration_Seconds><Recharge_Seconds>40</Recharge_Seconds>
             <Mod_Multiplier>UNKNOWN_MULTIPLIER, 900</Mod_Multiplier>
             <Mod_Multiplier>speed_multiplier, 2</Mod_Multiplier>
@@ -864,7 +1157,7 @@ void synthetic_tables() {
         const auto end = xml.find("</Unit_Abilities_Data>", begin);
         xml.replace(begin, end + std::string_view{"</Unit_Abilities_Data>"}.size() - begin,
             "<Create_Team_Type>Test_Squadron</Create_Team_Type><Redirect_Damage_To_Teammates>Yes</Redirect_Damage_To_Teammates>"
-            "<Unit_Abilities_Data><Unit_Ability><Type>REPLENISH_WINGMEN</Type><Recharge_Seconds>60</Recharge_Seconds>"
+            "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>REPLENISH_WINGMEN</Type><Recharge_Seconds>60</Recharge_Seconds>"
             "<Particle_Effect>fixture_wingmen</Particle_Effect></Unit_Ability></Unit_Abilities_Data>");
         write_fixture(tree.root, xml);
         const auto loaded = load(tree.root, models(-40.0F));
@@ -893,7 +1186,7 @@ void synthetic_tables() {
         const auto end = xml.find("</Unit_Abilities_Data>", begin);
         const std::string kind = bomb ? "HARMONIC_BOMB" : "WEAKEN_ENEMY";
         xml.replace(begin, end + std::string_view{"</Unit_Abilities_Data>"}.size() - begin,
-            "<Unit_Abilities_Data><Unit_Ability><Type>" + kind + "</Type>"
+            "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>" + kind + "</Type>"
             "<Spawned_Object_Type>Proj_Test_Small</Spawned_Object_Type><Bomb_Countdown_Seconds>1.5</Bomb_Countdown_Seconds>"
             "<Recharge_Seconds>20</Recharge_Seconds><Effective_Radius>1000</Effective_Radius>"
             "</Unit_Ability></Unit_Abilities_Data>");
@@ -934,10 +1227,10 @@ void synthetic_tables() {
         const std::string kind = energy ? "ENERGY_WEAPON" : "TRACTOR_BEAM";
         const std::string handler = energy ? "Energy_Weapon_Attack_Ability" : "Tractor_Beam_Attack_Ability";
         xml.replace(begin, end + std::string_view{"</Unit_Abilities_Data>"}.size() - begin,
-            "<Unit_Abilities_Data><Unit_Ability><Type>" + kind + "</Type><GUI_Activated_Ability_Name>beam</GUI_Activated_Ability_Name>"
+            "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability><Type>" + kind + "</Type><GUI_Activated_Ability_Name>beam</GUI_Activated_Ability_Name>"
             "<Expiration_Seconds>5</Expiration_Seconds><Recharge_Seconds>20</Recharge_Seconds>"
             "<Mod_Multiplier>SPEED_MULTIPLIER,0.6</Mod_Multiplier></Unit_Ability></Unit_Abilities_Data>"
-            "<Abilities><" + handler + " Name=\"beam\"><Activation_Style>User_Input</Activation_Style>"
+            "<Abilities SubObjectList=\"Yes\"><" + handler + " Name=\"beam\"><Activation_Style>User_Input</Activation_Style>"
             "<Activation_Min_Range>5</Activation_Min_Range><Activation_Max_Range>800</Activation_Max_Range>"
             "<Applicable_Unit_Categories>Frigate</Applicable_Unit_Categories><Damage_Per_Frame>50</Damage_Per_Frame>"
             "<Stacking_Category>2</Stacking_Category><Target_Speed_Decrease_Percent>0.9</Target_Speed_Decrease_Percent>"
@@ -1075,6 +1368,7 @@ void synthetic_tables() {
     cluster_bomb_inputs();
     manual_weapon_loading();
     randomized_fire_bone_loading();
+    hardpoint_min_range_loading();
     hardpoint_turret_loading();
     special_weapon_classification();
     rocket_variant_inputs();

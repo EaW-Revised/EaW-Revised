@@ -285,6 +285,7 @@ private:
     std::uint64_t card_clicks_{};
     // #944: the hero tray's collection and what it was collected from.
     ui::HeroTypeTable hero_types_;
+    const data::Catalog* hero_catalog_{};
     ui::HeroTrayPolicy hero_policy_;
     ui::HeroRoster hero_roster_;
     ui::HeroRoster hero_next_;

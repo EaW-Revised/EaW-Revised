@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -56,19 +57,68 @@ int main() {
                "effective XML flash scale and duration");
         const auto order_flash = pc::load_order_flash(mounted.value());
         expect(order_flash.level == 2.0F && order_flash.pulse_seconds == 0.2, "effective XML order flash level and pulse");
-        {   // WU-60: three sawtooth pulses of whole frames, 1 + level at each start, nothing after the third.
+        {   // WU-60/61: authored rapid linear fade, bounded amplitude, area-limited large hulls.
             const pc::OrderFlash stock{3.0F, 0.1};
-            const auto at = [&](const double frame) { return pc::order_flash_multiplier(stock, frame / 30.0); };
-            expect(at(0) && std::abs(*at(0) - 4.0F) < 1e-4F, "order flash starts at 1 + level");
-            expect(at(1) && std::abs(*at(1) - 3.0F) < 1e-4F && at(2) && std::abs(*at(2) - 2.0F) < 1e-4F,
-                   "order flash falls linearly within a pulse");
-            expect(at(3) && std::abs(*at(3) - 1.0F) < 1e-4F, "a stock pulse spans four frames and ends at 1");
-            expect(at(4) && std::abs(*at(4) - 4.0F) < 1e-4F && at(8) && std::abs(*at(8) - 4.0F) < 1e-4F,
-                   "pulses restart at 1 + level");
-            expect(at(11) && std::abs(*at(11) - 1.0F) < 1e-4F, "last frame of the third pulse");
-            expect(!at(12) && !at(40), "order flash is over after three pulses");
-            expect(!pc::order_flash_multiplier(stock, -0.01), "order flash has not started before its tick");
+            const auto at = [&](const double seconds) { return pc::order_flash_multiplier(stock, seconds); };
+            expect(at(0) && std::abs(*at(0) - 2.0F) < 1e-4F, "stock comfort peak is twice the hull light");
+            expect(at(0.025) && std::abs(*at(0.025) - 1.75F) < 1e-4F
+                   && at(0.075) && std::abs(*at(0.075) - 1.25F) < 1e-4F, "linear fade through each rapid pulse");
+            expect(at(0.1) == at(0) && at(0.2) == at(0), "authored tenth-second pulse restarts twice");
+            expect(!at(0.31) && !at(4.0), "three rapid pulses end after 0.3 seconds");
+            expect(!at(-0.01), "order flash has not started before its tick");
             expect(!pc::order_flash_multiplier(pc::OrderFlash{3.0F, 0.0}, 0.0), "zero pulse length shows nothing");
+            expect(pc::order_flash_multiplier(pc::OrderFlash{3000.0F, 0.001}, 0.0) == at(0),
+                   "mod strength cannot exceed presentation brightness bound");
+            expect(!pc::order_flash_multiplier(pc::OrderFlash{3000.0F, 0.001}, 0.004),
+                   "shorter authored durations retain their rapid cadence");
+            expect(pc::order_flash_multiplier(pc::OrderFlash{1.5F, 1.2}, 0.6) == at(0.075),
+                   "weaker and slower authored flashes are respected");
+            const auto large = pc::order_flash_multiplier(stock, 0.0, 1000000.0);
+            expect(large && std::abs(*large - 1.25F) < 1e-4F, "four times hull area gets one quarter added light");
+            pc::OrderFlashGate gate;
+            expect(gate.try_start(stock), "first target burst is admitted");
+            gate.advance(0.3);
+            expect(!gate.try_start(stock), "burst expiry alone does not rearm the target");
+            gate.advance(0.99);
+            expect(!gate.try_start(stock), "target stays quiet for a full real second after its burst");
+            gate.advance(0.02);
+            expect(gate.try_start(stock), "refused repeats do not extend the quiet interval");
+            pc::OrderFlashGate another_target;
+            expect(another_target.try_start(stock), "a different target is independently admitted");
+            pc::OrderFlashGate slow_gate;
+            const pc::OrderFlash slow{3.0F, 1.2};
+            expect(slow_gate.try_start(slow), "longer authored burst starts");
+            slow_gate.advance(2.0);
+            expect(!slow_gate.try_start(slow), "a long authored burst cannot restart while still flashing");
+            slow_gate.advance(2.61);
+            expect(slow_gate.try_start(slow), "long authored burst also gets a full quiet second");
+
+            // Twelve orders 0.2 seconds apart: the production gate must bound every
+            // rolling real second to one burst, with steady frames while orders continue.
+            pc::OrderFlashGate repeated_gate;
+            std::optional<double> elapsed;
+            std::array<bool, 240> active{};
+            int starts = 0;
+            int active_samples = 0;
+            for (int frame = 0; frame < static_cast<int>(active.size()); ++frame) {
+                if (frame <= 132 && frame % 12 == 0 && repeated_gate.try_start(stock)) {
+                    elapsed = 0.0;
+                    ++starts;
+                }
+                if (elapsed) {
+                    active[static_cast<std::size_t>(frame)] = pc::order_flash_multiplier(stock, *elapsed).has_value();
+                    if (active[static_cast<std::size_t>(frame)]) ++active_samples;
+                    *elapsed += 1.0 / 60.0;
+                }
+                repeated_gate.advance(1.0 / 60.0);
+            }
+            expect(starts == 2 && active_samples >= 36 && active_samples <= 38,
+                   "twelve rapid orders admit only two complete bursts");
+            for (std::size_t begin = 0; begin + 60 <= active.size(); ++begin) {
+                int window_samples = 0;
+                for (std::size_t frame = begin; frame < begin + 60; ++frame) window_samples += active[frame] ? 1 : 0;
+                expect(window_samples <= 19, "every rolling real second is bounded to one three-pulse burst");
+            }
         }
         for (const auto invalid : {"-1", "nan", "inf", "1junk", "", "1,2"}) {
             const eawr::data::DocumentOverrides override({{"data/xml/gameconstants.xml", "Laser_Beam_Z_Scale_Factor", {invalid}},

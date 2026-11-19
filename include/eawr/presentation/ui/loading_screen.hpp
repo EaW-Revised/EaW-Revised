@@ -58,6 +58,7 @@ struct LoadingScreenContent {
     std::string weather;      // IDC_STATIC_WEATHER
     std::string terrain;      // IDC_STATIC_TERRAIN
     std::string population;   // IDC_STATIC_NATIVE
+    std::string wildlife;     // IDC_STATIC_WILDLIFE (WGP-198)
     std::string native_icon;  // IDC_NATIVE_ICON, empty when the planet names none
     std::string weather_icon; // IDC_WEATHER_ICON, empty when the planet names none
     std::string overlay_icon; // IDC_PLANET_OVERLAY

@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "note": "Which Windows executables of a release archive get an Authenticode signature. Paths are relative to the archive's top folder; '*' stays inside one folder, '**' crosses folders; matching ignores case. A PE file that matches no entry and carries no signature of its own fails the signing run, so a new binary needs a decision here. 'required_in_player' lists the signed files that every extracted player folder must contain (each must also match an entry of 'sign'); tools/release/verify_signatures.ps1 fails when one is missing.",
+  "sign": [
+    "EAWR.exe",
+    "EAWR Mods.exe",
+    "eawr_loadcheck.exe",
+    "eawr_mods_service.exe",
+    "project/bin/libeawr_viewer.*.dll",
+    "project/common/eawr_bink_helper.exe",
+    "tools/*.exe",
+    "bin/*.exe"
+  ],
+  "required_in_player": [
+    "EAWR.exe",
+    "EAWR Mods.exe",
+    "eawr_loadcheck.exe",
+    "eawr_mods_service.exe",
+    "project/bin/libeawr_viewer.*.dll"
+  ],
+  "never_sign": [
+    {
+      "pattern": "godot/Godot_*.exe",
+      "reason": "the patched engine's SHA-256 is the engine pin (tools/engine_pins.json); signing it needs a pin change of its own"
+    }
+  ]
+}

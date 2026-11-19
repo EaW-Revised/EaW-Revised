@@ -61,6 +61,7 @@ void test_spin_in_dogfight();
 void test_avoidance();
 void test_intercepted();
 void test_retarget_clears_the_hardpoint();
+void test_bomber_hardpoint_approach();
 void test_group_move();
 
 struct Order {

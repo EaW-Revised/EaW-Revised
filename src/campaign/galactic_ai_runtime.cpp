@@ -3,6 +3,7 @@
 #include "galactic_ai_usability.hpp"
 #include "galactic_ai_lane_inbox.hpp"
 #include "eawr/campaign/galactic_world_immediate_host.hpp"
+#include "eawr/campaign/mp_lobby_catalog.hpp"
 #include "../script/foc/ai_script_evaluators.hpp"
 #include "eawr/sim/replay.hpp"
 #include "eawr/campaign/story_plots.hpp"
@@ -105,7 +106,7 @@ private:
 // copies, or, while the window's lane barrier is open on the reading thread, that barrier's own view (the world plus what the
 // window decided so far, which is what the session itself returns then). The window's identity reservation advances the copied
 // frontiers with the world's. With the observation oracle on, every read is compared with the live session's read.
-class WindowInput final : public GalacticAiWorldReader {
+class WindowInput final : public GalacticAiWorldReader, public ga::NativeActions::WorldReader {
 public:
     using Session = ga::gc::GalacticSession;
     WindowInput(Session* const& live, const std::unique_ptr<Session::NativeActionBarrier>& barrier) noexcept : live_(live), barrier_(barrier) {}
@@ -113,7 +114,7 @@ public:
     WindowInput& operator=(const WindowInput&) = delete;
     void open(const Session& session, bool verify) {
         cut_.emplace(Cut{session.snapshot(), session.graph(), &session.setup(), session.completed_tick(), session.clock().galactic_frame,
-            session.next_entity_id(), session.next_native_invasion_id()});
+            session.next_entity_id(), session.next_native_invasion_id(), session.clock().pause_depth});
         verify_ = verify;
     }
     void close() noexcept { cut_.reset(); }
@@ -147,8 +148,11 @@ public:
         return cut_ ? note(cut_->galactic_frame, [&] { return live_->clock().galactic_frame; }) : live_->clock().galactic_frame;
     }
     // The campaign setup is immutable; its address is part of the cut.
-    [[nodiscard]] const ga::gc::GalacticSetup& setup() const {
+    [[nodiscard]] const ga::gc::GalacticSetup& setup() const override {
         return cut_ ? *note(cut_->setup, [&] { return &live_->setup(); }) : live_->setup();
+    }
+    [[nodiscard]] std::uint64_t pause_depth() const override {
+        return cut_ ? note(cut_->pause_depth, [&] { return static_cast<std::uint64_t>(live_->clock().pause_depth); }) : live_->clock().pause_depth;
     }
     void drain(GalacticAiApplyTally& tally) noexcept {
         tally.window_input_reads += reads_.exchange(0, std::memory_order_relaxed);
@@ -162,6 +166,7 @@ private:
         std::uint64_t completed_tick{}, galactic_frame{};
         sim::EntityId next_entity_id{};
         std::uint64_t next_invasion_id{};
+        std::uint64_t pause_depth{};
     };
     [[nodiscard]] const Session::NativeActionShadow* barrier_view() const noexcept { return barrier_ ? barrier_->view() : nullptr; }
     template<class T, class Live> T note(T value, const Live& live) const {
@@ -198,6 +203,19 @@ public:
     // Async AI A2.2: the barrier decides, it does not commit. The players' intents are retained per virtual
     // tick in the outbox and the world takes them through the ordered readmit at their apply tick.
     ga::IntentOutbox outbox{ga::synchronous_reference_schedule};
+    // Async step 3b: the open window's batch, built by the lane (open while the body decides; closed while the window is finished
+    // and not adopted). With a nonzero adoption delay the window's publication (which carries its diagnostics and load notes) waits
+    // beside it; the world adopts both at H (adopt_finished). The cut copies what the batch starts from (the adopted frontier and
+    // floor, the billing log end).
+    ga::OutboxBatch lane_batch{ga::synchronous_reference_schedule};
+    struct FinishedWindow {
+        std::uint64_t adopt_at{};
+        std::optional<GalacticAiBillingPublication> publication;
+    };
+    std::optional<FinishedWindow> finished;
+    std::uint64_t finished_generation{};
+    ga::LaneIdentities cut_frontier{};
+    std::uint64_t cut_floor{}, cut_log_end{};
     // Batch driver. ai_ticks counts the admitted AI service ticks (a held or blocked AI neither snapshots nor applies);
     // ai_index is the current one. A batch of schedule.batch_ticks virtual ticks starts every batch_ticks-th admitted
     // tick, executed inline on the sim thread; its slices apply at ai_index = snapshot + delay + (j - 1).
@@ -325,7 +343,35 @@ public:
     // #6337: the actors the async stage lost that the world has not applied yet (saved after the story globals).
     GalacticAiStageLosses stage_losses;
     [[nodiscard]] auto stage_loss_pending() const { // used within one full expression: Pending views the returned callable
-        return [this](const GalacticAiStageLosses::Source& source) { return outbox.holds_slice(source.snapshot_tick, source.virtual_tick); };
+        return [this](const GalacticAiStageLosses::Source& source) {
+            return lane_batch.holds_slice(source.snapshot_tick, source.virtual_tick) || outbox.holds_slice(source.snapshot_tick, source.virtual_tick);
+        };
+    }
+    [[nodiscard]] std::uint32_t adopt_delay() const noexcept { return outbox.schedule().adopt_delay; }
+    // Step 3b: the lane's identities and pending work as the outbox holds them once the open or finished batch is adopted (what the
+    // readers saw while the batch was built on the outbox itself).
+    [[nodiscard]] ga::LaneIdentities lane_frontier() const noexcept {
+        return lane_batch.active() ? lane_batch.contents().frontier : outbox.frontier();
+    }
+    [[nodiscard]] std::uint64_t lane_floor() const noexcept { return lane_batch.active() ? lane_batch.contents().floor : outbox.lane_floor(); }
+    [[nodiscard]] std::uint64_t lane_invasion_floor() const noexcept {
+        const auto batch = lane_batch.lowest_invasion(), adopted = outbox.lane_invasion_floor();
+        return !batch ? adopted : !adopted ? batch : std::min(batch, adopted);
+    }
+    [[nodiscard]] bool lane_holds_invasion(std::uint64_t handle) const noexcept {
+        return lane_batch.holds_invasion(handle) || outbox.holds_invasion(handle);
+    }
+    // A faulted attempt drops what its batch decided; a closed (finished) batch is final and stays.
+    void abandon_open_batch() {
+        if (lane_batch.open()) lane_batch.abandon();
+        stage_losses.abandon_batch();
+    }
+    // Step 3b: the world adopts a finished window's output at the start of the AI tick H, before that tick applies or publishes.
+    void adopt_finished() {
+        if (lane_batch.closed()) outbox.adopt(lane_batch.take());
+        if (!finished) return;
+        if (finished->publication) billing_view.capture(std::move(*finished->publication));
+        finished.reset(); ++finished_generation;
     }
     // A load diagnostic: inside an async window it waits for the window's publication (the world appends it when that becomes
     // visible); anywhere else it is appended at once.
@@ -435,7 +481,7 @@ public:
     core::Result<void> capture_publication(std::uint64_t visible_at, auth::ScriptScheduler& scripts, const sim::PartitionExecutor& executor) {
         const auto begin = std::chrono::steady_clock::now();
         GalacticAiBillingPublication publication;
-        publication.visible_at = visible_at; publication.log_cut = billing_view.log_end();
+        publication.visible_at = visible_at; publication.log_cut = finished && window_input.is_open() ? cut_log_end : billing_view.log_end();
         for (const auto& selected : setup->lifecycle.players)
             if (const auto ledger = funding->ledger(selected.player)) publication.ledgers.emplace(selected.player, *ledger);
         publication.rows = actions->bill_rows();
@@ -461,7 +507,9 @@ public:
         publication.diagnostics = std::move(window_diagnostics); window_diagnostics.clear();
         publication.load_notes = std::move(window_load_notes); window_load_notes.clear();
         publication.global_writes = engine->take_global_writes();
-        billing_view.capture(std::move(publication));
+        // Step 3b: a window's publication waits with its finished output when the world adopts it later.
+        if (finished && window_input.is_open()) { finished->publication = std::move(publication); ++finished_generation; }
+        else billing_view.capture(std::move(publication));
         return core::Result<void>::success();
     }
     void note_billing_time(std::chrono::steady_clock::time_point begin) {
@@ -469,7 +517,7 @@ public:
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count());
     }
     template<class T> core::Result<T> checked_native(core::Result<T> result) {
-        if (!result && !phase_active) { native_actions_barrier.reset(); outbox.abandon_batch(); stage_losses.abandon_batch(); }
+        if (!result && !phase_active) { native_actions_barrier.reset(); abandon_open_batch(); }
         return result;
     }
     // Async window overlay: the world as it will be once the lane's still-pending slices are applied. Built once per window
@@ -504,8 +552,8 @@ public:
         const auto players = lane_players();
         if (players.empty()) return core::Result<void>::success();
         // The order and the stale floor of the NEXT apply, shared with commit_ordered_intents (plan_slice, slice_step_stale).
-        ga::IntentCommitOptions options; options.refuse_stale_identities = true; options.identity_floor = outbox.lane_floor();
-        options.invasion_floor = outbox.lane_invasion_floor();
+        ga::IntentCommitOptions options; options.refuse_stale_identities = true; options.identity_floor = lane_floor();
+        options.invasion_floor = lane_invasion_floor();
         std::vector<ga::gc::GalacticSession::NativeOverlayRecord> records;
         for (const auto& slice : outbox.pending_slices())
             for (const auto& step : ga::plan_slice(slice.intents)) {
@@ -525,20 +573,20 @@ public:
     core::Result<void> begin_native_actions_barrier() {
         if (virtual_offset) {
             if (!native_actions_barrier) return core::Result<void>::success();
-            outbox.begin_virtual_tick(virtual_offset + 1);
+            lane_batch.begin_virtual_tick(virtual_offset + 1);
             return native_actions_barrier->begin_turn();
         }
         if (native_actions_barrier) return absent<void>("completed preceding native action barrier");
         const auto players = lane_players();
-        const auto start = outbox.begin_batch(ai_index, {window_input.next_entity_id(), window_input.next_native_invasion_id()});
+        const auto start = lane_batch.begin(ai_index, cut_frontier, cut_floor, {window_input.next_entity_id(), window_input.next_native_invasion_id()});
         stage_losses.begin_batch();
         ga::gc::GalacticSession::NativeBarrierOptions options;
-        options.first_id = start.id; options.first_invasion = start.invasion; options.intent_sink = outbox.sink(); options.lane = true;
+        options.first_id = start.id; options.first_invasion = start.invasion; options.intent_sink = lane_batch.sink(); options.lane = true;
         options.overlay = std::move(window_overlay); window_overlay.reset(); window_snapshot.reset();
         // An asynchronous window owns a fixed identity block from its start (the outbox frontier is the block's end).
         const bool blocked = outbox.schedule().apply_delay != 0;
         if (blocked) {
-            options.id_end = outbox.frontier().id; options.invasion_end = outbox.frontier().invasion;
+            options.id_end = lane_batch.contents().frontier.id; options.invasion_end = lane_batch.contents().frontier.invasion;
             // The sim keeps allocating between the slices' apply ticks. Reserve the whole block now, once, at window start
             // (before the barrier opens), so no sim allocation can take an identity a pending slice still owns, whatever the
             // window ends up using; each slice is then readmitted with the world counter rewound to its own first identity
@@ -546,14 +594,14 @@ public:
             // The invasion counter's block is reserved in the same step.
             if (auto reserved = lane_session().reserve_native_frontiers(window_input.next_entity_id(), options.id_end,
                     window_input.next_native_invasion_id(), options.invasion_end); !reserved) {
-                outbox.abandon_batch(); stage_losses.abandon_batch(); return reserved;
+                abandon_open_batch(); return reserved;
             }
             window_input.reserved(options.id_end, options.invasion_end);
         }
         auto begun = lane_session().begin_native_barrier(players, ga::gc::galactic_max_commands, std::move(options));
-        if (!begun) { outbox.abandon_batch(); stage_losses.abandon_batch(); return core::Result<void>::failure(begun.error()); }
+        if (!begun) { abandon_open_batch(); return core::Result<void>::failure(begun.error()); }
         native_actions_barrier = std::move(begun).value();
-        outbox.begin_virtual_tick(1);
+        lane_batch.begin_virtual_tick(1);
         return core::Result<void>::success();
     }
     // The world takes every slice due at ai_index through the ordered readmit; their commands go to the tick's report.
@@ -563,15 +611,20 @@ public:
         // the inbox for the AI's next window start; the AI state is written inside its window only.
         struct DeferScope {
             Runtime& owner; bool previous, previous_applying;
+            const ga::NativeActions::WorldReader* previous_reader;
             explicit DeferScope(Runtime& value) : owner(value), previous(value.window_open), previous_applying(value.applying_slices) {
+                previous_reader = owner.actions->bind_world_reader(nullptr);
                 owner.window_open = false; owner.applying_slices = true;
             }
-            ~DeferScope() { owner.window_open = previous; owner.applying_slices = previous_applying; }
+            ~DeferScope() {
+                owner.actions->bind_world_reader(previous_reader);
+                owner.window_open = previous; owner.applying_slices = previous_applying;
+            }
             DeferScope(const DeferScope&) = delete; DeferScope& operator=(const DeferScope&) = delete;
         } defer_scope(*this);
         ga::IntentCommitOptions options; options.refuse_stale_identities = outbox.schedule().apply_delay != 0;
-        options.identity_floor = outbox.lane_floor(); // read before take_due empties the outbox
-        if (options.refuse_stale_identities) options.invasion_floor = outbox.lane_invasion_floor();
+        options.identity_floor = lane_floor(); // read before take_due empties the outbox
+        if (options.refuse_stale_identities) options.invasion_floor = lane_invasion_floor();
         const sim::InlineExecutor inline_executor;
         const auto& executor = active_executor ? *active_executor : static_cast<const sim::PartitionExecutor&>(inline_executor);
         auto due = outbox.take_due(ai_index);
@@ -600,8 +653,12 @@ public:
             if (!discarded) return discarded;
             if (auto settled = actions->settle_movement_cursors(); !settled) return settled;
         }
-        outbox.end_batch();
+        lane_batch.end();
         stage_losses.end_batch();
+        // Step 3b: with an adoption delay the finished batch waits for H (a window's own batch only); otherwise the world adopts it now.
+        if (adopt_delay() != 0 && window_input.is_open()) {
+            if (!finished) { finished = FinishedWindow{}; finished->adopt_at = ai_index + adopt_delay(); ++finished_generation; }
+        } else if (lane_batch.closed()) outbox.adopt(lane_batch.take());
         // The identity block was reserved when the window began (begin_native_actions_barrier).
         return apply_due_slices();
     }
@@ -1196,7 +1253,7 @@ public:
         report.commands = std::move(kept);
         if (auto synchronized = synchronize_reservations(); !synchronized) return synchronized;
         // They leave the AI at the slice's apply tick, with its intents (a batch that is not open passes them through).
-        static_cast<void>(outbox.add_commands(report.commands));
+        static_cast<void>(lane_batch.add_commands(report.commands));
         if (native_actions_barrier && !phase_active)
             if (auto finished = finish_native_lane(); !finished) return finished;
         return core::Result<void>::success();
@@ -1247,6 +1304,7 @@ public:
         if (auto view = owner->billing_view.encode(bytes.value()); !view) return core::Result<ga::NativeState>::failure(view.error());
         owner->story_globals.encode(bytes.value());
         owner->stage_losses.encode(bytes.value());
+        if (auto window = encode_finished(*owner, bytes.value()); !window) return core::Result<ga::NativeState>::failure(window.error());
         ga::NativeState state; state.components.emplace(std::string(component), std::move(bytes).value());
         return core::Result<ga::NativeState>::success(std::move(state));
     }
@@ -1257,7 +1315,9 @@ public:
         if (state.version != ga::native_state_version || found == state.components.end()) return absent<void>("async lane component");
         auto decoded = ga::decode_outbox_state(found->second, true);
         if (!decoded) return core::Result<void>::failure(decoded.error());
-        if (decoded.value().schedule != owner->outbox.schedule()) return absent<void>("async lane schedule of this build");
+        const auto& schedule = owner->outbox.schedule();
+        if (decoded.value().schedule.batch_ticks != schedule.batch_ticks || decoded.value().schedule.apply_delay != schedule.apply_delay)
+            return absent<void>("async lane schedule of this build");
         const auto tail = std::span<const std::uint8_t>(decoded.value().tail);
         auto inbox = owner->inbox.restore_prefix(tail);
         if (!inbox) return core::Result<void>::failure(inbox.error());
@@ -1268,7 +1328,15 @@ public:
         if (!globals) return core::Result<void>::failure(globals.error());
         auto losses = owner->stage_losses.restore_prefix(rest.subspan(globals.value()));
         if (!losses) return core::Result<void>::failure(losses.error());
-        if (globals.value() + losses.value() != rest.size()) return absent<void>("async lane state framing (unknown trailing block)");
+        std::optional<GalacticAiFinishedWindow> window;
+        auto finished = restore_finished_window_prefix(rest.subspan(globals.value() + losses.value()), schedule, window);
+        if (!finished) return core::Result<void>::failure(finished.error());
+        if (globals.value() + losses.value() + finished.value() != rest.size()) return absent<void>("async lane state framing (unknown trailing block)");
+        owner->lane_batch.abandon(); owner->finished.reset(); ++owner->finished_generation;
+        if (window) {
+            owner->lane_batch.restore_closed(std::move(window->batch));
+            owner->finished.emplace(Runtime::FinishedWindow{window->adopt_at, std::move(window->publication)});
+        }
         owner->inbox_tags.assign(owner->inbox.entries().size(), {});
         if (auto rebuilt = owner->rebuild_switched_types(); !rebuilt) return rebuilt;
         owner->ai_ticks = decoded.value().ai_ticks;
@@ -1285,7 +1353,7 @@ public:
         if (!owner) return absent<std::string>("async lane owner");
         if (cold || cached_.empty() || generation_ != owner->outbox.generation() || inbox_generation_ != owner->inbox.generation()
             || view_generation_ != owner->billing_view.generation() || globals_generation_ != owner->story_globals.generation()
-            || losses_generation_ != owner->stage_losses.generation()) {
+            || losses_generation_ != owner->stage_losses.generation() || finished_generation_ != owner->finished_generation) {
             // The batch counter is hashed apart from the slices, so only a change of the slices or the inbox encodes them.
             auto bytes = ga::encode_outbox_state(owner->outbox, 0);
             if (!bytes) return core::Result<std::string>::failure(bytes.error());
@@ -1293,10 +1361,11 @@ public:
             if (auto view = owner->billing_view.encode(bytes.value()); !view) return core::Result<std::string>::failure(view.error());
             owner->story_globals.encode(bytes.value());
             owner->stage_losses.encode(bytes.value());
+            if (auto window = encode_finished(*owner, bytes.value()); !window) return core::Result<std::string>::failure(window.error());
             cached_ = core::sync_state_digest(bytes.value()); bytes_ = bytes.value().size();
             generation_ = owner->outbox.generation(); inbox_generation_ = owner->inbox.generation();
             view_generation_ = owner->billing_view.generation(); globals_generation_ = owner->story_globals.generation();
-            losses_generation_ = owner->stage_losses.generation();
+            losses_generation_ = owner->stage_losses.generation(); finished_generation_ = owner->finished_generation;
         }
         std::vector<std::uint8_t> head(cached_.begin(), cached_.end());
         for (unsigned i = 0; i < 8; ++i) head.push_back(static_cast<std::uint8_t>(owner->ai_ticks >> (i * 8U)));
@@ -1304,9 +1373,15 @@ public:
     }
     std::size_t record_byte_upper_bound() const noexcept override { return bytes_ + 64; }
 private:
+    // Step 3b: a window finished and not adopted is saved behind the stage losses (nothing while none waits).
+    static core::Result<void> encode_finished(const Runtime& owner, std::vector<std::uint8_t>& bytes) {
+        if (!owner.finished) return core::Result<void>::success();
+        return encode_finished_window(bytes, owner.finished->adopt_at, owner.lane_batch.contents(), owner.finished->publication);
+    }
     std::weak_ptr<Runtime> owner_;
     mutable std::string cached_;
     mutable std::uint64_t generation_{}, inbox_generation_{}, view_generation_{}, globals_generation_{}, losses_generation_{};
+    mutable std::uint64_t finished_generation_{};
     mutable std::size_t bytes_{};
 };
 // Runtime holds a weak manager; the manager's services retain its other owners.
@@ -1360,7 +1435,7 @@ struct NativePhaseAttempt {
     }
     ~NativePhaseAttempt() {
         owner.native_actions_barrier.reset(); // unsettled attempts preserve the existing terminal refusal
-        owner.outbox.abandon_batch(); owner.stage_losses.abandon_batch();
+        owner.abandon_open_batch();
         owner.phase_active = false; owner.active_scripts = nullptr; owner.active_executor = nullptr;
         owner.actions->set_executor(owner.setup->executor.get()); owner.clear_path_tables();
     }
@@ -1430,7 +1505,7 @@ struct NativePhaseAttempt {
             if (auto result = owner.native_actions_barrier->discard(); !result) return result;
             owner.native_actions_barrier.reset();
         }
-        owner.outbox.abandon_batch(); owner.stage_losses.abandon_batch();
+        owner.abandon_open_batch();
         if (auto result = funding->rollback(); !result) return result;
         if (auto result = actions->rollback(); !result) return result;
         if (execution) if (auto result = execution->rollback(); !result) return result;
@@ -1506,6 +1581,8 @@ public:
         // synchronous reference applies its own batch at the end of this phase. Held ticks never reach this point.
         const auto& schedule = owner_->outbox.schedule();
         owner_->ai_index = owner_->ai_ticks++;
+        // Async step 3b: a finished window whose adoption tick has come joins the world first, before anything applies or publishes.
+        if (owner_->finished && owner_->ai_index >= owner_->finished->adopt_at) owner_->adopt_finished();
         owner_->released_commands.clear();
         owner_->active_executor = &executor;
         const std::uint32_t window = owner_->ai_index % schedule.batch_ticks == 0 ? schedule.batch_ticks : 0;
@@ -1548,7 +1625,12 @@ public:
         struct InputScope {
             Runtime& owner; bool open{};
             explicit InputScope(Runtime& value) : owner(value) {}
-            ~InputScope() { if (open) { owner.window_input.close(); owner.window_input.drain(*owner.apply_tally); } }
+            ~InputScope() {
+                if (open) {
+                    owner.actions->bind_world_reader(nullptr);
+                    owner.window_input.close(); owner.window_input.drain(*owner.apply_tally);
+                }
+            }
             InputScope(const InputScope&) = delete; InputScope& operator=(const InputScope&) = delete;
         } input_scope(*owner_);
         owner_->write_probe->arm(schedule.apply_delay != 0);
@@ -1577,6 +1659,9 @@ public:
                 if (auto noted = owner_->pre_cut_type_switches(); !noted) { owner_->active_executor = nullptr; return Result::failure(noted.error()); }
             body_scope.emplace(*owner_->write_probe, true);
             owner_->window_input.open(parent, static_cast<bool>(owner_->providers.observe)); input_scope.open = true;
+            owner_->actions->bind_world_reader(&owner_->window_input);
+            owner_->cut_frontier = owner_->outbox.frontier(); owner_->cut_floor = owner_->outbox.lane_floor();
+            owner_->cut_log_end = owner_->billing_view.log_end();
             // Async step 2: the cut comes AFTER the due slices applied, so what the world delivered while they applied (queued, in arrival
             // order after the notices of the steps before) is in this window's cut, the order the AI saw them in when they applied at once.
             owner_->active_executor = &executor;
@@ -1731,7 +1816,7 @@ public:
                 owner_->live_players, &owner_->pass_executor);
         }();
         if (!begun) {
-            if (!owner_->phase_active) { owner_->native_actions_barrier.reset(); owner_->outbox.abandon_batch(); owner_->stage_losses.abandon_batch(); }
+            if (!owner_->phase_active) { owner_->native_actions_barrier.reset(); owner_->abandon_open_batch(); }
             return core::Result<auth::ServiceOptions>::failure(begun.error());
         }
         owner_->engine->set_galactic_funding(owner_->funding);
@@ -1874,23 +1959,15 @@ bool ai_seated(const CampaignSetupPlan& plan, const CampaignPlayerBinding& bindi
     const auto id = binding.player.player_id;
     return binding.active && active_seat(plan, id, sim::galactic::SeatKind::ai) && !active_seat(plan, id, sim::galactic::SeatKind::human);
 }
-// The controller type an AI-seated faction acquires (WGA-02 / WGS-08 under single-player rules; GCMP-AI-01/03 under
-// multiplayer rules), or empty when it acquires none. Neutral seat metadata does not create a galactic goal owner (the
-// native goal checkpoint contract excludes neutral players), and an ambient faction retains the campaign's authored
-// assignment or its absence. Refuses an unknown faction and a playable multiplayer faction without Basic_AI.
+// The controller type an AI-seated faction acquires, or empty when it acquires none: the shared choice the lobby's row
+// caption also reads (ai_controller_choice). Neutral seat metadata does not create a galactic goal owner (the native goal
+// checkpoint contract excludes neutral players), and an ambient faction retains the campaign's authored assignment or its
+// absence. Refuses an unknown faction and a playable multiplayer faction without Basic_AI.
 core::Result<std::string_view> galactic_ai_controller_type(const data::galactic::GalacticData& data,
     const data::galactic::Campaign& campaign, const CampaignSetupPlan& plan, std::string_view faction_name) {
-    const auto* faction = data.faction(faction_name);
-    if (!faction) return absent<std::string_view>("AI faction relations");
-    if (faction->is_neutral.value_or(false)) return core::Result<std::string_view>::success({});
-    if (plan.rules_flavour() == CampaignRulesFlavour::multiplayer && faction->is_playable.value_or(false)) {
-        if (faction->basic_ai.empty()) return absent<std::string_view>("multiplayer playable faction Basic_AI");
-        return core::Result<std::string_view>::success(faction->basic_ai);
-    }
-    const auto assignment = std::find_if(campaign.ai_player_control.begin(), campaign.ai_player_control.end(),
-        [&](const auto& row) { return ai::upper_case(row.faction) == ai::upper_case(faction_name); });
-    if (assignment == campaign.ai_player_control.end()) return core::Result<std::string_view>::success({});
-    return core::Result<std::string_view>::success(assignment->name);
+    const auto choice = ai_controller_choice(data, campaign, plan.rules_flavour(), faction_name);
+    if (!choice.missing.empty()) return absent<std::string_view>(std::string(choice.missing));
+    return core::Result<std::string_view>::success(choice.type);
 }
 } // namespace
 
@@ -2345,6 +2422,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
         }
         auto install = [runtime, birth](GameSession& game) -> core::Result<void> {
             if (!game.galactic_scripts()) return absent<void>("reconstructed galactic schedulers");
+            if (auto bound = game.galactic_scripts()->bind_ground_abilities(); !bound) return bound;
             // W1 S5: on the async schedule the story's GlobalValue writes go to the story-owned store (sim-owned, hashed live), seeded
             // from the registry as it stands; a restore then replaces it with the saved store.
             if (runtime->outbox.schedule().apply_delay != 0 && !runtime->story_globals.active())
@@ -2468,11 +2546,12 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                 runtime->actions->bind_reconciliation_placement(runtime->providers.reconciliation_placement);
                 runtime->actions->bind_write_probe(runtime->write_probe);
                 runtime->outbox = ga::IntentOutbox(runtime->setup->lifecycle.schedule);
+                runtime->lane_batch = ga::OutboxBatch(runtime->setup->lifecycle.schedule);
                 runtime->actions->bind_lane_floor([weak]() -> sim::EntityId {
-                    const auto owner = weak.lock(); return owner ? owner->outbox.lane_floor() : sim::EntityId{};
+                    const auto owner = weak.lock(); return owner ? owner->lane_floor() : sim::EntityId{};
                 });
                 runtime->actions->bind_invasion_pending([weak](std::uint64_t request) {
-                    const auto owner = weak.lock(); return owner && owner->outbox.holds_invasion(request);
+                    const auto owner = weak.lock(); return owner && owner->lane_holds_invasion(request);
                 });
                 runtime->actions->bind_pending_freestore_replay([weak](ga::QualifiedFreestore& staged) -> core::Result<void> {
                     const auto owner = weak.lock();
@@ -2584,20 +2663,20 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                     if (!owner->defers_deliveries()) {
                         ++owner->apply_tally->delivered_at_once;
                         // #6337: what the async stage loses reaches the AI now, the world only when the slice applies.
-                        if (owner->outbox.schedule().apply_delay != 0 && owner->outbox.open() && owner->outbox.virtual_tick() != 0)
+                        if (owner->outbox.schedule().apply_delay != 0 && owner->lane_batch.open() && owner->lane_batch.virtual_tick() != 0)
                             if (const auto* batch = std::get_if<ga::NativeActions::ActorChangesDelivery>(&delivery))
                                 for (const auto& change : batch->changes)
                                     if (change.kind == ga::gc::GalacticSession::NativeActorChange::Kind::lost)
-                                        owner->stage_losses.record(change.actor, {owner->outbox.snapshot_tick(), owner->outbox.virtual_tick()});
+                                        owner->stage_losses.record(change.actor, {owner->lane_batch.snapshot_tick(), owner->lane_batch.virtual_tick()});
                         return false;
                     }
                     owner->queue(std::move(delivery));
                     return true;
                 });
                 runtime->actions->bind_identity_ceiling([weak]() -> sim::EntityId {
-                    const auto owner = weak.lock(); return owner ? owner->outbox.frontier().id : sim::EntityId{};
+                    const auto owner = weak.lock(); return owner ? owner->lane_frontier().id : sim::EntityId{};
                 });
-                runtime->outbox.bind_hooks([weak](ga::gc::PlayerId, const ga::IntentRecord& record) {
+                const ga::IntentHookFactory lane_hooks = [weak](ga::gc::PlayerId, const ga::IntentRecord& record) {
                     using Shadow = ga::gc::GalacticSession::NativeActionShadow;
                     ga::IntentHooks hooks;
                     const auto owner = weak.lock();
@@ -2616,7 +2695,8 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                             locked->queue(consequence); ++locked->apply_tally->refusals_queued;
                             return true;
                         });
-                });
+                };
+                runtime->outbox.bind_hooks(lane_hooks); runtime->lane_batch.bind_hooks(lane_hooks);
                 if (auto bound = runtime->providers.bind_actions(game, galaxy, *runtime->actions, runtime->engine, runtime->world, [weak] {
                     const auto owner = weak.lock();
                     return owner ? (owner->current_executor() ? owner->current_executor() : owner->setup->executor.get()) : nullptr;

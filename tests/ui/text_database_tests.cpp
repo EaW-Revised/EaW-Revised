@@ -225,6 +225,10 @@ void missing_key_contracts() {
            "missing-key diagnostic names the key");
     // The retail executable's own defaults for the two mod-dialog keys the database lacks.
     expect(lookup.text("TEXT_EAWR_GIFT_UNITS") == u"Gift", "project gift caption uses the localised lookup fallback");
+    expect(lookup.text("TEXT_EAWR_HIDDEN_PLANET") == u"Hidden planet", "hidden finder marker uses the text lookup fallback");
+    auto hidden_marker = load(encode(sorted({{"TEXT_EAWR_HIDDEN_PLANET", u"Planète cachée"}})));
+    expect(hidden_marker && ui::TextLookup(hidden_marker.value()).text("TEXT_EAWR_HIDDEN_PLANET") == u"Planète cachée",
+        "a mounted language table overrides the hidden finder marker");
     auto authored_gift = load(encode(sorted({{"TEXT_EAWR_GIFT_UNITS", u"Donner"}})));
     expect(authored_gift && ui::TextLookup(authored_gift.value()).text("TEXT_EAWR_GIFT_UNITS") == u"Donner",
         "authored language/mod text overrides the project gift caption");

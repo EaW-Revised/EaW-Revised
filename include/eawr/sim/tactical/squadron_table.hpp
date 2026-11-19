@@ -67,7 +67,7 @@ inline constexpr std::int32_t unlimited_reserve = -1;
 struct SpawnEntryProfile {
     TypeId squadron{};
     std::int32_t starting{}; // Starting_Spawned_Units_Tech_0 count: the most alive at once
-    std::int32_t reserve{};  // Reserve_Spawned_Units_Tech_0 count, or unlimited_reserve
+    std::int32_t reserve{};  // Reserve_Spawned_Units_Tech_0 count; any negative value is unlimited (FL-02)
     bool ship{};             // WSL-16: a type with no squadron members launches as one single ship (campaign stations)
     bool arrival{};          // WSL-16a: the ship's own Hyperspace tag: it arrives by hyperspace, not from the bay
     friend constexpr bool operator==(const SpawnEntryProfile&, const SpawnEntryProfile&) noexcept = default;

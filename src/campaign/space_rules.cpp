@@ -44,15 +44,26 @@ core::Result<void> bind_space_rules(const tactical::TacticalSetup& setup,
         // producer eligibility: pads, UC objects and ordinary mod shipyards were priced.
         const bool price_exempt = producer && !producer->build_pad && !producer->under_construction
             && (producer->kind == units::UnitKind::station || !producer->production.income.empty() || producer->capture_point);
-        if (price_exempt) continue;
+        const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(),
+            [&](const auto& row) { return battle::faction_id(row.name) == menu.faction; });
+        const auto index = setup.campaign->corrupted ? 0U : 1U;
         for (auto& option : menu.options) {
-            const auto price = sim::math::multiply(option.price, setup.campaign->corruption_price_multiplier);
+            const bool pad = producer && producer->build_pad;
+            // WGCH-204: only the ordinary scalar has the station exemption; the faction pair follows it.
+            const auto ordinary = sim::math::multiply(option.price, price_exempt
+                ? Fixed::from_raw(Fixed::scale) : setup.campaign->corruption_price_multiplier);
+            if (!ordinary) return core::Result<void>::failure(ordinary.error());
+            const auto factor = faction == inputs.factions.end() ? Fixed::from_raw(Fixed::scale)
+                : (pad ? faction->corruption_pad_price[index] : faction->corruption_production_price[index]);
+            const auto price = sim::math::multiply(ordinary.value(), factor);
             if (!price) return core::Result<void>::failure(price.error());
-            option.price = price.value();
-            // WBP-11: campaign pads require a positive campaign price.
+            option.price = pad && setup.campaign->corrupted
+                ? Fixed::from_raw(price.value().trunc_to_integer() * Fixed::scale) : price.value();
+            // WBP-11: the effective price must remain positive after the campaign-to-MP fallback.
             option.available = option.available && option.price.raw() > 0;
         }
     }
+    // WBP-31: shared profiles retain the generic sale basis, before the faction pair or debit truncation.
     for (auto& child : economy.value().pads.construction) {
         const auto price = sim::math::multiply(child.price, setup.campaign->corruption_price_multiplier);
         if (!price) return core::Result<void>::failure(price.error());
@@ -135,6 +146,7 @@ core::Result<void> apply_space_rules(ConflictEntry& entry, const skirmish::Start
         return fail<void>("reserve restrictions or campaign price multiplier is invalid");
     auto setup = entry.conflict.tactical;
     tactical::CampaignBattleSetup binding;
+    binding.corrupted = inputs.corrupted;
     binding.corruption_price_multiplier = inputs.corruption_price_multiplier;
     binding.upgrades = inputs.upgrades;
     binding.victory_leaders = inputs.leaders;

@@ -425,7 +425,8 @@ struct AbilityTable {
 };
 
 inline constexpr std::uint32_t max_ability_frames = 30U * 3600U;
-// Ordinary mode multipliers are in [-64, 64]; WLK-03's shot-only damage is checked at impact.
+// Non-speed mode multipliers are in [-64, 64]; WLK-03's shot-only damage is checked at impact.
+// WAB-24 checks speed combinations against the Q24 motion-input envelope instead.
 inline constexpr std::int64_t max_ability_multiplier = 64;
 
 // Fails with EAWR-SIM-0305 unless type IDs, humans and creation owners strictly increase,

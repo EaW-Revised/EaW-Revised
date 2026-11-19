@@ -123,17 +123,18 @@ Ref<Texture2D> UiTextures::empty() {
 }
 
 Ref<Texture2D> UiTextures::texture(const model::ThemeTexture& slot, const double scale_x, const double scale_y) {
+    if (slot.origin == model::TextureOrigin::none) return {};
     Ref<Image> source;
     Rect2i region;
     std::string key;
     if (slot.origin == model::TextureOrigin::atlas) {
-        if (page_.is_null()) return {};
+        if (page_.is_null()) return missing_fallback_;
         const assets::AtlasRectangle& rect = slot.rectangle;
         region = Rect2i(static_cast<int32_t>(rect.x), static_cast<int32_t>(rect.y), static_cast<int32_t>(rect.width),
                         static_cast<int32_t>(rect.height));
         if (rect.width == 0 || rect.height == 0 || region.get_end().x > page_->get_width()
             || region.get_end().y > page_->get_height()) {
-            return {};
+            return missing_fallback_;
         }
         source = page_;
         key = "atlas:" + lower(slot.texture);
@@ -170,12 +171,12 @@ Ref<Texture2D> UiTextures::texture(const model::ThemeTexture& slot, const double
             if (image.is_null()) problems_.push_back(slot.logical_path + ": " + failure);
             found = standalone_.emplace(slot.logical_path, image).first;
         }
-        if (found->second.is_null()) return {};
+        if (found->second.is_null()) return missing_fallback_;
         source = found->second;
         region = Rect2i(0, 0, source->get_width(), source->get_height());
         key = "file:" + lower(slot.logical_path);
     } else {
-        return {};
+        return missing_fallback_;
     }
     const Vector2i size = scaled(static_cast<std::uint32_t>(region.size.x), static_cast<std::uint32_t>(region.size.y),
                                  scale_x, scale_y);

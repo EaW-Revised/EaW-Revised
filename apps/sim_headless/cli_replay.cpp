@@ -146,7 +146,6 @@ int run_tactical(const Options& options, const std::vector<std::uint8_t>& bytes)
                 content.motion = std::move(bound.value().motion);
                 content.combat = std::move(bound.value().combat);
                 content.abilities = std::move(bound.value().abilities);
-                content.fog = std::move(bound.value().fog);
                 victory = std::move(bound.value().victory);
                 economy = std::move(bound.value().economy);
             } else {
@@ -157,15 +156,19 @@ int run_tactical(const Options& options, const std::vector<std::uint8_t>& bytes)
                 content = std::move(bound).value();
                 if (auto levels = eawr::skirmish::bind_difficulty(content, start.value(), inputs.value()); !levels)
                     return fail(levels.error());
-                auto fog = eawr::skirmish::fog_rules(inputs.value());
-                if (!fog) return fail(fog.error());
-                content.fog = fog.value();
                 content.map_box = eawr::skirmish::map_box(inputs.value());
                 auto rules = eawr::skirmish::economy_rules(start.value(), inputs.value(), tables);
                 if (!rules) return fail(rules.error());
                 economy = std::move(rules).value();
                 victory = eawr::skirmish::victory_rules(start.value(), tables);
             }
+            // Shared-allocator binding also serves skirmishes with skipped
+            // placements. Fog origin is explicit, independent of that binding.
+            const auto fog_context = eawr::skirmish::replay_fog_context(setup);
+            if (!fog_context) return fail(fog_context.error());
+            auto fog = eawr::skirmish::fog_rules(inputs.value(), fog_context.value());
+            if (!fog) return fail(fog.error());
+            content.fog = std::move(fog).value();
         } else {
             // Scenario recordings can extend the default table closure with stock types.
             // Resolve their checksums in setup order, as the native recorder does. The
@@ -233,7 +236,12 @@ int run_tactical(const Options& options, const std::vector<std::uint8_t>& bytes)
                 std::cerr << eawr::core::format_diagnostic(inputs.error()) << '\n';
                 return 3;
             }
-            auto fog = eawr::skirmish::fog_rules(inputs.value());
+            const auto fog_context = eawr::skirmish::replay_fog_context(replay.value().setup);
+            if (!fog_context) {
+                std::cerr << eawr::core::format_diagnostic(fog_context.error()) << '\n';
+                return 3;
+            }
+            auto fog = eawr::skirmish::fog_rules(inputs.value(), fog_context.value());
             if (!fog) {
                 std::cerr << eawr::core::format_diagnostic(fog.error()) << '\n';
                 return 3;

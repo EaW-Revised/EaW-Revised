@@ -1,6 +1,7 @@
 #include "../../apps/viewer/src/galactic/planet_thumbnail_cells.hpp"
 #include "ui_test_support.hpp"
 
+#include <cmath>
 #include <set>
 #include <string>
 
@@ -73,5 +74,23 @@ int main() {
     const auto changed = tight.bind(21, model(9));
     expect(kept == changed && tight.model_of(*changed) == model(9) && tight.generation() != before,
            "a model change on the same row rebinds in place");
+
+    // #7568: a member's resident identity carries the map's surface alternate.
+    using viewer::galactic::thumbnail_model_key;
+    expect(thumbnail_model_key(model(1), 0) == model(1), "the normal alternate keeps the plain model path");
+    expect(thumbnail_model_key(model(1), 2) != model(1) && thumbnail_model_key(model(1), 2) != thumbnail_model_key(model(1), 1),
+           "a grid-shell (or camera) alternate is a different resident, so discovery rebinds the row");
+
+    // Framing: the extent's centre and largest half-extent; a lone turning model frames about its pivot.
+    using viewer::galactic::thumbnail_extent;
+    const auto close_to = [](float a, float b) { return std::abs(a - b) < 1.0e-5F; };
+    const auto system = thumbnail_extent({-4.0F, -2.0F, -1.0F}, {6.0F, 2.0F, 1.0F}, false);
+    expect(close_to(system.centre[0], 1.0F) && close_to(system.radius, 5.0F), "a still or composite extent frames on its own centre");
+    const auto body = thumbnail_extent({-1.0F, -1.0F, -1.0F}, {1.5F, 1.0F, 1.0F}, true);
+    expect(close_to(body.centre[0], 0.0F) && close_to(body.radius, 1.5F), "a turning body holding its pivot is centred on the pivot");
+    const auto offset = thumbnail_extent({2.0F, -1.0F, -1.0F}, {4.0F, 1.0F, 1.0F}, true);
+    expect(close_to(offset.centre[0], 0.0F) && close_to(offset.radius, std::sqrt(18.0F)),
+           "a turning model off its pivot frames its whole swing (farthest corner from the pivot)");
+    expect(offset.radius >= 4.0F, "every idle pose about the pivot stays inside the cell");
     return test::ui::failures() ? 1 : 0;
 }

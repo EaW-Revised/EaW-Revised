@@ -27,18 +27,24 @@ public:
     void close();
     void service(GalacticMode::State&);
     [[nodiscard]] bool visible() const;
+    [[nodiscard]] bool pointer_inside() const;
+    void observe_pointer(const godot::Ref<godot::InputEvent>&);
+    void pointer_left();
     [[nodiscard]] std::string report_json() const;
 private:
     void rebuild();
     void refresh();
     void key(const godot::Ref<godot::InputEvent>&);
     void choose(std::int64_t);
+    void sync_focus();
     GalacticMode::State* state_{};
     godot::Control* root_{};
     std::optional<BuiltDialog> dialog_;
     godot::LineEdit* edit_{};
     godot::ItemList* list_{};
     godot::Vector2 size_;
+    std::optional<godot::Vector2> pointer_;
+    bool pointer_was_inside_{};
     viewer::galactic::PlanetSearchIndex index_;
     std::vector<std::uint64_t> matches_;
     std::vector<godot::TextureRect*> emblems_;

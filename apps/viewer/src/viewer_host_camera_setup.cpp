@@ -190,6 +190,7 @@ void ViewerHost::_input(const Ref<InputEvent>& event) {
     sync_modal_holds();
     if (front_end_ && !map_mode_) front_end_->input(event);
     if (map_mode_) map_mode_->observe_pointer(event, input_focus(*get_viewport()));
+    if (galactic_mode_) galactic_mode_->observe_pointer(event);
     std::uint32_t button{};
     const auto input = input_class(event, button);
     if (!input || !presentation::ui::world_takes_before_gui(*input, button, world_capture_)) return;

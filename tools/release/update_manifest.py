@@ -4,7 +4,8 @@ Built from the finished player zip, so the hashes describe the bytes that are up
 launcher's updater design note (manifest section); the launcher client parses it strictly, and `validate` below
 applies the same rules so a bad manifest is refused here, before it reaches a release.
 
-Integrity is HTTPS plus these hashes. There is no signing: `signature` is the reserved empty string.
+Integrity is HTTPS plus these hashes. The manifest itself is not signed: `signature` is the reserved empty string
+(code signing of the executables is a separate step, tools/release/sign_release.py, which rebuilds this manifest).
 The output is deterministic (no timestamps, files sorted by path, fixed key order).
 """
 

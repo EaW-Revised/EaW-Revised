@@ -585,6 +585,56 @@ void checkpoint_restore_orchestration() {
     expect(timeout_throw.poll(10, &room, Job::Clock::now()).state == State::timed_out, "throwing restore can time out");
     throw_release.set_value();
     expect(finish(timeout_throw, 10, &room) == State::stale, "timed-out exception is consumed");
+
+    // #7858: a heavy-mod restore that needs about 90 s must not time out under the lobby's own limit.
+    std::promise<void> slow_release; auto slow_gate = slow_release.get_future().share();
+    Job slow; const auto began = Job::Clock::now();
+    expect(slow.submit(11, room, began + eawr::viewer::checkpoint_restore_limit, [slow_gate] { slow_gate.wait(); return 11; }),
+        "slow restore submitted");
+    expect(slow.poll(11, &room, began + std::chrono::seconds(30)).state == State::pending, "restore still pending at 30 s");
+    expect(slow.poll(11, &room, began + std::chrono::seconds(90)).state == State::pending, "restore still pending at 90 s");
+    expect(eawr::viewer::checkpoint_restore_limit == std::chrono::minutes(5), "restore limit is 5 minutes");
+    slow_release.set_value();
+    expect(finish(slow, 11, &room) == State::ready, "slow restore finishes and publishes");
+
+    // #7878: a 90 s restore while the room's revision, status text, readiness and host mod description keep moving, with the
+    // same players and settings, finishes and publishes; a player joining or leaving during it is a real change.
+    struct Lobby { int players; int settings; int revision; int status; bool ready; bool operator==(const Lobby&) const = default; };
+    using LobbyJob = eawr::viewer::CheckpointRestoreJob<int, Lobby>;
+    const auto same_players = [](const Lobby& a, const Lobby& b) { return a.players == b.players && a.settings == b.settings; };
+    const Lobby start{2, 4, 1, 0, false};
+    std::promise<void> long_release; auto long_gate = long_release.get_future().share();
+    LobbyJob quiet; const auto from = LobbyJob::Clock::now();
+    expect(quiet.submit(12, start, from + eawr::viewer::checkpoint_restore_limit, [long_gate] { long_gate.wait(); return 12; }, same_players),
+        "restore with a room comparison submitted");
+    Lobby now_room = start;
+    bool pending = true;
+    for (int second = 1; second <= 90; ++second) {
+        ++now_room.revision; now_room.status = second; now_room.ready = second % 2 == 0;
+        pending = pending && quiet.poll(12, &now_room, from + std::chrono::seconds(second)).state == State::pending;
+    }
+    expect(pending, "periodic status, readiness and revision updates keep a 90 s restore pending");
+    long_release.set_value();
+    const auto wait_end = LobbyJob::Clock::now() + std::chrono::seconds(5);
+    auto finished = quiet.poll(12, &now_room, from + std::chrono::seconds(91));
+    while (finished.state == State::pending && LobbyJob::Clock::now() < wait_end) {
+        std::this_thread::yield(); finished = quiet.poll(12, &now_room, from + std::chrono::seconds(91));
+    }
+    expect(finished.state == State::ready && finished.value && *finished.value == 12,
+        "a restore with no real room change finishes and publishes after 90 s of quiet updates");
+    for (const auto& real : {Lobby{1, 4, 9, 9, true}, Lobby{3, 4, 9, 9, true}, Lobby{2, 5, 9, 9, true}}) {
+        LobbyJob changed_job; Lobby submitted_room = start;
+        expect(changed_job.submit(13, submitted_room, LobbyJob::Clock::now() + std::chrono::seconds(10), [] { return 13; }, same_players),
+            "restore for a real change submitted");
+        auto result = changed_job.poll(13, &real, LobbyJob::Clock::now());
+        const auto end = LobbyJob::Clock::now() + std::chrono::seconds(5);
+        while (result.state == State::pending && LobbyJob::Clock::now() < end) {
+            std::this_thread::yield(); result = changed_job.poll(13, &real, LobbyJob::Clock::now());
+        }
+        expect(result.state == State::room_changed && !result.value && changed_job.submitted_room()
+                && changed_job.submitted_room()->players == 2,
+            "a player leaving or joining, or the settings changing, during the restore is a room change and keeps the submitted room");
+    }
 }
 
 // A canvas-layer expression of the lobby sources: an integer, or screen_layer plus or minus an integer.

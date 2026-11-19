@@ -468,6 +468,37 @@ std::vector<const data::XmlNode*> Object::list(const std::string_view tag, Repor
     return result;
 }
 
+std::vector<const data::XmlNode*> Object::ability_lists(const std::string_view tag) const {
+    std::vector<const data::XmlNode*> result;
+    for (auto remaining = layers.size(); remaining > 0; --remaining) {
+        const auto visit = [&](const auto& self, const data::XmlNode& node) -> void {
+            bool nested_list = false;
+            if (!node.children.empty()) {
+                for (const auto& attribute : node.attributes) {
+                    if (!iequals(attribute.name, "SubObjectList")) continue;
+                    if (iequals(node.name, tag)) data::tag_trace::used_attribute(node, attribute.name);
+                    nested_list = attribute.value == "Yes";
+                    break;
+                }
+            }
+            if (iequals(node.name, tag)) {
+                const auto dispatch = [&] {
+                    data::tag_trace::used(node);
+                    if (remaining != layers.size()) result.clear();
+                    result.push_back(&node);
+                };
+                if (!data::retail::is_placeholder(node.raw_text)) dispatch();
+                if (nested_list) dispatch();
+            }
+            // WABL-01: an unmarked container is visited recursively; a list is handed
+            // to its own decoder, whose children are not ordinary object fields.
+            if (!nested_list) for (const auto& child : node.children) self(self, child);
+        };
+        for (const auto& node : layers[remaining - 1]->root.children) visit(visit, node);
+    }
+    return result;
+}
+
 void Object::note_duplicates(Report& report) const {
     for (const auto* layer : layers) {
         std::map<std::string, std::vector<std::string>> seen;

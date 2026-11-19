@@ -29,6 +29,7 @@
 
 #include "battle_audio_internal.hpp"
 #include "eawr/presentation/audio/hardpoint_loss.hpp"
+#include "eawr/presentation/audio/unit_loss.hpp"
 #include "eawr/presentation/audio/last_seen_walk.hpp"
 #include "eawr/presentation/audio/gift_notifications.hpp"
 
@@ -2044,6 +2045,12 @@ void BattleAudio::present_combat_audio(const LiveSessionView& live, const LiveSe
             }
             hardpoint_death(event.hardpoint, "hardpoint");
         }
+        audio::present_unit_losses(record.unit_losses, local,
+            [this](const tactical::TypeId type) -> const audio::SfxEvent* {
+                const auto found = types_.find(type);
+                return found == types_.end() ? nullptr : found->second.unit_lost;
+            },
+            [this](const audio::SfxEvent* cue) { play(cue, std::nullopt, false, "unit_lost"); });
     }
 }
 

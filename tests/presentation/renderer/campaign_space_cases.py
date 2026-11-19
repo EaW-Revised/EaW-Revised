@@ -65,6 +65,8 @@ def qualified_campaign_arguments(mode):
     The native galactic AI (on by default since the 0.2.5 release default) is
     switched off: it launches every opposing fleet on the first ticks, leaving
     no authored defender in Byss orbit for the proof to attack.
+    Close the intro objectives summary: opening it intentionally pauses the
+    single-player galaxy, so a noninteractive battle proof cannot leave it up.
     """
     if mode not in ("win", "retreat", "loss", "save", "prompt-save"):
         raise ValueError("unsupported campaign space proof mode: " + str(mode))
@@ -72,6 +74,7 @@ def qualified_campaign_arguments(mode):
         "--eawr-galactic", "Sandbox_Gateways_Rebel",
         "--eawr-galactic-paused", "no",
         "--eawr-galactic-ai", "off",
+        "--eawr-galactic-dismiss-story", "yes",
         "--eawr-galactic-space-proof", mode,
     ]
 

@@ -31,6 +31,30 @@ using galactic_test::expect;
 using sim::math::Fixed;
 Fixed whole(const std::int64_t n) { return Fixed::from_integer(n).value(); }
 
+void rejected_campaign_headers(const std::vector<std::uint8_t>& encoded) {
+    const auto u16 = [&](const std::size_t offset) {
+        return static_cast<std::size_t>(encoded.at(offset))
+            | (static_cast<std::size_t>(encoded.at(offset + 1)) << 8U);
+    };
+    const auto header_size = u16(10); // Eight-byte magic, then the 16-bit format.
+    for (std::size_t offset = tactical::replay_header_size + 4; offset + 4 <= header_size;) {
+        const auto tag = u16(offset), length = u16(offset + 2);
+        const auto body = offset + 4;
+        if (length > header_size - body) break;
+        if (tag == tactical::replay_extension_campaign) {
+            for (const auto version : {5U, 6U}) {
+                auto old = encoded; old.at(body) = static_cast<std::uint8_t>(version);
+                expect(!tactical::parse_replay(old), "old campaign payload versions 5 and 6 refuse");
+            }
+            auto invalid_flag = encoded; invalid_flag.at(body + 4) = 2;
+            expect(!tactical::parse_replay(invalid_flag), "campaign corruption flag values above one refuse");
+            return;
+        }
+        offset = body + length;
+    }
+    expect(false, "campaign codec regression locates the campaign payload");
+}
+
 void normalized_account_return() {
     tactical::TacticalSetup setup;
     setup.players = {{1, 0, 100, 1}};
@@ -284,6 +308,43 @@ void proof() {
             "ordinary mod shipyard eligibility preserves the campaign corruption price multiplier");
         expect(station_menu && station_menu->options.size() == 1 && station_menu->options[0].price == whole(123),
             "existing station price exemption is unchanged");
+        auto adjusted_inputs = inputs;
+        adjusted_inputs.factions[1].corruption_production_price = {whole(2), whole(3)};
+        adjusted_inputs.factions[1].corruption_production_time = {whole(4), whole(5)};
+        priced_setup.campaign->corrupted = true;
+        expect(static_cast<bool>(campaign::bind_space_rules(priced_setup, adjusted_inputs, priced_content)), "corrupted production binds");
+        yard_menu = priced_content.economy.menu(skirmish::type_id("ModShipyard"), skirmish::faction_id("Empire"));
+        station_menu = priced_content.economy.menu(conflict.station_type, skirmish::faction_id("Empire"));
+        expect(yard_menu && yard_menu->options[0].price == whole(492) && yard_menu->options[0].build_frames == 120
+            && station_menu && station_menu->options[0].price == whole(246),
+            "WGCH-204: faction corruption scales price after ordinary discounts and scales production time");
+        priced_setup.campaign->corrupted = false;
+        expect(static_cast<bool>(campaign::bind_space_rules(priced_setup, adjusted_inputs, priced_content)), "uncorrupted production binds");
+        yard_menu = priced_content.economy.menu(skirmish::type_id("ModShipyard"), skirmish::faction_id("Empire"));
+        expect(yard_menu && yard_menu->options[0].price == whole(738) && yard_menu->options[0].build_frames == 150,
+            "WGCH-204: uncorrupted production uses the other authored pair element");
+        auto fractional_tables = tables;
+        for (auto& type : fractional_tables.units) if (type.id == "Upgrade")
+            type.production.build_time_seconds = Fixed::from_decimal("1.02").value();
+        adjusted_inputs.tables = &fractional_tables;
+        adjusted_inputs.factions[1].corruption_production_time[1] = Fixed::from_decimal("1.5").value();
+        expect(static_cast<bool>(campaign::bind_space_rules(priced_setup, adjusted_inputs, priced_content)), "fractional production binds");
+        yard_menu = priced_content.economy.menu(skirmish::type_id("ModShipyard"), skirmish::faction_id("Empire"));
+        expect(yard_menu && yard_menu->options[0].build_frames == 46,
+            "WGCH-204: fractional time rounds once after the corruption multiplier");
+        auto unknown_tables = tables;
+        for (auto& type : unknown_tables.units) if (type.id == "ModShipyard")
+            type.production.buildable_campaign.push_back({"Unlisted", {"Upgrade"}});
+        auto unknown_inputs = adjusted_inputs; unknown_inputs.tables = &unknown_tables;
+        for (const auto corrupted : {false, true}) {
+            auto unknown_setup = priced_setup; unknown_setup.campaign->corrupted = corrupted;
+            expect(static_cast<bool>(campaign::bind_space_rules(unknown_setup, unknown_inputs, priced_content)),
+                "an unlisted menu faction does not refuse campaign entry");
+            const auto* unknown_menu = priced_content.economy.menu(skirmish::type_id("ModShipyard"), skirmish::faction_id("Unlisted"));
+            expect(unknown_menu && unknown_menu->options.front().price == whole(246)
+                && unknown_menu->options.front().build_frames == 30,
+                "an unlisted production faction uses neutral price and time factors in both location states");
+        }
         auto tiny_tables = tables;
         for (auto& type : tiny_tables.units) if (type.id == "Upgrade") type.production.build_cost_campaign = Fixed::from_raw(1);
         auto tiny_inputs = inputs; tiny_inputs.tables = &tiny_tables;
@@ -466,7 +527,8 @@ void campaign_pad_difficulty() {
         child.production.build_time_seconds = whole(2); child.production.build_cost_campaign = whole(100);
         tables.units.push_back(child);
         auto finished = child; finished.id = "BuiltPad"; finished.under_construction = false;
-        finished.constructed_type.clear(); finished.production = {};
+        finished.constructed_type.clear(); finished.production = {}; finished.tactical_sale = true;
+        finished.tactical_sell_percentage = Fixed::from_decimal("0.5").value();
         tables.units.push_back(finished);
         auto inputs = synthetic_inputs(tables);
         inputs.factions[0].space_unit_cap = 10; inputs.factions[1].space_unit_cap = 10;
@@ -486,13 +548,60 @@ void campaign_pad_difficulty() {
         if (pad == entry.conflict.tactical.units.end()) return;
         pad->owner = 2;
         const auto pad_id = pad->entity_id;
+        const auto pad_type = pad->type_id;
         campaign::SpaceRuleInputs rules;
         rules.players = {{1, whole(500), 0, 5, 1, {}, false, {}}, {2, whole(500), 0, 5, 1, {}, ai, {}}};
+        rules.corrupted = true;
+        inputs.factions[1].corruption_pad_price = {Fixed::from_decimal("0.755").value(), whole(2)};
         if (ai) rules.reserve_order = {79}; // cover both campaign payload shapes
         const auto applied = campaign::apply_space_rules(entry, inputs, rules);
         expect(static_cast<bool>(applied), "difficulty campaign rules bind");
         if (!applied) { std::cerr << applied.error().message << '\n'; return; }
         const auto& setup = entry.conflict.tactical;
+        const auto* pad_menu = entry.content.economy.menu(pad_type, skirmish::faction_id("Empire"));
+        expect(setup.campaign->corrupted && pad_menu && pad_menu->options.front().price == whole(75),
+            "WGCH-204/WBP-11: child retains corruption and pad price truncates after its faction multiplier");
+        auto uncorrupted = setup; uncorrupted.campaign->corrupted = false;
+        auto uncorrupted_content = entry.content;
+        expect(static_cast<bool>(campaign::bind_space_rules(uncorrupted, inputs, uncorrupted_content)), "uncorrupted pad binds");
+        const auto* uncorrupted_menu = uncorrupted_content.economy.menu(pad_type, skirmish::faction_id("Empire"));
+        expect(uncorrupted_menu && uncorrupted_menu->options.front().price == whole(200)
+            && uncorrupted_menu->options.front().build_frames == pad_menu->options.front().build_frames,
+            "pad price pair selects the uncorrupted element without altering pad construction time");
+        auto fractional_tables = tables;
+        for (auto& type : fractional_tables.units) if (type.id == "PadUC")
+            type.production.build_cost_campaign = Fixed::from_decimal("100.5").value();
+        auto alternate_inputs = inputs; alternate_inputs.tables = &fractional_tables;
+        auto fractional_setup = uncorrupted;
+        fractional_setup.campaign->corruption_price_multiplier = Fixed::from_decimal("1.25").value();
+        auto alternate_content = entry.content;
+        expect(static_cast<bool>(campaign::bind_space_rules(fractional_setup, alternate_inputs, alternate_content)),
+            "fractional uncorrupted pad binds");
+        const auto* fractional_menu = alternate_content.economy.menu(pad_type, skirmish::faction_id("Empire"));
+        expect(fractional_menu && fractional_menu->options.front().price == Fixed::from_decimal("251.25").value()
+            && alternate_content.economy.pads.child(skirmish::type_id("PadUC"))->price == Fixed::from_decimal("125.625").value(),
+            "uncorrupted debit stays fractional and generic sale cost precedes the faction factor");
+        for (const auto& campaign_cost : {whole(0), whole(-1)}) {
+            auto fallback_tables = tables;
+            for (auto& type : fallback_tables.units) if (type.id == "PadUC") {
+                type.production.build_cost_campaign = campaign_cost;
+                type.production.build_cost_multiplayer = Fixed::from_decimal("123.5").value();
+            }
+            alternate_inputs.tables = &fallback_tables;
+            expect(static_cast<bool>(campaign::bind_space_rules(uncorrupted, alternate_inputs, alternate_content)),
+                "nonpositive campaign pad cost falls back to multiplayer cost");
+            const auto* fallback_menu = alternate_content.economy.menu(pad_type, skirmish::faction_id("Empire"));
+            expect(fallback_menu && fallback_menu->options.front().available && fallback_menu->options.front().price == whole(247)
+                && alternate_content.economy.pads.child(skirmish::type_id("PadUC"))->price == Fixed::from_decimal("123.5").value(),
+                "campaign pad fallback stays buyable and retains its generic sale basis");
+        }
+        auto unknown_tables = tables;
+        for (auto& type : unknown_tables.units) if (type.id == "Pad")
+            type.production.buildable_campaign.push_back({"Unlisted", {"PadUC"}});
+        alternate_inputs.tables = &unknown_tables;
+        expect(static_cast<bool>(campaign::bind_space_rules(setup, alternate_inputs, alternate_content)), "unlisted pad faction binds");
+        const auto* unknown_menu = alternate_content.economy.menu(pad_type, skirmish::faction_id("Unlisted"));
+        expect(unknown_menu && unknown_menu->options.front().price == whole(100), "unlisted pad faction uses neutral price factor");
         const auto multiplier = ai ? whole(2) : whole(1);
         expect(setup.campaign->players[1].ai_build_time_multiplier == multiplier
             && entry.content.economy.players[1].ai_build_time_multiplier == multiplier,
@@ -506,9 +615,12 @@ void campaign_pad_difficulty() {
                 "campaign difficulty pad request submits");
             std::vector<std::string> hashes{live.step(executor).value().state_hash.get()};
             const auto building = live.pads().at(pad_id).under_construction;
+            expect(ai || live.snapshot()->economy()[1].credits == whole(425),
+                "campaign pad debit uses the same faction price as the menu");
             expect(building != 0 && live.construction().at(building).finish_frame == deadline,
                 "campaign AI pad takes scaled seconds while human pad takes authored seconds");
             const auto encoded = tactical::write_replay(live.record()).value();
+            if (workers == 1) rejected_campaign_headers(encoded);
             const auto replay = tactical::parse_replay(encoded).value();
             expect(replay.setup == setup && replay.setup.campaign->players[1].ai_build_time_multiplier == multiplier,
                 "campaign replay retains the account build multiplier");
@@ -530,7 +642,25 @@ void campaign_pad_difficulty() {
                     "campaign difficulty replay and checkpoint preserve construction timing");
             }
             expect(live.pads().at(pad_id).constructed != 0, "campaign difficulty construction completes at its deadline");
+            const auto credits_before_sale = live.snapshot()->economy()[1].credits;
+            const auto sold = live.pads().at(pad_id).constructed;
+            expect(static_cast<bool>(live.submit({{deadline + 1, 2, 1}, {sold}, tactical::PadSellPayload{}})),
+                "campaign pad sale submits");
+            hashes.push_back(live.step(executor).value().state_hash.get());
+            expect(live.snapshot()->economy()[1].credits == sim::math::add(credits_before_sale, whole(50)).value(),
+                "WBP-31: sale refunds the generic cost without the 0.755 pad factor or debit truncation");
             if (reference.empty()) reference = hashes; else expect(reference == hashes, "campaign difficulty agrees on 1/2/4/8 workers");
+            auto clear_live = tactical::TacticalSession::create(uncorrupted, uncorrupted_content).value();
+            expect(static_cast<bool>(clear_live.submit({{0, 2, 0}, {pad_id}, tactical::PadBuildPayload{skirmish::type_id("PadUC")}})),
+                "uncorrupted campaign pad request submits");
+            for (std::uint32_t frame = 0; frame <= deadline; ++frame) (void)clear_live.step(executor).value();
+            const auto clear_before_sale = clear_live.snapshot()->economy()[1].credits;
+            expect(static_cast<bool>(clear_live.submit({{deadline + 1, 2, 1}, {clear_live.pads().at(pad_id).constructed}, tactical::PadSellPayload{}})),
+                "uncorrupted campaign pad sale submits");
+            (void)clear_live.step(executor).value();
+            expect(clear_live.snapshot()->economy()[1].credits == sim::math::add(clear_before_sale, whole(50)).value(),
+                "WBP-31: uncorrupted sale ignores the authored pad factor of two");
+
             tactical::BuildOption option;
             option.available = true; option.type = skirmish::type_id("Ship"); option.build_frames = option.ai_build_frames = 30;
             tactical::PlayerEconomy queue;

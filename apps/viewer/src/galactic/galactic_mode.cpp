@@ -1875,6 +1875,12 @@ std::optional<int> GalacticMode::process(const double delta) {
     return state.failure.empty() && written ? 0 : 2;
 }
 
+void GalacticMode::observe_pointer(const Ref<InputEvent>& event) {
+    if (!state_ || !state_->planet_search || state_->tactical || state_->loading || !state_->host
+        || input_focus(*state_->host->get_viewport()).modal_open) return;
+    state_->planet_search->observe_pointer(event);
+}
+
 void GalacticMode::input(const Ref<InputEvent>& event) {
     State& state = *state_;
     // #4031: the performance overlay's key (F3), in any galactic run; nothing else sees it.
@@ -1923,7 +1929,7 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
     if (state.map_input.gates.tutorial_locked) { cancel_input(); return; }
     // PS-05: the search owns text/navigation through the kit controls. The
     // window remains usable while paused, but never opens over a prompt/tour.
-    if (state.planet_search && state.planet_search->visible()) return;
+    if (state.planet_search && state.planet_search->pointer_inside()) return;
     if (const auto* key = Object::cast_to<InputEventKey>(event.ptr());
         key && key->is_pressed() && !key->is_echo() && key->is_ctrl_pressed()
         && !key->is_shift_pressed() && !key->is_alt_pressed() && !key->is_meta_pressed()
@@ -2122,6 +2128,7 @@ void GalacticMode::focus(const bool focused) {
 }
 
 void GalacticMode::pointer_left() {
+    if (state_->planet_search) state_->planet_search->pointer_left();
     if (state_->dragged_fleet && state_->host) state_->host->get_viewport()->gui_cancel_drag();
     state_->cancel_fleet_drag();
     if (state_->tactical) state_->tactical->pointer_left();

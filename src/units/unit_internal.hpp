@@ -95,6 +95,8 @@ struct Object final {
     [[nodiscard]] std::optional<std::int32_t> integer(std::string_view tag, Report& report, bool required);
     // Every occurrence from the most-derived layer that authors the tag.
     [[nodiscard]] std::vector<const data::XmlNode*> list(std::string_view tag, Report& report) const;
+    // WABL-01/02: list dispatch and variant overlays for the two ability containers.
+    [[nodiscard]] std::vector<const data::XmlNode*> ability_lists(std::string_view tag) const;
     // Notes for single-value tags authored more than once in one layer.
     void note_duplicates(Report& report) const;
 };

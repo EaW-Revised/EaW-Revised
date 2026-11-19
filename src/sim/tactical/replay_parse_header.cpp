@@ -14,7 +14,7 @@ namespace {
     std::uint32_t flags{}, slots{};
     std::int64_t credits{}, win_float{};
     auto& match = setup.match;
-    if (!text(setup.map) || !text(setup.map_sha256) || !reader.read_u32(flags) || (flags & ~31U) != 0
+    if (!text(setup.map) || !text(setup.map_sha256) || !reader.read_u32(flags) || (flags & ~63U) != 0
         || !reader.read_i64(credits)) return false;
     for (auto* value : {&match.start_tech, &match.max_tech, &match.game_timer, &match.win_integer, &match.auto_resolve}) {
         std::int64_t decoded{};
@@ -29,6 +29,7 @@ namespace {
     match.free_starting_units = (flags & 4U) == 0;
     match.pre_built_base = (flags & 8U) == 0;
     match.allow_random_events = (flags & 16U) != 0;
+    setup.campaign_origin = (flags & 32U) != 0;
     match.credits = math::Fixed::from_raw(credits);
     match.win_float = math::Fixed::from_raw(win_float);
     for (std::uint32_t index = 0; index < slots; ++index) {
@@ -235,10 +236,14 @@ core::Result<void> parse_extension_campaign(
     CampaignBattleSetup binding;
     std::uint32_t version{}, count_players{}, count_reserves{}, count_upgrades{};
     std::int64_t price_multiplier{};
-    if (!body.read_u32(version) || (version != 5 && version != 6) || !body.read_i64(price_multiplier) || !body.read_u32(count_players)
+    std::uint32_t corrupted{};
+    if (!body.read_u32(version) || (version != 7 && version != 8)
+        || !body.read_u32(corrupted) || corrupted > 1
+        || !body.read_i64(price_multiplier) || !body.read_u32(count_players)
         || count_players == 0 || count_players > max_players)
         return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign setup header", logical_path);
     binding.corruption_price_multiplier = math::Fixed::from_raw(price_multiplier);
+    binding.corrupted = corrupted != 0;
     for (std::uint32_t row = 0; row < count_players; ++row) {
         EconomyPlayer p;
         std::uint32_t flags{};
@@ -295,7 +300,7 @@ core::Result<void> parse_extension_campaign(
         return fail<Parsed>(diagnostic_codes::malformed, "truncated campaign leader", logical_path);
     if (!body.read_u64(binding.victory_station))
         return fail<Parsed>(diagnostic_codes::malformed, "truncated campaign station condition", logical_path);
-    if (version == 6) {
+    if (version == 8) {
         std::uint32_t count_ordered_reserves{};
         if (!body.read_u32(count_ordered_reserves) || count_ordered_reserves == 0
             || count_ordered_reserves != count_reserves || count_ordered_reserves > body.remaining() / 8U)
