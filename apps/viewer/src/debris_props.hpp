@@ -111,6 +111,7 @@ private:
     };
     struct ParticleType final {
         std::uint32_t lifetime_frames{};
+        float minimum_detail{};  // PS-45: tested once when the particle object is created.
         std::shared_ptr<const particles::SystemDefinition> system;
         std::string cause;
     };
@@ -197,6 +198,7 @@ private:
     std::uint64_t busy_{};
     std::uint64_t max_live_{};
     std::map<std::string, std::uint64_t> started_;       // reason:particle -> count
+    std::map<std::string, std::uint64_t> detail_suppressed_; // reason:particle -> creation gate.
     std::map<std::string, std::uint64_t> start_failed_;  // reason:particle -> count
     std::map<std::string, std::uint64_t> skipped_;       // reason:particle -> ended before a frame reached it
     std::string failure_;

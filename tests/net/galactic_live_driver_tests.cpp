@@ -2018,6 +2018,264 @@ void saves_are_agreed() {
     }
 }
 
+// The lowest active human seat writes the reserved autosave when the conflict prompt opens. The request is a lockstep seat
+// order issued from the lockstep loop (the single-player producer never runs under a step driver), so both peers agree on the
+// capture tick. `choose_at_once` makes both seats choose Begin the moment the prompt opens: the save must still come first.
+void multiplayer_prebattle_autosave(const bool choose_at_once) {
+    const auto initial = multiplayer_child_setup();
+    const auto directory = std::filesystem::temp_directory_path() / ("eawr-gc-prebattle-" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct RemoveAtExit {
+        std::filesystem::path path;
+        ~RemoveAtExit() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+    } remove_directory{directory};
+    Pair pair(initial, {1, 1}, LiveGameSession::Pacing::driven, 3000, 0, net::max_session_ticks,
+        net::GalacticClockPolicy::unrestricted);
+    std::filesystem::create_directories(directory);
+    const auto services = child_services(initial, false);
+    pair.start(0, [&](auto& options) { options.services = services; options.saves.directory = directory.string(); });
+    pair.start(1, [&](auto& options) { options.services = services; options.saves.directory = (directory / "joiner").string(); });
+    expect(pair.run_to(10), "autosave fixture reaches the shared conflict prompt");
+    const auto pending = pair.lives[0]->frame().pending_conflict;
+    expect(pending && pair.lives[1]->frame().pending_conflict, "both peers publish the pending conflict");
+    if (!pending) return;
+    const auto outcomes = [&] { return pair.lives[0]->save_outcomes(); };
+    const auto report = [&](const char* where) {
+        std::cerr << "autosave " << (choose_at_once ? "same-tick" : "later-choice") << " " << where << ": host tick "
+            << pair.lives[0]->completed_tick() << " guest tick " << pair.lives[1]->completed_tick() << " outcomes " << outcomes().size();
+        for (const auto& row : outcomes()) std::cerr << " [" << row.name << " phase " << static_cast<int>(row.phase) << " tick "
+            << row.completed_tick << (row.diagnostic ? " " + row.diagnostic->code + ": " + row.diagnostic->message : std::string{}) << "]";
+        for (const auto& error : pair.lives[0]->rejected_orders()) std::cerr << " rejected " << error.code << ": " << error.message;
+        std::cerr << " file " << std::filesystem::exists(directory / "Auto Save.eawrsave") << std::endl;
+    };
+    const auto choose = [&] {
+        pair.order(0, galactic::BattleChoice{pending->conflict.id, true});
+        pair.order(1, galactic::BattleChoice{pending->conflict.id, true});
+    };
+    if (choose_at_once) {
+        choose();
+        expect(pair.run_to(40), "the battle begins and both peers continue after the autosave");
+    } else {
+        // Ticks pass with the prompt open: the save is requested and completes without any choice.
+        expect(pair.run_to(40) && pair.lives[0]->frame().pending_conflict, "the prompt stays open while the autosave runs");
+    }
+    const auto requested = outcomes();
+    const bool settled = requested.size() == 1 && pair.lives[0]->wait_save(requested.front().token, 10s);
+    expect(settled, "the host requests one prebattle autosave");
+    const auto written_outcomes = outcomes();
+    const bool on_disk = !written_outcomes.empty() && written_outcomes.front().phase == eawr::platform::LiveSavePhase::completed
+        && std::filesystem::exists(directory / "Auto Save.eawrsave");
+    expect(on_disk, "the autosave reaches disk");
+    if (!settled || !on_disk) report("autosave not written");
+    expect(pair.lives[1]->save_outcomes().empty(), "a guest requests no autosave of its own");
+    // The file written by this code reads back as a resumable multiplayer checkpoint (the lobby's restore path).
+    const auto written = eawr::platform::read_saved_game_bytes(directory.string(), "Auto Save");
+    expect(static_cast<bool>(written), "the autosave file reads back");
+    if (written) {
+        const auto container = eawr::checkpoint::parse_checkpoint(written.value());
+        expect(static_cast<bool>(container) && static_cast<bool>(eawr::checkpoint::inspect_game_resume(container.value())),
+            "the autosave parses and carries resumable multiplayer state");
+    }
+    if (choose_at_once) expect(static_cast<bool>(pair.lives[0]->frame().battle), "the battle began after the autosave");
+    else {
+        choose();
+        expect(pair.run_to(50), "the battle begins and both peers continue after the autosave");
+    }
+    expect(outcomes().size() == 1, "one autosave per conflict");
+    expect(pair.lives[0]->tick_hashes() == pair.lives[1]->tick_hashes(), "the autosave barrier keeps two-peer digest agreement");
+    for (auto& live : pair.lives) live->stop();
+}
+
+// One reserved autosave per prompt holds across a writer departure: the guest becomes the lowest active human seat, but the
+// executed autosave (from any seat, on every peer) already covers the open prompt, so the guest writes none of its own.
+void prebattle_autosave_is_not_repeated_after_the_writer_leaves() {
+    auto initial = multiplayer_child_setup();
+    // A departure needs a configured seat-control fallback (WGS-P04): the leaving human side becomes AI.
+    initial.seat_control.emplace();
+    initial.seat_control->teams.push_back({1, {1}, false});
+    initial.seat_control->teams.push_back({2, {2}, false});
+    for (std::uint32_t player = 1; player <= 3; ++player)
+        initial.seat_control->controllers.push_back({player,
+            player <= 2 ? galactic::FactionControl::human : galactic::FactionControl::ai, galactic::FactionControl::ai, {}, {}});
+    const auto directory = std::filesystem::temp_directory_path() / ("eawr-gc-prebattle-leave-" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct RemoveAtExit {
+        std::filesystem::path path;
+        ~RemoveAtExit() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+    } remove_directory{directory};
+    Pair pair(initial, {1, 1}, LiveGameSession::Pacing::driven, 3000, 0, net::max_session_ticks,
+        net::GalacticClockPolicy::unrestricted);
+    std::filesystem::create_directories(directory);
+    const auto services = child_services(initial, false);
+    pair.start(0, [&](auto& options) { options.services = services; options.saves.directory = directory.string(); });
+    pair.start(1, [&](auto& options) { options.services = services; options.saves.directory = (directory / "joiner").string(); });
+    expect(pair.run_to(40) && pair.lives[0]->frame().pending_conflict && pair.lives[1]->frame().pending_conflict,
+        "the prompt is open on both peers while the writer's autosave runs");
+    const auto written = pair.lives[0]->save_outcomes();
+    expect(written.size() == 1 && pair.lives[0]->wait_save(written.front().token, 10s), "the writer saved the prompt once");
+    pair.lives[0]->stop();
+    {
+        const std::lock_guard lock(pair.pipes.mutex);
+        pair.pipes.open_[0] = false;
+    }
+    pair.lives[1]->advance_to(160);
+    const bool survived = pair.lives[1]->wait_for(160, 30s) && !pair.lives[1]->failure();
+    expect(survived, "the guest survives the writer's departure" + (pair.lives[1]->failure()
+        ? std::string(": ") + pair.lives[1]->failure()->message : std::string(": no failure, tick stalled")));
+    expect(static_cast<bool>(pair.lives[1]->frame().pending_conflict), "the prompt is still open after the departure");
+    expect(pair.lives[1]->save_outcomes().empty(), "the next writer does not save the same prompt again");
+    pair.lives[1]->stop();
+}
+
+// A save request the lockstep driver refuses before it reaches the sealed input settles as rejected. Left as requested it
+// would hold every later save of this peer as already in progress (manual saves included).
+void refused_lockstep_save_does_not_block_later_saves() {
+    class Driver final : public eawr::platform::LiveGameStepDriver {
+    public:
+        std::atomic_bool refuse_saves{true};
+        [[nodiscard]] bool may_save(eawr::sim::SeatId) const noexcept override { return true; }
+        eawr::core::Result<std::optional<eawr::campaign::GameTick>> step(
+            eawr::platform::LiveGameStepContext& context, std::span<const eawr::platform::LiveGameOrder> orders, std::uint64_t) override {
+            using Result = eawr::core::Result<std::optional<eawr::campaign::GameTick>>;
+            for (const auto& order : orders)
+                if (refuse_saves.load() && std::holds_alternative<galactic::SaveRequest>(order.payload))
+                    context.refuse(order, eawr::core::Diagnostic{"EAWR-PLATFORM-0600", eawr::core::Severity::error, "seat departed or agreement pending", {}, {}, {}, {}});
+            if (!context.advance_allowed) return Result::success({});
+            auto tick = context.game.step(context.executor);
+            if (!tick) return Result::failure(tick.error());
+            return Result::success(std::move(tick).value());
+        }
+    };
+    const auto setup = policy_setup();
+    const auto directory = std::filesystem::temp_directory_path() / ("eawr-gc-refused-save-" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct RemoveAtExit {
+        std::filesystem::path path;
+        ~RemoveAtExit() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+    } remove_directory{directory};
+    std::filesystem::create_directories(directory);
+    auto driver = std::make_shared<Driver>();
+    LiveGameSession::Options options; options.workers = 1; options.pacing = LiveGameSession::Pacing::driven;
+    options.step_driver = driver; options.saves.directory = directory.string();
+    auto live = require(LiveGameSession::start(setup, std::move(options)));
+    eawr::platform::LiveSaveRequest request; request.seat = human_seats(setup).front(); request.name = "manual";
+    const auto first = live->request_save(request);
+    expect(first != 0 && live->wait_save(first, 10s), "a save refused before the sealed input settles");
+    const auto settled = live->save_outcomes();
+    expect(settled.size() == 1 && settled.front().phase == eawr::platform::LiveSavePhase::rejected,
+        "the refused lockstep save request is rejected, not left requested");
+    driver->refuse_saves = false;
+    const auto second = live->request_save(request);
+    const auto outcomes = live->save_outcomes();
+    const auto row = std::find_if(outcomes.begin(), outcomes.end(), [&](const auto& outcome) { return outcome.token == second; });
+    expect(second != first && row != outcomes.end() && row->phase == eawr::platform::LiveSavePhase::requested,
+        "a later save is not refused as already in progress");
+    live->stop();
+}
+
+// #7852: a prebattle autosave the session refuses (the prompt is not open: Begin already staged the battle, or no conflict)
+// ends rejected and does not hold later saves; and a prebattle autosave told to retry is dropped once its prompt is gone,
+// while an ordinary save asked to retry stays requested.
+class SaveSeamDriver final : public eawr::platform::LiveGameStepDriver {
+public:
+    std::atomic_bool forward_to_sim{false}, answer_retry{false};
+    [[nodiscard]] bool may_save(eawr::sim::SeatId) const noexcept override { return true; }
+    std::optional<eawr::platform::AgreedGameSave> take_agreed_save() override {
+        if (!answer_retry.load() || !asked) return {};
+        answer_retry = false;
+        eawr::platform::AgreedGameSave saved;
+        saved.event.producer = seat; saved.event.value = slot;
+        saved.failure = eawr::core::Diagnostic{"EAWR-NET-1700", eawr::core::Severity::error, "Save failed: overlaps capture", {}, {}, {}, {}};
+        saved.retry = true;
+        return saved;
+    }
+    eawr::core::Result<std::optional<eawr::campaign::GameTick>> step(
+        eawr::platform::LiveGameStepContext& context, std::span<const eawr::platform::LiveGameOrder> orders, std::uint64_t) override {
+        using Result = eawr::core::Result<std::optional<eawr::campaign::GameTick>>;
+        for (const auto& order : orders) {
+            const auto* save = std::get_if<galactic::SaveRequest>(&order.payload);
+            if (!save) continue;
+            seat = order.seat; slot = static_cast<std::uint64_t>(save->slot); asked = true;
+            if (forward_to_sim.load()) {
+                auto sent = context.game.submit({{context.game.completed_tick() + 1, order.seat, ++sequence}, order.payload});
+                if (!sent) return Result::failure(sent.error());
+            }
+        }
+        if (!context.advance_allowed) return Result::success({});
+        auto tick = context.game.step(context.executor);
+        if (!tick) return Result::failure(tick.error());
+        return Result::success(std::move(tick).value());
+    }
+    eawr::sim::SeatId seat{};
+    std::uint64_t slot{}, sequence{};
+    std::atomic_bool asked{false};
+};
+
+void sim_refused_prebattle_autosave_is_rejected_and_frees_later_saves() {
+    const auto setup = policy_setup();
+    const auto directory = std::filesystem::temp_directory_path() / ("eawr-gc-sim-refused-save-" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct RemoveAtExit {
+        std::filesystem::path path;
+        ~RemoveAtExit() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+    } remove_directory{directory};
+    std::filesystem::create_directories(directory);
+    auto driver = std::make_shared<SaveSeamDriver>();
+    driver->forward_to_sim = true;
+    LiveGameSession::Options options; options.workers = 1; options.pacing = LiveGameSession::Pacing::driven;
+    options.step_driver = driver; options.saves.directory = directory.string();
+    auto live = require(LiveGameSession::start(setup, std::move(options)));
+    eawr::platform::LiveSaveRequest request; request.seat = human_seats(setup).front(); request.name = "Auto Save";
+    request.autosave = true; request.prebattle = true;
+    const auto first = live->request_save(request);
+    live->advance_to(5);
+    expect(first != 0 && live->wait_save(first, 10s), "the session-refused prebattle autosave settles");
+    const auto settled = live->save_outcomes();
+    expect(settled.size() == 1 && settled.front().phase == eawr::platform::LiveSavePhase::rejected,
+        "a prebattle autosave refused by the session (no open prompt) ends rejected, not requested");
+    request.autosave = false; request.prebattle = false; request.name = "manual";
+    const auto second = live->request_save(request);
+    const auto outcomes = live->save_outcomes();
+    const auto row = std::find_if(outcomes.begin(), outcomes.end(), [&](const auto& outcome) { return outcome.token == second; });
+    expect(row != outcomes.end() && row->phase == eawr::platform::LiveSavePhase::requested,
+        "a later save is not refused as already in progress");
+    live->stop();
+}
+
+void prebattle_autosave_retry_is_dropped_when_its_prompt_is_gone() {
+    const auto setup = policy_setup();
+    const auto directory = std::filesystem::temp_directory_path() / ("eawr-gc-retry-save-" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct RemoveAtExit {
+        std::filesystem::path path;
+        ~RemoveAtExit() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+    } remove_directory{directory};
+    std::filesystem::create_directories(directory);
+    for (const bool prebattle : {true, false}) {
+        auto driver = std::make_shared<SaveSeamDriver>();
+        LiveGameSession::Options options; options.workers = 1; options.pacing = LiveGameSession::Pacing::driven;
+        options.step_driver = driver; options.saves.directory = directory.string();
+        auto live = require(LiveGameSession::start(setup, std::move(options)));
+        eawr::platform::LiveSaveRequest request; request.seat = human_seats(setup).front(); request.name = "retry";
+        request.autosave = prebattle; request.prebattle = prebattle;
+        const auto token = live->request_save(request);
+        live->advance_to(3);
+        for (unsigned wait = 0; wait < 1000 && !driver->asked; ++wait) std::this_thread::sleep_for(5ms);
+        expect(driver->asked, "the driver saw the save request");
+        driver->answer_retry = true;
+        live->advance_to(8);
+        expect(live->wait_for(8, 10s), "the live session keeps running through the retry answer");
+        const auto outcomes = live->save_outcomes();
+        const auto row = std::find_if(outcomes.begin(), outcomes.end(), [&](const auto& outcome) { return outcome.token == token; });
+        expect(row != outcomes.end(), "the save row exists");
+        if (row != outcomes.end())
+            expect(row->phase == (prebattle ? eawr::platform::LiveSavePhase::rejected : eawr::platform::LiveSavePhase::requested),
+                prebattle ? "a retried prebattle autosave is dropped once its prompt is gone"
+                          : "an ordinary save asked to retry stays requested");
+        live->stop();
+    }
+}
+
 void recovered_owner_publishes_at_boundary() {
     class Driver final : public eawr::platform::LiveGameStepDriver {
     public:
@@ -2059,6 +2317,67 @@ void recovered_owner_publishes_at_boundary() {
     expect(driver->published && driver->refused_wrong_boundary && !live->failure()
         && !hashes.empty() && hashes.back() == oracle.state_sha256(),
         "owner publication rejects a wrong boundary atomically and resumes the private owner without a load prologue");
+}
+
+// A save request queued when the recovered owner is published ends with that publication (the live session refuses queued
+// local input there). It settles as rejected and does not hold later saves of the peer as already in progress.
+void recovered_owner_publication_settles_queued_saves() {
+    class Driver final : public eawr::platform::LiveGameStepDriver {
+    public:
+        std::shared_ptr<eawr::campaign::GameSession> replacement;
+        LiveGameSession* live{};
+        eawr::platform::LiveSaveRequest request;
+        std::atomic_bool published{};
+        std::atomic<std::uint64_t> token{};
+        [[nodiscard]] bool may_save(eawr::sim::SeatId) const noexcept override { return true; }
+        eawr::core::Result<std::optional<eawr::campaign::GameTick>> step(
+            eawr::platform::LiveGameStepContext& context, std::span<const eawr::platform::LiveGameOrder>, std::uint64_t) override {
+            using Result = eawr::core::Result<std::optional<eawr::campaign::GameTick>>;
+            if (!context.advance_allowed) return Result::success({});
+            if (!published.load() && context.game.completed_tick() == 5) {
+                token = live->request_save(request); // queued as local input, not yet in the sealed frontier
+                auto accepted = context.adopt_recovered_owner({replacement, {}, 9});
+                if (!accepted) return Result::failure(accepted.error());
+                published = true;
+                return Result::success({});
+            }
+            auto tick = context.game.step(context.executor);
+            if (!tick) return Result::failure(tick.error());
+            return Result::success(std::move(tick).value());
+        }
+    };
+    const auto setup = policy_setup();
+    const eawr::sim::InlineExecutor executor;
+    auto staged = require(eawr::campaign::GameSession::create(setup));
+    for (unsigned tick = 0; tick < 9; ++tick) require(staged.step(executor));
+    const auto directory = std::filesystem::temp_directory_path() / ("eawr-gc-recovered-save-" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct RemoveAtExit {
+        std::filesystem::path path;
+        ~RemoveAtExit() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+    } remove_directory{directory};
+    std::filesystem::create_directories(directory);
+    auto driver = std::make_shared<Driver>();
+    driver->replacement = std::make_shared<eawr::campaign::GameSession>(std::move(staged));
+    driver->request.seat = human_seats(setup).front(); driver->request.name = "queued";
+    LiveGameSession::Options options; options.workers = 1; options.pacing = LiveGameSession::Pacing::driven;
+    options.step_driver = driver; options.saves.directory = directory.string();
+    auto live = require(LiveGameSession::start(setup, std::move(options)));
+    driver->live = live.get();
+    live->advance_to(12);
+    expect(live->wait_for(12, 10s) && driver->published && !live->failure(), "the recovered owner is published at its boundary");
+    const auto token = driver->token.load();
+    expect(token != 0 && live->wait_save(token, 10s), "the queued save request settles at the publication");
+    auto outcomes = live->save_outcomes();
+    const auto queued = std::find_if(outcomes.begin(), outcomes.end(), [&](const auto& row) { return row.token == token; });
+    expect(queued != outcomes.end() && queued->phase == eawr::platform::LiveSavePhase::rejected,
+        "the queued save request is rejected, not left requested");
+    const auto later = live->request_save(driver->request);
+    outcomes = live->save_outcomes();
+    const auto row = std::find_if(outcomes.begin(), outcomes.end(), [&](const auto& outcome) { return outcome.token == later; });
+    expect(later != token && row != outcomes.end() && row->phase == eawr::platform::LiveSavePhase::requested,
+        "a later save is not refused as already in progress");
+    live->stop();
 }
 
 void driver_cannot_outlive_its_session() {
@@ -2873,12 +3192,13 @@ struct RecoveryPeers {
             matches.push_back(std::make_unique<viewer::GalacticLanMatch>(*transports.back(), std::move(options)));
             drivers.push_back(matches.back()->driver());
         }
-        publications.resize(count); rejected.resize(count);
+        publications.resize(count); rejected.resize(count); refused.resize(count);
     }
     ~RecoveryPeers() { for (auto& driver : drivers) driver->session_ended(); }
     void step(std::uint32_t peer, bool advance, std::span<const LiveGameOrder> orders = {}) {
         eawr::platform::LiveGameStepContext context{*games[peer], *pools[peer], advance, {},
             [&](auto error) { rejected[peer].push_back(std::move(error)); }};
+        context.reject_order = [&](const LiveGameOrder& order, eawr::core::Diagnostic) { refused[peer].push_back(order); };
         context.adopt_recovered_owner = [&](eawr::platform::RecoveredGameOwner owner) {
             expect(owner.session && owner.completed_tick == owner.session->completed_tick(), "live recovery publishes a complete private owner");
             games[peer] = std::move(owner.session); ++publications[peer];
@@ -2924,6 +3244,7 @@ struct RecoveryPeers {
     std::vector<std::shared_ptr<eawr::platform::LiveGameStepDriver>> drivers;
     std::vector<std::uint32_t> publications;
     std::vector<std::vector<eawr::core::Diagnostic>> rejected;
+    std::vector<std::vector<LiveGameOrder>> refused; // orders a driver refused by name (the session settles a save request on it)
     std::vector<std::string> logs; // diagnostic lines of every peer, in step order (one thread)
     std::uint64_t now{};
 };
@@ -2968,6 +3289,24 @@ void three_peer_survivor_saves_after_host_drop() {
     require(adapter.restore_network_state(resume.network_state));
     for (int step = 0; step < 3; ++step) { require(adapter.install(std::vector<net::SeatInput>{})); require(adapter.step()); }
     expect(adapter.completed_tick() == resume.completed_tick + 3, "the survivor's save loads and continues");
+}
+
+// #7852: a save request in the batch of a peer whose match failed while recovery listens is refused by name, not dropped:
+// the live session settles it as rejected on that refusal, so it cannot hold later saves as already in progress.
+void failed_match_refuses_a_save_request_by_name() {
+    RecoveryPeers rig(3, 1);
+    rig.run(20);
+    rig.pipes.open_[2] = false;
+    const std::vector<LiveGameOrder> save{LiveGameOrder{{3}, galactic::SaveRequest{7, false, false, false}, {}}};
+    for (unsigned round = 0; round < 200'000 && rig.matches[2]->view().phase != viewer::GalacticLanPhase::ended; ++round) {
+        rig.step(0, true); rig.step(1, true); rig.step(2, true);
+    }
+    expect(rig.matches[2]->view().phase == viewer::GalacticLanPhase::ended, "the isolated peer's match fails while recovery listens");
+    expect(rig.refused[2].empty(), "nothing was refused before the save request");
+    rig.step(2, true, save);
+    expect(rig.refused[2].size() == 1 && std::holds_alternative<galactic::SaveRequest>(rig.refused[2].front().payload)
+        && std::get<galactic::SaveRequest>(rig.refused[2].front().payload).slot == 7,
+        "the failed match refuses the save request by name");
 }
 
 void default_hash_window_contracts() {
@@ -3352,6 +3691,7 @@ int main(int argc, char** argv) {
             guest_saves_with_the_host_present();
             guest_saves_after_the_host_drops();
             three_peer_survivor_saves_after_host_drop();
+            failed_match_refuses_a_save_request_by_name();
             return galactic_test::checker.finish();
         }
         if (argc == 2 && std::string_view(argv[1]) == "--deferred") {
@@ -3413,6 +3753,13 @@ int main(int argc, char** argv) {
         guest_saves_with_the_host_present();
         guest_saves_after_the_host_drops();
         three_peer_survivor_saves_after_host_drop();
+        failed_match_refuses_a_save_request_by_name();
+        for (const bool choose_at_once : {false, true}) multiplayer_prebattle_autosave(choose_at_once);
+        prebattle_autosave_is_not_repeated_after_the_writer_leaves();
+        refused_lockstep_save_does_not_block_later_saves();
+        sim_refused_prebattle_autosave_is_rejected_and_frees_later_saves();
+        prebattle_autosave_retry_is_dropped_when_its_prompt_is_gone();
+        recovered_owner_publication_settles_queued_saves();
         recovered_owner_publishes_at_boundary();
         driver_cannot_outlive_its_session();
         completed_match_idles_until_session_end();

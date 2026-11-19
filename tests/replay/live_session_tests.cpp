@@ -10,6 +10,7 @@
 #include "eawr/platform/live_scripts.hpp"
 #include "eawr/platform/tactical_feed.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/presentation/audio/unit_loss.hpp"
 #include "eawr/sim/replay.hpp"
 #include "eawr/sim/tactical/motion.hpp"
 #include "eawr/sim/tactical/replay.hpp"
@@ -30,6 +31,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -63,6 +65,28 @@ constexpr std::int64_t one = std::int64_t{1} << 24;
 [[nodiscard]] math::Vec3 at(const std::int64_t x, const std::int64_t y, const std::int64_t z) {
     return {units(x), units(y), units(z)};
 }
+
+// The viewer and this sink use the same type lookup, listener decision and play
+// arguments. Only the audio backend is replaced; no source text is copied here.
+struct UnitLossPlaySpy {
+    struct Cue { std::string name; } authored{"Authored_Station_Lost"};
+    struct TypeSounds { const Cue* unit_lost{}; };
+    const std::map<tactical::TypeId, TypeSounds> types{{40, {&authored}}};
+    std::vector<const Cue*> requests;
+    std::uint64_t reached{};
+
+    void advance(const LiveSession& session, const std::uint64_t through, const tactical::PlayerId local) {
+        for (const auto& record : session.events_after(reached, through).ticks) {
+            eawr::presentation::audio::present_unit_losses(record.unit_losses, local, types,
+                [this](const Cue* cue, std::nullopt_t, const bool hidden, const char* reason) {
+                    expect(!hidden && std::string_view(reason) == "unit_lost",
+                        "BA-65: shared viewer decision requests ordinary unattached loss playback");
+                    requests.push_back(cue);
+                });
+        }
+        reached = through;
+    }
+};
 
 // The motion table of the tactical-motion fixture (tests/replay/motion_tests.cpp foc_table).
 [[nodiscard]] tactical::MotionTable motion_table() {
@@ -965,7 +989,14 @@ void test_victory_outcome() {
                 && loss.type == 40 && loss.count == 1;
     }
     expect(loss_count == 1 && loss_retained,
-        "BA-65: a real station kill publishes one loss cue at its completed death tick");
+        "BA-65: a real station kill publishes one loss row at its completed death tick");
+    UnitLossPlaySpy owner, other;
+    owner.advance(session, 6, 2);
+    other.advance(session, 6, 1);
+    expect(owner.requests == std::vector<const UnitLossPlaySpy::Cue*>{&owner.authored}
+        && other.requests.empty(), "BA-65: station kill journal reaches one authored play request for its owner only");
+    owner.advance(session, 6, 2);
+    expect(owner.requests.size() == 1, "BA-65: another presentation frame cannot replay the consumed station loss");
     if (!latest || !latest->outcome()) return;
     const auto end_tick = latest->outcome()->end_tick;
     session.halt_at(end_tick);
@@ -982,6 +1013,97 @@ void test_victory_outcome() {
     }
     const auto headless = eawr::platform::headless_tick_hashes(session.record(), {}, durability, {}, {}, victory);
     expect(headless && headless.value() == session.tick_hashes(), "the live victory run matches its headless replay");
+}
+
+void test_unit_loss_delivery_after_restart_and_catch_up() {
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 1, tactical::player_flag_commandable}, {2, 1, 2, tactical::player_flag_commandable}};
+    for (const auto id : {1U, 2U, 3U}) {
+        tactical::UnitState station;
+        station.entity_id = id; station.type_id = 40; station.owner = id == 1 ? 1U : 2U;
+        station.position = at(static_cast<std::int64_t>(id) * 3000, 0, 0);
+        setup.units.push_back(station);
+    }
+    tactical::DurabilityTable durability;
+    durability.rules = {decimal("0.2"), decimal("0.4"), decimal("0.33")};
+    durability.profiles = {{40, units(2400), std::nullopt, false, {}}};
+    const std::vector<tactical::PlayerCommand> commands{
+        command_at(3, 1, 0, 2, tactical::DamagePayload{units(3000)}),
+        command_at(12, 1, 1, 3, tactical::DamagePayload{units(3000)})};
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        bool replaced = false;
+        LiveSession::Options options{.workers = workers, .pacing = LiveSession::Pacing::driven, .history = 2};
+        options.command_source = [&commands](const std::uint64_t tick) {
+            std::vector<tactical::PlayerCommand> due;
+            for (const auto& command : commands) if (command.key.tick == tick) due.push_back(command);
+            return due;
+        };
+        options.step_driver = [&](eawr::platform::LiveStepContext& context,
+            std::span<const tactical::PlayerCommand> due, std::uint64_t) {
+            using Result = eawr::core::Result<bool>;
+            if (context.completed_tick() == 8 && !replaced) {
+                auto staged = context.rebuild(); if (!staged) return Result::failure(staged.error());
+                auto installed = staged.value()->install(std::span(commands.data(), 1));
+                if (!installed) return Result::failure(installed.error());
+                while (staged.value()->completed_tick() < 8) {
+                    auto stepped = staged.value()->step(); if (!stepped) return Result::failure(stepped.error());
+                }
+                expect(staged.value()->snapshot()->losses().size() == 1
+                    && context.state_hash() == staged.value()->state_hash(),
+                    "BA-65: catch-up really replays the earlier kill without changing the held live world");
+                auto activated = staged.value()->activate(); if (!activated) return Result::failure(activated.error());
+                replaced = true;
+            }
+            auto installed = context.install(due); if (!installed) return Result::failure(installed.error());
+            auto stepped = context.step();
+            return stepped ? Result::success(true) : Result::failure(stepped.error());
+        };
+        auto live = LiveSession::start(setup, {}, durability, {}, {}, options);
+        expect(static_cast<bool>(live), "BA-65: loss catch-up fixture starts");
+        if (!live) continue;
+        auto& session = *live.value();
+        session.advance_to(6);
+        expect(session.wait_for(6, std::chrono::seconds(30)), "BA-65: first station kill completes");
+        expect(!session.snapshot_at(4), "BA-65: death snapshot is evicted before delivery");
+        UnitLossPlaySpy owner, other;
+        owner.advance(session, 6, 2); other.advance(session, 6, 1);
+        expect(owner.requests == std::vector<const UnitLossPlaySpy::Cue*>{&owner.authored}
+            && other.requests.empty(), "BA-65: retained real loss reaches the owner after snapshot eviction");
+        session.advance_to(10);
+        expect(session.wait_for(10, std::chrono::seconds(30)), "BA-65: catch-up activates and resumes");
+        UnitLossPlaySpy catch_up;
+        catch_up.advance(session, 10, 2);
+        owner.advance(session, 10, 2);
+        expect(replaced && session.frame().latest->losses().size() == 1
+            && session.events_after(0, 10).ticks.empty() && catch_up.requests.empty() && owner.requests.size() == 1,
+            "BA-65: activation clears old loss notifications; even a fresh cursor cannot replay catch-up kills");
+        session.advance_to(16);
+        expect(session.wait_for(16, std::chrono::seconds(30)), "BA-65: post-activation station kill completes");
+        owner.advance(session, 16, 2); other.advance(session, 16, 1); catch_up.advance(session, 16, 2);
+        expect(owner.requests.size() == 2 && other.requests.empty()
+            && catch_up.requests == std::vector<const UnitLossPlaySpy::Cue*>{&catch_up.authored},
+            "BA-65: only the new post-activation death requests playback, for its owner exactly once");
+        catch_up.advance(session, 16, 2);
+        expect(catch_up.requests.size() == 1, "BA-65: caught-up presentation does not repeat a delivered loss");
+        session.stop();
+        const auto hashes = eawr::platform::headless_tick_hashes(session.record(), {}, durability, {}, {});
+        expect(hashes && hashes.value() == session.tick_hashes(), "BA-65: loss recovery preserves headless hashes at every worker count");
+
+        auto restart_options = options;
+        restart_options.step_driver = {};
+        auto restarted = LiveSession::start(setup, {}, durability, {}, {}, restart_options);
+        expect(static_cast<bool>(restarted), "BA-65: a fresh session reuses the station identities");
+        if (!restarted) continue;
+        UnitLossPlaySpy fresh_owner, fresh_other;
+        fresh_owner.advance(*restarted.value(), 0, 2);
+        expect(fresh_owner.requests.empty(), "BA-65: restart begins without stale loss notifications");
+        restarted.value()->advance_to(6);
+        expect(restarted.value()->wait_for(6, std::chrono::seconds(30)), "BA-65: restarted station kill completes");
+        fresh_owner.advance(*restarted.value(), 6, 2); fresh_other.advance(*restarted.value(), 6, 1);
+        expect(fresh_owner.requests == std::vector<const UnitLossPlaySpy::Cue*>{&fresh_owner.authored}
+            && fresh_other.requests.empty(), "BA-65: restart neither suppresses nor duplicates a reused station identity's loss");
+        restarted.value()->stop();
+    }
 }
 
 // The content passed as one TacticalContent runs exactly like the same tables passed one by one:
@@ -1778,6 +1900,7 @@ int main(const int argc, const char* const argv[]) {
     test_quit_publication_halts_the_live_thread();
     test_shared_fog_history();
     test_victory_outcome();
+    test_unit_loss_delivery_after_restart_and_catch_up();
     test_content_bundle_matches_arguments();
     test_driven_matches_headless(argv[1]);
     test_phase_timings_preserve_hashes(argv[1]);

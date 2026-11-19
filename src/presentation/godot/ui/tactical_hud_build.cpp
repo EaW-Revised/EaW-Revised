@@ -606,6 +606,9 @@ void build_battle_overlay(HudState& state, const vfs::Vfs& filesystem, const dat
         return state.command_texture(state.card_type(type).first, "battle result", true);
     };
     overlay.result_name = [&state](const std::string& type) { return state.card_type(type).second; };
+    overlay.result_picture = [&state](const std::string& name) {
+        return state.command_texture(name, "battle result picture");
+    };
     // WBF-44/45: the installed dialog owns the geometry, skin and captions.
     if (auto dialogs = data::ui::load_dialog_catalog(filesystem)) {
         auto skin = std::make_shared<data::ui::DialogCatalog>(std::move(dialogs).value());

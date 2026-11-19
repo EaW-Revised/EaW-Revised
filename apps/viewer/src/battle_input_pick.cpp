@@ -143,7 +143,7 @@ void BattleInput::update_hover() {
         if (unit != units_.end()) {
             hovered_ = static_cast<std::size_t>(unit - units_.begin());
             hovered_hostile_ = unit->hostile;
-            hovered_selectable_ = unit->own;
+            hovered_selectable_ = unit->own && unit->selectable && !unit->selection_denied;
             cursor_hover_ = "hardpoint";
             return;
         }
@@ -151,14 +151,15 @@ void BattleInput::update_hover() {
     if (const auto icon = world_ui_->icon_hit(*pointer_)) {
         hovered_icon_ = icon->entity;
         hovered_hostile_ = icon->hostile;
-        hovered_selectable_ = icon->own;
+        hovered_selectable_ = icon->own && icon->selectable;
         cursor_hover_ = "squadron_icon";
         return;
     }
     if (pick_ray) hovered_ = ui::pick_index(*pick_ray, units_);
     if (hovered_) {
         hovered_hostile_ = units_[*hovered_].hostile;
-        hovered_selectable_ = units_[*hovered_].own;
+        const auto& unit = units_[*hovered_];
+        hovered_selectable_ = unit.own && unit.selectable && !unit.selection_denied;
         cursor_hover_ = "unit";
     }
 }

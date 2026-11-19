@@ -1,6 +1,7 @@
 #include "revised_layer.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "options_screen.hpp"
+#include "eawr/presentation/ui/build_tray_files.hpp"
 #include "eawr/presentation/ui/selection_config.hpp"
 #include "dialog_rectangles.hpp"
 
@@ -254,6 +255,18 @@ bool EawrOptionsScreen::build(Options options) {
     }
     const vfs::Vfs& filesystem = *resources.filesystem;
     model::apply_selection_config(committed_, filesystem);
+    {
+        const auto layout = model::build_tray::load_tray_layout(filesystem);
+        committed_.galactic_build_tray_layer_default = model::build_tray::layer_enabled_by_default(layout);
+        // GBT-11: a rejected layout file gets one EAWR-UI diagnostic. The screen is built often, so a reason already
+        // reported is not repeated; a different broken file reports again.
+        static std::string reported;
+        if (layout.invalid && layout.first_error != reported) {
+            reported = layout.first_error;
+            UtilityFunctions::push_warning(text("EAWR-UI-BUILD-TRAY: invalid layout file; retaining the last valid one: "
+                + layout.first_error));
+        }
+    }
     draft_ = committed_;
 
     auto catalog = data::load_dialog_catalog(filesystem);
@@ -484,7 +497,7 @@ void EawrOptionsScreen::rebuild_page() {
     if (page_ == Page::keyboard) {
         // ST-K3: append the owner-requested preset to the loaded keyboard page.
         const int top = service.rect.height;
-        service.rect.height += 170;
+        service.rect.height += 204;
         data::DialogControl label;
         label.statement = "LTEXT"; label.id_name = "IDC_CAMERA_KEYS_LABEL";
         label.text = "Camera keys"; label.rect = {12, top + 8, service.rect.width / 3 - 18, 20};
@@ -506,10 +519,19 @@ void EawrOptionsScreen::rebuild_page() {
             bind.rect = {service.rect.width / 2, top + 36 + static_cast<int>(action) * 34, service.rect.width / 2 - 12, 26};
             service.controls.push_back(bind);
         }
+        // GBT-07: the galactic build tray's key, a third press-to-bind row (any one key without modifiers).
+        label.id_name = "IDC_BUILD_TRAY_KEY_LABEL";
+        label.text = "Galactic build tray";
+        label.rect = {12, top + 108, service.rect.width / 2 - 18, 20};
+        service.controls.push_back(label);
+        bind.id_name = "IDC_BUILD_TRAY_KEY";
+        bind.text = capturing_ == build_tray_capture ? "Press key..." : std::string(model::build_tray_key(draft_));
+        bind.rect = {service.rect.width / 2, top + 104, service.rect.width / 2 - 12, 26};
+        service.controls.push_back(bind);
         data::DialogControl defaults;
         defaults.statement = "PUSHBUTTON"; defaults.id_name = "IDC_SELECTION_KEYS_DEFAULTS";
         defaults.text = "Reset selection keys";
-        defaults.rect = {12, top + 108, service.rect.width / 2 - 18, 24};
+        defaults.rect = {12, top + 142, service.rect.width / 2 - 18, 24};
         defaults.style = {"WS_VISIBLE", "WS_TABSTOP"}; service.controls.push_back(defaults);
         defaults.id_name = "IDC_SELECTION_KEYS_CANCEL"; defaults.text = "Cancel";
         defaults.rect.x = service.rect.width / 2;
@@ -517,7 +539,7 @@ void EawrOptionsScreen::rebuild_page() {
         data::DialogControl status;
         status.statement = "LTEXT"; status.id_name = "IDC_SELECTION_KEYS_STATUS";
         status.text = selection_message_.empty() ? "Click a binding, then press a key or mouse button." : selection_message_;
-        status.rect = {12, top + 146, service.rect.width - 24, 20};
+        status.rect = {12, top + 180, service.rect.width - 24, 20};
         status.style = {"WS_VISIBLE"}; service.controls.push_back(status);
     }
     if (page_ == Page::video) {
@@ -645,6 +667,9 @@ void EawrOptionsScreen::rebuild_page() {
             performance.controls.push_back(check);
             check.id_name = "IDC_SPACE_PAUSES_GALACTIC";
             check.text = "TEXT_EAWR_SPACE_PAUSES_GALACTIC"; check.rect.y = 214;
+            performance.controls.push_back(check);
+            check.id_name = "IDC_GALACTIC_BUILD_TRAY";
+            check.text = "TEXT_EAWR_GALACTIC_BUILD_TRAY"; check.rect.y = 246;
             performance.controls.push_back(check);
         }
 
@@ -1133,6 +1158,7 @@ void EawrOptionsScreen::wire_page() {
         }
         if (has("IDC_FIT_RADAR_TO_GALAXY")) check("IDC_FIT_RADAR_TO_GALAXY")->set_pressed_no_signal(draft_.gameplay.fit_radar_to_galaxy);
         if (has("IDC_SPACE_PAUSES_GALACTIC")) check("IDC_SPACE_PAUSES_GALACTIC")->set_pressed_no_signal(draft_.gameplay.space_pauses_galactic);
+        if (has("IDC_GALACTIC_BUILD_TRAY")) check("IDC_GALACTIC_BUILD_TRAY")->set_pressed_no_signal(model::galactic_build_tray_enabled(draft_.gameplay, draft_.galactic_build_tray_layer_default));
         if (has("IDC_ANIMATED_LOADING_BACKGROUND")) check("IDC_ANIMATED_LOADING_BACKGROUND")->set_pressed_no_signal(draft_.gameplay.animated_loading_background);
         if (has("IDC_HOVER_OWNER_NAMES")) check("IDC_HOVER_OWNER_NAMES")->set_pressed_no_signal(model::hover_owner_names_enabled(draft_.gameplay, options_.multiplayer));
         if (has("IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING")) check("IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING")->set_pressed_no_signal(draft_.gameplay.reinforcement_areas_only_while_placing);
@@ -1322,6 +1348,7 @@ void EawrOptionsScreen::update_tweaks_dirty() {
         || draft_.selection_hotkeys_authored != committed_.selection_hotkeys_authored
         || draft_.gameplay.fit_radar_to_galaxy != committed_.gameplay.fit_radar_to_galaxy
         || draft_.gameplay.space_pauses_galactic != committed_.gameplay.space_pauses_galactic
+        || draft_.gameplay.galactic_build_tray != committed_.gameplay.galactic_build_tray
         || draft_.gameplay.animated_loading_background != committed_.gameplay.animated_loading_background
         || draft_.gameplay.hover_owner_names != committed_.gameplay.hover_owner_names
         || draft_.gameplay.reinforcement_areas_only_while_placing != committed_.gameplay.reinforcement_areas_only_while_placing;
@@ -1355,10 +1382,11 @@ void EawrOptionsScreen::on_toggled(const bool pressed, String id) {
         update_advanced_dirty();
         return;
     }
-    if (page_ == Page::tweaks && (name == "IDC_HOVER_OWNER_NAMES" || name == "IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING" || name == "IDC_ANIMATED_LOADING_BACKGROUND" || name == "IDC_FIT_RADAR_TO_GALAXY" || name == "IDC_SPACE_PAUSES_GALACTIC")) {
+    if (page_ == Page::tweaks && (name == "IDC_HOVER_OWNER_NAMES" || name == "IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING" || name == "IDC_ANIMATED_LOADING_BACKGROUND" || name == "IDC_FIT_RADAR_TO_GALAXY" || name == "IDC_SPACE_PAUSES_GALACTIC" || name == "IDC_GALACTIC_BUILD_TRAY")) {
         if (name == "IDC_HOVER_OWNER_NAMES") draft_.gameplay.hover_owner_names = pressed ? 1 : 0;
         else if (name == "IDC_FIT_RADAR_TO_GALAXY") draft_.gameplay.fit_radar_to_galaxy = pressed;
         else if (name == "IDC_SPACE_PAUSES_GALACTIC") draft_.gameplay.space_pauses_galactic = pressed;
+        else if (name == "IDC_GALACTIC_BUILD_TRAY") draft_.gameplay.galactic_build_tray = pressed ? 1 : 0; // GBT-13: a click is an explicit choice
         else if (name == "IDC_ANIMATED_LOADING_BACKGROUND") draft_.gameplay.animated_loading_background = pressed;
         else draft_.gameplay.reinforcement_areas_only_while_placing = pressed;
         update_tweaks_dirty();
@@ -1583,6 +1611,7 @@ void EawrOptionsScreen::sync_draft_from_controls() {
     case Page::tweaks:
         if (const auto v = value("IDC_FIT_RADAR_TO_GALAXY")) draft_.gameplay.fit_radar_to_galaxy = *v > 0.5;
         if (const auto v = value("IDC_SPACE_PAUSES_GALACTIC")) draft_.gameplay.space_pauses_galactic = *v > 0.5;
+        if (const auto v = value("IDC_GALACTIC_BUILD_TRAY")) draft_.gameplay.galactic_build_tray = *v > 0.5 ? 1 : 0;
         if (const auto v = value("IDC_ANIMATED_LOADING_BACKGROUND")) draft_.gameplay.animated_loading_background = *v > 0.5;
         if (const auto v = value("IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING"))
             draft_.gameplay.reinforcement_areas_only_while_placing = *v > 0.5;
@@ -1654,6 +1683,7 @@ void EawrOptionsScreen::commit_page(const bool leave) {
         committed_.selection_hotkeys = draft_.selection_hotkeys; committed_.selection_hotkeys_authored = draft_.selection_hotkeys_authored;
         committed_.gameplay.fit_radar_to_galaxy = draft_.gameplay.fit_radar_to_galaxy;
         committed_.gameplay.space_pauses_galactic = draft_.gameplay.space_pauses_galactic;
+        committed_.gameplay.galactic_build_tray = draft_.gameplay.galactic_build_tray;
         committed_.gameplay.animated_loading_background = draft_.gameplay.animated_loading_background;
         committed_.gameplay.hover_owner_names = draft_.gameplay.hover_owner_names;
         committed_.gameplay.reinforcement_areas_only_while_placing = draft_.gameplay.reinforcement_areas_only_while_placing; break;
@@ -1711,6 +1741,7 @@ void EawrOptionsScreen::defaults_page() {
         draft_.selection_hotkeys_authored = false;
         draft_.gameplay.fit_radar_to_galaxy = defaults.gameplay.fit_radar_to_galaxy;
         draft_.gameplay.space_pauses_galactic = defaults.gameplay.space_pauses_galactic;
+        draft_.gameplay.galactic_build_tray = defaults.gameplay.galactic_build_tray;
         draft_.gameplay.animated_loading_background = defaults.gameplay.animated_loading_background;
         draft_.gameplay.hover_owner_names = defaults.gameplay.hover_owner_names;
         draft_.gameplay.reinforcement_areas_only_while_placing = defaults.gameplay.reinforcement_areas_only_while_placing;
@@ -1969,10 +2000,15 @@ void EawrOptionsScreen::handle_button(const std::string& id) {
             begin_capture(id == "IDC_SELECTION_ALL_KEY" ? 0 : 1);
             break;
         }
+        if (id == "IDC_BUILD_TRAY_KEY") {
+            begin_capture(build_tray_capture);
+            break;
+        }
         if (capturing_) end_capture(); // any other button ends a waiting capture
         if (id == "IDC_SELECTION_KEYS_CANCEL") cancel_page();
         else if (id == "IDC_SELECTION_KEYS_DEFAULTS") {
             for (const auto command : model::selection_commands) draft_.keys.erase(std::string(command));
+            draft_.keys.erase(std::string(model::build_tray_command));
             dirty_ = draft_.keys != committed_.keys || draft_.camera_wasd != committed_.camera_wasd;
             selection_message_.clear();
             rebuild_page();
@@ -2003,7 +2039,7 @@ void EawrOptionsScreen::open_page(const Page target) {
 
 void EawrOptionsScreen::begin_capture(const std::size_t action) {
     capturing_ = action;
-    selection_message_ = "Press a key or mouse button (Esc cancels).";
+    selection_message_ = action == build_tray_capture ? "Press a key (Esc cancels)." : "Press a key or mouse button (Esc cancels).";
     rebuild_page();
 }
 
@@ -2013,6 +2049,18 @@ void EawrOptionsScreen::end_capture() { capturing_.reset(); }
 void EawrOptionsScreen::capture_chord(const std::string& chord) {
     if (!capturing_) return;
     const std::size_t action = *capturing_;
+    if (action == build_tray_capture) {
+        // GBT-07: one key without modifiers; the galaxy view's own keys and the selection keys are refused.
+        if (model::set_build_tray_key(draft_, chord)) selection_message_ = chord + " bound to the galactic build tray.";
+        else {
+            selection_message_ = chord + " is used by another command; press a different key.";
+            notes_.push_back("Build tray binding refused: " + chord + " is reserved.");
+        }
+        end_capture();
+        dirty_ = draft_.keys != committed_.keys || draft_.camera_wasd != committed_.camera_wasd;
+        rebuild_page();
+        return;
+    }
     switch (model::selection_chord_status(draft_, action, chord)) {
     case model::SelectionChordStatus::ok:
         model::set_selection_key(draft_, action, chord);
@@ -2044,6 +2092,11 @@ void EawrOptionsScreen::capture_chord(const std::string& chord) {
 
 bool EawrOptionsScreen::press_key(const std::string& chord) {
     if (!shown_ || !capturing_) return false;
+    if (*capturing_ == build_tray_capture) { // scripted `key:` step: the key's name, as the real key path sends it
+        if (chord.find("Mouse ") != std::string::npos) return false;
+        capture_chord(chord);
+        return true;
+    }
     if (chord.find("Mouse ") != std::string::npos) {
         auto suffix = std::string_view(chord);
         const bool ctrl = suffix.starts_with("Ctrl+");
@@ -2079,7 +2132,7 @@ void EawrOptionsScreen::_input(const Ref<InputEvent>& event) {
     const Ref<InputEventMouseButton> mouse = event;
     if (mouse.is_valid() && capturing_ && !confirm_open()) {
         get_viewport()->set_input_as_handled();
-        if (!mouse->is_pressed()) return;
+        if (!mouse->is_pressed() || *capturing_ == build_tray_capture) return; // the tray key takes keys only
         const int number = selection_mouse_number(static_cast<int>(mouse->get_button_index()));
         if (number == 0 || mouse->is_meta_pressed()) return;
         capture_chord(model::selection_mouse_chord_for(number, mouse->is_shift_pressed(),
@@ -2099,6 +2152,15 @@ void EawrOptionsScreen::_input(const Ref<InputEvent>& event) {
             return;
         }
         const Key physical = key->get_physical_keycode() != KEY_NONE ? key->get_physical_keycode() : code;
+        if (*capturing_ == build_tray_capture) {
+            if (key->is_ctrl_pressed() || key->is_shift_pressed() || key->is_alt_pressed() || key->is_meta_pressed()) {
+                selection_message_ = "The build tray key is one key without Ctrl, Shift or Alt.";
+                rebuild_page();
+                return;
+            }
+            capture_chord(utf8(OS::get_singleton()->get_keycode_string(physical)));
+            return;
+        }
         const bool letter = physical >= KEY_A && physical <= KEY_Z;
         if (!letter || key->is_shift_pressed() || key->is_alt_pressed() || key->is_meta_pressed()) {
             // The dispatcher matches a physical letter, bare or with Ctrl; stay armed for another key.

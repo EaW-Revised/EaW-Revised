@@ -46,9 +46,13 @@ the host, so the job fails within seconds and not after the 30-minute wait for i
 `finish_kit.py` must be run from the kit commit's own bytes: it refuses unless its own file and `kit_manifest.py` equal the
 plan's blobs (for a kit commit that predates them, add both with `--extra` at the cut). It then verifies the manifest and the
 player archive before it extracts anything, takes the engine pins, README template, launcher pin and packager modules from
-`git archive` of the kit commit, compares the unpacked `launcher/` with the pinned artifact, compares `--layer` with the kit
-commit's `revised-layer-manifest.json` (`--allow-unreviewed-layer` ships a different layer and records that), and judges the
-layout against each `--reference`: names must match except for the built-in allowances and `--allow-diff` patterns, and the
+`git archive` of the kit commit, compares the unpacked `launcher/` with the pinned artifact, takes the layer files the
+repository owns (`REPO_LAYER_FILES` in `tools/install_selection_advisor.py`) from the kit commit into a copy of `--layer`, so
+the layer folder only has to carry the private part and the last kit's folder can be reused as it is, compares that copy
+with the kit commit's `revised-layer-manifest.json` (`--allow-unreviewed-layer` ships a different layer and records that), and
+judges the layout against each `--reference` by the files the reference's `SHA256SUMS` lists (files written into an extracted
+reference after delivery, such as a run's `project/tactical.json`, are a note): names must match except for the built-in
+allowances and `--allow-diff` patterns, and the
 engine, launcher and library files must be byte-equal to the reference. `--allow-diff` refuses a pattern that could hide an exe,
 dll, engine or launcher file (`--allow-binary-diff` names those explicitly); every pattern used, every hidden name and every file
 whose bytes differ is recorded in the `finish` section. Name-specific patterns are refused too: an `--allow-diff` pattern that matches any exe, dll, `.pck`/`.so`, engine, launcher, `project/bin` or

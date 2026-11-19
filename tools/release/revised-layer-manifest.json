@@ -133,9 +133,17 @@
       "size": 56044,
       "sha256": "147a0be49f666bf1f0c4602fb6aefc8f48a5befecc7f0aeea50274a7d6b5eb86"
     },
+    "Data/XML/RevisedBuildTray.xml": {
+      "size": 2204,
+      "sha256": "b8ceec600211b402f1cde59b6bf2661b5ff32c0f55fa15baf04b269d6be51702"
+    },
+    "Data/XML/RevisedBuildTrayGroups.xml": {
+      "size": 2103,
+      "sha256": "130d4580f2f5b385a3fdbbdd838aede58cd6a5e3e760ebd73b12a4866e38f314"
+    },
     "Data/XML/RevisedPlanetSearch.xml": {
       "size": 985,
-      "sha256": "809ffab5a9d901a7cc31ae4a3a946a239d9efe940c00627253d264905316becb"
+      "sha256": "29ff3bf55e44d831f9da07c212b7c2253921f494cf718a8bcfebfb4f00533059"
     },
     "Data/XML/RevisedSelectionSFX.xml": {
       "size": 3476,
@@ -143,7 +151,7 @@
     },
     "Data/XML/SelectionControls.xml": {
       "size": 2259,
-      "sha256": "ce653c486d245cc3168c5ce112b88b4c7632655377a63c6b1653335c92b2385d"
+      "sha256": "facdd6610301ac4f303594d50e5102f0f371666e630b7c99b0b86d55de09c364"
     },
     "Data/XML/SFXEventFilesAdditions.xml": {
       "size": 150,

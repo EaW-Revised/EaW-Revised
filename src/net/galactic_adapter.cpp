@@ -32,6 +32,7 @@ EAWR_GALACTIC_POLICY(DebugSetFleetOrbit, human_wire);
 EAWR_GALACTIC_POLICY(TacticalLayerCommand, human_wire);
 EAWR_GALACTIC_POLICY(SaveRequest, human_wire);
 EAWR_GALACTIC_POLICY(PostLoadFixup, engine_only); // internal restore prologue
+EAWR_GALACTIC_POLICY(SeatAdmit, engine_only); // a human joining a loaded save, load prologue only (#7869)
 EAWR_GALACTIC_POLICY(CreateFleet, human_wire);
 EAWR_GALACTIC_POLICY(AddFleetMembers, human_wire);
 EAWR_GALACTIC_POLICY(RemoveFleetMembers, human_wire);
@@ -62,6 +63,7 @@ EAWR_GALACTIC_POLICY(TransferSurface, human_wire);
 EAWR_GALACTIC_POLICY(TransferFleetMembers, human_wire);
 EAWR_GALACTIC_POLICY(SetFleetPathfinder, human_wire);
 EAWR_GALACTIC_POLICY(BattleSummaryAcknowledge, human_wire);
+EAWR_GALACTIC_POLICY(CorruptionDialogOpened, human_wire);
 EAWR_GALACTIC_POLICY(GuiClick, human_wire); // a seat raises its own HUD click to its own plots (WST-37)
 EAWR_GALACTIC_POLICY(InvasionAccept, human_wire); // the sending seat accepts its own prepared selection (GCMP-04)
 #undef EAWR_GALACTIC_POLICY
@@ -122,7 +124,7 @@ core::Result<galactic::GameCommand> decode_galactic_input(const SeatInput& input
 GalacticSessionAdapter::GalacticSessionAdapter(campaign::GameSession& game, const sim::PartitionExecutor& executor,
     GalacticAdapterOptions options)
     : game_(&game), executor_(&executor), options_(options), clock_limiter_(options.clock_policy),
-      roster_(game.galaxy().setup().seats), debug_commands_(game.galaxy().setup().debug_commands) {
+      roster_(game.galaxy().seats().begin(), game.galaxy().seats().end()), debug_commands_(game.galaxy().setup().debug_commands) {
     std::sort(roster_.begin(), roster_.end(), [](const auto& left, const auto& right) { return left.seat_id < right.seat_id; });
     game.galaxy().prepare_exchange_encoding(); // the first exchange must not build the offer tables mid-game
 }
@@ -257,7 +259,7 @@ const galactic::Seat* GalacticSessionAdapter::seat(const sim::SeatId id) const {
 core::Result<galactic::GameCommand> GalacticSessionAdapter::authorize(const SeatInput& input) const {
     auto decoded = decode_galactic_input(input);
     if (!decoded) return decoded;
-    // Only static facts: the agreed tick-zero roster, the payload class and the agreed setup flags. Anything that
+    // Only static facts: the agreed seat table (admitted joiners included), the payload class and the agreed setup flags. Anything that
     // depends on live state (an alert, a departure) is decided at execution, identically on every peer.
     const auto* issuer = seat(input.key.seat);
     if (!issuer) return fail_with<galactic::GameCommand>(session_errors::admission, "galactic input has unbound seat");

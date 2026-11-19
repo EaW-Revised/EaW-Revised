@@ -1193,7 +1193,7 @@ void test_human_seat_admission() {
             std::variant_alternative_t<Index, tactical::CommandPayload>{}}) == tactical::PayloadAuthority::engine_only), ...);
         return engine_count;
     };
-    expect(classify(std::make_index_sequence<std::variant_size_v<tactical::CommandPayload>>{}) == 7U,
+    expect(classify(std::make_index_sequence<std::variant_size_v<tactical::CommandPayload>>{}) == 8U,
         "CP-1: every payload is classified, including script invulnerability as engine-only");
     tactical::SeatBinding binding{{1}, 2};
     tactical::SeatCommand intent{{0, {1}, 0}, 2, {10}, tactical::StopPayload{}};

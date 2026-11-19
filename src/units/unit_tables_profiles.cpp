@@ -718,6 +718,8 @@ void Loader::load_selection(Object& object, UnitType& unit) {
         };
         // WSU-21: behaviour presence, independent of authored or current speed.
         unit.selectable = selection_behavior("SELECTABLE");
+        // SEL-MOD-01: selection denial is separate from behavior-based mouse/bar/reticle admission.
+        unit.selection_denied = flag(object, "Not_Really_Selectable", false).value_or(false);
         // WSU-13/50: presentation admission is independent of ownership and maximum hull.
         const bool impassable = flag(object, "Is_Impassable_Asteroid", false).value_or(false);
         const bool living_contact = flag(object, "Collidable_By_Projectile_Living", false).value_or(false);

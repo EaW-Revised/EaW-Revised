@@ -60,9 +60,9 @@ core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state()
                 unit.waypoints->points.begin(), unit.waypoints->points.end(),
                 [](const auto& point) { return point.move.final_yaw.has_value(); }));
         });
-        // WSPL-08: domain 29 base (the super laser use state joined the ability slot; a save from domains 21..28 is
-        // refused, never read with the wider slot); +1 fire range; +2 script invulnerability; +4 final facing.
-        out(std::uint32_t{29U + (out.fire_range_bonuses ? 1U : 0U) + (out.script_invulnerable ? 2U : 0U)
+        // SSU-03: domain 37 base includes direct-creation references and positions.
+        // +1 fire range; +2 script invulnerability; +4 final facing. Older layouts are refused.
+        out(std::uint32_t{37U + (out.fire_range_bonuses ? 1U : 0U) + (out.script_invulnerable ? 2U : 0U)
             + (out.final_facing ? 4U : 0U)});
         checkpoint_detail::Access::state(out, std::as_const(*impl_));
         out(live);
@@ -111,10 +111,10 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         checkpoint_detail::Reader in(bytes);
         std::uint32_t version{};
         in(version);
-        if (version < 29U || version > 36U) throw checkpoint_detail::Invalid("unsupported child state domain");
-        in.fire_range_bonuses = (version - 29U) % 2U == 1U;
-        in.script_invulnerable = (version - 29U) % 4U >= 2U;
-        in.final_facing = version >= 33U;
+        if (version < 37U || version > 44U) throw checkpoint_detail::Invalid("unsupported child state domain");
+        in.fire_range_bonuses = (version - 37U) % 2U == 1U;
+        in.script_invulnerable = (version - 37U) % 4U >= 2U;
+        in.final_facing = version >= 41U;
         const auto cursors = impl_->last_submitted;
         checkpoint_detail::Access::state(in, *impl_);
         // SAE-10: a reinforcement whose search failed advanced its issuer's cursor but is never recorded, so the
@@ -156,6 +156,23 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         checkpoint_detail::Access::PublishedVisibility visibility;
         in(visibility);
         if (impl_->completed_tick > max_ticks || live.size() > max_units) throw checkpoint_detail::Invalid("state exceeds tactical limits");
+        std::set<std::uint64_t> script_identities;
+        // A direct-created upgrade's physical object ID belongs to it alone: never a live unit or another held object.
+        std::set<EntityId> live_ids;
+        for (const auto& unit : live) live_ids.insert(unit.state.entity_id);
+        std::map<EntityId, std::size_t> held_objects;
+        for (const auto& account : impl_->ledgers) for (const auto& held : account.completed)
+            if (held.object != 0) ++held_objects[held.object];
+        for (const auto& account : impl_->ledgers) for (const auto& held : account.completed) {
+            if (held.script_identity == 0) continue;
+            const auto* profile = impl_->economy.upgrade(held.type);
+            if ((held.script_identity & script_creation_namespace) == 0
+                || held.script_identity == script_creation_namespace || held.station != 0 || held.object == 0
+                || (impl_->next_id != 0 && held.object >= impl_->next_id) || !profile || profile->level_up || !profile->bounties.empty()
+                || live_ids.contains(held.object) || held_objects[held.object] != 1
+                || !script_identities.insert(held.script_identity).second)
+                throw checkpoint_detail::Invalid("invalid direct-created upgrade identity");
+        }
         EntityId previous = 0;
         for (auto& unit : live) {
             if (unit.state.entity_id <= previous || (impl_->next_id != 0 && unit.state.entity_id >= impl_->next_id)
@@ -206,13 +223,13 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
             if (!profile || (spawner.ready && spawner.entries.size() != profile->entries.size()))
                 throw checkpoint_detail::Invalid("hangar binding disagrees with content");
         }
-        if (impl_->setup.campaign) {
+        if (impl_->tracks_player_reveal()) {
             auto derived = impl_->update_command_ledger(live, impl_->next_id, InlineExecutor{});
             if (!derived || derived.value().battlefield_defence != impl_->command_ledger.battlefield_defence
                 || derived.value().reveal_multipliers != impl_->command_ledger.reveal_multipliers)
-                throw checkpoint_detail::Invalid("campaign player modifier ledger disagrees with its live sources");
-            for(std::size_t i=0;i<impl_->last_fog_multipliers.size();++i) if(impl_->last_fog_multipliers[i]<math::Fixed{}
-                || (i>=impl_->setup.players.size() && impl_->last_fog_multipliers[i]!=math::Fixed{})) throw checkpoint_detail::Invalid("invalid last-fog multiplier cache");
+                throw checkpoint_detail::Invalid("player modifier ledger disagrees with its live sources");
+            for(std::size_t i=impl_->setup.players.size();i<impl_->last_fog_multipliers.size();++i)
+                if(impl_->last_fog_multipliers[i]!=math::Fixed{}) throw checkpoint_detail::Invalid("invalid last-fog multiplier cache");
             impl_->fog_modifiers_dirty=impl_->fog_multipliers(impl_->command_ledger)!=impl_->last_fog_multipliers;
         }
         const auto search_count = in.count();

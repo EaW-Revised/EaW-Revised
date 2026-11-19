@@ -55,6 +55,8 @@ struct ChargedBlastProfile {
     std::string charging_effect{}, charged_effect{}, activate_sfx{};
     friend bool operator==(const ChargedBlastProfile&, const ChargedBlastProfile&) = default;
 };
+enum class HealingLightKind : std::uint8_t { color_flash, linear_pulse, two_way_pulse };
+
 struct SpecialAbilityProfile {
     std::string name;
     SpecialAbilityKind kind{};
@@ -119,10 +121,13 @@ struct SpecialAbilityProfile {
     std::uint32_t heal_interval_frames{};
     bool single_target_heal{};
     std::string heal_sfx{}, heal_particle{}, heal_lightning{}, heal_owner_bone{};
+    std::string heal_owner_particle{};
     std::vector<std::string> heal_target_bones{};
     std::array<math::Fixed, 3> heal_target_colour{}, heal_owner_colour{};
     std::uint32_t heal_target_light_frames{}, heal_owner_light_frames{};
     std::uint32_t heal_target_light_pulses{1}, heal_owner_light_pulses{1};
+    HealingLightKind heal_target_light_kind{}, heal_owner_light_kind{};
+    std::array<math::Fixed, 3> heal_target_colour2{}, heal_owner_colour2{};
     bool market_purchase_required{}; // WGEP-145
     friend bool operator==(const SpecialAbilityProfile&, const SpecialAbilityProfile&) = default;
 };
@@ -218,9 +223,10 @@ struct AbilityModifiers {
     math::Fixed cause_damage{math::Fixed::from_raw(math::Fixed::scale)}; // WHE-22
     math::Fixed take_damage{math::Fixed::from_raw(math::Fixed::scale)}; // WHE-22
     math::Fixed fire_rate{math::Fixed::from_raw(math::Fixed::scale)}; // WAD-38
-    // AB-26: retained authored data; victim and land consumers remain unmodelled.
+    // AB-26: recognized but ignored by the original; retained for content identity.
     math::Fixed target_speed{math::Fixed::from_raw(math::Fixed::scale)};
     math::Fixed target_take_damage{math::Fixed::from_raw(math::Fixed::scale)};
+    // AB-26: retained flags; their victim and land consumers remain unmodelled.
     std::optional<bool> weapons_enabled, can_be_squashed, allow_target_diminishing_firepower;
     friend constexpr bool operator==(const AbilityModifiers&, const AbilityModifiers&) noexcept = default;
 };

@@ -599,6 +599,16 @@ void planet_names() {
 <Behavior>SPACE_OBSTACLE, dummy_tooltip</Behavior></SpaceProp>
 <SpaceProp Name="HoverInherited"><Variant_Of_Existing_Type>HoverTooltip</Variant_Of_Existing_Type></SpaceProp>
 <SpaceProp Name="HoverNearMatch"><Behavior>NOT_SELECTABLE DUMMY_TOOLTIP_EXTRA</Behavior></SpaceProp>
+<Container Name="Team"><Behavior>TEAM,SELECTABLE,UNIT_AI,TEAM_LOCOMOTOR</Behavior></Container>
+<Container Name="PlainTeam"><Behavior>TEAM</Behavior></Container>
+<Container Name="ModTeam"><Behavior>TEAM</Behavior><SpaceBehavior>selectable</SpaceBehavior></Container>
+<Squadron Name="HoverSquadron"><Behavior>DUMMY_SPACE_FIGHTER_SQUADRON</Behavior><Squadron_Units>Kuat</Squadron_Units>
+<Text_ID>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Text_ID></Squadron>
+<Squadron Name="HoverModSquadron"><Behavior>DUMMY_SPACE_FIGHTER_SQUADRON</Behavior><Squadron_Units>Kuat</Squadron_Units>
+<Create_Team_Type>ModTeam</Create_Team_Type></Squadron>
+<Squadron Name="HoverPlainSquadron"><Behavior>DUMMY_SPACE_FIGHTER_SQUADRON</Behavior><Squadron_Units>Kuat</Squadron_Units>
+<Create_Team_Type>PlainTeam</Create_Team_Type></Squadron>
+<Squadron Name="HoverLoopSquadron"><Create_Team_Type>HoverLoopSquadron</Create_Team_Type></Squadron>
 <SpaceUnit Name="Popup"><Encyclopedia_Text>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT, TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Encyclopedia_Text>
 <MP_Encyclopedia_Text>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</MP_Encyclopedia_Text>
 <Encyclopedia_Unit_Class>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Encyclopedia_Unit_Class>
@@ -647,6 +657,17 @@ void planet_names() {
         && !ui::world_encyclopedia_admitted("Missing", objects)
         && !ui::world_encyclopedia_admitted("HoverSelectable", nullptr),
         "CARD-20: exact behaviour tokens and an effective game-object definition are required");
+    // CARD-21: a fighter pick and a squadron icon report the squadron purchase type; it is admitted through
+    // the team container it creates (the generic team by default), not by its own dummy behaviour.
+    expect(ui::world_encyclopedia_admitted("HoverSquadron", objects)
+        && ui::world_encyclopedia_admitted("HoverModSquadron", objects),
+        "CARD-21: a squadron type is admitted through its selectable team container, default or authored");
+    expect(!ui::world_encyclopedia_admitted("HoverPlainSquadron", objects)
+        && !ui::world_encyclopedia_admitted("HoverLoopSquadron", objects)
+        && !ui::world_encyclopedia_admitted("Kuat", objects),
+        "CARD-21: a non-selectable team container, a self-referencing team and a plain unit stay unadmitted");
+    expect(ui::unit_card_looks("HoverSquadron", objects, &text.value()).name == "Coruscant",
+        "CARD-21: the squadron hover reads the squadron's own Text_ID through the shared card looks");
     const auto ability = ui::ability_card_looks("PopupSquadron", ui::ability_index("POWER_TO_WEAPONS"), objects, &text.value());
     expect(ability.name == "Coruscant" && ability.description == "Coruscant" && ability.icon == "overridden-ability.tga",
         "squadron ability hover uses first craft and independently authored localized overrides");

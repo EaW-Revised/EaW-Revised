@@ -194,7 +194,9 @@ private:
     std::string failure_;
     Page page_{Page::hub};
     int keyboard_page_{1};
-    std::optional<std::size_t> capturing_; // the selection action waiting for a key
+    // The binding waiting for a key: a selection action (0, 1) or the galactic build tray key (GBT-07).
+    static constexpr std::size_t build_tray_capture = presentation::ui::selection_commands.size();
+    std::optional<std::size_t> capturing_;
     std::string selection_message_;        // the Controls page's binding status line
     int performance_scroll_{};
     bool file_existed_{};

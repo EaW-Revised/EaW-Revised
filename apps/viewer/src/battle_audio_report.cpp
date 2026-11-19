@@ -129,7 +129,8 @@ void BattleAudio::write_report(std::ostream& output) const {
            << ", \"stops\": " << engine_stops_ << ", \"retired\": " << engine_retired_
            << ", \"hidden_updates\": " << engine_hidden_updates_ << ", \"fade_updates\": " << engine_fade_updates_
            << ", \"cinematic_focus_active\": " << cinematic_focus_active
-           << ", \"detached\": " << engine_detached_ << "}";
+           << ", \"detached\": " << engine_detached_
+           << ", \"turret_sources\": " << turret_states_.size() << ", \"turret_transitions\": " << turret_transitions_ << "}";
     output << ", \"self_destruct_sound_stops\": " << self_destruct_sound_stops_;
     output << ", \"ambient\": {\"visits\": " << ambient_visits_
            << ", \"initialized\": " << ambient_initialized_ << ", \"retired\": " << ambient_retired_

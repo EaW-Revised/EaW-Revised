@@ -534,6 +534,10 @@ struct EawrLanLobby::Impl final {
     std::vector<net::SetupSeat> checkpoint_bindings;
     std::vector<net::PeerIndex> checkpoint_bound_peers; // the room's peers the bindings were fitted to (#6121)
     std::string checkpoint_description, checkpoint_date, checkpoint_problem;
+    // #7858: what the host is busy with (reading the save, waiting for content, a cancelled restore), shown as a plain line: only
+    // checkpoint_problem is a refusal. The restore's own elapsed-time line is derived each frame from the running job.
+    std::string checkpoint_status;
+    std::chrono::steady_clock::time_point checkpoint_wait_started{};   // the host's wait for the guests' restore: set at the commit
     std::string checkpoint_signature, checkpoint_status_signature;
     bool checkpoint_applied{};
     std::uint64_t checkpoint_request{};

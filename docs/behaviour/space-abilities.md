@@ -49,12 +49,30 @@ unmodelled interfaces described above; this change does not invent separate Luck
 
 ## Applicability
 
+### Combat-bonus creation self flag
+
+| Rule | Behavior | Evidence |
+| --- | --- | --- |
+| ABG-05 | An automatic space `Combat_Bonus_Ability` whose `Apply_Special_Ability_To_Self_On_Creation` is true includes its source in its creation notifications. Omitted or false skips that identity. The source still needs the ordinary categorized-recipient, type, faction and unique-container eligibility; the flag does not bypass those gates. The existing partitioned creation path applies the resulting source-owned contributions. This scope covers non-upgrade source bonuses and does not add self application to other handler kinds or land. | Debug-build creation notification recheck; WHE-13/14/53; XML-to-hull and identity perturbations in `tests/units/unit_tables_synthetic_identity_tests.cpp` at 1/2/4/8 workers. |
+
+### Named point-defence admission
+
+| Rule | Behavior | Evidence |
+| --- | --- | --- |
+| ABG-04 | An ordinary space `LASER_DEFENSE` slot can activate only while its named `Laser_Defense_Ability` handler is enabled. `Initially_Enabled` defaults to true; false refuses activation without starting recharge. Commands, recorded object turns and published readiness use the same handler state. This admission rule does not implement cancellation of an already running defence when a named lock changes. Independently automatic handlers and land remain separate gaps. | Debug-build named activation recheck; `tests/replay/ability_defence_tests.cpp` perturbs absent/true/false at 1/2/4/8 workers on both activation paths. |
+
+### Lure pulse-count range
+
+| Rule | Behavior | Evidence |
+| --- | --- | --- |
+| ABG-07 | `LURE` compares its pulse counter with the authored signed `Max_Number_Of_Pulses`. Zero or negative permits no pulse; a positive count has no frame-duration ceiling. The parsed table retains the signed integer bits, while runtime binding maps negative values to zero. The remake derives the pulse index from 64-bit elapsed ticks divided by the pulse period, rather than incrementing a stored counter: reaching `INT_MAX` cannot overflow a counter and per-tick work is constant regardless of the count. Pulse-frequency and ability-duration bounds are unchanged. | Debug-build LURE service recheck; WLU-03; XML counts zero, above 108000, `INT_MAX`, -1 and `INT_MIN` through the pulse consumer; full-session 1/2/4/8 coverage with a count above the frame limit. |
+
 ### Mod coverage audit
 
 | Rule | Behaviour and current coverage | Source |
 |---|---|---|
 | ABG-01 | Automatic space command bonuses and healing use the same nested handler loaders for `SpaceUnit`, `UniqueUnit` and `StarBase`; the XML class alone does not select a different consumer. Ordinary command sources compile the shared WHE-14 type/category filter, including exclusions, into their recipient lists and retain their authored percentage contributions for WHE-53/55 reduction. An explicit applicable type bypasses ordinary exclusions. The separate `DUMMY_UPGRADE` recipient compiler is not covered by that command-source claim. Automatic healers retain their name, mode, filter, flat/percentage amount, interval and single-target choice and receive WSH-01..10 service. Land and nonautomatic handlers remain separate coverage, as do the existing healing bounds, ties and lifecycle seams. | debug build: command eligibility, shared type filtering and healing service rechecked; current loader, command-recipient compiler and healing service audit |
-| ABG-02 | The common ability light request retains the authored effect type, first and second colours, duration and pulse count, but starts only when the recipient has no active light effect. `Color_Flash` blends the first colour back to the incoming model colour over its duration; its renderer reads neither the second colour nor pulse count. `Linear_Pulse` and `Smooth_Pulse` use the first colour and pulse count; `Two_Way_Pulse` also uses the second colour. Automatic healing currently applies only `Color_Flash` first colour and duration. Other authored types, their second-colour/pulse consumers and occupied-light arbitration remain separate gaps; a parsed count is not an applied count. The same automatic healing light path serves `SpaceUnit`, `UniqueUnit` and `StarBase`. | debug build: owner/target light requests and per-type colour application rechecked; WSH-08/10 |
+| ABG-02 | The common ability light request retains the authored effect type, first and second colours, duration and pulse count, but starts only when the recipient has no active light effect. `Color_Flash` blends the first colour back to the incoming model colour over its duration; its renderer reads neither the second colour nor pulse count. `Linear_Pulse` and `Smooth_Pulse` use the first colour and pulse count; `Two_Way_Pulse` also uses the second colour. Automatic healing applies `Color_Flash` (first colour and duration), `Linear_Pulse` (first colour, duration and pulse count, ABG-12) and `Two_Way_Pulse` (first and second colours, duration and pulse count, ABG-13). `Smooth_Pulse`, other authored types and occupied-light arbitration remain separate gaps; a parsed count is not an applied count. The same automatic healing light path serves `SpaceUnit`, `UniqueUnit` and `StarBase` by shared code; only a corvette (space unit) healer is GPU-tested. | debug build: owner/target light requests and per-type colour application rechecked; WSH-08/10 |
 | ABG-03 | A `UniqueUnit` carrying an ordinary `LASER_DEFENSE` slot uses the same named handler binding, authored run/look timing, projectile filtering and beam presentation as a `SpaceUnit`. The XML class does not select a separate handler. The current ordinary space path consumes the listed timing, range, projectile-category, beam texture/width/frame/colour and bone parameters. Land and independently automatic handlers remain outside this scoped claim; the lightning-particle field is not applied by the simple beam renderer. | debug build: named point-defence handler and beam lifecycle; WLD-01..12; current runtime consumer audit |
 
 The registry audit corrects stale TODO rows for these existing consumers; it changes no
@@ -126,7 +144,7 @@ WGT-50 in [the tactical-entry walk](walks/gc-tactical.md), remain a separate spa
 | AB-23 | **Energy regeneration.** The energy pool's recharge amount is multiplied by the energy regen multiplier and its interval by the energy interval multiplier, rounded as AB-22 (`DEFEND`: 5 x 0.1 gives 15 frames). | research AB-R07 |
 | AB-24 | **Speed.** Maximum speed, acceleration and deceleration are multiplied by the speed multiplier; minimum speed is not (retail computes it and discards the result). A craft's locomotor reads the same maximum. A move under way plans again from the tick the multiplier changes, so the new speed takes effect with a move's usual two-tick latency: in S-17 `TURBO` at tick 60 changes the corvette's motion from tick 62, and it cruises at 7.44 instead of 3.72. | research AB-R08; recording S-17 |
 | AB-25 | No modelled ability changes the diminishing-firepower gate ([space damage](space-damage.md) DG-05): only a `MAXIMUM_FIREPOWER`-style ability turns the shooter's flag off, and none is in the M2 fleet. The flag stays on for every M2 shooter. | research AB-R04; data |
-| AB-26 | **Modifier vocabulary.** The ability table retains twelve `Mod_Multiplier` names, matched without regard to case: `WEAPON_DELAY_MULTIPLIER`, `SHIELD_REGEN_MULTIPLIER`, `SHIELD_REGEN_INTERVAL_MULTIPLIER`, `ENERGY_REGEN_MULTIPLIER`, `ENERGY_REGEN_INTERVAL_MULTIPLIER` and `SPEED_MULTIPLIER` (AB-21 to AB-24), `FIRE_RATE_MULTIPLIER` (AB-27), `SCATTER_RADIUS_MULTIPLIER` (AB-28), `CAUSE_DAMAGE_MULTIPLIER` and `TAKE_DAMAGE_MULTIPLIER` (AB-29), plus `TARGET_SPEED_MULTIPLIER` and `TARGET_TAKE_DAMAGE_MULTIPLIER`. A multiplier not authored is 1. It also retains the three `Mod_Flag` names: `WEAPONS_ENABLED_FLAG`, `CAN_BE_SQUASHED` and `ALLOW_TARGET_DIMINISHING_FIREPOWER`, preserving authored false values. Unknown names are ignored with a load note, and a supported ability keeps its remaining modifiers (legacy EAWR-2194). **Retail** matches names without regard to case against its table of these twelve multipliers and three flags, stores nothing for an unknown name and still loads the rest of the ability. The remake applies the ten existing multiplier names; the two target multipliers and three flags are stored with pending-consumer load notes, but their victim/land consumers remain unmodelled. Duplicate flags and multipliers use the last authored value as an **inferred host choice**, with retail precedence **unverified** (see Unknowns). Stock FoC XML authors only one of the extra names, `ALLOW_TARGET_DIMINISHING_FIREPOWER` (false), on the land `MAXIMUM_FIREPOWER` ability (AB-25); no stock ability authors the others, and none is in the M2 fleet. **Company-copy exception:** HeroCompany containers skip the ability loader (`src/units/unit_tables_decode.cpp:254`), so the `General_Veers_Team` company's own `Unit_Abilities_Data`, including its multiplier and flag copy, is neither retained nor diagnosed. The walker and its inherited death clones carry the retained flag. Checked against the Focumentation wiki (Ability Modifiers; Ability modifier types), which lists the same names under different counts; the debug build's tables are authoritative. | debug build (F2165-E01, E02, E04); stock XML; project; unverified duplicate precedence |
+| AB-26 | **Modifier vocabulary.** The ability table retains twelve `Mod_Multiplier` names, matched without regard to case: `WEAPON_DELAY_MULTIPLIER`, `SHIELD_REGEN_MULTIPLIER`, `SHIELD_REGEN_INTERVAL_MULTIPLIER`, `ENERGY_REGEN_MULTIPLIER`, `ENERGY_REGEN_INTERVAL_MULTIPLIER` and `SPEED_MULTIPLIER` (AB-21 to AB-24), `FIRE_RATE_MULTIPLIER` (AB-27), `SCATTER_RADIUS_MULTIPLIER` (AB-28), `CAUSE_DAMAGE_MULTIPLIER` and `TAKE_DAMAGE_MULTIPLIER` (AB-29), plus `TARGET_SPEED_MULTIPLIER` and `TARGET_TAKE_DAMAGE_MULTIPLIER`. A multiplier not authored is 1. It also retains the three `Mod_Flag` names: `WEAPONS_ENABLED_FLAG`, `CAN_BE_SQUASHED` and `ALLOW_TARGET_DIMINISHING_FIREPOWER`, preserving authored false values. Unknown names are ignored with a load note, and a supported ability keeps its remaining modifiers (legacy EAWR-2194). **Retail** matches names without regard to case against its table of these twelve multipliers and three flags, stores nothing for an unknown name and still loads the rest of the ability. The remake applies ten multiplier names. The debug build recognizes and stores `TARGET_SPEED_MULTIPLIER` and `TARGET_TAKE_DAMAGE_MULTIPLIER` but never requests either value from its multiplier accessors: they have no gameplay effect. The remake retains them for content identity and reports an informational note that the original ignores them. The three flags retain pending-consumer notes; their victim/land consumers remain unmodelled. Duplicate flags and multipliers use the last authored value as an **inferred host choice**, with retail precedence **unverified** (see Unknowns). Stock FoC XML authors only one of the extra names, `ALLOW_TARGET_DIMINISHING_FIREPOWER` (false), on the land `MAXIMUM_FIREPOWER` ability (AB-25); no stock ability authors the others, and none is in the M2 fleet. **Company-copy exception:** HeroCompany containers skip the ability loader (`src/units/unit_tables_decode.cpp:254`), so the `General_Veers_Team` company's own `Unit_Abilities_Data`, including its multiplier and flag copy, is neither retained nor diagnosed. The walker and its inherited death clones carry the retained flag. Checked against the Focumentation wiki (Ability Modifiers; Ability modifier types), which lists the same names under different counts; the debug build's tables are authoritative. | debug build (F2165-E01, E02, E04; ABT-E01 to ABT-E03); stock XML; project; unverified duplicate precedence |
 | AB-27 | **Fire rate.** An object weapon's full recharge and pulse gap are divided by the fire rate multiplier, and the refilled pulse count is scaled by it ([barrage](barrage.md): `BARRAGE` authors 3). | data; project |
 | AB-28 | **Scatter radius.** While the shooter's scatter radius multiplier differs from 1, the blast radius of the projectiles it launches is multiplied by it. No stock M2 ability authors it; it is read so that data using it stays modelled. Retail applies the same factor to the blast radius of an area projectile, from the object that fired it. | debug build (F2165-E04); project |
 | AB-29 | **Damage modes.** `CAUSE_DAMAGE_MULTIPLIER` multiplies the damage the unit deals, and `TAKE_DAMAGE_MULTIPLIER` the damage it takes, in the damage service ([space damage](space-damage.md) DG-02). A product of 0 makes the unit immune to that damage (the Falcon's invulnerability); `LURE` authors 0.7 take damage (WLU-08). Privileged script damage skips take damage but not cause damage (WHE-51 in [the heroes walk](walks/heroes.md)). | data; project |
@@ -188,6 +206,28 @@ knocks shields down and stuns ([space damage](space-damage.md) IS-01 to IS-07).
 | Rule | Behaviour | Source |
 |---|---|---|
 | AB-70 | **The kind list.** The FoC build recognises 75 authorable ability kinds by name, plus an internal "none" and one internal garrison placeholder that has no XML name. The Focumentation page "Unit ability types" lists 64 of them, a list that stops short of the expansion. Kinds the build has that the wiki list lacks: `HARASS`, `BARRAGE`, `HUNT`, `LURE`, `AVOID_DANGER`, `DEPLOY_TROOPERS`, `SELF_DESTRUCT`, `CLUSTER_BOMB`, `INFECTION`, `BUZZ_DROIDS` and `CORRUPT_SYSTEMS`. Every wiki kind is in the build. The stock data authors `HUNT`, `LURE`, `BARRAGE`, `SELF_DESTRUCT`, `CLUSTER_BOMB` and `BUZZ_DROIDS` on space units (AB-03 and the ability walk cover them), `DEPLOY_TROOPERS` on land units, and `INFECTION` and `CORRUPT_SYSTEMS` on one Underworld hero; no stock object authors `HARASS` or `AVOID_DANGER`. A kind name outside the 75 is not an ability (it maps to none); the loader likewise skips kinds it does not model (unit census M141 to M156). Use the build's list, not the wiki list, as the source of kind names. | debug build F2166-E12; stock XML; Focumentation: Unit ability types |
+
+### Recognized target multipliers without an effect
+
+The complete debug-build multiplier-accessor caller audit (ABT-E01 to ABT-E03)
+finds no request for `TARGET_SPEED_MULTIPLIER` or
+`TARGET_TAKE_DAMAGE_MULTIPLIER`. The speed consumers request the ordinary speed
+multiplier. Damage requests the victim's ordinary take-damage multiplier and the
+source's cause-damage multiplier, including Lucky Shot's separate cause-damage
+read. The other callers request weapon timing, regeneration, scatter and
+lock-setup modifiers. The two target names therefore select no recipients and
+create no effect to stack, time, refresh or remove; they change neither shield
+nor hull damage and impose no speed limit. A nested handler's
+`Target_Speed_Decrease_Percent` remains its independent effect (WHE-60).
+
+A surveyed mod authors the target-speed name alongside a tractor beam; authoring
+a recognized name does not give it an effect. The no-effect contract perturbs
+each name independently and together on active primary and secondary abilities,
+with a locked target, ordinary speed and damage modes, shield and hull damage,
+movement, expiry and early release. Every gameplay hash stays equal across the
+perturbations and 1/2/4/8 workers. Authored values still distinguish content
+identity; the contract does not require different content to have the same
+content digest.
 
 ## Cases
 
@@ -257,6 +297,55 @@ shows the overlay remains behind the menu opened by Escape. The targeting radius
 does not alter the ability's effect or reveal range (BARR-04, WFP-01).
 Evidence: debug build and Broadside retail capture.
 
+**ABG-06 — healing owner bone candidates.** `Owner_Particle_Bone_Name` is an
+ordered list, split on commas and whitespace. Choose the first name present in
+the owner's model, using case-insensitive bone lookup. If no candidate exists,
+including an omitted or empty list, use `ROOT`. The healing owner's particle and
+the source endpoint of its lightning use that same choice. Resolve the choice
+once when preparing the loaded type; the model and authored list do not change
+between pulses. This covers automatic space healing; land and nonautomatic
+healing presentation remain separate consumers. Evidence: debug build.
+
+**ABG-12 — finite linear healing lights.** An automatic space healer may author
+`Linear_Pulse` for its owner or target light. Over `Light_Effect_Duration`, each
+of the `Light_Effect_Pulse_Count` equal periods rises linearly from the object's
+base light to the authored first color at its midpoint and returns to base.
+Owner and target have independent color, duration and count. `Color_Flash`
+continues to return linearly from its color to base over the whole duration;
+it does not consume the pulse count. The existing event-driven healing light
+binding selects the renderer's finite pulse, with no new frame traversal.
+Evidence: debug build; WSH-08. Second colors belong to `Two_Way_Pulse` (ABG-13). Other
+light styles, runtime team presentation beyond ABG-18 and occupied-light arbitration
+remain separate coverage gaps.
+
+**ABG-13 — two-color healing pulses.** `Two_Way_Pulse` divides the finite
+duration into the authored number of equal periods. A period starts at the
+object's base light, reaches the first color at one quarter, returns to base at
+half, reaches `Light_Effect_Color2` at three quarters and returns to base at its
+end. The blend strength follows the magnitude of one sine cycle; its sign chooses
+the first or second color. Owner and target retain independent colors, duration
+and count. The effect ends at the duration boundary. Only this style consumes a
+second color; Color_Flash and Linear_Pulse ignore it. Evidence: debug build.
+Automatic space healing uses the existing material-light pass and opt-in
+verification samples. Other styles, runtime-team presentation beyond ABG-18, count bounds and
+occupied-light arbitration retain their separate gaps.
+
+**ABG-18 — runtime team healing recipient effects.** A squadron's healing
+pulse indexes the nested handlers retained from its `Create_Team_Type`, not the
+purchase template's own handlers. Particle and bolt preparation, recipient
+material lights and recipient pulse audio select that same runtime handler
+list. A missing purchase handler or a different purchase entry at the index
+cannot replace the runtime effect. The adapters retain their existing target
+bone selection, light styles and audio dispatch (the squadron's own owner light
+uses the same list); the effect follows the
+already-published heal event and adds no world or frame scan. Evidence: debug
+build's runtime-type ability lookup and shared healing presentation (AB-60,
+WSH-08). This recipient scope does not establish a visible owner model for a
+team, owner-bone attachment to its craft, land/nonautomatic healing, other light
+styles, occupied-light arbitration or the nonzero-ROOT fallback. The simulation now services a squadron company's healing (ABG-09, WSH-13), and the
+Separate GPU cases (one recipient, several recipients, a recipient killed mid-pulse, none in range) show the
+recipient effects, audio and lights from that runtime event.
+
 **ABG-08 — healing target presentation.** For automatic space healing, a
 successful recipient pulse presents `Target_Particle_Effect` at the first
 available name in the ordered `Target_Particle_Bone_Name` list. Both ordinary
@@ -271,13 +360,12 @@ resolves its runtime container's nested `Force_Healing_Ability` declaration.
 The ability table binds those handlers to the session's squadron identity,
 including name, activation style, recipient categories/types/exclusions, range,
 amount, percentage, interval and single-target choice. The ordinary automatic
-healing service consumes them on the container's own hull (WSH-01..07, AB-60,
-WSQ-60). This does not establish support for an arbitrary Container object that
+healing service consumes them on the container itself: a squadron company has no hull and
+serves while it exists (WSH-13). This does not establish support for an arbitrary Container object that
 is not reached as a runtime team type. Evidence: debug build and existing team
-loading/ability binding. The viewer's particle, light and audio preparation still
-indexes the purchase type's ordinary handlers, so runtime team healing
-presentation is a separate gap. Team range-blob data is retained, but its runtime
-selection path has not been verified here.
+loading/ability binding. Recipient presentation for those handlers is ABG-18.
+Team range-blob data is retained, but its runtime selection path has not been
+verified here.
 
 **ABG-10 — unique-unit LURE parameters.** Ordinary LURE binding is shared by
 space holders, including UniqueUnit: `Pulse_Frequency_Secs` sets the pulse period
@@ -326,3 +414,16 @@ update, hit and termination paths did not establish an independent lightning
 placement or lifecycle. Keep that consumer unresolved for UniqueUnit and
 StarBase; neither parsing nor an ordinary beam demonstrates application of the
 lightning field, and these checks do not establish that the original ignores it.
+
+**ABG-19 — healing target ROOT fallback.** Automatic space healing checks
+`Target_Particle_Bone_Name` candidates in authored order and uses the first name
+present on the recipient model. If the list is omitted, blank or has no matching
+candidate, the fallback names `ROOT`; it does not prescribe bone index zero.
+The model's ROOT index is resolved once during preparation and supplies the
+existing particle attachment and bolt endpoint fallback. The runtime request
+still follows the published heal pulse. Evidence: debug build's shared usable
+bone finder and WSH-08. The GPU case edits only a temporary model copy: its zero
+bone loses the ROOT name, bone two gains it, and an explicit existing candidate
+still takes precedence. Models without a ROOT name retain the current adapter's
+zero-index fallback; its parity is not established here. Land, nonautomatic and
+runtime-team presentation retain their separate adapter scopes.

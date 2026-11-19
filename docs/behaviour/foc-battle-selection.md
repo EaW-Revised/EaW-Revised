@@ -63,6 +63,19 @@ orders, as next-tick commands.
   alone; with Shift it toggles the unit in or out of the selection; with Ctrl it adds every own
   unit of that type on screen. A click on another player's unit changes nothing. A click on empty
   space clears the selection, or, while an attack or move mode is armed, only disarms it.
+- **SEL-MOD-01 (debug build, HUD-E04; WNO-37).** Player selection requires the
+  selectable behavior and rejects a type whose effective `Not_Really_Selectable`
+  flag is Yes, before the ownership/community-property test. The flag defaults
+  to No. It does not remove the selectable behavior itself, mouse contact,
+  reticles or bracket admission. The loaded selection policy applies the inherited flag to
+  ships and map objects, and to a squadron's created team rather than its purchase
+  template. The existing click, box, type/class and select-all paths consume that
+  policy. Friendly hero-tray selection uses the same cached gate (WHE-47), with
+  double-click camera focus independent of selection admission. The select cursor follows
+  the same gate: an own unit without the selectable behavior, or whose effective flag is Yes, shows
+  no select cursor over its body, reticle or icon (unverified: derived from the selection gate, not
+  captured from retail). Presentation
+  eligibility remains outside simulation content identity.
 - S-1a (DEV-1). Deliberate deviation (legacy EAWR-4919): a plain click on an allied structure the local player
   does not own inspects it (health card only). The inspect target lives outside the selection, issues no
   order, opens no build menu or ability, sends no net message and changes no simulation state. An allied click replaces your current selection with the inspect card; reselect your units afterwards. Esc, a box drag, select-all or any selection drops it. Shift,

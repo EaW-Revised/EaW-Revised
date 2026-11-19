@@ -46,6 +46,7 @@ void Loader::load_special_healing(UnitType& unit, sim::tactical::SpecialAbilityP
         special.initially_enabled = special.initially_enabled.value_or(true);
         special.heal_sfx = child_text("SFXEvent_Target_Affected");
         special.heal_particle = child_text("Target_Particle_Effect");
+        special.heal_owner_particle = child_text("Owner_Particle_Effect");
         special.heal_target_bones = tokens(child_text("Target_Particle_Bone_Name"));
         special.heal_owner_bone = child_text("Owner_Particle_Bone_Name");
         special.heal_lightning = child_text("Lighting_Effect_Name");
@@ -56,13 +57,27 @@ void Loader::load_special_healing(UnitType& unit, sim::tactical::SpecialAbilityP
                 result[i] = number(values[i]).value_or(Fixed{});
             return result;
         };
-        if (iequals(child_text("Target_Light_Effect_Type"), "Color_Flash")) {
+        const bool target_linear = iequals(child_text("Target_Light_Effect_Type"), "Linear_Pulse");
+        const bool owner_linear = iequals(child_text("Owner_Light_Effect_Type"), "Linear_Pulse");
+        const bool target_two_way = iequals(child_text("Target_Light_Effect_Type"), "Two_Way_Pulse");
+        const bool owner_two_way = iequals(child_text("Owner_Light_Effect_Type"), "Two_Way_Pulse");
+        if (target_two_way || target_linear || iequals(child_text("Target_Light_Effect_Type"), "Color_Flash")) {
+            if (target_linear) special.heal_target_light_kind = sim::tactical::HealingLightKind::linear_pulse;
+            if (target_two_way) {
+                special.heal_target_light_kind = sim::tactical::HealingLightKind::two_way_pulse;
+                special.heal_target_colour2 = colour("Target_Light_Effect_Color2");
+            }
             special.heal_target_colour = colour("Target_Light_Effect_Color");
             special.heal_target_light_frames = frame_count(read("Target_Light_Effect_Duration"));
             special.heal_target_light_pulses = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
                 read("Target_Light_Effect_Pulse_Count", Fixed::from_raw(Fixed::scale)).raw() / Fixed::scale, 1, 65535));
         }
-        if (iequals(child_text("Owner_Light_Effect_Type"), "Color_Flash")) {
+        if (owner_two_way || owner_linear || iequals(child_text("Owner_Light_Effect_Type"), "Color_Flash")) {
+            if (owner_linear) special.heal_owner_light_kind = sim::tactical::HealingLightKind::linear_pulse;
+            if (owner_two_way) {
+                special.heal_owner_light_kind = sim::tactical::HealingLightKind::two_way_pulse;
+                special.heal_owner_colour2 = colour("Owner_Light_Effect_Color2");
+            }
             special.heal_owner_colour = colour("Owner_Light_Effect_Color");
             special.heal_owner_light_frames = frame_count(read("Owner_Light_Effect_Duration"));
             special.heal_owner_light_pulses = static_cast<std::uint32_t>(std::clamp<std::int64_t>(

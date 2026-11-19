@@ -702,7 +702,7 @@ it is refused (`frontier_agreement_in_progress`, retried by the caller) while a 
 is still immutable, and the rebuilt core is created at the frontier's delay. A co-op save that hits a pending proposal or
 roster change is refused with `EAWR-NET-0110` (nothing saved, nothing failed) and the live session issues the same save
 again, up to 16 times, so the player never sees an error; the host does not start a proposal while a save barrier runs.
-A loaded save starts a new session at the offered delay on every peer (a pending proposal is never part of a save).
+A loaded save starts a new session at the offered delay on every peer (a pending proposal is never part of a save). More players than the save has humans may join it before Start rule WGS-P10 (legacy EAWR-7869): the host's combo for a peer without a saved seat offers "Join <faction>", a faction that has humans in the save (a shared seat beside them) or a playable AI faction that the human takes over while the save holds fewer than two human sides; a third side is refused by name. The setup payload lists the joiners as (peer, faction) pairs; each seat id is derived from the saved seat table, the joiners are seated after the saved state hash is verified, and the AI of a taken-over faction stops acting but keeps its configuration and state, so it takes the faction back when the last human of that faction leaves. Joining after Start is not offered: a later human can only return to a seat that left (checkpoint rejoin).
 Departure acknowledgements settle during receive processing, so a following
 host timing proposal in the same drain sees the agreed roster. When another
 stream still holds a departure acknowledgement, a timing control that follows

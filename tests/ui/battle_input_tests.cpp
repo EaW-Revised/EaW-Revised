@@ -338,6 +338,35 @@ void allied_inspect_is_not_selection() {
         "#4919: armed mode, modifiers, empty space, own, enemy and unknown picks never inspect");
 }
 
+void selection_denial() {
+    auto denied = unit(2, 10, true, {}, std::array{20.0F, 20.0F});
+    denied.selection_denied = true;
+    const auto allowed = unit(1, 10, true, {40.0F, 0.0F, 0.0F}, std::array{40.0F, 20.0F});
+    const std::array units{denied, allowed};
+    expect(ui::pick_unit(down_at(0.0F, 0.0F), units) == denied.entity && denied.selectable,
+        "SEL-MOD-01: selection denial preserves pointer contact and selectable behavior");
+    ui::Selection selection;
+    expect(!selection.click(denied.entity, {}, units, viewport) && selection.empty(),
+        "SEL-MOD-01: a denied object cannot enter the selection by click");
+    selection.click(allowed.entity, {}, units, viewport);
+    expect(!selection.click(denied.entity, {.shift = true}, units, viewport) && selection.units() == std::vector<sim::EntityId>{1},
+        "SEL-MOD-01: clicking a denied object preserves the prior selection");
+    expect(!selection.double_click(denied.entity, units, viewport), "SEL-MOD-01: denied double-click has no selection action");
+    const auto only_allowed = [&] { return selection.units() == std::vector<sim::EntityId>{1}; };
+    selection.clear(); selection.box(viewport, false, units);
+    expect(only_allowed(), "SEL-MOD-01: model box selection excludes denied objects");
+    selection.clear(); selection.all(units);
+    expect(only_allowed(), "SEL-MOD-01: select-all excludes denied objects");
+    selection.clear(); selection.bulk(units, std::nullopt, true);
+    expect(only_allowed(), "SEL-MOD-01: optional bulk selection excludes denied objects");
+    selection.clear(); selection.type_on_screen(10, units, viewport);
+    expect(only_allowed(), "SEL-MOD-01: type selection excludes denied objects");
+    auto craft = units;
+    for (auto& member : craft) { member.part = member.entity + 10; member.part_type = 20; }
+    selection.clear(); selection.craft_type_on_screen(20, craft, viewport);
+    expect(only_allowed(), "SEL-MOD-01: craft-type selection excludes denied teams");
+}
+
 void select_all() {
     auto units = fleet();
     units[4].mouse_sensitive = false; // keyboard selection needs no pointer contact
@@ -1692,6 +1721,7 @@ int main() {
     clicks_and_boxes();
     box_eligibility_and_icons();
     allied_inspect_is_not_selection();
+    selection_denial();
     select_all();
     control_groups();
     overview();

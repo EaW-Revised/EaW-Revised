@@ -265,6 +265,9 @@ private:
     void checkpoint_chosen(godot::String directory, godot::String name);
     void select_checkpoint_seat(int64_t index, int64_t peer);
     void apply_checkpoint_selection();
+    void cancel_checkpoint_restore();
+    bool restore_fixture(int seconds);
+    bool press_cancel_restore();
     void new_campaign();
     void refresh_galactic_preview(Impl& impl, PageState& state, Resources& resources,
                                   const sim::galactic::MpLobbyCampaign* campaign);

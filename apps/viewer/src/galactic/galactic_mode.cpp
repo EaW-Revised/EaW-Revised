@@ -1941,6 +1941,21 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
         state.planet_search->open(state);
         return;
     }
+    // GBT-07: the build tray key (default Tab, Options > Controls) opens and closes the tray like its handle: one key,
+    // no modifiers. It does nothing while a modal (menu, save dialog, prompt) is open, while any UI control holds
+    // keyboard focus (the planet search, chat, a list), during the cinematic tour, or while no handle is shown; then
+    // the key goes on as before. A used key is consumed so it does not also move UI focus.
+    if (const auto* key = Object::cast_to<InputEventKey>(event.ptr()); key && state.build_tray && state.host
+        && key->is_pressed() && !key->is_echo() && !key->is_ctrl_pressed() && !key->is_shift_pressed()
+        && !key->is_alt_pressed() && !key->is_meta_pressed() && !state.tour && !state.galaxy_modal_open()) {
+        auto* viewport = state.host->get_viewport();
+        if (!input_focus(*viewport).modal_open && viewport->gui_get_focus_owner() == nullptr
+            && state.build_tray->toggle_from_key(
+                key->get_physical_keycode() != KEY_NONE ? key->get_physical_keycode() : key->get_keycode())) {
+            viewport->set_input_as_handled();
+            return;
+        }
+    }
     if (state.tour_input(event)) return; // #6291 (GCT-08): the tour takes the mouse events that end it, or ignores small pointer moves
     const auto* wheel_button = Object::cast_to<InputEventMouseButton>(event.ptr());
     const bool wheel = wheel_button && (wheel_button->get_button_index() == MOUSE_BUTTON_WHEEL_UP

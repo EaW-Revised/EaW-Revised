@@ -192,6 +192,7 @@ void BattleEffects::write_report(std::ostream& output) const {
         output << "}";
     };
     counts("spawned", spawned_);
+    counts("detail_suppressed", detail_suppressed_);
     counts("spawn_failed", spawn_failed_);
     counts("expired", expired_);
     const auto point = [&output](const particles::Vec3 value) {
@@ -289,6 +290,26 @@ void BattleEffects::write_report(std::ostream& output) const {
                << (row.first_age ? std::to_string(*row.first_age) : std::string("null")) << "]";
     }
     output << "], \"spawn_log_full\": " << (spawn_log_.size() >= spawn_log_limit ? "true" : "false");
+    output << ", \"healing_owner_samples\": [";
+    bool first_healing_owner = true;
+    for (const SpawnRow& row : spawn_log_) {
+        if (!row.key.starts_with("heal_owner:")) continue;
+        output << (first_healing_owner ? "" : ", ") << "{\"tick\":" << row.tick << ",\"source\":" << row.owner
+               << ",\"particle\":" << json(row.key.substr(11)) << ",\"bone\":" << row.bone
+               << ",\"drawn\":" << (row.first_age ? "true" : "false") << '}';
+        first_healing_owner = false;
+    }
+    output << ']';
+    output << ", \"healing_target_samples\": [";
+    bool first_healing_target = true;
+    for (const SpawnRow& row : spawn_log_) {
+        if (!row.key.starts_with("heal_target:")) continue;
+        output << (first_healing_target ? "" : ", ") << "{\"tick\":" << row.tick << ",\"target\":" << row.owner
+               << ",\"particle\":" << json(row.key.substr(12)) << ",\"bone\":" << row.bone
+               << ",\"drawn\":" << (row.first_age ? "true" : "false") << '}';
+        first_healing_target = false;
+    }
+    output << ']';
     output << ", \"explosion_frames\": [";
     bool first_explosion = true;
     for (const SpawnRow& row : spawn_log_) {

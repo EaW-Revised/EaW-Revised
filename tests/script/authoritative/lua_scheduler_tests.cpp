@@ -636,6 +636,20 @@ std::int64_t unit_word(std::uint64_t tick_key, std::uint64_t id, std::uint64_t d
 void object_turn_contracts() {
     const eawr::sim::InlineExecutor executor;
     {
+        // SSU-05: a handle is a physical object ID or a direct-creation reference; nothing between is accepted.
+        const std::uint64_t creation = std::uint64_t{1} << 63;
+        Session session = make_object_session({3});
+        for (const std::uint64_t bad : {creation, std::uint64_t{1} << 37, (std::uint64_t{1} << 62) | 5U}) {
+            const auto refused = session.scheduler->reconcile_objects({{auth::Handle{1, bad}, 1, bad, "Obj.lua"}});
+            expect(!refused, "SSU-05: an object handle outside the physical IDs and the creation namespace is refused");
+        }
+        Session created = make_object_session({creation | 5U});
+        const auto saved = created.scheduler->save();
+        Session restored = make_object_session({creation | 5U});
+        expect(saved && restored.scheduler->load(saved.value()).has_value(),
+            "SSU-05: a creation-namespace handle saves and loads");
+    }
+    {
         Session session = make_object_session({3});
         const auto saved = session.scheduler->save();
         const auto hash = session.scheduler->state_hash();

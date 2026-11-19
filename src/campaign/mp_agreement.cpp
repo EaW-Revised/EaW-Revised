@@ -386,11 +386,37 @@ core::Result<MpAgreement> derive_mp_agreement(const MpLocalContent& local, const
     return Result::success(agreement_from_derived(local, roster, std::move(derived).value()));
 }
 
+core::Result<void> admit_mp_extra_seats(GameSession& session, const std::span<const MpExtraSeat> extras) {
+    if (extras.empty()) return core::Result<void>::success();
+    // A joiner's seat is in place when it exists; a taken-back seat when it is active again.
+    const auto has = [&](const MpExtraSeat& extra) {
+        const auto seats = session.galaxy().seats();
+        return std::any_of(seats.begin(), seats.end(), [&](const auto& row) {
+            return row.seat_id == extra.seat && row.kind == sim::SeatKind::human && row.player == extra.player && (!extra.rejoin || row.active); });
+    };
+    std::vector<sim::SeatId> back;
+    std::vector<gc::PlayerId> players;
+    bool joins_missing = false;
+    for (const auto& extra : extras) {
+        if (extra.rejoin) { if (!has(extra)) back.push_back(extra.seat); }
+        else { players.push_back(extra.player); joins_missing = joins_missing || !has(extra); }
+    }
+    if (auto reseated = session.reseat_human_seats(back); !reseated) return reseated;
+    if (joins_missing)
+        if (auto admitted = session.admit_human_seats(players); !admitted) return admitted;
+    if (!std::all_of(extras.begin(), extras.end(), has)) return refuse<void>("extra_seat_mismatch");
+    return core::Result<void>::success();
+}
+
 core::Result<MpAgreement> restore_mp_agreement(const MpLocalContent& local, const gc::MpRoster& roster,
-    const MpSessionTerms& terms, std::span<const std::uint8_t> bytes, const checkpoint::GameResumeMetadata& metadata) {
+    const MpSessionTerms& terms, std::span<const std::uint8_t> bytes, const checkpoint::GameResumeMetadata& metadata,
+    const std::atomic<bool>* cancel, const std::span<const MpExtraSeat> extras) {
     using Result = core::Result<MpAgreement>;
+    const auto stopped = [cancel] { return cancel && cancel->load(std::memory_order_acquire); };
     if (auto valid = gc::validate_mp_roster(roster); !valid) return Result::failure(valid.error());
+    if (stopped()) return refuse<MpAgreement>("restore_cancelled");
     auto derived = derive_local(local, roster, terms, bytes);
+    if (stopped()) return refuse<MpAgreement>("restore_cancelled");
     if (!derived && !terms.rules_flavour) {
         // An MP entry may also have been launched with SP rules. Try the other
         // flavour against the saved setup identity rather than inferring it from
@@ -402,10 +428,14 @@ core::Result<MpAgreement> restore_mp_agreement(const MpLocalContent& local, cons
             derived = derive_local(local, roster, alternate, bytes);
         }
     }
+    if (stopped()) return refuse<MpAgreement>("restore_cancelled");
     if (!derived) return Result::failure(derived.error());
     if (derived.value().session->completed_tick() != metadata.completed_tick
         || derived.value().tick_zero != metadata.state_digest)
         return refuse<MpAgreement>("restored_state_hash_mismatch");
+    // The saved state matched what the host claimed; now seat the joining humans (the amended hash is what the
+    // lockstep tick hashes and the setup's terms digest, which binds every seat id, then hold every peer to).
+    if (auto admitted = admit_mp_extra_seats(*derived.value().session, extras); !admitted) return Result::failure(admitted.error());
     // The resume claim replaces the tick-zero claim only in this start domain.
     auto claims = roster; claims.tick_zero = derived.value().tick_zero;
     auto agreement = agreement_from_derived(local, claims, std::move(derived).value());

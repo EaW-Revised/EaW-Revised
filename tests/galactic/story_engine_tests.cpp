@@ -237,6 +237,22 @@ void click_gui() {
     expect(e.triggered("P1.xml", "C2"), "a second component in the same plot");
 }
 
+void open_corruption() {
+    auto e = engine({
+        sub("P1.xml", 1, {make("OPEN", "STORY_OPEN_CORRUPTION", {"PLANET_A", "PLANET_B"}),
+            trig("GO", {{"OPEN"}}, "CREDITS", {"1"}), make("OTHER", "STORY_OPEN_CORRUPTION", {"PLANET_C"})}),
+        sub("P2.xml", 2, {make("OPEN", "STORY_OPEN_CORRUPTION", {"PLANET_A"})}),
+        sub("OFF.xml", 1, {make("OPEN", "STORY_OPEN_CORRUPTION", {"PLANET_A"})}, false)});
+    take(e.notify(1, st::TextNotice{st::Text::open_corruption, "planet_a", std::nullopt}));
+    expect(names(e.take_triggered()) == Names{"GO"} && e.triggered("P1.xml", "OPEN"), "dialog opening matches a planet type and triggers dependants");
+    expect(!e.triggered("P1.xml", "OTHER") && !e.triggered("P2.xml", "OPEN") && !e.triggered("OFF.xml", "OPEN"),
+        "dialog opening respects the planet list, owner and active subplot");
+    take(e.notify(1, st::TextNotice{st::Text::open_corruption, "PLANET_A", std::nullopt}));
+    expect(e.take_triggered().empty(), "one-shot open events stay spent");
+    take(e.notify(2, st::TextNotice{st::Text::open_corruption, "PLANET_A", std::nullopt}));
+    expect(e.triggered("P2.xml", "OPEN"), "each player's own opening reaches its plot");
+}
+
 void click_listeners() {
     // #5857: the HUD raises a click only for a component some STORY_CLICK_GUI event names. The list is definition-wide
     // (a suspended plot or a spent event still names it), upper-cased and sorted, and an Event_Param edit moves its revision.
@@ -1777,7 +1793,7 @@ int case_galactic_story_engine_tests(int argc, char** argv) {
             installed_campaign_routes(argv[2], argv[3]);
             return galactic_test::failures ? 1 : 0;
         }
-        order_and_prerequisites(); elapsed_time(); flags(); tech_levels(); click_gui(); click_listeners(); click_command_codec(); perpetual_and_branches(); sub_plots_and_elements(); lua_plot_commands();
+        order_and_prerequisites(); elapsed_time(); flags(); tech_levels(); click_gui(); open_corruption(); click_listeners(); click_command_codec(); perpetual_and_branches(); sub_plots_and_elements(); lua_plot_commands();
         land_battle_seam(); cycles_and_tactical_triggers(); digest_covers_clocks(); multiplayer_gate(); hero_unlock_flavour_probe(); construction_refusals(); save_and_restore();
         loader(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-engine"));
         campaign_story_routes(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-engine"));

@@ -69,6 +69,7 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
                 candidate.type = instance.type_id;
                 candidate.own = true;
                 candidate.selectable = type.selectable;
+                candidate.selection_denied = type.selection_denied;
                 candidate.locomotion = type.locomotion;
                 candidate.decoration = type.decoration;
                 candidate.hero = type.named_hero || type.generic_hero || type.team_named_hero || type.team_generic_hero;
@@ -82,6 +83,7 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
                         const auto& team = *team_type->second;
                         candidate.hero = candidate.hero || team.named_hero || team.generic_hero || team.team_named_hero || team.team_generic_hero;
                         candidate.selectable = candidate.selectable && team.selectable;
+                        candidate.selection_denied = candidate.selection_denied || team.selection_denied;
                     } else {
                         // Land roots use company profiles, separate from renderable unit types (LC-01).
                         const auto company = companies.find(container->type_id);

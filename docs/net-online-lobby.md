@@ -199,10 +199,10 @@ becomes simulation command order.
 | Names/colours | Player requests their own name/colour; host commits after validation. Names are unverified labels. An observer cannot edit another seat. |
 | Faction/team and ownership | Owner decision 2026-10-15: every local, LAN and online space/ground skirmish human has its own owner row (units, credits, base, faction, colour); alliances use the row Team number. Host accepts/overrides assignments. Shared-owner mappings are reserved for Galactic Conquest and refused for skirmish. Eight-row maps support eight humans; nine humans require nine rows. Faction IDs and map capacity come from loaded data. |
 | Map, advanced options, AI/open/closed rows | Host only, through the existing validated skirmish builder. Joiners see a read-only map/preview/options summary and local availability. Unsupported choices remain disabled with a reason. Every human occupies a separate loaded owner row. |
-| Ready | Each human explicitly accepts the current revision. A consequential change (map/options, faction/team/colour, seat membership or owner mapping) clears all ready flags. Name/chat-only changes do not. Host also explicitly readies its selected setup. |
+| Ready | Each human explicitly accepts the current revision. Rule per change type: a host game/map/option change clears every seat; a seat whose own faction, team, colour, slot or owner mapping changed (by itself or by the host) clears only that seat; name-only edits, chat, another seat's edit, a seat joining (it arrives unready) and a seat leaving clear nobody; Start cancellation, room close and failed match-setup preparation still clear as before. The single-slot and join/leave exemptions follow the owner's play knowledge of the original lobby (legacy EAWR-7854); the original's exact behaviour per change type is unverified (no capture yet). Start still requires every seat ready, so an unready newcomer blocks Start on its own. Host also explicitly readies its selected setup. |
 | Start | Host only; every required seat is connected/ready, teams/map/options valid, and the exact revision is frozen. Run `SetupSession` with manual accept/start. Each peer's existing setup Accept must match that frozen offer digest; UI readiness cannot bypass content construction or tick-zero proof. The host's setup acceptance remains implicit in the core's host role. |
 | Unready during Start | Before Start commitment, abort the proposed start and return everyone to staging; clear readiness. After the reliable Start commitment, controls are locked and leave uses the agreed session/departure path. Do not rewrite an in-flight offer. |
-| Kick | Host may remove a non-host seat before commitment; send a typed reason, close its streams/reservation and clear readiness. Deny that admitted identity for this room lifetime, and cancel its admission reservation. Optional room aliases do not override this denial. No claim of account-level ban protection against a new identity. |
+| Kick | Host may remove a non-host seat before commitment; send a typed reason, close its streams/reservation; remaining seats keep their ready state. Deny that admitted identity for this room lifetime, and cancel its admission reservation. Optional room aliases do not override this denial. No claim of account-level ban protection against a new identity. |
 | Chat | The shared screen has a chat window. Room chat uses admitted streams, immutable session ID and host-assigned bounded sequence. Online lobby chat uses I's bounded service channel; LAN chat stays source-specific. MP-9b alone supplies neither room state nor online lobby chat. |
 
 Lobby readiness and final setup acceptance are separate gates. The implementation
@@ -214,7 +214,7 @@ integration: `SetupSession` currently takes one offer and is not a live editor.
 
 ### Leave and host loss
 
-Before Start, a joiner's voluntary leave frees its seat and clears readiness.
+Before Start, a joiner's voluntary leave frees its seat; the remaining seats keep their ready state.
 Host leave or loss **closes staging for everyone**; preserve each player's local
 profile/settings and return to the selected source with the host-closed notice.
 No staging host election in the initial product. A temporary service outage after

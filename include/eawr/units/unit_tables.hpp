@@ -107,6 +107,7 @@ struct UnitType final {
     Vec3 fog_box_offset{};
     // WSU-21, WSU-15: presentation selection eligibility; excluded from content identity.
     bool selectable{};
+    bool selection_denied{}; // SEL-MOD-01: Not_Really_Selectable; presentation only, outside content identity.
     bool mouse_sensitive{}; // WSU-13: behaviour, impassable asteroid or living-collidable valid target
     bool bar_admitted{}; // WSU-50: selectable, hero, construction or indigenous-spawner admission
     bool locomotion{};

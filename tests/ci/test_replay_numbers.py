@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -88,7 +89,9 @@ class ReplayNumbersTests(unittest.TestCase):
     def test_literal_max_opcode_is_still_checked(self):
         header = self.root / checker.OPCODE_HEADER
         text = header.read_text(encoding="utf-8")
-        header.write_text(text.replace("max_command_opcode = opcode_move_facing", "max_command_opcode = 40"), encoding="utf-8")
+        changed, count = re.subn(r"max_command_opcode\s*=\s*\w+", "max_command_opcode = 40", text, count=1)
+        self.assertEqual(count, 1)
+        header.write_text(changed, encoding="utf-8")
         self.assertTrue(any("max_command_opcode is 40" in problem for problem in checker.check(self.root)))
 
 

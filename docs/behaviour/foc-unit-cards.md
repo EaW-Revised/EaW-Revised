@@ -188,6 +188,16 @@ the effective object catalog; the viewer draws it with the encyclopedia componen
   does not independently test `Is_Valid_Target`; WCC-25's later direct-assignment
   refusal still applies. Stock neutral asteroids have neither hostile ownership
   nor living-projectile contact and produce no attack action.
+- **CARD-21** (project decision from data; retail text keys for a fighter and a squadron icon unverified: no capture
+  exists and the debug-build route was unavailable when written). A pick on a craft of a squadron and a hit on a
+  squadron's world icon both report the squadron purchase type, whose own behaviour is only a dummy
+  (`DUMMY_SPACE_FIGHTER_SQUADRON`), so CARD-20 on that type alone refused every fighter and squadron-icon hover
+  while capital ships, which author `SELECTABLE`, showed theirs. A type that authors `Squadron_Units` or
+  `Create_Team_Type` is therefore admitted when the team container it creates (`Create_Team_Type`, else the generic
+  team) authors `SELECTABLE` or `DUMMY_TOOLTIP`; the type's own behaviour still admits it first. The popup content is
+  the squadron's own card content (`Text_ID`, `Encyclopedia_Text`, class, matchups, first craft's abilities), the
+  same as its selection card, with the usual `Encyclopedia_Delay` and placement. Applies to any mod through the
+  data; a container that is not selectable keeps its squadron unadmitted.
 
 ### CARD-19 evidence details
 

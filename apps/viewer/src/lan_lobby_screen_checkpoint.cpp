@@ -16,6 +16,16 @@ sim::galactic::MpRoster display_roster(const GalacticLobbyBackend::CheckpointCan
     roster.seats = candidate.saved.seats;
     return roster;
 }
+// #7869: the factions a human may join in the loaded save: every faction that has saved humans, and the playable factions the
+// campaign data lets a human take over while the save holds fewer than two human sides.
+std::vector<sim::galactic::MpRosterPlayer> join_choices(const GalacticLobbyBackend& backend, const sim::galactic::MpRoster& roster) {
+    const auto& list = backend.campaigns();
+    const auto campaign = std::find_if(list.begin(), list.end(), [&](const auto& entry) { return entry.name == roster.campaign; });
+    return viewer::checkpoint_join_choices(roster, [&](const sim::galactic::MpRosterPlayer& player) {
+        return campaign != list.end() && std::any_of(campaign->factions.begin(), campaign->factions.end(), [&](const auto& faction) {
+            return faction.player == player.player && faction.playable; });
+    });
+}
 } // namespace
 
 void EawrLanLobby::checkpoint_closed() { close_checkpoint_list(); }
@@ -78,7 +88,7 @@ void EawrLanLobby::open_checkpoint_list() {
         current.checkpoint_applied = false; current.checkpoint_candidate.reset();
         current.checkpoint_bytes.reset(); current.checkpoint_bindings.clear();
         current.checkpoint_description = request.name; current.checkpoint_date.clear();
-        current.checkpoint_problem = "Reading saved game";
+        current.checkpoint_status = "Reading saved game";
         current.checkpoint_request_active = ++current.checkpoint_request;
         if (current.list() != nullptr) {
             const auto* row = current.list()->model().selected_entry();
@@ -141,6 +151,7 @@ void EawrLanLobby::process_checkpoint_read() {
                                        : core::Result<void>::failure(prepared.error());
                 impl.checkpoint_applied = static_cast<bool>(result);
                 impl.checkpoint_problem = result ? std::string{} : result.error().message;
+                impl.checkpoint_wait_started = std::chrono::steady_clock::now();   // the guests' restores are waited for from here
                 // The refusal shows in the panel; the log gets it too, in full (the panel row is cut at the screen edge).
                 if (!result) {
                     const auto line = std::string("EAWR checkpoint refused: ") + (was_prepared ? "commit: " : "restore: ")
@@ -149,9 +160,6 @@ void EawrLanLobby::process_checkpoint_read() {
                 }
             }
             impl.rows_signature.clear(); impl.checkpoint_signature.clear();
-        } else if (polled.state == State::timed_out) {
-            impl.checkpoint_problem = "Restoring the saved game timed out. Return to the lobby or try again when it finishes.";
-            impl.checkpoint_signature.clear();
         } else if (polled.state == State::room_changed) {
             // #7878: only a real change (players, seats, settings) gets here. Say what it was; re-apply by itself while the
             // assignment can still be fitted to the room, and stop after a few rounds so a room that keeps changing is not
@@ -215,10 +223,10 @@ void EawrLanLobby::process_checkpoint_read() {
         }
     }();
     if (impl.checkpoint_request_active != impl.checkpoint_request || !impl.host || !match_->galactic_room()) return;
-    if (!read) { impl.checkpoint_problem = read.error().message; return; }
+    if (!read) { impl.checkpoint_problem = read.error().message; impl.checkpoint_status.clear(); return; }
     auto result = std::move(read).value();
     impl.checkpoint_candidate = std::move(result.candidate); impl.checkpoint_bytes = std::move(result.bytes);
-    impl.checkpoint_problem.clear(); impl.checkpoint_bindings.clear();
+    impl.checkpoint_problem.clear(); impl.checkpoint_status.clear(); impl.checkpoint_bindings.clear();
     impl.checkpoint_signature.clear(); impl.rows_signature.clear();
     const auto room = match_->lobby_state();
     impl.checkpoint_bound_peers.clear();
@@ -235,8 +243,65 @@ void EawrLanLobby::new_campaign() {
     if (!impl.host || !room || room->snapshot.phase != net::LobbyPhase::staging || !impl.galactic_backend) return;
     ++impl.checkpoint_request; impl.checkpoint_store.reset();
     impl.galactic_backend->clear_checkpoint(); impl.checkpoint_candidate.reset(); impl.checkpoint_bytes.reset();
-    impl.checkpoint_bindings.clear(); impl.checkpoint_problem.clear(); impl.checkpoint_description.clear();
+    impl.checkpoint_bindings.clear(); impl.checkpoint_problem.clear(); impl.checkpoint_status.clear(); impl.checkpoint_description.clear();
     impl.checkpoint_date.clear(); impl.checkpoint_applied = false; impl.checkpoint_signature.clear(); impl.rows_signature.clear();
+}
+
+// #7858: the host stops waiting for a restore that is taking long. The room and the chosen save stay; the guests see the restore was
+// cancelled, and Apply saved seats starts it again.
+void EawrLanLobby::cancel_checkpoint_restore() {
+    Impl& impl = *impl_;
+    const auto room = match_->lobby_state();
+    if (!impl.host || !room || room->snapshot.phase != net::LobbyPhase::staging || !impl.galactic_backend || !impl.checkpoint_candidate) return;
+    ++impl.checkpoint_request;
+    impl.checkpoint_prepare.cancel();
+    impl.galactic_backend->clear_checkpoint(); impl.checkpoint_applied = false;
+    impl.checkpoint_problem.clear();
+    impl.checkpoint_status = "Restore cancelled. Apply the saved seats to try again.";
+    impl.checkpoint_signature.clear(); impl.rows_signature.clear();
+}
+
+// Fixture for the GPU test (--eawr-lan-do restore_fixture:<seconds>): a host with a one-human save chosen and a restore that has
+// already run for <seconds> and never ends by itself, so the waiting state (busy line, slow mark, Cancel restore) can be looked at
+// without a campaign that takes minutes to load. Cancel restore and Apply then run the real code.
+bool EawrLanLobby::restore_fixture(const int seconds) {
+    Impl& impl = *impl_;
+    const auto room = match_->lobby_state();
+    if (!impl.host || !room || room->snapshot.phase != net::LobbyPhase::staging || !impl.galactic_backend || impl.checkpoint_prepare.active()) return false;
+    GalacticLobbyBackend::CheckpointCandidate candidate;
+    candidate.original_roster.campaign = "Fixture campaign"; candidate.original_roster.difficulty = "Normal";
+    sim::galactic::MpRosterPlayer player; player.player = {1}; player.faction = "REBEL";
+    candidate.original_roster.players.push_back(player);
+    sim::galactic::Seat seat; seat.seat_id = {1}; seat.player = {1}; seat.human_side_id = {1};
+    candidate.saved.seats.push_back(seat); candidate.saved.completed_tick = 3600;
+    impl.checkpoint_candidate = std::move(candidate);
+    impl.checkpoint_bytes = std::make_shared<const std::vector<std::uint8_t>>(std::vector<std::uint8_t>{1});
+    impl.checkpoint_description = "Fixture save"; impl.checkpoint_date = "2026-11-18";
+    impl.checkpoint_bound_peers.clear();
+    for (const auto& held : room->snapshot.seats) impl.checkpoint_bound_peers.push_back(held.peer);
+    impl.checkpoint_bindings = viewer::reconcile_checkpoint_bindings(display_roster(*impl.checkpoint_candidate), {}, {}, impl.checkpoint_bound_peers);
+    impl.checkpoint_applied = false; impl.checkpoint_problem.clear(); impl.checkpoint_status.clear();
+    const auto request = ++impl.checkpoint_request;
+    auto never = std::make_shared<std::promise<void>>();   // the worker waits on it for good (the process ends first)
+    auto gate = never->get_future().share();
+    using Result = core::Result<GalacticLobbyBackend::PreparedCheckpoint>;
+    (void)impl.checkpoint_prepare.submit(request, room->snapshot, std::chrono::steady_clock::now() - std::chrono::seconds(seconds),
+        [gate, never](const std::atomic<bool>& cancel) mutable {
+            while (!cancel.load(std::memory_order_acquire) && gate.wait_for(std::chrono::milliseconds(50)) != std::future_status::ready) {}
+            core::Diagnostic stop; stop.message = "fixture"; return Result::failure(std::move(stop)); });
+    impl.rows_signature.clear(); impl.checkpoint_signature.clear();
+    return true;
+}
+
+// The Cancel restore button as a click reaches it (the panel's own button, the real signal path).
+bool EawrLanLobby::press_cancel_restore() {
+    auto* panel = EAWR_CONTROL(Control, "EAWR_GC_CHECKPOINT");
+    if (panel == nullptr) return false;
+    for (int i = 0; i < panel->get_child_count(); ++i) {
+        auto* button = Object::cast_to<EawrUiButton>(panel->get_child(i));
+        if (button != nullptr && utf8(button->get_text()) == "Cancel restore" && !button->is_disabled()) { button->emit_signal("pressed"); return true; }
+    }
+    return false;
 }
 
 void EawrLanLobby::select_checkpoint_seat(const int64_t index, const int64_t peer) {
@@ -244,37 +309,71 @@ void EawrLanLobby::select_checkpoint_seat(const int64_t index, const int64_t pee
     const auto room = match_->lobby_state();
     if (!impl.host || !room || room->snapshot.phase != net::LobbyPhase::staging || !impl.checkpoint_candidate
         || index < 0 || peer < 0 || static_cast<std::size_t>(peer) >= impl.checkpoint_bindings.size()) return;
-    const auto humans = viewer::checkpoint_humans(display_roster(*impl.checkpoint_candidate));
-    if (static_cast<std::size_t>(index) >= humans.size()) return;
+    const auto roster = display_roster(*impl.checkpoint_candidate);
+    auto humans = viewer::checkpoint_humans(roster);
+    for (const auto& seat : viewer::checkpoint_departed(roster)) humans.push_back(seat); // #7876: departed seats follow the active ones
+    const auto joins = join_choices(*impl.galactic_backend, roster);
     auto& binding = impl.checkpoint_bindings[static_cast<std::size_t>(peer)];
-    const auto& saved = humans[static_cast<std::size_t>(index)];
-    if (binding.seat == saved.seat_id) return;
+    // Entries 0..humans-1 are the saved seats (active, then departed); the entries after them are the factions to join (#7869).
+    if (static_cast<std::size_t>(index) >= humans.size() + joins.size()) return;
+    if (static_cast<std::size_t>(index) >= humans.size()) {
+        const auto& join = joins[static_cast<std::size_t>(index) - humans.size()];
+        if (binding.seat.value == 0 && binding.player == join.player) return;
+        binding.seat = sim::SeatId{}; binding.player = join.player;
+    } else {
+        const auto& saved = humans[static_cast<std::size_t>(index)];
+        if (binding.seat == saved.seat_id) return;
+        binding.seat = saved.seat_id; binding.player = saved.player;
+    }
     ++impl.checkpoint_request;
-    binding.seat = saved.seat_id; binding.player = saved.player;
     impl.galactic_backend->clear_checkpoint(); impl.checkpoint_applied = false;
-    impl.checkpoint_problem.clear(); impl.checkpoint_signature.clear();
+    impl.checkpoint_problem.clear(); impl.checkpoint_status.clear(); impl.checkpoint_signature.clear();
 }
 
 void EawrLanLobby::apply_checkpoint_selection() {
     Impl& impl = *impl_;
     const auto room = match_->lobby_state();
     if (!impl.host || !room || room->snapshot.phase != net::LobbyPhase::staging
-        || !impl.checkpoint_candidate || !impl.checkpoint_bytes || !impl.galactic_options || impl.checkpoint_prepare.active()) return;
+        || !impl.checkpoint_candidate || !impl.checkpoint_bytes || !impl.galactic_options || impl.checkpoint_prepare.active() || impl.checkpoint_prepare.finishing()) return;
     const auto& candidate = *impl.checkpoint_candidate;
     const auto& roster = candidate.original_roster;
-    const auto humans = viewer::checkpoint_humans(display_roster(candidate));
-    impl.checkpoint_problem.clear();
-    if (humans.size() != room->snapshot.seats.size() || impl.checkpoint_bindings.size() != humans.size()) {
-        impl.checkpoint_problem = humans.size() > room->snapshot.seats.size() ? "checkpoint: missing_human_seat" : "checkpoint: extra_human_seat";
+    const auto saved_roster = display_roster(candidate);
+    const auto humans = viewer::checkpoint_humans(saved_roster);
+    const auto departed = viewer::checkpoint_departed(saved_roster);
+    const auto joins = join_choices(*impl.galactic_backend, saved_roster);
+    impl.checkpoint_problem.clear(); impl.checkpoint_status.clear();
+    // A peer without a saved seat joins the save (#7869): the room may hold more peers than the save has humans, never fewer.
+    if (impl.checkpoint_bindings.size() != room->snapshot.seats.size() || humans.size() > room->snapshot.seats.size()) {
+        impl.checkpoint_problem = "checkpoint: missing_human_seat";
         return;
     }
     std::set<sim::SeatId> assigned;
+    std::set<sim::galactic::PlayerId> joined;
+    std::size_t active_mapped = 0;
     for (const auto& binding : impl.checkpoint_bindings) {
+        if (binding.seat.value == 0) {
+            if (std::none_of(joins.begin(), joins.end(), [&](const auto& join) { return join.player == binding.player; })) {
+                const bool held = std::any_of(saved_roster.seats.begin(), saved_roster.seats.end(), [&](const auto& seat) {
+                    return seat.kind == sim::SeatKind::human && seat.player == binding.player; });
+                const auto known = std::any_of(saved_roster.players.begin(), saved_roster.players.end(), [&](const auto& row) {
+                    return row.player == binding.player; });
+                impl.checkpoint_problem = held || !known ? "checkpoint: extra_seat_faction_unknown" : "checkpoint: third_human_side";
+                return;
+            }
+            joined.insert(binding.player);
+            continue;
+        }
         if (!assigned.insert(binding.seat).second) { impl.checkpoint_problem = "checkpoint: duplicate_saved_seat"; return; }
+        if (std::any_of(departed.begin(), departed.end(), [&](const auto& seat) { return seat.seat_id == binding.seat && seat.player == binding.player; })) {
+            joined.insert(binding.player); // a departed seat taken back (#7876): its faction has a human again
+            continue;
+        }
         if (std::none_of(humans.begin(), humans.end(), [&](const auto& seat) {
             return seat.seat_id == binding.seat && seat.player == binding.player;
         })) { impl.checkpoint_problem = "checkpoint: unknown_saved_human_seat"; return; }
+        ++active_mapped;
     }
+    if (active_mapped != humans.size()) { impl.checkpoint_problem = "checkpoint: missing_human_seat"; return; }
     auto options = *impl.galactic_options;
     options.campaign = roster.campaign; options.difficulty = roster.difficulty; options.seed = candidate.seed;
     options.custom = roster.custom; options.credits = roster.credits; options.starting_tech = roster.starting_tech;
@@ -284,7 +383,8 @@ void EawrLanLobby::apply_checkpoint_selection() {
     for (const auto& player : roster.players) {
         net::GalacticLobbyRow row{}; row.player = player.player; row.faction_id = player.faction_id;
         row.flags = player.flags; row.faction = player.faction; row.dropout = player.dropout;
-        row.human = std::any_of(humans.begin(), humans.end(), [&](const auto& seat) { return seat.player == player.player; });
+        row.human = std::any_of(humans.begin(), humans.end(), [&](const auto& seat) { return seat.player == player.player; })
+            || joined.contains(player.player);
         options.rows.push_back(std::move(row));
     }
     // The options and every faction owner change together, before the backend captures the exact room.
@@ -298,14 +398,13 @@ void EawrLanLobby::apply_checkpoint_selection() {
     // Restore refusal retains these visible room choices for Apply/Retry. The pending
     // candidate keeps Start disabled until successful selection or explicit New Campaign.
     impl.checkpoint_applied = false;
-    impl.checkpoint_problem = "Restoring saved game...";
+    // The restore line itself (with the elapsed time) comes from the running job; nothing refuses a restore that is still running.
     const auto request = ++impl.checkpoint_request;
-    const auto deadline = std::chrono::steady_clock::now() + viewer::checkpoint_restore_limit;
-    (void)impl.checkpoint_prepare.submit(request, configured->snapshot, deadline,
+    (void)impl.checkpoint_prepare.submit(request, configured->snapshot, std::chrono::steady_clock::now(),
         [backend = impl.galactic_backend, snapshot = configured->snapshot,
         roster, bindings = impl.checkpoint_bindings, bytes = impl.checkpoint_bytes,
-        epoch = impl.galactic_backend->selection_epoch() + 1]() mutable {
-        return backend->prepare_checkpoint(snapshot, std::move(roster), std::move(bindings), std::move(bytes), epoch);
+        epoch = impl.galactic_backend->selection_epoch() + 1](const std::atomic<bool>& cancel) mutable {
+        return backend->prepare_checkpoint(snapshot, std::move(roster), std::move(bindings), std::move(bytes), epoch, &cancel);
     }, &GalacticLobbyBackend::same_checkpoint_room);
     impl.rows_signature.clear(); impl.checkpoint_signature.clear();
 }
@@ -327,7 +426,7 @@ void EawrLanLobby::refresh_checkpoint_staging() {
             impl.checkpoint_bindings, impl.checkpoint_bound_peers, room_peers);
         impl.checkpoint_bound_peers = std::move(room_peers);
         impl.galactic_backend->clear_checkpoint(); impl.checkpoint_applied = false;
-        impl.checkpoint_problem.clear(); impl.checkpoint_signature.clear(); impl.rows_signature.clear();
+        impl.checkpoint_problem.clear(); impl.checkpoint_status.clear(); impl.checkpoint_signature.clear(); impl.rows_signature.clear();
     }
     // #7878: the restore ended because the room really changed: apply the saved seats again, now fitted to the new room. When
     // they no longer fit (a human is missing or extra) the refusal names the change and what is needed.
@@ -411,14 +510,38 @@ void EawrLanLobby::refresh_checkpoint_staging() {
     const auto transfer = impl.galactic_backend->checkpoint_progress();
     const std::string problem = impl.host ? impl.checkpoint_problem
         : transfer.refusal ? transfer.refusal->message : std::string{};
-    const bool pending = impl.checkpoint_read.valid() || !problem.empty()
+    // #7858: a restore in progress is a busy line with its elapsed time, on the host (own restore, then the guests') and on a guest.
+    const auto now = std::chrono::steady_clock::now();
+    std::string status = impl.host ? impl.checkpoint_status : std::string{};
+    std::chrono::steady_clock::duration restoring{};
+    bool restoring_now = false;
+    if (impl.host && impl.checkpoint_prepare.active()) {
+        restoring = now - impl.checkpoint_prepare.started(); restoring_now = true;
+        status = viewer::checkpoint_restoring_text(restoring);
+    } else if (impl.host && impl.checkpoint_prepare.finishing()) {
+        // The cancelled worker is still ending: no new restore starts beside it (#7858).
+        status = viewer::checkpoint_finishing_text();
+    } else if (impl.host && checkpoint && impl.checkpoint_applied && !transfer.agreed && !transfer.refusal) {
+        restoring = now - impl.checkpoint_wait_started; restoring_now = true;
+        status = viewer::checkpoint_restoring_text(restoring, true);
+    } else if (!impl.host && !transfer.restored && !transfer.refusal) {
+        if (const auto elapsed = impl.galactic_backend->restore_elapsed()) {
+            restoring = *elapsed; restoring_now = true;
+            status = viewer::checkpoint_restoring_text(restoring);
+        } else if (impl.galactic_backend->restore_finishing()) {
+            status = viewer::checkpoint_finishing_text();
+        }
+    }
+    // Past the slow mark the host may stop waiting: the Apply button turns into Cancel restore.
+    const bool cancel_offered = impl.host && restoring_now && restoring >= viewer::checkpoint_restore_slow_after;
+    const bool pending = impl.checkpoint_read.valid() || !problem.empty() || !status.empty()
         || (impl.checkpoint_candidate && !impl.checkpoint_applied);
     if (auto* label = EAWR_CONTROL(EawrUiLabel, "IDC_INTERNET_DIALOG_HEADER")) {
         const auto title = utf8(resolved(resources_->text, impl.host ? "TEXT_INTERNET_HOST_GAME_TITLE" : "TEXT_INTERNET_JOIN_GAME_TITLE"));
-        const auto status = impl.checkpoint_listing.valid() && impl.checkpoint_listing_request == impl.checkpoint_request
+        const auto header_status = impl.checkpoint_listing.valid() && impl.checkpoint_listing_request == impl.checkpoint_request
             ? std::string("Checking saved games")
-            : !checkpoint && !impl.checkpoint_candidate ? (problem.empty() ? impl.checkpoint_list_note : problem) : std::string{};
-        label->set_text(text(viewer::checkpoint_staging_title(title, status)));
+            : !checkpoint && !impl.checkpoint_candidate ? (!problem.empty() ? problem : !status.empty() ? status : impl.checkpoint_list_note) : std::string{};
+        label->set_text(text(viewer::checkpoint_staging_title(title, header_status)));
     }
     if (!checkpoint && !impl.checkpoint_candidate) {
         if (auto* panel = EAWR_CONTROL(Control, "EAWR_GC_CHECKPOINT")) panel->hide();
@@ -439,7 +562,7 @@ void EawrLanLobby::refresh_checkpoint_staging() {
         };
         const auto model = viewer::checkpoint_lobby_model(impl.host, staging, roster, tick, bindings, peers,
             match_->view().seat, transfer, description, date,
-            problem, faction_name);
+            problem, faction_name, status);
         if (auto* maps = EAWR_CONTROL(Control, "IDC_STAGING_MAP_LIST")) maps->hide();
         auto* panel = EAWR_CONTROL(Control, "EAWR_GC_CHECKPOINT");
         const auto* area = find_gadget(*state_->dialog, "IDC_STAGING_MAP_LIST");
@@ -453,8 +576,9 @@ void EawrLanLobby::refresh_checkpoint_staging() {
         std::string signature = impl.host ? "host" : "joiner";
         signature += roster.campaign + std::to_string(tick);
         signature += staging ? "S" : "F";
+        signature += cancel_offered ? "X" : "-";   // the bottom button's job (Apply or Cancel restore) changes with it
         for (const auto& seat : room->snapshot.seats) signature += "|" + std::to_string(seat.peer) + seat.selection.name;
-        for (const auto& binding : bindings) signature += ":" + std::to_string(binding.seat.value);
+        for (const auto& binding : bindings) signature += ":" + std::to_string(binding.seat.value) + "/" + std::to_string(binding.player);
         if (signature != impl.checkpoint_signature) {
             impl.checkpoint_signature = signature;
             while (panel->get_child_count()) { auto* child = panel->get_child(0); panel->remove_child(child); memdelete(child); }
@@ -465,7 +589,10 @@ void EawrLanLobby::refresh_checkpoint_staging() {
             summary->set_size(Vector2(rect.size.x, summary_height)); panel->add_child(summary);
             impl.checkpoint_status_signature.clear();
             if (impl.host) {
-                const auto humans = viewer::checkpoint_humans(roster);
+                auto humans = viewer::checkpoint_humans(roster);
+                const auto active_humans = humans.size();
+                for (const auto& seat : viewer::checkpoint_departed(roster)) humans.push_back(seat); // #7876
+                const auto joins = join_choices(*impl.galactic_backend, roster);
                 for (std::size_t i = 0; i < room->snapshot.seats.size(); ++i) {
                     auto* combo = memnew(EawrUiCombo); combo->set_fit_to_longest_item(false); combo->set_clip_text(true);
                     combo->set_position(Vector2(0, summary_height + row_height * static_cast<float>(i)));
@@ -474,22 +601,27 @@ void EawrLanLobby::refresh_checkpoint_staging() {
                         const auto& saved = humans[j];
                         const auto player = std::find_if(roster.players.begin(), roster.players.end(), [&](const auto& row) { return row.player == saved.player; });
                         combo->add_item(text(room->snapshot.seats[i].selection.name + " -> seat " + std::to_string(saved.seat_id.value)
-                            + " / " + (player == roster.players.end() ? "unknown" : faction_name(player->faction))));
+                            + " / " + (player == roster.players.end() ? "unknown" : faction_name(player->faction))
+                            + (j >= active_humans ? " (left, take it back)" : "")));
                         if (i < bindings.size() && bindings[i].seat == saved.seat_id) combo->select(static_cast<int>(j));
                     }
-                    // #6178: a peer beyond the save's humans has no saved seat. Say so in its combo instead of showing the first seat as
-                    // if it were chosen; the entry sits after the saved seats, so choosing it (index past the humans) changes nothing.
-                    if (i < bindings.size() && bindings[i].seat.value == 0) {
-                        combo->add_item(text(room->snapshot.seats[i].selection.name + " -> no saved seat (not in the save)"));
-                        combo->select(static_cast<int>(humans.size()));
+                    // #7869: a peer beyond the save's humans joins the save: after the saved seats the combo offers "Join <faction>" for every
+                    // faction it may play (a shared seat beside the saved players, or an AI faction it takes over), never a refusal.
+                    for (std::size_t j = 0; j < joins.size(); ++j) {
+                        const bool held = std::any_of(roster.seats.begin(), roster.seats.end(), [&](const auto& seat) {
+                            return seat.kind == sim::SeatKind::human && seat.player == joins[j].player; });
+                        combo->add_item(text(room->snapshot.seats[i].selection.name + " -> Join " + faction_name(joins[j].faction)
+                            + (held ? " (shared)" : " (takes over the AI)")));
+                        if (i < bindings.size() && bindings[i].seat.value == 0 && bindings[i].player == joins[j].player)
+                            combo->select(static_cast<int>(humans.size() + j));
                     }
-                    combo->set_disabled(!model.can_assign || impl.checkpoint_prepare.active());
+                    combo->set_disabled(!model.can_assign || impl.checkpoint_prepare.active() || impl.checkpoint_prepare.finishing());
                     combo->connect("item_selected", callable_mp(this, &EawrLanLobby::select_checkpoint_seat).bind(static_cast<int64_t>(i)));
                 }
-                auto* apply = memnew(EawrUiButton); apply->set_text("Apply saved seats / Retry"); apply->set_fit_to_rect(true);
+                auto* apply = memnew(EawrUiButton); apply->set_text(cancel_offered ? "Cancel restore" : "Apply saved seats / Retry"); apply->set_fit_to_rect(true);
                 apply->set_position(Vector2(0, rect.size.y - row_height)); apply->set_size(Vector2(rect.size.x, row_height));
-                apply->set_disabled(!model.can_assign || !impl.checkpoint_bytes || impl.checkpoint_prepare.active()); panel->add_child(apply);
-                apply->connect("pressed", callable_mp(this, &EawrLanLobby::apply_checkpoint_selection));
+                apply->set_disabled(!model.can_assign || (!cancel_offered && (!impl.checkpoint_bytes || impl.checkpoint_prepare.active() || impl.checkpoint_prepare.finishing()))); panel->add_child(apply);
+                apply->connect("pressed", callable_mp(this, cancel_offered ? &EawrLanLobby::cancel_checkpoint_restore : &EawrLanLobby::apply_checkpoint_selection));
             }
         }
         std::string status_signature;

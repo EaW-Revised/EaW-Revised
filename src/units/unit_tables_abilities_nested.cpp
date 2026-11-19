@@ -74,11 +74,11 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
                         report_.missing(unit.id, "Mod_Multiplier", value, "expected modifier, decimal");
                     } else {
                         ability.modifiers.push_back({row[0], *factor});
-                        // AB-26: unknown names keep the ability; retained names with no
-                        // current consumer also produce a load note.
+                        // AB-26: unknown names keep the ability. Recognized inert names
+                        // carry an informational note rather than an implementation gap.
                         const auto name = upper(row[0]);
                         if (name == "TARGET_SPEED_MULTIPLIER" || name == "TARGET_TAKE_DAMAGE_MULTIPLIER") {
-                            report_.note(unit.id, child.name, value, "retained modifier has no consumer (AB-26)");
+                            report_.note(unit.id, child.name, value, "original ignores recognized modifier (AB-26)");
                         } else if (name != "WEAPON_DELAY_MULTIPLIER" && name != "SCATTER_RADIUS_MULTIPLIER"
                             && name != "FIRE_RATE_MULTIPLIER" && name != "SHIELD_REGEN_MULTIPLIER"
                             && name != "SHIELD_REGEN_INTERVAL_MULTIPLIER" && name != "ENERGY_REGEN_MULTIPLIER"

@@ -726,6 +726,7 @@ bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
                 && options.hud_fixture != "corruption-icons"
                 && options.hud_fixture != "corruption-gaps" && options.hud_fixture != "corruption-locked"
                 && options.hud_fixture != "corruption-no-mission-service" && options.hud_fixture != "corruption-republish"
+                && options.hud_fixture != "corruption-info" && options.hud_fixture != "corruption-info-empty"
                 && options.hud_fixture != "theft"&& options.hud_fixture != "theft-single" && options.hud_fixture != "theft-many"
                 && options.hud_fixture != "neutralization" && options.hud_fixture != "hack" && options.hud_fixture != "hack-poor"
                 && options.hud_fixture != "hack-fractional"

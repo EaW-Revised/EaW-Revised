@@ -499,6 +499,7 @@ void Loader::load_obstacle(const std::string& id) {
         UnitType selection;
         load_selection(*object, selection);
         obstacle.selectable = selection.selectable;
+        obstacle.selection_denied = selection.selection_denied;
         obstacle.mouse_sensitive = selection.mouse_sensitive;
         obstacle.last_state_visible_under_fow = flag(*object, "Last_State_Visible_Under_FOW", false).value_or(false);
         obstacle.initial_state_visible_under_fow = flag(*object, "Initial_State_Visible_Under_FOW", false).value_or(false);

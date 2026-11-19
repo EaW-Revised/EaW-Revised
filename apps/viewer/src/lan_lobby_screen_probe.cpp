@@ -148,6 +148,16 @@ std::string EawrLanLobby::pointer_json() const {
     out << ", \"listing_pending\": " << yes_no(impl.checkpoint_listing.valid());
     out << ", \"load_pending\": " << yes_no(impl.load_pending);
     out << ", \"problem\": " << json_text(impl.checkpoint_problem);
+    out << ", \"status\": " << json_text(impl.checkpoint_status);
+    out << ", \"restoring\": " << yes_no(impl.checkpoint_prepare.active());
+    // #7858: what the load summary says first, and what the panel's bottom button offers.
+    if (const auto* panel = EAWR_CONTROL(Control, "EAWR_GC_CHECKPOINT"); panel != nullptr && panel->is_visible() && panel->get_child_count() > 0) {
+        if (const auto* summary = Object::cast_to<ItemList>(panel->get_child(0)); summary != nullptr && summary->get_item_count() > 0)
+            out << ", \"summary_first\": " << json_text(utf8(summary->get_item_text(0)));
+        for (int i = 0; i < panel->get_child_count(); ++i)
+            if (const auto* button = Object::cast_to<EawrUiButton>(panel->get_child(i)))
+                out << ", \"panel_button\": " << json_text(utf8(button->get_text())) << ", \"panel_button_disabled\": " << yes_no(button->is_disabled());
+    }
     const auto* load_game = EAWR_CONTROL(EawrUiButton, "EAWR_GC_LOAD_GAME");
     out << ", \"load_game_disabled\": " << (load_game != nullptr ? yes_no(load_game->is_disabled()) : "null");
     const auto* header = EAWR_CONTROL(EawrUiLabel, "IDC_INTERNET_DIALOG_HEADER");

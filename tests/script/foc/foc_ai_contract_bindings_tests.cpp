@@ -9,6 +9,8 @@
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/sim/tactical/damage.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
+#include "eawr/sim/tactical/admission.hpp"
+#include "../../../src/sim/tactical/checkpoint_fields_internal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1637,18 +1639,382 @@ void movement_query_projection() {
 }
 
 
+void script_creation_contracts() {
+    namespace t = eawr::sim::tactical;
+    using Q = eawr::sim::math::Fixed;
+    const auto q = [](std::int64_t value) { return Q::from_integer(value).value(); };
+    {
+        foc::detail::WorldView previous;
+        foc::detail::ViewUnit physical;
+        physical.id = t::script_creation_namespace + 100;
+        previous.units.push_back(physical);
+        const eawr::sim::InlineExecutor executor;
+        const auto projected = foc::detail::build_turn_view(executor, t::ObjectTurnView{}, previous);
+        expect(projected->units.empty(), "SSU-03: a physical high-ID row is not retained as a hidden creation");
+    }
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        // A later factory fault must discard an earlier successful staged creation.
+        for (const auto failure : {0U, 1U, 2U}) {
+            t::TacticalSetup negative_setup;
+            negative_setup.players = {{1, 1, 1, t::player_flag_commandable}, {2, 2, 2, t::player_flag_commandable}};
+            const bool exhausted = failure == 1;
+            negative_setup.units = {{exhausted ? t::script_creation_namespace - 2 : 10, 1, 2}};
+            t::EconomyRules negative_economy;
+            negative_economy.players = {{1, q(29), 0, true}, {2, q(137), 0, true}};
+            t::UpgradeProfile negative_upgrade; negative_upgrade.type = 50;
+            negative_economy.upgrades.push_back(negative_upgrade);
+            auto negative = t::TacticalSession::create(negative_setup, {}, {}, {}, std::nullopt,
+                {}, {}, {}, negative_economy);
+            expect(negative.has_value(), "SSU-03: atomic failure session creates");
+            if (!negative) return;
+            auto& rejected = negative.value();
+            const auto first_reference = t::script_creation_namespace | (1ULL << 20);
+            for (std::uint64_t sequence = 0; sequence < 2; ++sequence) {
+                t::PlayerCommand command;
+                command.key = {0, 2, sequence};
+                command.payload = t::ScriptCreateObjectPayload{
+                    failure == 2 && sequence == 1 ? 999U : 50U, 2, {},
+                    first_reference + (failure == 0 ? 0 : sequence)};
+                expect(rejected.submit(command).has_value(), "SSU-03: negative engine factory commands submit");
+            }
+            const std::vector<t::PlayerEconomy> before_ledgers(rejected.ledgers().begin(), rejected.ledgers().end());
+            const auto before_snapshot = rejected.snapshot();
+            const auto before_hash = rejected.state_sha256();
+            const auto before_next_id = rejected.next_entity_id();
+            for (const auto attempt : {0U, 1U}) {
+                (void)attempt;
+                const auto failed = rejected.step(executor);
+                expect(!failed && rejected.completed_tick() == 0 && rejected.snapshot() == before_snapshot
+                    && rejected.next_entity_id() == before_next_id && rejected.state_sha256() == before_hash
+                    && std::equal(before_ledgers.begin(), before_ledgers.end(), rejected.ledgers().begin(), rejected.ledgers().end()),
+                    "SSU-03: duplicate, exhausted and unsupported factories fail atomically, including retry; ledger, tick and publication stay unchanged");
+            }
+        }
+        t::TacticalSetup setup;
+        setup.players = {{1, 1, 1, t::player_flag_commandable}, {2, 2, 2, t::player_flag_commandable}};
+        setup.units = {{10, 1, 2}};
+        t::EconomyRules economy;
+        // No funds, room or menu: a successful direct creation cannot have used Buy.
+        economy.players = {{1, {}, 0, true}, {2, {}, 0, true}};
+        t::UpgradeProfile upgrade;
+        upgrade.type = 50;
+        upgrade.increments_tech = true;
+        upgrade.removes_previous = 51;
+        t::UpgradeBonus bonus;
+        bonus.applicable = {1}; bonus.percentages[0] = Q::from_raw(Q::scale / 2);
+        upgrade.bonuses.push_back(bonus);
+        economy.upgrades.push_back(upgrade);
+        auto previous = upgrade; previous.type = 51; previous.increments_tech = false; previous.removes_previous = 0;
+        economy.upgrades.push_back(previous);
+        auto level = previous; level.type = 52; level.level_up = true; economy.upgrades.push_back(level);
+        t::DurabilityTable durability;
+        t::DurabilityProfile health; health.type_id = 1; health.max_hull = q(100);
+        durability.profiles.push_back(health);
+        auto made = t::TacticalSession::create(setup, {}, durability, {}, std::nullopt, {}, {}, {}, economy);
+        expect(made.has_value(), "SSU-03: direct-creation session creates");
+        if (!made) { std::cerr << made.error().message << '\n'; return; }
+        auto& world = made.value();
+        World fixture;
+        auto& host = fixture.host;
+        host->world = &world;
+        host->snapshot = world.snapshot();
+        host->setup.local_player = 2;
+        host->setup.perception.campaign_game = false;
+        // A commandable seat the simulation has no economy account for (defeated or account-less).
+        host->setup.players.push_back(foc::AiPlayer{3, "NOACCOUNT", false, false, ""});
+        host->players.clear();
+        for (const auto& player : host->setup.players) host->players.emplace(player.player, &player);
+        foc::AiType type; type.type_id = 50; type.name = "RESEARCH"; type.upgrade_object = true;
+        type.tactical_cost = q(137); type.tactical_campaign_cost = q(251);
+        host->setup.content.types.push_back(type);
+        type.type_id = 51; type.name = "PREVIOUS"; host->setup.content.types.push_back(type);
+        type.type_id = 52; type.name = "LEVEL"; host->setup.content.types.push_back(type);
+        host->types.clear(); host->types_by_name.clear();
+        for (const auto& row : host->setup.content.types) {
+            host->types.emplace(row.type_id, &row); host->types_by_name.emplace(row.name, &row);
+        }
+        host->view = foc::detail::build_view(world, *world.snapshot());
+        auth::ModuleManifest modules;
+        expect(modules.add("CREATE.LUA", R"lua(
+function ReadWallet() wallet = Find_Player('local').Get_Credits() end
+function Create()
+    local p = Find_Player('local')
+    local ty = Find_Object_Type('RESEARCH')
+    cost = ty.Get_Tactical_Build_Cost('ignored')
+    prior = Create_Generic_Object('previous', {7, 8, 9}, p)
+    created = Create_Generic_Object(ty, prior, p)
+    immediate = created.Is_Valid() and created.Get_Type() == ty
+        and created.Get_Owner() == p and created.Get_Position()[3] == 9
+    invalid = not pcall(function() Create_Generic_Object(ty, {0, 0, 0}, p, 1) end)
+        and not pcall(function() Create_Generic_Object('missing', {0, 0, 0}, p) end)
+        and not pcall(function() Create_Generic_Object(ty, false, p) end)
+        and not pcall(function() Create_Generic_Object(ty, {0, 0, 0}, nil) end)
+        and not pcall(function() Create_Generic_Object('SHIP', {0, 0, 0}, p) end)
+        and not pcall(function() Create_Generic_Object('LEVEL', {0, 0, 0}, p) end)
+    local orphan = Find_Player('NOACCOUNT')
+    noaccount = orphan ~= nil and not pcall(function() Create_Generic_Object(ty, {0, 0, 0}, orphan) end)
+end
+function Check()
+    retained = created.Is_Valid() and prior.Is_Valid()
+        and created.Get_Type().Get_Name() == 'RESEARCH'
+        and created.Get_Owner().Get_ID() == 2
+        and created.Get_Position()[1] == 7 and created.Get_Position()[2] == 8
+    campaign_cost = Find_Object_Type('RESEARCH').Get_Tactical_Build_Cost()
+end
+)lua").has_value(), "SSU-03: creation script loads");
+        auto scripts = auth::ScriptScheduler::create({}, modules);
+        expect(scripts.has_value(), "SSU-03: creation scheduler starts"); if (!scripts) return;
+        const auto bind = [&](auth::ScriptScheduler& scheduler) {
+            std::vector<eawr::core::Diagnostic> errors;
+            foc::tactical_ai_detail::register_globals(scheduler, host, errors);
+            foc::tactical_ai_detail::register_methods(scheduler, host, errors);
+            expect(errors.empty(), "SSU-03: production bindings register");
+        };
+        bind(scripts.value());
+        const auto service = [&](auth::ScriptScheduler& scheduler, const std::string& name) {
+            for (const auto instance : {1ULL, 2ULL}) {
+                auth::ScriptEvent event;
+                event.key = {scheduler.completed_tick() + 1, foc::producer_foc_engine, instance, 0};
+                event.target = instance; event.kind = auth::ScriptEvent::Kind::call; event.name = name;
+                expect(scheduler.submit_event(event).has_value(), "SSU-03: creation event submits");
+            }
+            return scheduler.service(executor);
+        };
+        for (const auto instance : {1ULL, 2ULL})
+            expect(scripts.value().create_instance(instance, "CREATE.LUA").has_value(), "SSU-03: independent callers create");
+        std::vector<t::ObjectTurnWallet> wallets{{1, q(29)}, {2, q(137)}};
+        const t::ObjectTurnView wallet_turn{1, {}, wallets};
+        host->view = foc::detail::build_turn_view(executor, wallet_turn, *host->view);
+        wallets[1].credits = q(911); // the published turn view owns its immutable copy
+        host->in_object_turn = true;
+        const auto wallet_report = service(scripts.value(), "ReadWallet");
+        expect(wallet_report && wallet_report.value().diagnostics.empty() && !host->rejected_turn_read.load(),
+            "SOS-T1: staged wallet reads do not enter the completed-world reader");
+        for (const auto instance : {1ULL, 2ULL}) {
+            const auto value = scripts.value().read_global(instance, "wallet");
+            expect(value && value.value() && std::get<Real>(value.value()->data) == ai::real(137),
+                "SOS-T1: every worker reads the immutable staged wallet, not the zero completed wallet");
+        }
+        host->in_object_turn = false;
+        host->view = foc::detail::build_view(world, *host->snapshot);
+        const auto completed_wallet = service(scripts.value(), "ReadWallet");
+        expect(completed_wallet && completed_wallet.value().diagnostics.empty(), "SOS-T1: completed wallet route remains admitted");
+        for (const auto instance : {1ULL, 2ULL}) {
+            const auto value = scripts.value().read_global(instance, "wallet");
+            expect(value && value.value() && std::get<Real>(value.value()->data) == ai::real(0),
+                "SOS-T1: completed calls retain their original wallet route and do not leak the staged projection");
+        }
+        auto report = service(scripts.value(), "Create");
+        expect(report && report.value().diagnostics.empty() && report.value().commands.size() == 4,
+            "SSU-03: parallel creation returns wrappers and rejects malformed or unsupported factories");
+        if (!report) return;
+        for (const auto instance : {1ULL, 2ULL}) for (const auto* name : {"immediate", "invalid", "noaccount"}) {
+            const auto value = scripts.value().read_global(instance, name);
+            expect(value && value.value() && std::get<bool>(value.value()->data), "SSU-03: same-call facts and invalid-argument controls; an owner without an economy account is a Lua error, not a tick abort");
+        }
+        const auto multiplayer_cost = scripts.value().read_global(1, "cost");
+        expect(multiplayer_cost && multiplayer_cost.value() && std::get<Real>(multiplayer_cost.value()->data) == ai::real(137),
+            "SSU-04: skirmish cost uses multiplayer data even when the type also has a campaign price");
+        std::uint64_t sequence{};
+        for (const auto& request : report.value().commands) {
+            const auto translated = foc::tactical_ai_detail::translate_order(request);
+            expect(translated.has_value(), "SSU-03: creation translates"); if (!translated) return;
+            t::PlayerCommand command{{0, translated.value().issuer, sequence++}, {}, translated.value().payload};
+            const auto encoded = t::encode_command_body(command, setup);
+            const auto decoded = encoded ? t::decode_command_body(encoded.value(), setup) : eawr::core::Result<t::PlayerCommand>::failure(encoded.error());
+            expect(encoded && decoded && decoded.value() == command, "SSU-03: opcode 39 command round-trips");
+            expect(!t::human_wire_payload(command.payload), "SSU-03: generic creation is engine-only");
+            auto invalid = command; invalid.units = {10};
+            expect(!t::encode_command_body(invalid, setup), "SSU-03: a factory command cannot carry an ordinary unit order");
+            invalid = command; std::get<t::ScriptCreateObjectPayload>(invalid.payload).identity = 1;
+            expect(!t::encode_command_body(invalid, setup), "SSU-03: creation references use their dedicated namespace");
+            invalid = command; invalid.origin = t::CommandOrigin::seat;
+            expect(!t::encode_command_body(invalid, setup), "SSU-03: a human seat cannot forge a factory command");
+            if (encoded) {
+                auto corrupt = encoded.value(); corrupt[36] = 1;
+                expect(!t::decode_command_body(corrupt, setup), "SSU-03: nonzero reserved payload word is rejected");
+                for (std::size_t size = 0; size < encoded.value().size(); ++size)
+                    expect(!t::decode_command_body(std::span(encoded.value()).first(size), setup), "SSU-03: truncated creation body is rejected");
+            }
+            expect(world.submit(command).has_value(), "SSU-03: creation submits without a station");
+        }
+        auto step = world.step(executor);
+        expect(step && world.ledgers()[1].completed.size() == 4 && world.ledgers()[1].credits.raw() == 0
+            && world.ledgers()[1].lifetime.empty() && world.ledgers()[1].tech_level == 0,
+            "SSU-03: factory keeps prior upgrades and bypasses debit, queue, lifetime and tech bookkeeping");
+        expect(step && step.value().snapshot->instances().front().durability->max_hull == q(150),
+            "SSU-03/WPR-51: direct-created objects deliver their ordinary health bonus");
+        if (!step) return;
+        const auto state = world.save_checkpoint_state();
+        const auto log = world.record();
+        auto replay = t::TacticalSession::from_replay(log, {}, durability, {}, std::nullopt, {}, {}, {}, economy);
+        expect(replay && replay.value().step(executor).has_value()
+            && replay.value().state_sha256() == world.state_sha256(), "SSU-03: recorded factory commands reproduce the same world");
+        auto resumed = t::TacticalSession::from_replay(log, {}, durability, {}, std::nullopt, {}, {}, {}, economy);
+        expect(state && resumed && resumed.value().load_checkpoint_state(state.value()).has_value(), "SSU-03: creation metadata restores");
+        if (!state || !resumed) return;
+        {
+            // SSU-05: a direct-created upgrade's physical object ID belongs to it alone. The corrupt checkpoints come from
+            // the public writer after the held rows are edited through the checkpoint access seam, never from patched bytes.
+            const auto refused = [&](const auto& edit, const std::string_view label) {
+                auto source = t::TacticalSession::from_replay(log, {}, durability, {}, std::nullopt, {}, {}, {}, economy);
+                auto target = t::TacticalSession::from_replay(log, {}, durability, {}, std::nullopt, {}, {}, {}, economy);
+                if (!source || !target || !source.value().load_checkpoint_state(state.value()).has_value()) {
+                    expect(false, std::string(label) + ": the corrupting fixture restores its clean checkpoint");
+                    return;
+                }
+                auto& impl = t::checkpoint_detail::Access::state_for_testing(source.value());
+                std::vector<t::CompletedBuild*> created;
+                for (auto& account : impl.ledgers) for (auto& held : account.completed)
+                    if (held.script_identity != 0) created.push_back(&held);
+                expect(created.size() >= 2, std::string(label) + ": the fixture holds direct-created upgrades");
+                if (created.size() < 2) return;
+                edit(created, impl);
+                const auto bytes = source.value().save_checkpoint_state();
+                const auto loaded = bytes ? target.value().load_checkpoint_state(bytes.value()) : eawr::core::Result<void>::failure(bytes.error());
+                expect(bytes && !loaded.has_value() && loaded.error().message.find("invalid direct-created upgrade identity") != std::string::npos,
+                    std::string(label) + ": the load names the direct-created identity");
+            };
+            refused([](auto& held, auto&) { held[0]->object = 10U; },
+                "SSU-05: a held object equal to a live unit ID is refused");
+            refused([](auto& held, auto&) { held[1]->object = held[0]->object; },
+                "SSU-05: two held objects with one ID are refused");
+        }
+        host->world = &resumed.value(); host->snapshot = resumed.value().snapshot();
+        host->view = foc::detail::build_view(resumed.value(), *host->snapshot);
+        t::ObjectTurnView turn;
+        const auto turn_view = foc::detail::build_turn_view(executor, turn, *host->view);
+        expect(turn_view->units.size() == 4, "SSU-03: hidden object references remain visible across object-turn projections");
+        host->setup.perception.campaign_game = true;
+        auto saved = scripts.value().save(executor);
+        auto restored = auth::ScriptScheduler::create({}, modules);
+        expect(saved && restored, "SSU-03: Lua wrapper save creates"); if (!saved || !restored) return;
+        bind(restored.value());
+        expect(restored.value().load(saved.value()).has_value(), "SSU-03: returned handles restore with Lua state");
+        const auto checked = service(restored.value(), "Check");
+        expect(checked && checked.value().diagnostics.empty(), "SSU-03: restored wrappers query committed objects");
+        for (const auto instance : {1ULL, 2ULL}) {
+            const auto retained = restored.value().read_global(instance, "retained");
+            const auto cost = restored.value().read_global(instance, "campaign_cost");
+            expect(retained && retained.value() && std::get<bool>(retained.value()->data)
+                && cost && cost.value() && std::get<Real>(cost.value()->data) == ai::real(251),
+                "SSU-03/04: saved wrappers retain type, owner and all position axes; campaign cost selects override");
+        }
+        expect(resumed.value().step(executor).has_value() && resumed.value().ledgers()[1].completed.size() == 4,
+            "SSU-03: direct objects survive holder pruning");
+        const auto hash = resumed.value().state_sha256();
+        expect(!hash.empty(), "SSU-03: created world hashes");
+        if (reference.empty()) reference = hash;
+        else expect(reference == hash, "SSU-03: factory state agrees on 1/2/4/8 workers");
+    }
+}
+
+void script_created_attachment_contracts() {
+    namespace t = eawr::sim::tactical;
+    using Q = eawr::sim::math::Fixed;
+    t::TacticalSetup setup;
+    setup.players = {{1, 1, 1, t::player_flag_commandable}, {2, 2, 2, t::player_flag_commandable}};
+    setup.units = {{10, 100, 2}};
+    t::EconomyRules economy;
+    economy.players = {{1, {}, 0, true}, {2, {}, 0, true}};
+    t::UpgradeProfile upgrade; upgrade.type = 50; economy.upgrades.push_back(upgrade);
+    foc::AiSetup config;
+    config.players = {{1, "REBEL", false, false, ""}, {2, "EMPIRE", false, false, ""}};
+    config.local_player = 2;
+    foc::AiType station; station.type_id = 100; station.name = "STATION"; station.lua_script = "FACTORY_CREATOR";
+    foc::AiType research; research.type_id = 50; research.name = "RESEARCH";
+    research.lua_script = "CREATED_UPGRADE"; research.upgrade_object = true;
+    config.content.types = {station, research};
+    const std::map<std::string, std::string> modules{
+        {"Data/Scripts/Library/PGAICommands.lua", "function Base_Definitions() EnemyContrastTypes={}; FriendlyContrastTypes={} end"},
+        {"Data/Scripts/GameObject/FACTORY_CREATOR.lua", R"lua(
+function Base_Definitions() ServiceRate=0 end
+function main()
+    child=Create_Generic_Object('RESEARCH',Object,Object.Get_Owner())
+    assert(child.Is_Valid())
+    while true do coroutine.yield(true) end
+end
+)lua"},
+        {"Data/Scripts/GameObject/CREATED_UPGRADE.lua", R"lua(
+function Base_Definitions() ServiceRate=0 end
+function main()
+    while true do
+        assert(Object.Is_Valid() and Object.Get_Type()==Find_Object_Type('RESEARCH'))
+        assert(Object.Get_Owner()==Find_Player('local'))
+        Object.Get_Owner().Give_Money(7)
+        coroutine.yield(true)
+    end
+end
+)lua"}};
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto world = t::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+        expect(world.has_value(), "SSU-05: created attachment world starts"); if (!world) return;
+        auto session = foc::create_session(std::move(world).value(), config, modules);
+        expect(session.has_value(), "SSU-05: production attachment bridge starts"); if (!session) return;
+        std::optional<auth::ScriptedTacticalSession> uninterrupted;
+        std::vector<std::string> hashes;
+        for (std::uint64_t frame = 0; frame < 12; ++frame) {
+            const auto tick = session.value().step(executor);
+            expect(tick && tick.value().scripts.diagnostics.empty(), "SSU-05: authored created-upgrade script attaches and pumps without identity or binding faults");
+            if (!tick) { std::cerr << tick.error().message << '\n'; return; }
+            hashes.push_back(tick.value().state_sha256);
+            if (uninterrupted) {
+                const auto control = uninterrupted->step(executor);
+                expect(control && control.value().state_sha256 == tick.value().state_sha256,
+                    "SSU-05: restored created attachment continues with identical world and Lua state");
+            }
+            if (frame != 6) continue;
+            const auto saved = session.value().save_scripts();
+            const auto checkpoint = session.value().world().save_checkpoint_state();
+            auto prepared = foc::prepare_session(config, modules);
+            auto restored_world = t::TacticalSession::from_replay(session.value().record(), {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+            expect(saved && checkpoint && prepared && restored_world, "SSU-05: created attachment checkpoint captures");
+            if (!saved || !checkpoint || !prepared || !restored_world) return;
+            expect(prepared.value().scripts.load(saved.value().scheduler).has_value(), "SSU-05: unchanged save format restores a full 64-bit attachment handle");
+            const auto& held = session.value().world().ledgers()[1].completed;
+            expect(held.size() == 1, "SSU-05: creator produces exactly one upgrade"); if (held.size() != 1) return;
+            const auto object = prepared.value().scripts.read_global(foc::first_object_instance + held.front().object, "Object");
+            const auto child = prepared.value().scripts.read_global(foc::first_object_instance + 10, "child");
+            expect(object && child && object.value() && child.value()
+                && std::get<auth::Handle>(object.value()->data) == std::get<auth::Handle>(child.value()->data)
+                && std::get<auth::Handle>(object.value()->data).id == held.front().script_identity,
+                "SSU-05: attachment Object is the creator's exact returned wrapper; instance uses physical allocation");
+            expect(restored_world.value().load_checkpoint_state(checkpoint.value()).has_value(), "SSU-05: hidden allocation restores");
+            auto restored = auth::ScriptedTacticalSession::restore(std::move(restored_world).value(), std::move(prepared.value().scripts), saved.value());
+            expect(restored && prepared.value().bind(restored.value()), "SSU-05: restored bridge derives due pumps from full object handles");
+            if (!restored) return;
+            uninterrupted.emplace(std::move(session).value());
+            session = std::move(restored);
+        }
+        expect(session.value().world().ledgers()[1].credits > Q{},
+            "SSU-05: created-upgrade object-turn pumps keep delivering their authored effects after restore");
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "SSU-05: created attachment and save-load agree on 1/2/4/8 workers");
+    }
+}
+
 void mod_ai_calls() {
+    script_creation_contracts();
+    script_created_attachment_contracts();
     World world;
     world.host->setup.players[1].name = "Admiral Test";
+    world.host->setup.players.front().human = true;
+    world.host->setup.players.front().ai = false;
     world.view->players.push_back({3, 2, 2});
     world.host->setup.players.push_back(foc::AiPlayer{3, "ALLY", false, true, ""});
     world.host->players.clear();
     for (const auto& player : world.host->setup.players) world.host->players.emplace(player.player, &player);
     world.host->setup.content.types.front().combat_power = ai::real(16777216);
     world.host->setup.content.types.front().property_bits = 2;
+    world.host->setup.content.types.front().base_level = 37;
     world.host->setup.content.types.front().tactical_cost = eawr::sim::math::Fixed::from_integer(1234).value();
     world.host->setup.content.properties = {{"FIRST", 1}, {"SECOND", 2}};
     auto small = world.host->setup.content.types.front(); small.type_id = 2; small.name = "SMALL"; small.combat_power = ai::real(1);
+    small.base_level = 0;
     small.tactical_cost = eawr::sim::math::Fixed{};
     world.host->setup.content.types.push_back(small);
     auto missing_cost = small; missing_cost.type_id = 3; missing_cost.name = "MISSING_COST";
@@ -1675,6 +2041,11 @@ void mod_ai_calls() {
         function Block(tf) tf.Block_Goal_Proposal() end
         function PlayerName(player)
             stored_name = player.Get_Name()
+        end
+        function LocalQuery()
+            local p = Find_Player('LoCaL')
+            local_id = p and p.Get_ID() or -1
+            local_human = p and p.Is_Human() or false
         end
         function AlliedAfterName(object, player)
             -- Exercise the name-to-log-to-alliance path used by Shared/Util.lua.
@@ -1743,7 +2114,11 @@ void mod_ai_calls() {
             absent = table.getn(Find_All_Objects_Of_Type('First', owner))
             catalog_absent = table.getn(Find_All_Objects_Of_Type('Empire_Star_Base_1', owner))
             generic_cost = object.Get_Type().Get_Build_Cost()
+            tactical_cost = object.Get_Type().Get_Tactical_Build_Cost()
+            base_level = object.Get_Type().Get_Base_Level('ignored')
+            zero_base_level = Find_Object_Type('SMALL').Get_Base_Level()
             zero_cost = Find_Object_Type('SMALL').Get_Build_Cost()
+            zero_tactical_cost = Find_Object_Type('SMALL').Get_Tactical_Build_Cost()
             category_union = object.Is_Category('Fighter | Corvette')
             category_absent = object.Is_Category('Fighter')
             property_union = object.Has_Property('First | Second')
@@ -1766,6 +2141,7 @@ void mod_ai_calls() {
         function EmptyQuery() Find_All_Objects_Of_Type() end
         function DuplicateQuery() Find_All_Objects_Of_Type('CORVETTE', 'CORVETTE') end
         function MissingCost() Find_Object_Type('MISSING_COST').Get_Build_Cost() end
+        function MissingTacticalCost() Find_Object_Type('MISSING_COST').Get_Tactical_Build_Cost() end
     )LUA").has_value(), "EX-53/54/55: call fixture enters manifest");
     auto scripts = auth::ScriptScheduler::create({}, std::move(manifest));
     expect(scripts.has_value(), "EX-53/54/55: call scheduler starts"); if (!scripts) return;
@@ -1792,6 +2168,16 @@ void mod_ai_calls() {
     const auto force = [](std::uint64_t id) { return auth::Value{auth::Handle{ai::handle_taskforce, id}}; };
     const auto player_handle = [](std::uint64_t id) { return auth::Value{auth::Handle{foc::handle_player, id}}; };
     const auto object_handle = auth::Value{auth::Handle{foc::handle_game_object, 10}};
+    for (const auto local : std::array<std::optional<tactical::PlayerId>, 4>{std::nullopt, 99, 1, 3}) {
+        world.host->setup.local_player = local;
+        invoke(1, "LocalQuery", {});
+        const auto id = scripts.value().read_global(1, "local_id");
+        const auto human = scripts.value().read_global(1, "local_human");
+        expect(id && id.value() && std::get<Real>(id.value()->data) == ai::real(local == 3 ? 3 : local == 1 ? 1 : -1),
+            "SSU-02: local lookup uses the selected slot, with nil for absent or invalid selection");
+        expect(human && human.value() && std::get<bool>(human.value()->data) == (local == 1),
+            "SSU-02: local lookup preserves a human or AI seat's independent control flag");
+    }
     for (const auto& [id, name, faction] : {std::tuple{2U, "Admiral Test", "EMPIRE"}, std::tuple{3U, "", "ALLY"}}) {
         invoke(1, "AlliedAfterName", {object_handle, player_handle(id)});
         const auto logged = scripts.value().read_global(1, "logged_name");
@@ -1842,7 +2228,8 @@ void mod_ai_calls() {
         && total && total.value() && std::get<Real>(total.value()->data) == ai::real(4),
         "AI-16: player-first object lookup preserves ownership and category matching");
     for (const auto& [name, expected] : {std::pair{"player_only", 3}, {"exact_type", 1},
-            {"combined", 1}, {"absent", 0}, {"catalog_absent", 0}, {"generic_cost", 1234}, {"zero_cost", 0}}) {
+            {"combined", 1}, {"absent", 0}, {"catalog_absent", 0}, {"generic_cost", 1234}, {"zero_cost", 0},
+            {"base_level", 37}, {"zero_base_level", 0}, {"tactical_cost", 1234}, {"zero_tactical_cost", 0}}) {
         const auto value = scripts.value().read_global(1, name);
         expect(value && value.value() && std::get<Real>(value.value()->data) == ai::real(expected),
             "RGC-112: owner, exact type, property and category filters intersect; generic cost reads type data");
@@ -1867,7 +2254,7 @@ void mod_ai_calls() {
         expect(value && value.value() && std::get<Real>(value.value()->data) == ai::real(expected),
             "RGC-112: sentinel-first replacement and metadata-free owner queries retain live ID matches");
     }
-    for (const char* query : {"InvalidQuery", "EmptyQuery", "DuplicateQuery", "MissingCost",
+    for (const char* query : {"InvalidQuery", "EmptyQuery", "DuplicateQuery", "MissingCost", "MissingTacticalCost",
             "AllOnlyQuery", "PropertyOnlyQuery", "LateCategoryAllQuery", "LatePropertyAllQuery"}) {
         expect(scripts.value().create_instance(invalid_instance, "CALLS.LUA").has_value(),
             "RGC-112: each failing query has an independent instance");

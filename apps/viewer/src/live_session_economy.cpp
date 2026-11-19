@@ -141,9 +141,13 @@ std::optional<std::array<std::uint8_t, 3>> LiveSessionView::owner_ui_colour(cons
     return std::array<std::uint8_t, 3>{faction->r, faction->g, faction->b};
 }
 
+bool LiveSessionView::model_uses_player_colour(const tactical::PlayerId player) const noexcept {
+    return colorization_enabled_ && !neutral_model_owners_.contains(player);
+}
+
 std::optional<std::array<std::uint8_t, 3>> LiveSessionView::model_colour(const tactical::PlayerId player,
                                                                          const std::string& object_id) const {
-    if (colorization_enabled_) return player_colour(player);
+    if (model_uses_player_colour(player)) return player_colour(player);
     if (const auto type = type_no_colorization_.find(object_id); type != type_no_colorization_.end()) return type->second;
     const auto faction = ui::faction_colour(faction_colours_, player_faction(player), true);
     if (!faction) return std::nullopt;

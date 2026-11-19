@@ -1200,7 +1200,8 @@ PreparedPlanetModel prepare_planet_thumbnail_model(const vfs::Vfs& filesystem, c
     auto taken = scene::read_hash_decode_model(filesystem, logical_path);
     if (!taken.model) { result.cause = core::format_diagnostic(taken.model.error()); return result; }
     const assets::Model& model = taken.model.value();
-    const auto levels = eawr::viewer::model_preview::unit_levels(model);
+    auto levels = eawr::viewer::model_preview::unit_levels(model);
+    levels.alt = alternate; // PS-08: frame the same close-up or hidden-shell surfaces the row draws.
     const auto chosen = eawr::viewer::model_preview::unit_surfaces(model, levels);
     if (auto bind_player = animation::Player::create(model)) {
         if (auto bind = bind_player.value().sample({0.0F, animation::PlaybackMode::clamp, 0.0F})) {
@@ -1267,7 +1268,7 @@ PreparedPlanetModel prepare_planet_thumbnail_model(const vfs::Vfs& filesystem, c
         }
         result.surfaces.push_back(std::move(item));
     }
-    if (result.surfaces.empty()) result.cause = last_skip.empty() ? std::string("the model has no overview surface") : last_skip;
+    if (result.surfaces.empty()) result.cause = last_skip.empty() ? std::string("the model has no surface for the requested alternate") : last_skip;
     return result;
 }
 

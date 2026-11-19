@@ -4,6 +4,8 @@
 #include "../replay_internal.hpp"
 #include "encoding.hpp"
 
+#include <algorithm>
+#include <map>
 #include <span>
 #include <set>
 #include <type_traits>
@@ -21,6 +23,32 @@ Overloaded(Ts...) -> Overloaded<Ts...>;
 
 } // namespace
 
+std::vector<GameCommand> plan_seat_admissions(
+    const std::span<const Seat> seats, const std::span<const PlayerId> extra_players, const std::uint64_t tick) {
+    std::vector<GameCommand> out;
+    std::uint32_t next_seat{}, next_side{};
+    for (const auto& seat : seats) {
+        next_seat = std::max(next_seat, seat.seat_id.value);
+        if (seat.kind == SeatKind::human) next_side = std::max(next_side, seat.human_side_id);
+    }
+    // Sides the plan itself opens, so a repeated takeover of one faction shares one new side.
+    std::map<PlayerId, HumanSideId> opened;
+    for (const auto player : extra_players) {
+        SeatAdmit admit; admit.player = player;
+        const auto human = std::find_if(seats.begin(), seats.end(), [&](const Seat& row) { return row.kind == SeatKind::human && row.player == player; });
+        const auto any = std::find_if(seats.begin(), seats.end(), [&](const Seat& row) { return row.player == player; });
+        admit.lobby_slot = human != seats.end() ? human->lobby_slot : any != seats.end() ? any->lobby_slot : 0U;
+        if (human != seats.end()) admit.human_side = human->human_side_id;
+        else {
+            auto [at, inserted] = opened.try_emplace(player, HumanSideId{});
+            if (inserted) at->second = ++next_side;
+            admit.human_side = at->second;
+        }
+        out.push_back({{tick, SeatId{++next_seat}, 0}, admit});
+    }
+    return out;
+}
+
 CommandLayer layer_of(const CommandPayload& payload) noexcept {
     return std::visit(Overloaded{
                           [](const PauseGalaxy&) { return CommandLayer::session; },
@@ -31,6 +59,7 @@ CommandLayer layer_of(const CommandPayload& payload) noexcept {
                           [](const AssignBattleTeamRole&) { return CommandLayer::session; },
                           [](const SaveRequest&) { return CommandLayer::session; },
                           [](const PostLoadFixup&) { return CommandLayer::session; },
+                          [](const SeatAdmit&) { return CommandLayer::session; },
                           [](const SetSpeed&) { return CommandLayer::session; },
                           [](const DebugSetPlanetOwner&) { return CommandLayer::session; },
                           [](const DebugSetFleetOrbit&) { return CommandLayer::session; },
@@ -50,6 +79,7 @@ CommandLayer layer_of(const CommandPayload& payload) noexcept {
                           [](const AutoResolveWithdraw&) { return CommandLayer::session; },
                           [](const InvasionAccept&) { return CommandLayer::session; },
                           [](const GuiClick&) { return CommandLayer::session; },
+                          [](const CorruptionDialogOpened&) { return CommandLayer::session; },
                           [](const ProductionCommand&) { return CommandLayer::galactic; },
                           [](const SellObject&) { return CommandLayer::galactic; },
                           [](const ObserverCommand&) { return CommandLayer::galactic; },
@@ -78,6 +108,7 @@ std::uint16_t opcode_of(const CommandPayload& payload) noexcept {
                           [](const AssignBattleTeamRole&) { return session_opcodes::battle_team_role; },
                           [](const SaveRequest&) { return session_opcodes::save_request; },
                           [](const PostLoadFixup&) { return session_opcodes::post_load_fixup; },
+                          [](const SeatAdmit&) { return session_opcodes::seat_admit; },
                           [](const SetSpeed& command) {
                               return command.tactical ? session_opcodes::set_tactical_speed : session_opcodes::set_strategic_speed;
                           },
@@ -99,6 +130,7 @@ std::uint16_t opcode_of(const CommandPayload& payload) noexcept {
                           [](const AutoResolveWithdraw&) { return session_opcodes::auto_resolve_withdraw; },
                           [](const InvasionAccept&) { return session_opcodes::invasion_accept; },
                           [](const GuiClick&) { return session_opcodes::gui_click; },
+                          [](const CorruptionDialogOpened&) { return session_opcodes::corruption_dialog_opened; },
                           [](const ProductionCommand&) { return galactic_opcodes::production; },
                           [](const SellObject&) { return galactic_opcodes::sell_object; },
                           [](const ObserverCommand&) { return galactic_opcodes::observer_intelligence; },
@@ -145,6 +177,7 @@ std::vector<std::uint8_t> encode_payload(const CommandPayload& payload) {
                    [&](const BattleChoice& command) { detail::put_u64(bytes, command.conflict); detail::put_u8(bytes, command.tactical ? 1 : 0); },
                    [&](const AutoResolveWithdraw& command) { detail::put_u64(bytes, command.conflict); },
                    [&](const InvasionAccept& command) { detail::put_u64(bytes, command.conflict); },
+                   [&](const CorruptionDialogOpened& command) { detail::put_u64(bytes, command.planet); },
                    [&](const GuiClick& command) {
                        if (command.component.empty() || command.component.size() > max_gui_component_name) return;
                        for (const unsigned char c : command.component) if (c <= 0x20 || c >= 0x7F) return;
@@ -229,6 +262,11 @@ std::vector<std::uint8_t> encode_payload(const CommandPayload& payload) {
                        detail::put_u8(bytes, command.pending_battle ? 1 : 0);
                        detail::put_u8(bytes, command.autosave ? 1 : 0);
                    },
+                   [&](const SeatAdmit& command) {
+                       detail::put_u32(bytes, command.player);
+                       detail::put_u32(bytes, command.lobby_slot);
+                       detail::put_u32(bytes, command.human_side);
+                   },
                    [&](const SetSpeed& command) { detail::put_i64(bytes, command.factor.raw()); },
                    [&](const DebugSetPlanetOwner& command) {
                        detail::put_u64(bytes, command.planet);
@@ -265,6 +303,11 @@ std::optional<CommandPayload> decode_payload(
         if (opcode == session_opcodes::invasion_accept) {
             InvasionAccept command;
             if (!reader.read_u64(command.conflict) || !command.conflict || reader.remaining()) return std::nullopt;
+            return CommandPayload{command};
+        }
+        if (opcode == session_opcodes::corruption_dialog_opened) {
+            CorruptionDialogOpened command;
+            if (!reader.read_u64(command.planet) || !command.planet || reader.remaining()) return std::nullopt;
             return CommandPayload{command};
         }
         if (opcode == session_opcodes::gui_click) {
@@ -306,6 +349,12 @@ std::optional<CommandPayload> decode_payload(
                 || !reader.read_u8(autosave) || reader.remaining() != 0 || resume > 1 || pending > 1 || autosave > 1
                 || command.pause_depth > 1 || (resume && command.pause_depth != 0)) return std::nullopt;
             command.resume = resume != 0; command.pending_battle = pending != 0; command.autosave = autosave != 0;
+            return CommandPayload{command};
+        }
+        if (opcode == session_opcodes::seat_admit) {
+            SeatAdmit command;
+            if (!reader.read_u32(command.player) || !reader.read_u32(command.lobby_slot) || !reader.read_u32(command.human_side)
+                || reader.remaining() != 0 || command.player == 0 || command.human_side == 0) return std::nullopt;
             return CommandPayload{command};
         }
         if (opcode == session_opcodes::pause || opcode == session_opcodes::resume) {

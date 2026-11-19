@@ -5,6 +5,7 @@
 // is exposed. A host without a capability supplies empty records or rejects it.
 #include "ai_data.hpp"
 #include "eawr/sim/tactical/economy.hpp"
+#include "eawr/sim/tactical/object_turn.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
 #include "eawr/sim/tactical/tsw.hpp"
 #include "eawr/sim/math/geometry.hpp"
@@ -68,6 +69,7 @@ struct ViewUnit {
     std::uint64_t purchase_token{}; // SAE-11: distinguish concurrent arrivals of the same type
     std::optional<tactical::TacticalInstance::PlanetaryWeaponView> planetary_weapon;
     bool can_move{}; // completed SPACE formation eligibility, including active movement locks
+    sim::EntityId script_object_id{}; // SSU-05: hidden object's physical allocation, separate from its Lua reference
     std::optional<TswView> tsw; // TSW-02: only on an object whose type has the tactical super weapon behaviour
 };
 
@@ -75,6 +77,7 @@ struct ViewPlayer {
     tactical::PlayerId id{};
     tactical::TeamId team{};
     std::size_t snapshot_index{};
+    std::optional<math::Fixed> turn_credits{}; // SOS-T1: immutable staged balance only in a turn view
 };
 
 struct WorldView {
@@ -82,6 +85,7 @@ struct WorldView {
     std::vector<ViewUnit> units; // ascending ID
     std::vector<ViewPlayer> players; // ascending ID
     std::vector<tactical::CaptureCandidate> capture_candidates; // prepared with the unit rows
+    std::size_t script_objects{}; // SSU-03: appended hidden rows; physical high IDs are not a classification.
 
     [[nodiscard]] const ViewUnit* find(sim::EntityId id) const {
         const auto found = std::lower_bound(units.begin(), units.end(), id,

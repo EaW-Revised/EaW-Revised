@@ -22,6 +22,7 @@ struct CorruptionMenu {
     PlanetId planet{};
     std::vector<ObservedCorruptionChoice> choices;
     std::uint64_t preparation{};
+    bool information_only{};
 };
 // The campaign host supplies its fixture, tutorial admission and routing names.
 // No live campaign producer or action executor is installed by this seam.

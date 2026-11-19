@@ -291,8 +291,9 @@ public:
     // #3076 (WU-21, WSU-31): the owner's UI tint: its lobby colour in a skirmish, its faction's `Color`
     // in a campaign battle.
     [[nodiscard]] std::optional<std::array<std::uint8_t, 3>> owner_ui_colour(sim::tactical::PlayerId player) const;
-    // #3076: a model's Colorization. FoC colorizes units only in a skirmish (lobby colour); a campaign
-    // battle uses the type's nonzero `No_Colorization_Color`, else the owner faction's.
+    // WGT-120: neutral owners always use nonzero type/faction No_Colorization_Color;
+    // other owners use lobby colour in skirmish and type/faction colour in campaign.
+    [[nodiscard]] bool model_uses_player_colour(sim::tactical::PlayerId player) const noexcept;
     [[nodiscard]] std::optional<std::array<std::uint8_t, 3>> model_colour(sim::tactical::PlayerId player,
                                                                           const std::string& object_id) const;
     // #3150: model_colour for an instance's type (the pad capture and construction tints).
@@ -948,6 +949,14 @@ private:
     };
     std::map<sim::EntityId, SelfDestructLight> self_destruct_lights_;
     std::map<sim::EntityId, light_effect::State> healing_lights_;
+    struct HealingLightSample final {
+        sim::EntityId entity{};
+        double frame{}, birth{};
+        light_effect::Kind kind{};
+        std::uint32_t pulses{};
+        std::array<float, 3> scale{};
+    };
+    std::vector<HealingLightSample> healing_light_samples_;
     std::uint64_t self_destruct_pulses_{};
     std::uint64_t self_destruct_cancels_{};
     std::uint64_t self_destruct_light_samples_{};
@@ -1019,6 +1028,7 @@ private:
     presentation::ui::MinimapSettings faction_colours_;
     std::map<std::string, std::array<std::uint8_t, 3>> type_no_colorization_;
     bool colorization_enabled_{true};
+    std::set<sim::tactical::PlayerId> neutral_model_owners_; // WGT-120: cached from authored faction neutrality
     std::map<sim::tactical::TypeId, std::vector<animation::BonePose>> neutral_fog_poses_;
     std::map<sim::tactical::TypeId, std::pair<bool, bool>> fog_memory_types_;
     std::vector<sim::RenderInstance> fog_ghost_instances_;
@@ -1091,6 +1101,7 @@ private:
     std::optional<std::uint64_t> begin_frame_;
     std::optional<std::chrono::steady_clock::time_point> battle_clock_start_;
     ui::BattleResults results_;
+    std::array<std::string, 2> result_pictures_; // WBF-54: win, loss; resolved once at preparation.
     std::shared_ptr<BattleScoring> scoring_;
     std::string scoring_failure_;
 

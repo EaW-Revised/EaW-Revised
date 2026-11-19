@@ -103,6 +103,7 @@ public:
         std::function<BuiltDialog(godot::Vector2)> results_dialog;
         std::function<godot::Ref<godot::Texture2D>(const std::string&)> result_icon;
         std::function<godot::String(const std::string&)> result_name;
+        std::function<godot::Ref<godot::Texture2D>(const std::string&)> result_picture;
         godot::String battle_time;
         godot::String exit_text;
         std::function<godot::CanvasLayer*()> save_replay;

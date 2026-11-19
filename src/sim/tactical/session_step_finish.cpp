@@ -488,7 +488,7 @@ core::Result<void> session_detail::Tick::finalize_fog(const std::vector<UnitStat
             std::sort(revealers.begin(), revealers.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
         }
         std::array<PlayerId,max_players> forced{}; std::size_t forced_count{};
-        if (impl_->setup.campaign && (impl_->fog_modifiers_dirty || bonuses_->command_ledger)) {
+        if (impl_->tracks_player_reveal() && (impl_->fog_modifiers_dirty || bonuses_->command_ledger)) {
             const auto current=impl_->fog_multipliers(bonuses_->command_ledger ? *bonuses_->command_ledger : impl_->command_ledger);
             for(std::size_t i=0;i<impl_->setup.players.size();++i) if(current[i]!=impl_->last_fog_multipliers[i]) forced[forced_count++]=impl_->setup.players[i].player_id;
             finalized_->fog_multipliers=current;

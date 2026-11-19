@@ -1,5 +1,6 @@
 #include "unit_tables_support.hpp"
 #include "eawr/skirmish/start.hpp"
+#include "../../src/sim/tactical/combat_internal.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -248,7 +249,198 @@ static void income_authoring_contracts() {
     }
 }
 
+// SHC-01: a concrete XML spelling does not bypass the shared space shield consumers.
+static void shield_class_consumers() {
+    namespace t = eawr::sim::tactical;
+    namespace d = t::detail;
+    const auto q = [](const int value) { return Fixed::from_integer(value).value(); };
+    const auto source_id = eawr::assets::object_type_crc("Shield_Command");
+    const auto target_id = eawr::assets::object_type_crc("Shield_Target");
+    for (const std::string spelling : {"SpaceUnit", "UniqueUnit", "TransportUnit", "SpaceBuildable",
+        "SpecialStructure", "DummyStructure", "Template", "GenericHeroUnit", "HeroUnit", "SpaceHero",
+        "Space_Indigenous_Unit", "Space_Unit", "UnderConstructionShip", "SpaceFauna", "Freighter",
+        "Props_Wave", "SpaceProp", "Mission_Object", "MiscObject", "Dummy"}) {
+        for (const bool override_values : {false, true}) {
+            TempTree tree;
+            auto xml = units_xml("3600", "Unit_Select_Test");
+            const auto points = override_values ? 240 : 100;
+            const auto refresh = override_values ? 19 : 7;
+            const auto radius = override_values ? 170 : 80;
+            const auto armor = override_values ? "Shield_Capital" : "Shield_Frigate";
+            const auto amount = override_values ? "0.5" : "0.25";
+            const std::string fields = "<Shield_Points>" + std::to_string(points) + "</Shield_Points>"
+                "<Shield_Refresh_Rate>" + std::to_string(refresh) + "</Shield_Refresh_Rate>"
+                "<Shield_Armor_Type>" + armor + "</Shield_Armor_Type>"
+                "<Passive_Missile_Shield_Radius>" + std::to_string(radius) + "</Passive_Missile_Shield_Radius>";
+            const auto concrete = spelling == "Template" ? std::string{"SpaceUnit"} : spelling;
+            const std::string definitions =
+                "<Template Name=\"Shield_Base\"><Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>"
+                "<SpaceBehavior>SHIELDED, SIMPLE_SPACE_LOCOMOTOR, REVEAL</SpaceBehavior>"
+                + (spelling == "Template" ? fields : std::string{
+                    "<Shield_Points>100</Shield_Points><Shield_Refresh_Rate>7</Shield_Refresh_Rate>"
+                    "<Shield_Armor_Type>Shield_Frigate</Shield_Armor_Type>"
+                    "<Passive_Missile_Shield_Radius>80</Passive_Missile_Shield_Radius>"}) + "</Template>"
+                "<" + concrete + " Name=\"Shield_Target\"><Variant_Of_Existing_Type>Shield_Base</Variant_Of_Existing_Type>"
+                + (override_values && spelling != "Template" ? fields : "") + "</" + concrete + ">"
+                "<" + concrete + " Name=\"Shield_Command\"><Variant_Of_Existing_Type>Test_Fighter</Variant_Of_Existing_Type>"
+                "<Abilities SubObjectList=\"Yes\"><Combat_Bonus_Ability Name=\"Shield_Bonus\">"
+                "<Activation_Style>Space_Automatic</Activation_Style><Applicable_Unit_Types>Shield_Target</Applicable_Unit_Types>"
+                "<Shield_Bonus_Percentage>" + amount + "</Shield_Bonus_Percentage>"
+                "</Combat_Bonus_Ability></Abilities></" + concrete + ">";
+            xml.insert(xml.rfind("</Objects>"), definitions);
+            write_fixture(tree.root, xml);
+            const auto loaded = load(tree.root, models(-40.0F), "Normal_Default", t::BattleDomain::space,
+                {"Shield_Target", "Shield_Command"});
+            expect(loaded.tables.has_value(), "SHC-01: cross-class shield XML loads");
+            if (!loaded.tables) continue;
+            const auto health = eawr::units::durability_table(*loaded.tables);
+            const auto combat = eawr::units::combat_table(*loaded.tables);
+            expect(health && health.value().damage && combat, "SHC-01: authored shields bind live profiles");
+            if (!health || !health.value().damage || !combat) continue;
+            const auto* target = health.value().find(target_id);
+            const auto* defender = combat.value().find(target_id);
+            const auto types = eawr::units::damage_type_index(*loaded.tables);
+            expect(target && target->max_shields == q(points) && target->shield_refresh == q(refresh)
+                && target->shield_armor_type == types.armor(armor), "SHC-01: inherited and overridden shield values reach durability");
+            if (!target || !defender) continue;
+            t::DurabilityState state;
+            state.hull = target->max_hull;
+            state.shields = q(points);
+            // The state mirrors the profile's hardpoint list: apply_hit and recharge refuse a mismatch.
+            for (const auto& hardpoint : target->hardpoints) state.hardpoints.push_back(hardpoint.max_health);
+            state.disabled.assign(target->hardpoints.size(), false);
+            t::Hit hit;
+            hit.amount = q(40); hit.projectile = true; hit.damage_type = types.damage("Damage_Fighter");
+            hit.allow_diminishing_firepower = false;
+            const auto damaged = t::apply_hit(*target, *health.value().damage, state, hit, 0);
+            const auto absorbed = override_values ? 40 : 10;
+            expect(damaged && state.shields == q(points - absorbed), "SHC-01: shield armor changes actual absorption");
+            const auto recharged = t::recharge_shields(*target, *health.value().damage, state, 90);
+            expect(recharged && state.shields == q(std::min(points, points - absorbed + refresh)),
+                "SHC-01: authored refresh changes actual shield recovery");
+            eawr::skirmish::SkirmishStart start;
+            start.setup.players = {{1, 1, 1, t::player_flag_commandable}};
+            start.setup.units = {{1, source_id, 1, {}, eawr::sim::math::identity_quat(), {}},
+                {2, target_id, 1, {}, eawr::sim::math::identity_quat(), {}}};
+            const auto economy = eawr::skirmish::economy_rules(start, {}, *loaded.tables);
+            expect(static_cast<bool>(economy), "SHC-01: cross-class shield command compiles");
+            if (!economy) continue;
+            std::vector<std::string> reference;
+            for (const auto workers : {1U, 2U, 4U, 8U}) {
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                auto session = t::TacticalSession::create(start.setup, {}, health.value(), {}, {}, combat.value(), {}, {}, economy.value());
+                expect(static_cast<bool>(session), "SHC-01: shield command session creates");
+                if (!session) continue;
+                const auto step = session.value().step(executor);
+                const auto current = session.value().durability_state(2);
+                expect(step && current && current->shields == q(override_values ? 360 : 125),
+                    "SHC-01: authored shield bonus changes the live recipient's shields");
+                if (step) {
+                    const std::vector<std::string> hashes{step.value().state_sha256};
+                    if (reference.empty()) reference = hashes;
+                    else expect(hashes == reference, "SHC-01: live shield bonus is equal on 1/2/4/8 workers");
+                }
+                d::CombatWorld world;
+                world.units.resize(1);
+                world.units.front().id = 1;
+                world.units.front().owner = 1;
+                world.units.front().profile = defender;
+                const std::vector<d::ProjectileDefenceAbilityInput> inputs(1);
+                const auto prepared = d::prepare_projectile_defences(world, inputs, executor);
+                const auto& sources = world.projectile_defences.sources;
+                expect(prepared && sources.size() == 1 && sources.front().passive_shield
+                    && sources.front().radius() == q(radius), "SHC-01: authored passive radius reaches the live defence registry");
+            }
+        }
+    }
+}
+
+static void unique_shield_leech_consumer() {
+    namespace t = eawr::sim::tactical;
+    const auto q = [](const int value) { return Fixed::from_integer(value).value(); };
+    TempTree tree;
+    auto xml = units_xml("3600", "Unit_Select_Test");
+    xml.insert(xml.rfind("</Objects>"), R"(
+      <UniqueUnit Name="Leech_Source"><Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>
+        <Unit_Abilities_Data SubObjectList="Yes"><Unit_Ability><Type>LEECH_SHIELDS</Type>
+          <Recharge_Seconds>5</Recharge_Seconds><GUI_Activated_Ability_Name>Named_Leech</GUI_Activated_Ability_Name>
+        </Unit_Ability></Unit_Abilities_Data>
+        <Abilities SubObjectList="Yes"><Leech_Shields_Ability Name="Named_Leech">
+          <Activation_Style>User_Input</Activation_Style><Activation_Min_Range>1</Activation_Min_Range>
+          <Activation_Max_Range>500</Activation_Max_Range><Applicable_Unit_Types>Leech_Target</Applicable_Unit_Types>
+          <Applicable_Unit_Categories>Frigate</Applicable_Unit_Categories><Duration_In_Secs>2</Duration_In_Secs>
+          <Shield_Damage_Per_Second>90</Shield_Damage_Per_Second><Damage_Multiplier>0.5</Damage_Multiplier>
+          <Beam_Bone_Name>Root</Beam_Bone_Name><Beam_Color>10,20,30,40</Beam_Color><Beam_Frames>7</Beam_Frames>
+          <Beam_Width>2</Beam_Width><Beam_Texture_Name>leech.tga</Beam_Texture_Name>
+          <Beam_Effect_Name>Leech_Lightning</Beam_Effect_Name><Leech_Effect>Leech_Particle</Leech_Effect>
+        </Leech_Shields_Ability></Abilities>
+      </UniqueUnit>
+      <UniqueUnit Name="Leech_Target"><Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>
+        <SpaceBehavior>SHIELDED, SIMPLE_SPACE_LOCOMOTOR, REVEAL</SpaceBehavior>
+        <Shield_Points>100</Shield_Points><Shield_Refresh_Rate>0</Shield_Refresh_Rate>
+      </UniqueUnit>)");
+    write_fixture(tree.root, xml);
+    // WHD-01: LEECH_SHIELDS needs a surviving special-weapon hardpoint on the source type; the fixture's first
+    // hardpoint becomes one so the activation is admitted.
+    std::string points{hardpoints_xml};
+    const std::string laser = "HARD_POINT_WEAPON_LASER";
+    points.replace(points.find(laser), laser.size(), "HARD_POINT_WEAPON_SPECIAL");
+    write(tree.root / "XML" / "eawr_hardpoints.xml", points);
+    const auto loaded = load(tree.root, models(-40.0F), "Normal_Default", t::BattleDomain::space,
+        {"Leech_Source", "Leech_Target"});
+    if (!loaded.tables) return;
+    const auto source_id = eawr::assets::object_type_crc("Leech_Source");
+    const auto target_id = eawr::assets::object_type_crc("Leech_Target");
+    const auto abilities = eawr::units::ability_table(*loaded.tables, std::vector<t::PlayerId>{1, 2});
+    const auto health = eawr::units::durability_table(*loaded.tables);
+    auto combat = eawr::units::combat_table(*loaded.tables);
+    expect(abilities && health && combat, "SHC-01 WLS-01: UniqueUnit leech XML binds all runtime tables");
+    if (!abilities || !health || !combat) return;
+    const auto* holder = abilities.value().find(source_id);
+    const auto handler = holder ? std::find_if(holder->special.begin(), holder->special.end(), [](const auto& row) {
+        return row.kind == t::SpecialAbilityKind::leech_shields;
+    }) : std::vector<t::SpecialAbilityProfile>::const_iterator{};
+    expect(holder && handler != holder->special.end(), "SHC-01: UniqueUnit binds its named shield-leech handler");
+    if (!holder || handler == holder->special.end()) return;
+    expect(handler->beam_min_range == q(1) && handler->beam_max_range == q(500)
+        && handler->damage_per_frame == q(3) && handler->leech_damage_bonus == Fixed::from_ratio(1, 2).value()
+        && handler->leech_duration_frames == 60 && handler->filter.applicable_categories != 0
+        && handler->leech_colour == std::array<std::uint8_t, 4>{10, 20, 30, 40}
+        && handler->beam_owner_bone == "Root" && handler->leech_beam_frames == 7 && handler->leech_beam_width == q(2)
+        && handler->leech_texture == "leech.tga" && handler->leech_lightning == "Leech_Lightning"
+        && handler->leech_effect == "Leech_Particle", "SHC-01: UniqueUnit retains authored drain, filters and presentation fields");
+    for (auto& profile : combat.value().profiles) profile.weapons.clear();
+    std::vector<t::SensorProfile> sensors{{source_id, q(1000)}, {target_id, q(1000)}};
+    std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+    t::TacticalSetup setup;
+    setup.players = {{1, 1, 1, t::player_flag_commandable}, {2, 2, 2, t::player_flag_commandable}};
+    setup.units = {{1, source_id, 1, {}, eawr::sim::math::identity_quat(), {}},
+        {2, target_id, 2, point(raw(100), 0, 0), eawr::sim::math::identity_quat(), {}}};
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto session = t::TacticalSession::create(setup, sensors, health.value(), {}, {}, combat.value(), {}, abilities.value());
+        expect(static_cast<bool>(session), "SHC-01: UniqueUnit shield-leech session creates");
+        if (!session) continue;
+        expect(static_cast<bool>(session.value().submit({{0, 1, 0}, {1},
+            t::AbilityPayload{t::AbilityKind::leech_shields, t::AbilityAction::activate, 2}})),
+            "SHC-01: UniqueUnit targeted shield-leech command submits");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (int tick = 0; tick < 3; ++tick) {
+            const auto step = session.value().step(executor);
+            expect(static_cast<bool>(step), "SHC-01: UniqueUnit shield drain steps");
+            if (step) hashes.push_back(step.value().state_sha256);
+        }
+        const auto state = session.value().durability_state(2);
+        expect(state && state->shields < q(100), "SHC-01: UniqueUnit named handler drains the live enemy shield");
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "SHC-01: UniqueUnit shield leech is equal on 1/2/4/8 workers");
+    }
+}
+
 void content_identity() {
+    shield_class_consumers();
+    unique_shield_leech_consumer();
     income_authoring_contracts();
     // Duplicate names are a known catalog seam (legacy #3741), not a retail overlay rule.
     // Pin today's deterministic winner position until separate indexed entries are supported.
@@ -278,6 +470,29 @@ void content_identity() {
     const auto second = load(tree.root, models(-40.0F));
     if (!first.tables || !second.tables) return;
     const auto identity = eawr::units::content_identity(*first.tables);
+    {
+        auto reveal = *first.tables;
+        auto& bonuses = reveal.units.front().production.battlefield_bonuses;
+        expect(bonuses.empty(), "WBR-01: ordinary fixture has no reveal extension");
+        expect(eawr::units::canonical_encoding(reveal) == eawr::units::canonical_encoding(*first.tables),
+            "WBR-01: absent reveal source preserves the complete encoding");
+        eawr::units::BattlefieldBonus bonus; bonus.name = "Mod_Reveal"; bonus.category = 7;
+        bonus.reveal_delta = Fixed::from_raw(raw(1) / 2); bonus.all_allies = true;
+        bonuses.push_back(bonus);
+        const auto extended = eawr::units::content_identity(reveal);
+        expect(extended != identity, "WBR-01: actual skirmish reveal contribution enters identity");
+        for (unsigned field = 0; field != 5; ++field) {
+            auto changed = reveal; auto& row = changed.units.front().production.battlefield_bonuses.front();
+            if (field == 0) row.reveal_delta = Fixed::from_raw(raw(1) / 4);
+            if (field == 1) row.category = 8;
+            if (field == 2) row.all_allies = false;
+            if (field == 3) row.enabled = !row.enabled;
+            if (field == 4) row.name = "Other_Reveal";
+            expect(eawr::units::content_identity(changed) != extended, "WBR-01: each admitted reveal field is identity-bound");
+        }
+        reveal.units.front().production.battlefield_bonuses.clear();
+        expect(eawr::units::content_identity(reveal) == identity, "WBR-01: clearing the only contribution removes its marker");
+    }
     expect(identity == eawr::units::content_identity(*second.tables), "identity is stable across loads");
     {
         auto pads = *first.tables;
@@ -453,6 +668,70 @@ void content_identity() {
     allowed.enabled = false;
     const auto disabled = eawr::skirmish::economy_rules(command_start, {}, allowed_tables);
     expect(disabled && disabled.value().command_bonuses.empty(), "WHE-11: disabled passive source never registers");
+
+    // ABG-05: XML must reach the existing creation-self gate, not just the parsed row.
+    namespace tactical = eawr::sim::tactical;
+    std::optional<std::array<std::uint8_t, 32>> default_self_identity;
+    for (const std::string field : {"", "<Apply_Special_Ability_To_Self_On_Creation>No</Apply_Special_Ability_To_Self_On_Creation>",
+             "<Apply_Special_Ability_To_Self_On_Creation>Yes</Apply_Special_Ability_To_Self_On_Creation>"}) {
+        const bool self = field.find("Yes") != std::string::npos;
+        auto self_xml = units_xml("3600", "Unit_Select_Test");
+        self_xml.insert(self_xml.find(fighter_tag) + fighter_tag.size(),
+            "<Abilities SubObjectList=\"Yes\"><Combat_Bonus_Ability Name=\"Fixture_Self\">"
+            "<Activation_Style>Space_Automatic</Activation_Style>" + field
+            + "<Applicable_Unit_Types>Test_Fighter,Test_Frigate</Applicable_Unit_Types>"
+              "<Health_Bonus_Percentage>-0.25</Health_Bonus_Percentage></Combat_Bonus_Ability></Abilities>");
+        write_fixture(tree.root, self_xml);
+        const auto loaded_self = load(tree.root, models(-40.0F));
+        expect(loaded_self.tables.has_value(), "ABG-05: authored creation-self fixture loads");
+        if (!loaded_self.tables) continue;
+        const auto self_identity = eawr::units::content_identity(*loaded_self.tables);
+        if (!default_self_identity) default_self_identity = self_identity;
+        expect((self_identity != *default_self_identity) == self,
+            "ABG-05: true changes identity; omitted and explicit false are equivalent");
+        const auto source_type = eawr::assets::object_type_crc("Test_Fighter");
+        const auto target_type = eawr::assets::object_type_crc("Test_Frigate");
+        eawr::skirmish::SkirmishStart start;
+        start.setup.seed = 7644;
+        start.setup.players = {{1, 0, 1, 1}};
+        start.setup.units = {{1, source_type, 1, {}, eawr::sim::math::identity_quat(), {}},
+            {2, target_type, 1, {}, eawr::sim::math::identity_quat(), {}}};
+        auto rules = eawr::skirmish::economy_rules(start, {}, *loaded_self.tables);
+        expect(rules && rules.value().command_bonuses.size() == 1
+            && rules.value().command_bonuses.front().apply_to_self == self,
+            "ABG-05: authored flag reaches the creation-notification profile");
+        if (!rules) continue;
+        rules.value().players = {{1, {}, 100, false, {}}};
+        tactical::DurabilityTable health;
+        for (const auto type : {source_type, target_type}) {
+            tactical::DurabilityProfile profile;
+            profile.type_id = type;
+            profile.max_hull = Fixed::from_raw(raw(100));
+            health.profiles.push_back(profile);
+        }
+        std::sort(health.profiles.begin(), health.profiles.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+        std::vector<std::string> self_reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto created = tactical::TacticalSession::create(start.setup, {}, health, {}, {}, {}, {}, {}, rules.value());
+            expect(static_cast<bool>(created), "ABG-05: creation-self session creates");
+            if (!created) continue;
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned tick = 0; tick < 3; ++tick) {
+                const auto stepped = created.value().step(executor);
+                expect(static_cast<bool>(stepped), "ABG-05: creation-self step succeeds");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+                const auto source_health = created.value().durability_state(1), target_health = created.value().durability_state(2);
+                expect(source_health && source_health->hull == Fixed::from_raw(raw(self ? 75 : 100)),
+                    "ABG-05: only authored true applies the command bonus to its source hull");
+                expect(target_health && target_health->hull == Fixed::from_raw(raw(75)),
+                    "ABG-05: every flag variant keeps the ordinary recipient bonus");
+            }
+            if (workers == 1) self_reference = hashes;
+            else expect(hashes == self_reference, "ABG-05: creation-self hashes equal on 1/2/4/8 workers");
+        }
+    }
 }
 
 void hunt_tables() {

@@ -452,6 +452,20 @@ void checkpoint_screen_models() {
         && guest.rows[6].find("your assigned seat") == std::string::npos,
         "joiner assignment follows stable peer mapping and sparse saved seat IDs");
     expect(guest.progress == "Transfer: 512 / 1024 bytes", "bounded transfer progress is visible before restore");
+    {   // #7858: "Transfer: 0 / 0 bytes" never shows; the host only shows restore states; a fully received file is the restore's turn.
+        const auto has_transfer = [](const auto& model) {
+            return std::any_of(model.rows.begin(), model.rows.end(), [](const auto& row) { return row.find("Transfer:") != std::string::npos; });
+        };
+        net::SaveTransferView empty{};
+        const auto host_zero = eawr::viewer::checkpoint_lobby_model(true, true, roster, 90, bindings, peers, 0, empty, "", "", "");
+        const auto guest_zero = eawr::viewer::checkpoint_lobby_model(false, true, roster, 90, bindings, peers, 3, empty, "", "", "");
+        const auto host_bytes = eawr::viewer::checkpoint_lobby_model(true, true, roster, 90, bindings, peers, 0, progress, "", "", "");
+        net::SaveTransferView whole{}; whole.total = 1024; whole.received = 1024;
+        const auto guest_whole = eawr::viewer::checkpoint_lobby_model(false, true, roster, 90, bindings, peers, 3, whole, "", "", "");
+        expect(!has_transfer(host_zero) && !has_transfer(guest_zero) && !has_transfer(host_bytes) && !has_transfer(guest_whole),
+            "no 0 / 0 transfer line; the host has none; a fully received file has none");
+        expect(has_transfer(guest), "a guest still sees real byte progress while the file arrives");
+    }
     expect(guest.rows[5].find("Mod faction") != std::string::npos, "without a lookup the saved-seat line keeps the identity");
     const auto named = eawr::viewer::checkpoint_lobby_model(false, true, roster, 90, bindings, peers, 3,
         progress, "", "", "", [](const std::string& faction) { return faction == "Mod faction" ? std::string("Mod Display") : faction; });
@@ -475,6 +489,20 @@ void checkpoint_screen_models() {
         progress, "", "", "");
     expect(!guest.can_accept && guest.refusal == refusal.message
         && guest.rows.back() == "Refused: checkpoint: duplicate_saved_seat", "backend refusal survives intact in the summary");
+    {   // #7858: a restore in progress is a status row, never "Refused"; a real refusal still is; a host cancel reads as one.
+        progress.refusal.reset();
+        const auto busy = eawr::viewer::checkpoint_lobby_model(true, true, roster, 90, bindings, peers, 0, progress, "", "", "",
+            eawr::viewer::IdentityFactionName{}, "Restoring saved game... please wait (1:30)");
+        expect(busy.rows.front() == "Restoring saved game... please wait (1:30)" && busy.refusal.empty() && !busy.can_accept
+            && std::none_of(busy.rows.begin(), busy.rows.end(), [](const auto& row) { return row.find("Refused") != std::string::npos; }),
+            "a restore in progress is a status line, not a refusal");
+        eawr::core::Diagnostic cancelled{}; cancelled.message = "checkpoint transfer: selection_cleared";
+        progress.refusal = cancelled;
+        const auto after_cancel = eawr::viewer::checkpoint_lobby_model(false, true, roster, 90, bindings, peers, 3, progress, "", "", "");
+        expect(after_cancel.rows.back().find("The host cancelled the restore") != std::string::npos && !after_cancel.can_accept,
+            "a guest sees that the host cancelled the restore");
+        progress.refusal.reset();
+    }
     progress.refusal.reset();
     host = eawr::viewer::checkpoint_lobby_model(true, true, roster, 90, bindings, peers, 0,
         progress, "", "", "Apply saved seats");
@@ -573,30 +601,64 @@ void checkpoint_restore_orchestration() {
     expect(finish(throwing, 6, &room) == State::failed, "current restore exception becomes a failure");
     Job stale_throw; expect(stale_throw.submit(7, room, deadline, []() -> int { throw std::runtime_error("restore"); }), "stale throwing work submitted");
     expect(finish(stale_throw, 8, &room) == State::stale, "stale restore exception is consumed");
-    std::promise<void> timeout_release; auto timeout_gate = timeout_release.get_future().share();
-    Job timeout; expect(timeout.submit(9, room, Job::Clock::now(), [timeout_gate] { timeout_gate.wait(); return 9; }), "timeout work submitted");
-    expect(timeout.poll(9, &room, Job::Clock::now()).state == State::timed_out, "blocked restore times out");
-    timeout_release.set_value();
-    expect(finish(timeout, 9, &room) == State::stale, "timed-out result cannot publish");
-    std::promise<void> throw_release; auto throw_gate = throw_release.get_future().share();
-    Job timeout_throw; expect(timeout_throw.submit(10, room, Job::Clock::now(), [throw_gate]() -> int {
-        throw_gate.wait(); throw std::runtime_error("restore");
-    }), "timed-out throwing work submitted");
-    expect(timeout_throw.poll(10, &room, Job::Clock::now()).state == State::timed_out, "throwing restore can time out");
-    throw_release.set_value();
-    expect(finish(timeout_throw, 10, &room) == State::stale, "timed-out exception is consumed");
-
-    // #7858: a heavy-mod restore that needs about 90 s must not time out under the lobby's own limit.
-    std::promise<void> slow_release; auto slow_gate = slow_release.get_future().share();
-    Job slow; const auto began = Job::Clock::now();
-    expect(slow.submit(11, room, began + eawr::viewer::checkpoint_restore_limit, [slow_gate] { slow_gate.wait(); return 11; }),
-        "slow restore submitted");
-    expect(slow.poll(11, &room, began + std::chrono::seconds(30)).state == State::pending, "restore still pending at 30 s");
-    expect(slow.poll(11, &room, began + std::chrono::seconds(90)).state == State::pending, "restore still pending at 90 s");
-    expect(eawr::viewer::checkpoint_restore_limit == std::chrono::minutes(5), "restore limit is 5 minutes");
-    slow_release.set_value();
-    expect(finish(slow, 11, &room) == State::ready, "slow restore finishes and publishes");
-
+    // #7858: the restore of a heavy-mod campaign needs minutes, so nothing gives up on it: a restore still running at 30, 90 and 120 s
+    // and past the slow mark stays pending, and its result still publishes when it finishes.
+    {
+        std::promise<void> slow_release; auto slow_gate = slow_release.get_future().share();
+        Job slow; const auto began = Job::Clock::now();
+        expect(slow.submit(11, room, began, [slow_gate] { slow_gate.wait(); return 11; }), "slow restore submitted");
+        for (const int seconds : {1, 30, 90, 120, 5 * 60 + 1, 20 * 60})
+            expect(slow.poll(11, &room, began + std::chrono::seconds(seconds)).state == State::pending,
+                "a slow restore stays pending, never timed out (" + std::to_string(seconds) + " s)");
+        expect(slow.active() && slow.started() == began, "the job keeps its start for the elapsed-time line");
+        slow_release.set_value();
+        expect(finish(slow, 11, &room) == State::ready, "a restore that finished late still publishes");
+    }
+    {   // Cancel restore (#7858): the lobby stops waiting and the worker is told to stop; no second restore starts beside it.
+        std::promise<void> cancel_release; auto cancel_gate = cancel_release.get_future().share();
+        std::atomic<bool> worker_done{false}, saw_cancel{false};
+        Job cancelled; expect(cancelled.submit(12, room, Job::Clock::now(), [cancel_gate, &worker_done, &saw_cancel](const std::atomic<bool>& stop) {
+            // A work that takes the cancel flag checks it between its phases; this one has a long phase and one boundary.
+            cancel_gate.wait(); saw_cancel = stop.load(); worker_done = true; return 12; }), "cancellable restore submitted");
+        const auto before = Job::Clock::now();
+        cancelled.cancel();
+        expect(Job::Clock::now() - before < std::chrono::seconds(2) && !cancelled.active(), "cancel returns at once and frees the job");
+        expect(cancelled.finishing(), "a cancelled worker that is still running is finishing");
+        expect(!cancelled.submit(13, room, Job::Clock::now(), [] { return 13; }), "a second restore cannot start while a cancelled one still runs");
+        expect(!cancelled.active(), "the refused submit left nothing running");
+        cancel_release.set_value();
+        const auto limit = Job::Clock::now() + std::chrono::seconds(10);
+        while ((!worker_done || cancelled.finishing()) && Job::Clock::now() < limit) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        expect(worker_done && saw_cancel, "the cancelled worker saw the cancel flag and ended");
+        expect(!cancelled.finishing(), "finishing ends with the worker");
+        expect(cancelled.submit(14, room, Job::Clock::now(), [] { return 14; }), "a new restore starts once the cancelled worker has ended");
+        expect(finish(cancelled, 14, &room) == State::ready, "the restarted restore publishes");
+    }
+    {   // A cooperative worker ends early when cancelled: it stops at the next phase boundary, long before its full length.
+        std::atomic<int> phases_run{0};
+        Job early; expect(early.submit(15, room, Job::Clock::now(), [&phases_run](const std::atomic<bool>& stop) {
+            for (int phase = 0; phase < 200; ++phase) {
+                if (stop.load()) return -1;
+                std::this_thread::sleep_for(std::chrono::milliseconds(20)); ++phases_run;
+            }
+            return 15; }), "phased restore submitted");
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        early.cancel();
+        const auto limit = Job::Clock::now() + std::chrono::seconds(3);
+        while (early.finishing() && Job::Clock::now() < limit) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        expect(!early.finishing() && phases_run < 100, "cancel ends the work early (" + std::to_string(phases_run.load()) + " of 200 phases ran)");
+    }
+    expect(eawr::viewer::checkpoint_finishing_text() == "Finishing the cancelled restore...", "the busy line while a cancelled restore ends");
+    {   // The lobby lines: a busy state with the elapsed time, a slow mark that is still not a refusal, and the elapsed clock.
+        using std::chrono::seconds;
+        expect(eawr::viewer::checkpoint_restoring_text(seconds(42)) == "Restoring saved game... please wait (0:42)", "restoring line shows elapsed m:ss");
+        expect(eawr::viewer::checkpoint_restoring_text(seconds(125)) == "Restoring saved game... please wait (2:05)", "elapsed minutes and padded seconds");
+        expect(eawr::viewer::checkpoint_restoring_text(seconds(90), true).find("waiting for the other players") != std::string::npos,
+            "the host's wait for the guests says so");
+        const auto slow = eawr::viewer::checkpoint_restoring_text(seconds(5 * 60 + 3));
+        expect(slow.find("Still waiting") != std::string::npos && slow.find("5:03") != std::string::npos
+            && slow.find("Refused") == std::string::npos && slow.find("timed out") == std::string::npos, "past the slow mark the line is still not a refusal");
+    }
     // #7878: a 90 s restore while the room's revision, status text, readiness and host mod description keep moving, with the
     // same players and settings, finishes and publishes; a player joining or leaving during it is a real change.
     struct Lobby { int players; int settings; int revision; int status; bool ready; bool operator==(const Lobby&) const = default; };
@@ -605,7 +667,7 @@ void checkpoint_restore_orchestration() {
     const Lobby start{2, 4, 1, 0, false};
     std::promise<void> long_release; auto long_gate = long_release.get_future().share();
     LobbyJob quiet; const auto from = LobbyJob::Clock::now();
-    expect(quiet.submit(12, start, from + eawr::viewer::checkpoint_restore_limit, [long_gate] { long_gate.wait(); return 12; }, same_players),
+    expect(quiet.submit(12, start, from, [long_gate] { long_gate.wait(); return 12; }, same_players),
         "restore with a room comparison submitted");
     Lobby now_room = start;
     bool pending = true;
@@ -710,7 +772,8 @@ void checkpoint_screen_reconciles_by_peer() {
     std::size_t calls = 0;
     for (auto at = source.find("viewer::reconcile_checkpoint_bindings("); at != std::string::npos;
          at = source.find("viewer::reconcile_checkpoint_bindings(", at + 1)) ++calls;
-    expect(calls == 2, "exactly the two screen call sites fit the assignment to the room (found " + std::to_string(calls) + ")");
+    // The two real call sites plus the restore fixture's own seat assignment (#7858).
+    expect(calls == 3, "exactly the two screen call sites and the restore fixture fit the assignment to the room (found " + std::to_string(calls) + ")");
     const auto read = source.find("void EawrLanLobby::process_checkpoint_read()");
     const auto select = source.find("void EawrLanLobby::new_campaign()", read);
     expect(read != std::string::npos && select != std::string::npos, "the saved-game read source is present");
@@ -736,9 +799,10 @@ void checkpoint_screen_reconciles_by_peer() {
             "a room change keeps each assignment with its PEER: the previous peers and the new ones are passed");
         const auto record = body.find("impl.checkpoint_bound_peers = std::move(room_peers)", close);
         expect(record != std::string::npos, "the peers the assignment was fitted to are recorded after the fit");
-        expect(body.find("no saved seat (not in the save)") != std::string::npos
-            && body.find("bindings[i].seat.value == 0") != std::string::npos,
-            "a peer beyond the save's humans is labelled in its combo (F3)");
+        expect(body.find("no saved seat (not in the save)") == std::string::npos
+            && body.find("-> Join ") != std::string::npos && body.find("bindings[i].seat.value == 0") != std::string::npos,
+            "a peer beyond the save's humans is offered Join <faction> in its combo, never a refusal (#7869)");
+        expect(body.find("checkpoint: extra_human_seat") == std::string::npos, "Apply never refuses an extra human (#7869)");
     }
 }
 
@@ -984,6 +1048,57 @@ void checkpoint_bindings_follow_the_room() {
     const auto extra = eawr::viewer::reconcile_checkpoint_bindings(owner, built, 3);
     expect(seats_of(extra) == std::vector<std::uint32_t>{1, 2, 0} && extra[2].peer == 2,
         "#6121 a peer beyond the saved humans stays unassigned");
+    expect(extra[2].player == 1, "#7869 a peer beyond the saved humans joins the faction of the first saved human by default");
+    {   // #7869: a join the host chose stays with its peer; the join list offers shared factions and, below two sides, playable AI ones.
+        const std::vector<net::SetupSeat> chosen{{0, {1}, 1}, {1, {2}, 1}, {2, {0}, 2}};
+        const auto kept = eawr::viewer::reconcile_checkpoint_bindings(owner, chosen, 3);
+        expect(seats_of(kept) == std::vector<std::uint32_t>{1, 2, 0} && kept[2].player == 2, "#7869 a chosen join is kept");
+        // A saved player leaves the room: the joiner behind it takes the freed saved seat, so no saved human is missing.
+        const auto after_leave = eawr::viewer::reconcile_checkpoint_bindings(owner, chosen, {0, 1, 2}, {0, 2});
+        expect(seats_of(after_leave) == std::vector<std::uint32_t>{1, 2} && after_leave[1].peer == 1 && after_leave[1].player == 1,
+            "#7869 when a saved player leaves, a joiner takes its saved seat");
+        // The joiner leaves: the saved players keep their seats and nothing else changes.
+        const auto joiner_leaves = eawr::viewer::reconcile_checkpoint_bindings(owner, chosen, {0, 1, 2}, {0, 1});
+        expect(seats_of(joiner_leaves) == std::vector<std::uint32_t>{1, 2}, "#7869 a leaving joiner drops its extra seat");
+        sim::galactic::MpRoster listed = owner;
+        sim::galactic::MpRosterPlayer one{}; one.player = 1; one.faction = "Empire";
+        sim::galactic::MpRosterPlayer two{}; two.player = 2; two.faction = "Rebel";
+        sim::galactic::MpRosterPlayer three{}; three.player = 3; three.faction = "Neutral";
+        listed.players = {one, two, three};
+        const auto joins = eawr::viewer::checkpoint_join_choices(listed, [](const auto& player) { return player.player != 3; });
+        expect(joins.size() == 2 && joins[0].player == 1 && joins[1].player == 2, "#7869 shared and playable AI factions are offered, a non-playable one is not");
+        listed.seats = {human(1, 1), human(2, 2), ai(3, 3)};
+        listed.seats[0].human_side_id = 1; listed.seats[1].human_side_id = 2;
+        const auto sided = eawr::viewer::checkpoint_join_choices(listed, [](const auto&) { return true; });
+        expect(sided.size() == 2, "#7869 with two human sides saved, no further faction is offered");
+        listed.seats = {human(1, 1), human(2, 1), ai(3, 3)};
+        listed.seats[0].human_side_id = 1; listed.seats[1].human_side_id = 1;
+        const auto one_side = eawr::viewer::checkpoint_join_choices(listed, [](const auto&) { return true; });
+        expect(one_side.size() == 3, "#7869 with one human side saved, a second side may be taken");
+        const std::vector<net::PeerIndex> peers_of{0, 1, 2};
+        net::SaveTransferView progress{};
+        const auto model = eawr::viewer::checkpoint_lobby_model(true, true, listed, 90, chosen, peers_of, 2, progress, "", "", "");
+        expect(std::any_of(model.rows.begin(), model.rows.end(), [](const auto& line) { return line == "You join Rebel (the AI hands over this faction)"; }),
+            "#7869 the summary names the faction a joining player takes over");
+    }
+    {   // #7876: a departed saved human seat is offered after the active ones, never required, and a peer beyond the active humans takes it.
+        sim::galactic::MpRoster dropped;
+        dropped.seats = {human(1, 1), human(2, 1, false), ai(3, 2)};
+        const auto only_host = eawr::viewer::reconcile_checkpoint_bindings(dropped, {}, 1);
+        expect(seats_of(only_host) == std::vector<std::uint32_t>{1}, "#7876 the active human holds its seat; the departed one is not assigned to it");
+        const auto with_guest = eawr::viewer::reconcile_checkpoint_bindings(dropped, only_host, 2);
+        expect(seats_of(with_guest) == std::vector<std::uint32_t>{1, 2} && with_guest[1].player == 1,
+            "#7876 a second peer takes the departed seat back by default");
+        const auto third = eawr::viewer::reconcile_checkpoint_bindings(dropped, with_guest, 3);
+        expect(seats_of(third) == std::vector<std::uint32_t>{1, 2, 0}, "#7876 a third peer joins the faction");
+        expect(eawr::viewer::checkpoint_humans(dropped).size() == 1 && eawr::viewer::checkpoint_departed(dropped).size() == 1,
+            "#7876 one required human, one departed seat");
+        const std::vector<net::PeerIndex> peers_of{0, 1};
+        net::SaveTransferView progress{};
+        const auto model = eawr::viewer::checkpoint_lobby_model(true, true, dropped, 90, with_guest, peers_of, 1, progress, "", "", "");
+        expect(std::any_of(model.rows.begin(), model.rows.end(), [](const auto& line) { return line.rfind("You take back seat 2", 0) == 0; }),
+            "#7876 the summary says the peer takes the departed seat back");
+    }
     // Different factions and an inactive human: saves that already worked map as before.
     sim::galactic::MpRoster mixed;
     mixed.seats = {human(4, 3), human(9, 5), human(12, 5, false), ai(13, 6)};

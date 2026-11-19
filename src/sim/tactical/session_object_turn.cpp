@@ -195,7 +195,12 @@ core::Result<void> session_detail::Tick::object_turn_seam() {
                 }
             });
             if (!staged_rows) return core::Result<void>::failure(staged_rows.error());
-            auto produced = impl_->object_turn->run(executor, ObjectTurnView{tick, rows});
+            // SOS-T1: copy the small player ledger list, never traverse world entities for wallet reads.
+            auto& wallets = impl_->object_turn_wallets;
+            wallets.clear();
+            wallets.reserve(staging_->ledgers->size());
+            for (const auto& account : *staging_->ledgers) wallets.push_back({account.player, account.credits});
+            auto produced = impl_->object_turn->run(executor, ObjectTurnView{tick, rows, wallets});
             if (!produced) return core::Result<void>::failure(produced.error());
             auto uses = std::move(produced).value();
             std::sort(uses.begin(), uses.end(), [](const ObjectTurnUse& left, const ObjectTurnUse& right) {
@@ -445,6 +450,9 @@ core::Result<RejectReason> session_detail::Tick::apply_object_turn_use(const Obj
     if (slot.active || !ability_ready(ability, slot, impl_->ability_gate(*unit, tick), tick))
         return Result::success(RejectReason::ability_unavailable);
     if (use.ability == AbilityKind::sensor_jamming && !impl_->jammer_ready(*unit, ability, named_ability_locks_))
+        return Result::success(RejectReason::ability_unavailable);
+    if (use.ability == AbilityKind::laser_defense
+        && !impl_->ordinary_handler_ready(*unit, ability, named_ability_locks_, SpecialAbilityKind::laser_defense))
         return Result::success(RejectReason::ability_unavailable);
     if (use.ability == AbilityKind::deploy_squad) {
         AbilityPayload payload;

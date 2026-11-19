@@ -304,6 +304,31 @@ class FinishManifestTests(unittest.TestCase):
                 allowed = finish_kit.check_layer(layer, reviewed, plan, True)
                 self.assertEqual((allowed['mode'], allowed['problems']), ('unreviewed', []))
 
+    def test_staged_layer_takes_the_repo_owned_files_from_the_commit(self):
+        # #7944: a layer folder carried over from the last kit lacks a new template and holds an old one; the private files stay.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            reviewed_files = {'Data/XML/Old.xml': b'new template', 'Data/XML/New.xml': b'added template',
+                              'Data/Audio/take.wav': b'private'}
+            layer, reviewed = self.reviewed_layer(root, {'Data/XML/Old.xml': b'old template', 'Data/Audio/take.wav': b'private'},
+                                                  reviewed_files)
+            plan = {'inputs': {'revised_layer': {'manifest_sha256': 'x'}}}
+            self.assertEqual(finish_kit.check_layer(layer, reviewed, plan, False)['mode'], 'unreviewed')
+            taken = finish_kit.stage_layer(layer, {'Data/XML/Old.xml': b'new template', 'Data/XML/New.xml': b'added template'},
+                                           root / 'staged')
+            self.assertEqual(taken, ['Data/XML/New.xml', 'Data/XML/Old.xml'])
+            self.assertEqual(finish_kit.check_layer(root / 'staged', reviewed, plan, False)['problems'], [])
+            self.assertEqual((layer / 'Data/XML/Old.xml').read_bytes(), b'old template')  # the given folder is not changed
+            again = finish_kit.stage_layer(root / 'staged', {'Data/XML/Old.xml': b'new template'}, root / 'again')
+            self.assertEqual(again, [])
+
+    def test_repo_layer_table_is_the_installers(self):
+        table = finish_kit.repo_layer_table(ROOT / 'tools/install_selection_advisor.py')
+        self.assertIn('Data/XML/RevisedBuildTray.xml', table)
+        self.assertIn('Data/XML/RevisedBuildTrayGroups.xml', table)
+        for template in table.values():
+            self.assertTrue((ROOT / 'tools' / template).is_file(), template)
+
     def make_tree(self, root, files):
         for name, data in files.items():
             path = pathlib.Path(root) / name
@@ -325,6 +350,22 @@ class FinishManifestTests(unittest.TestCase):
             allowed = finish_kit.compare_layout(root / 'kit', root / 'ref', finish_kit.BUILTIN_ALLOW + ['*.lnk', 'extra.txt'])
             self.assertEqual((allowed['added'], allowed['removed']), ([], []))
             self.assertEqual(allowed['allowed_differences'], ['EAWR (Instanced hulls).lnk', 'extra.txt'])
+
+    def test_layout_takes_a_references_files_from_its_sums(self):
+        # #7944: a run of the extracted reference wrote project/tactical.json into it; that is not a file the kit lost.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            delivered = {'EAWR.exe': b'e', 'project/main.tscn': b'm'}
+            sums = ''.join(f'{hashlib.sha256(d).hexdigest()}  {n}\n' for n, d in delivered.items()).encode()
+            self.make_tree(root / 'ref', {**delivered, 'SHA256SUMS': sums, 'project/tactical.json': b'{}'})
+            self.make_tree(root / 'kit', {**delivered, 'SHA256SUMS': sums})
+            found = finish_kit.compare_layout(root / 'kit', root / 'ref', finish_kit.BUILTIN_ALLOW)
+            self.assertEqual((found['added'], found['removed'], found['allowed_differences']), ([], [], []))
+            self.assertEqual((found['reference_unlisted'], found['reference_missing']), (['project/tactical.json'], []))
+            self.assertEqual(found['reference_files'], 3)
+            (root / 'ref/project/main.tscn').unlink()  # a listed file gone from the reference: reported, not hashed
+            damaged = finish_kit.compare_layout(root / 'kit', root / 'ref', finish_kit.BUILTIN_ALLOW)
+            self.assertEqual((damaged['reference_missing'], damaged['removed']), (['project/main.tscn'], []))
 
     def test_safe_render_thread_shortcut_is_a_built_in_allowance(self):
         with tempfile.TemporaryDirectory() as temporary:

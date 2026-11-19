@@ -10,6 +10,7 @@
 #include "eawr/sim/match_identity.hpp"
 #include "eawr/units/galactic_types.hpp"
 
+#include <atomic>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -121,8 +122,25 @@ struct MpAgreement {
 [[nodiscard]] core::Result<MpAgreement> derive_mp_agreement(const MpLocalContent&,
     const sim::galactic::MpRoster&, const MpSessionTerms&);
 
+// #7869: a human joining a loaded save: the faction it plays and the seat id the room agreed for it. With `rejoin` (#7876) the
+// seat is a departed human seat of the save that a joining player takes back.
+struct MpExtraSeat {
+    sim::galactic::PlayerId player{};
+    sim::SeatId seat{};
+    bool rejoin{};
+    friend bool operator==(const MpExtraSeat&, const MpExtraSeat&) = default;
+};
+// Seats the extra humans into a just-restored session (GameSession::admit_human_seats, and reseat_human_seats for the departed
+// seats taken back) and checks that each got exactly the agreed seat id on the agreed faction, else refuses
+// "extra_seat_mismatch". Seats that are already in place (a recovery base saved after the humans joined) are left as they are.
+[[nodiscard]] core::Result<void> admit_mp_extra_seats(GameSession&, std::span<const MpExtraSeat>);
+
 // Derive local installed identities and directly restore, never run placement or player-load fixups.
+// `cancel`, when given, is checked between the phases (roster check, local identity derivation, the other-flavour retry,
+// the state comparison): once it is set the restore stops with the reason restore_cancelled (#7858).
+// `extras` seat the humans that join the loaded save (admit_mp_extra_seats), after the saved state hash has been verified.
 [[nodiscard]] core::Result<MpAgreement> restore_mp_agreement(const MpLocalContent&,
     const sim::galactic::MpRoster&, const MpSessionTerms&, std::span<const std::uint8_t>,
-    const checkpoint::GameResumeMetadata&);
+    const checkpoint::GameResumeMetadata&, const std::atomic<bool>* cancel = nullptr,
+    std::span<const MpExtraSeat> extras = {});
 } // namespace eawr::campaign

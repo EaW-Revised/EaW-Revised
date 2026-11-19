@@ -44,6 +44,11 @@ namespace eawr::sim::tactical {
 
 bool TacticalSession::Impl::jammer_ready(const LiveUnit& unit, const AbilityProfile& ability,
     const NamedAbilityLocks& locks) const {
+    return ordinary_handler_ready(unit, ability, locks, SpecialAbilityKind::sensor_jamming);
+}
+
+bool TacticalSession::Impl::ordinary_handler_ready(const LiveUnit& unit, const AbilityProfile& ability,
+    const NamedAbilityLocks& locks, const SpecialAbilityKind kind) const {
     if (!unit.abilities) return false;
     const auto* profile = abilities.find(unit.state.type_id);
     if (!profile) return false;
@@ -51,7 +56,7 @@ bool TacticalSession::Impl::jammer_ready(const LiveUnit& unit, const AbilityProf
     if (ability.gui_activated_ability_name.empty()) return true;
     for (std::size_t slot = 0; slot < profile->special.size(); ++slot) {
         const auto& handler = profile->special[slot];
-        if (handler.kind != SpecialAbilityKind::sensor_jamming || handler.name != ability.gui_activated_ability_name) continue;
+        if (handler.kind != kind || handler.name != ability.gui_activated_ability_name) continue;
         return !unit.abilities->special.service_cancelled && !unit.abilities->special.slots[slot].cancelled
             && named_ability_enabled(locks, unit.state.owner, unit.state.type_id, handler);
     }
@@ -188,6 +193,11 @@ bool TacticalSession::Impl::heal_in_range(const LiveUnit& source, const LiveUnit
     return within_range({}, closest, reach, RangeMetric::planar);
 }
 
+bool TacticalSession::Impl::heal_source_serves(const LiveUnit& source) const {
+    if (source.durability) return source.durability->hull.raw() > 0;
+    return motion.squadrons.find_squadron(source.state.type_id) != nullptr;
+}
+
 core::Result<void> TacticalSession::Impl::service_healing(std::vector<LiveUnit>& units,
     const std::map<EntityId, ArrivalState>& arriving, const std::uint64_t tick,
     const PartitionExecutor& executor, std::vector<CombatEvent>& events) {
@@ -221,7 +231,7 @@ core::Result<void> TacticalSession::Impl::service_healing(std::vector<LiveUnit>&
         auto& output = scratch.outputs[partition];
         for (auto i = range.begin; i < range.end; ++i) {
             auto& source = units[i];
-            if (!source.abilities || !source.durability || source.durability->hull.raw() <= 0
+            if (!source.abilities || !heal_source_serves(source)
                 || arriving.contains(source.state.entity_id) || source.abilities->special.service_cancelled) continue;
             const auto& handlers = abilities.find(source.state.type_id)->special;
             for (std::size_t slot = 0; slot < handlers.size(); ++slot) {
@@ -311,7 +321,7 @@ core::Result<void> TacticalSession::Impl::select_passive_damage(const UnitStage&
         auto& output = outputs[partition];
         for (auto i = range.begin; i < range.end; ++i) {
             const auto& source = *units[i];
-            if (!source.abilities || !source.durability || source.durability->hull.raw() <= 0
+            if (!source.abilities || !heal_source_serves(source)
                 || arriving.contains(source.state.entity_id) || source.abilities->special.service_cancelled) continue;
             const auto* profile = abilities.find(source.state.type_id);
             if (profile == nullptr) continue;
@@ -1639,6 +1649,9 @@ std::vector<AbilityStatus> TacticalSession::Impl::ability_statuses(const LiveUni
             status.position = slot.position;
             status.active = slot.active;
             status.ready = ability_ready(ability, slot, gate, tick);
+            if (ability.kind == AbilityKind::laser_defense)
+                status.ready = status.ready && ordinary_handler_ready(unit, ability, named_ability_locks,
+                    SpecialAbilityKind::laser_defense);
             if (ability.kind == AbilityKind::blast) {
                 const auto nested = std::find_if(profile.special.begin(), profile.special.end(), [&](const auto& entry) {
                     return entry.kind == SpecialAbilityKind::blast && entry.name == ability.gui_activated_ability_name;

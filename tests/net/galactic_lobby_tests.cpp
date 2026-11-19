@@ -1434,6 +1434,16 @@ void production_file_resume(unsigned workers, bool single_player_rules, bool pen
     for (auto& peer : live) expect(peer->wait_for(5, 30s), "live save fixture reaches tick five");
     if (pending_battle) for (auto& peer : live)
         expect(peer->frame().pending_conflict && !peer->frame().battle, "player save starts at a pending conflict");
+    // The multiplayer prebattle autosave (#7852) runs first at a pending conflict; the explicit save waits for it, as
+    // a second save request while one is in flight is refused as busy.
+    if (pending_battle) {
+        for (auto& peer : live) peer->advance_to(20);
+        for (auto& peer : live) expect(peer->wait_for(20, 30s), "live peers run on to the agreed autosave");
+        const auto autosaves = live[0]->save_outcomes();
+        expect(autosaves.size() == 1, "the host requested one reserved prebattle autosave");
+        expect(!autosaves.empty() && live[0]->wait_save(autosaves.front().token, 30s),
+            "the reserved prebattle autosave finishes before the explicit save");
+    }
     eawr::platform::LiveSaveRequest request;
     request.seat = bindings[0].seat; request.name = "host";
     const auto token = live[0]->request_save(request);
@@ -1521,9 +1531,12 @@ void production_file_resume(unsigned workers, bool single_player_rules, bool pen
     eawr::testing::remove_temp_directory(directory);
 }
 
+// `joiners` humans join the loaded save on faction row 1 (#7869): their bindings carry saved seat 0 and the faction, the
+// backend derives each seat id from the saved seat table, and every peer restores and agrees on the amended game.
 std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay, bool departed = false, unsigned lobby_failure = 0,
-    bool single_player_rules = false) {
-    auto locals = locals_of(count);
+    bool single_player_rules = false, unsigned joiners = 0) {
+    const unsigned total = count + joiners;
+    auto locals = locals_of(total);
     for (auto& local : locals) {
         auto campaign = local->data.campaigns.front();
         campaign.name = "CoopSinglePlayer"; campaign.is_multiplayer = false;
@@ -1568,6 +1581,12 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
     description.faction = roster.players.front().faction; description.seat = bindings.front().seat.value;
     saved.sections.push_back(eawr::platform::save_detail::encode_campaign(description));
     const auto bytes = std::make_shared<const Bytes>(require(eawr::checkpoint::write_checkpoint(saved)));
+    for (unsigned peer = count; peer < total; ++peer) {
+        room.admit(peer, 1, "joiner" + std::to_string(peer));
+        // With a departed saved seat in the save (#7876) the joiner takes that seat back instead of joining the faction.
+        bindings.push_back({peer, departed ? sim::SeatId{count + 11} : sim::SeatId{0}, 1});
+        room.peers[peer].backend->acceptance_final_tick(horizon);
+    }
     auto candidate = require(room.peers[0].backend->inspect_checkpoint(*bytes));
     if (single_player_rules) {
         expect(room.peers[0].backend->campaigns().size() == 2,
@@ -1593,7 +1612,7 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
         && std::any_of(candidate.original_roster.seats.begin(), candidate.original_roster.seats.end(), [](const auto& seat) {
             return seat.player == 3 && seat.kind == sim::SeatKind::ai;
         }), "saved roster retains the non-playable AI and neutral owners");
-    if (workers == 1 && !relay) {
+    if (workers == 1 && !relay && !joiners) {
         auto wrong_seed_room = room.host().snapshot();
         auto wrong_seed_options = require(net::decode_galactic_lobby_game(wrong_seed_room.game));
         ++wrong_seed_options.seed;
@@ -1618,10 +1637,49 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
         if (departed) {
             auto inactive = bindings; inactive.back().seat = sim::SeatId{count + 11};
             const auto inactive_result = room.peers[0].backend->select_checkpoint(room.host().snapshot(), roster, inactive, bytes, 1);
-            expect(!inactive_result && inactive_result.error().message.find("inactive_saved_seat") != std::string::npos, "departed saved human cannot reactivate through mapping");
+            expect(!inactive_result && inactive_result.error().message.find("missing_human_seat") != std::string::npos,
+                "a departed seat taken in place of an active saved human leaves that human unmapped");
         }
     }
     bool selected_by_commit = false;
+    // Backend-level cases of a joining human (#7869), taken on copies so the flow below is unchanged: a joiner on a faction the
+    // save had no human on takes it from its AI (a second human side); a third human side is refused; two joiners claiming one
+    // departed seat are refused.
+    if (!relay && !lobby_failure && !single_player_rules && joiners) {
+        const auto claim = [&](const std::vector<gc::PlayerId>& factions, const bool one_seat) {
+            auto snapshot = room.host().snapshot();
+            auto claimed = bindings;
+            for (std::size_t index = 0; index < factions.size(); ++index) {
+                snapshot.seats[count + index].player = factions[index];
+                claimed[count + index].player = factions[index];
+                if (one_seat) claimed[count + index].seat = claimed[count].seat;
+            }
+            return room.peers[0].backend->prepare_checkpoint(snapshot, roster, claimed, bytes, 1);
+        };
+        if (!departed && joiners == 1) {
+            auto taken = require(claim({2}, false));
+            const auto& session = *taken.agreement->session;
+            const auto seats = session.galaxy().seats();
+            const auto& controllers = session.galaxy().seat_control()->control.controllers;
+            const auto controller = std::find_if(controllers.begin(), controllers.end(), [](const auto& row) { return row.player == 2; });
+            expect(std::any_of(seats.begin(), seats.end(), [](const auto& row) {
+                       return row.player == 2 && row.kind == sim::SeatKind::human && row.active && row.human_side_id != 1; })
+                && std::none_of(seats.begin(), seats.end(), [](const auto& row) {
+                       return row.player == 2 && row.kind == sim::SeatKind::ai && row.active; })
+                && controller != controllers.end() && controller->kind == gc::FactionControl::human,
+                "a joiner on a faction without humans takes it from its AI, as a second human side");
+        }
+        if (!departed && joiners == 2) {
+            const auto third = claim({2, 3}, false);
+            expect(!third && third.error().message.find("third_human_side") != std::string::npos,
+                "a third human side is refused by the backend");
+        }
+        if (departed && joiners == 2) {
+            const auto twice = claim({1, 1}, true);
+            expect(!twice, "two joiners claiming one departed seat are refused");
+            return "refused";
+        }
+    }
     room.all_ready();
     if (workers == 1 && !relay) {
         auto prepared = require(room.peers[0].backend->prepare_checkpoint(room.host().snapshot(), roster, bindings, bytes, 1));
@@ -1719,7 +1777,7 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
         return "cleared";
     }
     for (const auto& seat : room.host().snapshot().seats) expect(!seat.ready, "checkpoint selection clears every ready vote");
-    for (unsigned peer = 0; peer < count; ++peer) {
+    for (unsigned peer = 0; peer < total; ++peer) {
         expect(room.peers[peer].backend->initial_tick() == boundary, "every peer restored completed N");
         expect(room.peers[peer].backend->producer_sequences() == sequences, "logical producer continuation agrees");
     }
@@ -1728,11 +1786,41 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
     for (auto& session : room.sessions) require(session.request(net::LobbyAction::ready, room.revision()));
     room.rounds(300);
     require(room.host().start(room.revision())); room.rounds(300);
-    for (unsigned peer = 1; peer < count; ++peer) require(room.sessions[peer].accept_setup());
+    for (unsigned peer = 1; peer < total; ++peer) require(room.sessions[peer].accept_setup());
     for (unsigned round = 0; round < 1000 && !std::all_of(room.sessions.begin(), room.sessions.end(),
         [](const auto& session) { return session.result_ready(); }); ++round) room.round();
     std::vector<net::LobbyResult> results;
     for (auto& session : room.sessions) results.push_back(require(session.take_result()));
+    if (joiners) {
+        const auto agreed = room.peers[0].agreement()->session->state_sha256();
+        const auto& offered = results[0].setup().offer().seats;
+        for (unsigned peer = 0; peer < total; ++peer) {
+            expect(room.peers[peer].agreement()->session->state_sha256() == agreed
+                && results[peer].setup().adapter().completed_tick() == boundary, "every peer, the joiners included, restores the same amended game");
+            expect(results[peer].setup().offer().seats == offered, "every peer holds the same seat bindings");
+        }
+        for (unsigned extra = count; extra < total; ++extra) {
+            const auto& seats = room.peers[0].agreement()->session->galaxy().seats();
+            const auto found = std::find_if(seats.begin(), seats.end(), [&](const auto& row) { return row.seat_id == offered[extra].seat; });
+            expect(offered[extra].seat.value > 0 && found != seats.end() && found->kind == sim::SeatKind::human && found->active
+                && found->player == 1 && found->human_side_id == 1, "a joining human is a seat of the saved faction, its id derived from the saved table");
+        }
+        std::vector<sim::SeatId> keys;
+        for (unsigned peer = 0; peer < total; ++peer) {
+            const auto key = require(results[peer].setup().session().submit([](auto stamp) {
+                return net::encode_galactic_input(stamp, gc::PauseGalaxy{});
+            }));
+            keys.push_back(key.seat);
+        }
+        for (unsigned round = 0; round < 2000; ++round) {
+            ++room.network.round;
+            for (auto& result : results) require(result.setup().session().pump(room.network.round));
+        }
+        for (unsigned peer = 0; peer < total; ++peer)
+            expect(room.peers[peer].agreement()->session->state_sha256() == room.peers[0].agreement()->session->state_sha256()
+                && keys[peer] == offered[peer].seat, "every seat, joiners included, commands the same continued game");
+        return room.peers[0].agreement()->session->state_sha256();
+    }
     for (unsigned peer = 0; peer < count; ++peer) {
         expect(results[peer].setup().adapter().completed_tick() == boundary, "setup hash barrier never steps restored owner");
         expect(room.peers[peer].agreement()->session->state_sha256() == source.session->state_sha256()
@@ -4136,6 +4224,11 @@ int main(int argc, char** argv) {
         for (const auto workers : {1U, 2U, 4U, 8U})
             for (const bool sp : {false, true}) production_file_resume(workers, sp);
         for (const auto workers : {1U, 2U, 4U, 8U}) production_file_resume(workers, false, true);
+        for (const unsigned joiners : {1U, 2U}) static_cast<void>(checkpoint_room_resume(1, 2, false, false, 0, false, joiners));
+        static_cast<void>(checkpoint_room_resume(1, 2, false, true, 0, false, 1)); // #7876: a joiner takes the departed seat back
+        static_cast<void>(checkpoint_room_resume(1, 2, false, true, 0, false, 2)); // two joiners claim the one departed seat
+        static_cast<void>(checkpoint_room_resume(4, 2, false, true, 0, false, 1));
+        static_cast<void>(checkpoint_room_resume(4, 2, false, false, 0, false, 1));
         static_cast<void>(checkpoint_room_resume(1, 2, false, false, 1));
         static_cast<void>(checkpoint_room_resume(1, 2, false, false, 2));
         static_cast<void>(checkpoint_room_resume(1, 3, false, false, 3));

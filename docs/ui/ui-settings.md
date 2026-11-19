@@ -308,6 +308,14 @@ tour, which stays on the camera button. The pause button, the paused banner and 
 Game button work in both settings. The key reads the setting each time it is used, so a
 change applies without a restart.
 
+**Galactic build tray** (GBT-13) is a default-on checkbox in Options > Tweaks, stored as
+`gameplay.galactic_build_tray`: -1 untouched, 0 off, 1 on. An untouched value follows the active layer's
+`Enabled_By_Default` in `RevisedBuildTray.xml` (on when no valid file exists), so a mod can ship the
+tray off; clicking the checkbox stores an explicit choice, which wins. Apply/Accept saves it, Cancel
+discards edits and Defaults returns to the untouched state. The layer default is never saved. The
+switch applies at once; the tray itself arrives with the later build tray slices
+([spec](galactic-build-tray.md)).
+
 ### Tweaks defaults (owner decision 2026-11-17)
 
 All six Options > Tweaks preferences now default on: selection hotkeys, owner names

@@ -746,18 +746,55 @@ ResumeDigest resume_terms(const net::SaveManifest& manifest, const net::LobbySna
     }
     return core::sha256(bytes);
 }
+// The humans joining a loaded save (#7869) and the seat ids the saved table gives them, in peer order; a peer taking back a
+// departed saved seat (#7876) keeps the saved seat its binding names.
+std::vector<campaign::MpExtraSeat> extra_seat_plan(const checkpoint::GameResumeMetadata& metadata,
+    std::span<const net::GalacticExtraSeat> extras, std::span<const net::SetupSeat> bindings) {
+    std::vector<sim::galactic::PlayerId> players;
+    for (const auto& extra : extras) if (!extra.rejoin) players.push_back(extra.player);
+    const auto plan = sim::galactic::plan_seat_admissions(metadata.seats, players, 0);
+    std::vector<campaign::MpExtraSeat> result;
+    std::size_t next = 0;
+    for (const auto& extra : extras) {
+        if (extra.rejoin) result.push_back({extra.player, extra.peer < bindings.size() ? bindings[extra.peer].seat : sim::SeatId{}, true});
+        else result.push_back({extra.player, plan[next++].key.seat, false});
+    }
+    return result;
+}
 core::Result<void> saved_bindings(const checkpoint::GameResumeMetadata& metadata, const net::SaveManifest& manifest,
-    const net::LobbySnapshot& snapshot) {
+    const net::LobbySnapshot& snapshot, std::span<const net::GalacticExtraSeat> extras = {}) {
     const auto humans = static_cast<std::size_t>(std::count_if(metadata.seats.begin(), metadata.seats.end(),
         [](const auto& row) { return row.kind == sim::SeatKind::human && row.active; }));
-    if (manifest.offer.seats.size() < humans || snapshot.seats.size() < humans) return resume_refusal<void>("missing_human_seat");
-    if (manifest.offer.seats.size() > humans || snapshot.seats.size() > humans) return resume_refusal<void>("extra_human_seat");
-    if (manifest.peers.size() != humans) return resume_refusal<void>("peer_mapping_mismatch");
+    const auto total = humans + extras.size();
+    if (manifest.offer.seats.size() < total || snapshot.seats.size() < total) return resume_refusal<void>("missing_human_seat");
+    if (manifest.offer.seats.size() > total || snapshot.seats.size() > total) return resume_refusal<void>("extra_human_seat");
+    if (manifest.peers.size() != total) return resume_refusal<void>("peer_mapping_mismatch");
+    for (const auto& extra : extras)
+        if (extra.peer >= manifest.offer.seats.size()) return resume_refusal<void>("peer_mapping_mismatch");
+    const auto plan = extra_seat_plan(metadata, extras, manifest.offer.seats);
     std::set<sim::SeatId> mapped;
     for (std::size_t i = 0; i < manifest.offer.seats.size(); ++i) {
         const auto& binding = manifest.offer.seats[i];
         if (binding.peer != i || manifest.peers[i] != snapshot.seats[i].peer)
             return resume_refusal<void>("authenticated_peer_mapping_mismatch");
+        if (const auto extra = std::find_if(extras.begin(), extras.end(), [&](const auto& row) { return row.peer == i; });
+            extra != extras.end()) {
+            const auto& expected = plan[static_cast<std::size_t>(extra - extras.begin())];
+            if (extra->rejoin) {
+                // A departed saved human seat that a joining player takes back (#7876).
+                if (!mapped.insert(binding.seat).second) return resume_refusal<void>("duplicate_saved_seat");
+                const auto departed = std::find_if(metadata.seats.begin(), metadata.seats.end(), [&](const auto& row) { return row.seat_id == binding.seat; });
+                if (departed == metadata.seats.end() || departed->kind != sim::SeatKind::human) return resume_refusal<void>("unknown_saved_human_seat");
+                if (departed->active) return resume_refusal<void>("saved_seat_not_departed");
+                if (departed->player != binding.player || snapshot.seats[i].player != binding.player || extra->player != binding.player)
+                    return resume_refusal<void>("saved_faction_mismatch");
+                continue;
+            }
+            if (binding.seat != expected.seat || binding.player != expected.player || snapshot.seats[i].player != expected.player)
+                return resume_refusal<void>("extra_seat_mismatch");
+            if (!mapped.insert(binding.seat).second) return resume_refusal<void>("duplicate_saved_seat");
+            continue;
+        }
         if (!mapped.insert(binding.seat).second) return resume_refusal<void>("duplicate_saved_seat");
         const auto found = std::find_if(metadata.seats.begin(), metadata.seats.end(), [&](const auto& row) { return row.seat_id == binding.seat; });
         if (found == metadata.seats.end() || found->kind != sim::SeatKind::human) return resume_refusal<void>("unknown_saved_human_seat");
@@ -826,13 +863,24 @@ net::GalacticRecoveryWorker::Restore GalacticLobbyBackend::recovery_factory(cons
     auto payload = net::decode_galactic_setup(offer.setup);
     const auto prepared = agreement();
     if (!payload || !prepared || !prepared->plan) return {};
+    // The humans that joined the loaded save (#7869): the returner seats them again unless its base already holds them.
+    std::vector<campaign::MpExtraSeat> extras;
+    for (const auto& extra : payload.value().extra_seats) {
+        if (extra.peer >= offer.seats.size()) return {};
+        extras.push_back({extra.player, offer.seats[extra.peer].seat, extra.rejoin});
+    }
     // Capture immutable plan/content closures, never the live agreement/session.
     return [restore = local_.restore_session, plan = prepared->plan, difficulty = payload.value().roster.difficulty,
-        workers, clock_policy](const net::GalacticRecoveryPackage& package) -> core::Result<std::unique_ptr<net::SessionAdapter>> {
+        workers, clock_policy, extras = std::move(extras), initial_tick = payload.value().initial_tick](const net::GalacticRecoveryPackage& package) -> core::Result<std::unique_ptr<net::SessionAdapter>> {
         if (!package.bytes) return resume_refusal<std::unique_ptr<net::SessionAdapter>>("checkpoint_unavailable");
         auto restored = restore(*plan, difficulty, *package.bytes);
         if (!restored) return core::Result<std::unique_ptr<net::SessionAdapter>>::failure(restored.error());
         auto owner = std::move(restored).value();
+        // Only the agreed checkpoint itself needs the joiners seated; a base saved later already holds them (or, for a seat that
+        // left again, must not be given back).
+        if (owner.session->completed_tick() == initial_tick)
+            if (auto admitted = campaign::admit_mp_extra_seats(*owner.session, extras); !admitted)
+                return core::Result<std::unique_ptr<net::SessionAdapter>>::failure(admitted.error());
         auto executor = std::make_shared<platform::ThreadWorkerAdapter>(workers);
         net::GalacticAdapterOptions options; options.clock_policy = clock_policy;
         auto adapter = net::GalacticSessionAdapter::owned(std::move(owner.session), std::move(executor), options,
@@ -849,7 +897,11 @@ std::map<sim::SeatId, std::uint64_t> GalacticLobbyBackend::producer_sequences() 
 }
 core::Result<GalacticLobbyBackend::PreparedCheckpoint> GalacticLobbyBackend::prepare_checkpoint(const net::LobbySnapshot& snapshot,
     sim::galactic::MpRoster roster, std::vector<net::SetupSeat> bindings,
-    std::shared_ptr<const std::vector<std::uint8_t>> bytes, std::uint64_t epoch) const {
+    std::shared_ptr<const std::vector<std::uint8_t>> bytes, std::uint64_t epoch, const std::atomic<bool>* cancel) const {
+    // The host's Cancel restore stops the work at these phase boundaries: before parsing, after parsing, after the metadata, after the
+    // restore itself (restore_mp_agreement also checks between its own phases), and before the offer is built (#7858).
+    const auto stopped = [cancel] { return cancel && cancel->load(std::memory_order_acquire); };
+    const auto cancelled = [] { return resume_refusal<PreparedCheckpoint>("restore_cancelled"); };
     if (!ensure()) return unavailable<PreparedCheckpoint>(load_error());
     if (snapshot.phase != net::LobbyPhase::staging || snapshot.host != 0 || !epoch
         || !bytes || bytes->empty() || bytes->size() > net::save_transfer_limit)
@@ -857,12 +909,33 @@ core::Result<GalacticLobbyBackend::PreparedCheckpoint> GalacticLobbyBackend::pre
     auto options = net::decode_galactic_lobby_game(snapshot.game);
     if (!options) return core::Result<PreparedCheckpoint>::failure(options.error());
     const auto terms = terms_for(options.value().seed, local_.command_quota, local_.byte_quota);
+    if (stopped()) return cancelled();
     auto parsed = checkpoint::parse_checkpoint(*bytes);
     if (!parsed) return core::Result<PreparedCheckpoint>::failure(parsed.error());
+    if (stopped()) return cancelled();
     auto metadata_result = checkpoint::inspect_game_resume(parsed.value());
     if (!metadata_result) return core::Result<PreparedCheckpoint>::failure(metadata_result.error());
-    auto restored = campaign::restore_mp_agreement(local_, roster, terms, *bytes, metadata_result.value());
+    if (stopped()) return cancelled();
+
+    // A peer the host marked "join <faction>" (saved seat 0, the faction in `player`) is a human joining the loaded save:
+    // its seat id comes from the saved seat table, never from the viewer (#7869).
+    // A peer mapped to a departed (inactive) saved human seat takes that seat back (#7876).
+    std::vector<net::GalacticExtraSeat> extras;
+    for (const auto& binding : bindings) {
+        const auto saved = std::find_if(metadata_result.value().seats.begin(), metadata_result.value().seats.end(),
+            [&](const auto& row) { return row.seat_id == binding.seat; });
+        if (binding.seat.value == 0) extras.push_back({binding.peer, binding.player, false});
+        else if (saved != metadata_result.value().seats.end() && saved->kind == sim::SeatKind::human && !saved->active)
+            extras.push_back({binding.peer, binding.player, true});
+    }
+    const auto extra_plan = extra_seat_plan(metadata_result.value(), extras, bindings);
+    for (std::size_t i = 0; i < extras.size(); ++i) {
+        if (extras[i].peer >= bindings.size()) return resume_refusal<PreparedCheckpoint>("peer_mapping_mismatch");
+        bindings[extras[i].peer].seat = extra_plan[i].seat;
+    }
+    auto restored = campaign::restore_mp_agreement(local_, roster, terms, *bytes, metadata_result.value(), cancel, extra_plan);
     if (!restored) return core::Result<PreparedCheckpoint>::failure(restored.error());
+    if (stopped()) return cancelled();
     auto agreement = std::make_shared<campaign::MpAgreement>(std::move(restored).value());
     const auto& metadata = *agreement->resume;
     net::SaveManifest manifest; manifest.epoch = epoch; manifest.byte_length = bytes->size();
@@ -870,9 +943,10 @@ core::Result<GalacticLobbyBackend::PreparedCheckpoint> GalacticLobbyBackend::pre
     manifest.offer.domain = net::galactic_setup_domain; manifest.offer.seed = options.value().seed;
     manifest.offer.input_delay = options.value().input_delay; manifest.offer.final_tick_count = final_tick_count();
     manifest.offer.seats = std::move(bindings);
-    if (auto bound = saved_bindings(metadata, manifest, snapshot); !bound)
+    if (auto bound = saved_bindings(metadata, manifest, snapshot, extras); !bound)
         return core::Result<PreparedCheckpoint>::failure(bound.error());
     net::GalacticSetupPayload payload; payload.roster = std::move(roster); payload.roster.tick_zero = metadata.state_digest;
+    payload.extra_seats = extras;
     payload.start = net::GalacticStart::checkpoint; payload.initial_tick = metadata.completed_tick;
     payload.checkpoint_digest = core::sha256(*bytes); payload.state_digest = metadata.state_digest;
     payload.frontier_digest = metadata.frontier_digest; payload.terms_digest = resume_terms(manifest, snapshot);
@@ -939,7 +1013,7 @@ std::optional<GalacticLobbyBackend::CheckpointView> GalacticLobbyBackend::checkp
         manifest->offer.seats, manifest->peers};
 }
 void GalacticLobbyBackend::clear_checkpoint() {
-    resume_.reset(); restore_job_.reset(); cancel_transfer_ = true; ++selection_epoch_;
+    resume_.reset(); abandon_restore_job(); cancel_transfer_ = true; ++selection_epoch_;
     { const std::lock_guard lock(mutex_); agreement_.reset(); }
     { const std::lock_guard lock(preparation_mutex_); preparation_.reset(); }
 }
@@ -947,7 +1021,10 @@ core::Result<std::vector<net::SetupSeat>> GalacticLobbyBackend::bind_setup_seats
     const std::vector<net::SetupSeat>& ordinary) const {
     using Result = core::Result<std::vector<net::SetupSeat>>;
     if (!resume_) return Result::success(ordinary);
-    if (auto valid = saved_bindings(*resume_->agreement->resume, resume_->manifest, snapshot); !valid) return Result::failure(valid.error());
+    const auto resumed = net::decode_galactic_setup(resume_->manifest.offer.setup);
+    if (!resumed) return Result::failure(resumed.error());
+    if (auto valid = saved_bindings(*resume_->agreement->resume, resume_->manifest, snapshot, resumed.value().extra_seats); !valid)
+        return Result::failure(valid.error());
     if (!same_resume_room(resume_->snapshot, snapshot)) return resume_refusal<std::vector<net::SetupSeat>>("selection_or_membership_changed");
     return Result::success(resume_->manifest.offer.seats);
 }
@@ -966,12 +1043,13 @@ core::Result<void> GalacticLobbyBackend::restore_transfer(const net::SaveManifes
     auto metadata_result = checkpoint::inspect_game_resume(parsed.value());
     if (!metadata_result) return core::Result<void>::failure(metadata_result.error());
     auto agreement = campaign::restore_mp_agreement(local_, payload.value().roster,
-        terms_for(manifest.offer.seed, payload.value().command_quota, payload.value().byte_quota), bytes, metadata_result.value());
+        terms_for(manifest.offer.seed, payload.value().command_quota, payload.value().byte_quota), bytes, metadata_result.value(), nullptr,
+        extra_seat_plan(metadata_result.value(), payload.value().extra_seats, manifest.offer.seats));
     if (!agreement) return core::Result<void>::failure(agreement.error());
     const auto& metadata = *agreement.value().resume;
     if (metadata.completed_tick != payload.value().initial_tick || metadata.state_digest != payload.value().state_digest
         || metadata.frontier_digest != payload.value().frontier_digest) return resume_refusal<void>("restored_hash_or_frontier_mismatch");
-    if (auto bound = saved_bindings(metadata, manifest, snapshot); !bound) return bound;
+    if (auto bound = saved_bindings(metadata, manifest, snapshot, payload.value().extra_seats); !bound) return bound;
     bind_resume_identity(agreement.value(), payload.value());
     const sim::MatchAgreement identity{std::string(core::build_identity()), agreement.value().content};
     if (auto mismatch = sim::describe_mismatch(manifest.offer.identity, identity)) return core::Result<void>::failure(*mismatch);
@@ -988,16 +1066,34 @@ struct GalacticLobbyBackend::RestoreJob {
     net::SaveManifest manifest;
     net::GalacticSetupPayload payload;
     std::shared_ptr<const std::vector<std::uint8_t>> bytes;
+    std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
     std::atomic<bool> done{};
+    std::atomic<bool> cancel{};   // set when the restore is abandoned: the worker stops at its next phase boundary
     std::optional<core::Result<campaign::MpAgreement>> result; // written once by the worker before `done`
 };
+std::optional<std::chrono::steady_clock::duration> GalacticLobbyBackend::restore_elapsed() const {
+    if (!restore_job_ || restore_job_->done.load(std::memory_order_acquire)) return std::nullopt;
+    return std::chrono::steady_clock::now() - restore_job_->started;
+}
+bool GalacticLobbyBackend::restore_finishing() const {
+    return cancelled_restore_job_ && !cancelled_restore_job_->done.load(std::memory_order_acquire);
+}
+void GalacticLobbyBackend::abandon_restore_job() {
+    if (!restore_job_) return;
+    if (!restore_job_->done.load(std::memory_order_acquire)) {
+        restore_job_->cancel.store(true, std::memory_order_release);
+        cancelled_restore_job_ = std::move(restore_job_);
+    }
+    restore_job_.reset();
+}
 core::Result<bool> GalacticLobbyBackend::restore_transfer_async(const net::SaveManifest& manifest,
     std::shared_ptr<const std::vector<std::uint8_t>> bytes) {
     using Result = core::Result<bool>;
     if (!pumping_snapshot_) return core::Result<bool>::failure(net::lobby_diagnostic(net::LobbyReason::setup_failed, "checkpoint: no_room_snapshot"));
     const auto& snapshot = *pumping_snapshot_;
-    if (restore_job_ && restore_job_->epoch != manifest.epoch) restore_job_.reset(); // a newer selection: the old result is dropped
+    if (restore_job_ && restore_job_->epoch != manifest.epoch) abandon_restore_job(); // a newer selection: the old result is dropped
     if (!restore_job_) {
+        if (restore_finishing()) return Result::success(false);   // the cancelled worker is still ending: wait, never two restores at once
         if (!ensure()) return Result::failure(unavailable<void>(load_error()).error());
         auto payload = net::decode_galactic_setup(manifest.offer.setup);
         if (!payload) return Result::failure(payload.error());
@@ -1019,12 +1115,17 @@ core::Result<bool> GalacticLobbyBackend::restore_transfer_async(const net::SaveM
                         const auto& file = *job->bytes;
                         if (core::sha256(file) != job->payload.checkpoint_digest)
                             return resume_refusal<campaign::MpAgreement>("selection_mapping_or_file_digest_mismatch");
+                        const auto stopped = [&] { return job->cancel.load(std::memory_order_acquire); };
+                        if (stopped()) return resume_refusal<campaign::MpAgreement>("restore_cancelled");
                         auto parsed = checkpoint::parse_checkpoint(file);
                         if (!parsed) return core::Result<campaign::MpAgreement>::failure(parsed.error());
+                        if (stopped()) return resume_refusal<campaign::MpAgreement>("restore_cancelled");
                         auto metadata = checkpoint::inspect_game_resume(parsed.value());
                         if (!metadata) return core::Result<campaign::MpAgreement>::failure(metadata.error());
+                        if (stopped()) return resume_refusal<campaign::MpAgreement>("restore_cancelled");
                         return campaign::restore_mp_agreement(job->local, job->payload.roster,
-                            terms_for(job->manifest.offer.seed, job->payload.command_quota, job->payload.byte_quota), file, metadata.value());
+                            terms_for(job->manifest.offer.seed, job->payload.command_quota, job->payload.byte_quota), file, metadata.value(),
+                            &job->cancel, extra_seat_plan(metadata.value(), job->payload.extra_seats, job->manifest.offer.seats));
                     } catch (const std::exception& failure) {
                         return resume_refusal<campaign::MpAgreement>(std::string("restore_failed: ") + failure.what());
                     } catch (...) {
@@ -1057,7 +1158,7 @@ core::Result<bool> GalacticLobbyBackend::restore_transfer_async(const net::SaveM
     if (metadata.completed_tick != payload.initial_tick || metadata.state_digest != payload.state_digest
         || metadata.frontier_digest != payload.frontier_digest)
         return Result::failure(resume_refusal<void>("restored_hash_or_frontier_mismatch").error());
-    if (auto bound = saved_bindings(metadata, manifest, snapshot); !bound) return Result::failure(bound.error());
+    if (auto bound = saved_bindings(metadata, manifest, snapshot, payload.extra_seats); !bound) return Result::failure(bound.error());
     bind_resume_identity(agreement, payload);
     const sim::MatchAgreement identity{std::string(core::build_identity()), agreement.content};
     if (auto mismatch = sim::describe_mismatch(manifest.offer.identity, identity)) return Result::failure(*mismatch);
@@ -1078,13 +1179,13 @@ void GalacticLobbyBackend::pump_transfer(net::MessageTransport& transport, const
     } pumping(*this, snapshot);
     if (const auto cleared = transfer_->take_cleared_epoch(); cleared && (!resume_ || resume_->manifest.epoch <= *cleared)) {
         resume_.reset();
-        if (restore_job_ && restore_job_->epoch <= *cleared) restore_job_.reset();
+        if (restore_job_ && restore_job_->epoch <= *cleared) abandon_restore_job();
         ++selection_epoch_;
         const std::lock_guard lock(mutex_); agreement_.reset();
     }
     if (cancel_transfer_) {
         trace_checkpoint("cancel", "now=" + std::to_string(now) + " reason=selection_cleared");
-        transfer_->cancel(transport, "selection_cleared"); transfer_->reset(); restore_job_.reset(); cancel_transfer_ = false;
+        transfer_->cancel(transport, "selection_cleared"); transfer_->reset(); abandon_restore_job(); cancel_transfer_ = false;
     }
     if (resume_ && resume_->bytes && transfer_->requested_epoch() != resume_->manifest.epoch) {
         trace_checkpoint_once("select-attempt", std::to_string(resume_->manifest.epoch),
@@ -1112,7 +1213,7 @@ void GalacticLobbyBackend::pump_transfer(net::MessageTransport& transport, const
     // Background refusals arrive without a foreground receive callback.
     if (const auto progress = transfer_->view(); progress.refusal) {
         if (progress.refusal->message == "checkpoint transfer: selection_cleared") {
-            resume_.reset(); transfer_->reset(); restore_job_.reset(); ++selection_epoch_;
+            resume_.reset(); transfer_->reset(); abandon_restore_job(); ++selection_epoch_;
         }
         const std::lock_guard lock(mutex_); agreement_.reset();
     }
@@ -1135,7 +1236,7 @@ void GalacticLobbyBackend::receive_transfer(net::MessageTransport& transport, co
         const auto error = *transfer_->view().refusal;
         if (received.from == snapshot.host && received.frame.front() == net::save_cancel_kind
             && error.message == "checkpoint transfer: selection_cleared") {
-            resume_.reset(); transfer_->reset(); restore_job_.reset(); ++selection_epoch_;
+            resume_.reset(); transfer_->reset(); abandon_restore_job(); ++selection_epoch_;
         }
         const std::lock_guard lock(mutex_); agreement_.reset();
     }

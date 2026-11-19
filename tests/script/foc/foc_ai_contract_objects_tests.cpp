@@ -1846,7 +1846,7 @@ end
     }
     // Dynamic completed-world queries must diagnose rather than silently read t-1.
     const sim::InlineExecutor executor;
-    for (const auto* query : {"Object.Get_Owner().Get_Credits()", "Find_Nearest(Object,Object.Get_Owner(),false)"}) {
+    for (const auto* query : {"Object.Get_Owner().Get_Tech_Level()", "Find_Nearest(Object,Object.Get_Owner(),false)"}) {
         auto guarded_modules = modules;
         guarded_modules["Data/Scripts/GameObject/RENAMED_TURN_PROBE.lua"] =
             std::string("function Base_Definitions() ServiceRate=0 end\n")

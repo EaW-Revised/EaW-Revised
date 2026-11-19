@@ -116,8 +116,9 @@ void unit_losses() {
         {"Samples", "synthetic.wav"}, {"Overlap_Test", "Shared_Advisor"}}, problems);
     registry.add("Ship_Lost", std::vector<Field>{{"Is_3D", "No"}, {"Is_2D", "Yes"},
         {"Samples", "synthetic.wav"}, {"Overlap_Test", "Shared_Advisor"}}, problems);
-    const std::map<int, const audio::SfxEvent*> authored{
-        {11, registry.find("Structure_Lost")}, {12, registry.find("Ship_Lost")}, {13, nullptr}};
+    struct TypeSounds { const audio::SfxEvent* unit_lost{}; };
+    const std::map<int, TypeSounds> authored{
+        {11, {registry.find("Structure_Lost")}}, {12, {registry.find("Ship_Lost")}}, {13, {nullptr}}};
     struct Loss { int owner{}, type{}; std::uint64_t count{}; };
     const std::array losses{Loss{2, 11, 1}, Loss{1, 11, 2}, Loss{1, 12, 1},
         Loss{1, 13, 1}, Loss{1, 99, 1}, Loss{1, 11, 0}};
@@ -125,11 +126,9 @@ void unit_losses() {
     audio::Random random(7);
     std::vector<std::string> requested;
     std::vector<Result> admitted;
-    audio::present_unit_losses(losses, 1,
-        [&authored](int type) -> const audio::SfxEvent* {
-            const auto found = authored.find(type);
-            return found == authored.end() ? nullptr : found->second;
-        }, [&](const audio::SfxEvent* cue) {
+    audio::present_unit_losses(losses, 1, authored,
+        [&](const audio::SfxEvent* cue, std::nullopt_t, bool hidden, const char* reason) {
+            expect(!hidden && std::string_view(reason) == "unit_lost", "BA-65: ordinary unhidden loss request");
             requested.push_back(cue->name);
             admitted.push_back(queue.admit({{cue, {}}}, random).result);
         });

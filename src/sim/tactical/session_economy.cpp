@@ -128,7 +128,7 @@ CombatBonuses TacticalSession::Impl::profile_bonuses(const OwnershipKey key, con
             if (!allied(account.player, key.first)) continue;
             for (const auto& held : account.completed) {
                 const auto container = containers.find(held.station);
-                if (container == containers.end() || container->second == key.second) continue;
+                if (held.script_identity == 0 && (container == containers.end() || container->second == key.second)) continue;
                 if (retained_only) {
                     const auto previous = std::find_if(ledgers.begin(), ledgers.end(),
                         [&](const auto& old) { return old.player == account.player; });
@@ -138,7 +138,7 @@ CombatBonuses TacticalSession::Impl::profile_bonuses(const OwnershipKey key, con
                     });
                     if (old == previous->completed.end()) continue;
                     const auto host = handles.find(old->station);
-                    if (host == handles.end() || registry.get<Identity>(host->second).type_id == key.second) continue;
+                    if (old->script_identity == 0 && (host == handles.end() || registry.get<Identity>(host->second).type_id == key.second)) continue;
                 }
                 const auto* upgrade = economy.upgrade(held.type);
                 if (upgrade == nullptr) continue;
@@ -276,6 +276,8 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
     std::vector<PlayerContribution> contributions;
     for (auto& part : player_parts) contributions.insert(contributions.end(),
         std::make_move_iterator(part.begin()), std::make_move_iterator(part.end()));
+    // WBR-01: the total order starts with the source ID, so an equal-magnitude tie below is won by the lowest
+    // source ID whatever partition produced each entry.
     std::sort(contributions.begin(), contributions.end());
     contributions.erase(std::unique(contributions.begin(), contributions.end()), contributions.end());
     std::map<std::pair<PlayerId, std::uint32_t>, std::array<std::optional<Fixed>, 2>> reduced;
@@ -285,9 +287,17 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
         for (std::size_t i = 0; i < values.size(); ++i) {
             if (incoming[i] == Fixed{}) continue;
             if (!values[i]) values[i] = incoming[i];
-            // WGT-50 / WHE-55: zero is an ordinary stacking category too.
-            // Each category keeps its greatest source contribution; categories add.
-            else values[i] = std::max(*values[i], incoming[i]);
+            // WGT-50 / WBR-01: defence keeps the signed maximum; player reveal
+            // keeps the greatest magnitude. Strict comparison retains stable source
+            // order for ties; zero is an ordinary category and categories add.
+            else if (i == 0) values[i] = std::max(*values[i], incoming[i]);
+            else {
+                const auto magnitude = [](Fixed value) {
+                    const auto raw = static_cast<std::uint64_t>(value.raw());
+                    return value < Fixed{} ? std::uint64_t{0} - raw : raw;
+                };
+                if (magnitude(incoming[i]) > magnitude(*values[i])) values[i] = incoming[i];
+            }
         }
     }
     for (const auto& [key, values] : reduced) {
@@ -299,11 +309,6 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
                 at = result.reveal_multipliers.insert(at, {key.first, Fixed::from_raw(Fixed::scale)});
             auto sum = math::add(at->second, *values[1]); if (!sum) return Result::failure(sum.error()); at->second = sum.value();
         }
-    }
-    for (const auto& [player, multiplier] : result.reveal_multipliers) {
-        (void)player;
-        if (multiplier < Fixed{}) return Result::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
-            "campaign reveal modifier sum is negative"));
     }
     if (!result.reveal_multipliers.empty()) if (auto valid=validate_sensors(sensors,result.reveal_multipliers); !valid) return Result::failure(valid.error());
     return Result::success(std::move(result));
@@ -395,6 +400,7 @@ bool TacticalSession::Impl::prune_upgrade_holders(std::vector<PlayerEconomy>& ac
         bool changed = false;
         for (auto& account : accounts) {
             std::erase_if(account.completed, [&](CompletedBuild& held) {
+                if (held.script_identity != 0) return false; // SSU-03: no station owns a direct-created object.
                 const auto current = std::lower_bound(live.begin(), live.end(), held.station,
                     [](const LiveUnit& unit, const EntityId id) { return unit.state.entity_id < id; });
                 if (current != live.end() && current->state.entity_id == held.station) return false;
@@ -1433,6 +1439,33 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
         };
         auto* ledger = ledger_of(stage.ledgers, issuer);
         const auto player = economy.player_at(issuer, tick);
+        if (const auto* created = std::get_if<ScriptCreateObjectPayload>(&command.payload)) {
+            // SSU-03: the hosted factory currently admits ordinary space upgrade objects.
+            // Queue completion's lifetime, tech and previous-level bookkeeping is not a factory action.
+            // A staged wrapper has already been returned: execution failure aborts the whole tick.
+            const auto* profile = economy.upgrade(created->type);
+            auto* owner = ledger_of(stage.ledgers, created->owner);
+            if (ledger == nullptr || !player || setup.domain != BattleDomain::space || owner == nullptr
+                || profile == nullptr || profile->level_up || !profile->bounties.empty()
+                || economy.disabled_types.contains(created->type))
+                return Void::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+                    "script object factory cannot create the requested type for this player"));
+            if (stage.next_id == invalid_entity_id || (stage.next_id & script_creation_namespace) != 0)
+                return Void::failure(detail::diagnostic(diagnostic_codes::resource_limit,
+                    "script object factory physical identity space exhausted"));
+            for (const auto& account : stage.ledgers) for (const auto& held : account.completed)
+                if (held.script_identity == created->identity)
+                    return Void::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+                        "script object factory creation reference is already retained"));
+            CompletedBuild held;
+            held.type = created->type;
+            held.object = stage.next_id++;
+            held.script_identity = created->identity;
+            held.script_position = created->position;
+            owner->completed.push_back(std::move(held));
+            event.unit = created->identity;
+            return finish(RejectReason::none);
+        }
         if (ledger == nullptr || !player) return finish(RejectReason::no_economy);
         if (auto handled = execute_economy_transfers(*this, command, tick, staged, stage, events, ledger, player, finish); handled)
             return std::move(*handled);

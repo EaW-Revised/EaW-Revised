@@ -117,9 +117,11 @@ func _close_preview() -> void:
 try:
     from . import test_viewer_planet_hud_runtime as support
     from . import test_viewer_galactic_radar_runtime as native
+    from . import test_viewer_galactic_pause_banner_runtime as campaign_support
 except ImportError:
     import test_viewer_planet_hud_runtime as support
     import test_viewer_galactic_radar_runtime as native
+    import test_viewer_galactic_pause_banner_runtime as campaign_support
 
 
 @unittest.skipUnless(support.RUNTIME and support.GAME_ROOT, "requires GPU viewer and installed FoC")
@@ -138,6 +140,130 @@ class GalacticCorruptionHudRuntime(unittest.TestCase):
         for index, point in enumerate(points):
             events.extend([[1.0 + index * .3, point, 1, True], [1.05 + index * .3, point, 1, False]])
         return native.GalacticRadarRuntime.native_run(self, events, fixture=fixture)
+
+    def test_live_information_open_submits_once_until_cancel_and_reopen(self):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-corruption-open-notices-"))
+        report, capture, driver = directory / "report.json", directory / "capture.png", directory / "driver.gd"
+        facts_path = directory / "click-facts.json"
+        script = r"""extends SceneTree
+var viewport: SubViewport
+var elapsed = 0.0
+var phase = 0
+var icon: Control
+var point = Vector2.ZERO
+var facts = {"notices": []}
+func _initialize():
+    viewport = SubViewport.new()
+    viewport.size = Vector2i(1280,720)
+    viewport.handle_input_locally = true
+    viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+    root.add_child(viewport)
+    viewport.add_child(load(ProjectSettings.get_setting("application/run/main_scene")).instantiate())
+    viewport.notify_mouse_entered()
+    current_scene = viewport
+func mouse(down):
+    var motion = InputEventMouseMotion.new()
+    motion.position = point
+    motion.global_position = point
+    viewport.push_input(motion,true)
+    var event = InputEventMouseButton.new()
+    event.button_index = MOUSE_BUTTON_LEFT
+    event.pressed = down
+    event.position = point
+    event.global_position = point
+    viewport.push_input(event,true)
+func modal():
+    return root.find_child("corruption_modal",true,false)
+func count_notice():
+    facts["notices"].append(int(modal().get_meta("open_notices_submitted",0)))
+func advance(value):
+    phase = value
+    elapsed = 0
+func finish():
+    var file = FileAccess.open(FACTS,FileAccess.WRITE)
+    file.store_string(JSON.stringify(facts))
+    file.close()
+    viewport.get_texture().get_image().save_png(SHOT)
+    current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+    quit()
+func _process(delta) -> bool:
+    elapsed += delta
+    if elapsed > 45:
+        facts["timeout"] = phase
+        finish()
+        return false
+    if phase == 0 and elapsed > 8:
+        for candidate in root.find_children("planet_corruption_icon_*","",true,false):
+            if candidate.is_visible_in_tree() and candidate.get_meta("information_only",false) and Rect2(0,0,1280,520).encloses(candidate.get_global_rect()):
+                icon = candidate
+                point = icon.get_global_rect().get_center()
+                mouse(true)
+                advance(1)
+                break
+    elif phase == 1 and elapsed > 0.15:
+        mouse(false)
+        advance(2)
+    elif phase == 2 and elapsed > 2:
+        if modal() == null or not modal().is_visible_in_tree():
+            facts["failed_open"] = true
+            finish()
+            return false
+        count_notice()
+        # A disabled row (or the covered information icon on an empty planet) cannot reopen or execute.
+        var row = root.find_child("corrupt_button_icon_a",true,false)
+        point = row.get_global_rect().get_center() if row != null and row.is_visible_in_tree() else icon.get_global_rect().get_center()
+        mouse(true)
+        advance(3)
+    elif phase == 3 and elapsed > 0.15:
+        mouse(false)
+        advance(4)
+    elif phase == 4 and elapsed > 2:
+        facts["refusal_kept_open"] = modal().is_visible_in_tree()
+        count_notice()
+        viewport.size = Vector2i(1300,720)
+        advance(5)
+    elif phase == 5 and elapsed > 2:
+        viewport.size = Vector2i(1280,720)
+        advance(6)
+    elif phase == 6 and elapsed > 2:
+        count_notice()
+        point = root.find_child("corrupt_close",true,false).get_global_rect().get_center()
+        mouse(true)
+        advance(7)
+    elif phase == 7 and elapsed > 0.15:
+        mouse(false)
+        advance(8)
+    elif phase == 8 and elapsed > 2:
+        facts["closed"] = not modal().is_visible_in_tree()
+        point = icon.get_global_rect().get_center()
+        mouse(true)
+        advance(9)
+    elif phase == 9 and elapsed > 0.15:
+        mouse(false)
+        advance(10)
+    elif phase == 10 and elapsed > 2:
+        facts["reopened"] = modal().is_visible_in_tree()
+        count_notice()
+        finish()
+    return false
+"""
+        script = script.replace("FACTS", json.dumps(facts_path.as_posix())).replace("SHOT", json.dumps(capture.as_posix()))
+        driver.write_text(script, encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--render-thread", "separate", "--max-fps", "60",
+            "--resolution", "1280x720", "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", campaign_support.CAMPAIGN, "--eawr-game-root", support.GAME_ROOT,
+            "--eawr-galactic-paused", "yes", "--eawr-galactic-dismiss-story", "yes", "--eawr-report", str(report)],
+            cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        facts = json.loads(facts_path.read_text(encoding="utf-8"))
+        self.assertNotIn("timeout", facts, facts)
+        self.assertEqual(facts["notices"], [1, 1, 1, 2], facts)
+        self.assertTrue(all(facts[key] for key in ("refusal_kept_open", "closed", "reopened")), facts)
+        data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(data["corruption_hud"]["open_notices_submitted"], 2)
+        self.assertEqual(data["corruption_hud"]["choices_accepted"], 0)
+        self.assertEqual(data["corruption_hud"]["closes"], 1)
 
     def test_authored_slots_independent_requirements_and_all_native_buttons(self):
         initial, _ = self.capture()
@@ -201,6 +327,26 @@ class GalacticCorruptionHudRuntime(unittest.TestCase):
         self.assertEqual(accepted["corruption_hud"]["choices_accepted"], 1)
         self.assertEqual(accepted["corruption_hud"]["accepted_slot"], 1)
         self.assertEqual(accepted["map_input"]["selection_invalidations"], initial["map_input"]["selection_invalidations"])
+
+    def test_information_mode_disables_choices_and_empty_menu_has_cancel(self):
+        for fixture in ("corruption-info", "corruption-info-empty"):
+            initial, _ = self.capture(fixture)
+            hud = initial["corruption_hud"]
+            self.assertTrue(hud["active"])
+            controls = {row["name"]: row for row in hud["controls"]}
+            self.assertTrue(controls["corrupt_close"]["enabled"])
+            self.assertEqual(len(hud["options"]), 0 if fixture.endswith("empty") else 3)
+            self.assertTrue(all(not row["enabled"] for name, row in controls.items() if name.startswith("corrupt_button_icon_")))
+            labels = {row["name"]: row["text"] for row in hud["labels"]}
+            self.assertTrue(labels["corrupt_planet_defiler_00"])
+            if not fixture.endswith("empty"):
+                self.assertTrue(labels["corrupt_text01a"], "information rows label their requirements")
+                clicked = self.click([self.point(initial, "corrupt_button_icon_a")], fixture=fixture)
+                self.assertTrue(clicked["corruption_hud"]["active"])
+                self.assertEqual(clicked["corruption_hud"]["choices_accepted"], 0)
+            closed = self.click([self.point(initial, "corrupt_close")], fixture=fixture)
+            self.assertFalse(closed["corruption_hud"]["active"])
+            self.assertEqual(closed["corruption_hud"]["closes"], 1)
 
     def test_mission_choice_without_a_mission_service_is_unavailable(self):
         # Remake-only gap: a choice that needs a mission battle this host cannot start is greyed, never refused

@@ -584,6 +584,46 @@ void BattleAudio::engine_loops(const tactical::TacticalSnapshot& snapshot, const
     engine_peak_ = std::max<std::uint64_t>(engine_peak_, engine_states_.size());
 }
 
+void BattleAudio::turret_loops(const tactical::TacticalSnapshot& snapshot, const std::span<const sim::EntityId> visible) {
+    // BA-89: the object turret's service compares its desired and current angles every frame; a difference starts the
+    // type's attached loop once and equality stops it once. Presentation only: nothing here feeds simulation.
+    if (!has_turret_loops_) return;
+    const auto stamp = snapshot.completed_tick() + 1;
+    for (const auto& instance : snapshot.instances()) {
+        const TypeSounds* const type = type_of(instance.type_id);
+        if (type == nullptr || !type->turret_loop) continue;
+        // A turret component dropped while its ship lives is a stop, not a skipped frame.
+        if (!instance.object_turret && turret_states_.find(instance.entity_id) == turret_states_.end()) continue;
+        auto& state = turret_states_[instance.entity_id];
+        state.seen = stamp;
+        const auto* const turret = instance.object_turret ? &*instance.object_turret : nullptr;
+        const bool rotating = turret != nullptr && (turret->yaw != turret->desired_yaw || turret->pitch != turret->desired_pitch);
+        if (rotating == state.rotating) continue;
+        if (rotating && stamp < state.retry_after) continue;
+        state.rotating = rotating;
+        ++turret_transitions_;
+        if (!rotating) {
+            stop_engine_loop(instance.entity_id, type->turret_loop);
+            continue;
+        }
+        const bool hidden = !std::binary_search(visible.begin(), visible.end(), instance.entity_id)
+            || (instance.arrival && *instance.arrival < tactical::arrival_visible_frame);
+        const auto point = audio::Vec3{to_double(instance.fixed_transform.rows[0][3]),
+            to_double(instance.fixed_transform.rows[1][3]), to_double(instance.fixed_transform.rows[2][3])};
+        // A refused start (hidden, instance limit, probability) creates no entry and takes no voice, but silencing the whole
+        // rotation for it is wrong: clear the flag and ask again after a short pause rather than every frame.
+        if (!play(type->turret_loop, point, hidden, "turret_rotating", sim::invalid_entity_id, instance.entity_id, true)) {
+            state.rotating = false;
+            state.retry_after = stamp + turret_retry_ticks_;
+            --turret_transitions_;
+        }
+    }
+    for (auto state = turret_states_.begin(); state != turret_states_.end();) {
+        if (state->second.seen == stamp) { ++state; continue; }
+        state = turret_states_.erase(state); // removed objects are detached by update_voices (SND-11)
+    }
+}
+
 void BattleAudio::ambient_moving(const tactical::TacticalSnapshot& snapshot, const LiveSessionView& live,
                                const std::span<const sim::EntityId> visible) {
     // SND-46: service once per logical frame; the free delay generator never feeds simulation.
@@ -1464,6 +1504,7 @@ void BattleAudio::present_reached_audio(const LiveSessionView& live, const LiveS
         const auto visible = initial->visible_entities(local);
         ambient_moving(*initial, live, visible);
         engine_loops(*initial, visible);
+        turret_loops(*initial, visible);
         ambient_begun_ = true;
     }
     if (!music_begun_ && music_) {
@@ -1567,6 +1608,7 @@ void BattleAudio::present_reached_audio(const LiveSessionView& live, const LiveS
             ambient_moving(*snapshot, live, visible);
             lap(audio_trace::Lap::t_ambient);
             engine_loops(*snapshot, visible);
+            turret_loops(*snapshot, visible);
             lap(audio_trace::Lap::t_engine);
             // WPR-22/30/31: sparse snapshot notifications retain accepted type identity;
             // no queue-length inference, so duplicate buys and same-tick cancels remain distinct.
@@ -2045,12 +2087,9 @@ void BattleAudio::present_combat_audio(const LiveSessionView& live, const LiveSe
             }
             hardpoint_death(event.hardpoint, "hardpoint");
         }
-        audio::present_unit_losses(record.unit_losses, local,
-            [this](const tactical::TypeId type) -> const audio::SfxEvent* {
-                const auto found = types_.find(type);
-                return found == types_.end() ? nullptr : found->second.unit_lost;
-            },
-            [this](const audio::SfxEvent* cue) { play(cue, std::nullopt, false, "unit_lost"); });
+        audio::present_unit_losses(record.unit_losses, local, types_,
+            [this](const audio::SfxEvent* cue, const std::optional<audio::Vec3> position,
+                   const bool hidden, const char* reason) { play(cue, position, hidden, reason); });
     }
 }
 

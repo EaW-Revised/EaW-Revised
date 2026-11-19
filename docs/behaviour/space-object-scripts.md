@@ -443,9 +443,21 @@ handlers remain unadmitted.
 Replenishment allocates in the turn; sparse births join the ordered unit commit after the existing
 indexed tracking inputs, before later impacts and commands, and first move the following tick.
 
+**SOS-T1: staged wallet seam.** Object-turn `Get_Credits` reads the current tick's
+immutable staged wallet, copied from the small player ledger list at the turn seam.
+Every Lua instance in that turn reads the same projection. The seam retains
+the player-sized buffer's capacity between turns; the immutable balance
+is projected into the existing player rows without a second wallet vector.
+Wallet writes retain
+their existing command boundary. Completed-barrier calls retain their existing
+wallet reader. Native timing is unverified; the programme check is pending.
+The contract contrasts the staged wallet with a different completed balance on
+1/2/4/8 workers. This admits only `Get_Credits`; other dynamic readers keep their
+tripwires.
+
 Completed-world dynamic-read audit: `EvaluatePerception`, `Evaluate_In_Galactic_Context`,
 `FindTarget` (including the reachable form), `Fire_Special_Weapon`, `Get_Build_Pad_Contents`,
-`Get_Credits`, `Get_Tech_Level`, player-filtered `Find_Nearest` (raw fog), and the plan-only
+`Get_Tech_Level`, player-filtered `Find_Nearest` (raw fog), and the plan-only
 `Withdraw_Units` fail with an object-turn
 tripwire diagnostic before entering their completed-world readers. Static type/profile/player
 configuration remains readable. The underlying tactical-world capability also guards every

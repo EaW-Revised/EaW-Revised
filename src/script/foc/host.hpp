@@ -259,6 +259,28 @@ inline std::optional<math::Vec3> position_of(const Host& host, const Value& valu
     return out;
 }
 
+// SSU-03/FH-40: a caller sees its own creation facts before ordered world commit.
+// No other script instance reads or mutates this transaction's commands.
+inline std::optional<ViewUnit> pending_created_object(const Host& host, const BindingContext& context, const Value& value) {
+    const auto* object = as_handle(value, handle_game_object);
+    if (!object || (object->id & tactical::script_creation_namespace) == 0) return std::nullopt;
+    for (const auto& command : context.staged_commands()) {
+        if (command.verb != verb_create_object || command.arguments.size() != 5) continue;
+        const auto* identity = as_handle(command.arguments[4], handle_game_object);
+        const auto* type = as_handle(command.arguments[1], handle_type);
+        const auto* owner = as_handle(command.arguments[3], handle_player);
+        const auto point = position_of(host, command.arguments[2]);
+        if (!identity || identity->id != object->id || !type || !owner || !point) continue;
+        ViewUnit unit;
+        unit.id = object->id;
+        unit.type = type->id;
+        unit.owner = static_cast<tactical::PlayerId>(owner->id);
+        unit.position = *point;
+        return unit;
+    }
+    return std::nullopt;
+}
+
 struct UnitDestination {
     sim::EntityId object{};
     math::Vec3 position{};

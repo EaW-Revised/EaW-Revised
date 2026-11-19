@@ -196,6 +196,7 @@ struct ObstacleType final {
     bool construction_blocker{true};
     bool living_projectile_collision{}; // WBP-50: false by default for map objects
     bool selectable{}; // WSU-21: presentation fields do not enter content identity
+    bool selection_denied{}; // SEL-MOD-01: preserve mouse/reticle behavior while denying player selection.
     bool mouse_sensitive{}; // WSU-13: map props use the same admission as live units
     bool last_state_visible_under_fow{};
     bool initial_state_visible_under_fow{};

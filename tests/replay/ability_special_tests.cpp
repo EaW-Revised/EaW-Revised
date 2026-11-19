@@ -528,11 +528,11 @@ void test_fire_range_bonus() {
                 }
                 if (frame == 1) {
                     const auto checkpoint = world.save_checkpoint_state();
-                    const auto domain = scenario == 0 ? 29U : 30U;
+                    const auto domain = scenario == 0 ? 37U : 38U;
                     expect(checkpoint && checkpoint.value().size() >= 4
                         && checkpoint.value()[0] == domain && checkpoint.value()[1] == 0
                         && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
-                        "WFR-01: zero range uses domain 29; nonzero range selects domain 30");
+                        "WFR-01: zero range uses domain 37; nonzero range selects domain 38");
                     auto fresh = tactical::TacticalSession::from_replay(world.record(),
                         std::vector<tactical::SensorProfile>{{corvette_type, units(1500)}, {frigate_type, units(1500)}},
                         health, {}, std::nullopt, combat, {}, {}, economy);
@@ -622,10 +622,10 @@ void test_script_invulnerable() {
             expect(final && final->hull.raw() < full.raw(), "TL-03: privileged script damage reaches a flagged unit");
             const auto checkpoint = session.save_checkpoint_state();
             // The invulnerability bit selects the extended domain; the leading uint32 is little-endian.
-            const unsigned domain = scenario == 1 ? 31U : 29U;
+            const unsigned domain = scenario == 1 ? 39U : 37U;
             expect(checkpoint && checkpoint.value().size() >= 4 && checkpoint.value()[0] == domain
                 && checkpoint.value()[1] == 0 && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
-                "TL-03: the flag selects domain 31; a cleared or absent flag keeps domain 29");
+                "TL-03: the flag selects domain 39; a cleared or absent flag keeps domain 37");
             if (scenario == 1) {
                 // Opcode 34 survives write and parse with its flag and unit list intact.
                 const auto bytes = tactical::write_replay(session.record());

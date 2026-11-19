@@ -25,12 +25,24 @@ namespace {
 // completed snapshots. It reads the run and changes nothing in it.
 class AiTrace {
 public:
-    explicit AiTrace(std::vector<std::pair<eawr::sim::tactical::PlayerId, std::string>> players)
-        : players_(std::move(players)) {}
+    AiTrace(std::vector<std::pair<eawr::sim::tactical::PlayerId, std::string>> players,
+        std::map<eawr::sim::tactical::TypeId, std::string> types)
+        : players_(std::move(players)), types_(std::move(types)) {}
 
     void observe(const std::uint64_t tick, const std::vector<eawr::sim::tactical::UnitState>& units,
         const eawr::sim::tactical::TacticalSnapshot& snapshot) {
         namespace tactical = eawr::sim::tactical;
+        for (const auto& event : snapshot.events()) {
+            if (event.order != tactical::OrderKind::script_create_object
+                || event.kind != tactical::EventKind::order_accepted || creations_.size() >= max_events) continue;
+            for (const auto& account : snapshot.economy()) for (const auto& held : account.completed) {
+                if (held.script_identity != event.unit) continue;
+                std::ostringstream row;
+                row << "{\"tick\":" << event.tick << ",\"player\":" << account.player
+                    << ",\"type\":" << held.type << ",\"identity\":" << held.script_identity << '}';
+                creations_.push_back(row.str());
+            }
+        }
         std::map<eawr::sim::EntityId, const tactical::UnitState*> by_id;
         for (const auto& unit : units) by_id.emplace(unit.entity_id, &unit);
         for (const auto& pad : snapshot.pads()) {
@@ -66,7 +78,37 @@ public:
                 comma = true;
                 line << '"' << account.player << "\":" << account.credits.raw();
             }
-            line << "},\"pad_owners\":{";
+            line << "},\"economy\":[";
+            comma = false;
+            for (const auto& account : snapshot.economy()) {
+                if (comma) line << ',';
+                comma = true;
+                line << "{\"player\":" << account.player << ",\"population\":" << account.population
+                    << ",\"population_cap\":" << account.population_cap << ",\"tech_level\":" << account.tech_level
+                    << ",\"pool\":[";
+                for (std::size_t index = 0; index < account.pool.size(); ++index)
+                    line << (index ? "," : "") << account.pool[index];
+                line << "],\"queues\":[";
+                for (std::size_t queue = 0; queue < account.queues.size(); ++queue) {
+                    line << (queue ? ",[" : "[");
+                    for (std::size_t index = 0; index < account.queues[queue].size(); ++index) {
+                        const auto& entry = account.queues[queue][index];
+                        line << (index ? "," : "") << "{\"type\":" << entry.type << ",\"station\":" << entry.station
+                            << ",\"entry_id\":" << entry.entry_id << ",\"frames\":" << entry.frames
+                            << ",\"complete_frame\":" << entry.complete_frame << '}';
+                    }
+                    line << ']';
+                }
+                line << "],\"lifetime\":{";
+                bool lifetime_comma = false;
+                for (const auto& [type, count] : account.lifetime) {
+                    if (lifetime_comma) line << ',';
+                    lifetime_comma = true;
+                    line << '"' << type << "\":" << count;
+                }
+                line << "}}";
+            }
+            line << "],\"pad_owners\":{";
             comma = false;
             for (const auto& [pad, row] : pads_) {
                 if (comma) line << ',';
@@ -92,6 +134,22 @@ public:
             comma = true;
             out << "{\"id\":" << id << ",\"faction\":" << quote(faction) << '}';
         }
+        out << "],\"types\":{";
+        comma = false;
+        for (const auto& [id, name] : types_) {
+            if (comma) out << ',';
+            comma = true;
+            out << '"' << id << "\":" << quote(name);
+        }
+        out << "},\"plans_dropped\":" << journal.plans_dropped << ",\"plans\":[";
+        comma = false;
+        for (const auto& row : journal.plans) {
+            if (comma) out << ',';
+            comma = true;
+            out << "{\"tick\":" << row.tick << ",\"player\":" << row.player << ",\"plan\":" << quote(row.plan)
+                << ",\"goal\":" << quote(row.goal) << ",\"target\":" << quote(row.target)
+                << ",\"event\":" << quote(row.event) << ",\"detail\":" << quote(row.detail) << '}';
+        }
         out << "],\"pads_initial\":{";
         comma = false;
         for (const auto& [pad, row] : initial_) {
@@ -104,6 +162,8 @@ public:
         for (std::size_t index = 0; index < events_.size(); ++index) out << (index ? "," : "") << events_[index];
         out << "],\"samples\":[";
         for (std::size_t index = 0; index < samples_.size(); ++index) out << (index ? "," : "") << samples_[index];
+        out << "],\"script_creations\":[";
+        for (std::size_t index = 0; index < creations_.size(); ++index) out << (index ? "," : "") << creations_[index];
         out << "],\"proposals\":[";
         comma = false;
         for (const auto& [key, row] : journal.proposals) {
@@ -130,8 +190,9 @@ private:
         friend bool operator==(const Row&, const Row&) = default;
     };
     std::vector<std::pair<eawr::sim::tactical::PlayerId, std::string>> players_;
+    std::map<eawr::sim::tactical::TypeId, std::string> types_;
     std::map<eawr::sim::EntityId, Row> pads_, initial_;
-    std::vector<std::string> events_, samples_;
+    std::vector<std::string> events_, samples_, creations_;
 };
 
 // Opt-in diagnostic runner: reuse the production AI/scoring factories and the
@@ -200,7 +261,10 @@ int run_ai_battle(const Options& options, const LoadedTables& loaded,
     std::set<eawr::sim::EntityId> moved;
     std::vector<std::pair<tactical::PlayerId, std::string>> trace_players;
     for (const auto& player : start.players) trace_players.emplace_back(player.player.player_id, player.faction);
-    AiTrace trace(std::move(trace_players));
+    std::map<tactical::TypeId, std::string> trace_types;
+    if (tracing) for (const auto& type : tables.units)
+        trace_types.emplace(eawr::assets::object_type_crc(type.id), type.id);
+    AiTrace trace(std::move(trace_players), std::move(trace_types));
     std::uint64_t shots{}, hits{}, accepted{}, rejected{}, routed{};
     std::string final_hash;
     std::ostringstream hashes;
@@ -458,6 +522,8 @@ int run_skirmish(const Options& options) {
     const auto& fixture = selected;
     auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, tables);
     if (!inputs) return fail(inputs.error());
+    // SSU-02: an AI-only diagnostic still selects a local view explicitly; this is not a human seat.
+    if (options.both_ai && !fixture.slots.empty()) inputs.value().local_player = fixture.slots.front().slot;
     // SC-01 / #5304: the selected start can require types outside the M2 roots.
     // Share the viewer's collector and retain the old table bytes when none are missing.
     auto missing = skirmish::missing_start_types(fixture, inputs.value(), tables);

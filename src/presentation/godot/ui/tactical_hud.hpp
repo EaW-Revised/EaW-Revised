@@ -133,6 +133,9 @@ public:
     // The shell's alternate index: meshes with an _ALT<n> suffix show only when n matches (none when unset).
     // `alpha` tints those meshes (the unseen-contents dimming of the focused diorama).
     void set_alternate(std::optional<std::uint32_t> index, float alpha = 1.0F);
+    [[nodiscard]] std::optional<std::uint32_t> alternate() const { return alternate_; }
+    // The shell meshes as drawn (an opaque mesh's texture already without its gloss alpha), for art drawn to match.
+    [[nodiscard]] const std::vector<Mesh>& meshes() const { return setup_.meshes; }
     // A caller's placement of its own shell-unit controls: run now and after every relayout with the placement and the
     // reference space (the Death Star readout, which has no button of its own).
     using LayoutHook = std::function<void(const presentation::ui::ShellPlacement&, const presentation::ui::ReferenceSpace&)>;

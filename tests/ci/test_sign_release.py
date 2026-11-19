@@ -383,6 +383,16 @@ class SignReleaseTests(unittest.TestCase):
                                                    {"SIGNING_SUBJECT": SUBJECT}), 0)
         self.assertIn("no expected signer subject", err.getvalue())
 
+    def test_osslsigncode_verify_command_passes_the_timestamp_ca(self):
+        ca = ROOT / "tools/release/signing_host/microsoft-identity-verification-root-2020.pem"
+        command = sign_release.osslsigncode_verify_command("ossl", Path("x.exe"), ca)
+        self.assertEqual(command, ["ossl", "verify", "-CAfile", str(ca), "-TSA-CAfile", str(ca), "-in", "x.exe"])
+        # the real runner builds exactly that command line
+        with mock.patch.object(sign_release.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="ok", stderr="")
+            self.assertEqual(sign_release.run_osslsigncode("ossl", Path("x.exe"), ca), (True, "ok"))
+        self.assertEqual(run.call_args.args[0], command)
+
     def test_verify_signatures_script_requires_the_player_files(self):
         script = (ROOT / "tools/release/verify_signatures.ps1").read_text(encoding="utf-8")
         suffixes = re.search(r"\$peSuffixes = ([^\r\n]+)", script)

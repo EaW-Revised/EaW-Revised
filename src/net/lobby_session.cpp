@@ -675,6 +675,16 @@ struct LobbyRuntime {
         ++state.revision; return core::Result<void>::success();
     }
     void clear_ready() { for (auto& value : state.seats) value.ready = false; }
+    // Ready rule (docs/net-online-lobby.md, Ready): a seat is unreadied only when its own match-affecting choice
+    // (faction/team/colour/slot, owner mapping) changed. Name-only edits, joins, leaves and other seats' edits keep it.
+    static void clear_changed_ready(const std::vector<LobbySeat>& before, std::vector<LobbySeat>& after) {
+        for (auto& next : after) {
+            const auto previous = std::find_if(before.begin(), before.end(), [&](const auto& old) { return old.peer == next.peer; });
+            if (previous == before.end()) { next.ready = false; continue; }
+            auto old = previous->selection; old.name = next.selection.name;
+            if (old != next.selection || previous->player != next.player) next.ready = false;
+        }
+    }
     core::Result<void> terminal(LobbyReason reason, std::string message) {
         start_pending.reset(); reset_setup(); state.phase = LobbyPhase::closed; state.frozen_revision = 0; state.start_attempt = {}; clear_ready();
         notice = LobbyNotice{state.room, state.revision, reason, sanitize_lobby_text(message, 512)};
@@ -723,9 +733,7 @@ struct LobbyRuntime {
         updated.selection = clean_selection(std::move(selection)); updated.player = player;
         if (updated == *previous) return core::Result<void>::success();
         if (hooks.follow_choice) if (auto followed = hooks.follow_choice(state, candidate, peer); !followed) return followed;
-        auto old_selection = previous->selection; old_selection.name = updated.selection.name;
-        const bool consequential = old_selection != updated.selection || previous->player != player;
-        if (consequential) for (auto& value : candidate.seats) value.ready = false;
+        clear_changed_ready(state.seats, candidate.seats);
         if (auto valid = validate(candidate); !valid) return valid;
         if (auto advanced = advance(); !advanced) return advanced;
         candidate.revision = state.revision; state = std::move(candidate); return broadcast(state);
@@ -739,7 +747,6 @@ struct LobbyRuntime {
         if (deny) denied.insert(identity->second);
         identities.erase(peer); chat_times.erase(peer); request_times.erase(peer);
         state.seats.erase(std::remove_if(state.seats.begin(), state.seats.end(), [peer](const auto& value) { return value.peer == peer; }), state.seats.end());
-        clear_ready();
         hooks.remove_peer(peer, reason);
         static_cast<void>(send(peer, LobbyClosed{{state.room, state.revision, reason, sanitize_lobby_text(notice_text, 512)}}));
         return core::Result<void>::success();
@@ -1109,7 +1116,6 @@ core::Result<void> LobbySession::admit(PeerIndex peer, std::string identity, Lob
     if (value.next_seat == std::numeric_limits<std::uint32_t>::max()) return failure<void>(LobbyReason::resource_limit, "stable seat IDs exhausted");
     auto candidate = value.state;
     candidate.seats.push_back({peer, sim::SeatId{value.next_seat}, player, clean_selection(std::move(selection)), false});
-    for (auto& seat : candidate.seats) seat.ready = false;
     if (auto valid = value.validate(candidate); !valid) return valid;
     if (auto advanced = value.advance(); !advanced) return advanced;
     candidate.revision = value.state.revision; value.state = std::move(candidate); ++value.next_seat; value.identities.emplace(peer, std::move(identity));
@@ -1123,17 +1129,15 @@ core::Result<void> LobbySession::configure_game(LobbyGame game, std::vector<Lobb
     auto& value = *runtime_; if (auto valid = value.allowed(revision); !valid) return valid;
     if (assignments.size() != value.state.seats.size()) return failure<void>(LobbyReason::authority, "configuration cannot change room membership");
     auto candidate = value.state; candidate.game = std::move(game);
-    bool consequential = candidate.game != value.state.game;
     for (std::size_t i = 0; i < assignments.size(); ++i) {
         const auto& previous = value.state.seats[i]; auto& next = assignments[i];
         if (next.peer != previous.peer || next.seat != previous.seat)
             return failure<void>(LobbyReason::authority, "configuration cannot change admitted identities");
         next.selection = clean_selection(std::move(next.selection)); next.ready = previous.ready;
-        auto old = previous.selection; old.name = next.selection.name;
-        consequential = consequential || old != next.selection || previous.player != next.player;
     }
     candidate.seats = std::move(assignments);
-    if (consequential) for (auto& seat : candidate.seats) seat.ready = false;
+    if (candidate.game != value.state.game) for (auto& seat : candidate.seats) seat.ready = false;
+    else value.clear_changed_ready(value.state.seats, candidate.seats);
     if (auto valid = value.validate(candidate); !valid) return valid;
     if (candidate == value.state) return core::Result<void>::success();
     if (auto advanced = value.advance(); !advanced) return advanced;

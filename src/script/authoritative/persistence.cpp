@@ -712,7 +712,7 @@ core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
         object.module = in.text();
         if (shared.config.galactic_clock) object.registration = in.u64();
         if (!in.ok() || object.instance == 0 || (!objects.empty() && object.instance <= objects.rbegin()->first) ||
-            object.object.id == 0 || object.object.id >= (std::uint64_t{1} << 37) || object.generation == 0 ||
+            !detail::valid_object_handle(object.object.id) || object.generation == 0 ||
             object.module.empty() || !ModuleManifest::normalise(object.module) ||
             (shared.config.galactic_clock && (!object.registration || !registrations.insert(object.registration).second)) ||
             !identities.emplace(object.object.kind, object.object.id).second) return detail::reject("object-script registry");

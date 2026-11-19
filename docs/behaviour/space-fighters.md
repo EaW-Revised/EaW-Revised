@@ -73,6 +73,15 @@
   increments its alive count and uses one of its left (an unlimited entry stays unlimited).
 - **FL-05** (research E75-04) After a service that could launch, the next-spawn frame is the frame
   plus trunc(`Spawned_Squadron_Delay_Seconds` x 30).
+  The existing space-body loader and hangar consumer also apply to selected
+  `DummyStructure`, `HeroUnit`, `Mission_Object`, `Props_Wave`, `SkirmishSpaceUnit`,
+  `SpaceBuildable`, `SpaceHero`, `SpaceProp`, `Space_Unit`, `SurvivalSpaceUnit`,
+  `Template`, `TransportUnit` and `UnderConstructionShip` bodies with
+  `SPAWN_SQUADRON` and a standing bay. Synthetic inherited, fractional-override and
+  explicit-zero cases qualify that path through actual hangar services: ten seconds
+  launches again at frame 300, 4.5 seconds at frame 150, and zero at frame 30 after a
+  first launch at frame zero. The thirty-frame service cadence still applies (FL-01).
+  This qualification does not cover unselected type metadata, deployment or other modes.
 - **FL-06** (research E75-06 to E75-08) The squadron leaves a randomly chosen standing bay. Every
   craft starts at the bay's attachment bone, facing along the bay's spawn vector (the bone's X
   axis times `Fighter_Bay_Flyout_Distance`, default 1) and flying along it at its maximum speed.
@@ -106,10 +115,14 @@
   launches. The remake stages an admitted request for the same tick's partitioned hangar pass
   and ordered birth commit, keeping the existing command/service phase boundary (FD-01).
   The ready state is consumed and recharge begins even when selection creates no object.
-- **FL-11** (owner, SK-36) The M2 fixture ignores `Reserve_Spawned_Units_Tech_0`: every entry of
-  the FoC table has a reserve of 0, so each spawner launches its starting squadrons once and a
-  lost squadron is not replaced (m2-skirmish SK-23, SK-36; the replenishment decision in the starting-force and AI discussion). The hangar keeps FL-02 and
-  FL-08 for a table with reserves (starbase hangars, a later phase).
+- **FL-11** (owner decision, reserves follow the original) Skirmish carriers and stations relaunch lost
+  squadrons from their reserve. Setup reads the `Reserve_Spawned_Units_Tech_N` column that the owner's
+  tech level selects (FL-20, independently of the starting column), the hangar service replaces a lost
+  squadron from the reserve by FL-02, FL-04 and FL-08, and an entry with no reserve left launches nothing.
+  Stations created from a multiplayer skirmish station marker launch nothing (FL-13, WSL-04); map-placed
+  bases and carriers do. This replaces the earlier fixture-only rule that the skirmish table ignored
+  `Reserve_Spawned_Units_Tech_0` and never replaced a lost squadron. Controlled contracts: C-01 and the
+  station garrison tier cases (FC-28, WSL-11); installed stock data: G-F11 (S-28 launches a reserve squadron).
 - **FL-10** (recording S-16, S-28) The Acclamator launches its first squadron 27 frames after tick
   zero and the second 150 frames later (FL-05 with its 5-second delay). In S-28 the TIE fighter
   squadron is lost around tick 417 (the loss comparison below lists 418) and the reserve squadron
@@ -130,7 +143,7 @@
   (FL-03, FL-06), including hero ships that author the same behavior. The squadrons are garrison
   units outside the tactical population list; only the reinforced carrier uses population.
   The remake stages carrier IDs at birth and registers them through the starting-unit initializer,
-  then applies the arrival gate in the partitioned hangar service. FL-11's reserve cut still applies.
+  then applies the arrival gate in the partitioned hangar service. Reserves apply as for a starting unit (FL-11).
 
 - **FL-13** (debug build, skirmish-garrison evidence ESG-01 to ESG-06) (legacy EAWR-1198)
   Garrison spawning has an object flag, independent of the authored starting and reserve rows.
@@ -926,8 +939,8 @@ fixture's exact starting slots.
   run. Remaining differences: the keyed draws and the tree order differ from retail frame by
   frame (space-weapon-fire P-02, space-targeting G-01); from the last craft's death the
   Acclamator's lasers alone finish the corvette; the keyed service draw launches at 15 instead of
-  27 (FL-01); and (FL-11) the M2 table launches no reserve squadron, while retail's reserve at 597
-  finishes the corvette.
+  27 (FL-01); and (FL-11, G-F11) the reserve squadron now launches in the remake too, at a different tick from
+  retail's 597.
 - **G-F11** (S-28 reserve timing; debug build E6234-01/02; recorded remake trace)
   The earlier replacement trace launches the initial fighters at 15, bombers at 165 and reserves
   at 735. Its last initial fighter is first absent at 571, also the destruction-event tick
@@ -948,6 +961,14 @@ fixture's exact starting slots.
   unverified; this research changes no runtime clock or replay baseline. FD-28's separate
   same-frame carrier-before-loss boundary remains open; it does not explain the earlier
   difference in fighter survival.
+  **Installed stock-data check (skirmish reserves).** The same scenario on the installed stock tables
+  with 1, 2 and 4 workers writes identical traces and launches at ticks 15, 165 and 765. The Acclamator
+  authors one fighter and one bomber squadron as its tech-0 starting entries and two fighter squadrons as
+  its tech-0 reserve, so the first two launches are the starting entries and the launch at 765 is a
+  reserve squadron replacing a lost one (FL-11). The corvette is destroyed at 747 in this trace, before
+  that launch, so the reserve does not finish it as it does in retail; that is the existing combat
+  survival difference above, not a reserve rule. The run does not vary the owner's tech level or place a
+  station: those are pinned by the synthetic hangar and garrison contracts named in FL-11.
 - **G-F6** The leader of a moving squadron follows a planned path in retail (E75-20). The remake
   supports move orders and retains their straight open-space segment, using WSQ-17's look-ahead
   and height easing for every craft. Planning segments around obstacles remains unverified;

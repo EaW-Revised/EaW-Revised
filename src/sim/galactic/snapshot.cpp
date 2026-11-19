@@ -120,6 +120,7 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
         : std::make_shared<const std::optional<EconomyCorruptionState>>(std::move(economy_corruption));
     sale_types_ = std::move(sale_types);
     live_corruption_menu_ = std::move(live_corruption_menu);
+    corruption_information_ = std::move(shared_sections.corruption_information);
     black_market_menus_ = std::move(black_market_menus);
     ability_results_ = std::move(ability_results);
     ability_services_ = std::move(shared_sections.ability_services);

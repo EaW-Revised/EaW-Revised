@@ -7,12 +7,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <optional>
 
 namespace eawr::presentation::light_effect {
 
-enum class Kind : std::uint8_t { none, linear_pulse, color_flash };
+enum class Kind : std::uint8_t { none, linear_pulse, color_flash, two_way_pulse };
 
 struct State final {
     Kind kind{Kind::none};
@@ -20,6 +21,7 @@ struct State final {
     double start_frame{};     // presented logical frame the effect started at
     double duration_frames{}; // 0 never runs
     std::uint32_t pulses{1};
+    std::array<float, 3> color2{};
 
     friend constexpr bool operator==(const State&, const State&) noexcept = default;
 };
@@ -49,13 +51,17 @@ struct State final {
     const double elapsed = frame - state.start_frame;
     if (elapsed < 0.0 || elapsed >= state.duration_frames) return std::nullopt;
     std::array<float, 3> result = base;
-    if (state.kind == Kind::linear_pulse) {
+    if (state.kind == Kind::linear_pulse || state.kind == Kind::two_way_pulse) {
         const double pulse_length = state.duration_frames / static_cast<double>(std::max<std::uint32_t>(state.pulses, 1U));
         const double within = (elapsed - pulse_length * static_cast<double>(static_cast<std::uint64_t>(elapsed / pulse_length)))
             / pulse_length;
-        const double scale = (within >= 0.5 ? 1.0 - within : within) * 2.0;
+        const double wave = state.kind == Kind::two_way_pulse
+            ? std::clamp(std::sin(within * 6.2831853071795864769), -1.0, 1.0)
+            : (within >= 0.5 ? 1.0 - within : within) * 2.0;
+        const auto& color = wave < 0.0 ? state.color2 : state.color;
+        const double scale = wave < 0.0 ? -wave : wave;
         for (std::size_t channel = 0; channel < 3; ++channel) {
-            result[channel] = static_cast<float>(base[channel] + (state.color[channel] - base[channel]) * scale);
+            result[channel] = static_cast<float>(base[channel] + (color[channel] - base[channel]) * scale);
         }
     } else {
         const double t = elapsed / state.duration_frames;

@@ -647,3 +647,31 @@ Inter-object damage ordering remains FD-56's deferred seam.
 
 `Charge_Up_Seconds` and `Damage_Multiplier` are required authored BLAST fields. Missing values
 are explicit loader gaps; neutral parser placeholders are not sourced runtime defaults.
+
+
+### Automatic player reveal modifiers (WBR-01)
+
+| Rule | Behaviour | Evidence |
+| --- | --- | --- |
+| WBR-01 | `Battlefield_Modifier_Ability` can contribute reveal range in a standalone space battle. An enabled `Space_Automatic` handler adds `FOW_Reveal_Range_Multiplier` minus one to a player ledger under its actor/ability identity and `Stacking_Category`; omitted multiplier is one, omitted `Initially_Enabled` is Yes, omitted `Apply_To_All_Allies` is No and omitted category is zero. A nonpositive authored multiplier is corrected to one. Select the actor owner alone or its allies according to `Apply_To_All_Allies`. Within each category keep the contribution with greatest absolute magnitude, then add category winners to one. This differs from the signed maximum for defence and ordinary command statistics. There is no authored reveal cap of eight. For each revealing object, use its owner's player multiplier and floor the final multiplied radius at ten source units; a nonpositive aggregate therefore still reveals ten. Removing an actor/ability removes only its contribution and recomputes surviving category winners. | debug build: automatic handler application/removal, validation, player reveal reducer and reveal caller; WHE-12, WGT-49..51 |
+
+The standalone-space adapter admits loaded live bodies with a hull, excluding Squadron purchase
+templates and upgrade objects. It reuses the partitioned source notifications and ordered sparse
+player ledger; it adds no world scan or tick phase. Disabled handlers retain their authored content
+identity but bind no active profile. A closure without an admitted nonneutral reveal contribution
+gains no identity marker. Carried hero metadata retains its campaign-only binding. Other activation
+styles, upgrade-owned effects, team-template dispatch and the rest of the battlefield modifier
+family remain separate work under (legacy EAWR-7696). Campaign profile/lock admission is unchanged, while the
+shared reveal arithmetic follows WBR-01.
+
+Equal absolute magnitudes retain the existing deterministic source order. The original reducer's
+strict comparison is established, but its equal-magnitude source traversal order remains unverified;
+this is an explicit adapter seam. Positive fixed-point sum or radius overflow remains a reported
+unsupported numeric limit, rather than a silent authored-value clamp.
+
+Stationary fog circles refresh through the existing player invalidation on source changes,
+including staged birth/removal and allied revealers. A checkpoint of standalone content with
+a nonneutral reveal profile retains its derived ledger and previous fog multipliers, including
+a pending refresh; closures without such profiles keep their existing checkpoint fields.
+Restoration validates the ledger against live sources. A signed multiplier is valid for a live
+player; unused cache slots remain zero. GC uses the same signed cache rule.

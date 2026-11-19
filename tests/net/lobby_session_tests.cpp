@@ -379,8 +379,8 @@ void authority_and_revisions() {
         if (field == 2) changed.faction = "mod-extra-side";
         if (field == 3) ++changed.slot;
         require(room.host().assign(1, changed, field == 4 ? 1 : 2, before)); room.rounds(3);
-        expect(!room.host().snapshot().seats[0].ready && !room.host().snapshot().seats[1].ready && room.revision() > before,
-            "colour/team/faction/slot/owner edits clear every ready flag");
+        expect(room.host().snapshot().seats[0].ready && !room.host().snapshot().seats[1].ready && room.revision() > before,
+            "colour/team/faction/slot/owner edits clear only the edited seat's ready flag");
     }
     room.all_ready(); require(room.host().set_game({"data/art/maps/test.ted", {1}}, room.revision())); room.rounds(3);
     expect(!room.client().snapshot().seats[1].ready, "advanced option changes clear readiness");
@@ -563,9 +563,11 @@ void admission_kick_close() {
     require(room.host().kick(1, room.revision())); room.rounds(3);
     expect(room.client().snapshot().phase == net::LobbyPhase::closed && room.client().notice()->reason == net::LobbyReason::kicked
         && room.removed.back() == std::pair{net::PeerIndex{1}, net::LobbyReason::kicked}, "typed kick closes seat and invokes stream/reservation removal");
-    expect(!room.host().snapshot().seats[0].ready && !room.host().snapshot().seats[1].ready, "membership changes clear ready");
+    expect(room.host().snapshot().seats[0].ready && room.host().snapshot().seats[1].ready, "a leaving seat keeps the remaining seats ready");
     expect(!room.host().admit(1, "identity-1", selection(1), 2, room.revision()), "kicked admitted identity denied for room lifetime");
     require(room.host().admit(1, "new-identity", selection(1), 2, room.revision()));
+    expect(room.host().snapshot().seats[0].ready && room.host().snapshot().seats[1].ready && !room.host().snapshot().seats.back().ready,
+        "a joining seat arrives unready and does not unready anyone else");
     expect(room.host().snapshot().seats.back().seat != departed_id, "vacated seat cannot silently become another command identity");
     // New identity requires a fresh local room client, just as the bridge does.
     room.sessions[1] = require(net::LobbySession::join(*room.transports[1], "test-room", 0, room.hooks(1)));
@@ -740,7 +742,7 @@ std::string nine_seats_three_sides(std::size_t workers) {
     expect(!full.host().admit(9, "identity-1", selection(9), 1, full.revision()), "kick denial survives replacement transport identity");
     Room vacant(9, workers); vacant.all_ready();
     require(vacant.sessions[8].request(net::LobbyAction::leave, vacant.revision())); vacant.rounds(3);
-    expect(vacant.host().snapshot().seats.size() == 8 && !vacant.host().start(vacant.revision()), "leaving ninth seat clears readiness");
+    expect(vacant.host().snapshot().seats.size() == 8 && vacant.host().snapshot().seats.back().ready, "leaving ninth seat keeps the others ready");
     require(vacant.host().admit(8, "replacement", selection(8), 9, vacant.revision())); vacant.rounds(3);
     expect(vacant.host().snapshot().seats.size() == 9 && !vacant.host().snapshot().seats.back().ready, "vacant ninth seat admits a fresh unready controller");
     for (const bool kick : {false, true}) {
@@ -959,6 +961,49 @@ void retained_transport_maps_room_peers() {
     expect(received && received->from == 1 && received->frame == payload,
         "the retained stream maps the returning sender back to its roster index");
 }
+}
+// #7854: ready is cleared only for seats whose own match-affecting choice changed, or for everyone when the host
+// changes the game. Three peers: A (host), B, C.
+void ready_rules_per_change_type() {
+    const auto ready = [](Room& room) { std::vector<bool> out; for (const auto& seat : room.host().snapshot().seats) out.push_back(seat.ready); return out; };
+    const std::vector<bool> all{true, true, true};
+    { // guest name edit and chat: nobody unreadied
+        Room room(3); room.all_ready(); auto name = selection(1); name.name = "renamed";
+        require(room.sessions[1].request(net::LobbyAction::select, room.revision(), name)); room.rounds(3);
+        require(room.sessions[2].chat("hi")); room.rounds(3);
+        expect(ready(room) == all, "name edit and chat unready nobody");
+    }
+    for (unsigned field = 0; field < 4; ++field) { // one guest's own slot change: only that guest
+        Room room(3); room.all_ready(); auto changed = room.host().snapshot().seats[1].selection;
+        if (field == 0) ++changed.colour;
+        if (field == 1) ++changed.team;
+        if (field == 2) changed.faction = "mod-extra-side";
+        if (field == 3) ++changed.slot;
+        require(room.sessions[1].request(net::LobbyAction::select, room.revision(), changed)); room.rounds(3);
+        expect(ready(room) == std::vector<bool>({true, false, true}), "a guest's own slot change unreadies only that guest");
+    }
+    { // host reassigns one guest: only that guest
+        Room room(3); room.all_ready(); auto seats = room.host().snapshot().seats; seats[2].selection.colour += 1;
+        require(room.host().configure_game(room.host().snapshot().game, seats, room.revision())); room.rounds(3);
+        expect(ready(room) == std::vector<bool>({true, true, false}), "host slot change unreadies only the changed seat");
+    }
+    { // host swaps two guests' colours in one edit: both unready, the third stays ready
+        Room room(3); room.all_ready(); auto seats = room.host().snapshot().seats; std::swap(seats[1].selection.colour, seats[2].selection.colour);
+        require(room.host().configure_game(room.host().snapshot().game, seats, room.revision())); room.rounds(3);
+        expect(ready(room) == std::vector<bool>({true, false, false}), "a seat swap unreadies both swapped seats only");
+    }
+    { // host game/options change: everyone
+        Room room(3); room.all_ready();
+        require(room.host().set_game({"data/art/maps/test.ted", {1}}, room.revision())); room.rounds(3);
+        expect(ready(room) == std::vector<bool>({false, false, false}), "host game or option change unreadies every seat");
+    }
+    { // ready guest leaves and a new one joins: others stay ready, the newcomer is unready
+        Room room(3); room.all_ready();
+        require(room.sessions[2].request(net::LobbyAction::leave, room.revision())); room.rounds(3);
+        expect(ready(room) == std::vector<bool>({true, true}), "a leaving guest keeps the rest ready");
+        require(room.host().admit(2, "rejoined", selection(2), 3, room.revision())); room.rounds(3);
+        expect(ready(room) == std::vector<bool>({true, true, false}), "a rejoining guest arrives unready, others stay ready");
+    }
 }
 void atomic_game_configuration() {
     Room room(3); room.all_ready();
@@ -1619,7 +1664,7 @@ int main() {
         host_mod_list_not_shared();
         concurrent_campaign_preparation(); concurrent_preparation_locks_once(); concurrent_preparation_cleanup(); preparation_codec();
         asynchronous_host_start(); asynchronous_guest_setup();
-        revised_layer_join(); early_freeze_cancellation(); cancellation_during_roster_confirmation(); asynchronous_roster_lock(); credential_delivery_retry(); atomic_game_configuration(); codec(); authority_and_revisions(); chat_contracts(); recovery_and_budgets(); send_failures_and_envelopes();
+        revised_layer_join(); early_freeze_cancellation(); cancellation_during_roster_confirmation(); asynchronous_roster_lock(); credential_delivery_retry(); atomic_game_configuration(); ready_rules_per_change_type(); codec(); authority_and_revisions(); chat_contracts(); recovery_and_budgets(); send_failures_and_envelopes();
         admission_kick_close(); concurrent_staging_departures(); cancel_send_failure(); editable_team_rules(); start_races(); guest_waits_for_own_barrier(); committed_guest_barrier_failure_is_typed(); mesh_refusal_and_start_gate(); retained_transport_maps_room_peers();
         std::string baseline, nine_baseline, close_three_baseline, close_nine_baseline;
         for (const auto workers : {1U, 2U, 4U, 8U}) {

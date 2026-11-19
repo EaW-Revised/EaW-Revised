@@ -147,7 +147,7 @@ public:
         std::vector<std::uint64_t> instances;
         std::uint64_t sequence = 0;
         for (const auto& pump : due_) {
-            const auto* object = host_->view->find(pump.instance - first_object_instance);
+            const auto* object = host_->view->find(pump.object);
             if (!object || (object->hull && object->hull->raw() <= 0)) continue;
             ScriptEvent event;
             event.key = {scripts_->completed_tick() + 1, producer_foc_engine, pump.instance, sequence++};
@@ -449,7 +449,7 @@ public:
     }
 
 private:
-    struct Pump { std::uint64_t instance{}; bool first{}; LuaNumber rate{}; };
+    struct Pump { std::uint64_t instance{}; sim::EntityId object{}; bool first{}; LuaNumber rate{}; };
     core::Result<void> prepare_turn(const sim::PartitionExecutor& executor) {
         turn_tick_ = host_->view->tick;
         const auto attachments = scripts_->object_scripts();
@@ -473,7 +473,8 @@ private:
                     if (!rate || !last) { row.error = !rate ? rate.error() : last.error(); continue; }
                     const auto* period = number_of(rate.value());
                     const auto* previous = number_of(last.value());
-                    if (period && (!previous || *period < now - *previous)) row.pump = Pump{id, previous == nullptr, *period};
+                    if (period && (!previous || *period < now - *previous))
+                        row.pump = Pump{id, attachments[index].object.id, previous == nullptr, *period};
                 }
             });
         if (!prepared) return prepared;
@@ -615,8 +616,10 @@ core::Result<void> tactical_ai_detail::service_objects(const sim::PartitionExecu
                 // Their allocation identity is also their generation (SOS-44).
                 auto module = "Data/Scripts/GameObject/" + name + ".lua";
                 if (host_->omitted_object_scripts.contains(module)) continue;
-                proposed[index] = authoritative::ObjectScript{{handle_game_object, unit.id}, unit.id,
-                    first_object_instance + unit.id, std::move(module)};
+                // SSU-05: a factory wrapper and its physical allocation are distinct identities.
+                const auto allocation = unit.script_object_id != 0 ? unit.script_object_id : unit.id;
+                proposed[index] = authoritative::ObjectScript{{handle_game_object, unit.id}, allocation,
+                    first_object_instance + allocation, std::move(module)};
             }
         });
     if (!prepared) return prepared;
@@ -815,7 +818,7 @@ core::Result<PreparedAiSession> prepare_session(
             std::sort(omitted_types.begin(), omitted_types.end());
             if (auto admitted = session.omit_object_script_decisions(omitted_types); !admitted) return admitted;
         }
-        for (const std::string_view verb : {verb_move, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_tactical_superweapon, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all, verb_make_invulnerable}) {
+        for (const std::string_view verb : {verb_move, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_tactical_superweapon, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all, verb_make_invulnerable, verb_create_object}) {
             if (auto added = session.register_verb(verb, translate_order); !added) return added;
         }
         if (auto added = session.register_presentation_verb(verb_letter_box); !added) return added;

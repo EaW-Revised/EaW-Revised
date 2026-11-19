@@ -58,6 +58,7 @@ int main(int argc, char* argv[]) {
     test_hardpoint_dependencies();
     test_space_healing();
     test_passive_damage_aura();
+    test_team_company_healing();
     test_passive_damage_edges();
     test_peacebringer_blast_session();
     test_deployment_abilities();

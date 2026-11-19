@@ -400,7 +400,7 @@ bool Selection::click(const std::optional<sim::EntityId> picked, const Modifiers
         clear();
         return true;
     }
-    if (!unit->own || !unit->controlled || !unit->selectable || unit->neutral) {
+    if (!unit->own || !unit->controlled || !unit->selectable || unit->selection_denied || unit->neutral) {
         // FoC: another player's unit gives no select action; with nothing selected the click
         // falls through to the deselect, which has nothing to clear.
         return false;
@@ -420,7 +420,7 @@ bool Selection::click(const std::optional<sim::EntityId> picked, const Modifiers
 bool Selection::double_click(const std::optional<sim::EntityId> picked, const std::span<const BattleUnit> units,
                              const ScreenRect& viewport) {
     const BattleUnit* unit = picked ? find(units, *picked) : nullptr;
-    if (unit == nullptr || !unit->own || !unit->controlled || !unit->selectable || unit->neutral) return false;
+    if (unit == nullptr || !unit->own || !unit->controlled || !unit->selectable || unit->selection_denied || unit->neutral) return false;
     // WSU-18: the picked object's type; for a craft, the craft type, whose objects select as their
     // squadrons (the squadron's first craft stands for the one under the pointer; M2 squadrons are
     // of one craft type).
@@ -438,7 +438,7 @@ bool Selection::box(const ScreenRect& rect, const bool shift, const std::span<co
     }
     bool found = false;
     for (const BattleUnit& unit : units) {
-        if (!unit.own || !unit.controlled || !unit.selectable || unit.neutral || !unit.locomotion || unit.decoration
+        if (!unit.own || !unit.controlled || !unit.selectable || unit.selection_denied || unit.neutral || !unit.locomotion || unit.decoration
             || !unit.screen || !rect.contains_origin(*unit.screen)) continue;
         if (!shift && !found) clear();
         found = true;
@@ -451,7 +451,7 @@ bool Selection::all(const std::span<const BattleUnit> units) {
     std::vector<sim::EntityId> next;
     for (const BattleUnit& unit : units) {
         // S-5a: global admission has no projection or pointer-sensitivity test.
-        if (unit.entity == sim::invalid_entity_id || !unit.own || !unit.controlled || !unit.selectable || unit.neutral
+        if (unit.entity == sim::invalid_entity_id || !unit.own || !unit.controlled || !unit.selectable || unit.selection_denied || unit.neutral
             || !unit.locomotion || unit.decoration) continue;
         next.push_back(unit.entity);
     }
@@ -462,7 +462,7 @@ bool Selection::bulk(const std::span<const BattleUnit> units, const std::optiona
                      const bool include_heroes) {
     std::vector<sim::EntityId> next;
     for (const auto& unit : units) {
-        if (unit.entity == sim::invalid_entity_id || !unit.own || !unit.controlled || !unit.selectable
+        if (unit.entity == sim::invalid_entity_id || !unit.own || !unit.controlled || !unit.selectable || unit.selection_denied
             || unit.neutral || !unit.locomotion || unit.decoration || (unit.hero && !include_heroes)) continue;
         if (viewport) {
             if (!unit.selection_bounds) continue;
@@ -479,7 +479,7 @@ bool Selection::type_on_screen(const sim::tactical::TypeId type, const std::span
                                const ScreenRect& viewport) {
     bool added = false;
     for (const BattleUnit& unit : units) {
-        if (!unit.own || !unit.controlled || !unit.selectable || unit.neutral || unit.decoration || unit.type != type
+        if (!unit.own || !unit.controlled || !unit.selectable || unit.selection_denied || unit.neutral || unit.decoration || unit.type != type
             || !unit.screen || !viewport.contains_origin(*unit.screen)) continue;
         if (append(unit.entity)) added = true;
     }
@@ -490,7 +490,7 @@ bool Selection::craft_type_on_screen(const sim::tactical::TypeId craft_type, con
                                      const ScreenRect& viewport) {
     bool added = false;
     for (const BattleUnit& unit : units) {
-        if (!unit.own || !unit.controlled || !unit.selectable || unit.neutral || unit.decoration
+        if (!unit.own || !unit.controlled || !unit.selectable || unit.selection_denied || unit.neutral || unit.decoration
             || unit.part == sim::invalid_entity_id || unit.part_type != craft_type) continue;
         if (!unit.screen || !viewport.contains_origin(*unit.screen)) continue;
         if (append(unit.entity)) added = true;

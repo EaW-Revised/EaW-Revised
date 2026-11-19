@@ -1407,6 +1407,65 @@ void test_laser_defence() {
         && tactical::special_service_interval(tactical::SpecialAbilityKind::laser_defense) == 1,
         "WLD-03: the nested handler binds and services every frame");
 
+    // ABG-04: admission and published readiness use the named handler's enabled state on both paths.
+    for (const auto enabled : {std::optional<bool>{}, std::optional<bool>{true}, std::optional<bool>{false}}) {
+        for (const bool object_turn : {false, true}) {
+            std::vector<std::string> enabled_reference;
+            for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+                auto table = laser_defence_abilities();
+                table.profiles[0].special[0].initially_enabled = enabled;
+                auto created = tactical::TacticalSession::create(laser_defence_setup(800), laser_defence_sensors(),
+                    laser_defence_durability(), motion(), std::nullopt, laser_defence_combat(true), {}, table);
+                expect(static_cast<bool>(created), "ABG-04: the enabled-state session is created");
+                if (!created) continue;
+                auto session = std::move(created).value();
+                if (object_turn) {
+                    expect(static_cast<bool>(session.submit_object_turn({2,
+                        {2, 0, Kind::laser_defense, tactical::AbilityAction::activate, 0, {}}})),
+                        "ABG-04: the object-turn use is recorded");
+                } else {
+                    expect(static_cast<bool>(session.submit(command(2, 2, 0, 2, laser(tactical::AbilityAction::activate)))),
+                        "ABG-04: the activation command is recorded");
+                }
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                std::vector<std::string> hashes;
+                bool rejected = false;
+                for (std::uint64_t tick = 0; tick < 5; ++tick) {
+                    const auto stepped = session.step(executor);
+                    expect(static_cast<bool>(stepped), "ABG-04: the enabled-state step succeeds");
+                    if (!stepped) break;
+                    hashes.push_back(stepped.value().state_sha256);
+                    for (const auto& outcome : stepped.value().object_turn) {
+                        rejected = rejected || outcome.reason == tactical::RejectReason::ability_unavailable;
+                    }
+                    for (const auto& event : stepped.value().snapshot->events()) {
+                        rejected = rejected || (event.kind == tactical::EventKind::order_rejected
+                            && event.reason == tactical::RejectReason::ability_unavailable);
+                    }
+                    bool published = false;
+                    for (const auto& instance : stepped.value().snapshot->instances()) {
+                        if (instance.entity_id != 2) continue;
+                        for (const auto& status : instance.abilities) {
+                            if (status.kind != Kind::laser_defense) continue;
+                            published = true;
+                            if (tick < 2) expect(status.ready == enabled.value_or(true),
+                                "ABG-04: readiness reflects the authored enabled state before activation");
+                            if (tick >= 2) expect(status.active == enabled.value_or(true),
+                                "ABG-04: only an enabled named handler activates");
+                        }
+                    }
+                    expect(published, "ABG-04: point-defence readiness is published");
+                }
+                expect(rejected == !enabled.value_or(true), "ABG-04: a disabled handler rejects either activation path");
+                const auto state = session.ability_state(2);
+                expect(state && (enabled.value_or(true) ? state->slots[0].ready_tick > 2
+                    : state->slots[0].ready_tick == 0), "ABG-04: rejected activation does not start recharge");
+                if (workers == 1) enabled_reference = hashes;
+                else expect(hashes == enabled_reference, "ABG-04: enabled-state hashes equal at 1/2/4/8 workers");
+            }
+        }
+    }
+
     // WLD-04: the categories a shot in flight belongs to.
     tactical::Projectile shot;
     expect(tactical::projectile_defence_category(shot) == 0, "WLD-04: a laser bolt is not a targeted category");

@@ -192,6 +192,669 @@
       "example": {
         "column": 1,
         "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Enabled_By_Default",
+      "tag_path": "Revised_Build_Tray/Enabled_By_Default",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Handle",
+      "tag_path": "Revised_Build_Tray/Handle",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Enabled",
+      "tag_path": "Revised_Build_Tray/Handle/Enabled",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Size",
+      "tag_path": "Revised_Build_Tray/Handle/Size",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Caption",
+      "tag_path": "Revised_Build_Tray/Handle/Caption",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Tooltip",
+      "tag_path": "Revised_Build_Tray/Handle/Tooltip",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Candidate",
+      "tag_path": "Revised_Build_Tray/Handle/Candidate",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Anchor",
+      "tag_path": "Revised_Build_Tray/Handle/Candidate/Anchor",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Side",
+      "tag_path": "Revised_Build_Tray/Handle/Candidate/Side",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Offset",
+      "tag_path": "Revised_Build_Tray/Handle/Candidate/Offset",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Close_Button",
+      "tag_path": "Revised_Build_Tray/Close_Button",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Enabled",
+      "tag_path": "Revised_Build_Tray/Close_Button/Enabled",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Size",
+      "tag_path": "Revised_Build_Tray/Close_Button/Size",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Caption",
+      "tag_path": "Revised_Build_Tray/Close_Button/Caption",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Tooltip",
+      "tag_path": "Revised_Build_Tray/Close_Button/Tooltip",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Candidate",
+      "tag_path": "Revised_Build_Tray/Close_Button/Candidate",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Anchor",
+      "tag_path": "Revised_Build_Tray/Close_Button/Candidate/Anchor",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Side",
+      "tag_path": "Revised_Build_Tray/Close_Button/Candidate/Side",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Offset",
+      "tag_path": "Revised_Build_Tray/Close_Button/Candidate/Offset",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Tray",
+      "tag_path": "Revised_Build_Tray/Tray",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Entry_Template",
+      "tag_path": "Revised_Build_Tray/Tray/Entry_Template",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Entry_Scale",
+      "tag_path": "Revised_Build_Tray/Tray/Entry_Scale",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Compact_Entry_Scale",
+      "tag_path": "Revised_Build_Tray/Tray/Compact_Entry_Scale",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Entry_Gap",
+      "tag_path": "Revised_Build_Tray/Tray/Entry_Gap",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Group_Gap",
+      "tag_path": "Revised_Build_Tray/Tray/Group_Gap",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Row_Gap",
+      "tag_path": "Revised_Build_Tray/Tray/Row_Gap",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Panel_Padding",
+      "tag_path": "Revised_Build_Tray/Tray/Panel_Padding",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Header_Scale",
+      "tag_path": "Revised_Build_Tray/Tray/Header_Scale",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Header_Template",
+      "tag_path": "Revised_Build_Tray/Tray/Header_Template",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Max_Rows",
+      "tag_path": "Revised_Build_Tray/Tray/Max_Rows",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Fold_Single_Choice_Groups",
+      "tag_path": "Revised_Build_Tray/Tray/Fold_Single_Choice_Groups",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Width_Mode",
+      "tag_path": "Revised_Build_Tray/Tray/Width_Mode",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Max_Width_Share",
+      "tag_path": "Revised_Build_Tray/Tray/Max_Width_Share",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Back_Source",
+      "tag_path": "Revised_Build_Tray/Tray/Back_Source",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtray.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTray.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Frame_Width",
+      "tag_path": "Revised_Build_Tray/Tray/Frame_Width",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtraygroups.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTrayGroups.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray_Groups",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Category_Priority",
+      "tag_path": "Revised_Build_Tray_Groups/Category_Priority",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtraygroups.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTrayGroups.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray_Groups",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Building_Categories",
+      "tag_path": "Revised_Build_Tray_Groups/Building_Categories",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtraygroups.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTrayGroups.xml"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Revised_Build_Tray_Groups",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Group_Caption",
+      "tag_path": "Revised_Build_Tray_Groups/Group_Caption",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/revisedbuildtraygroups.xml",
+        "source_id": "synthetic:tools/revised_build_tray/RevisedBuildTrayGroups.xml"
+      },
+      "file_count": 1,
+      "node_kind": "attribute",
+      "object_type": "Revised_Build_Tray_Groups",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Name",
+      "tag_path": "Revised_Build_Tray_Groups/Group_Caption/@Name",
+      "usage_count": 1
+    },
+    {
+      "example": {
+        "column": 1,
+        "line": 1,
         "logical_path": "data/xml/eawrhud.xml",
         "source_id": "synthetic:tests/ui/fixtures/eawr-hud.xml"
       },

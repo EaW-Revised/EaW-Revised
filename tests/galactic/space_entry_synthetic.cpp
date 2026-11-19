@@ -1869,6 +1869,40 @@ void commander_contracts() {
             tt::FogRules fog; fog.map_left=whole(-1000); fog.map_top=whole(1000); fog.cell_size=whole(100);
             fog.cells_wide=64; fog.cells_tall=32; fog.service_period=1; fog.ramp_down_step=238; content.fog=fog;
         }
+        if (scenario == 2) {
+            auto negative = content;
+            auto& profiles = negative.economy.command_bonuses;
+            const auto reveal = std::find_if(profiles.begin(), profiles.end(), [](const auto& profile) {
+                return profile.battlefield && profile.reveal_delta != Fixed{};
+            });
+            expect(reveal != profiles.end(), "REVIEW F3: campaign reveal profile exists");
+            if (reveal != profiles.end()) {
+                reveal->reveal_delta = Fixed::from_ratio(-3, 4).value();
+                auto other = *reveal; other.slot += 1000; other.bonus.stacking_category = 123;
+                profiles.push_back(other);
+                std::sort(profiles.begin(), profiles.end(), [](const auto& a, const auto& b) {
+                    return std::pair{a.type, a.slot} < std::pair{b.type, b.slot};
+                });
+                auto live_negative = tt::TacticalSession::create(entry.conflict.tactical, negative);
+                auto fresh_negative = tt::TacticalSession::create(entry.conflict.tactical, negative);
+                expect(live_negative && fresh_negative, "REVIEW F3: valid negative-aggregate GC sessions create");
+                if (live_negative && fresh_negative) {
+                    const auto saved = live_negative.value().save_checkpoint_state();
+                    expect(static_cast<bool>(saved), "REVIEW F3: valid negative-aggregate GC checkpoint saves");
+                    if (saved) {
+                        const auto loaded = fresh_negative.value().load_checkpoint_state(saved.value());
+                        expect(static_cast<bool>(loaded), "REVIEW F3: negative-aggregate GC checkpoint must load");
+                        if (loaded) {
+                            platform::ThreadWorkerAdapter negative_executor(workers);
+                            (void)take(live_negative.value().step(negative_executor));
+                            (void)take(fresh_negative.value().step(negative_executor));
+                            expect(live_negative.value().state_sha256() == fresh_negative.value().state_sha256(),
+                                "WBR-01: negative GC checkpoint continuation preserves the complete signed ledger and fog");
+                        }
+                    }
+                }
+            }
+        }
         auto session=take(tt::TacticalSession::create(entry.conflict.tactical,content)); platform::ThreadWorkerAdapter executor(workers);
         const auto reveal=[&](tt::TacticalSession& live,sim::EntityId id){auto view=live.snapshot();return std::find_if(view->instances().begin(),view->instances().end(),[id](const auto&u){return u.entity_id==id;})->reveal_range;};
         const auto initial_reveal=whole(scenario==8?175:150);

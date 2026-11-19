@@ -180,6 +180,21 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
       }
     });
     if (!prepared) throw std::runtime_error("AI world view preparation failed: " + prepared.error().message);
+    // SSU-03: the small hidden-upgrade list supplies Lua references; no extra live-entity pass.
+    const auto physical_rows = view->units.size();
+    for (const auto& account : world.ledgers()) for (const auto& held : account.completed) {
+        if (held.script_identity == 0) continue;
+        ViewUnit entry;
+        entry.id = held.script_identity;
+        entry.script_object_id = held.object;
+        entry.type = held.type;
+        entry.owner = account.player;
+        entry.position = held.script_position;
+        view->units.push_back(std::move(entry));
+    }
+    std::sort(view->units.begin() + static_cast<std::ptrdiff_t>(physical_rows), view->units.end(),
+        [](const ViewUnit& left, const ViewUnit& right) { return left.id < right.id; });
+    view->script_objects = view->units.size() - physical_rows;
     return view;
 }
 
@@ -188,6 +203,11 @@ inline std::shared_ptr<const WorldView> build_turn_view(const sim::PartitionExec
     auto view = std::make_shared<WorldView>();
     view->tick = turn.tick;
     view->players = previous.players;
+    for (auto& player : view->players) {
+        const auto wallet = std::lower_bound(turn.wallets.begin(), turn.wallets.end(), player.id,
+            [](const tactical::ObjectTurnWallet& row, const tactical::PlayerId id) { return row.player < id; });
+        player.turn_credits = wallet != turn.wallets.end() && wallet->player == player.id ? wallet->credits : math::Fixed{};
+    }
     view->units.resize(turn.rows.size());
     view->capture_candidates.resize(turn.rows.size());
     const auto prepared = executor.execute_phase("ai-world-view", sim::tick_partition_count,
@@ -211,6 +231,9 @@ inline std::shared_ptr<const WorldView> build_turn_view(const sim::PartitionExec
             }
         });
     if (!prepared) throw std::runtime_error("object turn view preparation failed: " + prepared.error().message);
+    view->script_objects = previous.script_objects;
+    const auto first_script = previous.units.end() - static_cast<std::ptrdiff_t>(previous.script_objects);
+    view->units.insert(view->units.end(), first_script, previous.units.end());
     return view;
 }
 

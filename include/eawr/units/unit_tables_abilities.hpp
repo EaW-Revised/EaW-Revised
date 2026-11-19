@@ -94,6 +94,7 @@ struct CombatBonus final {
     std::string specific_faction;
     bool enabled{true};
     std::vector<sim::tactical::TypeId> excluded_containers;
+    bool apply_to_self{}; // WHE-53: source creation notification defaults off.
     bool operator==(const CombatBonus&) const = default;
 };
 

@@ -113,7 +113,7 @@ private:
     GalacticClockLimiter clock_limiter_;
     std::optional<sim::SeatId> pause_actor_;
     std::vector<sim::SeatId> clock_refusals_;
-    std::vector<sim::galactic::Seat> roster_; // tick-zero seats, ascending seat identity
+    std::vector<sim::galactic::Seat> roster_; // the agreed seat table when the adapter is made (humans admitted into a loaded save included), ascending seat identity
     bool debug_commands_{};
     EngineSource engine_source_;
     std::optional<campaign::GameTick> last_tick_;

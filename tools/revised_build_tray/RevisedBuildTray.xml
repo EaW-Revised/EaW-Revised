@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<!-- Project addition GBT-11 (docs/ui/galactic-build-tray.md). Distances are UI reference units.
+     Every element is optional; an omitted one takes the built-in default named in the spec.
+     A mod may replace this whole file in a higher layer. The tray art, fonts and entries come from the
+     mod's own command bar and GUIDialogs skin; nothing here names art of its own. -->
+<Revised_Build_Tray>
+    <Enabled_By_Default>Yes</Enabled_By_Default>
+    <Handle>
+        <Enabled>true</Enabled>
+        <Size>48 20</Size>
+        <Caption>TEXT_EAWR_BUILD_TRAY_MORE</Caption>
+        <Tooltip>TEXT_EAWR_BUILD_TRAY_TOOLTIP</Tooltip>
+        <Candidate>
+            <Anchor>production_bar</Anchor>
+            <Side>above</Side>
+            <Offset>0 0</Offset>
+        </Candidate>
+    </Handle>
+    <!-- A small close icon in the panel's top right corner: the bar's own button art with an x. A mod with its own
+         close icon names its command bar component in an Art_Component element (the first one the mod has wins). -->
+    <Close_Button>
+        <Enabled>true</Enabled>
+        <Size>16 16</Size>
+        <Caption>TEXT_EAWR_BUILD_TRAY_CLOSE</Caption>
+        <Tooltip>TEXT_BUTTON_CLOSE</Tooltip>
+        <Candidate>
+            <Anchor>build_tray</Anchor>
+            <Side>inside_top_right</Side>
+            <Offset>-3 3</Offset>
+        </Candidate>
+    </Close_Button>
+    <Tray>
+        <Entry_Template>b_Create_00</Entry_Template>
+        <Entry_Scale>0.75</Entry_Scale>
+        <Compact_Entry_Scale>0.6</Compact_Entry_Scale>
+        <Entry_Gap>2</Entry_Gap>
+        <Group_Gap>12</Group_Gap>
+        <Row_Gap>4</Row_Gap>
+        <Panel_Padding>6</Panel_Padding>
+        <Header_Scale>0.8</Header_Scale>
+        <Header_Template>Text_Tech_Level</Header_Template>
+        <Max_Rows>7</Max_Rows>
+        <Fold_Single_Choice_Groups>Yes</Fold_Single_Choice_Groups>
+        <Width_Mode>Auto</Width_Mode>
+        <Max_Width_Share>0.6</Max_Width_Share>
+        <!-- Bar: the back and frame are the bar's own shell art (and colour) behind and above its slots. -->
+        <Back_Source>Bar</Back_Source>
+        <Frame_Width>3</Frame_Width>
+    </Tray>
+</Revised_Build_Tray>

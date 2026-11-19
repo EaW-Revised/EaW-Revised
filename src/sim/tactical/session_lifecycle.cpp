@@ -310,7 +310,7 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
             const auto field = SensorField::build(source.players, source.units, sensors, {}, command_ledger.reveal_multipliers).value();
             fog.emplace(*fog_rules, source.players);
             static_cast<void>(fog->advance(0, false, revealers(field, source.units), InlineExecutor{}));
-            if (source.campaign) last_fog_multipliers=fog_multipliers(command_ledger);
+            if (tracks_player_reveal()) last_fog_multipliers=fog_multipliers(command_ledger);
         }
         publish_staged(live, {}, {});
     }
@@ -694,7 +694,7 @@ core::Result<EntityId> TacticalSession::stage_spawn(const UnitState& unit) {
     }
     impl_->named_ability_locks = std::move(locks);
     impl_->rebuild(live, false);
-    if (command_ledger) { impl_->command_ledger = std::move(*command_ledger); impl_->fog_modifiers_dirty=impl_->setup.campaign.has_value(); }
+    if (command_ledger) { impl_->command_ledger = std::move(*command_ledger); impl_->fog_modifiers_dirty=impl_->tracks_player_reveal(); }
     if (impl_->motion.squadrons.find_spawner(state.type_id, state.owner) != nullptr) {
         impl_->spawners.emplace(state.entity_id,
             initial_spawner(impl_->setup.seed, impl_->completed_tick + 1, state.entity_id));
@@ -772,7 +772,7 @@ core::Result<void> TacticalSession::stage_remove(const EntityId unit) {
     }
     impl_->rebuild(live, false);
     impl_->ledgers = std::move(ledgers);
-    if (command_ledger) { impl_->command_ledger = std::move(*command_ledger); impl_->fog_modifiers_dirty=impl_->setup.campaign.has_value(); }
+    if (command_ledger) { impl_->command_ledger = std::move(*command_ledger); impl_->fog_modifiers_dirty=impl_->tracks_player_reveal(); }
     if (sources_changed && !impl_->bonus_categories.empty()) impl_->committed_bonus_profiles.swap(impl_->bonus_profiles);
     impl_->spawners.erase(unit);
     impl_->pads.erase(unit);

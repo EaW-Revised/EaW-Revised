@@ -19,6 +19,7 @@
 #include "ui/input_routing.hpp"
 #include "ui/build_queue_dial.hpp"
 
+#include <godot_cpp/classes/input_event_mouse_button.hpp>
 #include <godot_cpp/classes/canvas_item_material.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/os.hpp>
@@ -191,6 +192,8 @@ void GalacticMode::State::update_hud() {
     service_forced_clicks();
     service_story_hud();
     { const auto measured = measure_frame(FramePhase::hud_commands); update_command_bar(); }
+    if (!build_tray) build_tray = std::make_unique<GalacticBuildTray>();
+    build_tray->service(*this);
     { const auto measured = measure_frame(FramePhase::hud_fleets); update_fleet_hud(); }
     { const auto measured = measure_frame(FramePhase::hud_ground); update_ground_hud(); }
     { const auto measured = measure_frame(FramePhase::hud_orbit); update_orbit_hud(); }
@@ -207,6 +210,19 @@ void GalacticMode::State::update_hud() {
     const auto labels_timer = measure_frame(FramePhase::hud_labels);
     update_planet_labels();
     service_planet_hover();
+}
+
+// The one production-card buy path: the bar's cards and the build tray's entries both call it, so the admission
+// gate, the audio cue and the order stay identical (GBT-03).
+void GalacticMode::State::submit_build_choice(const galactic_view::BuildChoiceComponent& choice) {
+    if (!choice.enabled || !game) return;
+    // WGEP-97: underway feedback belongs to the admitted UI submission, before the request.
+    if (audio) audio->build(audio::GalacticBuildCue::underway, choice.type, true);
+    game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat},
+        sim::galactic::ProductionCommand{selected_planet, choice.type_id,
+            sim::galactic::ProductionAction::buy, choice.space
+                ? sim::galactic::ProductionDomain::space : sim::galactic::ProductionDomain::ground, 0}, {}});
+    ++submitted_orders;
 }
 
 void GalacticMode::State::reset_label_placement() {
@@ -1163,12 +1179,21 @@ void GalacticMode::State::update_planet_status_icons(const galactic_view::Object
             if (!build && !effect) slot->set_name(String::utf8(("planet_corruption_icon_" + std::to_string(id)).c_str()));
             if (effect) slot->set_name(String::utf8(("planet_status_" + std::to_string(id) + "_"
                 + std::to_string(static_cast<unsigned>(kind))).c_str()));
+            if (!build && !effect) {
+                // The slot is a child owned by this State; its callback cannot outlive that owner.
+                slot->connect("gui_input", callable_mp_static(+[](Ref<InputEvent> event, int64_t self, int64_t planet) {
+                    const Ref<InputEventMouseButton> mouse = event;
+                    if (mouse.is_valid() && mouse->is_pressed() && mouse->get_button_index() == MOUSE_BUTTON_LEFT)
+                        reinterpret_cast<State*>(self)->open_corruption_information(static_cast<sim::galactic::PlanetId>(planet));
+                }).bind(reinterpret_cast<int64_t>(this), static_cast<int64_t>(id)));
+            }
             slot->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE); world_overlays->add_child(slot);
         }
         if (!build && !effect) {
             // WGCI-1/2: both corruption icons answer the pointer; the information icon carries the authored plain tooltip
             // line, the per-type icon none (its popup is service_encyclopedia's).
             slot->set_mouse_filter(Control::MOUSE_FILTER_STOP);
+            slot->set_meta("information_only", kind == galactic_view::PlanetStatusIcon::corruption_info);
             String text;
             if (kind == galactic_view::PlanetStatusIcon::corruption_info && battle_text)
                 text = String::utf8(battle_text(galactic_view::corruption_information_tooltip_key).c_str());
@@ -1853,26 +1878,15 @@ void GalacticMode::State::build_command_bar_choices(const pugi::xml_document& do
         std::int32_t authored{};
         if (value >> authored) choice_slot_limit = std::max(0, authored);
     }
-    std::size_t slot_count{};
-    for (const auto& component : command_catalog.components()) {
-        constexpr std::string_view prefix = "b_Create_";
-        if (galactic_view::is_command_filter(component) || !component.in_group("Structure Buttons") || !component.name.starts_with(prefix)) continue;
-        const std::string_view suffix(component.name.data() + prefix.size(), component.name.size() - prefix.size());
-        std::size_t index{};
-        const auto parsed = std::from_chars(suffix.data(), suffix.data() + suffix.size(), index);
-        if (parsed.ec != std::errc{} || parsed.ptr != suffix.data() + suffix.size()
-            || index >= static_cast<std::size_t>(choice_slot_limit)) continue;
-        std::ostringstream canonical;
-        canonical << prefix << std::setw(2) << std::setfill('0') << index;
-        if (canonical.str() == component.name) slot_count = std::max(slot_count, index + 1);
-    }
+    // GHUD-S91: every numbered production component counts, whatever group the layer files it under (Remake files its slots 16 and
+    // up under another group; a retail capture of its bar shows them drawn, 20 per row).
+    const std::size_t slot_count = galactic_view::production_slot_count(command_catalog, static_cast<std::size_t>(choice_slot_limit));
     for (std::size_t slot = 0; slot < slot_count; ++slot) {
         // GHUD-S91: native numbered component bindings survive XML definition reordering.
         std::ostringstream name;
         name << "b_Create_" << std::setw(2) << std::setfill('0') << slot;
         const auto* authored = command_catalog.find(name.str());
-        const bool present = authored && !galactic_view::is_command_filter(*authored)
-            && authored->in_group("Structure Buttons") && command_anchors.find(authored->name);
+        const bool present = authored && !galactic_view::is_command_filter(*authored) && command_anchors.find(authored->name);
         choice_buttons.push_back(present ? authored->name : std::string{});
         if (!present) continue;
         const auto& component = *authored;
@@ -1889,15 +1903,7 @@ void GalacticMode::State::build_command_bar_choices(const pugi::xml_document& do
         button->set_texture_pressed(command_texture(command_bar_token(component, data::ui::Field::selected_texture_name)));
         button->set_action([this, name = component.name] {
             raise_story_click(name); // #5922: the plots hear a production-card press (BFC names its cards), whatever the card does
-            const auto choice = displayed_choices.find(name);
-            if (choice == displayed_choices.end() || !choice->second.enabled || !game) return;
-            // WGEP-97: underway feedback belongs to the admitted UI submission, before the request.
-            if (audio) audio->build(audio::GalacticBuildCue::underway, choice->second.type, true);
-            game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat},
-                sim::galactic::ProductionCommand{selected_planet, choice->second.type_id,
-                    sim::galactic::ProductionAction::buy, choice->second.space
-                        ? sim::galactic::ProductionDomain::space : sim::galactic::ProductionDomain::ground, 0}, {}});
-            ++submitted_orders;
+            if (const auto choice = displayed_choices.find(name); choice != displayed_choices.end()) submit_build_choice(choice->second);
         });
         // #2890 (GHUD-S57): the card's price is a text child on the pad's lower edge.
         auto* price = memnew(EawrHudText); price->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
@@ -2168,6 +2174,10 @@ void GalacticMode::State::service_encyclopedia() {
     for (const auto& [name, choice] : displayed_choices) {
         if (pointer != command_buttons.at(name)) continue;
         hovered = choice.type_id; hovered_choice = &choice; break;
+    }
+    // GBT-03: a tray entry hovers like the bar slot of the same choice.
+    if (!hovered && build_tray) if (const auto* choice = build_tray->choice_under(pointer)) {
+        hovered = choice->type_id; hovered_choice = choice;
     }
     if (!hovered) for (const auto& [name, row] : displayed_queues) {
         const auto* button = command_buttons.at(name);

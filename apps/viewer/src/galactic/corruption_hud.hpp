@@ -26,8 +26,10 @@ struct CorruptionHudState {
     std::shared_ptr<const sim::galactic::GalacticSnapshot> fixture, publication;
     std::optional<sim::galactic::CorruptionMenu> facts;
     std::uint32_t width{}, height{};
-    bool closed{}, enabled{};
-    std::uint64_t rebuilds{}, choices_accepted{}, closes{};
+    bool closed{}, enabled{}, notified{};
+    std::uint64_t rebuilds{}, choices_accepted{}, closes{}, open_notices_submitted{};
+    std::optional<std::uint64_t> dismissed_preparation;
     std::optional<unsigned> accepted_slot;
+    std::optional<sim::galactic::PlanetId> information_planet;
 };
 } // namespace eawr::presentation::godot_backend

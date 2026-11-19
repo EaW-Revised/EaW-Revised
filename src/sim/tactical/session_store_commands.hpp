@@ -23,6 +23,7 @@ struct SessionStoreObjectTurn {
     bool object_turn_running{};
     std::map<std::tuple<std::uint64_t, EntityId, std::uint64_t>, ObjectTurnRecord> object_turn_pending;
     std::vector<ObjectTurnRecord> object_turns_executed;
+    std::vector<ObjectTurnWallet> object_turn_wallets; // SOS-T1: retained scratch, not canonical state
 };
 
 } // namespace eawr::sim::tactical::session_detail

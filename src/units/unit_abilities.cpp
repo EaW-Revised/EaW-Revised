@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -315,7 +316,9 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 tactical::LureProfile lure;
                 lure.radius = ability.effective_radius.value_or(Fixed{});
                 lure.pulse_frames = frames(ability.pulse_frequency_seconds);
-                lure.max_pulses = std::min<std::uint32_t>(*ability.max_pulses, tactical::max_ability_frames);
+                // ABG-07: this is a signed authored count, not a frame duration; negative counts never pulse.
+                const auto count = *ability.max_pulses;
+                lure.max_pulses = count <= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ? count : 0;
                 for (const auto& name : ability.target_types) lure.target_types.push_back(assets::object_type_crc(name));
                 std::sort(lure.target_types.begin(), lure.target_types.end());
                 lure.target_types.erase(std::unique(lure.target_types.begin(), lure.target_types.end()), lure.target_types.end());

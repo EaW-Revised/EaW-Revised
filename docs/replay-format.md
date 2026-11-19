@@ -375,6 +375,7 @@ reserved (zero) and unit_count uint64 entity IDs, nonzero and strictly increasin
 | 36 | Land unload | uint64 occupant, uint32 all flag (0 or 1), uint32 reserved (zero); one listed host; occupant is zero exactly when all is set | 48 + 8n |
 | 37 | Tactical super weapon switch (TSW-07; OrderKind 31) | uint32 stage (1 start approach, 2 start power-up), uint32 admission (0 player, 1 AI object call; a human wire packet must carry 0); exactly one listed unit | 48 |
 | 38 | Move with a final facing (MV-40; OrderKind 2) | three int64 destination raw values, int64 yaw raw in [0, 360) degrees, uint32 flags (bit 0 through hazards, bit 1 queued), uint32 reserved (zero); listed units | 72 + 8n |
+| 39 | Direct script object creation (SSU-03; OrderKind 33) | uint64 type, uint32 owner, uint32 reserved (zero), three int64 Q24 position raws, uint64 creation reference; zero listed units, engine-only | 80 |
 
 The explicit-facing reinforcement command is an EAWR extension. Its facing drives both the arrival-lane placement sweep and the spawned unit's rotation and flight direction. Each drop carries the local player's chosen value; absence of a wheel choice retains opcodes 11/19 and the player's authored FoC facing, including their existing bytes. A present zero yaw is an explicit choice. Negative yaw and yaw at or above 360 degrees are rejected during command validation.
 
@@ -774,6 +775,13 @@ nonzero tech do not emit it; sessions without upgrades keep their prior byte lay
 WFR-01 selects block version 2 when any live unit has a nonzero fire-range bonus;
 every encoded unit then has seven bonus values, with fire range last. Otherwise
 the block retains version 1 and its exact six-slot bytes.
+SSU-03 selects version 3 when any held object has a script-creation reference.
+Each held row then appends uint64 script reference and three int64 Q24 position
+raws; ordinary queued objects write zero for all four added values. Every unit
+has seven bonus values in version 3. A direct object has no parent station, while
+its ordinary hidden-object ID still comes from the world's ordered allocator.
+The child checkpoint state domain is 37..44, retaining the existing three layout
+flags above a base domain of 37; older layouts are refused.
 It contains uint64 account count, then accounts in ascending player order:
 uint32 player and tech level, uint64 lifetime count, then pairs of uint64 type and
 completed-build count in ascending type order; uint64 held count, then uint64

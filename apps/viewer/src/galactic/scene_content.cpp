@@ -26,6 +26,22 @@ namespace {
     return core::trim(value, core::xml_whitespace);
 }
 
+// Names separated by `|`, commas or white space (CategoryMask, Behavior, member lists).
+[[nodiscard]] std::vector<std::string> split_names(const std::string_view text) {
+    std::vector<std::string> names;
+    std::string current;
+    for (const char value : text) {
+        if (value == '|' || value == ',' || core::xml_whitespace.find(value) != std::string_view::npos) {
+            if (!current.empty()) names.push_back(std::move(current));
+            current.clear();
+        } else {
+            current += value;
+        }
+    }
+    if (!current.empty()) names.push_back(std::move(current));
+    return names;
+}
+
 [[nodiscard]] float scalar(sim::math::Fixed value) {
     return static_cast<float>(static_cast<double>(value.raw()) / static_cast<double>(sim::math::Fixed::scale));
 }
@@ -47,6 +63,9 @@ public:
         layers_.push_back(&own_);
     }
     [[nodiscard]] const data::XmlNode* node(std::string_view tag) const { return data::retail::single(layers_, tag); }
+    [[nodiscard]] std::vector<const data::XmlNode*> list(std::string_view tag, data::retail::ListRule rule) const {
+        return data::retail::list(layers_, tag, rule);
+    }
     [[nodiscard]] std::string text(std::string_view tag) const {
         const auto* value = node(tag);
         return value ? trimmed(value->raw_text) : std::string();
@@ -126,6 +145,13 @@ std::map<std::string, ProductionArt> load_production_art(
             if (const auto value = data::retail::leading_number(rank->raw_text))
                 art.hero_rank = value->value.trunc_to_integer();
         art.generic_hero = fields.flag("Is_Generic_Hero");
+        // GBT-04, GBT-05: the facts the build tray groups by. A squadron's craft and a company's members count (PL-13).
+        art.category_names = split_names(fields.text("CategoryMask"));
+        art.behaviors = split_names(fields.text("Behavior"));
+        for (const auto* member : fields.list("Squadron_Units", data::retail::ListRule::replace_by_variant_all))
+            for (auto& name : split_names(member->raw_text)) art.members.push_back(std::move(name));
+        for (const auto* member : fields.list("Company_Units", data::retail::ListRule::append))
+            for (auto& name : split_names(member->raw_text)) art.members.push_back(std::move(name));
         art.hero = art.named_hero || art.generic_hero || fields.flag("Is_Special_Weapon_In_Space");
         art.force_sensitive = fields.flag("Is_Force_Sensitive");
         // Shared object content (CARD-17): negative Population_Value usage.
@@ -137,6 +163,19 @@ std::map<std::string, ProductionArt> load_production_art(
         result.emplace(definition.id, std::move(art));
     }
     return result;
+}
+
+presentation::ui::build_tray::TypeIndex build_tray_types(const std::map<std::string, ProductionArt>& art) {
+    presentation::ui::build_tray::TypeIndex index;
+    for (const auto& [name, type] : art) {
+        presentation::ui::build_tray::TypeFacts facts;
+        facts.name = name;
+        facts.categories = type.category_names;
+        facts.members = type.members;
+        facts.building_role = presentation::ui::build_tray::has_building_behavior(type.behaviors);
+        index.add(std::move(facts));
+    }
+    return index;
 }
 
 PlanetInfoMetadata planet_info_metadata(const data::galactic::Planet& planet, const data::ui::TextDatabase* text) {

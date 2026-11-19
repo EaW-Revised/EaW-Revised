@@ -593,11 +593,17 @@ void test_economy_load_boundaries() {
         [](const auto& r) { return r.players[1].strategic_credits == Fixed{}; });
     check([](auto& r) { r.players[1].credit_multiplier = units(-1); }, "EAWR-LOAD-0358",
         [](const auto& r) { return r.players[1].credit_multiplier == Fixed{}; });
-    check([](auto& r) {
-        r.campaign = true;
+    for (const bool campaign : {false, true}) {
+        auto authored = rules(); authored.campaign = campaign;
         tactical::CommandBonusProfile profile; profile.type = station_type; profile.battlefield = true;
-        profile.reveal_delta = units(9); r.command_bonuses.push_back(profile);
-    }, "EAWR-LOAD-0356", [](const auto& r) { return r.command_bonuses[0].reveal_delta == units(8); });
+        profile.reveal_delta = units(9); authored.command_bonuses.push_back(profile);
+        eawr::core::LoadNoteBuffer buffer;
+        const auto prepared = tactical::prepare_economy(authored, setup().players, buffer);
+        expect(prepared && prepared.value().command_bonuses.front().reveal_delta == units(9),
+            "WBR-01: skirmish and campaign reveal authoring is not capped at eight");
+        eawr::core::LoadNoteCollector collector; collector.merge(buffer);
+        expect(collector.snapshot().empty(), "WBR-01: supported reveal values require no clamp diagnostic");
+    }
     check([](auto& r) {
         tactical::UpgradeProfile profile; profile.type = upgrade_type;
         tactical::UpgradeProfile::Bounty bounty; bounty.percentage = units(-1);
@@ -982,6 +988,177 @@ void test_controller_shared_economy() {
     }
 }
 
+void test_battlefield_reveal_sources() {
+    // WBR-01: source identity, owner/allies and category policy do not depend on unit names.
+    for (const auto scenario : {0U, 1U, 2U, 3U, 4U, 5U}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup initial;
+            initial.players = {{1, 0, 1, 1}, {2, 1, 2, 1}, {3, 0, 1, 1}};
+            initial.units = {{1, 10, 1, at(5000, 0)}, {2, 11, 1, at(6000, 0)},
+                {10, 20, 1, at(0, 0)}, {11, 20, 3, at(1000, 0)}, {12, 20, 2, at(2000, 0)}};
+            tactical::TacticalContent content;
+            content.sensors = {{20, units(100)}};
+            if (scenario == 0) {
+                tactical::FogRules fog;
+                fog.map_left = units(-100); fog.map_top = units(100); fog.cell_size = units(10);
+                fog.cells_wide = 256; fog.cells_tall = 32; fog.service_period = 1; fog.ramp_down_step = 238;
+                content.fog = fog;
+            }
+            content.economy.players = {{1, units(100), 20}, {2, units(100), 20}, {3, units(100), 20}};
+            const auto profile = [&](tactical::TypeId type, std::uint32_t category, Fixed delta) {
+                tactical::CommandBonusProfile row;
+                row.type = type; row.bonus.stacking_category = category;
+                row.bonus.applicable = {type}; row.battlefield = true; row.apply_to_self = true;
+                row.all_allies = scenario != 3; row.enabled_players = {1, 2, 3}; row.reveal_delta = delta;
+                return row;
+            };
+            content.economy.command_bonuses = {
+                profile(10, 0, Fixed::from_raw(scenario == 5 ? 3 * one / 4 : -3 * one / 4)),
+                profile(11, scenario == 1 ? 1U : 0U, Fixed::from_raw(scenario == 1 || scenario == 5 ? -3 * one / 4 : scenario == 4 ? 3 * one / 4 : one / 4)),
+                profile(12, 0, Fixed::from_raw(one / 2))};
+            if (scenario == 2) content.economy.command_bonuses[0].enabled_players = {2};
+            auto made = tactical::TacticalSession::create(initial, content);
+            expect(static_cast<bool>(made), "WBR-01: signed source-ledger session creates");
+            if (!made) continue;
+            auto world = std::move(made).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            const auto range = [&](sim::EntityId id) {
+                const auto view = world.snapshot(); const auto* row = instance(*view, id);
+                return row ? row->reveal_range : std::optional<Fixed>{};
+            };
+            const auto expected = units(std::array{25, 10, 125, 25, 25, 175}[scenario]);
+            expect(range(10) == expected && range(11) == (scenario == 3 ? units(100) : expected)
+                && range(12) == units(100), "WBR-01: magnitude winner, additive categories, floor, enabled owner and alliance scope");
+            std::vector<std::string> hashes{world.state_sha256(), world.snapshot()->sha256()};
+            expect(static_cast<bool>(world.stage_remove(1)), "WBR-01: source retirement stages");
+            expect(static_cast<bool>(world.step(executor)), "WBR-01: source retirement commits");
+            const auto surviving = units(std::array{125, 25, 125, 125, 175, 25}[scenario]);
+            expect(range(10) == surviving && range(11) == (scenario == 3 ? units(100) : surviving),
+                "WBR-01: removing a source recomputes surviving contributions");
+            hashes.push_back(world.state_sha256()); hashes.push_back(world.snapshot()->sha256());
+            if (scenario == 0) {
+                expect(world.fog_cells()->values(0)[10 * 256 + 20] == 255,
+                    "REVIEW F1: removing the suppressor refreshes a stationary revealer's fog circle");
+                expect(world.fog_cells()->values(0)[10 * 256 + 120] == 255,
+                    "WBR-01: the source event refreshes stationary allied observers too");
+                const auto saved = world.save_checkpoint_state();
+                auto fresh = tactical::TacticalSession::create(initial, content);
+                expect(saved && fresh, "REVIEW F2: standalone checkpoint and factory create");
+                if (saved && fresh) {
+                    const auto loaded = fresh.value().load_checkpoint_state(saved.value());
+                    expect(static_cast<bool>(loaded), "REVIEW F2: standalone checkpoint loads");
+                    if (loaded) {
+                        expect(static_cast<bool>(world.step(executor)) && static_cast<bool>(fresh.value().step(executor)),
+                            "REVIEW F2: both sessions advance without source events");
+                        const auto restored_view = fresh.value().snapshot();
+                        const auto* restored = instance(*restored_view, 10);
+                        expect(restored && restored->reveal_range == units(125),
+                            "REVIEW F2: restored standalone reveal ledger retains the surviving +0.25 source");
+                        expect(fresh.value().state_sha256() == world.state_sha256()
+                            && fresh.value().snapshot()->sha256() == world.snapshot()->sha256(),
+                            "WBR-01: fresh checkpoint continuation preserves the complete quiet-tick state and fog");
+                    }
+                }
+            }
+            const auto born = world.stage_spawn({0, 12, 1, at(7000, 0)});
+            expect(static_cast<bool>(born) && static_cast<bool>(world.step(executor)), "WBR-01: new source birth commits");
+            const auto after_birth = units(std::array{150, 75, 150, 150, 175, 25}[scenario]);
+            expect(range(10) == after_birth, "WBR-01: new source participates in the existing notification ledger");
+            hashes.push_back(world.state_sha256()); hashes.push_back(world.snapshot()->sha256());
+            if (scenario == 0 && born) {
+                expect(world.fog_cells()->values(0)[10 * 256 + 24] == 255,
+                    "WBR-01: staged boosting-source birth expands a stationary fog circle");
+                expect(static_cast<bool>(world.stage_remove(born.value())), "WBR-01: boosting-source removal stages");
+                // Save before the pending range change reaches the fog service.
+                const auto saved = world.save_checkpoint_state();
+                auto fresh = tactical::TacticalSession::create(initial, content);
+                const bool loaded = saved && fresh
+                    && static_cast<bool>(fresh.value().load_checkpoint_state(saved.value()));
+                expect(static_cast<bool>(loaded), "WBR-01: pending source-change checkpoint loads");
+                expect(static_cast<bool>(world.step(executor)), "WBR-01: boosting-source retirement refreshes fog");
+                // V-15: the ramp-down service runs before the tick's releases, so the cell
+                // is still held in this tick; the release shows at the next service.
+                if (loaded) {
+                    expect(static_cast<bool>(fresh.value().step(executor)), "WBR-01: pending restored fog invalidation runs");
+                    expect(fresh.value().state_sha256() == world.state_sha256()
+                        && fresh.value().snapshot()->sha256() == world.snapshot()->sha256(),
+                        "WBR-01: checkpoint preserves the old fog cache until the pending source event commits");
+                }
+                expect(static_cast<bool>(world.step(executor)), "WBR-01: the service after the release commits");
+                expect(world.fog_cells()->values(0)[10 * 256 + 24] != 255,
+                    "WBR-01: losing a boosting source releases its stationary outer circle");
+            }
+            if (reference.empty()) reference = hashes;
+            expect(hashes == reference, "WBR-01: reveal source lifecycle is equal on 1/2/4/8 workers");
+        }
+    }
+}
+
+void test_neutral_reveal_content_resumes_like_uninterrupted() {
+    // WBR-01 review: content with a command ledger but no nonzero player reveal row keeps no reveal cache, so a
+    // battle resumed from a checkpoint and an uninterrupted one stay equal through later source events.
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        tactical::TacticalSetup initial;
+        initial.players = {{1, 0, 1, 1}, {2, 1, 2, 1}, {3, 0, 1, 1}};
+        initial.units = {{1, 10, 1, at(5000, 0)}, {10, 20, 1, at(0, 0)}, {11, 20, 3, at(1000, 0)}, {12, 20, 2, at(2000, 0)}};
+        tactical::TacticalContent content;
+        content.sensors = {{20, units(100)}};
+        tactical::FogRules fog;
+        fog.map_left = units(-100); fog.map_top = units(100); fog.cell_size = units(10);
+        fog.cells_wide = 256; fog.cells_tall = 32; fog.service_period = 1; fog.ramp_down_step = 238;
+        content.fog = fog;
+        content.economy.players = {{1, units(100), 20}, {2, units(100), 20}, {3, units(100), 20}};
+        tactical::CommandBonusProfile row;
+        row.type = 10; row.bonus.stacking_category = 0; row.bonus.applicable = {10};
+        row.battlefield = true; row.apply_to_self = true; row.all_allies = true; row.enabled_players = {1, 2, 3};
+        content.economy.command_bonuses = {row}; // neutral: no reveal contribution
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto first = tactical::TacticalSession::create(initial, content);
+        auto second = tactical::TacticalSession::create(initial, content);
+        expect(static_cast<bool>(first) && static_cast<bool>(second), "WBR-01 resume: neutral-row sessions create");
+        if (!first || !second) continue;
+        auto uninterrupted = std::move(first).value();
+        auto resumed = std::move(second).value();
+        expect(static_cast<bool>(uninterrupted.step(executor)) && static_cast<bool>(resumed.step(executor)),
+            "WBR-01 resume: first tick commits");
+        const auto saved = resumed.save_checkpoint_state();
+        auto fresh = tactical::TacticalSession::create(initial, content);
+        expect(saved && fresh, "WBR-01 resume: checkpoint saves and the factory creates");
+        if (!saved || !fresh) continue;
+        auto restored = std::move(fresh).value();
+        expect(static_cast<bool>(restored.load_checkpoint_state(saved.value())), "WBR-01 resume: checkpoint loads");
+        expect(restored.state_sha256() == uninterrupted.state_sha256()
+            && restored.snapshot()->sha256() == uninterrupted.snapshot()->sha256(),
+            "WBR-01 resume: the restored battle equals the uninterrupted one");
+        const auto same_fog = [&] {
+            const auto left = restored.fog_cells()->values(0);
+            const auto right = uninterrupted.fog_cells()->values(0);
+            return std::equal(left.begin(), left.end(), right.begin(), right.end());
+        };
+        const auto both = [&](auto&& action) { return action(uninterrupted) && action(restored); };
+        expect(both([&](auto& world) { return static_cast<bool>(world.stage_spawn({0, 10, 1, at(3000, 0)})); }),
+            "WBR-01 resume: a source-type spawn stages on both");
+        expect(both([&](auto& world) { return static_cast<bool>(world.step(executor)); }), "WBR-01 resume: spawn tick commits");
+        expect(restored.state_sha256() == uninterrupted.state_sha256()
+            && restored.snapshot()->sha256() == uninterrupted.snapshot()->sha256(),
+            "WBR-01 resume: spawn leaves the restored and uninterrupted state equal");
+        expect(same_fog(),
+            "WBR-01 resume: the spawn leaves the same fog on both");
+        expect(both([&](auto& world) { return static_cast<bool>(world.stage_remove(1)); }), "WBR-01 resume: removal stages on both");
+        expect(both([&](auto& world) { return static_cast<bool>(world.step(executor)); }), "WBR-01 resume: removal tick commits");
+        expect(restored.state_sha256() == uninterrupted.state_sha256()
+            && restored.snapshot()->sha256() == uninterrupted.snapshot()->sha256(),
+            "WBR-01 resume: removal leaves the restored and uninterrupted state equal");
+        expect(same_fog(),
+            "WBR-01 resume: the removal leaves the same fog on both");
+        const std::vector<std::string> hashes{uninterrupted.state_sha256(), uninterrupted.snapshot()->sha256()};
+        if (reference.empty()) reference = hashes;
+        expect(hashes == reference, "WBR-01 resume: the resumed lifecycle is equal on 1/2/4/8 workers");
+    }
+}
+
 } // namespace
 
 using namespace economy_test_support;
@@ -1000,6 +1177,8 @@ int main(const int argc, char** argv) {
     const std::optional<std::array<Fixed, 4>> bounds{{units(-10), units(-20), units(10), units(20)}};
     expect(tactical::reinforcement_inside_bounds(bounds, at(-10, 20)), "WR-23: playable bounds include equality");
     expect(!tactical::reinforcement_inside_bounds(bounds, at(11, 0)), "WR-23: outside playable bounds is refused");
+    test_battlefield_reveal_sources();
+    test_neutral_reveal_content_resumes_like_uninterrupted();
     test_controller_respawn_attribution();
     test_controller_output_attribution();
     test_controller_shared_economy();

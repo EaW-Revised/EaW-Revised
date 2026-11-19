@@ -489,6 +489,7 @@ void encode(Encoder& out, const UnitType& unit) {
         // The fire-range slot is hashed only when authored, so tables without it keep their identity.
         for (std::size_t slot = 0; slot < 6; ++slot) out.fixed(bonus.percentages[slot]);
         if (bonus.percentages[6].raw() != 0) out.fixed(bonus.percentages[6]);
+        if (bonus.apply_to_self) out.text("command-bonus-creation-self-v1");
     });
     out.fixed(unit.follow_distance);
 }
@@ -830,10 +831,23 @@ void encode_special_ability_extensions(Encoder& out, const UnitTables& tables) {
                 out.u32(profile.heal_interval_frames); out.flag(profile.single_target_heal);
                 out.text(profile.heal_sfx); out.text(profile.heal_particle); out.texts(profile.heal_target_bones);
                 out.text(profile.heal_lightning); out.text(profile.heal_owner_bone);
+                if (!profile.heal_owner_particle.empty()) {
+                    out.text("healing-owner-particle-v1"); out.text(profile.heal_owner_particle);
+                }
                 for (const auto channel : profile.heal_target_colour) out.fixed(channel);
                 for (const auto channel : profile.heal_owner_colour) out.fixed(channel);
                 out.u32(profile.heal_target_light_frames); out.u32(profile.heal_owner_light_frames);
                 out.u32(profile.heal_target_light_pulses); out.u32(profile.heal_owner_light_pulses);
+                if (profile.heal_target_light_kind != sim::tactical::HealingLightKind::color_flash
+                    || profile.heal_owner_light_kind != sim::tactical::HealingLightKind::color_flash) {
+                    out.text("space-healing-light-kind-v1");
+                    out.u32(static_cast<std::uint32_t>(profile.heal_target_light_kind));
+                    out.u32(static_cast<std::uint32_t>(profile.heal_owner_light_kind));
+                    if (profile.heal_target_light_kind == sim::tactical::HealingLightKind::two_way_pulse)
+                        for (const auto channel : profile.heal_target_colour2) out.fixed(channel);
+                    if (profile.heal_owner_light_kind == sim::tactical::HealingLightKind::two_way_pulse)
+                        for (const auto channel : profile.heal_owner_colour2) out.fixed(channel);
+                }
             }
             if (profile.kind == sim::tactical::SpecialAbilityKind::concentrate_fire) {
                 out.text("concentrate-fire-v1");
@@ -1050,6 +1064,20 @@ void encode_production_campaign_extensions(Encoder& out, const UnitTables& table
         out.each(tables.units, [&](const UnitType& unit) {
             out.text(unit.id); out.fixed(unit.tactical_bribe_cost);
             out.fixed(unit.bribe_corrupted_modifier); out.fixed(unit.bribe_uncorrupted_modifier);
+        });
+    }
+    if (!tables.campaign_scene && std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return std::any_of(unit.production.battlefield_bonuses.begin(), unit.production.battlefield_bonuses.end(),
+                [](const BattlefieldBonus& bonus) { return bonus.reveal_delta != Fixed{}; });
+        })) {
+        // WBR-01: absent/neutral rows add no marker to ordinary stock closures.
+        out.text("space-player-reveal-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.each(unit.production.battlefield_bonuses, [&](const BattlefieldBonus& bonus) {
+                out.text(bonus.name); out.u32(bonus.category); out.fixed(bonus.reveal_delta);
+                out.flag(bonus.all_allies); out.flag(bonus.enabled);
+            });
         });
     }
     if (tables.campaign_scene) {

@@ -3,7 +3,7 @@
      Fonts and skin come from GUIDialogs.xml (dialog/control name overrides work).
      Both row icons are one List_Box text line high, including mod font changes. -->
 <Planet_Search>
-    <Size>240 280</Size>
+    <Size>264 280</Size>
     <Offset>16 96</Offset>
     <Planet_Picture>True</Planet_Picture>
     <Owner_Emblem>True</Owner_Emblem>
@@ -11,16 +11,16 @@
     <Control Name="IDC_PLANET_SEARCH_TEXT">
         <Type>Text_Field</Type>
         <Offset>8 8</Offset>
-        <Size>224 24</Size>
+        <Size>248 24</Size>
     </Control>
     <Control Name="IDC_PLANET_SEARCH_RESULTS">
         <Type>List</Type>
         <Offset>8 40</Offset>
-        <Size>224 200</Size>
+        <Size>248 200</Size>
     </Control>
     <Control Name="IDC_PLANET_SEARCH_CLOSE">
         <Type>TextButton</Type>
-        <Offset>136 248</Offset>
+        <Offset>160 248</Offset>
         <Size>96 24</Size>
         <Caption>TEXT_BUTTON_CLOSE</Caption>
     </Control>

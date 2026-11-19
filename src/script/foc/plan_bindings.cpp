@@ -1171,10 +1171,19 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
         return one(Value{std::move(out)});
     });
     add("Find_Player", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
-        const std::string* name = arguments.empty() ? nullptr : as_text(arguments[0]);
+        if (arguments.size() != 1) return fail("Find_Player expects exactly one string");
+        const std::string* name = as_text(arguments[0]);
         if (name == nullptr) return fail("Find_Player expects a faction name");
+        const auto key = upper(*name);
+        if (key == "LOCAL") {
+            const auto local = host->setup.local_player;
+            if (!local) return none();
+            const auto present = std::find_if(host->setup.players.begin(), host->setup.players.end(),
+                [&](const AiPlayer& player) { return player.player == *local; });
+            return present == host->setup.players.end() ? none() : one(handle(handle_player, *local));
+        }
         for (const AiPlayer& player : host->setup.players) {
-            if (player.faction == upper(*name)) return one(handle(handle_player, player.player));
+            if (player.faction == key) return one(handle(handle_player, player.player));
         }
         return none();
     });

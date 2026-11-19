@@ -104,6 +104,7 @@ const IntField fields[] = {
     EAWR_SETTINGS_FIELD("gameplay.reinforcement_areas_only_while_placing", gameplay.reinforcement_areas_only_while_placing, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.fit_radar_to_galaxy", gameplay.fit_radar_to_galaxy, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.space_pauses_galactic", gameplay.space_pauses_galactic, 0, 1),
+    EAWR_SETTINGS_FIELD("gameplay.galactic_build_tray", gameplay.galactic_build_tray, -1, 1),
     EAWR_SETTINGS_FIELD("gameplay.animated_loading_background", gameplay.animated_loading_background, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.hover_owner_names", gameplay.hover_owner_names, -1, 1),
     EAWR_SETTINGS_FIELD("gameplay.right_button_scroll", gameplay.right_button_scroll, 0, 1),
@@ -385,6 +386,35 @@ std::string_view selection_key(const PlayerSettings& settings, const std::size_t
 bool set_selection_key(PlayerSettings& settings, const std::size_t action, const std::string_view chord) {
     if (selection_chord_status(settings, action, chord) != SelectionChordStatus::ok) return false;
     settings.keys[std::string(selection_commands[action])] = chord;
+    return true;
+}
+
+bool build_tray_key_usable(const PlayerSettings& settings, const std::string_view key) noexcept {
+    if (key.empty() || key.size() > 32 || key.find('+') != std::string_view::npos) return false;
+    // The engine's key names start with a capital letter or a digit and a one-letter name is a capital ("B", "Tab",
+    // "F6"); a hand-edited "b" is refused (and falls back to Tab) rather than kept as a binding that never fires.
+    if (!((key.front() >= 'A' && key.front() <= 'Z') || (key.front() >= '0' && key.front() <= '9'))) return false;
+    const auto& reserved = build_tray_reserved_keys;
+    if (std::find(reserved.begin(), reserved.end(), key) != reserved.end()) return false;
+    for (std::size_t action = 0; action < selection_commands.size(); ++action)
+        if (selection_key(settings, action) == key) return false;
+    return std::all_of(key.begin(), key.end(), [](const char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+    });
+}
+
+std::string_view build_tray_key(const PlayerSettings& settings) noexcept {
+    // Read on key presses in the galaxy view: the map key is built once, not per call.
+    static const std::string command{build_tray_command};
+    const auto found = settings.keys.find(command);
+    if (found != settings.keys.end() && build_tray_key_usable(settings, found->second)) return found->second;
+    return build_tray_default_key;
+}
+
+bool set_build_tray_key(PlayerSettings& settings, const std::string_view key) {
+    if (!build_tray_key_usable(settings, key)) return false;
+    if (key == build_tray_default_key) settings.keys.erase(std::string(build_tray_command));
+    else settings.keys[std::string(build_tray_command)] = key;
     return true;
 }
 
@@ -677,13 +707,14 @@ std::vector<DisplaySize> resolution_choices(const DisplaySize screen, const std:
 
 std::size_t startup_window_screen(const std::span<const std::string> arguments, const int current, const int count) {
     const int fallback = current >= 0 && current < count ? current : 0;
-    std::optional<int> requested;
+    // -1 means "no usable hint"; a plain int keeps gcc's -Wmaybe-uninitialized quiet about an optional's payload.
+    int requested = -1;
     for (std::size_t i = 0; i < arguments.size(); ++i) {
         if (arguments[i] == "--eawr-launcher-screen") {
-            requested = i + 1 < arguments.size() ? parse_int(arguments[++i]) : std::nullopt;
+            requested = i + 1 < arguments.size() ? parse_int(arguments[++i]).value_or(-1) : -1;
         }
     }
-    return static_cast<std::size_t>(requested && *requested >= 0 && *requested < count ? *requested : fallback);
+    return static_cast<std::size_t>(requested >= 0 && requested < count ? requested : fallback);
 }
 
 WindowPlacement place_window(const DisplaySize wanted, const FrameInsets frame, const std::span<const ScreenArea> screens,

@@ -138,7 +138,11 @@ struct Access {
             v.concentrate_effects, v.concentrate_changed_targets,
             v.concentrate_service_census, v.concentrate_service_last_id,
             v.committed_bonus_profiles, v.named_ability_locks, v.departure_controls, v.basic_ai, v.beacons, v.snapshot_players);
-        if (v.setup.campaign) a(v.command_ledger.battlefield_defence, v.command_ledger.reveal_multipliers, v.last_fog_multipliers);
+        // WBR-01: retain the exact pre-refresh cache too, including a checkpoint
+        // between a staged source event and the next fog service. Ordinary stock
+        // closures without player reveal profiles gain no checkpoint fields.
+        if (v.tracks_player_reveal())
+            a(v.command_ledger.battlefield_defence, v.command_ledger.reveal_multipliers, v.last_fog_multipliers);
         // TSW-02: the super weapon records ride the state only when the battle has a TSW setup, so a battle without one
         // saves the bytes it always did.
         if (v.setup.tsw) {

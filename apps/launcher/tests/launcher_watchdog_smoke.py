@@ -22,6 +22,7 @@ kernel.CloseHandle.argtypes = [wintypes.HANDLE]
 kernel.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
 ntdll = ctypes.WinDLL("ntdll")
 ntdll.NtSuspendProcess.argtypes = [wintypes.HANDLE]
+ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
 
 
 # Windows' not-responding test needs a window the session can actually show. A build host's non-interactive
@@ -76,7 +77,7 @@ class WatchdogSmoke(unittest.TestCase):
                 kernel.WaitForSingleObject(handle, 5000)
             kernel.CloseHandle(handle)
 
-    def start(self, manager=False, show_window=False, healthy_state=""):
+    def start(self, manager=False, show_window=False, healthy_state="", prompt_after_ms=None):
         p = self.package
         if manager:
             (p.package / "launcher").mkdir(exist_ok=True)
@@ -88,6 +89,9 @@ class WatchdogSmoke(unittest.TestCase):
                 "id": "sample", "launch": {"render_thread": "separate"}}), encoding="utf-8")
         environment = dict(os.environ, EAWR_FAKE_TREE_DIR=str(self.tree), APPDATA=str(p.appdata))
         environment["EAWR_FAKE_HEALTHY_STATE"] = healthy_state
+        environment.pop("EAWR_WATCHDOG_PROMPT_AFTER_MS", None)
+        if prompt_after_ms is not None:  # Shortens the sustained-hang wait; the default (15 s) is the product value.
+            environment["EAWR_WATCHDOG_PROMPT_AFTER_MS"] = str(prompt_after_ms)
         for key in ("EAWR_EAW_GAME_ROOT", "EAWR_GODOT_EXECUTABLE"):
             environment.pop(key, None)
         command = [str(p.package / "EAWR.exe"), "--game-root", str(p.game), "--user-data", str(p.user_data)]
@@ -194,20 +198,52 @@ class WatchdogSmoke(unittest.TestCase):
         self.assert_tree_gone()
 
     @needs_desktop
-    def test_native_close_button_works_when_the_manager_window_is_suspended(self):
-        self.start(manager=True, show_window=True)
+    def watchdog_window(self):
+        for hwnd, cls, _title in windows.top_windows():
+            pid = wintypes.DWORD()
+            windows.user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            windows.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if cls == "EAWRProcessWatchdog" and pid.value == self.process.pid:
+                return hwnd
+        return None
+
+    @needs_desktop
+    def test_short_stall_raises_no_prompt_and_a_recovery_keeps_the_session(self):
+        self.start(manager=True, show_window=True)  # The product threshold: a stall well under it must stay silent.
         self.assertEqual(ntdll.NtSuspendProcess(self.handles[0]), 0)
+        status = wait_for(lambda: (value if (value := read(self.watchdog_state / "watchdog.json")).get("hung") else None))
+        self.assertFalse(status.get("prompt"))
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:  # Windows already calls it hung; the prompt must not appear yet.
+            status = read(self.watchdog_state / "watchdog.json")
+            self.assertFalse(status.get("prompt"), f"a short stall raised the prompt: {status}")
+            self.assertIsNone(self.watchdog_window(), "a short stall showed the Force close window")
+            time.sleep(.2)
+        self.assertEqual(ntdll.NtResumeProcess(self.handles[0]), 0)
+        wait_for(lambda: not read(self.watchdog_state / "watchdog.json").get("hung"))
+        self.assertIsNone(self.watchdog_window())
+        self.assertIsNone(self.process.poll(), "a short stall ended the session")
+        for handle in self.handles:
+            self.assertEqual(kernel.WaitForSingleObject(handle, 0), 258, "a short stall killed a child")
 
-        def watchdog_window():
-            for hwnd, cls, _title in windows.top_windows():
-                pid = wintypes.DWORD()
-                windows.user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-                windows.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if cls == "EAWRProcessWatchdog" and pid.value == self.process.pid:
-                    return hwnd
-            return None
+    @needs_desktop
+    def test_sustained_hang_raises_the_prompt_and_it_clears_on_recovery(self):
+        self.start(manager=True, show_window=True, prompt_after_ms=3000)
+        self.assertEqual(ntdll.NtSuspendProcess(self.handles[0]), 0)
+        status = wait_for(lambda: (value if (value := read(self.watchdog_state / "watchdog.json")).get("prompt") else None))
+        self.assertGreaterEqual(status["hung_ms"], 3000)
+        hwnd = wait_for(self.watchdog_window)
+        self.assertIn("Force close", windows.child_texts(hwnd))
+        self.assertEqual(ntdll.NtResumeProcess(self.handles[0]), 0)
+        wait_for(lambda: not read(self.watchdog_state / "watchdog.json").get("prompt"))
+        wait_for(lambda: not windows.user32.IsWindowVisible(hwnd))
+        self.assertIsNone(self.process.poll(), "the prompt ended a session that recovered")
 
-        hwnd = wait_for(watchdog_window)
+    @needs_desktop
+    def test_native_close_button_works_when_the_manager_window_is_suspended(self):
+        self.start(manager=True, show_window=True, prompt_after_ms=1000)
+        self.assertEqual(ntdll.NtSuspendProcess(self.handles[0]), 0)
+        hwnd = wait_for(self.watchdog_window)
         self.assertIn("Force close", windows.child_texts(hwnd))
         self.assertTrue(windows.user32.PostMessageW(hwnd, 0x0010, 0, 0))  # WM_CLOSE on the native fallback.
         self.process.wait(timeout=5)

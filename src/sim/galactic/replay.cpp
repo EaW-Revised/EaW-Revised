@@ -138,11 +138,19 @@ core::Result<void> validate_replay(const GalacticReplay& replay) {
         }
         const auto seat = std::lower_bound(seats.begin(), seats.end(), command.key.seat,
             [](const Seat& row, const SeatId value) { return row.seat_id < value; });
-        if (seat == seats.end() || seat->seat_id != command.key.seat) {
+        // A seat admitted into a loaded save (SeatAdmit, #7869) is above every seat of the setup and exists only from
+        // its load-prologue tick; the session refuses the command of a seat that does not exist at its tick. Only a setup
+        // with the seat-control policy can admit a seat, and at most galactic_max_human_seats of them, so any other
+        // replay keeps refusing a command of a seat nothing creates. Whether the seat is admitted before the command is the
+        // session's to check (GameSession::from_recording / append_recording_window): the prologue is not part of the replay.
+        const bool admitted_later = seat == seats.end() && replay.setup.seat_control && !seats.empty()
+            && seats.back().seat_id < command.key.seat
+            && command.key.seat.value <= seats.back().seat_id.value + galactic_max_human_seats;
+        if (!admitted_later && (seat == seats.end() || seat->seat_id != command.key.seat)) {
             return fail<void>(diagnostic_codes::replay_command, context + ": no such seat");
         }
         const auto layer = layer_of(command.payload);
-        if (std::holds_alternative<PostLoadFixup>(command.payload))
+        if (std::holds_alternative<PostLoadFixup>(command.payload) || std::holds_alternative<SeatAdmit>(command.payload))
             return fail<void>(diagnostic_codes::replay_command, context + ": a load prologue is separate from player input");
         if (const auto* tactical = std::get_if<TacticalLayerCommand>(&command.payload);
             tactical != nullptr && tactical->body.size() > galactic_replay_max_payload - 8) {

@@ -103,6 +103,57 @@ void space_population() {
 }
 
 void ship_suitability_content() {
+    // TCFA-18 / WTA-29: the ordinary body class spelling does not gate this mask.
+    for (const std::string_view body_class : {"SpaceUnit", "Template", "SpecialStructure", "SecondaryStructure"}) {
+        for (const bool override_mask : {false, true}) {
+            TempTree tree;
+            auto xml = units_xml("3600", "Unit_Select_Test");
+            const auto begin = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+            const auto end = xml.find("</SpaceUnit>", begin) + std::string_view{"</SpaceUnit>"}.size();
+            auto parent = xml.substr(begin, end - begin);
+            parent.replace(parent.find("Test_Frigate"), std::string_view{"Test_Frigate"}.size(), "Restriction_Base");
+            parent.insert(parent.find("</SpaceUnit>"), "<Attack_Category_Restrictions>Fighter</Attack_Category_Restrictions>");
+            const auto tag = std::string(body_class);
+            const auto variant = "<" + tag + " Name=\"Test_Frigate\">"
+                "<Variant_Of_Existing_Type>Restriction_Base</Variant_Of_Existing_Type>"
+                + std::string(override_mask ? "<Attack_Category_Restrictions>Frigate</Attack_Category_Restrictions>" : "")
+                + "</" + tag + ">";
+            xml.replace(begin, end - begin, parent + variant);
+            write_fixture(tree.root, xml);
+            const auto loaded = load(tree.root, models(-40.0F));
+            expect(loaded.tables.has_value(), "TCFA-18: inherited body restriction XML loads");
+            if (!loaded.tables) continue;
+            const auto combat = eawr::units::combat_table(*loaded.tables);
+            expect(static_cast<bool>(combat), "TCFA-18: inherited restriction binds combat");
+            if (!combat) continue;
+            const auto* bound = combat.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+            const auto* attacker = combat.value().find(eawr::assets::object_type_crc("Test_Fighter"));
+            expect(bound && attacker, "TCFA-18: source and attacker retain ordinary combat profiles");
+            if (!bound || !attacker) continue;
+            auto profile = *bound;
+            expect(profile.attack_category_restrictions == (override_mask ? 16U : 1U),
+                "TCFA-18: inherited mask and child override reach the consumer unchanged");
+            profile.priority_set.reset();
+            eawr::sim::tactical::CombatState state;
+            state.weapons.resize(profile.weapons.size());
+            using namespace eawr::sim::tactical;
+            const std::vector<Player> players{{1, 1, 1, player_flag_commandable}, {2, 2, 2, player_flag_commandable}};
+            const std::vector<SnapshotPlayer> relations{{1, 1, false}, {2, 2, false}};
+            detail::CombatUnit source;
+            source.id = 1; source.type_id = profile.type_id;
+            source.owner = source.team = 1; source.profile = &profile; source.combat = &state;
+            detail::CombatUnit target;
+            target.id = 2; target.type_id = attacker->type_id;
+            target.owner = target.team = 2; target.profile = attacker; target.visible_to = 1;
+            target.position.x = Fixed::from_raw(raw(10));
+            detail::CombatWorld world;
+            world.players = players; world.relationships = relations; world.table = &combat.value();
+            world.units = {source, target};
+            const auto response = detail::retaliate_combat(world, world.units[0], world.units[1], {}, {});
+            expect(response && response.value().attack_target == (override_mask ? 2U : 0U),
+                "TCFA-18: the authored category mask refuses retaliation and its override admits the same attacker");
+        }
+    }
     {
         // Raw identity/picking/capability inputs stay in model order and model space;
         // combat consumers share the same scaled, turned tree built from those inputs.
@@ -886,6 +937,8 @@ void presentation_admission() {
         std::tuple{std::string{"<Collidable_By_Projectile_Living>yes</Collidable_By_Projectile_Living>"
             "<Is_Valid_Target>no</Is_Valid_Target>"}, false, false},
         std::tuple{std::string{"<Behavior>SELECTABLE</Behavior>"}, true, true},
+        std::tuple{std::string{"<Behavior>SELECTABLE</Behavior>"
+            "<Not_Really_Selectable>Yes</Not_Really_Selectable>"}, true, true},
         std::tuple{std::string{"<Behavior>TACTICAL_BUILD_OBJECTS</Behavior>"}, false, true},
         std::tuple{std::string{"<Behavior>DUMMY_TOOLTIP</Behavior>"}, false, true}}) {
         TempTree tree;
@@ -912,9 +965,12 @@ void presentation_admission() {
         const auto& obstacle = loaded.value().obstacles.front();
         expect(obstacle.selectable == selectable && obstacle.mouse_sensitive == mouse,
             "WSU-13: neutral fields pass through, while impassable and opted-in props stay pickable");
+        expect(obstacle.selection_denied == (tags.find("Not_Really_Selectable") != std::string::npos),
+            "SEL-MOD-01: inherited map-prop selection denial retains selectable behavior");
         auto changed = loaded.value();
         changed.obstacles.front().selectable = !selectable;
         changed.obstacles.front().mouse_sensitive = !mouse;
+        changed.obstacles.front().selection_denied = !changed.obstacles.front().selection_denied;
         expect(eawr::units::content_identity(changed) == eawr::units::content_identity(loaded.value()),
             "map-prop mouse admission is presentation-only and leaves replay identity unchanged");
     }
@@ -941,6 +997,48 @@ void presentation_admission() {
         const auto* station = loaded.tables->find("Skirmish_Test_Base");
         expect(station && station->mouse_sensitive == mouse && station->bar_admitted == bars,
             "WSU-13/50: inherited data and verified defaults distinguish mouse contact from bar admission");
+    }
+    // SEL-MOD-01: inherited selection denial does not remove mouse contacts or bars.
+    for (const bool override_denial : {false, true}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+        xml.insert(xml.find('>', ship) + 1, "<Not_Really_Selectable>Yes</Not_Really_Selectable>");
+        xml.insert(xml.rfind("</Objects>"), std::string{
+            "<UniqueUnit Name=\"Test_Selection_Variant\"><Variant_Of_Existing_Type>Test_Frigate"
+            "</Variant_Of_Existing_Type>"} + (override_denial
+                ? "<Not_Really_Selectable>No</Not_Really_Selectable>" : "") + "</UniqueUnit>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F), "Normal_Default",
+            eawr::sim::tactical::BattleDomain::space, {"Test_Selection_Variant"});
+        if (!loaded.tables) continue;
+        const auto* base = loaded.tables->find("Test_Frigate");
+        const auto* variant = loaded.tables->find("Test_Selection_Variant");
+        expect(base && base->selectable && base->selection_denied && base->mouse_sensitive && base->bar_admitted,
+            "SEL-MOD-01: denied ships retain behavior-based hover and bracket admission");
+        expect(variant && variant->selectable && variant->selection_denied == !override_denial
+                && variant->mouse_sensitive && variant->bar_admitted,
+            "SEL-MOD-01: a derived type inherits denial and an explicit No restores selection");
+        auto changed = *loaded.tables;
+        for (auto& type : changed.units) type.selection_denied = !type.selection_denied;
+        expect(eawr::units::content_identity(changed) == eawr::units::content_identity(*loaded.tables),
+            "SEL-MOD-01: player selection policy leaves simulation content identity unchanged");
+    }
+    for (const bool deny_team : {false, true}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const auto purchase = xml.find("<Squadron Name=\"Test_Squadron\">");
+        xml.insert(xml.find('>', purchase) + 1, "<Not_Really_Selectable>Yes</Not_Really_Selectable>");
+        if (deny_team) {
+            const auto team = xml.find("<Container Name=\"Team\">");
+            xml.insert(xml.find('>', team) + 1, "<Not_Really_Selectable>Yes</Not_Really_Selectable>");
+        }
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        if (!loaded.tables) continue;
+        const auto* team = loaded.tables->find("Test_Squadron");
+        expect(team && team->selectable && team->selection_denied == deny_team && team->mouse_sensitive && team->bar_admitted,
+            "SEL-MOD-01: runtime team denial applies, not the purchase template's flag");
     }
 }
 

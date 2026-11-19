@@ -432,6 +432,8 @@ prologues, each with tick u64, seat u32, sequence u64 and a u64-length-prefixed 
 of the typed post-load command. These prologues execute at the barrier before player input
 and do not consume a submission cursor or advance time.
 
+Seats admitted into a loaded multiplayer save, and departed seats taken back by a joining player (legacy EAWR-7869, EAWR-7876), are recorded as further load prologues. They are not in the list above: when a save holds any, a tail follows the timeline fields of the session section, with a u32 count (at most sixteen) and rows of tick u64, seat u32 (the new seat, or the departed seat taken back), sequence u64, session opcode u16 (19 admit a seat, 12 take a departed seat back) and a u64-length-prefixed payload (admit: three u32, faction, lobby slot, human side; take back: empty). A save that admitted no seat has no tail, so its bytes are unchanged. On load the rows merge back into the prologue list by tick.
+
 Conflicts holds a u32 count, then entry tick u64 and a u64-length-prefixed conflict record
 for each entry. The record stores the stable IDs, force order/roles, effective battle seats,
 mission flags/context and ordinary tactical replay setup, including its existing first-free

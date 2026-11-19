@@ -72,6 +72,7 @@
 #include "story_summary_widget.hpp"
 #include "planet_search_layout.hpp"
 #include "planet_search_widget.hpp"
+#include "galactic_build_tray.hpp"
 #include "story_text_widget.hpp"
 #include "galactic_save.hpp"
 
@@ -317,6 +318,8 @@ struct GalacticMode::State final {
     std::unique_ptr<PauseBannerWidget> pause_banner; // the "Game Paused" banner with its Resume Game button (#6759)
     std::unique_ptr<StorySummaryWidget> story_summary; // WST-58: the summary of the intro holocron goal
     std::unique_ptr<PlanetSearchWidget> planet_search;
+    // The galactic build tray (GBT-01 to GBT-03): drawn on top of the bar only when the bar omits choices.
+    std::unique_ptr<GalacticBuildTray> build_tray;
     std::unique_ptr<PlanetSearchThumbnails> planet_search_thumbnails;
     std::optional<galactic_view::PlanetSearchLayout> planet_search_layout;
     EawrTacticalHud* command_bar{};
@@ -814,6 +817,7 @@ struct GalacticMode::State final {
     CorruptionHudState corruption_menu;
     [[nodiscard]] bool build_corruption_hud();
     void update_corruption_hud();
+    void open_corruption_information(sim::galactic::PlanetId);
     void choose_corruption(unsigned slot);
     void close_corruption();
     void write_corruption_report(std::ostream&) const;
@@ -1333,6 +1337,8 @@ struct GalacticMode::State final {
     // #5922: a press of a command-bar control with an action of its own (production card, queue slot, help button) reaches the
     // plots that listen for it, like the generic press path does. No control name is excluded.
     void raise_story_click(const std::string& component);
+    // Buys `choice` at the selected planet as a production card does (the bar and the build tray share it).
+    void submit_build_choice(const galactic_view::BuildChoiceComponent& choice);
     // One press of a command-bar control by a human or a FORCE_CLICK_GUI reward (#5857); press state of the controls
     // a mod authors is kept in authored_controls (command_control_state.hpp), and forced requests are drained per frame.
     void press_command_control(const std::string& name);

@@ -145,7 +145,7 @@ public:
     };
     [[nodiscard]] core::Result<PreparedCheckpoint> prepare_checkpoint(const net::LobbySnapshot&,
         sim::galactic::MpRoster, std::vector<net::SetupSeat>,
-        std::shared_ptr<const std::vector<std::uint8_t>>, std::uint64_t epoch) const;
+        std::shared_ptr<const std::vector<std::uint8_t>>, std::uint64_t epoch, const std::atomic<bool>* cancel = nullptr) const;
     [[nodiscard]] core::Result<void> commit_checkpoint(PreparedCheckpoint, const net::LobbySnapshot&);
     // #7878: whether two snapshots are the same room for a saved-campaign restore: the room, host, game settings and the seat
     // bindings (peer, seat, player, slot). The revision, readiness, display-only mod description and chat cursor change while a
@@ -171,6 +171,11 @@ public:
     [[nodiscard]] std::optional<CheckpointView> checkpoint_view() const;
     void clear_checkpoint();
     [[nodiscard]] net::SaveTransferView checkpoint_progress() const { return transfer_->view(); }
+    // #7858: how long this peer's own restore of a received save has been running (empty when none runs): the lobby shows it as a
+    // busy state with its elapsed time, not as a refusal.
+    [[nodiscard]] std::optional<std::chrono::steady_clock::duration> restore_elapsed() const;
+    // A restore the host cancelled whose worker has not ended yet: no new restore starts until it has (#7858).
+    [[nodiscard]] bool restore_finishing() const;
     // The lobby log observer (#6178 follow-up): transfer events from the net layer plus this backend's own select/receive failures.
     void set_checkpoint_trace(net::GalacticCheckpointTransfer::Trace trace);
     [[nodiscard]] std::shared_ptr<const net::SaveManifest> checkpoint_manifest() const { return transfer_->manifest(); }
@@ -249,6 +254,8 @@ private:
     // a diagnostic on refusal. `pumping_snapshot_` is the room as the current receive/pump call saw it.
     struct RestoreJob;
     std::shared_ptr<RestoreJob> restore_job_;
+    std::shared_ptr<RestoreJob> cancelled_restore_job_;   // told to stop; kept only to know whether its worker is still running
+    void abandon_restore_job();
     const net::LobbySnapshot* pumping_snapshot_{};
     [[nodiscard]] core::Result<bool> restore_transfer_async(const net::SaveManifest&,
         std::shared_ptr<const std::vector<std::uint8_t>>);

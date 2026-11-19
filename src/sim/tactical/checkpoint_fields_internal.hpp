@@ -117,7 +117,7 @@ template <> struct Fields<Access::CommandSource> {
 
 template <> struct Fields<CompletedBuild> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.type, v.station, v.object, v.income_modifiers, v.level_up_service_frame);
+        a(v.type, v.station, v.object, v.income_modifiers, v.level_up_service_frame, v.script_identity, v.script_position);
     }
 };
 

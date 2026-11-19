@@ -256,8 +256,8 @@ bool spent_checkpoint_roundtrip(const Fixture& f, const std::vector<std::uint8_t
     checkpoint::Reader input(active_bytes);
     std::uint32_t version{};
     input(version);
-    input.fire_range_bonuses = (version - 29U) % 2U == 1U;
-    input.script_invulnerable = version >= 31U;
+    input.fire_range_bonuses = (version - 37U) % 2U == 1U;
+    input.script_invulnerable = (version - 37U) % 4U >= 2U;
     checkpoint::Access::state(input, staged);
     std::vector<t::session_detail::LiveUnit> live;
     input(live);

@@ -100,7 +100,7 @@ void LiveSessionView::add_launch_slot(const vfs::Vfs& filesystem, const data::Ca
             if (!paths.empty()) ship.clip = paths.front();
         }
     }
-    if (!colorization_enabled_) ship.team_colour = model_colour(near.state.owner, model);
+    if (!model_uses_player_colour(near.state.owner)) ship.team_colour = model_colour(near.state.owner, model);
     else if (colour) ship.team_colour = colour->rgb;
     launch_slots_.push_back({battle::type_id(model), placed_ships_.size(), false, std::nullopt,
                              required_station, near.state.owner, false});

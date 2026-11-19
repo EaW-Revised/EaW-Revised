@@ -166,6 +166,7 @@ struct GameplaySettings final {
     bool animated_loading_background{true};
     bool fit_radar_to_galaxy{true}; // WGUI-177 / DEV-9: galactic radar expansion, on by default (the original's fixed frame is the opt-out).
     bool space_pauses_galactic{true}; // DEV-13: off restores Space as the cinematic tour.
+    int galactic_build_tray{-1}; // GBT-13: -1 follows the layer's default (untouched), 0 off, 1 on (a player's choice).
     int hover_owner_names{1}; // -1 retains the saved mode-dependent choice (MP on, solo off), 0 off, 1 on.
     bool right_button_scroll{false};
     bool both_buttons_rotate{false};
@@ -181,6 +182,12 @@ struct GameplaySettings final {
 
 [[nodiscard]] constexpr bool hover_owner_names_enabled(const GameplaySettings& settings, const bool multiplayer) noexcept {
     return settings.hover_owner_names < 0 ? multiplayer : settings.hover_owner_names != 0;
+}
+
+// GBT-13: an explicit player choice wins; an untouched value follows the active layer's default.
+[[nodiscard]] constexpr bool galactic_build_tray_enabled(const GameplaySettings& settings,
+    const bool layer_default) noexcept {
+    return settings.galactic_build_tray < 0 ? layer_default : settings.galactic_build_tray != 0;
 }
 
 // PD-01: the saved preference can restrict the data rule, never relax it.
@@ -244,6 +251,8 @@ struct PlayerSettings final {
     // ST-K3: optional physical WASD pan; the default keeps retail arrow keys.
     bool camera_wasd{};
     SelectionConfig selection_config;
+    // GBT-13: the active layer's Enabled_By_Default for the galactic build tray; filled from the layer, never saved or compared.
+    bool galactic_build_tray_layer_default{true};
     bool selection_hotkeys_authored{};
     bool selection_hotkeys{true}; // SH-01: player and layer opt-outs still win.
     // Load provenance, consumed by the XML default migration; not an effective preference.
@@ -282,6 +291,21 @@ bool set_selection_key(PlayerSettings&, std::size_t action, std::string_view cho
 // No action while disabled, and exact modifier matching (Meta is never admitted).
 [[nodiscard]] std::optional<std::size_t> selection_action(const PlayerSettings&, char physical,
     bool shift, bool ctrl, bool alt, bool meta = false, bool free_camera = false) noexcept;
+
+// GBT-07: the galactic build tray's key, a local binding in Options > Controls (default Tab, rebindable). The
+// text is the engine's key name without modifiers ("Tab", "B", "F6"). Keys the galaxy view already uses and the
+// selection hotkeys' chords are refused.
+inline constexpr std::string_view build_tray_command = "GALACTIC_BUILD_TRAY";
+inline constexpr std::string_view build_tray_default_key = "Tab";
+// The galaxy view's own unmodified keys (the menu, pause, the overlay, camera home and planet stepping, the camera
+// pans and the arrow keys, Enter). tests/galactic/test_build_tray_key_pin.py pins this list against the keys
+// GalacticMode::input and the camera handle, so a new galaxy key cannot silently share the tray's binding.
+inline constexpr std::array<std::string_view, 15> build_tray_reserved_keys{"Escape", "Space", "F3", "Home", "PageUp",
+    "PageDown", "Up", "Down", "Left", "Right", "W", "A", "S", "D", "Enter"};
+[[nodiscard]] bool build_tray_key_usable(const PlayerSettings&, std::string_view key) noexcept;
+[[nodiscard]] std::string_view build_tray_key(const PlayerSettings&) noexcept;
+// Rejects an unusable key without changing the saved binding.
+bool set_build_tray_key(PlayerSettings&, std::string_view key);
 
 // Brings numeric fields into their bounds (NaN-free by construction). Online
 // service fields use validate_online_settings and fail closed instead of clamping.

@@ -349,7 +349,10 @@ void BattleInput::hero_click(const sim::EntityId hero, const bool hostile, const
         [&](const sim::tactical::TacticalInstance& target, const bool focus, const bool own) {
             const sim::EntityId entity = target.entity_id;
             // A teammate's hero (or a unit this seat cannot control) is never selected, but still takes the focus.
-            if (own && live.can_control(target)) {
+            const auto shape = pick_shapes_.find(target.type_id);
+            // SEL-MOD-01 / WHE-47: the direct tray callback uses ordinary player-selection admission.
+            if (own && live.can_control(target) && shape != pick_shapes_.end()
+                && shape->second.selectable && !shape->second.selection_denied) {
                 const std::array<sim::EntityId, 1> selected{entity};
                 const bool changed = selection_.replace(selected);
                 pad_palette_.close();

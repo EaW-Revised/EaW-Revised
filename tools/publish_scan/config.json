@@ -1276,7 +1276,8 @@
     "image_allowlist": {
       "third_party/lua/doc/logo.gif": "9c3a3208ef05e12110f9b7b491cef676e650e4ebf3d36c4414268666bcc95d8a",
       "third_party/lua/etc/lua.ico": "7a4ecc09ce82d90535591c6d98c1882527803747338b8c698422e56ec45169ee",
-      "third_party/lua/etc/lua.xpm": "2efc535d4e7ea430363a9592a6238217c3a24d825994f6546262bac3c83b709e"
+      "third_party/lua/etc/lua.xpm": "2efc535d4e7ea430363a9592a6238217c3a24d825994f6546262bac3c83b709e",
+      "docs/ui/images/galactic-build-tray.svg": "4a893fddf6751183bb3322a0f48760ed6de40fc6ac612744fd0f2070bb9644ac"
     },
     "binary_allowlist": {
       "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "c43ae03dcd074d3936953edc4e731686874919edde6fe1aea10c00b3bfd3a57b",
@@ -1353,7 +1354,7 @@
       "tests/replay/fixtures/tactical-visibility-frame-7.eawr-replay": "74a4215f28f015cae40e791baf58d3be76efb3ba2125ac588e57126d24d7c9c4",
       "tests/replay/fixtures/zero-tick-v1.eawr-replay": "f92cda7a6f86d6a321a1f0a8858b35318959d54b6f35a6457f353d0dbeab9345",
       "tests/skirmish/fixtures/m2-start.eawr-replay": "7c9979cd72ab13b8b1717a1e5fb23575b94fc8298f78d59ad4fa60b5578ab6ac",
-      "tests/skirmish/fixtures/saves/tactical-v2-host.eawr-ckp": "d82d07f808b9f9480e3e322898d2d75c180168a61a30a61983c0c62de94adbbf",
+      "tests/skirmish/fixtures/saves/tactical-v2-host.eawr-ckp": "9231b51e977fdf632612c55acf8b73faf32749bede5fc79c44b8a90cac40934a",
       "third_party/lua/test/life.lua": "8b6d100472572d4baf4ff06901077aad24d98336cdf7500871f07a486c7a25d2",
       "tests/galactic/fixtures/control-corpus/political-conquest.eawr-gcreplay": "17b8132b81ba1dfcab9c6ca4f5b2f7a954087c1332c6997a267ee0985abf3ac1",
       "tests/galactic/fixtures/corpus/coop-orders.eawr-gcreplay": "7527e20a178cf71d076d5bc8bd788949c77281859bd8467881886186584e1974",
@@ -1375,7 +1376,8 @@
     "image_allowlist_origins": {
       "third_party/lua/doc/logo.gif": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT).",
       "third_party/lua/etc/lua.ico": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT).",
-      "third_party/lua/etc/lua.xpm": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT)."
+      "third_party/lua/etc/lua.xpm": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT).",
+      "docs/ui/images/galactic-build-tray.svg": "Project-drawn layout schematic (plain rectangles and text, no game art) for the galactic build tray spec; reviewed by exact SHA-256."
     },
     "binary_allowlist_origins": {
       "third_party/lua/test/life.lua": "Upstream Lua 5.0.2 Life sample with non-UTF-8 display glyphs, normalized to LF; reviewed by exact SHA-256, from the distribution identified in third_party/lua/COPYRIGHT.",

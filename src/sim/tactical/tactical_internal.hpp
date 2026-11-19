@@ -61,7 +61,8 @@ inline constexpr std::uint8_t opcode_land_garrison = 35;
 inline constexpr std::uint8_t opcode_land_unload = 36;
 inline constexpr std::uint8_t opcode_tactical_superweapon = 37; // TSW-10: the Death Star switch, one listed unit
 inline constexpr std::uint8_t opcode_move_facing = 38; // MV-40: a move that carries a final facing, flags in the payload
-inline constexpr std::uint8_t max_command_opcode = opcode_move_facing;
+inline constexpr std::uint8_t opcode_script_create_object = 39; // SSU-03, coordinator-reserved
+inline constexpr std::uint8_t max_command_opcode = opcode_script_create_object;
 
 [[nodiscard]] core::Diagnostic diagnostic(
     std::string_view code,

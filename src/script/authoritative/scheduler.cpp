@@ -757,8 +757,9 @@ core::Result<::std::vector<ScriptDiagnostic>> ScriptScheduler::reconcile_objects
     ::std::set<::std::pair<::std::uint32_t, ::std::uint64_t>> identities;
     ::std::uint64_t previous = 0;
     for (const auto& object : objects) {
-        if (object.instance == 0 || object.instance == previous || object.object.id == 0 ||
-            object.object.id >= (::std::uint64_t{1} << 37) || object.generation == 0 || object.module.empty() ||
+        // SSU-05: object handles are full-width; instance and generation have independent identities.
+        if (object.instance == 0 || object.instance == previous || !detail::valid_object_handle(object.object.id) ||
+            object.generation == 0 || object.module.empty() ||
             !ModuleManifest::normalise(object.module) ||
             !identities.emplace(object.object.kind, object.object.id).second ||
             (impl_->instances.contains(object.instance) && !impl_->objects.contains(object.instance))) {

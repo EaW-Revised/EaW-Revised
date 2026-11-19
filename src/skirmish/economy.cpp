@@ -567,6 +567,7 @@ core::Result<tactical::EconomyRules> economy_rules(
                 profile.type = type_id(type.id);
                 profile.slot = static_cast<std::uint32_t>(slot);
                 profile.specific_faction = authored.specific_faction.empty() ? 0 : type_id(authored.specific_faction);
+                profile.apply_to_self = authored.apply_to_self;
                 profile.bonus.stacking_category = authored.stacking_category;
                 profile.bonus.percentages = authored.percentages;
                 for (const auto& target : tables.units) {
@@ -578,6 +579,22 @@ core::Result<tactical::EconomyRules> economy_rules(
                 }
                 std::sort(profile.bonus.applicable.begin(), profile.bonus.applicable.end());
                 rules.command_bonuses.push_back(std::move(profile));
+            }
+            // WBR-01: reuse the source-owned player ledger for automatic live-body
+            // reveal. Campaign locks and carried sources bind in WGT-49..51 instead.
+            if (!campaign && tables.domain == tactical::BattleDomain::space) {
+                auto slot = static_cast<std::uint32_t>(production.combat_bonuses.size());
+                for (const auto& authored : production.battlefield_bonuses) {
+                    if (!authored.enabled || authored.reveal_delta == Fixed{}) continue;
+                    tactical::CommandBonusProfile profile;
+                    profile.type = type_id(type.id); profile.slot = slot++;
+                    profile.battlefield = true; profile.apply_to_self = true;
+                    profile.all_allies = authored.all_allies; profile.reveal_delta = authored.reveal_delta;
+                    profile.bonus.stacking_category = authored.category;
+                    profile.bonus.applicable.push_back(profile.type);
+                    for (const auto& player : start.setup.players) profile.enabled_players.push_back(player.player_id);
+                    rules.command_bonuses.push_back(std::move(profile));
+                }
             }
         }
         if (production.upgrade_object) {

@@ -85,7 +85,8 @@ real and timestamped, and counts as one signing in the monthly quota.
 
 1. Upload it as `inbox/signing-test/eawr-signing-test.exe`.
 2. `gh workflow run sign-release.yml --repo <repository> -f mode=test` and have the owner approve.
-3. Fetch `outbox/signing-test/` (the signed file, `signing-test-receipt.json`, `osslsigncode-verify.txt`), then on Windows run
+3. Fetch `outbox/signing-test/` (the signed file, `signing-test-receipt.json`, `osslsigncode-verify.txt`; the job checks the
+   signature with the pinned root as both `-CAfile` and `-TSA-CAfile`), then on Windows run
    `Get-AuthenticodeSignature .\eawr-signing-test.exe | Format-List` (status `Valid`, a timestamp, the expected signer).
 
 ## Sign a release (release operator)
@@ -97,7 +98,10 @@ real and timestamped, and counts as one signing in the monthly quota.
 3. Start the workflow: `gh workflow run sign-release.yml --repo <repository> -f mode=release -f tag=<tag> -f sums_sha256=<that hash>`.
    The owner approves the run in GitHub (every run).
 4. When it succeeds, fetch `outbox/<tag>/` (signed archives, rewritten `SHA256SUMS.txt` and `update-manifest.json`,
-   `signing-receipt.json`). Then check it again on your own machine, which needs no credential:
+   `signing-receipt.json`). The job's own `verify` step already refused anything unsigned; it passes the pinned
+   root to `osslsigncode` as both `-CAfile` and `-TSA-CAfile` (the timestamp countersignature chains to the same root,
+   and without `-TSA-CAfile` a correctly timestamped file does not verify). Then check it again on your own machine,
+   which needs no credential:
 
    ```text
    python tools/release/sign_release.py verify <release dir> --final <fetched outbox dir> --subject <legal name on the certificate>

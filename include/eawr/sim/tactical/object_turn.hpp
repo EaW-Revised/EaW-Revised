@@ -40,9 +40,17 @@ struct ObjectTurnRow {
     friend bool operator==(const ObjectTurnRow&, const ObjectTurnRow&) = default;
 };
 
+// SOS-T1: immutable current-tick wallet projection, in ascending player order.
+struct ObjectTurnWallet {
+    PlayerId player{};
+    math::Fixed credits{};
+    friend bool operator==(const ObjectTurnWallet&, const ObjectTurnWallet&) = default;
+};
+
 struct ObjectTurnView {
     std::uint64_t tick{};
     std::span<const ObjectTurnRow> rows;
+    std::span<const ObjectTurnWallet> wallets{};
 };
 
 // One ability use an object script asked for: `unit` holds the ability and `sequence` orders the

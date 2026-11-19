@@ -268,6 +268,8 @@ eawr_add_python_contract(python_presentation_renderer_hud_flytext tests.presenta
 eawr_add_python_contract(python_presentation_renderer_hud_readouts tests.presentation.renderer.test_hud_readouts)
 eawr_add_python_contract(python_presentation_renderer_input_routing tests.presentation.renderer.test_input_routing)
 
+
+set_property(TEST APPEND PROPERTY LABELS "gpu")
 eawr_add_python_contract(python_presentation_renderer_memory_attribution tests.presentation.renderer.test_memory_attribution)
 eawr_add_python_contract(python_presentation_renderer_owner_census tests.presentation.renderer.test_owner_census)
 eawr_add_python_contract(python_presentation_renderer_owner_census_snapshot tests.presentation.renderer.test_owner_census_snapshot)
@@ -414,3 +416,6 @@ set_property(TEST
     python_presentation_renderer_prewarm_mesh_layout
     python_presentation_renderer_unit_camera
     APPEND PROPERTY LABELS compiler-test)
+
+
+set_property(TEST APPEND PROPERTY LABELS gpu)

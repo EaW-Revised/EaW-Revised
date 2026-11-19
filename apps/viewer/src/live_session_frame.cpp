@@ -709,18 +709,25 @@ void LiveSessionView::observe_frame_ability_lights(const std::shared_ptr<const s
         const auto type = std::find_if(tables_->units.begin(), tables_->units.end(), [&](const auto& unit) {
             return battle::type_id(unit.id) == source->type_id;
         });
-        if (type == tables_->units.end() || event.weapon >= type->special_abilities.size()) continue;
-        const auto& heal = type->special_abilities[event.weapon];
+        if (type == tables_->units.end()) continue;
+        const auto& handlers = type->kind == units::UnitKind::squadron ? type->team_special_abilities : type->special_abilities;
+        if (event.weapon >= handlers.size()) continue;
+        const auto& heal = handlers[event.weapon];
         const auto colour = [](const auto& authored) {
             return std::array<float, 3>{to_float(authored[0]), to_float(authored[1]), to_float(authored[2])};
         };
         const double birth = static_cast<double>(record.tick) - 1.0;
-        healing_lights_[event.shooter] = {light_effect::Kind::color_flash, colour(heal.heal_owner_colour), birth,
-            static_cast<double>(heal.heal_owner_light_frames), heal.heal_owner_light_pulses};
+        const auto kind = [](const tactical::HealingLightKind value) {
+            if (value == tactical::HealingLightKind::two_way_pulse) return light_effect::Kind::two_way_pulse;
+            return value == tactical::HealingLightKind::linear_pulse ? light_effect::Kind::linear_pulse
+                : light_effect::Kind::color_flash;
+        };
+        healing_lights_[event.shooter] = {kind(heal.heal_owner_light_kind), colour(heal.heal_owner_colour), birth,
+            static_cast<double>(heal.heal_owner_light_frames), heal.heal_owner_light_pulses, colour(heal.heal_owner_colour2)};
         // WSH-10: zero-range self-healing presents owner effects only.
         if (heal.heal_range.raw() > 0)
-            healing_lights_[event.target] = {light_effect::Kind::color_flash, colour(heal.heal_target_colour), birth,
-                static_cast<double>(heal.heal_target_light_frames), heal.heal_target_light_pulses};
+            healing_lights_[event.target] = {kind(heal.heal_target_light_kind), colour(heal.heal_target_colour), birth,
+                static_cast<double>(heal.heal_target_light_frames), heal.heal_target_light_pulses, colour(heal.heal_target_colour2)};
     }
     std::erase_if(healing_lights_, [&](const auto& light) {
         return !space::find_instance(*latest, light.first)
@@ -801,6 +808,7 @@ void LiveSessionView::observe_frame_outcome(const std::shared_ptr<const sim::tac
             }
             return ui::ResultType{};
         });
+        results_.picture = result_pictures_[battle_end_->result == ui::BattleResult::victory ? 0 : 1];
         // WBF-44: wall milliseconds start at Begin, excluding loading. Including explicit
         // pause is the current project policy while the retail pause contribution remains U5.
         if (battle_clock_start_) results_.elapsed_milliseconds = static_cast<std::uint64_t>(
@@ -1521,7 +1529,13 @@ void LiveSessionView::apply_frame_opacity(const std::shared_ptr<const sim::tacti
             }
         }
         if (const auto effect = healing_lights_.find(pose.entity); effect != healing_lights_.end())
-            if (const auto lit = light_effect::apply(effect->second, presented_tick_, scale)) scale = *lit;
+            if (const auto lit = light_effect::apply(effect->second, presented_tick_, scale)) {
+                scale = *lit;
+                // Verification is opt-in for real-time play; driven proof runs enable it by default.
+                if (options_.verify.value_or(!options_.real_time) && healing_light_samples_.size() < 1024U)
+                    healing_light_samples_.push_back({pose.entity, presented_tick_, effect->second.start_frame,
+                        effect->second.kind, effect->second.pulses, scale});
+            }
         visual_scales.emplace(pose.entity, scale);
         // WBP-52: capture colour belongs to each material mask, independently of lighting.
         for (const sim::EntityId piece : population.live_ship_entities(*ship)) {

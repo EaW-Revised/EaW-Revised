@@ -616,7 +616,7 @@ void EawrLanLobby::handle_button(const std::string& id) {
             if (!prefetch_galactic_content(true)) {
                 impl_->load_pending = true;
                 impl_->pending_text.clear();   // finish_pending_galactic draws the waiting line (it names the digest progress)
-                impl_->checkpoint_problem = "Loading campaign content...";
+                impl_->checkpoint_status = "Loading campaign content...";
                 impl_->checkpoint_signature.clear();
                 return;
             }

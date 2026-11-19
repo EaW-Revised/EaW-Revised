@@ -60,7 +60,18 @@ core::Result<void> parse_commands(
                 logical_path);
         }
         std::size_t roster_bytes{};
-        if (opcode == detail::opcode_tactical_superweapon) {
+        if (opcode == detail::opcode_script_create_object) {
+            ScriptCreateObjectPayload created;
+            std::uint32_t created_reserved{};
+            std::int64_t x{}, y{}, z{};
+            if (!reader.read_u64(created.type) || !reader.read_u32(created.owner)
+                || !reader.read_u32(created_reserved) || created_reserved != 0
+                || !reader.read_i64(x) || !reader.read_i64(y) || !reader.read_i64(z)
+                || !reader.read_u64(created.identity))
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid direct creation payload" + at, logical_path);
+            created.position = {math::Fixed::from_raw(x), math::Fixed::from_raw(y), math::Fixed::from_raw(z)};
+            command.payload = created;
+        } else if (opcode == detail::opcode_tactical_superweapon) {
             TacticalSuperweaponPayload tsw;
             std::uint32_t stage{}, admission{};
             if (!reader.read_u32(stage) || !reader.read_u32(admission)

@@ -363,7 +363,7 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
     for (const units::UnitType& type : tables->units) {
         const sim::tactical::TypeId id = battle::type_id(type.id);
         TypeUi ui_type;
-        ui_type.selectable = type.selectable;
+        ui_type.selectable = type.selectable && !type.selection_denied;
         ui_type.team = type.ability_team_dispatch;
         ui_type.bar_admitted = type.bar_admitted;
         ui_type.name = type.id;

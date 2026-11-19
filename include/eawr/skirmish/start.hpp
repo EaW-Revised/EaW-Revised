@@ -212,6 +212,8 @@ struct StartInputs final {
     // RGC-112: registered names beyond the battle/render/production type closure.
     std::shared_ptr<const std::vector<std::pair<std::string, sim::tactical::TypeId>>> catalog_types{};
     bool new_markers{true}; // WSS-19/54: authored map-header branch; synthetic team starts default to new.
+    // SSU-02: explicit view seat for noninteractive fixtures; ordinary local starts use their human seat.
+    std::optional<sim::tactical::PlayerId> local_player;
 };
 
 // Rebuild lobby/faction bindings from recorded players; human ownership remains

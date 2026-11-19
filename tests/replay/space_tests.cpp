@@ -276,6 +276,33 @@ void test_team_sharing_and_sensor_table() {
     expect(accepted && accepted.value().snapshot()->visible_entities(99).empty(), "an unknown player sees nothing");
 }
 
+void test_player_reveal_numeric_boundaries() {
+    const std::vector<tactical::Player> players{{1, 0, 1, 1}, {2, 1, 2, 1}};
+    for (const auto multiplier : {units(-2), math::Fixed{}, math::Fixed::from_raw(one / 16), units(2)}) {
+        const std::vector<std::pair<tactical::PlayerId, math::Fixed>> modifiers{{1, multiplier}};
+        const std::vector<tactical::SensorProfile> sensors{{10, units(100)}};
+        const std::vector<tactical::UnitState> sources{unit(1, 10, 1, at(0, 0))};
+        const auto made = tactical::SensorField::build(players, sources, sensors, {}, modifiers);
+        expect(static_cast<bool>(made), "WBR-01: negative and small player aggregates are valid");
+        if (!made) continue;
+        const auto radius = multiplier == units(2) ? units(200) : units(10);
+        expect(made.value().reveal_range(10, 1) == radius && made.value().reveal_range(10, 2) == units(100),
+            "WBR-01: modifier lookup uses revealer owner and floors final radius");
+        expect(made.value().visible_to(2, {radius, {}, {}}) == 3
+            && made.value().visible_to(2, {math::Fixed::from_raw(radius.raw() + 1), {}, {}}) == 2,
+            "WBR-01: minimum and scaled reveal boundaries are inclusive");
+    }
+    const std::vector<tactical::SensorProfile> small{{10, units(1)}};
+    const auto plain = tactical::SensorField::build(players, {}, small);
+    expect(plain && plain.value().reveal_range(10, 1) == units(10), "WBR-01: an unmodified small radius has the same floor");
+    const std::vector<tactical::SensorProfile> enormous{{10, math::Fixed::from_raw(std::numeric_limits<std::int64_t>::max())}};
+    const std::vector<std::pair<tactical::PlayerId, math::Fixed>> positive{{1, units(2)}};
+    expect(!tactical::SensorField::build(players, {}, enormous, {}, positive), "WBR-01: positive multiplication overflow remains rejected");
+    const std::vector<std::pair<tactical::PlayerId, math::Fixed>> negative{{1, math::Fixed::from_raw(std::numeric_limits<std::int64_t>::min())}};
+    const auto floored = tactical::SensorField::build(players, {}, enormous, {}, negative);
+    expect(floored && floored.value().reveal_range(10, 1) == units(10), "WBR-01: negative aggregate floors without overflowing multiplication");
+}
+
 // --- Oracle fixture ------------------------------------------------------------------------
 
 [[nodiscard]] std::vector<std::uint8_t> read_bytes(const std::string& path) {
@@ -456,6 +483,7 @@ int main(const int argc, char** argv) {
     test_index_matches_brute_force();
     test_index_rejects_bad_ids();
     test_team_sharing_and_sensor_table();
+    test_player_reveal_numeric_boundaries();
     test_visibility_fixture(argv[1]);
     test_session_visibility_across_workers();
     if (failures != 0) {

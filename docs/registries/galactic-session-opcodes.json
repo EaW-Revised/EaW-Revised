@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "about": "Galactic session command opcodes. Allocation is coordinator-owned; include/eawr/sim/galactic/commands.hpp is the wire contract. Opcode 18 is WGCH-121: report an actual information or actor corruption-dialog opening to the issuing player\u2019s story plots.",
+  "commands": [
+    {
+      "opcode": 1,
+      "constant": "pause"
+    },
+    {
+      "opcode": 2,
+      "constant": "resume"
+    },
+    {
+      "opcode": 3,
+      "constant": "set_strategic_speed"
+    },
+    {
+      "opcode": 4,
+      "constant": "set_tactical_speed"
+    },
+    {
+      "opcode": 5,
+      "constant": "save_request"
+    },
+    {
+      "opcode": 6,
+      "constant": "resign"
+    },
+    {
+      "opcode": 7,
+      "constant": "battle_choice"
+    },
+    {
+      "opcode": 8,
+      "constant": "battle_vote"
+    },
+    {
+      "opcode": 9,
+      "constant": "dialog_acknowledge"
+    },
+    {
+      "opcode": 10,
+      "constant": "victory_continue"
+    },
+    {
+      "opcode": 11,
+      "constant": "seat_leave"
+    },
+    {
+      "opcode": 12,
+      "constant": "seat_rejoin"
+    },
+    {
+      "opcode": 13,
+      "constant": "post_load_fixup"
+    },
+    {
+      "opcode": 14,
+      "constant": "battle_team_role"
+    },
+    {
+      "opcode": 15,
+      "constant": "auto_resolve_withdraw"
+    },
+    {
+      "opcode": 16,
+      "constant": "invasion_accept"
+    },
+    {
+      "opcode": 17,
+      "constant": "gui_click"
+    },
+    {
+      "opcode": 18,
+      "constant": "corruption_dialog_opened"
+    },
+    {
+      "opcode": 19,
+      "constant": "seat_admit"
+    },
+    {
+      "opcode": 62,
+      "constant": "debug_set_planet_owner"
+    },
+    {
+      "opcode": 63,
+      "constant": "debug_set_fleet_orbit"
+    }
+  ],
+  "reserved": {
+    "first": 20,
+    "last": 61
+  }
+}

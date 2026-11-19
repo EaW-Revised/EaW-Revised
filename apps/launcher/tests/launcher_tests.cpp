@@ -9,6 +9,7 @@
 #include "launcher_flow.hpp"
 #include "launcher_state.hpp"
 #include "text_formats.hpp"
+#include "watchdog_policy.hpp"
 #include "eawr/core/sha256.hpp"
 
 #include <windows.h>
@@ -346,6 +347,64 @@ void test_two_stores_two_installs() {
 }
 
 // --- saved choice -----------------------------------------------------------------------------
+
+// A short stall must not raise the Force close prompt; a hang that lasts must, and it must clear the moment the
+// window answers. The decision is a pure function of the samples, so the timeline is simulated here.
+void test_hung_prompt_waits_for_a_sustained_hang() {
+    HangTracker tracker;
+    std::uint64_t now = 100000;
+    // Responding window: never hung, never a prompt.
+    for (int second = 0; second < 5; ++second, now += 1000) {
+        const auto verdict = observe_hang(tracker, false, now);
+        CHECK(!verdict.hung && !verdict.prompt && verdict.hung_ms == 0);
+    }
+    // A stall of about ten seconds: Windows reports it hung, yet no prompt.
+    for (int second = 0; second < 10; ++second, now += 1000) {
+        const auto verdict = observe_hang(tracker, true, now);
+        CHECK(verdict.hung);
+        CHECK(!verdict.prompt);
+        CHECK(verdict.hung_ms == static_cast<std::uint64_t>(second) * 1000);
+    }
+    // It answers again: the stall is forgotten, so a second stall starts from zero.
+    CHECK(!observe_hang(tracker, false, now).hung);
+    now += 1000;
+    for (int second = 0; second < 14; ++second, now += 1000) CHECK(!observe_hang(tracker, true, now).prompt);
+    // A continuous hang reaches the threshold exactly at kHungPromptAfterMs, then stays prompted.
+    HangTracker lasting;
+    now = 500000;
+    const std::uint64_t first_seen = now;
+    bool prompted = false;
+    for (; now <= first_seen + 2 * kHungPromptAfterMs; now += 1000) {
+        const auto verdict = observe_hang(lasting, true, now);
+        CHECK(verdict.prompt == (now - first_seen >= kHungPromptAfterMs));
+        prompted = prompted || verdict.prompt;
+    }
+    CHECK(prompted);
+    // The prompt goes away as soon as the window responds.
+    CHECK(!observe_hang(lasting, false, now).prompt);
+    // The threshold can be shortened (the smoke tests do) and measures the same way.
+    HangTracker shortened;
+    CHECK(!observe_hang(shortened, true, 1000, 2000).prompt);
+    CHECK(!observe_hang(shortened, true, 2000, 2000).prompt);
+    CHECK(observe_hang(shortened, true, 3000, 2000).prompt);
+}
+
+// The watchdog loop itself can stop (system sleep, a suspended launcher): a long gap between samples restarts
+// the measurement instead of counting the gap as hang time.
+void test_hung_prompt_ignores_a_gap_in_the_samples() {
+    HangTracker tracker;
+    CHECK(!observe_hang(tracker, true, 10000).prompt);
+    CHECK(!observe_hang(tracker, true, 11000).prompt);
+    const auto resumed = observe_hang(tracker, true, 11000 + 60000);
+    CHECK(resumed.hung && !resumed.prompt && resumed.hung_ms == 0);
+    // From the resumed sample on, one sample per second: the prompt comes kHungPromptAfterMs after it.
+    for (std::uint64_t offset = 1000; offset <= kHungPromptAfterMs; offset += 1000)
+        CHECK(observe_hang(tracker, true, 11000 + 60000 + offset).prompt == (offset >= kHungPromptAfterMs));
+    // A clock that does not advance never reports a negative or huge duration.
+    HangTracker stuck;
+    CHECK(observe_hang(stuck, true, 5000).hung_ms == 0);
+    CHECK(observe_hang(stuck, true, 4000).hung_ms == 0);
+}
 
 void test_state() {
     Scratch scratch;
@@ -2183,6 +2242,8 @@ int main(int argc, char** argv) {
     test_nothing_found();
     test_two_stores_two_installs();
     test_state();
+    test_hung_prompt_waits_for_a_sustained_hang();
+    test_hung_prompt_ignores_a_gap_in_the_samples();
     test_launch_plan();
     test_flow_explicit_game_root();
     test_render_thread_precedence();

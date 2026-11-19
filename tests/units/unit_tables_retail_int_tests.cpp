@@ -194,6 +194,44 @@ void negative_reserves() {
     }
 }
 
+void lure_runtime_counts() {
+    namespace tactical = eawr::sim::tactical;
+    for (const std::int32_t count : {0, 108001, std::numeric_limits<std::int32_t>::max(), -1,
+             std::numeric_limits<std::int32_t>::min()}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        append(xml, "<SpaceUnit Name=\"Test_Frigate\">", "</Unit_Abilities_Data>",
+            "<Unit_Ability><Type>LURE</Type><Target_Types>Test_Fighter</Target_Types>"
+            "<Effective_Radius>350</Effective_Radius><Pulse_Frequency_Secs>0.5</Pulse_Frequency_Secs>"
+            + tag("Max_Number_Of_Pulses", std::to_string(count)) + "</Unit_Ability>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "ABG-07: authored LURE count fixture loads");
+        if (!loaded.tables) continue;
+        const auto abilities = eawr::units::ability_table(*loaded.tables);
+        expect(static_cast<bool>(abilities), "ABG-07: counts have no frame-duration ceiling at binding");
+        if (!abilities) continue;
+        const auto* profile = abilities.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+        expect(profile != nullptr, "ABG-07: the LURE holder survives binding");
+        if (!profile) continue;
+        const auto found = std::find_if(profile->abilities.begin(), profile->abilities.end(), [](const auto& row) {
+            return row.kind == tactical::AbilityKind::lure;
+        });
+        expect(found != profile->abilities.end() && found->lure.has_value(), "ABG-07: the authored LURE reaches its consumer");
+        if (found == profile->abilities.end() || !found->lure) continue;
+        const auto& lure = *found->lure;
+        const auto positive = static_cast<std::uint32_t>(std::max(count, 0));
+        expect(lure.max_pulses == positive && lure.pulse_frames == 15,
+            "ABG-07: positive count is retained; zero and signed negative counts pulse zero times");
+        expect(tactical::lure_pulses(lure, 2, 2) == (positive != 0), "ABG-07: nonpositive count never emits a first pulse");
+        if (positive != 0) {
+            const auto last = std::uint64_t{2} + std::uint64_t{15} * (positive - 1);
+            expect(tactical::lure_pulses(lure, 2, last) && !tactical::lure_pulses(lure, 2, last + 15),
+                "ABG-07: the full authored count controls the last pulse without simulating every preceding frame");
+        }
+    }
+}
+
 }
 
 int main() {
@@ -203,5 +241,6 @@ int main() {
     }
     appearance_contexts();
     negative_reserves();
+    lure_runtime_counts();
     return unit_tables_test_support::failures == 0 ? 0 : 1;
 }

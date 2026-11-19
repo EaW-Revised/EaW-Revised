@@ -644,7 +644,36 @@ static int collision_projection_contract() {
     return check(tables, false) ? 0 : 1;
 }
 
+static int battlefield_reveal_binding_contract() {
+    namespace sk = eawr::skirmish;
+    namespace t = eawr::sim::tactical;
+    const auto value = [](int n) { return Fixed::from_raw(n * Fixed::scale); };
+    eawr::units::UnitType body; body.id = "Mod_Reveal_Body"; body.hull = value(100);
+    eawr::units::BattlefieldBonus bonus; bonus.name = "Mod_Reveal"; bonus.category = 4;
+    bonus.reveal_delta = Fixed::from_raw(Fixed::scale / 2); bonus.all_allies = true;
+    body.production.battlefield_bonuses = {bonus};
+    body.production.combat_bonuses.emplace_back(); // keeps the authored command slot namespace
+    body.production.combat_bonuses.back().enabled = false;
+    auto disabled = body; disabled.id = "Mod_Disabled";
+    disabled.production.battlefield_bonuses.front().enabled = false;
+    auto upgrade = body; upgrade.id = "Mod_Upgrade"; upgrade.production.upgrade_object = true;
+    eawr::units::UnitTables tables; tables.units = {body, disabled, upgrade};
+    sk::SkirmishStart start; start.setup.players = {{1, 0, 1, 1}, {2, 1, 2, 1}, {3, 0, 1, 1}};
+    const auto made = sk::economy_rules(start, {}, tables);
+    if (!made) { std::cerr << made.error().message << '\n'; return 1; }
+    const auto& profiles = made.value().command_bonuses;
+    if (profiles.size() != 1) return 1;
+    const auto& row = profiles.front();
+    if (row.type != sk::type_id(body.id) || row.slot != 1 || !row.battlefield || !row.apply_to_self
+        || !row.all_allies || row.reveal_delta != bonus.reveal_delta || row.bonus.stacking_category != 4
+        || row.enabled_players != std::vector<t::PlayerId>{1, 2, 3}
+        || row.bonus.applicable != std::vector<t::TypeId>{row.type}) return 1;
+    const auto campaign = sk::economy_rules(start, {}, tables, true);
+    return campaign && campaign.value().command_bonuses.empty() ? 0 : 1;
+}
+
 int main(int argc,char** argv) {
+    if (battlefield_reveal_binding_contract() != 0) { std::cerr << "WBR-01 binding failed\n"; return 1; }
     if(argc>1&&std::string_view(argv[1])=="--stock") return stock_contract();
     if (mode_ineligible_upgrades() != 0) return 1;
     if (collision_projection_contract() != 0) { std::cerr << "collision projection contract failed\n"; return 1; }

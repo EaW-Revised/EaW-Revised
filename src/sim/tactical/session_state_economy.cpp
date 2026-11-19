@@ -139,7 +139,11 @@ void TacticalSession::Impl::append_canonical_upgrades_state(std::vector<std::uin
             const bool fire_range = std::any_of(units.begin(), units.end(), [](const auto& unit) {
                 return unit.upgrade_bonuses[6].raw() != 0;
             });
-            sim::detail::append_u32(bytes, fire_range ? 2U : 1U); sim::detail::append_u32(bytes, 0);
+            const bool script_objects = std::any_of(ledgers.begin(), ledgers.end(), [](const auto& account) {
+                return std::any_of(account.completed.begin(), account.completed.end(),
+                    [](const auto& held) { return held.script_identity != 0; });
+            });
+            sim::detail::append_u32(bytes, script_objects ? 3U : fire_range ? 2U : 1U); sim::detail::append_u32(bytes, 0);
             sim::detail::append_u64(bytes, static_cast<std::uint64_t>(account_count));
             for (const auto& account : ledgers) {
                 if (!account_state(account)) continue;
@@ -152,6 +156,12 @@ void TacticalSession::Impl::append_canonical_upgrades_state(std::vector<std::uin
                 for (const auto& held : account.completed) {
                     sim::detail::append_u64(bytes, held.type); sim::detail::append_u64(bytes, held.station);
                     sim::detail::append_u64(bytes, held.object);
+                    if (script_objects) {
+                        sim::detail::append_u64(bytes, held.script_identity);
+                        append_fixed(bytes, held.script_position.x);
+                        append_fixed(bytes, held.script_position.y);
+                        append_fixed(bytes, held.script_position.z);
+                    }
                 }
             }
             sim::detail::append_u64(bytes, static_cast<std::uint64_t>(modified_count));
@@ -160,7 +170,7 @@ void TacticalSession::Impl::append_canonical_upgrades_state(std::vector<std::uin
                 sim::detail::append_u64(bytes, unit.state.entity_id);
                 // UPGD v2 includes all seven slots; zero-range sessions keep the six-slot v1 bytes.
                 for (std::size_t slot = 0; slot < 6; ++slot) append_fixed(bytes, unit.upgrade_bonuses[slot]);
-                if (fire_range) append_fixed(bytes, unit.upgrade_bonuses[6]);
+                if (fire_range || script_objects) append_fixed(bytes, unit.upgrade_bonuses[6]);
                 sim::detail::append_u64(bytes, unit.durability ? unit.durability->hardpoints.size() : 0);
                 if (!unit.durability) continue;
                 for (std::size_t slot = 0; slot < unit.durability->hardpoints.size(); ++slot) {

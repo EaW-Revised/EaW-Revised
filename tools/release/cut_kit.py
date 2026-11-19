@@ -212,9 +212,10 @@ def base_release_version(base, extras):
 
 def package_version(label, commit, version, release):
     """The version the host packager is given. A release is named like every release so far, v<release version>: archives
-    eaw-revised-v0.3.3-..., tag v0.3.3, stable channel, no kit suffix. A kit carries its label and its kit commit."""
+    eaw-revised-v0.3.3-..., tag v0.3.3, stable channel, no kit suffix. A release candidate is v<version>-rc<N> (label 0.3.6-rc1),
+    which the update manifest puts on the preview channel. A kit carries its label and its kit commit."""
     if release:
-        return 'v' + version
+        return 'v' + label
     return release_version.kit_version(label, commit, version) if version else f'{label}-{commit[:8]}'
 
 
@@ -241,20 +242,29 @@ def subprocess_blob(commit, path, directory):
     return target
 
 
-def layer_zip(layer, reviewed_manifest, target, date_time):
+def commit_file(commit, path):
+    """A file of a commit as a checkout of it holds it: the repository's line-ending rules applied."""
+    return subprocess.run(['git', '-C', str(ROOT), 'cat-file', '--filters', f'{commit}:{path}'], check=True,
+                          capture_output=True).stdout
+
+
+def layer_zip(layer, reviewed_manifest, target, date_time, repo_files=None):
     """Zip the reviewed Revised layer reproducibly after checking it against the reviewed manifest. The package host unpacks
-    it and the packager compares it again with --public."""
+    it and the packager compares it again with --public. `repo_files` (layer path -> bytes): the layer files the repository
+    owns, taken from the commit in place of the layer folder's copies (#7944)."""
     import finish_kit
-    state = finish_kit.check_layer(layer, reviewed_manifest, {'inputs': {'revised_layer': {'manifest_sha256': ''}}}, False)
-    if state['problems']:
-        raise ValueError('layer: ' + '; '.join(state['problems']))
-    layer = Path(layer)
-    with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(p for p in layer.rglob('*') if p.is_file()):
-            info = zipfile.ZipInfo(path.relative_to(layer).as_posix(), date_time=date_time)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o644 << 16
-            archive.writestr(info, path.read_bytes())
+    with tempfile.TemporaryDirectory(prefix='eawr-layer-') as staging:
+        staged = Path(staging) / 'Revised'
+        finish_kit.stage_layer(layer, repo_files or {}, staged)
+        state = finish_kit.check_layer(staged, reviewed_manifest, {'inputs': {'revised_layer': {'manifest_sha256': ''}}}, False)
+        if state['problems']:
+            raise ValueError('layer: ' + '; '.join(state['problems']))
+        with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(p for p in staged.rglob('*') if p.is_file()):
+                info = zipfile.ZipInfo(path.relative_to(staged).as_posix(), date_time=date_time)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o644 << 16
+                archive.writestr(info, path.read_bytes())
     return target
 
 
@@ -293,7 +303,7 @@ def extract_cross_assets(bundle, fetched):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sha')
-    parser.add_argument('--release-tag', metavar='vX.Y.Z',
+    parser.add_argument('--release-tag', metavar='vX.Y.Z[-rcN]',
                         help='cut the release package: the annotated tag (signing optional) must point at --sha (default: the tag\'s commit), '
                              'the label is the release version, and --layer is the reviewed Revised layer')
     parser.add_argument('--layer', type=Path, help='release only: the reviewed Revised layer directory')
@@ -306,6 +316,9 @@ def main(argv=None):
     parser.add_argument('--extra', action='append', default=[], metavar='FILE=REPO_PATH')
     parser.add_argument('--host', action='append', help='pool host or any; repeat to restrict candidates')
     parser.add_argument('--cross-host', help='use this Linux cross-build host instead of the Windows pool')
+    parser.add_argument('--admission-cap-minutes', type=float, metavar='MIN',
+                        help='cross route only: the longest estimated wait linux_cross_build accepts (default its own 120 min; 0 = no cap, '
+                             'for a release cut that has to wait behind a long queue)')
     parser.add_argument('--linux-godot', help='the pinned official Linux Godot 4.7.2 editor on the cross host, relative to its base '
                         '(tools/release/godot_linux_import.py fetch provisions it); it writes the project metadata, no Wine')
     parser.add_argument('--no-land-skirmish', action='store_true',
@@ -320,6 +333,8 @@ def main(argv=None):
         args.work = args.work.resolve()
         if args.cross_host and (args.host or not args.linux_godot):
             raise ValueError('--cross-host needs --linux-godot and cannot be combined with --host')
+        if args.admission_cap_minutes is not None and (not args.cross_host or args.admission_cap_minutes < 0):
+            raise ValueError('--admission-cap-minutes is for --cross-host and must be >= 0')
         if not args.cross_host and args.linux_godot:
             raise ValueError('--linux-godot requires --cross-host')
         if not args.changes.is_file():
@@ -348,7 +363,7 @@ def main(argv=None):
             if release['tag_commit'] != base:
                 raise ValueError(f"{args.release_tag} points at {release['tag_commit'][:12]}, not at --sha {base[:12]}")
             release.update(version=version, public=True)
-            args.label = version
+            args.label = release_version.tag_label(args.release_tag, version)  # the version, or version-rcN
             args.pin = Path(scratch.name) / 'launcher-pin.json'  # the tagged commit's own pin: the overlay changes nothing
             args.pin.write_bytes(subprocess.run(['git', '-C', str(ROOT), 'show', f'{base}:config/launcher-pin.json'],
                                                 check=True, capture_output=True).stdout)
@@ -379,8 +394,11 @@ def main(argv=None):
             # The reviewed layer goes in as a reproducible archive; the host packages with --public and the symbols kept.
             when = time.gmtime(max(int(git('show', '-s', '--format=%ct', base)), 315532800))
             stamp = (when.tm_year, when.tm_mon, when.tm_mday, when.tm_hour, when.tm_min, when.tm_sec - when.tm_sec % 2)
+            import finish_kit
+            table = finish_kit.repo_layer_table(subprocess_blob(base, 'tools/install_selection_advisor.py', scratch.name))
             archive = layer_zip(args.layer, subprocess_blob(base, 'tools/release/revised-layer-manifest.json', scratch.name),
-                                args.work / 'revised-layer.zip', stamp)
+                                args.work / 'revised-layer.zip', stamp,
+                                {name: commit_file(base, f'tools/{template}') for name, template in table.items()})
             config.update(public=True, allow_missing_revised_layer=False)
             config['local_inputs']['revised_layer'] = str(archive.resolve())
         if args.cross_host:
@@ -417,6 +435,8 @@ def main(argv=None):
         if args.cross_host:
             cmd = [sys.executable, str(ROOT / 'tools/offload/linux_cross_build.py'), '--ref', commit, '--kit',
                    '--no-test', '--host', args.cross_host, '--package-on-host', str(cfg), '--out', str(build)]
+            if args.admission_cap_minutes is not None:
+                cmd += ['--admission-cap-minutes', str(args.admission_cap_minutes)]
         else:
             cmd = [sys.executable, str(ROOT / 'tools/offload/windows_build.py'), '--ref', commit, '--viewer',
                    '--viewer-relay-only', '--preset', 'windows-clang-ninja-relay', '--require-symbols', '--no-test',

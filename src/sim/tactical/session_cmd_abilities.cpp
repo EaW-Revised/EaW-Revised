@@ -711,6 +711,10 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::switch_ordinar
             if (payload.ability == AbilityKind::sensor_jamming
                 && !phase.impl_->jammer_ready(*live, profile_of(*live), phase.named_ability_locks_))
                 return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
+            if (payload.ability == AbilityKind::laser_defense
+                && !phase.impl_->ordinary_handler_ready(*live, profile_of(*live), phase.named_ability_locks_,
+                    SpecialAbilityKind::laser_defense))
+                return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
             const auto switched = activate_ability(profile_of(*live), slot_of(*live), phase.impl_->ability_gate(*live, command_tick), command_tick);
             switched_any = switched_any || switched.changed;
             if (switched.changed && (payload.ability == AbilityKind::interdict || payload.ability == AbilityKind::missile_shield

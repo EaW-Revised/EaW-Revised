@@ -600,7 +600,7 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
             // WLU-01: the craft's own pulse data; a team container never holds it.
             const auto& lure = ability.lure;
             if (!lure || ability.team || lure->radius.raw() < 0 || lure->radius.raw() > max_combat_distance * one_raw
-                || lure->pulse_frames > max_ability_frames || lure->max_pulses > max_ability_frames
+                || lure->pulse_frames > max_ability_frames
                 || lure->target_types.empty()
                 || std::adjacent_find(lure->target_types.begin(), lure->target_types.end(), std::greater_equal<TypeId>{})
                     != lure->target_types.end()

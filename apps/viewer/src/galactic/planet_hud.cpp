@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <iomanip>
 #include <limits>
@@ -286,6 +287,22 @@ PlanetHudView planet_hud_view(const PlanetHudFacts* selected, bool space_tab,
     std::stable_partition(result.choices.begin(), result.choices.end(),
         [](const auto& choice) { return choice.row == 0; });
     return result;
+}
+
+std::size_t production_slot_count(const data::ui::CommandBarCatalog& catalog, const std::size_t limit) {
+    constexpr std::string_view prefix = "b_Create_";
+    std::size_t count{};
+    for (const auto& component : catalog.components()) {
+        if (is_command_filter(component) || !component.name.starts_with(prefix)) continue;
+        const std::string_view suffix(component.name.data() + prefix.size(), component.name.size() - prefix.size());
+        std::size_t index{};
+        const auto parsed = std::from_chars(suffix.data(), suffix.data() + suffix.size(), index);
+        if (parsed.ec != std::errc{} || parsed.ptr != suffix.data() + suffix.size() || index >= limit) continue;
+        std::ostringstream canonical;
+        canonical << prefix << std::setw(2) << std::setfill('0') << index;
+        if (canonical.str() == component.name) count = std::max(count, index + 1);
+    }
+    return count;
 }
 
 std::vector<std::optional<std::size_t>> production_choice_slots(

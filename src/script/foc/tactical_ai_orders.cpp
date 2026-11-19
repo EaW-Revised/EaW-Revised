@@ -38,6 +38,30 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
         return OrderResult::failure(make_error(authoritative::codes::command_unroutable, command.verb + ": " + std::move(message)));
     };
     const auto& arguments = command.arguments;
+    if (command.verb == verb_create_object) {
+        if (arguments.size() != 5) return bad("expects issuer, type, position, owner and identity");
+        const auto* issuer = std::get_if<LuaNumber>(&arguments[0].data);
+        const auto* type = as_handle(arguments[1], handle_type);
+        const auto* owner = as_handle(arguments[3], handle_player);
+        const auto* identity = as_handle(arguments[4], handle_game_object);
+        const auto* point = std::get_if<std::vector<Value>>(&arguments[2].data);
+        if (!issuer || !type || !owner || !identity || !point || point->size() != 3)
+            return bad("malformed creation arguments");
+        const auto player = numeric::to_exact_integer(*issuer);
+        if (!player || player.value() < 0 || player.value() > std::numeric_limits<tactical::PlayerId>::max()
+            || owner->id > std::numeric_limits<tactical::PlayerId>::max()) return bad("invalid player");
+        math::Vec3 position;
+        math::Fixed* axes[] = {&position.x, &position.y, &position.z};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const auto* coordinate = std::get_if<LuaNumber>(&(*point)[axis].data);
+            if (!coordinate) return bad("malformed coordinate");
+            const auto fixed = numeric::to_fixed(*coordinate);
+            if (!fixed) return bad("invalid coordinate");
+            *axes[axis] = fixed.value();
+        }
+        return OrderResult::success({static_cast<tactical::PlayerId>(player.value()), {},
+            tactical::ScriptCreateObjectPayload{type->id, static_cast<tactical::PlayerId>(owner->id), position, identity->id}});
+    }
     if (command.verb == verb_reveal_all) {
         if (arguments.size() != 2) return bad("expects issuer and player");
         const auto* issuer = std::get_if<LuaNumber>(&arguments[0].data);

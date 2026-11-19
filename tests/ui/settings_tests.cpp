@@ -576,6 +576,35 @@ void test_fit_radar_settings() {
            "an invalid radar setting keeps the default (on)");
 }
 
+void test_galactic_build_tray_settings() {
+    // GBT-13: untouched follows the layer default, an explicit choice wins, both are saved as what they are.
+    const ui::PlayerSettings fresh;
+    expect(fresh.gameplay.galactic_build_tray == -1 && ui::galactic_build_tray_enabled(fresh.gameplay, true),
+           "a fresh profile follows the layer default, which is on");
+    expect(!ui::galactic_build_tray_enabled(fresh.gameplay, false), "a layer may ship the tray off");
+    ui::GameplaySettings choice;
+    choice.galactic_build_tray = 0;
+    expect(!ui::galactic_build_tray_enabled(choice, true), "an explicit off beats a layer default of on");
+    choice.galactic_build_tray = 1;
+    expect(ui::galactic_build_tray_enabled(choice, false), "an explicit on beats a layer default of off");
+    expect(ui::parse_settings("eawr-settings 1\n").settings.gameplay.galactic_build_tray == -1,
+           "an absent value stays untouched");
+    for (const int stored : {-1, 0, 1}) {
+        ui::PlayerSettings value;
+        value.gameplay.galactic_build_tray = stored;
+        const auto text = ui::serialize_settings(value);
+        expect(text.find("gameplay.galactic_build_tray=" + std::to_string(stored) + "\n") != std::string::npos,
+               "the value is saved as written");
+        expect(ui::parse_settings(text).settings == value, "the value round trips");
+    }
+    expect(ui::parse_settings("eawr-settings 1\ngameplay.galactic_build_tray=7\n").settings.gameplay.galactic_build_tray != 7,
+           "an out-of-range value is clamped");
+    ui::PlayerSettings with_default;
+    with_default.galactic_build_tray_layer_default = false;
+    expect(ui::serialize_settings(with_default) == ui::serialize_settings(ui::PlayerSettings{}),
+           "the layer default is provenance and is never saved");
+}
+
 void test_space_pauses_settings() {
     expect(ui::PlayerSettings{}.gameplay.space_pauses_galactic, "Space pauses by default (DEV-13)");
     expect(ui::parse_settings("eawr-settings 1\n").settings.gameplay.space_pauses_galactic,
@@ -1229,9 +1258,30 @@ void test_session_values() {
            "the mapping survives a save and a load");
 }
 
+// GBT-07: the build tray key defaults to Tab, is rebindable, survives a save and refuses the galaxy view's own keys.
+void test_build_tray_key() {
+    ui::PlayerSettings settings;
+    expect(ui::build_tray_key(settings) == "Tab", "the build tray key defaults to Tab");
+    expect(ui::set_build_tray_key(settings, "B") && ui::build_tray_key(settings) == "B", "the key is rebindable");
+    const auto saved = ui::parse_settings(ui::serialize_settings(settings)).settings;
+    expect(ui::build_tray_key(saved) == "B", "a rebound key survives a save and a load");
+    for (const auto* refused : {"Escape", "Space", "F3", "PageUp", "W", "Q", "", "Ctrl+B", "Tab Tab"})
+        expect(!ui::set_build_tray_key(settings, refused) && ui::build_tray_key(settings) == "B",
+            std::string("a reserved, selection or malformed key is refused: ") + refused);
+    expect(ui::set_build_tray_key(settings, "Tab") && !settings.keys.contains(std::string(ui::build_tray_command)),
+        "binding the default again stores nothing");
+    settings.keys[std::string(ui::build_tray_command)] = "Escape";
+    expect(ui::build_tray_key(settings) == "Tab", "a hand-edited reserved key falls back to Tab");
+    settings.keys[std::string(ui::build_tray_command)] = "b";
+    expect(ui::build_tray_key(settings) == "Tab" && !ui::set_build_tray_key(settings, "b"),
+        "a lowercase hand edit is refused and falls back to Tab, never a binding that does not fire");
+    expect(ui::set_build_tray_key(settings, "F6") && ui::build_tray_key(settings) == "F6", "a function key binds");
+}
+
 } // namespace
 
 int main() {
+    test_build_tray_key();
     test_default_sfx_catalog_unchanged();
     test_selection_layer_config();
     test_revised_settings();
@@ -1243,6 +1293,7 @@ int main() {
     test_performance_thread_settings();
     test_render_thread_settings();
     test_fit_radar_settings();
+    test_galactic_build_tray_settings();
     test_space_pauses_settings();
     test_animated_loading_background_settings();
     test_reinforcement_area_settings();

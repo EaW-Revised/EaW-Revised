@@ -1390,6 +1390,21 @@ public:
 
     // The canonical commitment already succeeded on every peer. Local hints and
     // repository metadata enter only the host's optional sections before disk I/O.
+    // A save request refused before it reached the sealed input settles as rejected, so it cannot stay requested and
+    // hold every later save of this peer as busy. Caller holds mutex_. Lock order: mutex_ comes BEFORE any driver lock
+    // (request_save calls may_save under mutex_), so a driver must never refuse an order while holding its own lock.
+    void settle_refused_save_locked(const LiveGameOrder& order, const core::Diagnostic& error) {
+        const auto* save = std::get_if<galactic::SaveRequest>(&order.payload);
+        if (!save) return;
+        const auto token = static_cast<std::uint64_t>(save->slot);
+        const auto request = save_requests_.find(token);
+        if (request == save_requests_.end() || request->second.seat != order.seat) return;
+        auto& outcome = save_outcomes_.at(token);
+        outcome.phase = LiveSavePhase::rejected; outcome.diagnostic = error;
+        save_requests_.erase(request);
+        published_.notify_all();
+    }
+
     void publish_agreed_save(AgreedGameSave saved) {
         const auto found = save_requests_.find(saved.event.value);
         if (found == save_requests_.end() || found->second.seat != saved.event.producer) return;
@@ -1397,6 +1412,15 @@ public:
         // A barrier that overlapped a delay or roster change saved nothing and failed nothing: ask again (the same token
         // keeps the outcome "requested", so the player sees no error), a bounded number of times.
         constexpr std::uint32_t max_save_retries = 16;
+        // The reserved prebattle autosave belongs to one open prompt: once that conflict is gone (the battle began or the
+        // prompt ended) asking again would only be refused by the session, so it settles as rejected now.
+        if (saved.failure && saved.retry && request.prebattle && !session_->pending_conflict()) {
+            auto& outcome = save_outcomes_.at(token); outcome.completed_tick = saved.completed_tick;
+            outcome.phase = LiveSavePhase::rejected;
+            outcome.diagnostic = diagnostic("EAWR-SAVE-0103", "Prebattle autosave dropped: the conflict prompt closed before it could be retried.");
+            published_.notify_all();
+            return;
+        }
         if (saved.failure && saved.retry && request.attempts < max_save_retries && !stopping_ && !ended_) {
             ++request.attempts;
             order_inbox_.push_back({request.seat, galactic::SaveRequest{static_cast<std::int64_t>(token),
@@ -1506,7 +1530,7 @@ public:
     // WGS-99/142/143/145: choosing the tactical battle of a pending single-player space conflict
     // first writes the reserved autosave. The save request runs in this tick while the conflict is
     // still pending (the capture is the pre-battle state); the choice itself follows next tick. A
-    // refused or failed save never holds the battle back. Skirmish, multiplayer and the first Begin
+    // refused or failed save never holds the battle back. Skirmish and the first Begin
     // after restoring the autosave itself do not produce one (WGS-142/143).
     void request_prebattle_autosave(const std::uint64_t tick, std::vector<LiveGameOrder>& due_orders,
         std::vector<LiveGameOrder>& kept_orders) {
@@ -1514,9 +1538,33 @@ public:
         if (!pending || session_->mode() == campaign::SessionMode::battle || options_.saves.directory.empty()) return;
         if (pending->layer != campaign::BattleLayer::space || pending->tactical.skirmish) return;
         const auto& seats = session_->galaxy().setup().seats;
-        // WGS-33/143: multiplayer mode writes no autosave. The single human seat is this producer's own
-        // precondition (the one local chooser), no longer the multiplayer test.
-        if (session_->galaxy().multiplayer()) return;
+        // Multiplayer deviation from retail (WGS-33, owner #7852): the lowest active human seat writes the reserved
+        // autosave when the conflict prompt opens. The request is a lockstep command, so every peer captures the
+        // same barrier state; no choice order is delayed (remote seats may choose at any agreed tick).
+        if (session_->galaxy().multiplayer()) {
+            if (!options_.step_driver) return;
+            // One agreed writer on every peer: the lowest active human seat of the live roster. After a host drop it
+            // moves to the next seat on every peer alike; only the peer that owns that seat issues the request.
+            const auto live_seats = session_->galaxy().seats();
+            const auto host = std::find_if(live_seats.begin(), live_seats.end(), [](const auto& seat) {
+                return seat.kind == galactic::SeatKind::human && seat.active; });
+            if (host == live_seats.end() || !options_.step_driver->may_save(host->seat_id) || prebattle_saved_ == pending->id) return;
+            prebattle_saved_ = pending->id;
+            if (std::exchange(skip_next_prebattle_autosave_, false)) return;
+            LiveSaveRequest request;
+            request.seat = host->seat_id; request.name = "Auto Save"; request.overwrite = true;
+            request.autosave = true; request.prebattle = true;
+            const std::lock_guard lock(mutex_);
+            const bool busy = std::any_of(save_outcomes_.begin(), save_outcomes_.end(), [](const auto& row) {
+                return row.second.phase == LiveSavePhase::requested || row.second.phase == LiveSavePhase::captured;
+            });
+            if (busy || stopping_ || ended_ || save_token_ >= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) return;
+            const auto token = ++save_token_;
+            due_orders.push_back({request.seat, galactic::SaveRequest{static_cast<std::int64_t>(token), false, true, true}, {}});
+            save_outcomes_.emplace(token, LiveSaveOutcome{token, frame_.session_tick, request.name, LiveSavePhase::requested, {}});
+            save_requests_.emplace(token, std::move(request));
+            return;
+        }
         if (std::count_if(seats.begin(), seats.end(), [](const auto& seat) { return seat.kind == galactic::SeatKind::human; }) != 1) return;
         for (auto at = due_orders.begin(); at != due_orders.end(); ++at) {
             const auto* choice = std::get_if<galactic::BattleChoice>(&at->payload);
@@ -1617,6 +1665,14 @@ public:
                 }
             }
             const auto tick = session_->completed_tick();
+            // Multiplayer deviation (#7852): loop() hands over to this function whenever a step driver exists, so the
+            // producer must be called from here; its single-player call site is never reached in multiplayer.
+            // The save goes first in this peer's input, so a Begin choice made at the same moment cannot run before it.
+            if (session_->mode() != campaign::SessionMode::battle) {
+                std::vector<LiveGameOrder> autosave;
+                request_prebattle_autosave(tick, autosave, autosave);
+                orders.insert(orders.begin(), std::make_move_iterator(autosave.begin()), std::make_move_iterator(autosave.end()));
+            }
             bool due = false;
             {
                 const auto now = Clock::now();
@@ -1635,6 +1691,12 @@ public:
             std::vector<std::pair<TacticalFeed::ExecutionObserver, campaign::TacticalInputExecution>> executed_input;
             std::chrono::nanoseconds source_time{};
             LiveGameStepContext context{*session_, executor, due, {}, [&](core::Diagnostic error) { rejected.push_back(std::move(error)); }};
+            // A save request refused before it reached the sealed input settles as rejected, so it cannot stay requested
+            // and hold every later save of this peer as busy (the same settling as the single-player loop).
+            context.reject_order = [&](const LiveGameOrder& order, core::Diagnostic error) {
+                const std::lock_guard lock(mutex_);
+                settle_refused_save_locked(order, error);
+            };
             context.adopt_recovered_owner = [&](RecoveredGameOwner replacement) -> core::Result<void> {
                 if (!replacement.session || replacement.session->completed_tick() != replacement.completed_tick
                     || replacement.completed_tick < session_->completed_tick() || options_.interactive_seat.value
@@ -1645,8 +1707,11 @@ public:
                 // Queued local intents have not entered the sealed frontier. Give
                 // them a named refusal while preserving all accepted wire input.
                 for (const auto& order : order_inbox_) {
-                    (void)order; rejected.push_back(diagnostic("EAWR-PLATFORM-0600", "recovery_publication_pending"));
+                    const auto refusal = diagnostic("EAWR-PLATFORM-0600", "recovery_publication_pending");
+                    settle_refused_save_locked(order, refusal); rejected.push_back(refusal);
                 }
+                // The orders already handed to this step end here too: settle their save requests the same way.
+                for (const auto& order : orders) settle_refused_save_locked(order, diagnostic("EAWR-PLATFORM-0600", "recovery_publication_pending"));
                 order_inbox_.clear(); command_inbox_.clear();
                 const auto target = target_;
                 owner_.emplace<std::shared_ptr<campaign::GameSession>>(replacement.session);
@@ -1696,6 +1761,11 @@ public:
                             const auto observer = battle_execution_observers_.find(execution.seat);
                             if (observer != battle_execution_observers_.end()) executed_input.emplace_back(observer->second, execution);
                         }
+                        // One reserved autosave per prompt across a writer departure: any executed save while the prompt
+                        // is still open (from any seat, on every peer alike) means the next writer must not save it again.
+                        for (const auto& event : stepped.value().save_events)
+                            if (event.kind == galactic::GalacticEventKind::save_requested && event.subject == 1U) // reserved autosave only
+                                if (const auto* open = session_->pending_conflict()) prebattle_saved_ = open->id;
                         schedule.stepped();
                     }
                 }

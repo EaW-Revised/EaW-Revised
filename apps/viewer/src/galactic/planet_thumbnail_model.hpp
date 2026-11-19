@@ -14,9 +14,8 @@
 namespace eawr::presentation::godot_backend::galactic_detail {
 
 // PS-08: one planet model decoded for the search pictures with the galaxy
-// upload's own material, texture-chain and idle-clip rules, overview surfaces
-// only (alternate 0 and untagged, as the map draws a discovered planet away
-// from the camera target). Pure CPU work, safe on a worker thread; the GPU
+// upload's own material, texture-chain and idle-clip rules, with the requested
+// close-up, overview or hidden-shell surfaces. Pure CPU work, safe on a worker thread; the GPU
 // upload stays on the main thread.
 struct PreparedPlanetSurface final {
     assets::Model geometry;
@@ -35,7 +34,7 @@ struct PreparedPlanetModel final {
 };
 
 // `alternate` is the surface alternate the map draws for the object (WGUI-05: 2 for an undiscovered planet's
-// grid shell, else 0); untagged surfaces always draw.
+// grid shell, 1 for the pictured system's close-up, 0 for decorations); untagged surfaces always draw.
 [[nodiscard]] PreparedPlanetModel prepare_planet_thumbnail_model(const vfs::Vfs& filesystem, const std::string& logical_path,
     int alternate, const presentation::lighting::Environment& environment);
 

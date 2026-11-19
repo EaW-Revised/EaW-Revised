@@ -491,6 +491,9 @@ avoids other ships and static objects. Ships in other layers are invisible to it
   `Custom_Soft_Footprint_Radius`, else `Space_Obstacle_Radius`, else the larger half extent,
   times `Scale_Factor`. Measured on the FoC data ([unit data](../unit-data.md#motion-table)):
   the corvette 17.76 by 41.82, the Nebulon-B 23.48 by 109.95, the mining pad radius 206.25.
+  The hard extents are fields of the shared object type and read through one type-level accessor
+  (debug build), so the ship, transport, station and buildable classes take this path: the synthetic
+  loader test pins it for exactly those classes. The remaining space classes stay unqualified.
 
 ### The search
 

@@ -384,6 +384,12 @@
     "constant": "opcode_move_facing",
     "name": "move with a final facing",
     "documented": true
+   },
+   {
+    "value": 39,
+    "constant": "opcode_script_create_object",
+    "name": "direct script object creation",
+    "documented": true
    }
   ]
  },

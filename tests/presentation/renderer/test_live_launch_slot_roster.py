@@ -269,6 +269,7 @@ struct LiveSessionView {
     std::optional<tactical::TacticalSetup> setup_;
     tactical::PlayerId player_ = 1;
     bool colorization_enabled_ = true;
+    bool model_uses_player_colour(tactical::PlayerId) const { return colorization_enabled_; }
     std::vector<SpacePopulation::Options::PlacedShip> placed_ships_;
     struct LaunchSlot { tactical::TypeId type{}; std::size_t ship{}; bool bound{}; std::optional<std::size_t> clone;
                         tactical::TypeId required_station{}; tactical::PlayerId station_owner{}; bool shadow_bound{}; };

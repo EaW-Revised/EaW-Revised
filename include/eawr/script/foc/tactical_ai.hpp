@@ -58,6 +58,7 @@ inline constexpr std::string_view verb_attack = "foc.attack"; // issuer, unit, t
 inline constexpr std::string_view verb_attack_move = "foc.attack_move";
 inline constexpr std::string_view verb_guard = "foc.guard";
 inline constexpr std::string_view verb_buy = "foc.buy";
+inline constexpr std::string_view verb_create_object = "foc.create_object"; // SSU-03: issuer, type, position, owner, identity
 inline constexpr std::string_view verb_pad_build = "foc.pad_build";
 inline constexpr std::string_view verb_credit_grant = "foc.credit_grant";
 inline constexpr std::string_view verb_reservation_debit = "foc.reservation_debit";
@@ -140,6 +141,8 @@ struct AiType {
     std::optional<sim::math::Fixed> tactical_cost; // WAS-26: generic cost, distinct from selected effective price
     bool unit_ai{}; // PG-03: authored UNIT_AI behavior admits this type to combat perception
     std::vector<std::uint32_t> previous_base_levels{}; // SAE-02: authored predecessor levels, nearest first
+    bool upgrade_object{}; // SSU-03: factory capability, not a production-menu test
+    std::optional<sim::math::Fixed> tactical_campaign_cost{}; // SSU-04: positive campaign override
 };
 
 // What the defensive abilities read of a projectile type (WTA-34): its category.
@@ -457,6 +460,8 @@ struct AiSetup {
     // Optional fixture/controller admission boundary in completed simulation ticks.
     // Omitted players run immediately; admitted control never changes the world clock.
     std::map<sim::tactical::PlayerId, std::uint64_t> player_ai_start_ticks;
+    // SSU-02: the host's selected local view, independent of script ownership or AI control.
+    std::optional<sim::tactical::PlayerId> local_player;
 };
 
 // The AI XML files the goal system reads (#449), as logical paths.

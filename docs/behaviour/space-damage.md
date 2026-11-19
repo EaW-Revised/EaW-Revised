@@ -21,6 +21,25 @@
   the AI (tactical AI host). The abilities' multipliers on weapons, shields and energy are in
   [space abilities](space-abilities.md) (space ability implementation).
 
+### Concrete classes and inherited shield data
+
+| Rule | Behaviour | Evidence |
+| --- | --- | --- |
+| SHC-01 | The ordinary space shield path uses the effective type's shield data and `SHIELDED` behaviour, rather than a whitelist of XML element names. DG-06/13 apply to a deployed `TransportUnit` and to live space bodies authored as `SpaceBuildable`, `SpecialStructure` or `DummyStructure`, including values inherited from a `Template`. Merely resolving an unselected company transport's metadata creates no shield recipient; WHE-49 selects the body that actually enters space. Automatic command sources authored as `SpaceUnit` use the same shield bonus as `UniqueUnit`: WHE-13/18/19/55 govern admission, maximum and current shields. A positive `Passive_Missile_Shield_Radius` declares a passive holder independently of either class spelling (WPJ-17). | Debug build SHC-E01: shield maximum and shield hit consumers; SHC-E02: command target admission and shield contribution; SHC-E03: passive holder predicate and radius getter. Current consumer audit: `load_body`, `load_company`, `durability_table`, `apply_bonuses` and `prepare_projectile_defences`. |
+
+The synthetic shield-class contract loads inherited and overridden points, refresh,
+armor and passive radius for these live space bodies. It checks actual absorption,
+recovery, command-adjusted shields and passive defence registration, including
+equal session hashes on 1, 2, 4 and 8 workers. The same checks cover the additional
+registered space-body spellings in the fixture, including `SpaceHero`,
+`Space_Indigenous_Unit`, `Space_Unit`, `Freighter`, `SpaceFauna`, `SpaceProp`,
+`UnderConstructionShip`, `Mission_Object` and `Props_Wave`. A named
+`Leech_Shields_Ability` on a `UniqueUnit` uses the existing WLS-01..05 consumers:
+the second fixture checks its authored fields and actual enemy shield drain on all
+four worker counts. Its presentation follows the shared beam adapter, including
+the lightning consumer described by TBF-06. This audit makes no claim about ground-only
+instances, non-live map props or the separate planetary special-weapon path.
+
 ## Interface
 
 - Content: the durability table's damage rules (`DurabilityTable::damage`, built by

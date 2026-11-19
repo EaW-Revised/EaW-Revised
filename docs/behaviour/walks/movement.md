@@ -332,6 +332,23 @@ flight described by WMV-01..WMV-03 and FM-01..FM-08.
   consumers belong to walking; authoring the tag on a space unit does not quantize
   ordinary ship or craft steering. Land walking coverage remains separate.
 
+- **WMV-53** (qualified loader and motion contract; MV-01..03, BK-01..06,
+  FM-01/05, WHE-SQ-02) A selected `TransportUnit` with an effective space locomotor
+  is a physical body. Inherited `SIMPLE_SPACE_LOCOMOTOR` uses ordinary ship motion;
+  inherited `FIGHTER_LOCOMOTOR` selects solo craft motion independently of the XML
+  class. The generic binding retains inherited movement inputs and child overrides:
+  speed, turn and roll rates receive the space multiplier, bank angle remains raw,
+  ordinary acceleration/deceleration use their overrides, and craft minimum scales
+  while craft thrust remains raw. An authored ordinary-ship layer reaches tracking.
+  The qualified synthetic transport cases bind both locomotors, exercise an actual
+  path-duration change and run a solo craft frame. This does not deploy stock
+  transports that the company resolver touched only as metadata (WHE-07/49), or
+  establish land movement coverage. Ordinary ship flight still ignores minimum
+  speed and thrust, and craft flight ignores the ordinary acceleration overrides.
+  The solo craft's no-layer formation upkeep separately binds the member type's
+  deceleration override (WMV-42/44); the craft flight exclusion does not exclude
+  that formation consumer.
+
 The private E7647 receipts are a fresh accessor cross-reference and caller review.
 They establish consumer boundaries, not an original-game runtime measurement.
 

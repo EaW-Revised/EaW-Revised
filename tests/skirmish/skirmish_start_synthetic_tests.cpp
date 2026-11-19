@@ -614,6 +614,8 @@ void synthetic_start() {
         std::ofstream(revised / "xml/SelectionControls.xml") << "presentation";
         std::ofstream(revised / "xml/RevisedPlanetSearch.xml") << "<Planet_Search/>";
         std::ofstream(revised / "xml/RevisedGiftSFX.xml") << "<SFXEvents/>";
+        std::ofstream(revised / "xml/RevisedBuildTray.xml") << "<Revised_Build_Tray/>";
+        std::ofstream(revised / "xml/RevisedBuildTrayGroups.xml") << "<Revised_Build_Tray_Groups/>";
         const eawr::vfs::MountSpec revised_mount{.layer_id = std::string(eawr::vfs::revised_layer_id),
             .data_root = revised, .loose_logical_prefix = "data", .active_archives = {}};
         const eawr::vfs::MountSpec mod_mount{.layer_id = "mod", .data_root = mod,
@@ -629,6 +631,8 @@ void synthetic_start() {
             "presentation layer falls back to stock identity");
         std::ofstream(revised / "xml/RevisedPlanetSearch.xml") << "<Planet_Search>restyled</Planet_Search>";
         std::ofstream(revised / "xml/RevisedGiftSFX.xml") << "<SFXEvents><!-- alternate presentation --></SFXEvents>";
+        std::ofstream(revised / "xml/RevisedBuildTray.xml") << "<Revised_Build_Tray><Max_Rows>4</Max_Rows></Revised_Build_Tray>";
+        std::ofstream(revised / "xml/RevisedBuildTrayGroups.xml") << "<Revised_Build_Tray_Groups><Made_For>x</Made_For></Revised_Build_Tray_Groups>";
         const auto restyled = read_layers({revised_mount, mount});
         expect(without && restyled && without.value().ai_data_digest == restyled.value().ai_data_digest,
             "restyling Revised search and gift presentation leaves identity unchanged");
@@ -668,7 +672,7 @@ void synthetic_start() {
         expect(without && override_result && without.value().ai_data_digest != override_result.value().ai_data_digest,
             "user mod winner remains in identity");
         std::filesystem::remove(mod / "xml/SelectionControls.xml");
-        for (const auto name : {"RevisedPlanetSearch.xml", "RevisedGiftSFX.xml"}) {
+        for (const auto name : {"RevisedPlanetSearch.xml", "RevisedGiftSFX.xml", "RevisedBuildTray.xml", "RevisedBuildTrayGroups.xml"}) {
             const auto path = mod / "xml" / name;
             std::ofstream(path) << "user mod presentation";
             const auto mod_presentation = read_layers({mod_mount, revised_mount, mount});

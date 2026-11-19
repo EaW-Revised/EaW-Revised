@@ -515,6 +515,8 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
         }
         published_ability_results = std::make_shared<const std::vector<AbilityResult>>(std::move(results));
         published_hero_action_menus.reset();
+        cache.published_corruption_information = publish_corruption_information(view_player, observer_projection
+            ? std::span<const ObservedPlanet>(*observer_projection) : std::span<const ObservedPlanet>{});
         published_corruption_menu = publish_corruption_menu(view_player, observer_projection
             ? std::span<const ObservedPlanet>(*observer_projection) : std::span<const ObservedPlanet>{});
         if (ability_host && observer && observer_projection) for (const auto& menu : ability_host->preparations) {
@@ -757,6 +759,7 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     share(rows.economy_corruption, keys[10], generation(StateSection::economy_corruption), [&] { return economy_corruption; });
     auto projected_rows = rows;
     projected_rows.ability_services = published_ability_services;
+    projected_rows.corruption_information = cache.published_corruption_information;
     if (observer && std::binary_search(observer->human_observers.begin(), observer->human_observers.end(), view_player)) {
         const std::array key{generation(StateSection::history), generation(StateSection::observer)};
         if (!cache.history || cache.history_key != key) {

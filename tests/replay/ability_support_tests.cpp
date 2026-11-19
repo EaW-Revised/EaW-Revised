@@ -220,7 +220,8 @@ void test_lure() {
     lure.expiration_frames = 480;
     lure.recharge_frames = 1350;
     lure.modifiers.take_damage = decimal("0.7");
-    lure.lure = tactical::LureProfile{units(350), 15, 40, {tie}, "Lure_Ability_Particle"};
+    // ABG-07: exercise the full session at 1/2/4/8 with a count beyond the unrelated frame limit.
+    lure.lure = tactical::LureProfile{units(350), 15, tactical::max_ability_frames + 1, {tie}, "Lure_Ability_Particle"};
     tactical::AbilityTable table;
     table.profiles = {unit_of(awing, lure)};
     expect(static_cast<bool>(tactical::validate_abilities(table)), "WLU-01: a craft's lure profile validates");
@@ -552,6 +553,128 @@ void test_passive_damage_aura() {
                 if (replay) for (const auto& hash : hashes) {
                     const auto step = replay.value().step(executor);
                     expect(step && step.value().state_sha256 == hash, "WSH-09: aura damage replays identically");
+                }
+            }
+        }
+    }
+}
+
+// WSH-13: a squadron company (the team container) has no hull. Its Force_Healing_Ability serves while the company
+// exists: it heals, or passively damages, from the company's own position without durability, with the ordinary due,
+// range, filter, single-target (lowest percent) and ordering rules. The company is never a recipient and no other
+// source needs a hull. Equal on 1/2/4/8 workers and through the replay.
+void test_team_company_healing() {
+    constexpr tactical::TypeId team_type = 40, member_type = 41, ship_type = 100;
+    constexpr eawr::sim::EntityId company = 10, near_ally = 20, low_ally = 21, far_ally = 22, enemy = 23;
+    struct Variant { bool passive; bool single; bool kill_low; };
+    for (const Variant variant : {Variant{false, true, false}, Variant{false, false, false}, Variant{false, true, true},
+                                  Variant{true, false, false}}) {
+        tactical::TacticalSetup initial;
+        initial.seed = 7911;
+        initial.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 3, 3, tactical::player_flag_commandable}};
+        initial.units = {{company, team_type, 1, at(0, 0), math::identity_quat(), {}},
+            {11, member_type, 1, at(0, 0), math::identity_quat(), {}},
+            {12, member_type, 1, at(30, 0), math::identity_quat(), {}},
+            {near_ally, ship_type, 1, at(300, 0), math::identity_quat(), {}},
+            {low_ally, ship_type, 1, at(400, 60), math::identity_quat(), {}},
+            {far_ally, ship_type, 1, at(1500, 0), math::identity_quat(), {}},
+            {enemy, ship_type, 2, at(200, 100), math::identity_quat(), {}}};
+        initial.squadrons = {{company, {11, 12}}};
+        auto health = durability();
+        health.profiles.clear(); // the company type has no durability row, as in the loaded data
+        for (const tactical::TypeId type : {member_type, ship_type}) {
+            tactical::DurabilityProfile profile; profile.type_id = type; profile.max_hull = units(1000);
+            health.profiles.push_back(profile);
+        }
+        auto movement = motion();
+        tactical::CraftProfile craft;
+        craft.type_id = member_type;
+        craft.max_speed = units(3); craft.min_speed = units(2);
+        craft.rate_of_turn = units(6); craft.lift = units(6);
+        craft.thrust = units(1); craft.roll_rate = units(3); craft.bank_angle = units(70);
+        craft.strafe_distance = units(500);
+        movement.squadrons.craft = {craft};
+        movement.squadrons.squadrons = {{team_type, {member_type, member_type}, {at(0, 0), at(30, 0)}, units(1000), units(200), units(300), units(25)}};
+        tactical::CombatTable combat;
+        tactical::CombatProfile ship; ship.type_id = ship_type; ship.category_bits = 1;
+        combat.profiles.push_back(ship);
+        tactical::AbilityTable abilities; abilities.passive_damage_type = 0;
+        tactical::UnitAbilityProfile team; team.type_id = team_type; team.dispatch_defaults_to_members = true;
+        tactical::SpecialAbilityProfile heal; heal.name = "Team_Heal"; heal.kind = tactical::SpecialAbilityKind::force_healing;
+        heal.style = tactical::SpecialActivationStyle::space_automatic; heal.initially_enabled = true;
+        heal.heal_range = units(550); heal.heal_interval_frames = 60; heal.single_target_heal = variant.single;
+        heal.filter.applicable_categories = 1;
+        if (variant.passive) { heal.heal_amount = units(-30); heal.heal_interval_frames = 15; }
+        else heal.heal_amount = units(20);
+        team.special.push_back(heal); abilities.profiles.push_back(team);
+        expect(static_cast<bool>(tactical::validate_abilities(abilities)), "WSH-13: the team healing table is valid");
+        std::vector<std::string> baseline;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto made = tactical::TacticalSession::create(initial, {}, health, movement, std::nullopt, combat, {}, abilities);
+            expect(static_cast<bool>(made), "WSH-13: the team healing session creates"); if (!made) continue;
+            auto session = std::move(made.value());
+            expect(!session.durability_state(company), "WSH-13: the company has no hull");
+            const auto first_poll = session.ability_state(company)->special.slots[0].next_service_frame;
+            for (const eawr::sim::EntityId id : {near_ally, low_ally, far_ally, enemy}) {
+                expect(static_cast<bool>(session.submit(command(1, 1, id, id,
+                    tactical::DamagePayload{units(id == near_ally ? 300 : 600), tactical::hull_target}))),
+                    "WSH-13: recipient damage submits");
+            }
+            if (variant.kill_low) {
+                expect(static_cast<bool>(session.submit(command(100, 1, 100, low_ally,
+                    tactical::DamagePayload{units(5000), tactical::hull_target}))), "WSH-13: the lowest recipient is killed mid-run");
+            }
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            std::size_t pulses_near = 0, pulses_low = 0, pulses_after_kill = 0;
+            const std::uint64_t interval = variant.passive ? 15U : 60U;
+            for (std::uint64_t tick = 0; tick <= 180; ++tick) {
+                const auto stepped = session.step(executor); expect(static_cast<bool>(stepped), "WSH-13: team healing tick advances");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+                std::size_t pulses_now = 0;
+                for (const auto& event : stepped.value().snapshot->combat_events()) {
+                    if (event.kind != tactical::CombatEventKind::heal_pulse) continue;
+                    ++pulses_now;
+                    expect(event.shooter == company, "WSH-13: the company is the pulse source");
+                    expect(event.target != company && event.target != 11 && event.target != 12 && event.target != far_ally
+                        && (event.target == enemy) == variant.passive,
+                        "WSH-13: only filtered recipients inside the range are pulsed; the company and its members never are");
+                    pulses_near += event.target == near_ally ? 1U : 0U;
+                    pulses_low += event.target == low_ally ? 1U : 0U;
+                    if (variant.kill_low && tick > 100) pulses_after_kill += event.target == near_ally ? 1U : 0U;
+                }
+                expect((pulses_now != 0) == (tick >= 1 && tick >= first_poll && (tick - first_poll) % interval == 0),
+                    "WSH-13: the company pulses on the authored interval from its first poll");
+            }
+            if (baseline.empty()) baseline = hashes; else expect(hashes == baseline, "WSH-13: team healing 1/2/4/8 hashes match");
+            const auto hull = [&](const eawr::sim::EntityId id) { return session.durability_state(id)->hull.raw(); };
+            if (variant.passive) {
+                expect(pulses_near == 0 && pulses_low == 0 && hull(near_ally) == units(700).raw() && hull(far_ally) == units(400).raw(),
+                    "WSH-13: passive damage leaves allies untouched");
+                expect(hull(enemy) < units(400).raw(), "WSH-13: passive damage reaches the enemy inside the range");
+            } else if (variant.single && !variant.kill_low) {
+                expect(pulses_near == 0 && pulses_low >= 2, "WSH-02/10: single target heals the lowest percent only");
+                expect(std::abs(hull(low_ally) - (units(400).raw() + static_cast<std::int64_t>(pulses_low) * units(20).raw())) <= 1000,
+                    "WSH-13: each pulse adds the authored amount to the recipient");
+            } else if (!variant.single) {
+                expect(pulses_near == pulses_low && pulses_near >= 2, "WSH-13: every damaged ally in range is pulsed together");
+            } else {
+                expect(!session.durability_state(low_ally) && pulses_after_kill >= 1,
+                    "WSH-13: a recipient killed mid-run drops out and the next lowest is healed");
+            }
+            expect(hull(far_ally) == units(400).raw() && (variant.passive || hull(enemy) == units(400).raw()),
+                "WSH-13: allies outside the range and enemies are never healed");
+            const auto encoded = tactical::write_replay(session.record());
+            expect(static_cast<bool>(encoded), "WSH-13: team healing replay writes"); if (!encoded) continue;
+            const auto parsed = tactical::parse_replay(encoded.value());
+            expect(static_cast<bool>(parsed), "WSH-13: team healing replay encodes");
+            if (parsed) {
+                auto replay = tactical::TacticalSession::from_replay(parsed.value(), {}, health, movement, std::nullopt, combat, {}, abilities);
+                expect(static_cast<bool>(replay), "WSH-13: team healing replay creates");
+                if (replay) for (const auto& hash : hashes) {
+                    const auto step = replay.value().step(executor);
+                    expect(step && step.value().state_sha256 == hash, "WSH-13: team healing replays identically");
                 }
             }
         }

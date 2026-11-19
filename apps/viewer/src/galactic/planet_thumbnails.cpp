@@ -454,15 +454,18 @@ struct PlanetThumbnails::Impl final {
         return state.planet_layer(id) == 0 && !state.fixture_enabled(GalacticHudFixture::Feature::unaligned_planets);
     }
 
-    // WGUI-05 as the map's submit applies it: the shell for an undiscovered campaign planet that has one, else
-    // the normal surfaces. A picture is never the camera target, so the camera's zoom alternate never applies.
-    [[nodiscard]] int map_alternate(const std::uint64_t id) const {
+    // PS-08 / WGUI-05: preview this system as the close-up camera target, retaining hidden shells and the
+    // ordinary map alternate of its co-located decorations. The real map camera does not change the row.
+    [[nodiscard]] int picture_alternate(const std::uint64_t id, const bool target) const {
         galactic_view::PlanetShellInput art;
         art.galaxy_planet = state.galaxy_planet_ids.contains(id);
         if (art.galaxy_planet) {
             art.scene_art = std::find(state.scene_objects.begin(), state.scene_objects.end(), id) != state.scene_objects.end();
             art.discovered = art.scene_art || state.planet_discovered(id);
             art.has_shell = state.shell_planets.contains(id);
+            art.world_layer = world_planet(id);
+            art.camera_target = target;
+            art.camera_alternate = 1;
         }
         return galactic_view::planet_alternate(art);
     }
@@ -487,7 +490,7 @@ struct PlanetThumbnails::Impl final {
         for (auto& member : group.members) {
             const auto* current = planet_view(member.id);
             const std::string& model = current ? current->model : none;
-            const int alternate = map_alternate(member.id);
+            const int alternate = picture_alternate(member.id, member.id == view.id);
             if (member.model != model || member.alternate != alternate || inserted) {
                 member.model = model;
                 member.alternate = alternate;

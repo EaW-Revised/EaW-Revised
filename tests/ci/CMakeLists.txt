@@ -79,6 +79,10 @@ add_test(
 # improvement, --update is deterministic, malformed input is refused.
 
 
+# The source gates run by every cross job (tools/offload/cross_source_gates.py): one reused work tree, one run at a time behind a
+# lock, a corrupted tree is recreated, the receipt and the baseline comparison are unchanged.
+
+
 # The mod degradation sweep (tools/ci/degradation_sweep.py) with a stand-in sim_headless: targets are deleted before the runs,
 # the gate gets --expect-all and --since, the matrix and the baseline stay in step.
 

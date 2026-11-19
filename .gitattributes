@@ -55,3 +55,9 @@ tests/mods_service/transcripts/*.jsonl text eol=lf
 tools/sched/deploy/* text eol=lf
 # The degradation baseline is written by degradation_gate.py update; its tests compare the exact LF bytes.
 tests/degradation_baseline.json text eol=lf
+# The reviewed release layer manifest pins these templates' exact bytes.
+tools/revised_build_tray/*.xml text eol=lf
+# CRLF on every host, like the shipped layer's other XML (the gift templates keep theirs with -text).
+tools/revised_planet_search/*.xml text eol=crlf
+# The publish scan reviews the build tray layout drawing by its committed SHA-256 on every platform.
+docs/ui/images/galactic-build-tray.svg text eol=lf

@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <array>
 #include <exception>
+#include <functional>
+#include <span>
 #include <stdexcept>
 #include <set>
 #include <tuple>
@@ -307,7 +309,8 @@ core::Result<void> GameSession::select_pending_battle(bool fight, const sim::Par
     return core::Result<void>::success();
 }
 core::Result<void> GameSession::submit(const galactic::GameCommand& command) {
-    if (std::holds_alternative<galactic::PostLoadFixup>(command.payload)) return fail<void>("load fixups are internal restore commands");
+    if (std::holds_alternative<galactic::PostLoadFixup>(command.payload) || std::holds_alternative<galactic::SeatAdmit>(command.payload))
+        return fail<void>("load fixups are internal restore commands");
     if (impl_->failure) return core::Result<void>::failure(*impl_->failure);
     const auto* issuer = impl_->seat(command.key.seat);
     if (issuer == nullptr) return fail<void>("unknown game-command seat", galactic::diagnostic_codes::unknown_issuer);
@@ -532,6 +535,21 @@ core::Result<void> GameSession::process_session_commands(StepContext& tick_conte
             if (!accepted) out.diagnostics.push_back(accepted.error());
             out.invasion_accept_responses.push_back({accept->conflict, command.key.seat,
                 accepted ? std::string{} : accepted.error().message, summary_closed});
+        } else if (const auto* opened = std::get_if<galactic::CorruptionDialogOpened>(&command.payload)) {
+            if (impl.gui_click_tick != impl.tick) { impl.gui_click_tick = impl.tick; impl.gui_clicks_this_tick.clear(); }
+            const auto* issuer = impl.seat(command.key.seat);
+            if (!impl.child && issuer && issuer->active && issuer->kind == galactic::SeatKind::human && issuer->player) {
+                if (++impl.gui_clicks_this_tick[command.key.seat] > galactic::max_gui_clicks_per_tick)
+                    out.diagnostics.push_back(fail<void>("corruption dialog notice dropped: too many story clicks from one seat in one tick").error());
+                else if (impl.world().corruption_dialog_admitted(issuer->player, opened->planet)) {
+                    const auto planet = impl.story_planets.find(opened->planet);
+                    if (planet != impl.story_planets.end()) {
+                        auto told = impl.story_notice({issuer->player, galactic::story::TextNotice{
+                            galactic::story::Text::open_corruption, planet->second, std::nullopt}});
+                        if (!told) { impl.failure = told.error(); return core::Result<void>::failure(*impl.failure); }
+                    }
+                }
+            }
         } else if (const auto* click = std::get_if<galactic::GuiClick>(&command.payload)) {
             if (impl.gui_click_tick != impl.tick) { impl.gui_click_tick = impl.tick; impl.gui_clicks_this_tick.clear(); }
             // WST-37: the click reaches the plots of the seat that issued it, at the agreed tick on every peer. It changes
@@ -1381,6 +1399,23 @@ core::Result<GameTick> GameSession::step(const sim::PartitionExecutor& executor)
         return failed;
     }
 }
+namespace {
+// #7869: a command of a seat the session does not have yet is valid only once the recording admits that seat (a SeatAdmit
+// of the load prologue at or before the command's tick). The replay validator sees the commands and the setup only; the
+// seat table and the prologue are here.
+core::Result<void> commands_follow_admissions(const std::span<const galactic::GameCommand> commands,
+    const std::span<const galactic::GameCommand> prologue, const std::function<bool(sim::SeatId)>& exists) {
+    for (const auto& command : commands) {
+        if (exists(command.key.seat)) continue;
+        const bool admitted = std::any_of(prologue.begin(), prologue.end(), [&](const auto& fixup) {
+            return fixup.key.seat == command.key.seat && std::holds_alternative<galactic::SeatAdmit>(fixup.payload)
+                && fixup.key.tick <= command.key.tick; });
+        if (!admitted)
+            return fail<void>("a command of a seat comes before the seat's admission", galactic::diagnostic_codes::replay_command);
+    }
+    return core::Result<void>::success();
+}
+} // namespace
 core::Result<GameSession> GameSession::from_recording(const GameRecording& recording,
     ContentResolver content, ScriptFactory scripts, ScriptRequirement requirement) {
     return from_recording(recording, std::move(content), std::move(scripts), requirement, {});
@@ -1391,6 +1426,12 @@ core::Result<GameSession> GameSession::from_recording(const GameRecording& recor
     auto created = create(recording.commands.setup);
     if (!created) return created;
     auto& impl = *created.value().impl_;
+    // A recording from the start of the game has every seat in its setup or in its own prologue; a bounded one (a base) may
+    // hold seats its dropped prologue admitted earlier, and the session refuses a command of a seat that does not exist.
+    if (recording.base.at.tick == 0)
+        if (auto followed = commands_follow_admissions(recording.commands.commands, recording.load_fixups,
+                [&](const sim::SeatId id) { return impl.seat(id) != nullptr; }); !followed)
+            return core::Result<GameSession>::failure(followed.error());
     if (recording.multiplayer_vote_timeout) {
         if (auto configured = created.value().configure_multiplayer_votes(*recording.multiplayer_vote_timeout); !configured)
             return core::Result<GameSession>::failure(configured.error());
@@ -1443,9 +1484,12 @@ core::Result<GameSession> GameSession::from_recording(const GameRecording& recor
     space.content = std::move(content); space.scripts = std::move(scripts);
     space.script_requirement = requirement;
     for (const auto& fixup : recording.load_fixups) {
-        if (!std::holds_alternative<galactic::PostLoadFixup>(fixup.payload) || fixup.key.tick > recording.commands.final_tick_count
-            || impl.seat(fixup.key.seat) == nullptr
-            || galactic::decode_payload(galactic::CommandLayer::session, galactic::session_opcodes::post_load_fixup,
+        // A SeatAdmit names a seat that does not exist until it is applied; its own verdict is taken then.
+        const bool admission = std::holds_alternative<galactic::SeatAdmit>(fixup.payload);
+        if ((!admission && !std::holds_alternative<galactic::PostLoadFixup>(fixup.payload) && !std::holds_alternative<galactic::SeatRejoin>(fixup.payload))
+            || fixup.key.tick > recording.commands.final_tick_count
+            || (impl.seat(fixup.key.seat) == nullptr) != admission
+            || galactic::decode_payload(galactic::CommandLayer::session, galactic::opcode_of(fixup.payload),
                 galactic::encode_payload(fixup.payload)) != std::optional(fixup.payload)
             || (!impl.replay_fixups.empty() && fixup.key.tick < impl.replay_fixups.rbegin()->first))
             return fail<GameSession>("invalid load prologue");
@@ -1766,6 +1810,9 @@ core::Result<void> GameSession::append_recording_window(const GameRecording& win
     const auto from = impl.tick;
     if (auto valid = galactic::validate_replay(window.commands); !valid) return valid;
     if (window.commands.final_tick_count < from) return fail<void>("recorded window ends before its boundary");
+    if (auto followed = commands_follow_admissions(window.commands.commands, window.load_fixups,
+            [&](const sim::SeatId id) { return impl.seat(id) != nullptr; }); !followed)
+        return followed;
     std::set<sim::EntityId> ids;
     for (const auto& entry : window.conflicts) ids.insert(entry.conflict.id);
     for (const auto& entry : window.admissions) ids.insert(entry.conflict.id);
@@ -1811,8 +1858,10 @@ core::Result<void> GameSession::append_recording_window(const GameRecording& win
         const bool held = std::any_of(staged.first, staged.second, [&](const auto& row) { return row.second == fixup; })
             || std::find(impl.load_fixups.begin(), impl.load_fixups.end(), fixup) != impl.load_fixups.end();
         if (held) continue;
-        if (!std::holds_alternative<galactic::PostLoadFixup>(fixup.payload) || fixup.key.tick > window.commands.final_tick_count
-            || impl.seat(fixup.key.seat) == nullptr
+        const bool admission = std::holds_alternative<galactic::SeatAdmit>(fixup.payload);
+        if ((!admission && !std::holds_alternative<galactic::PostLoadFixup>(fixup.payload) && !std::holds_alternative<galactic::SeatRejoin>(fixup.payload))
+            || fixup.key.tick > window.commands.final_tick_count
+            || (impl.seat(fixup.key.seat) == nullptr) != admission
             || (!impl.replay_fixups.empty() && fixup.key.tick < impl.replay_fixups.rbegin()->first))
             return fail<void>("invalid load prologue");
         impl.replay_fixups.emplace(fixup.key.tick, fixup);
@@ -1851,7 +1900,9 @@ void GameSession::Impl::rebase_history() {
     std::erase_if(conflicts, finished); std::erase_if(admissions, finished);
 }
 core::Result<void> GameSession::apply_load_fixup(const galactic::GameCommand& command) {
-    if (command.key.tick != impl_->tick || !std::holds_alternative<galactic::PostLoadFixup>(command.payload))
+    if (command.key.tick != impl_->tick
+        || (!std::holds_alternative<galactic::PostLoadFixup>(command.payload) && !std::holds_alternative<galactic::SeatAdmit>(command.payload)
+            && !std::holds_alternative<galactic::SeatRejoin>(command.payload)))
         return fail<void>("load prologue needs the current session frontier");
     const std::array controls{command};
     // WGUI-102 / TR-01: active-mode frames and synchronized logical FPS, never
@@ -1867,6 +1918,26 @@ core::Result<void> GameSession::apply_load_fixup(const galactic::GameCommand& co
     }
     if (impl_->child) impl_->child->galaxy_hash = impl_->galaxy_hash().value();
     impl_->load_fixups.push_back(command);
+    return core::Result<void>::success();
+}
+core::Result<void> GameSession::admit_human_seats(const std::span<const galactic::PlayerId> extra_players) {
+    if (extra_players.empty()) return core::Result<void>::success();
+    if (impl_->failure) return core::Result<void>::failure(*impl_->failure);
+    if (!impl_->world().multiplayer()) return fail<void>("seats can be admitted only into a multiplayer game");
+    // The seat table is read once: each command names its own new seat, so the whole plan is fixed before any applies.
+    const auto plan = galactic::plan_seat_admissions(impl_->world().seats(), extra_players, impl_->tick);
+    for (const auto& command : plan)
+        if (auto applied = apply_load_fixup(command); !applied) return applied;
+    return core::Result<void>::success();
+}
+core::Result<void> GameSession::reseat_human_seats(const std::span<const sim::SeatId> seats) {
+    if (seats.empty()) return core::Result<void>::success();
+    if (impl_->failure) return core::Result<void>::failure(*impl_->failure);
+    for (const auto id : seats) {
+        const auto* seat = impl_->seat(id);
+        if (seat == nullptr || seat->kind != sim::SeatKind::human || seat->active) return fail<void>("seat_not_departed");
+        if (auto applied = apply_load_fixup({{impl_->tick, id, 0}, galactic::SeatRejoin{}}); !applied) return applied;
+    }
     return core::Result<void>::success();
 }
 core::Result<void> GameSession::apply_restore_prologue() {

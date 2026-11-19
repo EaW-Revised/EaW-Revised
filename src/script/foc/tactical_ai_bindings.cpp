@@ -308,6 +308,44 @@ void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector
         if (found == host->types_by_name.end()) return none();
         return one(handle(handle_type, found->second->type_id));
     });
+    if (tactical_world_queries) add("Create_Generic_Object", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() != 3) return fail("Create_Generic_Object expects type, position and player");
+        const AiType* type = nullptr;
+        if (const auto* name = as_text(arguments[0])) {
+            const auto found = host->types_by_name.find(upper(*name));
+            if (found != host->types_by_name.end()) type = found->second;
+        } else if (const auto* value = as_handle(arguments[0], handle_type)) type = host->type(value->id);
+        auto position = position_of(*host, arguments[1]);
+        if (!position) if (const auto pending = pending_created_object(*host, context, arguments[1])) position = pending->position;
+        const auto* owner = as_handle(arguments[2], handle_player);
+        if (!type || !position || !owner || owner->id > std::numeric_limits<tactical::PlayerId>::max()
+            || !host->players.contains(static_cast<tactical::PlayerId>(owner->id)))
+            return fail("Create_Generic_Object: invalid type, position or player");
+        const auto* profile = host->world ? host->world->economy().upgrade(type->type_id) : nullptr;
+        if (host->setup.domain != tactical::BattleDomain::space || !type->upgrade_object || !profile || profile->level_up || !profile->bounties.empty()
+            || host->world->economy().disabled_types.contains(type->type_id))
+            return fail("Create_Generic_Object: this host supports ordinary space upgrade objects only");
+        const auto player = static_cast<tactical::PlayerId>(owner->id);
+        const auto issuer = host->players.find(player);
+        if (issuer == host->players.end() || issuer->second->neutral)
+            return fail("Create_Generic_Object: no commandable creation owner");
+        // The ordered commit needs the owner's economy account (a defeated or account-less seat has none); a missing one
+        // would abort the tick after the wrapper is returned, so it is a Lua error here.
+        const auto ledgers = host->world->ledgers();
+        if (!host->world->economy().player(player)
+            || std::none_of(ledgers.begin(), ledgers.end(), [player](const tactical::PlayerEconomy& account) { return account.player == player; }))
+            return fail("Create_Generic_Object: the creation owner has no economy account");
+        // Project reference namespace: bounded, injective (instance, command sequence), retained in replay/state.
+        constexpr unsigned sequence_bits = 20;
+        if (context.instance() >= (std::uint64_t{1} << (63 - sequence_bits))
+            || context.command_sequence() >= (std::uint64_t{1} << sequence_bits))
+            return fail("Create_Generic_Object: script creation identity space exhausted");
+        const auto identity = tactical::script_creation_namespace | (context.instance() << sequence_bits) | context.command_sequence();
+        if (identity == tactical::script_creation_namespace) return fail("Create_Generic_Object: invalid creation identity");
+        context.issue_command(std::string(verb_create_object), {number(LuaNumber(static_cast<std::int64_t>(player))),
+            handle(handle_type, type->type_id), position_value(*position), arguments[2], handle(handle_game_object, identity)});
+        return one(handle(handle_game_object, identity));
+    });
     add("Script.Debug_Should_Issue_Event_Alert", [](BindingContext&, const ValueList&) { return one(boolean(false)); });
     // Debug output only (PGDebug): no effect on the game.
     for (const char* name : {"_OuputDebug", "_ScriptMessage", "_CustomScriptMessage", "_MessagePopup", "DumpCallStack"}) add(name, noop());
@@ -401,7 +439,7 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         if (auto added = scripts.register_method(handle_game_object, name, std::move(binding)); !added) errors.push_back(added.error());
     };
     const auto player = [&](std::string_view name, Binding binding) {
-        if (name == "Get_Credits" || name == "Get_Tech_Level") binding = guard_dynamic_read(name, std::move(binding));
+        if (name == "Get_Tech_Level") binding = guard_dynamic_read(name, std::move(binding));
         if (auto added = scripts.register_method(handle_player, name, std::move(binding)); !added) errors.push_back(added.error());
     };
     const auto type = [&](std::string_view name, Binding binding) {
@@ -410,11 +448,13 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
     // Arguments start with the handle itself. A method on a dead object gives nothing (the
     // wrappers assert and return no value).
     object("Is_Valid", [host](BindingContext& context, const ValueList& arguments) {
+        if (pending_created_object(*host, context, arguments[0])) return one(boolean(true));
         auto immediate = galactic_immediate_query(context, *host, "galactic.created_valid", {arguments[0]});
         if (!immediate || !immediate.value().empty()) return immediate;
         return one(boolean(live_object(*host, arguments[0]) != nullptr));
     });
     object("Get_Type", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (const auto unit = pending_created_object(*host, context, arguments[0])) return one(handle(handle_type, unit->type));
         auto immediate = galactic_immediate_query(context, *host, "galactic.created_type", {arguments[0]});
         if (!immediate || !immediate.value().empty()) return immediate;
         const ViewUnit* unit = live_object(*host, arguments[0]);
@@ -422,6 +462,7 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         return one(handle(handle_type, unit->type));
     });
     object("Get_Owner", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (const auto unit = pending_created_object(*host, context, arguments[0])) return one(handle(handle_player, unit->owner));
         auto immediate = galactic_immediate_query(context, *host, "galactic.created_owner", {arguments[0]});
         if (!immediate || !immediate.value().empty()) return immediate;
         const ViewUnit* unit = live_object(*host, arguments[0]);
@@ -429,6 +470,7 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         return one(handle(handle_player, unit->owner));
     });
     object("Get_Position", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (const auto unit = pending_created_object(*host, context, arguments[0])) return one(position_value(unit->position));
         auto immediate = galactic_immediate_query(context, *host, "galactic.created_position", {arguments[0]});
         if (!immediate || !immediate.value().empty()) return immediate;
         const ViewUnit* unit = live_object(*host, arguments[0]);
@@ -1043,6 +1085,12 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         return none();
     });
     player("Get_Credits", [host](BindingContext& context, const ValueList& arguments) {
+        if (host->in_object_turn) {
+            // SOS-T1: only this getter admits the immutable staged wallet; other economy reads stay guarded.
+            const auto player = static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id);
+            const auto* row = host->view->player(player);
+            return one(number(numeric::from_fixed(row != nullptr ? row->turn_credits.value_or(math::Fixed{}) : math::Fixed{})));
+        }
         auto immediate = galactic_immediate_query(context, *host, "galactic.credits", {arguments[0]});
         if (!immediate || !immediate.value().empty()) return immediate;
         return one(number(numeric::from_fixed(host->credits(
@@ -1077,12 +1125,27 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         if (found == nullptr) return none();
         return one(Value::text(found->name));
     });
+    type("Get_Base_Level", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        // SSU-01: authored unsigned Base_Level; the method ignores extra arguments.
+        const auto* found = host->type(std::get<Handle>(arguments[0].data).id);
+        return found == nullptr ? none() : one(number(LuaNumber(static_cast<std::int64_t>(found->base_level))));
+    });
     type("Get_Build_Cost", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const AiType* found = host->type(std::get<Handle>(arguments[0].data).id);
         if (found == nullptr) return none();
         // RGC-125: generic tactical cost (WAS-26), without a producer's effective price.
         if (!found->tactical_cost) return fail("Get_Build_Cost: generic tactical cost metadata unavailable");
         return one(number(numeric::from_fixed(*found->tactical_cost)));
+    });
+    type("Get_Tactical_Build_Cost", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        // SSU-04: integer authored price; campaign uses a positive override, otherwise multiplayer price.
+        const auto* found = host->type(std::get<Handle>(arguments[0].data).id);
+        if (!found) return none();
+        auto cost = found->tactical_cost;
+        if (host->setup.perception.campaign_game && found->tactical_campaign_cost
+            && found->tactical_campaign_cost->raw() >= math::Fixed::scale) cost = found->tactical_campaign_cost;
+        if (!cost) return fail("Get_Tactical_Build_Cost: tactical cost metadata unavailable");
+        return one(number(LuaNumber(cost->raw() / math::Fixed::scale)));
     });
     type("Get_Max_Range", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const AiType* found = host->type(std::get<Handle>(arguments[0].data).id);

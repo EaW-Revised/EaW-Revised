@@ -164,6 +164,13 @@ ADR-020 already makes co-op a project rule]. GHUD-C19 already lists the retail M
   the lobby yet (legacy EAWR-5373). SP campaigns are long, so this is the first follow-up after the milestone.
   Checkpoints already carry story plot state and scheduler state [docs: `docs/checkpoint-format.md`].
   The resume check must accept the new rules flavour (B1).
+- **Multiplayer prebattle autosave (deviation from WGS-33).** Retail writes no autosave in multiplayer; the project
+  does (legacy EAWR-7852). When a space conflict prompt opens, the lowest active human seat issues the reserved autosave
+  through the ordinary lockstep save command (same slot and rotation as single player), once per prompt even when
+  that seat leaves; quick-save stays refused. Only that seat writes the file for now; every human peer writing a local
+  copy follows the peer-save work (legacy EAWR-7853). Loading it from the multiplayer lobby is still the open part of the
+  multiplayer save resume (legacy EAWR-5373): the lobby has no resume entry and the resume check must accept the rules
+  flavour (B1), so today it is a recovery file, not a lobby-loadable campaign.
 - **Battle hand-off.** Unchanged: the ADR-020 seat split, caller-owned reinforcements, the D10 vote.
   - The TaskForce delivery abort (legacy EAWR-5484) is an AI-script problem that occurs in solo too. Its fix (never
     end the campaign on a retired script owner) is a prerequisite for mods, not for stock.

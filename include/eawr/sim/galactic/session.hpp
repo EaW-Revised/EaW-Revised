@@ -167,6 +167,8 @@ public:
     [[nodiscard]] core::Result<void> replay_native_invasion_service();
     [[nodiscard]] const EconomyCorruptionState* economy_corruption() const noexcept;
     [[nodiscard]] const GalacticAbilityState* ability_state() const noexcept;
+    // WGCH-121: canonical authorization for a dialog-open command; never builds a view projection.
+    [[nodiscard]] bool corruption_dialog_admitted(PlayerId, PlanetId) const;
     // WGCH-70: the campaign owns the existing saved hero-return queue.
     // Trusted generic service owner; saves/replays retain the enabled/cancelled facts.
     [[nodiscard]] core::Result<void> set_ability_lifecycle(EntityId, bool enabled, bool cancelled, AbilityKind = AbilityKind::black_market);

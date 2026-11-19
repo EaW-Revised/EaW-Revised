@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<!-- Project addition GBT-12 (docs/ui/galactic-build-tray.md). How the galactic build tray groups the build choices.
+     Presentation only: it never changes what can be built. A compat patch for a mod is this file, shipped higher in the
+     load order; the highest valid file wins whole, so a patch carries the complete lists it wants. -->
+<Revised_Build_Tray_Groups>
+    <Category_Priority>SpaceHero, LandHero, InfantryHero, VehicleHero, NonCombatHero, Hero, SuperCapital, Super, Capital, Frigate, Corvette, Gunship, Transport, Bomber, Fighter, Vehicle, Infantry, Air, AirGunship, AirSpeeder</Category_Priority>
+    <Building_Categories>Structure, SpaceStructure</Building_Categories>
+    <Group_Caption Name="Fighter">TEXT_EAWR_BUILD_TRAY_GROUP_FIGHTER</Group_Caption>
+    <Group_Caption Name="Bomber">TEXT_EAWR_BUILD_TRAY_GROUP_BOMBER</Group_Caption>
+    <Group_Caption Name="Transport">TEXT_EAWR_BUILD_TRAY_GROUP_TRANSPORT</Group_Caption>
+    <Group_Caption Name="Corvette">TEXT_EAWR_BUILD_TRAY_GROUP_CORVETTE</Group_Caption>
+    <Group_Caption Name="Frigate">TEXT_EAWR_BUILD_TRAY_GROUP_FRIGATE</Group_Caption>
+    <Group_Caption Name="Capital">TEXT_EAWR_BUILD_TRAY_GROUP_CAPITAL</Group_Caption>
+    <Group_Caption Name="Super">TEXT_EAWR_BUILD_TRAY_GROUP_SUPER</Group_Caption>
+    <Group_Caption Name="Infantry">TEXT_EAWR_BUILD_TRAY_GROUP_INFANTRY</Group_Caption>
+    <Group_Caption Name="Vehicle">TEXT_EAWR_BUILD_TRAY_GROUP_VEHICLE</Group_Caption>
+    <Group_Caption Name="Air">TEXT_EAWR_BUILD_TRAY_GROUP_AIR</Group_Caption>
+    <Group_Caption Name="LandHero">TEXT_EAWR_BUILD_TRAY_GROUP_LANDHERO</Group_Caption>
+    <Group_Caption Name="SpaceHero">TEXT_EAWR_BUILD_TRAY_GROUP_SPACEHERO</Group_Caption>
+    <Group_Caption Name="NonCombatHero">TEXT_EAWR_BUILD_TRAY_GROUP_NONCOMBATHERO</Group_Caption>
+    <Group_Caption Name="Hero">TEXT_EAWR_BUILD_TRAY_GROUP_HERO</Group_Caption>
+    <Group_Caption Name="Buildings">TEXT_EAWR_BUILD_TRAY_GROUP_BUILDINGS</Group_Caption>
+    <Group_Caption Name="Misc">TEXT_EAWR_BUILD_TRAY_GROUP_MISC</Group_Caption>
+</Revised_Build_Tray_Groups>

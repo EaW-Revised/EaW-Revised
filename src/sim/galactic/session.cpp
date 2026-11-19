@@ -240,6 +240,34 @@ const Seat* GalacticSession::Impl::seat(const SeatId id) const noexcept {
     return found != seats.end() && found->seat_id == id ? &*found : nullptr;
 }
 
+std::optional<std::string> GalacticSession::Impl::seat_admission_problem(const SeatId id, const SeatAdmit& admit) const {
+    if (!seat_control) return "seat admission needs the seat-control policy";
+    if (id.value == 0 || (!seats.empty() && !(seats.back().seat_id < id))) return "an admitted seat id must be above every existing seat id";
+    if (seats.size() >= galactic_max_seats) return "too many seats";
+    if (!std::any_of(setup.players.begin(), setup.players.end(), [&](const GalacticPlayer& row) { return row.player_id == admit.player; }))
+        return "the admitted seat names no listed player";
+    const auto& controllers = seat_control->control.controllers;
+    if (std::none_of(controllers.begin(), controllers.end(), [&](const FactionController& row) { return row.player == admit.player; }))
+        return "the admitted faction has no controller";
+    std::size_t humans = 0;
+    std::set<HumanSideId> sides;
+    std::optional<HumanSideId> own_side;
+    for (const auto& row : seats) {
+        if (row.kind != SeatKind::human) continue;
+        ++humans; sides.insert(row.human_side_id);
+        if (row.player == admit.player) own_side = row.human_side_id;
+    }
+    if (humans >= galactic_max_human_seats) return "too_many_human_seats";
+    if (own_side) {
+        // A faction that already has humans is a shared seat: same side as them, whatever the lobby asked for.
+        if (admit.human_side != *own_side) return "an admitted seat joins the side of its faction";
+    } else {
+        if (sides.contains(admit.human_side)) return "the faction has no human seat, so it cannot join an existing side";
+        if (sides.size() >= 2) return "third_human_side";
+    }
+    return std::nullopt;
+}
+
 void GalacticSession::Impl::execute(const GameCommand& command, const std::uint64_t tick, std::vector<GalacticEvent>& events,
     const bool pending_local_conflict) {
     GalacticEvent event{tick, GalacticEventKind::command_executed, command.key.seat, invalid_entity_id,
@@ -251,6 +279,36 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
     };
     const auto* issuer = seat(command.key.seat);
     const auto session_dirty = [&] { dirty[static_cast<std::size_t>(StateSection::session)] = true; };
+    if (const auto* admit = std::get_if<SeatAdmit>(&command.payload)) {
+        // The load prologue validated the whole batch (seat_admission_problem); a refusal here is a programming error
+        // that must not change state, so it is rejected like any other command.
+        if (issuer || seat_admission_problem(command.key.seat, *admit)) return reject(GalacticRejectReason::not_authorized);
+        seats.push_back({command.key.seat, admit->player, SeatKind::human, admit->lobby_slot, true, admit->human_side});
+        auto& teams = seat_control->control.teams;
+        const auto team = std::lower_bound(teams.begin(), teams.end(), admit->human_side,
+            [](const TeamLead& row, const HumanSideId value) { return row.side < value; });
+        if (team == teams.end() || team->side != admit->human_side) teams.insert(team, TeamLead{admit->human_side, SeatId{}, false});
+        update_seat_control_policy(*seat_control, seats);
+        // The faction's AI issuer acts only while its controller is the AI: a taken-over faction freezes it in place
+        // (its configuration and state stay in seat_control), and the last human leaving wakes the same AI again.
+        for (auto& row : seats) if (row.kind == SeatKind::ai && row.player == admit->player) {
+            const auto& controllers = seat_control->control.controllers;
+            const auto controller = std::find_if(controllers.begin(), controllers.end(), [&](const auto& value) { return value.player == row.player; });
+            row.active = controller != controllers.end() && controller->kind == FactionControl::ai;
+        }
+        events.push_back(event);
+        // TM-04/#5355: a second active human lowers a faster shared clock to the multiplayer maximum, as a rejoin does.
+        if (std::count_if(seats.begin(), seats.end(), [](const Seat& row) { return row.active && row.kind == SeatKind::human; }) > 1)
+            for (const bool tactical : {false, true}) {
+                auto& setting = tactical ? clock.tactical_speed : clock.strategic_speed;
+                if (setting.raw() <= multiplayer_speed_max_raw) continue;
+                setting = math::Fixed::from_raw(multiplayer_speed_max_raw);
+                event.kind = GalacticEventKind::speed_changed; event.subject = tactical ? 1U : 0U;
+                event.value = static_cast<std::uint64_t>(setting.raw());
+                events.push_back(event);
+            }
+        session_dirty(); return;
+    }
     if (std::holds_alternative<SeatLeave>(command.payload) || std::holds_alternative<SeatRejoin>(command.payload)) {
         if (!seat_control || !issuer || issuer->kind != SeatKind::human)
             return reject(GalacticRejectReason::not_authorized);
@@ -328,7 +386,8 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
     if (const auto* save = std::get_if<SaveRequest>(&command.payload)) {
         const bool allowed = issuer && issuer->active && issuer->kind == SeatKind::human
             // WGS-33: quick-save and autosave do nothing in multiplayer mode; the ordinary save stays admitted.
-            && (!(save->quick || save->autosave) || !multiplayer_flag())
+            // Deviation (#7852): the prebattle autosave is admitted in multiplayer too.
+            && (!(save->quick || save->autosave) || !multiplayer_flag() || (save->autosave && save->prebattle))
             // WGS-99/142/143: a prebattle autosave is the producer at Begin, issued from the conflict's own
             // pause with the conflict still pending and no child staged; every other state refuses it.
             && (!save->prebattle || prebattle_autosave_window);
@@ -701,7 +760,7 @@ core::Result<void> GalacticSession::replay_native_barrier(const PartitionExecuto
 }
 
 core::Result<void> GalacticSession::submit(const GameCommand& command) {
-    if (std::holds_alternative<PostLoadFixup>(command.payload))
+    if (std::holds_alternative<PostLoadFixup>(command.payload) || std::holds_alternative<SeatAdmit>(command.payload))
         return fail<void>(diagnostic_codes::invalid_command, "load fixups are internal restore commands");
     const auto context = command_context(command);
     const auto& key = command.key;
@@ -1162,7 +1221,11 @@ core::Result<void> GalacticSession::apply_session_controls(const std::span<const
     // Validate the whole batch before executing any control.
     for (const auto& command : commands) {
         const auto opcode = opcode_of(command.payload);
-        if (impl_->seat(command.key.seat) == nullptr || layer_of(command.payload) != CommandLayer::session
+        // #7869: an admitted seat does not exist yet; its verdict is taken in order, below, against the table the
+        // earlier admissions of this batch produced.
+        const bool admission = std::holds_alternative<SeatAdmit>(command.payload);
+        if ((admission ? impl_->seat(command.key.seat) != nullptr : impl_->seat(command.key.seat) == nullptr)
+            || layer_of(command.payload) != CommandLayer::session
             || opcode == session_opcodes::debug_set_planet_owner || opcode == session_opcodes::debug_set_fleet_orbit
             || decode_payload(CommandLayer::session, opcode, encode_payload(command.payload)) != std::optional(command.payload)) {
             return fail<void>(diagnostic_codes::invalid_command, "battle service accepts only valid session controls");
@@ -1171,6 +1234,9 @@ core::Result<void> GalacticSession::apply_session_controls(const std::span<const
     std::vector<GalacticEvent> events;
     if (append_events && impl_->snapshot) events.assign(impl_->snapshot->events().begin(), impl_->snapshot->events().end());
     for (const auto& command : commands) {
+        if (const auto* admit = std::get_if<SeatAdmit>(&command.payload))
+            if (const auto problem = impl_->seat_admission_problem(command.key.seat, *admit))
+                return fail<void>(diagnostic_codes::invalid_command, "seat admission refused: " + *problem);
         if (std::holds_alternative<PostLoadFixup>(command.payload)) {
             const auto [frame, fps] = observer_load_clock.value_or(std::pair{impl_->clock.galactic_frame,
                 impl_->observer ? impl_->observer->logical_fps : galactic_frames_per_second});

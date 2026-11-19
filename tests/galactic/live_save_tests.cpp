@@ -483,7 +483,7 @@ void prebattle_autosave(std::size_t workers, const std::string& directory) {
     expect(std::any_of(quit_slots.begin(), quit_slots.end(), [](const auto& slot) { return slot.name == "Auto Save" && slot.description == "[AutoSave]"; }),
         "the quit autosave is listed with the reserved label");
     quitter->stop();
-    // WGS-143: multiplayer sessions produce no autosave.
+    // Multiplayer writes the prebattle autosave only through the lockstep driver (#7852): without one, none.
     auto coop = setup(); coop.seats[1].kind = galactic::SeatKind::human; coop.seats[1].human_side_id = 2;
     auto multi = take(platform::LiveGameSession::start(coop, pending_options(directory + "-multi")));
     multi->advance_to(2); expect(multi->wait_for(2, 5s), "multiplayer fixture runs");

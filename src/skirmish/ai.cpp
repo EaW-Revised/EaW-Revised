@@ -113,6 +113,8 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         type.tech_level = unit.tech_level;
         type.base_level = unit.base_level;
         type.previous_base_levels = unit.previous_base_levels;
+        type.upgrade_object = unit.production.upgrade_object;
+        type.tactical_campaign_cost = unit.production.build_cost_campaign;
         if (unit.ai_combat_power) type.combat_power = lua(*unit.ai_combat_power);
         if (unit.targeting_max_attack_distance) type.max_attack_distance = lua(*unit.targeting_max_attack_distance);
         if (unit.targeting_min_attack_distance) type.min_attack_distance = lua(*unit.targeting_min_attack_distance);
@@ -214,6 +216,12 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         }
         entry.player_type = ai_player_type(inputs, player);
         setup.players.push_back(std::move(entry));
+    }
+    setup.local_player = inputs.local_player;
+    if (!setup.local_player) {
+        const auto local = std::find_if(start.players.begin(), start.players.end(),
+            [](const auto& player) { return player.lobby && player.human; });
+        if (local != start.players.end()) setup.local_player = local->player.player_id;
     }
     // PG-01: the declared extents, centred on the origin (Coruscant: 13000 x 13000 from -6500).
     if (inputs.map_extents) {

@@ -150,9 +150,15 @@ public:
     Tick drive(platform::LiveGameStepContext& context, std::span<const platform::LiveGameOrder> orders, std::uint64_t now) {
         if (session_ended_) {
             auto error = make_diagnostic("EAWR-PLATFORM-0600", "A galactic LAN driver cannot be reused after its live session ended.");
-            for (const auto& order : orders) { (void)order; context.reject(error); }
+            for (const auto& order : orders) context.refuse(order, error);
             return Tick::failure(std::move(error));
         }
+        // Every order of this step that is not submitted is refused by name, so a save request cannot stay requested.
+        // Never refuse while holding mutex_: the session takes its own lock in refuse, and its save path calls may_save
+        // (which takes mutex_) under that lock.
+        const auto refuse_all = [&](const std::string& why) {
+            for (const auto& order : orders) context.refuse(order, make_diagnostic(net::reconnect_errors::unavailable, why));
+        };
         service_recovery_queries();
         if (!session_) {
             if (auto opened = open(context); !opened) return end_with_failure(opened.error());
@@ -163,31 +169,34 @@ public:
         const bool published = recovery_incident_ && recovery_incident_->local_published;
         if (!session_->pump_galactic_recovery(private_candidate, published)) {
             quarantine_live_recovery(net::GalacticRecoveryRefusal::limit);
+            refuse_all("recovery_quarantined");
             return Tick::success(std::nullopt);
         }
         service_live_recovery(context, now);
-        if (service_recovery_publication(context)) return Tick::success(std::nullopt);
+        if (service_recovery_publication(context)) { refuse_all("recovery_publication_pending"); return Tick::success(std::nullopt); }
         if (recovery_incident_ && (transport_.self() == recovery_incident_->target
             || recovery_incident_->local_published || recovery_incident_->commit_seen)) {
-            for (const auto& order : orders) { (void)order; context.reject(make_diagnostic(net::reconnect_errors::unavailable, "recovery_publication_pending")); }
+            refuse_all("recovery_publication_pending");
             return Tick::success(std::nullopt);
         }
         if (failed_) {
             if (!recovery_listening_) return Tick::failure(*failed_);
             if (options_.repair_recovery_links && !recovery_quarantined_) static_cast<void>(options_.repair_recovery_links());
+            refuse_all("match_failed_recovery_pending");
             return Tick::success(std::nullopt);
         }
         {
-            const std::lock_guard lock(mutex_);
-            if (view_.phase == GalacticLanPhase::ended) {
-                for (const auto& order : orders) {
-                    (void)order;
-                    context.reject(make_diagnostic("EAWR-PLATFORM-0600",
-                        "A galactic LAN match that ended cannot accept orders."));
-                }
-                if (view_.reason == GalacticLanReason::desync && !options_.recovery_restore)
-                    return Tick::failure(make_diagnostic("EAWR-PLATFORM-0600", view_.message));
-                if (view_.reason != GalacticLanReason::desync) return Tick::success(std::nullopt);
+            bool ended = false; GalacticLanReason reason{}; std::string message;
+            {
+                const std::lock_guard lock(mutex_);
+                ended = view_.phase == GalacticLanPhase::ended; reason = view_.reason; message = view_.message;
+            }
+            if (ended) {
+                for (const auto& order : orders)
+                    context.refuse(order, make_diagnostic("EAWR-PLATFORM-0600", "A galactic LAN match that ended cannot accept orders."));
+                if (reason == GalacticLanReason::desync && !options_.recovery_restore)
+                    return Tick::failure(make_diagnostic("EAWR-PLATFORM-0600", message));
+                if (reason != GalacticLanReason::desync) return Tick::success(std::nullopt);
             }
         }
         if (&adapter_->game() != &context.game)
@@ -636,15 +645,15 @@ private:
     // Local orders are untimed seat inputs: the core stamps them when it seals the batch of the next open tick.
     void submit(platform::LiveGameStepContext& context, const platform::LiveGameOrder& order) {
         if (recovery_incident_ && recovery_incident_->barrier && adapter_->completed_tick() >= *recovery_incident_->barrier)
-            return context.reject(make_diagnostic(net::reconnect_errors::unavailable, "recovery_publication_pending"));
-        if (order.tick) return context.reject(make_diagnostic("EAWR-PLATFORM-0600",
+            return context.refuse(order, make_diagnostic(net::reconnect_errors::unavailable, "recovery_publication_pending"));
+        if (order.tick) return context.refuse(order, make_diagnostic("EAWR-PLATFORM-0600",
             "A lockstep live game takes untimed orders only; the agreed batch stamps the tick."));
-        if (order.seat != local_seat()) return context.reject(make_diagnostic("EAWR-PLATFORM-0600",
+        if (order.seat != local_seat()) return context.refuse(order, make_diagnostic("EAWR-PLATFORM-0600",
             "A lockstep live game takes orders for its own seat only."));
         auto stamped = session_->submit([&order](sim::SeatCommandKey key) {
             return net::encode_galactic_input(key, order.payload);
         });
-        if (!stamped) context.reject(stamped.error());
+        if (!stamped) context.refuse(order, stamped.error());
         else if (acceptance_) {
             auto encoded = net::encode_galactic_input(stamped.value(), order.payload);
             if (encoded) acceptance_->event("input", {stamped.value(), std::move(encoded).value()}, context.game.completed_tick());

@@ -122,6 +122,7 @@ struct SharedSnapshotSections {
     std::shared_ptr<const std::optional<IncomeState>> income{};
     std::shared_ptr<const std::optional<VictoryState>> victory{};
     std::shared_ptr<const std::optional<EconomyCorruptionState>> economy_corruption{};
+    std::shared_ptr<const std::vector<CorruptionMenu>> corruption_information{};
 };
 
 class GalacticSnapshot final {
@@ -229,6 +230,15 @@ public:
         }
         return production_offers_ ? std::span<const ObservedProductionOffer>(*production_offers_)
             : std::span<const ObservedProductionOffer>{};
+    }
+    [[nodiscard]] const CorruptionMenu* corruption_information(PlanetId planet) const noexcept {
+        const auto* root = native_root();
+        if (root->corruption_information_) for (const auto& menu : *root->corruption_information_) {
+            if (menu.player != view_player() || menu.planet != planet) continue;
+            for (const auto& row : observations())
+                if (row.player == menu.player && row.planet == planet && row.discovered) return &menu;
+        }
+        return nullptr;
     }
     [[nodiscard]] const CorruptionMenu* corruption_menu() const noexcept {
         if (native_base_) return native_base_->corruption_menu();
@@ -414,6 +424,7 @@ private:
     std::shared_ptr<const std::vector<ObservedBlackMarketMenu>> black_market_menus_;
     std::optional<CorruptionMenu> corruption_menu_;
     std::shared_ptr<const CorruptionMenu> live_corruption_menu_;
+    std::shared_ptr<const std::vector<CorruptionMenu>> corruption_information_;
     std::shared_ptr<const PlanetAccessState> planet_access_;
     std::uint64_t observer_input_generation_{};
     std::shared_ptr<const EconomyInputGeneration> economy_input_generation_;

@@ -224,8 +224,8 @@ void normalize_economy(EconomyRules& rules, core::LoadNoteBuffer& notes) {
         value = effective;
     };
     for (auto& profile : rules.command_bonuses) {
-        if (profile.battlefield) clamp(profile.reveal_delta, -8 * unit, 8 * unit, "EAWR-LOAD-0356", name(profile.type),
-            "reveal_delta", "battlefield reveal contribution exceeds supported bounds");
+        // WBR-01: reveal contributions have no authored cap; checked aggregation
+        // and sensor multiplication diagnose numeric overflow at their consumers.
         for (auto& value : profile.bonus.percentages)
             clamp(value, -8 * unit, 8 * unit, "EAWR-LOAD-0356", name(profile.type),
                 "command_bonus", "command bonus outside supported bounds");
@@ -367,14 +367,12 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
             rules.command_bonuses[index - 1].slot} >= std::pair{profile.type, profile.slot}))
             return invalid("command sources must be nonzero and strictly increasing");
         if (profile.battlefield) {
-            if (!rules.campaign || !std::is_sorted(profile.enabled_players.begin(), profile.enabled_players.end())
+            if (!std::is_sorted(profile.enabled_players.begin(), profile.enabled_players.end())
                 || std::adjacent_find(profile.enabled_players.begin(), profile.enabled_players.end()) != profile.enabled_players.end())
-                return invalid("battlefield modifier requires campaign players in canonical order");
+                return invalid("battlefield modifier requires players in canonical order");
             for (const auto player : profile.enabled_players)
                 if (std::none_of(players.begin(), players.end(), [&](const auto& p) { return p.player_id == player; }))
                     return invalid("battlefield modifier owner is absent");
-            if (profile.reveal_delta.raw() < -8 * math::Fixed::scale || profile.reveal_delta.raw() > 8 * math::Fixed::scale)
-                return invalid("battlefield reveal contribution exceeds supported bounds");
         }
         const auto& targets = profile.bonus.applicable;
         if (!std::is_sorted(targets.begin(), targets.end()) || std::adjacent_find(targets.begin(), targets.end()) != targets.end())

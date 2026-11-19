@@ -652,6 +652,12 @@ bool EawrLanLobby::run_action(const std::string& action) {
         cancel->emit_signal("pressed");
         return true;
     }
+    // #7858 fixtures: a restore that has run <number> seconds and never ends, and the real Cancel restore button.
+    if (verb == "restore_fixture" && page_ == Page::staging && match_->galactic_room()) {
+        std::uint32_t seconds{};
+        return number(argument, seconds) && restore_fixture(static_cast<int>(seconds));
+    }
+    if (verb == "restore_cancel" && page_ == Page::staging) return press_cancel_restore();
     if (verb == "host") return action_host(impl, argument);
     if (verb == "join") return action_join(impl, argument);
     if (verb == "password") return action_password(impl, argument);
@@ -1064,6 +1070,9 @@ bool EawrLanLobby::condition(const std::string& wanted) const {
     }
     if (key == "unready") {
         const auto room = match_->lobby_state(); return room && std::none_of(room->snapshot.seats.begin(), room->snapshot.seats.end(), [](const auto& seat) { return seat.ready; });
+    }
+    if (key == "notall") {
+        const auto room = match_->lobby_state(); return room && std::any_of(room->snapshot.seats.begin(), room->snapshot.seats.end(), [](const auto& seat) { return !seat.ready; });
     }
     if (key == "ready") {
         const auto room = match_->lobby_state(); if (!room) return false;

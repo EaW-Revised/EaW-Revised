@@ -508,8 +508,15 @@ core::Result<Checkpoint> capture(const campaign::GameSession& session, const Ide
     detail::write_history_base(context, recorded.value().base);
     context.u8(recorded.value().multiplayer_vote_timeout ? 1 : 0);
     if (recorded.value().multiplayer_vote_timeout) context.u64(*recorded.value().multiplayer_vote_timeout);
-    context.u32(static_cast<std::uint32_t>(recorded.value().load_fixups.size()));
-    for (const auto& command : recorded.value().load_fixups) {
+    // Seats admitted into a loaded save (#7869) and departed seats taken back (#7876) ride a tail after the timelines, so a save
+    // that never did either keeps its bytes; only PostLoadFixup rows are in this list.
+    const auto admission = [](const gc::GameCommand& command) {
+        return std::holds_alternative<gc::SeatAdmit>(command.payload) || std::holds_alternative<gc::SeatRejoin>(command.payload);
+    };
+    const auto& fixups = recorded.value().load_fixups;
+    context.u32(static_cast<std::uint32_t>(std::count_if(fixups.begin(), fixups.end(), [&](const auto& c) { return !admission(c); })));
+    for (const auto& command : fixups) {
+        if (admission(command)) continue;
         context.u64(command.key.tick); context.u32(command.key.seat.value); context.u64(command.key.sequence);
         blob(context, gc::encode_payload(command.payload));
     }
@@ -519,6 +526,15 @@ core::Result<Checkpoint> capture(const campaign::GameSession& session, const Ide
     if (timelines.historical_child) {
         const auto& row = *timelines.historical_child;
         context.u64(row.mode.conflict); context.u64(row.completed_tick); context.u32(static_cast<std::uint32_t>(row.value));
+    }
+    if (std::any_of(fixups.begin(), fixups.end(), admission)) {
+        context.u32(static_cast<std::uint32_t>(std::count_if(fixups.begin(), fixups.end(), admission)));
+        for (const auto& command : fixups) {
+            if (!admission(command)) continue;
+            context.u64(command.key.tick); context.u32(command.key.seat.value); context.u64(command.key.sequence);
+            context.u16(gc::opcode_of(command.payload));
+            blob(context, gc::encode_payload(command.payload));
+        }
     }
     add(SectionId::session, std::move(context.bytes()));
     // The v1 seats DTO stays unchanged; explicit human sides are in the galaxy session bytes.
@@ -801,6 +817,24 @@ core::Result<void> decode_checkpoint_timelines(detail::Reader& context, campaign
         const auto conflict = context.u64(); const auto tick = context.u64(); const auto value = context.u32();
         if (value > 5) return fail<void>("invalid historical timeline", path);
         timelines.historical_child = campaign::ModeTimelineSnapshot{{campaign::SessionMode::battle, conflict}, tick, static_cast<std::int32_t>(value)};
+    }
+    if (!context.failed() && context.remaining() != 0) {
+        // The tail of seats admitted into a loaded save (#7869): rows after the fixup list, merged back by tick.
+        const auto admitted = context.u32();
+        if (admitted == 0 || admitted > 2 * gc::galactic_max_human_seats || admitted > context.remaining() / 30) // a rejoin row is the smallest: 30 bytes
+            return fail<void>("section session: invalid admitted-seat count", path);
+        for (std::uint32_t i = 0; i < admitted; ++i) {
+            gc::GameCommand command; command.key.tick = context.u64(); command.key.seat = sim::SeatId{context.u32()}; command.key.sequence = context.u64();
+            const auto opcode = context.u16();
+            const auto payload = blob(context);
+            if (opcode != gc::session_opcodes::seat_admit && opcode != gc::session_opcodes::seat_rejoin)
+                return fail<void>("section session: unknown seat prologue", path);
+            auto decoded = gc::decode_payload(gc::CommandLayer::session, opcode, Bytes(payload.begin(), payload.end()));
+            if (!decoded) return fail<void>("section session: malformed admitted seat", path);
+            command.payload = *decoded; recording.load_fixups.push_back(std::move(command));
+        }
+        std::stable_sort(recording.load_fixups.begin(), recording.load_fixups.end(),
+            [](const auto& a, const auto& b) { return a.key.tick < b.key.tick; });
     }
     if (context.failed() || context.remaining() != 0 || completed != saved.header.completed_tick
         || completed > recording.commands.final_tick_count || strategic == 0 || tactical == 0

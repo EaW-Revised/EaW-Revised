@@ -30,6 +30,7 @@ struct BattleResults {
     std::array<std::string, 2> scores{}; // authored Lua control results, not credits spent
     std::array<std::map<std::string, std::string>, 2> statistics;
     std::uint64_t elapsed_milliseconds{}; // WBF-44, excluded from replay state
+    std::string picture; // WBF-54: local faction outcome art; presentation only.
     std::string scoring_diagnostic;
     std::string status_message; // LAN departure reason in the results header
     friend bool operator==(const BattleResults&, const BattleResults&) = default;

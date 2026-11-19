@@ -149,6 +149,21 @@ void production_names_localize_once(const data::Catalog& catalog) {
     assert(art.at("Crusader_Gunship").fleet_override_model.find("custom_fleet.alo") != std::string::npos);
     assert(inherited.fleet_override_model == art.at("Crusader_Gunship").fleet_override_model);
     assert(art.at("Modded_Ship").fleet_override_model.empty());
+    // GBT-04, GBT-05: the facts the build tray groups by come with the production art.
+    {
+        const auto& ship = art.at("Mod_Tray_Ship");
+        assert((ship.category_names == std::vector<std::string>{"Frigate", "AntiFighter"}));
+        assert((ship.behaviors == std::vector<std::string>{"DUMMY_STAR_BASE", "SELECTABLE"}));
+        assert((art.at("Mod_Tray_Squadron").members == std::vector<std::string>{"Mod_Tray_Ship", "Mod_Tray_Ship", "Modded_Ship"}));
+        assert((art.at("Mod_Tray_Company").members == std::vector<std::string>{"Modded_Ship"}));
+        assert((art.at("Mod_Tray_Company_Variant").members == std::vector<std::string>{"Modded_Ship"}));
+        assert(art.at("Modded_Ship").category_names.empty() && art.at("Modded_Ship").members.empty());
+        const auto index = build_tray_types(art);
+        const auto* facts = index.find("mod_tray_ship");
+        assert(facts && facts->building_role && facts->categories.size() == 2);
+        assert(!index.find("Modded_Ship")->building_role);
+        assert((index.categories_of("Mod_Tray_Squadron") == std::vector<std::string>{"Frigate", "AntiFighter"}));
+    }
     {
         struct Member { std::uint64_t type; };
         const std::vector<Member> plain{{1}, {2}}, mixed{{1}, {7}, {8}}, none;
@@ -190,6 +205,12 @@ void campaign_art_is_data_driven() {
       <MP_Encyclopedia_Text>TEXT_ENC_MULTIPLAYER</MP_Encyclopedia_Text><Ranking_In_Category>90</Ranking_In_Category>
       <Galactic_Fleet_Override_Model_Name> Custom_Fleet.alo </Galactic_Fleet_Override_Model_Name></SpaceUnit>
       <SpaceUnit Name="Modded_Ship"><Text_ID>TEXT_MISSING</Text_ID></SpaceUnit>
+      <SpaceUnit Name="Mod_Tray_Ship"><CategoryMask>Frigate | AntiFighter</CategoryMask>
+      <Behavior>DUMMY_STAR_BASE, SELECTABLE</Behavior></SpaceUnit>
+      <Squadron Name="Mod_Tray_Squadron"><Squadron_Units>Mod_Tray_Ship, Mod_Tray_Ship</Squadron_Units>
+      <Squadron_Units>Modded_Ship</Squadron_Units></Squadron>
+      <GroundCompany Name="Mod_Tray_Company"><Company_Units>Modded_Ship</Company_Units></GroundCompany>
+      <GroundCompany Name="Mod_Tray_Company_Variant"><Variant_Of_Existing_Type>Mod_Tray_Company</Variant_Of_Existing_Type></GroundCompany>
       <SpaceUnit Name="Modded_Variant"><Variant_Of_Existing_Type>Crusader_Gunship</Variant_Of_Existing_Type>
       <Icon_Name>i_variant.tga</Icon_Name><GUI_Row>7</GUI_Row></SpaceUnit>
       <HeroCompany Name="Mod_Repeated_Icon"><Icon_Name>i_repeat.tga</Icon_Name><Icon_Name></Icon_Name></HeroCompany>

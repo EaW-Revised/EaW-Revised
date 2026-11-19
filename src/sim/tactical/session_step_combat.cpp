@@ -1409,8 +1409,7 @@ core::Result<void> session_detail::Tick::late_impacts() {
         for (const auto& pulse : pulses) {
             const auto source = staged.find(pulse.source);
             // A source or victim killed earlier in this tick (an earlier pulse included) takes part no further.
-            if (source == staged.end() || !source->second.abilities || !source->second.durability
-                || source->second.durability->hull.raw() <= 0) continue;
+            if (source == staged.end() || !source->second.abilities || !impl_->heal_source_serves(source->second)) continue;
             const auto& source_profile = *impl_->abilities.find(source->second.state.type_id);
             const auto& handler = source_profile.special[pulse.slot];
             if (pulse.target == invalid_entity_id) {

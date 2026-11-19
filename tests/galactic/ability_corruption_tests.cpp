@@ -17,6 +17,7 @@
 #include "eawr/sim/galactic/economy_corruption.hpp"
 #include "eawr/sim/galactic/corruption_actions.hpp"
 #include "eawr/sim/galactic/income.hpp"
+#include "eawr/sim/galactic/replay.hpp"
 #include "eawr/sim/tactical/admission.hpp"
 #include "eawr/script/authoritative/galactic_bridge.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
@@ -70,6 +71,114 @@ gc::PreparedAbility prepare(eawr::campaign::GameSession& game, const gc::Galacti
     hashes.push_back(take(game.step(pool)).state_hash.get());
     expect(game.galaxy().ability_state()->preparations.at(0).corruption_choices.size() == 2, "authored slot gaps and unaffordable corruption choices remain visible");
     return gc::prepared_ability(game.galaxy().ability_state()->preparations.at(0), 0);
+}
+void information(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    auto config = setup();
+    ability_fixture::add_observer(config, 1, {1000, 3000});
+    config.ability_host->corruption_planets[1].slots = {}; // No authored choices
+    auto& choice = config.ability_host->corruption_planets[0].slots[0];
+    choice.required_mission_type = gc::corruption_fixture::Type::bribery; choice.mission_count = 1;
+    choice.unit_types = {1000, 3000, 1000}; choice.unit_count = 1;
+    config.ability_host->corruption_prerequisites = {{1000, false, true}, {3000, false, false}};
+    choice.planet_types = {3000, 999999};
+    auto& other = config.ability_host->corruption_planets[0].slots[2];
+    other.unit_types = {3000, 1000}; other.unit_count = 2;
+    auto game = take(eawr::campaign::GameSession::create(config));
+    const auto before = take(cp::save_game_checkpoint(game, cp::game_identities(config)));
+    const auto draws = game.galaxy().economy_corruption()->random_draws;
+    const auto snapshot = game.galaxy().view_snapshot({1});
+    const auto* info = snapshot->corruption_information(config.planets[0].id);
+    expect(info && info->information_only && !info->actor && !info->preparation, "information has no actor or execution preparation");
+    if (info) {
+        expect(info->choices.size() == 2 && info->choices[1].slot == 3, "information preserves authored gaps and prices");
+        expect(!info->choices[0].live_prepared && info->choices[0].live_choice.has_value(), "information choices are display facts only");
+        expect(!info->choices[0].missions_satisfied, "information tests the local player's own mission uses");
+        expect(info->choices[0].units_satisfied && !info->choices[1].units_satisfied && info->choices[0].planets_satisfied,
+            "shared requirement facts deduplicate alternatives and retain the global owned-planet ANY rule");
+    }
+    const auto* empty = snapshot->corruption_information(config.planets[1].id);
+    expect(empty && empty->information_only && empty->choices.empty(), "an empty information menu is a valid publication");
+    expect(!snapshot->corruption_information(999999), "unknown planet has no inspection facts");
+    expect(take(cp::save_game_checkpoint(game, cp::game_identities(config))) == before
+        && game.galaxy().economy_corruption()->random_draws == draws
+        && game.galaxy().ability_state()->preparations.empty() && game.galaxy().ability_state()->missions.empty(),
+        "inspection never writes state, draws, debits, prepares or queues a mission");
+    const gc::CommandPayload opened = gc::CorruptionDialogOpened{config.planets[0].id};
+    expect(gc::decode_payload(gc::layer_of(opened), gc::opcode_of(opened), gc::encode_payload(opened)) == opened,
+        "dialog-open story notice round trips the full planet identity");
+    game.set_story_identities({{config.planets[0].id, "PLANET_A"}}, {}, {}, {});
+    namespace story = gc::story;
+    story::EventDef event; event.name = "OPEN"; event.type = "STORY_OPEN_CORRUPTION"; event.params[0] = {"PLANET_A"};
+    story::SubPlotDef plot; plot.name = "OPEN.xml"; plot.owner = 1; plot.active = true; plot.events = {event};
+    take(game.install_story({}, {{1, "OPEN.xml"}}, {plot}));
+    take(game.submit({{game.completed_tick(), {1}, 1}, opened}));
+    hashes.push_back(take(game.step(pool)).state_hash.get());
+    expect(game.story_engine()->triggered("OPEN.xml", "OPEN"), "information opening reaches the seat's live story engine");
+}
+void information_admission(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    namespace story = gc::story;
+    for (unsigned variant = 0; variant < 9; ++variant) {
+        auto config = setup();
+        if (variant != 0 && variant != 6) {
+            auto& observer = ability_fixture::add_observer(config, 1, {1000, 3000});
+            if (variant == 2) for (auto& row : observer.records)
+                if (row.player == 2 && row.planet == config.planets[0].id) row.discovered = false;
+            if (variant == 2 || variant == 3) { observer.human_observers = {2}; observer.solo_reference_human = 2; }
+        }
+        if (variant == 1) config.economy_corruption->players[0].benefits = false;
+        if (variant == 2) config.economy_corruption->players[1].benefits = true;
+        if (variant == 4) {
+            // A corruption-capable actor requires complete planet authoring. Use a valid lifecycle-only
+            // host to exercise a discovered planet with no corruption data, without violating setup validation.
+            auto& host = *config.ability_host;
+            host.profiles[0].corruption.reset(); host.profiles[0].lifecycle_only = true;
+            host.activated_corruption_abilities.clear();
+            host.corruption_planets.erase(host.corruption_planets.begin());
+        }
+        const auto target = variant == 5 ? gc::PlanetId{999999} : config.planets[0].id;
+        const gc::PlayerId issuer = variant == 2 || variant == 6 ? 2 : 1;
+        auto install = [&](auto& game) {
+            game.set_story_identities({{config.planets[0].id, "PLANET_A"}}, {}, {}, {});
+            story::EventDef event; event.name = "OPEN"; event.type = "STORY_OPEN_CORRUPTION"; event.params[0] = {"PLANET_A"};
+            story::SubPlotDef one; one.name = "ONE.xml"; one.owner = 1; one.active = true; one.events = {event};
+            auto two = one; two.name = "TWO.xml"; two.owner = 2;
+            take(game.install_story({}, {{1, "ONE.xml"}, {2, "TWO.xml"}}, {one, two}));
+        };
+        auto game = take(eawr::campaign::GameSession::create(config)); install(game);
+        const auto first_hash = hashes.size();
+        if (variant == 6) static_cast<void>(prepare(game, config, pool, hashes));
+        const bool admitted = variant == 3 || variant == 6 || variant == 7 || variant == 8;
+        expect(game.galaxy().corruption_dialog_admitted(issuer, target) == admitted,
+            "dialog authorization uses canonical beneficiary/discovery/data or an owned open preparation");
+        if (variant == 0 || variant == 3)
+            expect(!game.galaxy().view_snapshot({1}), "the no-observer and missing-human-view cases have no projection");
+        const unsigned count = variant == 7 || variant == 8 ? 9U : 1U;
+        for (unsigned i = 0; i < count; ++i) {
+            gc::CommandPayload payload = variant == 8 && i < 8 ? gc::CommandPayload{gc::GuiClick{"unused"}}
+                : gc::CommandPayload{gc::CorruptionDialogOpened{target}};
+            take(game.submit({{game.completed_tick(), {issuer}, i + (variant == 6 ? 2U : 1U)}, std::move(payload)}));
+        }
+        const auto step = take(game.step(pool)); hashes.push_back(step.state_hash.get());
+        const auto notices = std::count_if(step.story_notices.begin(), step.story_notices.end(), [](const auto& notice) {
+            const auto* text = std::get_if<story::TextNotice>(&notice.payload);
+            return text && text->kind == story::Text::open_corruption;
+        });
+        const std::ptrdiff_t expected = variant == 7 ? 8U : admitted && variant != 8 ? 1U : 0U;
+        expect(notices == expected, "opcode 18 is canonical, safe without a view, and shares the eight-click bound");
+        expect(game.story_engine()->triggered(issuer == 1 ? "ONE.xml" : "TWO.xml", "OPEN") == (expected != 0),
+            "only an admitted dialog opening fires its player's plot");
+        expect(!game.story_engine()->triggered(issuer == 1 ? "TWO.xml" : "ONE.xml", "OPEN"),
+            "opcode 18 never fires another player's plot");
+        if (variant >= 7) expect(step.diagnostics.size() == 1, "the ninth story click is diagnosed and dropped");
+        // A recorded session really contains opcode 18, including refusals and MP owner routing; replay it on this worker count.
+        const auto recording = take(gc::parse_replay(take(gc::write_replay(game.record()))));
+        expect(std::any_of(recording.commands.begin(), recording.commands.end(), [](const auto& command) {
+            return std::holds_alternative<gc::CorruptionDialogOpened>(command.payload);
+        }), "the synthetic replay contains opcode 18");
+        auto replayed = take(eawr::campaign::GameSession::from_replay(recording)); install(replayed);
+        for (auto at = first_hash; at < hashes.size(); ++at)
+            expect(take(replayed.step(pool)).state_hash.get() == hashes[at], "opcode 18 replay matches live canonical story state");
+    }
 }
 void direct(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
     const auto config = setup(); auto game = take(eawr::campaign::GameSession::create(config));
@@ -718,7 +827,7 @@ int case_galactic_ability_corruption_tests() {
     ability_fixture::arm_watchdog();
     try {
         using Phase = void (*)(const eawr::sim::PartitionExecutor&, std::vector<std::string>&);
-        const Phase phases[] = {direct, direct_voice, ai_invocation, staged_ai_invocation, human_refusal, undiscovered_target, missions, land_timed, stale_units, representative, unsuccessful_missions, accepted_space_mission, stale_owned_target, startup, removal};
+        const Phase phases[] = {information, information_admission, direct, direct_voice, ai_invocation, staged_ai_invocation, human_refusal, undiscovered_target, missions, land_timed, stale_units, representative, unsuccessful_missions, accepted_space_mission, stale_owned_target, startup, removal};
         std::vector<std::string> baseline;
         for (std::size_t count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter workers(count); std::vector<std::string> hashes;

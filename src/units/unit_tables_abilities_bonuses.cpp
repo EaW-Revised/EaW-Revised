@@ -14,7 +14,14 @@ void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::str
             sim::tactical::special_activation_style(child_text("Activation_Style")), input_.domain, false)) {
         unit.production.retreat_prevention.push_back({name, boolean(child_text("Initially_Enabled")).value_or(true)});
     }
-    if (input_.campaign_scene && (iequals(node.name, "Enhance_Defense_Ability") || iequals(node.name, "Battlefield_Modifier_Ability"))
+    // WBR-01: standalone space admits the automatic reveal effect on a live body.
+    // Purchase templates, carried identities and held upgrades keep their own lifecycle.
+    const bool space_reveal = !input_.campaign_scene && input_.domain == sim::tactical::BattleDomain::space
+        && iequals(node.name, "Battlefield_Modifier_Ability") && unit.hull.has_value()
+        && unit.kind != UnitKind::squadron && !iequals(unit.xml_type, "UpgradeObject")
+        && !has_behavior(object, "DUMMY_UPGRADE");
+    if ((input_.campaign_scene || space_reveal)
+        && (iequals(node.name, "Enhance_Defense_Ability") || iequals(node.name, "Battlefield_Modifier_Ability"))
         && iequals(child_text("Activation_Style"), automatic_activation_name(input_.domain))) {
         BattlefieldBonus bonus; bonus.name = name;
         bonus.enabled = boolean(child_text("Initially_Enabled")).value_or(true);
@@ -24,7 +31,11 @@ void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::str
             bonus.category = static_cast<std::uint32_t>(category->trunc_to_integer());
         if (iequals(node.name, "Enhance_Defense_Ability")) bonus.defence = number(child_text("Enhancement_Percentage")).value_or(Fixed{});
         else if (const auto multiplier = number(child_text("FOW_Reveal_Range_Multiplier"))) {
-            const auto delta = sim::math::subtract(*multiplier, Fixed::from_raw(Fixed::scale));
+            // WBR-01: nonpositive authoring retains the neutral multiplier.
+            const auto effective = *multiplier > Fixed{} ? *multiplier : Fixed::from_raw(Fixed::scale);
+            if (*multiplier <= Fixed{}) report_.note(unit.id, "FOW_Reveal_Range_Multiplier",
+                child_text("FOW_Reveal_Range_Multiplier"), "nonpositive multiplier; retained one");
+            const auto delta = sim::math::subtract(effective, Fixed::from_raw(Fixed::scale));
             if (delta) bonus.reveal_delta = delta.value();
             else report_.missing(unit.id, "FOW_Reveal_Range_Multiplier", {}, "range multiplier overflows");
         }
@@ -67,6 +78,7 @@ void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::str
         bonus.name = name;
         bonus.filter = unit.special_abilities.back().filter;
         bonus.enabled = unit.special_abilities.back().initially_enabled.value_or(true);
+        bonus.apply_to_self = boolean(child_text("Apply_Special_Ability_To_Self_On_Creation")).value_or(false);
         bonus.specific_faction = child_text("Specific_Faction");
         for (const auto tag : {"Unique_Space_Unit", "Unique_Ground_Unit"}) {
             const auto container = trim(object.text(tag));

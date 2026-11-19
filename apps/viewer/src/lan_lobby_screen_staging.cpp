@@ -438,7 +438,7 @@ void EawrLanLobby::leave_staging() {
     impl_->checkpoint_list_note.clear();
     if (impl_->galactic_backend) impl_->galactic_backend->clear_checkpoint();
     impl_->checkpoint_candidate.reset(); impl_->checkpoint_bytes.reset();
-    impl_->checkpoint_bindings.clear(); impl_->checkpoint_problem.clear(); impl_->checkpoint_applied = false;
+    impl_->checkpoint_bindings.clear(); impl_->checkpoint_problem.clear(); impl_->checkpoint_status.clear(); impl_->checkpoint_applied = false;
     impl_->checkpoint_signature.clear();
     cancel_join();
     impl_->host_password.clear();

@@ -70,6 +70,7 @@ void test_corrupt_systems();
 void test_lure();
 void test_space_healing();
 void test_passive_damage_aura();
+void test_team_company_healing();
 void test_passive_damage_edges();
 void test_peacebringer_blast_session();
 void test_replenished_radar_creation();

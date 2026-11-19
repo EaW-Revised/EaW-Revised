@@ -1,5 +1,6 @@
 #include "eawr/core/json_text.hpp"
 #include "eawr/vfs/vfs.hpp"
+#include "particle_detail_threshold.hpp"
 #include "debris_props.hpp"
 #include "particle_texture_load.hpp"
 #include "eawr/presentation/particles/lane_guard.hpp"
@@ -133,6 +134,7 @@ const DebrisProps::ParticleType* DebrisProps::particle_type(const std::string& n
     } else {
         const std::string model = tag(object.value(), "Space_Model_Name");
         const auto lifetime = space::debris_seconds(tag(object.value(), "Particle_Lifetime_Frames"));
+        type.minimum_detail = particle_detail_threshold(object.value());
         type.lifetime_frames = lifetime && *lifetime > 0 ? static_cast<std::uint32_t>(*lifetime) : 0U;
         if (model.empty()) {
             type.cause = "no Space_Model_Name";
@@ -529,6 +531,10 @@ bool DebrisProps::start(const std::string& particle, const space::DebrisPose& po
     if (particle.empty()) return true;
     const std::string key = reason + ":" + particle;
     const ParticleType* type = particle_type(particle);
+    if (type != nullptr && !(registry_->detail().global > type->minimum_detail)) {
+        ++detail_suppressed_[key];
+        return true;
+    }
     if (type == nullptr || !type->system) {
         ++start_failed_[key];
         return true;
@@ -738,6 +744,7 @@ void DebrisProps::write_report(std::ostream& output) const {
     rows("spawned", spawn_rows_);
     rows("expired", expired_rows_);
     counts("effects_started", started_);
+    counts("detail_suppressed", detail_suppressed_);
     output << ", \"effect_admission\": ";
     registry_->write_admission_report(output);
     counts("effects_failed", start_failed_);

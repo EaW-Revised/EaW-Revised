@@ -1,4 +1,5 @@
 #include "unit_tables_support.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/sim/tactical/damage.hpp"
@@ -180,6 +181,67 @@ void subobject_list_tables() {
     }
 }
 
+void structure_soft_radius_tables() {
+    // AV-05 / WWP-21: selected layered space bodies share the model-backed soft radius.
+    for (const std::string_view xml_class : {"SpaceBuildable", "StarBase", "SpecialStructure"}) {
+        for (const auto& [override_value, expected_radius] : std::array{
+            std::pair{"", 18}, std::pair{"4", 8}, std::pair{"0", 40}}) {
+            TempTree tree;
+            auto xml = units_xml("3600", "Unit_Select_Test");
+            const std::string original_radius = "<Custom_Soft_Footprint_Radius> 40.0 </Custom_Soft_Footprint_Radius>";
+            xml.erase(xml.find(original_radius), original_radius.size());
+            const std::string scale = "<Scale_Factor>0.70</Scale_Factor>";
+            xml.replace(xml.find(scale), scale.size(), "<Scale_Factor>2</Scale_Factor>");
+            const std::string opening = "<SpaceUnit Name=\"Test_Frigate\">";
+            const auto start = xml.find(opening);
+            xml.replace(xml.find("</SpaceUnit>", start), std::string_view{"</SpaceUnit>"}.size(),
+                "</" + std::string(xml_class) + ">");
+            xml.replace(start, opening.size(), "<" + std::string(xml_class) + " Name=\"Test_Frigate\">"
+                "<Variant_Of_Existing_Type>Soft_Radius_Parent</Variant_Of_Existing_Type>"
+                + (std::string_view{override_value}.empty() ? std::string{} :
+                    "<Custom_Soft_Footprint_Radius>" + std::string(override_value) + "</Custom_Soft_Footprint_Radius>"));
+            xml.insert(xml.find('>') + 1, "<" + std::string(xml_class) + " Name=\"Soft_Radius_Parent\">"
+                "<Custom_Soft_Footprint_Radius>9</Custom_Soft_Footprint_Radius></" + std::string(xml_class) + ">");
+            const std::string behavior = "<SpaceBehavior>TARGETING,REVEAL , HIDE_WHEN_FOGGED, SIMPLE_SPACE_LOCOMOTOR</SpaceBehavior>";
+            xml.replace(xml.find(behavior), behavior.size(), "<SpaceBehavior>SPACE_OBSTACLE REVEAL</SpaceBehavior>");
+            write_fixture(tree.root, xml);
+            auto assets = models(-40.0F);
+            eawr::assets::Mesh mesh;
+            mesh.name = "COLLISIONBOX";
+            mesh.collidable = true;
+            mesh.bone = 0;
+            mesh.bounds_min = {-10, -20, -5};
+            mesh.bounds_max = {10, 20, 5};
+            assets.at("data/art/models/test_frigate.alo").meshes.push_back(mesh);
+            const auto loaded = load(tree.root, assets);
+            expect(loaded.tables.has_value(), "AV-05: structure soft-radius fixture loads");
+            if (!loaded.tables) continue;
+            const auto* unit = loaded.tables->find("Test_Frigate");
+            expect(unit && unit->xml_type == xml_class, "AV-05: each selected structure class retains its body");
+            const auto motion = eawr::units::motion_table(*loaded.tables);
+            const auto* footprint = motion ? motion.value().footprint(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+            expect(footprint && footprint->obstacle && footprint->radius == Fixed::from_raw(raw(expected_radius))
+                && footprint->x_extent == Fixed::from_raw(raw(20)) && footprint->y_extent == Fixed::from_raw(raw(40)),
+                "AV-05: inherited/overridden soft radius scales once; explicit zero falls back to model half extents");
+            if (!footprint) continue;
+            const auto tracked = eawr::sim::tactical::tracking_leaf(1, *footprint, {}, {});
+            expect(tracked && tracked.value().reach == Fixed::from_raw(raw(expected_radius)),
+                "WHZ-03: selected structure soft radius reaches obstacle tracking");
+            if (!tracked) continue;
+            eawr::sim::tactical::TrackingLayerView layer;
+            layer.windows = {{tracked.value()}};
+            eawr::sim::tactical::LinearQuery query;
+            query.start = {Fixed::from_raw(raw(12)), Fixed{}};
+            query.end = query.start;
+            query.end_frame = Fixed::from_raw(raw(1));
+            query.facing = {Fixed::from_raw(raw(1)), Fixed{}};
+            const auto hit = eawr::sim::tactical::find_linear_collision(layer, 90, query);
+            expect(hit && hit.value() == (expected_radius > 12 ? eawr::sim::tactical::collision_static : 0),
+                "AV-05: structure soft-radius authoring changes the live obstacle collision verdict");
+        }
+    }
+}
+
 void signed_weaken_reduction_tables() {
     for (const auto reduction : {"-0.15", "0", "0.2", "-1.5", "1.5"}) {
         TempTree tree;
@@ -213,60 +275,273 @@ void signed_weaken_reduction_tables() {
             "WHE-62: authored reduction keeps its sign without clamping");
     }
 }
-} // namespace
-
-void synthetic_tables() {
-    template_durability_tables();
-    subobject_list_tables();
-    signed_weaken_reduction_tables();
-    // AV-05: XML overrides must reach the collision query, independently on each axis.
-    for (const auto& [tags, expected_x, expected_y] : std::array{
-        std::tuple{"", 20, 40},
-        std::tuple{"<Custom_Hard_XExtent>3</Custom_Hard_XExtent>", 6, 40},
-        std::tuple{"<Custom_Hard_YExtent>4</Custom_Hard_YExtent>", 20, 8},
-        std::tuple{"<Custom_Hard_XExtent>3</Custom_Hard_XExtent><Custom_Hard_YExtent>4</Custom_Hard_YExtent>", 6, 8}}) {
+// #7643 audit: the space loader reads a type's reveal, targeting and object-weapon tags from the shared object body,
+// so every class that can stand in a space skirmish decodes them the same way (SpaceUnit is the reference).
+void class_agnostic_reveal_targeting_weapon_tables() {
+    std::optional<Fixed> reveal, max_distance;
+    std::string priority_set;
+    for (const std::string_view xml_class : {"SpaceUnit", "UniqueUnit", "HeroUnit", "GenericHeroUnit", "SpecialStructure",
+                                            "SecondaryStructure", "SpaceBuildable", "StarBase", "Freighter"}) {
         TempTree tree;
         auto xml = units_xml("3600", "Unit_Select_Test");
-        const std::string scale = "<Scale_Factor>0.70</Scale_Factor>";
-        xml.replace(xml.find(scale), scale.size(), "<Scale_Factor>2</Scale_Factor>");
         const std::string opening = "<SpaceUnit Name=\"Test_Frigate\">";
-        xml.insert(xml.find(opening) + opening.size(),
-            "<Variant_Of_Existing_Type>Hard_Extent_Parent</Variant_Of_Existing_Type>");
-        xml.insert(xml.find('>') + 1, "<SpaceUnit Name=\"Hard_Extent_Parent\">" + std::string(tags) + "</SpaceUnit>");
+        const auto start = xml.find(opening);
+        const std::string class_name{xml_class};
+        if (xml_class != "SpaceUnit") {
+            xml.replace(xml.find("</SpaceUnit>", start), std::string_view{"</SpaceUnit>"}.size(), "</" + class_name + ">");
+            xml.replace(start, opening.size(), "<" + class_name + " Name=\"Test_Frigate\">");
+        }
+        const std::string class_opening = "<" + class_name + " Name=\"Test_Frigate\">";
+        xml.insert(xml.find(class_opening) + class_opening.size(),
+            "<Dense_FOW_Reveal_Range_Multiplier>0.25</Dense_FOW_Reveal_Range_Multiplier>"
+            "<Projectile_Types>Proj_Test_Small</Projectile_Types>"
+            "<Projectile_Fire_Recharge_Seconds>7</Projectile_Fire_Recharge_Seconds>");
         write_fixture(tree.root, xml);
-        auto assets = models(-40.0F);
-        eawr::assets::Mesh mesh;
-        mesh.name = "COLLISIONBOX";
-        mesh.collidable = true;
-        mesh.bone = 0;
-        mesh.bounds_min = {-10, -20, -5};
-        mesh.bounds_max = {10, 20, 5};
-        assets.at("data/art/models/test_frigate.alo").meshes.push_back(mesh);
-        const auto loaded = load(tree.root, assets);
-        expect(static_cast<bool>(loaded.tables), "AV-05: hard-extent fixture loads");
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(static_cast<bool>(loaded.tables), "#7643 audit: class fixture loads");
         if (!loaded.tables) continue;
-        const auto motion = eawr::units::motion_table(*loaded.tables);
-        const auto* footprint = motion ? motion.value().footprint(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
-        expect(footprint && footprint->x_extent == Fixed::from_raw(raw(expected_x))
-            && footprint->y_extent == Fixed::from_raw(raw(expected_y))
-            && footprint->radius == Fixed::from_raw(raw(80)),
-            "AV-05: inherited hard extents override each model axis, scale once and preserve the soft radius");
-        if (!footprint) continue;
-        const auto tracked = eawr::sim::tactical::tracking_leaf(1, *footprint, {}, {});
-        expect(static_cast<bool>(tracked), "AV-05: XML hard extents enter live tracking");
-        if (!tracked) continue;
-        eawr::sim::tactical::TrackingLayerView layer;
-        layer.windows = {{tracked.value()}};
-        for (const bool x_axis : {true, false}) {
-            eawr::sim::tactical::LinearQuery query;
-            query.start = {Fixed::from_raw(raw(x_axis ? 12 : 0)), Fixed::from_raw(raw(x_axis ? 0 : 12))};
-            query.end = query.start;
-            query.end_frame = Fixed::from_raw(raw(1));
-            query.facing = {Fixed::from_raw(raw(1)), Fixed{}};
-            const auto hit = eawr::sim::tactical::find_linear_collision(layer, 90, query);
-            const auto extent = x_axis ? expected_x : expected_y;
-            expect(hit && hit.value() == (extent > 12 ? eawr::sim::tactical::collision_static : 0),
-                "AV-05: authored X and Y extents independently change the live collision verdict");
+        const auto* body = loaded.tables->find("Test_Frigate");
+        expect(body && body->xml_type == xml_class, "#7643 audit: each class under test keeps its own body");
+        if (!body) continue;
+        expect(body->dense_fow_multiplier == Fixed::from_decimal("0.25").value(),
+            "V-22: the dense reveal multiplier is read for every space class");
+        expect(body->weapon && body->weapon->projectile == "Proj_Test_Small"
+            && body->weapon->min_recharge_seconds && body->weapon->min_recharge_seconds.value() == Fixed::from_decimal("7").value(),
+            "EN-05: the object weapon projectile and recharge are read for every space class");
+        if (xml_class == "SpaceUnit") {
+            reveal = body->fow_reveal_range; max_distance = body->targeting_max_attack_distance;
+            priority_set = body->targeting_priority_set;
+            expect(reveal && max_distance && !priority_set.empty(), "#7643 audit: the reference class authors reveal and targeting");
+            continue;
+        }
+        expect(body->fow_reveal_range == reveal && body->targeting_max_attack_distance == max_distance
+            && body->targeting_priority_set == priority_set,
+            "S-26: reveal range, targeting reach and priority set decode like the reference class");
+    }
+}
+} // namespace
+
+// TCFA-16: effective data reaches the shared space AI and purchase consumers across class spellings.
+static void space_ai_class_consumers() {
+    namespace t = eawr::sim::tactical;
+    const auto q = [](const int value) { return Fixed::from_integer(value).value(); };
+    const auto target_id = eawr::assets::object_type_crc("Ai_Class_Target");
+    const auto base_id = eawr::assets::object_type_crc("Skirmish_Test_Base");
+    for (const std::string spelling : {"FlagshipTemplate", "Template", "Dummy", "DummyStructure", "SpaceBuildable",
+        "Space_Indigenous_Unit", "SpaceHero", "Freighter", "SpaceFauna", "Mission_Object", "UnderConstructionShip",
+        "Props_Wave", "SkirmishSpaceUnit", "FlagshipUnit", "SurvivalSpaceUnit", "Space_Unit", "TransportUnit", "HeroUnit"}) {
+        for (const bool generic_flags : {false, true}) for (const bool overridden : {false, true}) {
+            TempTree tree;
+            auto xml = units_xml("3600", "Unit_Select_Test");
+            const std::string parent_flags = "SIMPLE_SPACE_LOCOMOTOR, TARGETING, REVEAL";
+            const std::string child_flags = parent_flags + ", UNIT_AI";
+            const std::string parent_fields =
+                "<AI_Combat_Power>123</AI_Combat_Power><Tactical_Production_Queue>Tactical_Units</Tactical_Production_Queue>"
+                "<SpaceBehavior>" + (generic_flags ? std::string{"HIDE_WHEN_FOGGED"} : parent_flags)
+                + "</SpaceBehavior><Behavior>" + (generic_flags ? parent_flags : std::string{"HIDE_WHEN_FOGGED"}) + "</Behavior>";
+            const std::string child_fields =
+                "<AI_Combat_Power>321</AI_Combat_Power><Tactical_Production_Queue>Tactical_Upgrades</Tactical_Production_Queue>"
+                "<SpaceBehavior>" + (generic_flags ? std::string{"HIDE_WHEN_FOGGED"} : child_flags)
+                + "</SpaceBehavior><Behavior>" + (generic_flags ? child_flags + ", SELECTABLE" : std::string{"SELECTABLE"}) + "</Behavior>";
+            xml.insert(xml.rfind("</Objects>"), "<Template Name=\"Ai_Class_Parent\">"
+                "<Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>" + parent_fields + "</Template>"
+                "<" + spelling + " Name=\"Ai_Class_Target\"><Variant_Of_Existing_Type>Ai_Class_Parent</Variant_Of_Existing_Type>"
+                "<Tactical_Build_Cost_Multiplayer>10</Tactical_Build_Cost_Multiplayer>"
+                "<Tactical_Build_Time_Seconds>1</Tactical_Build_Time_Seconds>"
+                + (overridden ? child_fields : "") + "</" + spelling + ">");
+            const std::string station = "<StarBase Name=\"Skirmish_Test_Base\">";
+            xml.insert(xml.find(station) + station.size(),
+                "<Tactical_Buildable_Objects_Multiplayer>Rebel, Ai_Class_Target</Tactical_Buildable_Objects_Multiplayer>");
+            write_fixture(tree.root, xml);
+            write(tree.root / "XML" / "FactionFiles.xml", "<Faction_Files><File>Ai_Class_Factions.xml</File></Faction_Files>");
+            write(tree.root / "XML" / "Ai_Class_Factions.xml", "<Factions><Faction Name=\"Rebel\" /></Factions>");
+            const auto loaded = load(tree.root, models(-40.0F));
+            expect(loaded.tables.has_value(), "TCFA-16: registered-class AI and queue fixture loads");
+            if (!loaded.tables) continue;
+            eawr::skirmish::SkirmishStart start;
+            const auto faction = eawr::skirmish::faction_id("Rebel");
+            start.setup.players = {{1, 1, faction, t::player_flag_commandable}};
+            start.setup.units = {{1, base_id, 1, {}, eawr::sim::math::identity_quat(), {}}};
+            const auto ai = eawr::skirmish::ai_setup(start, {}, *loaded.tables);
+            const auto type = std::find_if(ai.content.types.begin(), ai.content.types.end(), [&](const auto& entry) {
+                return entry.type_id == target_id;
+            });
+            expect(type != ai.content.types.end() && type->combat_power == eawr::script::numeric::LuaNumber(overridden ? 321 : 123)
+                && type->unit_ai == overridden && type->selectable == overridden && type->locomotor,
+                "TCFA-16: inherited and overridden power and behavior flags reach space AI inputs");
+            auto rules = eawr::skirmish::economy_rules(start, {}, *loaded.tables);
+            expect(static_cast<bool>(rules), "TCFA-16: ordinary space purchase menu compiles");
+            if (!rules) continue;
+            const auto queue = overridden ? t::BuildQueue::upgrades : t::BuildQueue::units;
+            const auto* menu = rules.value().menu(base_id, faction);
+            const auto* option = menu ? menu->find(target_id) : nullptr;
+            expect(option && option->available && option->queue == queue,
+                "TCFA-16: inherited and overridden queue reaches an available offer");
+            if (!option || !option->available) continue;
+            rules.value().players = {{1, q(100), 100, false, {}}};
+            std::vector<std::string> reference;
+            for (const auto workers : {1U, 2U, 4U, 8U}) {
+                auto session = t::TacticalSession::create(start.setup, {}, {}, {}, {}, {}, {}, {}, rules.value());
+                expect(static_cast<bool>(session), "TCFA-16: purchase queue session creates");
+                if (!session) continue;
+                expect(static_cast<bool>(session.value().submit({{0, 1, 0}, {1}, t::BuyPayload{target_id}})),
+                    "TCFA-16: ordinary purchase command submits");
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                const auto step = session.value().step(executor);
+                expect(static_cast<bool>(step), "TCFA-16: purchase command steps");
+                const auto& ledger = session.value().ledgers().front();
+                const auto chosen = static_cast<std::size_t>(queue);
+                expect(ledger.queues[chosen].size() == 1 && ledger.queues[chosen].front().type == target_id
+                    && ledger.queues[1U - chosen].empty(), "TCFA-16: purchase enters only the authored queue");
+                if (step) {
+                    const std::vector<std::string> hashes{step.value().state_sha256};
+                    if (reference.empty()) reference = hashes;
+                    else expect(hashes == reference, "TCFA-16: authored purchase queue hashes equal on 1/2/4/8 workers");
+                }
+            }
+        }
+    }
+}
+
+void synthetic_tables() {
+    space_ai_class_consumers();
+    template_durability_tables();
+    // WBR-01: renamed live bodies own the automatic reveal source, not a purchase template.
+    for (const auto& multiplier : {"1.75", "0.25", "1", "0", "-2"}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string ability = std::string("<Abilities SubObjectList=\"Yes\"><Battlefield_Modifier_Ability Name=\"Mod_Reveal\">")
+            + "<Activation_Style>Space_Automatic</Activation_Style><Initially_Enabled>No</Initially_Enabled>"
+            + "<Apply_To_All_Allies>Yes</Apply_To_All_Allies><Stacking_Category>7</Stacking_Category>"
+            + "<FOW_Reveal_Range_Multiplier>" + multiplier + "</FOW_Reveal_Range_Multiplier></Battlefield_Modifier_Ability></Abilities>";
+        std::vector<std::string> names;
+        const auto append = [&](const std::string& kind, const std::string& name, const std::string& parent, std::string effect) {
+            names.push_back(name);
+            xml.insert(xml.rfind("</Objects>"), "<" + kind + " Name=\"" + name + "\">"
+                + (parent.empty() ? "" : "<Variant_Of_Existing_Type>" + parent + "</Variant_Of_Existing_Type>")
+                + effect + "</" + kind + ">");
+        };
+        append("SpaceUnit", "Mod_Reveal_Body", "Test_Frigate", ability);
+        append("UniqueUnit", "Mod_Reveal_Unique", "Test_Frigate", ability);
+        append("SpaceUnit", "Mod_Reveal_Parent", "Test_Frigate", ability);
+        append("UniqueUnit", "Mod_Reveal_Inherited", "Mod_Reveal_Parent", "");
+        auto overridden = ability;
+        const auto value_begin = overridden.find("<FOW_Reveal_Range_Multiplier>") + std::string("<FOW_Reveal_Range_Multiplier>").size();
+        overridden.replace(value_begin, overridden.find("</FOW_Reveal_Range_Multiplier>") - value_begin, "0.5");
+        append("UniqueUnit", "Mod_Reveal_Override", "Mod_Reveal_Parent", overridden);
+        append("SpaceUnit", "Mod_Reveal_Defaults", "Test_Frigate",
+            "<Abilities SubObjectList=\"Yes\"><Battlefield_Modifier_Ability Name=\"Defaults\">"
+            "<Activation_Style>Space_Automatic</Activation_Style><FOW_Reveal_Range_Multiplier>2</FOW_Reveal_Range_Multiplier>"
+            "</Battlefield_Modifier_Ability></Abilities>");
+        append("UpgradeObject", "Mod_Reveal_Upgrade", "", "<Behavior>DUMMY_UPGRADE</Behavior>" + ability);
+        append("GenericHeroUnit", "Mod_Reveal_Carried", "", ability);
+        append("Squadron", "Mod_Reveal_Purchase", "Test_Squadron", ability);
+        auto manual = ability;
+        const auto at = manual.find("Space_Automatic"); manual.replace(at, std::string("Space_Automatic").size(), "User_Input");
+        append("SpaceUnit", "Mod_Reveal_Manual", "Test_Frigate", manual);
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F), "Normal_Default",
+            eawr::sim::tactical::BattleDomain::space, names);
+        expect(loaded.tables.has_value(), "WBR-01: automatic reveal XML loads");
+        if (!loaded.tables) continue;
+        const bool active = std::string_view(multiplier) == "1.75" || std::string_view(multiplier) == "0.25";
+        const auto* defaults = loaded.tables->find("Mod_Reveal_Defaults");
+        expect(defaults && defaults->production.battlefield_bonuses.size() == 1
+            && defaults->production.battlefield_bonuses.front().enabled
+            && !defaults->production.battlefield_bonuses.front().all_allies
+            && defaults->production.battlefield_bonuses.front().category == 0,
+            "WBR-01: omitted enabled/alliance/category fields use original defaults");
+        for (const auto* name : {"Mod_Reveal_Body", "Mod_Reveal_Unique", "Mod_Reveal_Inherited"}) {
+            const auto* body = loaded.tables->find(name);
+            expect(body && body->production.battlefield_bonuses.size() == (active ? 1U : 0U),
+                "WBR-01: neutral and nonpositive multipliers contribute no source");
+            if (body && !body->production.battlefield_bonuses.empty()) {
+                const auto& bonus = body->production.battlefield_bonuses.front();
+                expect(bonus.name == "Mod_Reveal" && bonus.category == 7 && bonus.all_allies && !bonus.enabled
+                    && bonus.defence == Fixed{} && bonus.reveal_delta == Fixed::from_raw(
+                        std::string_view(multiplier) == "1.75" ? raw(3) / 4 : -raw(3) / 4),
+                    "WBR-01: reveal authoring retains sign, category, alliance and enabled state");
+            }
+        }
+        const auto* replaced = loaded.tables->find("Mod_Reveal_Override");
+        expect(replaced && replaced->production.battlefield_bonuses.size() == 1
+            && replaced->production.battlefield_bonuses.front().reveal_delta == Fixed::from_raw(-raw(1) / 2),
+            "WBR-01/WABL-02: child ability block replaces the parent's reveal value without adding a second source");
+        for (const auto* name : {"Mod_Reveal_Upgrade", "Mod_Reveal_Carried", "Mod_Reveal_Purchase", "Mod_Reveal_Manual"}) {
+            const auto* body = loaded.tables->find(name);
+            expect(body && body->production.battlefield_bonuses.empty(), "WBR-01: unadmitted source interfaces remain separate");
+        }
+    }
+    subobject_list_tables();
+    structure_soft_radius_tables();
+    signed_weaken_reduction_tables();
+    class_agnostic_reveal_targeting_weapon_tables();
+    // AV-05: XML overrides must reach the collision query, independently on each axis. The hard extents are
+    // fields of the shared object type, so every class that can stand in a space battle takes the same path.
+    for (const std::string_view xml_class : {"SpaceUnit", "TransportUnit", "StarBase", "SpaceBuildable", "HeroUnit",
+            "SpaceHero", "Freighter", "UnderConstructionShip", "Template", "DummyStructure"}) {
+        for (const auto& [tags, expected_x, expected_y] : std::array{
+            std::tuple{"", 20, 40},
+            std::tuple{"<Custom_Hard_XExtent>3</Custom_Hard_XExtent>", 6, 40},
+            std::tuple{"<Custom_Hard_YExtent>4</Custom_Hard_YExtent>", 20, 8},
+            std::tuple{"<Custom_Hard_XExtent>3</Custom_Hard_XExtent><Custom_Hard_YExtent>4</Custom_Hard_YExtent>", 6, 8}}) {
+            TempTree tree;
+            auto xml = units_xml("3600", "Unit_Select_Test");
+            const std::string scale = "<Scale_Factor>0.70</Scale_Factor>";
+            xml.replace(xml.find(scale), scale.size(), "<Scale_Factor>2</Scale_Factor>");
+            const std::string opening = "<SpaceUnit Name=\"Test_Frigate\">";
+            const auto start = xml.find(opening);
+            const std::string class_name{xml_class};
+            // SG-CLS-01: an element name that is no FoC class settles to the nearest class on its variant chain, so
+            // the parent keeps the SpaceUnit class for those names and only the child carries the authored name.
+            const bool known_class = eawr::data::is_foc_object_class(xml_class);
+            const std::string parent_class = known_class ? class_name : std::string("SpaceUnit");
+            if (xml_class != "SpaceUnit") {
+                xml.replace(xml.find("</SpaceUnit>", start), std::string_view{"</SpaceUnit>"}.size(), "</" + class_name + ">");
+                xml.replace(start, opening.size(), "<" + class_name + " Name=\"Test_Frigate\">");
+            }
+            const std::string class_opening = "<" + class_name + " Name=\"Test_Frigate\">";
+            xml.insert(xml.find(class_opening) + class_opening.size(),
+                "<Variant_Of_Existing_Type>Hard_Extent_Parent</Variant_Of_Existing_Type>");
+            xml.insert(xml.find('>') + 1, "<" + parent_class + " Name=\"Hard_Extent_Parent\">" + std::string(tags) + "</" + parent_class + ">");
+            write_fixture(tree.root, xml);
+            auto assets = models(-40.0F);
+            eawr::assets::Mesh mesh;
+            mesh.name = "COLLISIONBOX";
+            mesh.collidable = true;
+            mesh.bone = 0;
+            mesh.bounds_min = {-10, -20, -5};
+            mesh.bounds_max = {10, 20, 5};
+            assets.at("data/art/models/test_frigate.alo").meshes.push_back(mesh);
+            const auto loaded = load(tree.root, assets);
+            expect(static_cast<bool>(loaded.tables), "AV-05: hard-extent fixture loads");
+            if (!loaded.tables) continue;
+            const auto* body = loaded.tables->find("Test_Frigate");
+            expect(body && (!known_class || body->xml_type == xml_class),
+                "AV-05: each space class under test keeps its own body [" + class_name + "]");
+            const auto motion = eawr::units::motion_table(*loaded.tables);
+            const auto* footprint = motion ? motion.value().footprint(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+            expect(footprint && footprint->x_extent == Fixed::from_raw(raw(expected_x))
+                && footprint->y_extent == Fixed::from_raw(raw(expected_y))
+                && footprint->radius == Fixed::from_raw(raw(80)),
+                "AV-05: inherited hard extents override each model axis, scale once and preserve the soft radius");
+            if (!footprint) continue;
+            const auto tracked = eawr::sim::tactical::tracking_leaf(1, *footprint, {}, {});
+            expect(static_cast<bool>(tracked), "AV-05: XML hard extents enter live tracking");
+            if (!tracked) continue;
+            eawr::sim::tactical::TrackingLayerView layer;
+            layer.windows = {{tracked.value()}};
+            for (const bool x_axis : {true, false}) {
+                eawr::sim::tactical::LinearQuery query;
+                query.start = {Fixed::from_raw(raw(x_axis ? 12 : 0)), Fixed::from_raw(raw(x_axis ? 0 : 12))};
+                query.end = query.start;
+                query.end_frame = Fixed::from_raw(raw(1));
+                query.facing = {Fixed::from_raw(raw(1)), Fixed{}};
+                const auto hit = eawr::sim::tactical::find_linear_collision(layer, 90, query);
+                const auto extent = x_axis ? expected_x : expected_y;
+                expect(hit && hit.value() == (extent > 12 ? eawr::sim::tactical::collision_static : 0),
+                    "AV-05: authored X and Y extents independently change the live collision verdict");
+            }
         }
     }
     for (const bool structure : {false, true}) {
@@ -762,6 +1037,61 @@ void synthetic_tables() {
             }
         }
     }
+    // FL-05: class names do not bypass the selected space body's spawn-delay consumer.
+    for (const std::string_view xml_class : {"DummyStructure", "HeroUnit", "Mission_Object", "Props_Wave",
+            "SkirmishSpaceUnit", "SpaceBuildable", "SpaceHero", "SpaceProp", "Space_Unit",
+            "SurvivalSpaceUnit", "Template", "TransportUnit", "UnderConstructionShip"}) {
+        struct DelayCase {
+            std::string_view override_seconds;
+            std::uint32_t frames{};
+            std::uint64_t second_launch{};
+        };
+        for (const auto& delay : std::array<DelayCase, 3>{{{"", 300, 300}, {"4.5", 135, 150}, {"0", 0, 30}}}) {
+            TempTree tree;
+            auto xml = units_xml("3600", "Unit_Select_Test");
+            std::string carrier = "<" + std::string(xml_class) + " Name=\"Delay_Carrier\">"
+                "<Variant_Of_Existing_Type>Test_Base</Variant_Of_Existing_Type>";
+            // WHE-SQ-02: a hero without its own space locomotor is a carried identity with no body; give the
+            // hero carrier a locomotor so it is the deployable space body this case qualifies.
+            if (xml_class == "HeroUnit") carrier += "<SpaceBehavior>SIMPLE_SPACE_LOCOMOTOR, SPAWN_SQUADRON</SpaceBehavior>";
+            if (!delay.override_seconds.empty()) carrier += "<Spawned_Squadron_Delay_Seconds>"
+                + std::string(delay.override_seconds) + "</Spawned_Squadron_Delay_Seconds>";
+            carrier += "</" + std::string(xml_class) + ">";
+            xml.insert(xml.rfind("</Objects>"), carrier);
+            write_fixture(tree.root, xml);
+            const auto loaded = load(tree.root, models(-40.0F), "Normal_Default",
+                eawr::sim::tactical::BattleDomain::space, {"Delay_Carrier"});
+            const auto* unit = loaded.tables ? loaded.tables->find("Delay_Carrier") : nullptr;
+            // SG-CLS-01: an element name that is no FoC class settles its class from the variant chain, so the
+            // loaded class equals the authored element name only for names the registry knows.
+            const bool known_class = eawr::data::is_foc_object_class(xml_class);
+            const std::string detail = " [" + std::string(xml_class) + " type="
+                + (unit ? unit->xml_type : std::string("none")) + " spawner=" + (unit && unit->spawner ? "yes" : "no")
+                + " delay=" + (unit && unit->spawner && unit->spawner->delay_seconds ? "set" : "unset") + "]";
+            expect(unit && (!known_class || unit->xml_type == xml_class) && unit->spawner && unit->spawner->delay_seconds,
+                "FL-05: selected space spawner loads its inherited or overridden delay for each XML class" + detail);
+            if (!loaded.tables) continue;
+            const auto motion = eawr::units::motion_table(*loaded.tables);
+            const auto* profile = motion ? motion.value().squadrons.find_spawner_at_tech(
+                eawr::assets::object_type_crc("Delay_Carrier"), 1, 1) : nullptr;
+            expect(profile && profile->delay_frames == delay.frames && profile->entries.size() == 1
+                && profile->entries.front().starting == 2 && !profile->bays.empty(),
+                "FL-05: inherited ten seconds, fractional override and explicit zero reach the bound hangar" + detail
+                    + (profile ? " frames=" + std::to_string(profile->delay_frames) + " entries="
+                        + std::to_string(profile->entries.size()) + " bays=" + std::to_string(profile->bays.size())
+                        : std::string(" no-profile")));
+            if (!profile || profile->entries.size() != 1 || profile->bays.empty()) continue;
+            namespace tactical = eawr::sim::tactical;
+            tactical::SpawnerState state;
+            const std::vector<bool> intact(profile->bays.size(), true);
+            std::vector<std::uint64_t> launches;
+            for (std::uint64_t tick = 0; tick <= 300; ++tick) {
+                if (tactical::service_spawner(*profile, state, 540, tick, 1, intact)) launches.push_back(tick);
+            }
+            expect(launches == std::vector<std::uint64_t>{0, delay.second_launch},
+                "FL-01/05: the bound delay spaces launches on the first due thirty-frame service, including equality");
+        }
+    }
     // HD-06: omission, zero and malformed Health retain every authored hardpoint.
     for (const std::string_view value : {"", "<Health></Health>", "<Health>   </Health>",
             "<Health>0</Health>", "<Health>-1</Health>",
@@ -1041,7 +1371,14 @@ void synthetic_tables() {
                 && has_row(tables.notes, "Test_Frigate", "Mod_Flag", "UNKNOWN_FLAG, true")
                 && has_row(tables.notes, "Test_Frigate", "Mod_Multiplier", "target_speed_multiplier, 0.5")
                 && has_row(tables.notes, "Test_Frigate", "Mod_Flag", "weapons_enabled_flag, false"),
-                "AB-26: unknown and retained unmodelled names have load diagnostics");
+                "AB-26: unknown, ignored and retained unmodelled names have informational notes");
+            for (const std::string_view value : {"target_speed_multiplier, 0.5", "TARGET_TAKE_DAMAGE_MULTIPLIER, 3"}) {
+                expect(std::any_of(tables.notes.begin(), tables.notes.end(), [&](const auto& note) {
+                    return note.owner == "Test_Frigate" && note.field == "Mod_Multiplier" && note.value == value
+                        && note.reason == "original ignores recognized modifier (AB-26)";
+                }) && !has_row(tables.unresolved, "Test_Frigate", "Mod_Multiplier", value),
+                    "AB-26: original-ignored target names are informational, not unresolved behavior");
+            }
             const auto built = eawr::units::ability_table(tables);
             const auto* profile = built ? built.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
             expect(profile && profile->abilities.size() == 1, "AB-26: unknown names preserve the ability");
@@ -1058,6 +1395,10 @@ void synthetic_tables() {
             expect(unit && unit->abilities[0].modifiers.size() == 3 && unit->abilities[0].modifier_flags.size() == 4,
                 "AB-26: unknown values are not stored");
             if (unit) {
+                unit->abilities[0].modifiers[1].value = Fixed::from_decimal("0.1").value();
+                expect(eawr::units::content_identity(changed) != eawr::units::content_identity(tables),
+                    "AB-26: ignored target modifiers still participate in content identity");
+                unit->abilities[0].modifiers[1].value = Fixed::from_decimal("0.5").value();
                 unit->abilities[0].modifier_flags[0].value = true;
                 expect(eawr::units::content_identity(changed) != eawr::units::content_identity(tables),
                     "AB-26: retained flags participate in content identity");
@@ -1648,6 +1989,93 @@ void synthetic_tables() {
                station_profile->hardpoints[0].role == eawr::sim::tactical::HardpointRole::fighter_bay &&
                station_profile->hardpoints[0].repair_cost_per_frame.raw() == Fixed::from_decimal("1.5").value().raw(),
            "station profile with its fighter bay and repair values");
+
+    // WMV-53: a selected TransportUnit is a body, not carried metadata. Its
+    // inherited locomotor decides ship versus solo craft independently of XML class.
+    for (const bool fighter : {false, true}) {
+        std::optional<Fixed> previous_end;
+        for (const auto maximum : {"3", "6"}) {
+            TempTree transport_tree;
+            auto xml = units_xml("3600", "Unit_Select_Test");
+            const std::string opening = "<SpaceUnit Name=\"Test_Frigate\">";
+            const auto begin = xml.find(opening);
+            const auto end = xml.find("</SpaceUnit>", begin);
+            auto body = xml.substr(begin + opening.size(), end - begin - opening.size());
+            if (fighter) {
+                const std::string simple = "SIMPLE_SPACE_LOCOMOTOR";
+                body.replace(body.find(simple), simple.size(), "FIGHTER_LOCOMOTOR");
+            }
+            body += "<OverrideAcceleration>0.5</OverrideAcceleration><OverrideDeceleration>0.25</OverrideDeceleration>"
+                "<Max_Rate_Of_Roll>1.5</Max_Rate_Of_Roll><Bank_Turn_Angle>35</Bank_Turn_Angle>"
+                "<Min_Speed>0.5</Min_Speed><Max_Thrust>0.125</Max_Thrust><Layer_Z_Adjust>7</Layer_Z_Adjust>";
+            const auto replacement = "<TransportUnit Name=\"Test_Transport_Base\">" + body + "</TransportUnit>"
+                "<TransportUnit Name=\"Test_Frigate\"><Variant_Of_Existing_Type>Test_Transport_Base</Variant_Of_Existing_Type>"
+                "<Max_Speed>" + std::string(maximum) + "</Max_Speed></TransportUnit>";
+            xml.replace(begin, end + std::string("</SpaceUnit>").size() - begin, replacement);
+            write_fixture(transport_tree.root, xml);
+            const auto loaded_transport = load(transport_tree.root, models(-40.0F));
+            expect(loaded_transport.tables.has_value(), "WMV-53: selected transport body loads");
+            if (!loaded_transport.tables) continue;
+            const auto* type = loaded_transport.tables->find("Test_Frigate");
+            expect(type && type->xml_type == "TransportUnit" && type->locomotion
+                && type->kind == (fighter ? UnitKind::craft : UnitKind::ship),
+                "WMV-53: inherited space locomotor selects transport ship or solo craft");
+            const auto bound = eawr::units::motion_table(*loaded_transport.tables);
+            expect(bool(bound), "WMV-53: transport motion binds");
+            if (!bound) continue;
+            const auto id = eawr::assets::object_type_crc("Test_Frigate");
+            const auto scaled = [](const char* value) {
+                return eawr::sim::math::multiply(Fixed::from_decimal(value).value(),
+                    Fixed::from_decimal("1.2").value()).value();
+            };
+            namespace tactical = eawr::sim::tactical;
+            if (!fighter) {
+                const auto* profile = bound.value().find(id);
+                const auto* footprint = bound.value().footprint(id);
+                expect(profile && profile->max_speed == scaled(maximum)
+                    && profile->rate_of_turn == scaled("0.7") && profile->acceleration == scaled("0.5")
+                    && profile->deceleration == scaled("0.25") && profile->roll_rate == scaled("1.5")
+                    && profile->bank_angle == Fixed::from_decimal("35").value()
+                    && footprint && footprint->layer == tactical::SpaceLayer::frigate,
+                    "WMV-53: transport overrides and inherited movement inputs reach the ship consumer");
+                if (!profile) continue;
+                const auto plan = tactical::plan_move(*profile, bound.value().rules, 0, {}, {}, {}, point(raw(600), 0, 0));
+                expect(plan && plan.value().kind == tactical::MotionKind::path && !plan.value().nodes.empty(),
+                    "WMV-53: selected transport produces a movement path");
+                if (plan && !plan.value().nodes.empty()) {
+                    const auto finish = plan.value().nodes.back().frame;
+                    if (previous_end) expect(finish < *previous_end,
+                        "WMV-53: changing only the transport override changes actual path duration");
+                    previous_end = finish;
+                }
+            } else {
+                const auto* profile = bound.value().squadrons.find_craft(id);
+                expect(profile && !bound.value().find(id) && profile->max_speed == scaled(maximum)
+                    && profile->rate_of_turn == scaled("0.7") && profile->roll_rate == scaled("1.5")
+                    && profile->bank_angle == Fixed::from_decimal("35").value()
+                    && profile->min_speed == scaled("0.5") && profile->thrust == Fixed::from_decimal("0.125").value()
+                    && profile->layer_z == Fixed::from_decimal("7").value(),
+                    "WMV-53: craft transport minimum, raw thrust and height reach the craft consumer");
+                const auto* formation = bound.value().squadrons.find_squadron(id);
+                expect(formation && formation->formation_deceleration == scaled("0.25"),
+                    "WMV-53: solo transport formation upkeep separately consumes its deceleration override");
+                if (!profile) continue;
+                tactical::CraftView self{1, point(0, 0, raw(7)), {}, profile};
+                tactical::CraftFrame frame;
+                frame.self = &self; frame.leader = &self; frame.moving = true;
+                frame.hold = point(raw(1000), 0, raw(7));
+                const auto step = tactical::step_craft(frame);
+                expect(step && step.value().position.x > self.position.x
+                    && step.value().state.velocity.x == profile->thrust,
+                    "WMV-53: solo transport flight accelerates by its authored thrust");
+                self.state.velocity = {profile->min_speed, {}, {}};
+                frame.moving = false;
+                const auto idle = tactical::step_craft(frame);
+                expect(idle && idle.value().state.velocity.x == profile->min_speed,
+                    "WMV-53: solo transport idle flight retains its authored minimum");
+            }
+        }
+    }
 
     // #70 motion: speeds, accelerations and the rate of turn x Object_Max_Speed_Multiplier_Space (1.2).
     const auto motion = eawr::units::motion_table(tables);

@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <limits>
 #include <new>
+#include <set>
 #include <unordered_map>
 #include <utility>
 
@@ -87,6 +88,11 @@ BattleEffects::SpawnOutcome BattleEffects::spawn(const std::string& particle, co
     ++eligible_effects_;
     const std::string key = reason + ":" + particle;
     const ParticleType* type = particle_type(particle);
+    // PS-45: object admission only. An admitted group's later resets/frames keep their own rules.
+    if (type != nullptr && !(registry_->detail().global > type->minimum_detail)) {
+        ++detail_suppressed_[key];
+        return {SpawnState::skipped};
+    }
     if (type == nullptr || !type->system) {
         ++spawn_failed_[key]; ++effects_dropped_;
         if (refused_effects_.size() < spawn_log_limit)
@@ -98,7 +104,7 @@ BattleEffects::SpawnOutcome BattleEffects::spawn(const std::string& particle, co
     // or a session that ran ahead of the first frame) would only be spawned to detach at once.
     if (type->lifetime_frames > 0 && due_ > birth_ && due_ - birth_ >= type->lifetime_frames) {
         ++expired_[key];
-        if (spawn_log_.size() < spawn_log_limit) spawn_log_.push_back({tick, key, std::nullopt, std::nullopt});
+        if (spawn_log_.size() < spawn_log_limit) spawn_log_.push_back({tick, key, std::nullopt, std::nullopt, owner, bone});
         return {SpawnState::skipped};
     }
     const auto request_seed = seed_++;
@@ -139,7 +145,7 @@ BattleEffects::SpawnOutcome BattleEffects::spawn(const std::string& particle, co
             return {SpawnState::refused, particles::EffectRegistry::Refusal::definition_failure};
         }
         const std::size_t row = spawn_log_.size() < spawn_log_limit ? spawn_log_.size() : spawn_log_limit;
-        if (row < spawn_log_limit) spawn_log_.push_back({tick, key, std::nullopt, frame});
+        if (row < spawn_log_limit) spawn_log_.push_back({tick, key, std::nullopt, frame, owner, bone});
         LiveEffect effect{handle.handle, particle, birth_, 0U, type->lifetime_frames, false, false, row, std::nullopt, 0U, frame};
         if (type->attached_to_collision && owner != sim::invalid_entity_id) {
             const auto posed = contact_bones_ ? contact_bones_(owner, bone) : std::nullopt;
@@ -555,6 +561,9 @@ void BattleEffects::remember_effect_units(const sim::tactical::TacticalSnapshot&
 
 template <typename SnapshotFor>
 bool BattleEffects::present_combat_effects(const platform::LiveTickEvents& record, const BoneLookup& bones, const FixedCamera& camera, SnapshotFor& snapshot_for) {
+    // WSH-12: one owner effect per successful source/handler pulse, even with several recipients.
+    // This set visits only this tick's published heal events, never the world or active effects.
+    std::set<std::pair<sim::EntityId, std::uint32_t>> healing_owners;
     for (const tactical::CombatEvent& event : record.combat_events) {
         const FighterEffectScope fighter_scope(
             event.kind == tactical::CombatEventKind::projectile_hit || event.kind == tactical::CombatEventKind::heal_pulse
@@ -564,20 +573,40 @@ bool BattleEffects::present_combat_effects(const platform::LiveTickEvents& recor
             if (event.kind == tactical::CombatEventKind::projectile_hit) ++owner_counts_[1];
         }
         if (event.kind == tactical::CombatEventKind::heal_pulse) {
-            const auto source = last_seen_.find(event.shooter), target = last_seen_.find(event.target);
-            if (source == last_seen_.end() || target == last_seen_.end()) continue;
-            const auto source_type = types_.find(source->second.type), target_type = types_.find(target->second.type);
-            if (source_type == types_.end() || target_type == types_.end()
-                || event.weapon >= source_type->second.healing.size()) continue;
+            const auto source = last_seen_.find(event.shooter);
+            if (source == last_seen_.end()) continue;
+            const auto source_type = types_.find(source->second.type);
+            if (source_type == types_.end() || event.weapon >= source_type->second.healing.size()) continue;
             const auto& handler = source_type->second.healing[event.weapon];
-            std::uint32_t target_bone = 0, source_bone = 0;
+            const auto source_bone = source_type->second.healing_owner_bones[event.weapon];
             const auto lower_bone = [](std::string text) { for (auto& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return text; };
-            for (const auto& name : handler.heal_target_bones) {
-                const auto bone = target_type->second.named_bones.find(lower_bone(name));
-                if (bone != target_type->second.named_bones.end()) { target_bone = bone->second; break; }
+            if (!handler.heal_owner_particle.empty() && healing_owners.emplace(event.shooter, event.weapon).second) {
+                const FighterEffectScope owner_scope(event.shooter);
+                auto owner_point = source->second.position;
+                particles::Basis3 owner_basis{};
+                if (bones) if (const auto pose = bones(event.shooter, source_bone)) {
+                    owner_point = {pose->frame.origin.x, pose->frame.origin.y, pose->frame.origin.z};
+                    owner_basis = pose->frame.basis;
+                }
+                if (!process_spawn(handler.heal_owner_particle, owner_point, owner_basis, "heal_owner", record.tick,
+                    event.shooter, source_bone)) return false;
             }
-            if (const auto bone = source_type->second.named_bones.find(lower_bone(handler.heal_owner_bone));
-                bone != source_type->second.named_bones.end()) source_bone = bone->second;
+            const auto target = last_seen_.find(event.target);
+            if (target == last_seen_.end()) continue;
+            const auto target_type = types_.find(target->second.type);
+            if (target_type == types_.end()) continue;
+            const auto bone_key = std::make_tuple(source->second.type, event.weapon, target->second.type);
+            auto chosen_bone = heal_target_bones_.find(bone_key);
+            if (chosen_bone == heal_target_bones_.end()) {
+                // ABG-08/19: the first authored name present on the recipient model, else its ROOT; chosen once per pair.
+                auto resolved = target_type->second.root_bone;
+                for (const auto& name : handler.heal_target_bones) {
+                    const auto bone = target_type->second.named_bones.find(lower_bone(name));
+                    if (bone != target_type->second.named_bones.end()) { resolved = bone->second; break; }
+                }
+                chosen_bone = heal_target_bones_.emplace(bone_key, resolved).first;
+            }
+            const std::uint32_t target_bone = chosen_bone->second;
             auto point = target->second.position;
             particles::Basis3 basis{};
             if (bones) if (const auto pose = bones(event.target, target_bone)) {

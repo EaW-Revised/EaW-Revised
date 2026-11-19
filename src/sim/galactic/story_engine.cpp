@@ -77,7 +77,7 @@ constexpr std::string_view known_rewards[] = {
     "TUTORIAL_PLAYER", "SET_ADVISOR", "PAUSE_GAME", "PAUSE_GALACTIC", "UNPAUSE_GALACTIC", "PAUSE_GALACTIC_GAME",
     "SWITCH_SIDES", "SWITCH_CONTROL", "TRIGGER_AI", "SET_WEATHER", "INFORMATION", "ENABLE_EVENT", "DISABLE_EVENT"};
 
-enum class Kind : std::uint8_t { trigger, elapsed, flag, tech, click, ai_notification, win, lose, conquer, conquer_count,
+enum class Kind : std::uint8_t { trigger, elapsed, flag, tech, click, open_corruption, ai_notification, win, lose, conquer, conquer_count,
     destroy, destroy_base, defeat_hero, enter, move_hero, fleet_bounced, invasion_bounced, construct, construct_level, tactical, pending };
 
 Kind kind_of(std::string_view type) noexcept {
@@ -85,6 +85,7 @@ Kind kind_of(std::string_view type) noexcept {
     if (type == "STORY_ELAPSED") return Kind::elapsed;
     if (type == "STORY_FLAG") return Kind::flag;
     if (type == "STORY_TECH_LEVEL") return Kind::tech;
+    if (type == "STORY_OPEN_CORRUPTION") return Kind::open_corruption; // WGCH-121
     if (type == "STORY_CLICK_GUI") return Kind::click; // WST-37
     if (type == "STORY_AI_NOTIFICATION") return Kind::ai_notification; // WST-37, WST-55
     if (type == "STORY_WIN_BATTLES") return Kind::win; // WST-35
@@ -321,7 +322,7 @@ struct Engine::Impl {
     core::Result<void> graph_reward(std::size_t s, std::size_t e, int depth, bool& handled);
     core::Result<void> dispatch_elapsed(Fixed time, bool paused);
     core::Result<void> dispatch_tech(std::optional<Player> player, std::int64_t level);
-    core::Result<void> dispatch_click(std::optional<Player> player, std::string_view component);
+    core::Result<void> dispatch_click(std::optional<Player> player, std::string_view component, Kind kind = Kind::click);
     core::Result<void> dispatch_ai_notification(std::optional<Player> player, const TextNotice& notice);
     // WST-32/34/35: `step(s, e)` decides whether one eligible event of the kind fires for the notice (and counts it).
     template <class Step> core::Result<void> dispatch_counting(std::optional<Player> player, Kind kind, Step&& step);
@@ -550,12 +551,12 @@ core::Result<void> Engine::Impl::dispatch_tech(std::optional<Player> player, std
 
 // WST-37: a clicked component fires every STORY_CLICK_GUI event of the target player whose Event_Param1 list names it
 // (case-insensitive). Each event follows the ordinary eligibility rules, so a spent one-shot event stays quiet.
-core::Result<void> Engine::Impl::dispatch_click(std::optional<Player> player, std::string_view component) {
+core::Result<void> Engine::Impl::dispatch_click(std::optional<Player> player, std::string_view component, const Kind kind) {
     const auto wanted = upper(std::string(component));
     for (std::size_t s = 0; s < defs.size(); ++s) {
         if (!state.subplots[s].active || (player && defs[s].owner != *player)) continue; // WST-14
         for (std::size_t e = 0; e < defs[s].events.size(); ++e) {
-            if (index[s][e].kind != Kind::click || !eligible(s, e)) continue;
+            if (index[s][e].kind != kind || !eligible(s, e)) continue;
             const auto& names = defs[s].events[e].params[0];
             if (std::none_of(names.begin(), names.end(), [&](const std::string& name) { return upper(name) == wanted; })) continue;
             if (auto done = trigger(s, e, false, 0); !done) return done;
@@ -829,7 +830,7 @@ core::Result<Engine> Engine::create(Config config, std::vector<PlotRecord> plots
                     "evaluated, but the session emits no refused-invasion notice yet: the event cannot fire"});
             else if (index.kind == Kind::pending)
                 impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.type,
-                    "no evaluator yet (the story engine evaluates STORY_TRIGGER, STORY_ELAPSED, STORY_FLAG, STORY_TECH_LEVEL, STORY_CLICK_GUI, STORY_AI_NOTIFICATION, STORY_WIN_BATTLES, STORY_LOSE_BATTLES, STORY_CONQUER, STORY_CONQUER_COUNT, STORY_DESTROY, STORY_DESTROY_BASE, STORY_DEFEAT_HERO, STORY_ENTER, STORY_MOVE, STORY_FLEET_BOUNCED, STORY_INVASION_BOUNCED, STORY_CONSTRUCT and STORY_CONSTRUCT_LEVEL)"});
+                    "no evaluator yet (the story engine evaluates STORY_TRIGGER, STORY_ELAPSED, STORY_FLAG, STORY_TECH_LEVEL, STORY_CLICK_GUI, STORY_OPEN_CORRUPTION, STORY_AI_NOTIFICATION, STORY_WIN_BATTLES, STORY_LOSE_BATTLES, STORY_CONQUER, STORY_CONQUER_COUNT, STORY_DESTROY, STORY_DESTROY_BASE, STORY_DEFEAT_HERO, STORY_ENTER, STORY_MOVE, STORY_FLEET_BOUNCED, STORY_INVASION_BOUNCED, STORY_CONSTRUCT and STORY_CONSTRUCT_LEVEL)"});
             if (tactical_reward_type(def.reward_type))
                 impl->unavailable.push_back({defs[s].owner, defs[s].name, def.name, def.reward_type, std::string(land_battle_refusal)});
             else if (!def.reward_type.empty() && std::find(std::begin(known_rewards), std::end(known_rewards), def.reward_type) == std::end(known_rewards))
@@ -851,6 +852,8 @@ core::Result<void> Engine::notify(std::optional<Player> player, const Payload& p
     if (const auto* economy = std::get_if<EconomyNotice>(&payload);
         economy && (economy->kind == Economy::construct || economy->kind == Economy::construct_level)) // WST-33
         return impl_->dispatch_economy(player, *economy);
+    if (const auto* text = std::get_if<TextNotice>(&payload); text && text->kind == Text::open_corruption)
+        return impl_->dispatch_click(player, text->text, Kind::open_corruption);
     if (const auto* text = std::get_if<TextNotice>(&payload); text && text->kind == Text::click_gui) // WST-37
         return impl_->dispatch_click(player, text->text);
     if (const auto* text = std::get_if<TextNotice>(&payload); text && text->kind == Text::ai_notification) // WST-37, WST-55

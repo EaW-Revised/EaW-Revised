@@ -22,6 +22,14 @@ namespace eawr::script::authoritative::detail {
 namespace sf = ::eawr::script::sflua;
 using sf::lua_State;
 
+// SSU-05: an object-script handle is a physical object ID below 2^37, or a direct-creation reference: bit 63 set
+// with a nonzero remainder (project-defined namespace). Everything between is never produced.
+[[nodiscard]] constexpr bool valid_object_handle(const std::uint64_t id) noexcept {
+    constexpr std::uint64_t creation_namespace = std::uint64_t{1} << 63;
+    if (id == 0 || id == creation_namespace) return false;
+    return id < (std::uint64_t{1} << 37) || (id & creation_namespace) != 0;
+}
+
 struct ThreadSlot {
     bool live{};
     bool started{};

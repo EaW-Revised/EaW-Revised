@@ -172,7 +172,14 @@ bool LiveSessionView::prepare_head(const vfs::Vfs& filesystem, const std::string
 bool LiveSessionView::prepare_tail(const vfs::Vfs& filesystem, const data::Catalog& catalog,
                                    const std::string_view map_path, std::optional<battle::ArrivalPlan>& selected_arrivals,
                                    std::string& failure) {
-    if (!colorization_enabled_) {
+    // WGT-120 / WHZ-51: use the same authored faction neutrality as combat.
+    // Preparation only: neither a literal faction name nor a per-frame scan.
+    neutral_model_owners_.clear();
+    for (const auto& player : setup_->players) {
+        if (std::binary_search(tables_->pad_neutral_factions.begin(), tables_->pad_neutral_factions.end(),
+                               player.faction_id)) neutral_model_owners_.insert(player.player_id);
+    }
+    if (!colorization_enabled_ || !neutral_model_owners_.empty()) {
         // #3076: a type's own nonzero No_Colorization_Color wins over its owner faction's.
         const auto read_type = [&](const std::string& id) {
             if (type_no_colorization_.contains(id)) return;
@@ -183,7 +190,16 @@ bool LiveSessionView::prepare_tail(const vfs::Vfs& filesystem, const data::Catal
         for (auto& ship : placed_ships_) {
             read_type(ship.object_id);
             const auto owner = owner_of_entity_.find(ship.live_entity);
-            if (owner != owner_of_entity_.end()) ship.team_colour = model_colour(owner->second, ship.object_id);
+            if (owner != owner_of_entity_.end() && !model_uses_player_colour(owner->second))
+                ship.team_colour = model_colour(owner->second, ship.object_id);
+        }
+    }
+    // WBF-54: standalone space results use the local faction, independently of the winning faction.
+    result_pictures_ = {};
+    if (tables_->domain == sim::tactical::BattleDomain::space) {
+        if (const auto faction = catalog.resolve(local_faction(), data::Category::faction)) {
+            result_pictures_[0] = faction.value().single_text("Space_Win_Image");
+            result_pictures_[1] = faction.value().single_text("Space_Lose_Image");
         }
     }
     // #427: a type with a DEFEND ability composes its SHIELD sub-object as its shield shell.

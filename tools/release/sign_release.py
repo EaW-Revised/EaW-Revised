@@ -557,8 +557,14 @@ def finish(release_dir: Path, signed_dir: Path, out_dir: Path) -> int:
 # ---------------------------------------------------------------------------------------------------------------
 # verify
 
+def osslsigncode_verify_command(exe: str, path: Path, ca_file: Path) -> list[str]:
+    """The timestamp countersignature chains to the same pinned root, so the root is passed as the timestamp CA too:
+    without -TSA-CAfile a correctly timestamped file does not verify."""
+    return [exe, "verify", "-CAfile", str(ca_file), "-TSA-CAfile", str(ca_file), "-in", str(path)]
+
+
 def run_osslsigncode(exe: str, path: Path, ca_file: Path) -> tuple[bool, str]:
-    done = subprocess.run([exe, "verify", "-CAfile", str(ca_file), "-in", str(path)], capture_output=True, text=True, timeout=300)
+    done = subprocess.run(osslsigncode_verify_command(exe, path, ca_file), capture_output=True, text=True, timeout=300)
     return done.returncode == 0, done.stdout + done.stderr
 
 

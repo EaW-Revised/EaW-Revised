@@ -202,6 +202,7 @@ void GalacticMode::State::write_report_controls(std::ostringstream& output) cons
     output << ",\n  \"pause_banner\": " << (pause_banner ? pause_banner->report_json() : "null");
     output << ",\n  \"cinematic_tour\": " << tour_report_json();
     output << ",\n  \"planet_search\": " << (planet_search ? planet_search->report_json() : "null");
+    output << ",\n  \"build_tray\": " << (build_tray ? build_tray->report_json() : "null");
     const auto* pictures = dynamic_cast<const PlanetThumbnails*>(planet_search_thumbnails.get());
     output << ",\n  \"planet_search_pictures\": " << (pictures ? pictures->report_json() : "null");
     output << ",\n  \"story_letterbox\": {\"on\": " << (story_hud.letterbox_on() ? "true" : "false")

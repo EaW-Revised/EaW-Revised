@@ -880,7 +880,7 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
         wait_step = "kick";
         wait([&] { pump(); return join->view().phase == viewer::LanPhase::ended; });
         expect(join->lobby_state()->notice && join->lobby_state()->notice->reason == net::LobbyReason::kicked, "typed kick reaches the removed player");
-        expect(host->lobby_state()->snapshot.seats.size() == 1 && !host->view().start_enabled, "kick clears readiness and removes exactly one seat");
+        expect(host->lobby_state()->snapshot.seats.size() == 1 && !host->view().start_enabled, "kick removes exactly one seat (a lone host cannot Start)");
         expect(host->lobby_game(edited), "after the kick the freed row no longer blocks a publish");
         host->pump_setup(edited); host->pump_setup(edited);
         auto fresh = make_match(); fresh->configure_lobby("Carol", 4, {map}, builder);
@@ -889,7 +889,7 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
         wait([&] { host->pump_setup(edited); fresh->pump_setup({});
             return host->lobby_state()->snapshot.seats.size() == 2 && host->lobby_state()->snapshot.seats.back().selection.name == "Carol"; });
         expect(fresh->view().seat == 1 && host->lobby_state()->snapshot.seats.back().seat.value > 2, "a fresh edge refills the same transport index with a new stable seat identity");
-        expect(!host->view().start_enabled, "fresh admission clears every ready flag");
+        expect(!host->view().start_enabled, "fresh admission arrives unready, so Start stays disabled");
         host->cancel(); join->cancel(); fresh->cancel(); return;
     }
     // Human pacing opens a fresh bounded request window.

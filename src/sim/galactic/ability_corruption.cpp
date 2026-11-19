@@ -43,26 +43,105 @@ std::span<const TypeId> GalacticSession::Impl::corruption_local_unlocks(PlanetId
         [](const auto& r) { return std::pair{r.planet, r.player}; }) : nullptr;
     return row ? std::span<const TypeId>(row->build_unlocks) : std::span<const TypeId>{};
 }
+std::optional<EntityId> GalacticSession::Impl::corruption_counted_unit(const EntityId id, const CensusObject& live) const {
+    if (live.dead || live.delete_pending) return {};
+    const auto* policy = find(setup.ability_host->corruption_prerequisites, live.original_type, [](const auto& r) { return r.type; });
+    if (policy && policy->consumable && !planets.contains(live.planet)) return {};
+    if (live.container && movement_inputs) {
+        const auto parent = actor_records.find(live.container);
+        const auto* carrier = parent == actor_records.end() ? nullptr : find(movement_inputs->types, parent->second.current_type, [](const auto& r) { return r.type; });
+        if (carrier && carrier->transport) return live.container;
+    }
+    return id;
+}
 std::size_t GalacticSession::Impl::corruption_unit_count(std::span<const TypeId> alternatives, PlayerId player) const {
     // WGCH-49: eligibility pools the owner's alternatives, unlike the representative consumer.
     std::set<EntityId> identities;
     for (const auto& [id, live] : actor_records) {
-        if (live.owner != player || live.dead || live.delete_pending
-            || std::find(alternatives.begin(), alternatives.end(), live.original_type) == alternatives.end()) continue;
-        const auto* policy = find(setup.ability_host->corruption_prerequisites, live.original_type, [](const auto& r) { return r.type; });
-        if (policy && policy->consumable && !planets.contains(live.planet)) continue;
-        EntityId counted = id;
-        if (live.container && movement_inputs) {
-            const auto parent = actor_records.find(live.container);
-            const auto* carrier = parent == actor_records.end() ? nullptr : find(movement_inputs->types, parent->second.current_type, [](const auto& r) { return r.type; });
-            if (carrier && carrier->transport) counted = live.container;
-        }
-        identities.insert(counted);
+        if (live.owner != player || std::find(alternatives.begin(), alternatives.end(), live.original_type) == alternatives.end()) continue;
+        if (const auto counted = corruption_counted_unit(id, live)) identities.insert(*counted);
     }
     return identities.size();
 }
+GalacticSession::Impl::CorruptionDisplayRequirements GalacticSession::Impl::corruption_display_requirements(const PlayerId local) const {
+    CorruptionDisplayRequirements result;
+    // One actor and one planet pass for the whole publication, never one per planet/slot.
+    for (const auto& [id, live] : actor_records) if (live.owner == local) {
+        if (const auto counted = corruption_counted_unit(id, live)) result.units[live.original_type].push_back(*counted);
+    }
+    for (const auto& planet : setup.ability_host->corruption_planets) {
+        result.planet_types.insert(planet.type);
+        const auto entity = planets.find(planet.planet);
+        if (entity != planets.end() && registry.get<session_detail::PlanetData>(entity->second).owner == local)
+            result.owned_planet_types.insert(planet.type);
+    }
+    return result;
+}
+bool GalacticSession::corruption_dialog_admitted(const PlayerId player, const PlanetId planet) const {
+    if (!player || !planet || !impl_->ability_host) return false;
+    for (const auto& preparation : impl_->ability_host->preparations) {
+        if (!preparation.open || preparation.kind != AbilityKind::corruption || preparation.planet != planet) continue;
+        const auto actor = impl_->actor_records.find(preparation.actor);
+        if (actor != impl_->actor_records.end() && actor->second.owner == player
+            && !actor->second.dead && !actor->second.delete_pending) return true;
+    }
+    if (!impl_->observer || !impl_->setup.ability_host || !impl_->economy_corruption) return false;
+    const auto* beneficiary = find(impl_->economy_corruption->players, player, [](const auto& row) { return row.player; });
+    const auto* discovered = find(impl_->observer->records, std::pair{player, planet},
+        [](const auto& row) { return std::pair{row.player, row.planet}; });
+    return beneficiary && beneficiary->benefits && discovered && discovered->discovered
+        && find(impl_->setup.ability_host->corruption_planets, planet, [](const auto& row) { return row.planet; });
+}
+CorruptionMenu GalacticSession::Impl::corruption_display_menu(const PlayerId local, const PlanetId planet,
+    const AbilityPreparation* preparation, CorruptionDisplayRequirements& requirements) const {
+    CorruptionMenu result; result.player = local; result.planet = planet;
+    result.information_only = preparation == nullptr;
+    if (preparation) { result.actor = preparation->actor; result.preparation = preparation->id; }
+    const auto* location = find(setup.ability_host->corruption_planets, planet, [](const auto& r) { return r.planet; });
+    const auto* account = economy ? find(economy->players, local, [](const auto& r) { return r.player; }) : nullptr;
+    const auto* usage = find(ability_host->corruption_usage, local, [](const auto& r) { return r.player; });
+    if (!location || !account || !usage) return result;
+    for (std::size_t slot = 0; slot < location->slots.size(); ++slot) {
+        const auto& choice = location->slots[slot];
+        if (choice.type == CorruptionType::none) continue;
+        ObservedCorruptionChoice row; row.slot = static_cast<unsigned>(slot + 1); row.live_choice = choice;
+        if (preparation) {
+            const auto at = std::find_if(preparation->corruption_choices.begin(), preparation->corruption_choices.end(),
+                [slot](const auto& value) { return value.slot == slot; });
+            if (at == preparation->corruption_choices.end()) continue;
+            row.live_prepared = prepared_ability(*preparation, static_cast<std::uint32_t>(at - preparation->corruption_choices.begin()));
+        }
+        row.prepared.choice.type = choice.type;
+        row.prepared.choice.credits = row.live_prepared ? row.live_prepared->price : choice.price;
+        row.affordable = account->credits >= row.prepared.choice.credits;
+        row.missions_satisfied = choice.required_mission_type == CorruptionType::none || usage->uses[static_cast<std::size_t>(choice.required_mission_type)] >= choice.mission_count;
+        auto& live_choice = *row.live_choice;
+        std::erase_if(live_choice.planet_types, [&](const auto type) { return !requirements.planet_types.contains(type); });
+        row.planets_satisfied = live_choice.planet_types.empty() || std::any_of(live_choice.planet_types.begin(), live_choice.planet_types.end(),
+            [&](const auto type) { return requirements.owned_planet_types.contains(type); });
+        row.units_satisfied = !choice.unit_count || choice.unit_types.empty();
+        if (!row.units_satisfied) {
+            auto alternatives = choice.unit_types;
+            std::sort(alternatives.begin(), alternatives.end());
+            alternatives.erase(std::unique(alternatives.begin(), alternatives.end()), alternatives.end());
+            const auto [at, inserted] = requirements.unit_counts.try_emplace(alternatives, 0);
+            if (inserted) {
+                std::set<EntityId> identities;
+                for (const auto type : alternatives) if (const auto units = requirements.units.find(type); units != requirements.units.end())
+                    identities.insert(units->second.begin(), units->second.end());
+                at->second = identities.size();
+            }
+            row.units_satisfied = at->second >= choice.unit_count;
+        }
+        // WGCH-199: a mission whose battle can't be built takes the direct route, so every row has a route. The field
+        // stays for presentation fixtures; a live host now always offers the row.
+        row.mission_available = true;
+        result.choices.push_back(std::move(row));
+    }
+    return result;
+}
 std::shared_ptr<const CorruptionMenu> GalacticSession::Impl::publish_corruption_menu(const PlayerId local, std::span<const ObservedPlanet> observations) const {
-    if (!ability_host || !observer || !local || !economy) return {};
+    if (!ability_host || !setup.ability_host || !observer || !local || !economy) return {};
     for (const auto& menu : ability_host->preparations) {
         if (!menu.open || menu.kind != AbilityKind::corruption) continue;
         const auto actor = actor_records.find(menu.actor);
@@ -70,37 +149,26 @@ std::shared_ptr<const CorruptionMenu> GalacticSession::Impl::publish_corruption_
         if (std::none_of(observations.begin(), observations.end(), [&](const auto& row) {
             return row.player == local && row.planet == menu.planet && row.discovered;
         })) continue;
-        const auto* location = find(setup.ability_host->corruption_planets, menu.planet, [](const auto& r) { return r.planet; });
-        const auto* account = find(economy->players, local, [](const auto& r) { return r.player; });
-        const auto* usage = find(ability_host->corruption_usage, local, [](const auto& r) { return r.player; });
-        if (!location || !account || !usage) continue;
-        CorruptionMenu result; result.player = local; result.actor = menu.actor; result.planet = menu.planet; result.preparation = menu.id;
-        for (std::uint32_t i = 0; i < menu.corruption_choices.size(); ++i) {
-            const auto& prepared = menu.corruption_choices[i]; const auto& choice = location->slots[prepared.slot];
-            ObservedCorruptionChoice row; row.slot = prepared.slot + 1U; row.live_prepared = prepared_ability(menu, i); row.live_choice = choice;
-            row.prepared.choice.type = choice.type; row.prepared.choice.credits = row.live_prepared->price;
-            row.affordable = account->credits >= row.live_prepared->price;
-            row.missions_satisfied = choice.required_mission_type == CorruptionType::none || usage->uses[static_cast<std::size_t>(choice.required_mission_type)] >= choice.mission_count;
-            auto& live_choice = *row.live_choice;
-            std::erase_if(live_choice.planet_types, [&](const auto type) {
-                return std::none_of(setup.ability_host->corruption_planets.begin(), setup.ability_host->corruption_planets.end(), [&](const auto& p) { return p.type == type; });
-            });
-            row.planets_satisfied = live_choice.planet_types.empty() || std::any_of(setup.ability_host->corruption_planets.begin(), setup.ability_host->corruption_planets.end(),
-                [&](const auto& p) {
-                    const auto entity = planets.find(p.planet);
-                    return entity != planets.end() && registry.get<session_detail::PlanetData>(entity->second).owner == result.player
-                        && std::find(live_choice.planet_types.begin(), live_choice.planet_types.end(), p.type) != live_choice.planet_types.end();
-                });
-            row.units_satisfied = !choice.unit_count || choice.unit_types.empty()
-                || corruption_unit_count(choice.unit_types, result.player) >= choice.unit_count;
-            // WGCH-199: a mission whose battle can't be built takes the direct route, so every row has a route. The field
-            // stays for presentation fixtures; a live host now always offers the row.
-            row.mission_available = true;
-            result.choices.push_back(std::move(row));
-        }
+        auto requirements = corruption_display_requirements(local);
+        const auto result = corruption_display_menu(local, menu.planet, &menu, requirements);
         return std::make_shared<const CorruptionMenu>(std::move(result));
     }
     return {};
+}
+std::shared_ptr<const std::vector<CorruptionMenu>> GalacticSession::Impl::publish_corruption_information(
+    const PlayerId local, std::span<const ObservedPlanet> observations) const {
+    std::vector<CorruptionMenu> menus;
+    if (!ability_host || !setup.ability_host || !economy_corruption || !local) return {};
+    const auto* player = find(economy_corruption->players, local, [](const auto& r) { return r.player; });
+    if (!player || !player->benefits) return {};
+    auto requirements = corruption_display_requirements(local);
+    // WGCH-121/122: inspection has no actor, preparation, mutation or synchronized draw. Empty planets remain inspectable.
+    for (const auto& observation : observations) {
+        if (observation.player != local || !observation.discovered) continue;
+        if (find(setup.ability_host->corruption_planets, observation.planet, [](const auto& row) { return row.planet; }))
+            menus.push_back(corruption_display_menu(local, observation.planet, nullptr, requirements));
+    }
+    return std::make_shared<const std::vector<CorruptionMenu>>(std::move(menus));
 }
 bool GalacticSession::Impl::corruption_choice_tactical(const CorruptionChoice& choice, const PlayerId owner) const {
     const auto* player = economy_corruption ? find(economy_corruption->players, owner, [](const auto& r) { return r.player; }) : nullptr;

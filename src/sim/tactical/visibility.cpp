@@ -61,7 +61,6 @@ core::Result<void> validate_sensors(const std::span<const SensorProfile> sensors
     auto maximum=math::Fixed::from_raw(math::Fixed::scale);
     for (const auto& [player,multiplier] : player_multipliers) {
         (void)player;
-        if (multiplier<math::Fixed{}) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,"negative player reveal multiplier"));
         maximum=std::max(maximum,multiplier);
     }
     for (std::size_t index = 0; index < sensors.size(); ++index) {
@@ -104,7 +103,7 @@ core::Result<SensorField> SensorField::build(
     if (player_multipliers.size()>max_players) return core::Result<SensorField>::failure(detail::diagnostic(diagnostic_codes::resource_limit,"too many player reveal modifiers"));
     PlayerId previous{};
     for (const auto& [player,multiplier] : player_multipliers) {
-        if (player<=previous || multiplier<math::Fixed{} || std::none_of(players.begin(),players.end(),[player](const auto& value){return value.player_id==player;}))
+        if (player<=previous || std::none_of(players.begin(),players.end(),[player](const auto& value){return value.player_id==player;}))
             return core::Result<SensorField>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,"invalid player reveal modifier"));
         previous=player;
     }
@@ -165,9 +164,13 @@ std::optional<math::Fixed> SensorField::reveal_range(const TypeId type_id, const
     const auto end=player_multipliers_.begin()+static_cast<std::ptrdiff_t>(player_multiplier_count_);
     const auto multiplier = std::lower_bound(player_multipliers_.begin(), end, owner,
         [](const auto& p, PlayerId id) { return p.first < id; });
-    if (multiplier == end || multiplier->first != owner) return found->reveal_range;
+    // WBR-01: the reveal caller floors the final radius at ten source units.
+    const auto minimum = math::Fixed::from_raw(10 * math::Fixed::scale);
+    if (multiplier == end || multiplier->first != owner) return std::max(minimum, found->reveal_range);
+    if (multiplier->second <= math::Fixed{}) return minimum;
     math::Fixed range;
-    return math::try_multiply(found->reveal_range, multiplier->second, range) ? std::optional{range} : std::nullopt;
+    return math::try_multiply(found->reveal_range, multiplier->second, range)
+        ? std::optional{std::max(minimum, range)} : std::nullopt;
 }
 
 const SensorProfile* SensorField::profile(const TypeId type_id) const noexcept {

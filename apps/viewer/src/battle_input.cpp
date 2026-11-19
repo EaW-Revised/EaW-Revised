@@ -188,6 +188,7 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
             shape.sphere_radius = to_float(type.mouse_collide_sphere_radius.value_or(sim::math::Fixed{}));
             shape.movable = type.movement.max_speed && type.movement.max_speed->raw() > 0;
             shape.selectable = type.selectable;
+            shape.selection_denied = type.selection_denied;
             shape.mouse_sensitive = type.mouse_sensitive;
             shape.locomotion = type.locomotion;
             shape.decoration = type.decoration;
@@ -198,6 +199,7 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
             if (!selection.keeps(type)) continue;
             PickShape shape;
             shape.selectable = type.selectable;
+            shape.selection_denied = type.selection_denied;
             shape.mouse_sensitive = type.mouse_sensitive;
             pick_shapes_.insert_or_assign(battle::type_id(type.id), std::move(shape));
         }
@@ -258,6 +260,7 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
             unit.mesh = &pick_shape->second.mesh;
             unit.sphere_radius = pick_shape->second.sphere_radius;
             unit.selectable = pick_shape->second.selectable;
+            unit.selection_denied = pick_shape->second.selection_denied;
             unit.mouse_sensitive = pick_shape->second.mouse_sensitive;
             unit.locomotion = pick_shape->second.locomotion;
             unit.decoration = pick_shape->second.decoration;
@@ -270,6 +273,8 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
             unit.type = container->type_id;
             unit.part = visible.entity;
             unit.part_type = visible.type;
+            if (const auto team_shape = pick_shapes_.find(container->type_id); team_shape != pick_shapes_.end())
+                unit.selection_denied = unit.selection_denied || team_shape->second.selection_denied;
         }
         unit.neutral = visible.neutral;
         // WSU-16: authored community stations are selectable by allies and retain their owner.

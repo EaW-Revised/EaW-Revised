@@ -5,6 +5,7 @@
 #include <compare>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <variant>
 #include <vector>
@@ -20,7 +21,7 @@ enum class CommandLayer : std::uint8_t {
     tactical = 3, // the battle's tactical opcodes, executed by the child battle
 };
 
-// Session-layer opcodes, coordinator-reserved as one block: 1..14 below, 15..61 kept for the
+// Session-layer opcodes, coordinator-reserved as one block: 1..18 below, 19..61 kept for the
 // wave-3 walks' additions, 62..63 the debug commands. Its own number space.
 namespace session_opcodes {
 inline constexpr std::uint16_t pause = 1;
@@ -40,7 +41,9 @@ inline constexpr std::uint16_t battle_team_role = 14; // coordinator-reserved
 inline constexpr std::uint16_t auto_resolve_withdraw = 15; // WGM-182, conflict owner
 inline constexpr std::uint16_t invasion_accept = 16; // coordinator-reserved, GCMP-04, WGP-89
 inline constexpr std::uint16_t gui_click = 17; // WST-37: a clicked HUD component raised as a story event (provisional number, coordinator to confirm)
-inline constexpr std::uint16_t first_reserved = 18;
+inline constexpr std::uint16_t corruption_dialog_opened = 18; // WGCH-121
+inline constexpr std::uint16_t seat_admit = 19; // #7869: a human seat joins a loaded save (load prologue only; GC lane 2026-11-18)
+inline constexpr std::uint16_t first_reserved = 20;
 inline constexpr std::uint16_t last_reserved = 61;
 inline constexpr std::uint16_t debug_set_planet_owner = 62;
 inline constexpr std::uint16_t debug_set_fleet_orbit = 63;
@@ -100,6 +103,18 @@ struct BattleSummaryAcknowledge {
 // The envelope identifies the affected seat; no player may remove another seat.
 struct SeatLeave { friend bool operator==(const SeatLeave&, const SeatLeave&) = default; };
 struct SeatRejoin { friend bool operator==(const SeatRejoin&, const SeatRejoin&) = default; };
+// WGS-P10 (project rule, legacy #7869): a human seat that joins a loaded multiplayer save. Part of the load
+// prologue only (like PostLoadFixup), never admitted from a peer: the envelope's seat is the NEW seat id
+// (above every existing id), the payload names the faction it plays, its lobby slot and its human side.
+// A faction that already has a human seat keeps its side; a faction without one (an AI or passive
+// faction taken over) starts the next side, and a third side is refused. The faction's controller turns
+// human and its AI issuer stops acting; its AI configuration and state stay in the saved state.
+struct SeatAdmit {
+    PlayerId player{};
+    std::uint32_t lobby_slot{};
+    HumanSideId human_side{};
+    friend constexpr bool operator==(const SeatAdmit&, const SeatAdmit&) noexcept = default;
+};
 // WGS-P05: one lead decision for the whole side, never a per-seat subset.
 struct AssignBattleTeamRole {
     EntityId conflict{};
@@ -291,6 +306,11 @@ inline constexpr std::size_t max_gui_component_name = 96;
 // forms. The command is counted where it executes, so every peer and every replay drops the same clicks. A dropped
 // click is reported as a diagnostic and never ends the match.
 inline constexpr unsigned max_gui_clicks_per_tick = 8;
+// WGCH-121: the viewer reports an actual dialog opening; this never prepares an ability.
+struct CorruptionDialogOpened {
+    PlanetId planet{};
+    friend bool operator==(const CorruptionDialogOpened&, const CorruptionDialogOpened&) = default;
+};
 struct GuiClick {
     std::string component;
     friend bool operator==(const GuiClick&, const GuiClick&) = default;
@@ -357,10 +377,10 @@ struct TransferSurface {
 };
 using CommandPayload =
     std::variant<PauseGalaxy, ResumeGalaxy, SetSpeed, DebugSetPlanetOwner, DebugSetFleetOrbit, TacticalLayerCommand,
-        SaveRequest, PostLoadFixup, CreateFleet, AddFleetMembers, RemoveFleetMembers, MergeFleets, SetFleetOrbitSlot,
+        SaveRequest, PostLoadFixup, SeatAdmit, CreateFleet, AddFleetMembers, RemoveFleetMembers, MergeFleets, SetFleetOrbitSlot,
         ProductionCommand, SellObject, SeatLeave, SeatRejoin, AssignBattleTeamRole, RecheckOrbit, MoveFleet, LandFleet, BattleChoice, AutoResolveWithdraw, ObserverCommand,
         PrepareBlackMarket, BuyBlackMarket, PrepareGalacticAbility, ExecutePreparedAbility, CancelGalacticAbility,
-        LaunchFromSurface, LaunchFleet, TransferSurface, SetFleetPathfinder, TransferFleetMembers, BattleSummaryAcknowledge, InvasionAccept, DeployGroundAbility, SetGroundLayout, LandUnits, GuiClick>;
+        LaunchFromSurface, LaunchFleet, TransferSurface, SetFleetPathfinder, TransferFleetMembers, BattleSummaryAcknowledge, InvasionAccept, DeployGroundAbility, SetGroundLayout, LandUnits, GuiClick, CorruptionDialogOpened>;
 
 struct CommandOrderKey {
     std::uint64_t tick{};
@@ -374,6 +394,15 @@ struct GameCommand {
     CommandPayload payload;
     friend bool operator==(const GameCommand&, const GameCommand&) = default;
 };
+
+// #7869: the SeatAdmit load-prologue commands that seat extra humans, in order, on the factions listed in
+// `extra_players` (one entry per extra human; a faction may repeat). A pure function of the seat table the
+// checkpoint restored and that ordered list, so every peer derives the same commands: new seat ids count up from
+// one above the highest existing id, the slot is the faction's own lobby slot, the side is the faction's human side,
+// or, for a faction without a human seat, the next free side (repeats of that faction share it). Nothing here
+// judges the roster: the session refuses a third side or a ninth human when the commands are applied.
+[[nodiscard]] std::vector<GameCommand> plan_seat_admissions(
+    std::span<const Seat> seats, std::span<const PlayerId> extra_players, std::uint64_t tick);
 
 [[nodiscard]] CommandLayer layer_of(const CommandPayload& payload) noexcept;
 [[nodiscard]] std::uint16_t opcode_of(const CommandPayload& payload) noexcept;

@@ -58,9 +58,11 @@ they choose to share one; neither the viewer nor the symbol tools upload them.
 The release version lives in one place, `config/release-version.json`. The root and viewer CMake projects read it (so the
 project version, the mods service version and the default build identity follow it), a kit label is that version plus a
 suffix (`python tools/release/release_version.py label <suffix>`), and a release tag must equal `v` plus that version
-(`python tools/release/release_version.py check-tag <tag>`; `cut_kit.py --release-tag` runs the same check). The launcher executables' file and product versions are generated from the same
+(`python tools/release/release_version.py check-tag <tag>`; `cut_kit.py --release-tag` runs the same check). A release candidate
+is tagged `v<version>-rc<N>` (`v0.3.6-rc1`, N from 1 to 999) with the release version unchanged: its label and archive names carry the
+`-rc<N>`, and its update manifest is on the preview channel. The launcher executables' file and product versions are generated from the same
 version. The launcher pin (`config/launcher-pin.json`) is a separate
-product and keeps its own version. The last published release is v0.3.4.
+product and keeps its own version. The last published release is v0.3.5.
 The published release includes the portable player download with its double-click launcher,
 a debug download, playable space skirmish, LAN and online multiplayer and a partially working Galactic Conquest. The galactic AI is on by default
 in live campaigns; `--eawr-galactic-ai off` switches it off. Keep a candidate local until the
@@ -410,6 +412,24 @@ Windows executables are signed with Azure Artifact Signing (Authenticode, SHA-25
 below. Until then releases are described as unsigned, and the player guide keeps the unsigned wording. Git tags are a separate
 matter: they stay annotated and unsigned.
 
+### Runbook: signing a release
+
+Runs after the unsigned release is built and its draft exists, before anything is published.
+
+1. Drop the unsigned release archives and `SHA256SUMS.txt` (plus `update-manifest.json`) on the signing host as
+   `inbox/<tag>/`, and compute `sha256sum SHA256SUMS.txt` locally.
+2. Start `sign-release.yml` in release mode with the tag and that SHA-256
+   (`gh workflow run sign-release.yml -f mode=release -f tag=<tag> -f sums_sha256=<hash>`). The owner approves the
+   `release-signing` environment.
+3. The job signs the listed binaries inside the archives, re-zips, and rewrites the hashes and `SHA256SUMS.txt`.
+4. The job verifies every target and **fails the release** if any binary is unsigned or does not verify (signature,
+   timestamp and the expected signer). Nothing is published from a failed run.
+5. Fetch `outbox/<tag>/` and publish the signed archives and the new `SHA256SUMS.txt` to the draft. The unsigned set
+   stays with the release evidence.
+6. Last check: extract the signed player archive and run `pwsh tools/release/verify_signatures.ps1 -Folder <folder> -ExpectedSubject <name>`.
+
+The details of each step follow.
+
 ### Flow
 
 1. The pool builds and packages the release **unsigned**, exactly as above. Keys and credentials never exist on a build worker.
@@ -439,7 +459,7 @@ change comes first. Third-party files keep their own signatures.
 - On Linux or Windows with Python: `python tools/release/sign_release.py verify <unsigned release dir> --final <downloaded or final dir>`
   needs the unsigned set and checks that every signed file has the same code bytes as its unsigned original, every listed file
   is signed, and the hashes and manifest agree. With `osslsigncode` installed it also verifies each signature against the
-  Microsoft root pinned in the repository. `--subject <name>` (or `SIGNING_SUBJECT`) is required and is checked against each
+  Microsoft root pinned in the repository, which it passes as the timestamp CA as well (`-CAfile` and `-TSA-CAfile`). `--subject <name>` (or `SIGNING_SUBJECT`) is required and is checked against each
   signature: the Microsoft root also trusts other Artifact Signing customers, so a valid chain alone does not say it is ours.
 - On Windows, for the extracted folder a player would get: `pwsh tools/release/verify_signatures.ps1 -Folder <folder> -ExpectedSubject <name>`
   (status `Valid`, timestamp present, trusted chain for every listed file; it also fails when a file that

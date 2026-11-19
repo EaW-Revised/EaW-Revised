@@ -153,6 +153,14 @@ public:
     // scale of the shooter's owner. A Normal owner returns the mode itself.
     [[nodiscard]] core::Result<math::Fixed> caused_damage(math::Fixed mode, PlayerId owner) const;
 
+    // WBR-01: the player reveal cache (ledger multipliers and the last multipliers the fog service saw) exists
+    // for campaigns and for standalone content with a nonzero player reveal contribution. Every consumer
+    // (construction seeding, source-event refresh, the fog service, checkpoint save/restore) uses this one
+    // predicate, so a resumed battle keeps the state an uninterrupted one has.
+    [[nodiscard]] bool tracks_player_reveal() const noexcept {
+        return setup.campaign || std::any_of(economy.command_bonuses.begin(), economy.command_bonuses.end(),
+            [](const auto& row) { return row.battlefield && row.reveal_delta != math::Fixed{}; });
+    }
     [[nodiscard]] std::array<math::Fixed, max_players> fog_multipliers(const CommandLedger& ledger) const {
         std::array<math::Fixed, max_players> values{};
         for (std::size_t i = 0; i < setup.players.size(); ++i) {
@@ -736,9 +744,13 @@ public:
         std::vector<std::int8_t>& transitions);
     [[nodiscard]] bool jammer_ready(const LiveUnit& unit, const AbilityProfile& ability,
         const NamedAbilityLocks& locks) const;
+    [[nodiscard]] bool ordinary_handler_ready(const LiveUnit& unit, const AbilityProfile& ability,
+        const NamedAbilityLocks& locks, SpecialAbilityKind kind) const;
     void jammer_reactivated(LiveUnit& unit, const AbilityProfile& ability) const;
     // WSH-05: the inclusive planar centre test, then the rolled model box; shared by healing and WSH-09 damage.
     [[nodiscard]] bool heal_in_range(const LiveUnit& source, const LiveUnit& target, math::Fixed reach) const;
+    // WSH-13: a healing source is alive by its hull; a squadron company (the team container) has no hull and serves while it exists.
+    [[nodiscard]] bool heal_source_serves(const LiveUnit& source) const;
     // WSH-09: immutable selection of due negative-amount automatic handlers and their victims, in source order.
     core::Result<void> select_passive_damage(const UnitStage& staged, const std::map<EntityId, ArrivalState>& arrivals,
         std::uint64_t tick, const PartitionExecutor& executor, std::vector<PassiveDamagePulse>& pulses);

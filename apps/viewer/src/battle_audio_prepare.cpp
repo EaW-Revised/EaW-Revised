@@ -489,6 +489,12 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
         sounds.ambient_moving = event(tag(value, "SFXEvent_Ambient_Moving"), where);
         sounds.engine_idle = event(tag(value, "SFXEvent_Engine_Idle_Loop"), where);
         sounds.engine_moving = event(tag(value, "SFXEvent_Engine_Moving_Loop"), where);
+        sounds.turret_loop = event(tag(value, "SFXEvent_Turret_Rotating_Loop"), where); // BA-89
+        if (sounds.turret_loop && sounds.turret_loop->play_count != -1) {
+            problems_.push_back(where + ": turret rotating event must be a loop");
+            sounds.turret_loop = nullptr;
+        }
+        if (sounds.turret_loop) has_turret_loops_ = true;
         sounds.cinematic_focus = event(tag(value, "SFXEvent_Engine_Cinematic_Focus_Loop"), where);
         if (sounds.cinematic_focus && sounds.cinematic_focus->play_count != -1) {
             problems_.push_back(where + ": cinematic focus event must be a loop");
@@ -607,11 +613,13 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
                 sounds.ability_targets[tactical::AbilityKind::cluster_bomb] = event(child(handler, "SFXEvent_Activate"), where);
             }
         }
+        const auto& healing = type.kind == units::UnitKind::squadron ? type.team_special_abilities : type.special_abilities;
+        for (const auto& nested : healing)
+            sounds.heal_pulses.push_back(nested.kind == tactical::SpecialAbilityKind::force_healing
+                ? event(nested.heal_sfx, where) : nullptr);
         for (const auto& nested : type.special_abilities) {
             if (nested.kind == tactical::SpecialAbilityKind::blast && nested.charged_blast)
                 sounds.blast_activate = event(nested.charged_blast->activate_sfx, where);
-            sounds.heal_pulses.push_back(nested.kind == tactical::SpecialAbilityKind::force_healing
-                ? event(nested.heal_sfx, where) : nullptr);
             if (nested.kind == tactical::SpecialAbilityKind::corrupt_systems && !nested.corrupt_activate_sfx.empty())
                 sounds.corrupt_activate = event(nested.corrupt_activate_sfx, where);
             if (nested.kind == tactical::SpecialAbilityKind::laser_defense && !nested.defence_zap_sfx.empty())

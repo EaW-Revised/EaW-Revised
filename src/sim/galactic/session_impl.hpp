@@ -122,6 +122,15 @@ public:
     std::map<std::uint64_t, std::vector<PlanetId>> corruption_due;
     std::span<const TypeId> corruption_local_unlocks(PlanetId, PlayerId) const;
     std::size_t corruption_unit_count(std::span<const TypeId>, PlayerId) const;
+    std::optional<EntityId> corruption_counted_unit(EntityId, const CensusObject&) const;
+    struct CorruptionDisplayRequirements {
+        std::map<TypeId, std::vector<EntityId>> units;
+        std::map<std::vector<TypeId>, std::size_t> unit_counts;
+        std::set<TypeId> planet_types, owned_planet_types;
+    };
+    CorruptionDisplayRequirements corruption_display_requirements(PlayerId) const;
+    CorruptionMenu corruption_display_menu(PlayerId, PlanetId, const AbilityPreparation*, CorruptionDisplayRequirements&) const;
+    std::shared_ptr<const std::vector<CorruptionMenu>> publish_corruption_information(PlayerId, std::span<const ObservedPlanet>) const;
     std::shared_ptr<const CorruptionMenu> publish_corruption_menu(PlayerId, std::span<const ObservedPlanet>) const;
     core::Result<bool> begin_corruption(PlanetId, corruption_fixture::Type, math::Fixed);
     core::Result<void> finish_corruption_mission(std::uint64_t, CorruptionMissionState);
@@ -520,6 +529,7 @@ public:
         std::shared_ptr<const std::vector<LiveCorruptionTransition>> published_corruption_transitions;
         std::array<std::uint64_t, 3> corruption_publication_key{};
         std::shared_ptr<const CorruptionMenu> published_corruption_menu;
+        std::shared_ptr<const std::vector<CorruptionMenu>> published_corruption_information;
         std::shared_ptr<const HeroActionMenus> published_hero_action_menus;
         std::array<std::uint64_t, 5> black_market_publication_key{};
     };
@@ -586,6 +596,9 @@ public:
     [[nodiscard]] session_detail::GatheredObject gather(EntityId id, session_detail::ObjectKind kind) const;
 
     [[nodiscard]] const Seat* seat(SeatId id) const noexcept;
+    // #7869: why a SeatAdmit for the new seat `id` cannot be applied, or nothing. Pure over the seat table, the
+    // seat-control state and the setup's players, so every peer reaches the same verdict.
+    [[nodiscard]] std::optional<std::string> seat_admission_problem(SeatId id, const SeatAdmit& admit) const;
     // Executes one command in the serial commit, appending its events.
     void execute(const GameCommand& command, std::uint64_t tick, std::vector<GalacticEvent>& events,
         bool pending_local_conflict = false);

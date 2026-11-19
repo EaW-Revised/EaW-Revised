@@ -381,6 +381,11 @@ struct PlanetInfoLayout { float panel_width{}, panel_height{}, close_width{}, cl
 // each advances by two, preserves input order and drops overflow.
 [[nodiscard]] std::vector<std::optional<std::size_t>> production_choice_slots(
     const std::vector<BuildChoiceComponent>& choices, std::size_t component_count);
+// GHUD-S91/S92: how many numbered production slots the layer authors: one past the highest `b_Create_NN` (two digits, NN below
+// `limit`, the row-count constant) among its components, in whatever group the layer files them. A mod may file the slots past
+// the sixteenth under another group; one retail capture of a Remake build bar (Calamari, space tab: 20 icons in each row, no
+// scroll control, #7905) shows the original drawing them all and cutting what does not fit.
+[[nodiscard]] std::size_t production_slot_count(const data::ui::CommandBarCatalog& catalog, std::size_t limit);
 
 // WGUI-40: local allegiance only, space queue before ground queue. The icon is
 // the status component's own authored texture, not the queued object's icon.

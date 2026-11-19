@@ -13,6 +13,7 @@ namespace eawr::sim::tactical {
 
 std::string_view to_string(const OrderKind kind) noexcept {
     switch (kind) {
+    case OrderKind::script_create_object: return "script_create_object";
     case OrderKind::battle_control: return "battle_control";
     case OrderKind::script_invulnerable: return "script_invulnerable";
     case OrderKind::land_garrison: return "land_garrison";
@@ -182,6 +183,7 @@ core::Diagnostic diagnostic(
 
 std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     switch (opcode) {
+    case opcode_script_create_object: return 48; // type, owner, reserved, position, identity
     case opcode_battle_control: return 16; // departing seat, version and bounded roster counts
     case 1:
         return 0;
@@ -238,6 +240,7 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
 }
 
 std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
+    if (std::holds_alternative<ScriptCreateObjectPayload>(command.payload)) return opcode_script_create_object;
     if (std::holds_alternative<TacticalSuperweaponPayload>(command.payload)) return opcode_tactical_superweapon;
     if (std::holds_alternative<LandGarrisonPayload>(command.payload)) return opcode_land_garrison;
     if (std::holds_alternative<LandUnloadPayload>(command.payload)) return opcode_land_unload;
@@ -454,6 +457,14 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
             sim::detail::append_i64(bytes, ability->position->y.raw());
             sim::detail::append_i64(bytes, ability->position->z.raw());
         }
+    } else if (const auto* created = std::get_if<ScriptCreateObjectPayload>(&command.payload)) {
+        sim::detail::append_u64(bytes, created->type);
+        sim::detail::append_u32(bytes, created->owner);
+        sim::detail::append_u32(bytes, 0);
+        sim::detail::append_i64(bytes, created->position.x.raw());
+        sim::detail::append_i64(bytes, created->position.y.raw());
+        sim::detail::append_i64(bytes, created->position.z.raw());
+        sim::detail::append_u64(bytes, created->identity);
     } else if (const auto* buy = std::get_if<BuyPayload>(&command.payload)) {
         sim::detail::append_u64(bytes, buy->type);
     } else if (const auto* release = std::get_if<CampaignCreditReleasePayload>(&command.payload)) {
@@ -536,6 +547,14 @@ core::Result<void> validate_command_shape(
         return core::Result<void>::failure(diagnostic(diagnostic_codes::resource_limit,
             std::string(context) + ": unit list exceeds the per-command limit", logical_path));
     }
+    if (const auto* created = std::get_if<ScriptCreateObjectPayload>(&command.payload);
+        created && (!command.units.empty() || created->type == 0
+            || (created->identity & script_creation_namespace) == 0
+            || created->identity == script_creation_namespace || command.origin == CommandOrigin::seat
+            || command.issuing_seat.value != 0 || land_domain
+            || std::none_of(players.begin(), players.end(), [&](const Player& player) { return player.player_id == created->owner; })))
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": invalid direct script creation", logical_path));
     if (const auto* tsw = std::get_if<TacticalSuperweaponPayload>(&command.payload);
         tsw && (command.units.size() != 1 || (tsw->stage != TswStage::start_approach && tsw->stage != TswStage::start_power_up)
             || (tsw->admission != TswAdmission::player && tsw->admission != TswAdmission::ai_object)))

@@ -7,6 +7,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 // GCMP-03 (#4359): the lockstep seam of the live parent session, modelled on the tactical LiveStepDriver. With a
@@ -32,6 +33,14 @@ struct LiveGameStepContext {
     std::function<std::vector<sim::galactic::GameCommand>(std::uint64_t)> command_source;
     // A refused local order, reported to rejected_orders().
     std::function<void(core::Diagnostic)> reject;
+    // The same refusal with the order it concerns, so the session can settle a save request that never reached the
+    // sealed input (otherwise its outcome stays requested and blocks every later save). Set by the live session.
+    std::function<void(const LiveGameOrder&, core::Diagnostic)> reject_order{};
+    // A refusal of one order: reported to rejected_orders() and, for a save request, settled as rejected.
+    void refuse(const LiveGameOrder& order, core::Diagnostic error) const {
+        if (reject_order) reject_order(order, error);
+        reject(std::move(error));
+    }
     // Engine-only, after independent all-peer barrier proof. The driver prepares
     // every fallible frontier object first, calls once, and returns no tick from
     // this step: the next context borrows the new owner. No player-load prologue.

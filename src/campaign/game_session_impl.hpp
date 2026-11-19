@@ -63,7 +63,7 @@ public:
     std::set<galactic::TypeId> story_heroes; // WST-31: the types that count as heroes for STORY_MOVE (named heroes)
     std::vector<GameStoryNotice> story_notices; // current publication only, never saved/hashed
     core::Result<void> story_notice(GameStoryNotice notice);
-    // GuiClick commands executed this session tick per seat (max_gui_clicks_per_tick); a bound, never saved or hashed.
+    // GuiClick and CorruptionDialogOpened commands share the per-seat/tick bound; never saved or hashed.
     std::uint64_t gui_click_tick{};
     std::map<galactic::SeatId, unsigned> gui_clicks_this_tick;
     // #683: the live plot engine; absent when the campaign names no plots. Fed by story_notice and the

@@ -300,6 +300,14 @@ void EawrBattleOverlay::layout_results() {
         result_scroll_[side] = std::min(result_scroll_[side], model::loss_scroll_max(results_.losses[side].size()));
     }
     for (auto& gadget : result_dialog_->gadgets) {
+        if (gadget.id == "IDC_BATTLE_VICTORY_IMAGE") {
+            if (auto* image = Object::cast_to<TextureRect>(gadget.control)) {
+                const auto texture = !results_.picture.empty() && style_.result_picture
+                    ? style_.result_picture(results_.picture) : Ref<Texture2D>();
+                image->set_texture(texture);
+                image->set_visible(texture.is_valid());
+            }
+        }
         if (auto* label = Object::cast_to<EawrUiLabel>(gadget.control)) {
             if (gadget.id == "IDC_TITLE_STATIC") label->set_text(*ended_ ? style_.victory_title : style_.defeat_title);
             else if (gadget.id == "IDC_TIME_STATIC") label->set_text(style_.battle_time + " "
@@ -657,10 +665,22 @@ std::string EawrBattleOverlay::report_json() const {
                                                            : std::string("null"))
            << ", \"end_panel\": ";
     if (ended_) {
+        bool picture_drawn = false;
+        Rect2 picture_rect;
+        if (result_dialog_) for (const auto& gadget : result_dialog_->gadgets) {
+            if (gadget.id != "IDC_BATTLE_VICTORY_IMAGE") continue;
+            if (auto* image = Object::cast_to<TextureRect>(gadget.control)) {
+                picture_drawn = image->is_visible_in_tree() && image->get_texture().is_valid();
+                picture_rect = image->get_global_rect();
+            }
+        }
         output << "{\"title\": " << json(utf8(*ended_ ? style_.victory_title : style_.defeat_title))
                << ", \"rect\": " << rect_json(panel_rect_)
                << ", \"authored_dialog\": " << (result_dialog_ ? "true" : "false")
                << ", \"status\": " << json(results_.status_message)
+               << ", \"picture\": " << json(results_.picture)
+               << ", \"picture_drawn\": " << (picture_drawn ? "true" : "false")
+               << ", \"picture_rect\": " << rect_json(picture_rect)
                << ", \"status_rect\": " << rect_json(Rect2(result_status_->get_position(), result_status_->get_size()))
                << ", \"losses_top\": " << result_losses_top_
                << ", \"quit_rect\": " << rect_json(Rect2(quit_->get_position(), quit_->get_size())) << "}";

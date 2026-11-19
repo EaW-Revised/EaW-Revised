@@ -2,7 +2,10 @@
 #include "eawr/vfs/vfs.hpp"
 #include "battle_effects.hpp"
 #include "particle_texture_load.hpp"
+#include "particle_detail_threshold.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/data/tag_trace.hpp"
+#include "eawr/data/xml.hpp"
 
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/scene/scene.hpp"
@@ -15,7 +18,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <locale>
+#include <sstream>
 #include <set>
 #include <utility>
 
@@ -131,6 +137,30 @@ namespace {
 }
 } // namespace
 
+// PS-45 uses binary32 equality, so the Q24 XML reader would lose a boundary.
+// Use the locale-independent numeric-prefix pattern of the UI XML readers.
+float particle_detail_threshold(const data::EffectiveObject& object) {
+    const auto threshold = object.single("No_Particle_Below_Detail_Level");
+    if (!threshold) return 0.0F;
+    data::tag_trace::used(threshold->value);
+    auto text = core::trim_view(threshold->value.raw_text);
+    if (!text.empty() && text.front() == '+') text.remove_prefix(1);
+    float value{};
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (parsed.ec != std::errc::result_out_of_range) return value;
+
+    // from_chars leaves its output unchanged on overflow AND underflow. Preserve
+    // their C float-read admission outcomes without consulting the process locale.
+    std::istringstream input{std::string(text)};
+    input.imbue(std::locale::classic());
+    long double wide{};
+    input >> wide;
+    constexpr auto limit = static_cast<long double>(std::numeric_limits<float>::max());
+    if (wide > limit) return std::numeric_limits<float>::infinity();
+    if (wide < -limit) return -std::numeric_limits<float>::infinity();
+    return static_cast<float>(wide);
+}
+
 const assets::Texture* BattleEffects::resolve_texture(const std::string_view authored) {
     const std::size_t slash = authored.find_last_of("/\\");
     const std::string name = lower(slash == std::string_view::npos ? authored : authored.substr(slash + 1));
@@ -213,6 +243,7 @@ void BattleEffects::prepare_effect_constants() {
 template <typename LookOf>
 void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, LookOf& look_of) {
     scene::VfsAssetCache model_cache(*filesystem_);
+    heal_target_bones_.clear();
     std::map<std::string, std::map<tactical::TypeId, std::string>> lucky_projectiles;
     for (const auto& holder : tables.units) {
         const auto& abilities = holder.kind == units::UnitKind::squadron ? holder.team_abilities : holder.abilities;
@@ -237,7 +268,8 @@ void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const si
     }
     for (const units::UnitType& type : tables.units) {
         TypeLooks looks;
-        looks.healing = type.special_abilities;
+        // ABG-18: heal events index the runtime team handlers, not the purchase template.
+        looks.healing = type.kind == units::UnitKind::squadron ? type.team_special_abilities : type.special_abilities;
         for (const auto& handler : looks.healing) {
             if (handler.kind != tactical::SpecialAbilityKind::force_healing || handler.heal_lightning.empty()
                 || healing_lightning_.contains(handler.heal_lightning)) continue;
@@ -519,6 +551,25 @@ void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const si
                 }
             }
         }
+        // ABG-19: ROOT is a name, not a fixed bone index; resolve once for this model.
+        if (const auto root = looks.named_bones.find("root"); root != looks.named_bones.end()) looks.root_bone = root->second;
+        // ABG-06: owner candidates are invariant for this model; choose once, in authored order.
+        for (const auto& handler : looks.healing) {
+            std::uint32_t chosen = looks.root_bone;
+            std::string_view remaining = handler.heal_owner_bone;
+            constexpr std::string_view separators = ", \t\r\n\v\f";
+            for (;;) {
+                const auto first = remaining.find_first_not_of(separators);
+                if (first == std::string_view::npos) break;
+                remaining.remove_prefix(first);
+                const auto end = remaining.find_first_of(separators);
+                const auto candidate = looks.named_bones.find(lower(remaining.substr(0, end)));
+                if (candidate != looks.named_bones.end()) { chosen = candidate->second; break; }
+                if (end == std::string_view::npos) break;
+                remaining.remove_prefix(end);
+            }
+            looks.healing_owner_bones.push_back(chosen);
+        }
         types_.emplace(id, std::move(looks));
     }
 }
@@ -572,7 +623,10 @@ void BattleEffects::prewarm_effect_programs() {
                 &looks.shield_hits, &looks.asteroid_hits}) {
             for (const auto& name : *names) warm(name);
         }
-        for (const auto& handler : looks.healing) warm(handler.heal_particle);
+        for (const auto& handler : looks.healing) {
+            warm(handler.heal_particle);
+            warm(handler.heal_owner_particle);
+        }
     }
     backend_->finish_program_prewarm(std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - warm_start).count());
@@ -651,6 +705,7 @@ const BattleEffects::ParticleType* BattleEffects::particle_type(const std::strin
     } else {
         const std::string model = tag(object.value(), "Space_Model_Name");
         const auto lifetime = numbers(tag(object.value(), "Particle_Lifetime_Frames"));
+        type.minimum_detail = particle_detail_threshold(object.value());
         type.lifetime_frames = lifetime.empty() ? 0U : static_cast<std::uint32_t>(std::max(0.0F, lifetime.front()));
         type.attached_to_collision = truthy(tag(object.value(), "Particle_Attach_To_Collision"));
         type.decoration = truthy(tag(object.value(), "Is_Decoration"));

@@ -1272,9 +1272,8 @@ void prebattle_autosave_admission() {
         if (!coop) expect(autosave(game, 2).kind == galactic::GalacticEventKind::save_rejected,
             "WGS-143 a non-human seat cannot issue the prebattle autosave");
         const auto event = autosave(game, 1);
-        expect(event.kind == (coop ? galactic::GalacticEventKind::save_rejected : galactic::GalacticEventKind::save_requested),
-            "WGS-99/143 the pending prompt admits the prebattle autosave for a single human only");
-        if (coop) continue;
+        expect(event.kind == galactic::GalacticEventKind::save_requested,
+            "WGS-99 the pending prompt admits the prebattle autosave (multiplayer too, #7852 deviation from WGS-33)");
         expect(event.subject == 1U && game.pending_conflict() && !game.conflict(), "the admitted request leaves the prompt pending, no child");
         const auto saved = take(cp::save_game_checkpoint(game, identities));
         cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;

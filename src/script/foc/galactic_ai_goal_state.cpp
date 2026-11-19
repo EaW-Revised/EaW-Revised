@@ -194,7 +194,8 @@ struct Archive {
         v.tech_level, v.base_level, v.combat_power, v.max_attack_distance, v.max_speed, v.soft_radius,
         v.reveal_range, v.weapons, v.weapon_damage, v.squadron, v.craft, v.squadron_units,
         v.squadron_unit, v.capture_point, v.build_pad, v.initial_state_visible_under_fow,
-        v.last_state_visible_under_fow, v.tactical_cost, v.unit_ai, v.previous_base_levels); }
+        v.last_state_visible_under_fow, v.tactical_cost, v.unit_ai, v.previous_base_levels, v.upgrade_object,
+        v.tactical_campaign_cost); }
     void item(GoalFunction& v) { fields(v.goal, v.function); }
     void item(Node& v) { fields(v.kind, v.value, v.text, v.lookup); }
     void item(Lookup& v) { fields(v.tokens, v.parameters); }
@@ -1417,6 +1418,8 @@ core::Result<std::string> native_configuration(const AiSetup& setup) {
         ar.fields(content.types, content.projectile_categories, content.categories, content.properties,
             seed, schedule.mode, schedule.attach_per_tick, special, perception.campaign_game,
             perception.defender, perception.base_level, perception.campaign_defender);
+        auto local = setup.local_player;
+        ar.item(local);
         for (auto player : setup.players) ar.fields(player.player, player.faction, player.neutral,
             player.ai, player.player_type, player.human);
         bool bounds = setup.bounds.has_value(); ar.item(bounds);

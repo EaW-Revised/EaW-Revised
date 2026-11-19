@@ -38,6 +38,62 @@ int case_galactic_planet_hud_tests() {
         assert((planet_hover_levels(facts, std::nullopt, std::nullopt) == PlanetHoverLevels{}));
     }
     {
+        // GHUD-S91: the numbered production slots count whatever group the layer files them under (a mod files the slots past
+        // the sixteenth under another group; the original draws them all).
+        const std::string layer = "<CommandBarComponents>"
+            "<CommandBarComponent Name='b_Create_00'><Type>Button</Type><Group>Structure Buttons</Group></CommandBarComponent>"
+            "<CommandBarComponent Name='b_Create_01'><Type>Button</Type><Group>Hero Buttons</Group></CommandBarComponent>"
+            "<CommandBarComponent Name='b_Create_03'><Type>Button</Type></CommandBarComponent>"
+            "<CommandBarComponent Name='b_Create_5'><Type>Button</Type></CommandBarComponent>"
+            "<CommandBarComponent Name='b_Create_x'><Type>Button</Type></CommandBarComponent>"
+            "<CommandBarComponent Name='b_Create_41'><Type>Button</Type><Group>Hero Buttons</Group></CommandBarComponent>"
+            "<CommandBarComponent Name='b_scroll_left'><Type>Button</Type></CommandBarComponent>"
+            "</CommandBarComponents>";
+        eawr::data::ui::CommandBarCatalog catalog;
+        eawr::vfs::AssetRecord record; record.canonical_path = "data/xml/synthetic_slots.xml";
+        std::vector<eawr::core::Diagnostic> diagnostics;
+        assert(eawr::data::ui::parse_command_bar_components(std::as_bytes(std::span(layer.data(), layer.size())),
+            record, catalog, diagnostics));
+        assert(production_slot_count(catalog, 40) == 4); // 00, 01 and 03; the loose spellings and 41 (past the limit) do not count
+        assert(production_slot_count(catalog, 3) == 2);  // below the row-count constant only
+        assert(production_slot_count(catalog, 0) == 0);
+        assert(production_slot_count(eawr::data::ui::CommandBarCatalog{}, 40) == 0);
+        // A stock-style shell (16 numbered slots, all in the Structure Buttons group) counts 16; a Remake-style one files slots
+        // 16 and up under another group and still counts 40, 20 per row class.
+        const auto numbered = [](const std::size_t total, const std::size_t grouped) {
+            std::string xml = "<CommandBarComponents>";
+            for (std::size_t slot = 0; slot < total; ++slot) {
+                xml += "<CommandBarComponent Name='b_Create_" + std::string(slot < 10 ? "0" : "") + std::to_string(slot)
+                    + "'><Type>Button</Type><Group>" + (slot < grouped ? "Structure Buttons" : "Other Buttons") + "</Group></CommandBarComponent>";
+            }
+            return xml + "</CommandBarComponents>";
+        };
+        const auto count_for = [&](const std::size_t total, const std::size_t grouped, const std::size_t limit) {
+            eawr::data::ui::CommandBarCatalog slots;
+            eawr::vfs::AssetRecord slot_record; slot_record.canonical_path = "data/xml/synthetic_numbered.xml";
+            std::vector<eawr::core::Diagnostic> slot_diagnostics;
+            const auto xml = numbered(total, grouped);
+            assert(eawr::data::ui::parse_command_bar_components(std::as_bytes(std::span(xml.data(), xml.size())),
+                slot_record, slots, slot_diagnostics));
+            return production_slot_count(slots, limit);
+        };
+        assert(count_for(16, 16, 40) == 16);
+        assert(count_for(40, 16, 40) == 40);
+        assert(count_for(40, 40, 16) == 16); // the row-count constant bounds the numbers
+        // The 40 slots hold 20 choices per row class and drop what does not fit (the original cuts; the build tray lists the rest).
+        std::vector<BuildChoiceComponent> calamari(70);
+        for (std::size_t index = 0; index < calamari.size(); ++index) calamari[index].row = index < 27 ? 0 : 1;
+        const auto forty = production_choice_slots(calamari, 40);
+        assert(forty.size() == 40);
+        std::size_t shown_zero = 0, shown_other = 0;
+        for (std::size_t slot = 0; slot < forty.size(); ++slot) {
+            if (!forty[slot]) continue;
+            ((slot % 2 == 1) ? shown_zero : shown_other) += 1;
+            assert((calamari[*forty[slot]].row == 0) == (slot % 2 == 1));
+        }
+        assert(shown_zero == 20 && shown_other == 20);
+    }
+    {
         eawr::data::ui::CommandBarComponent filter;
         filter.name = "synthetic_filter"; filter.groups = {"fIlTeR_Space"};
         assert(is_command_filter(filter));

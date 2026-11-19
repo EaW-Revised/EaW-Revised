@@ -11,13 +11,30 @@ import xml.etree.ElementTree as ET
 VOICES = (("empire", "Empire", "f0_fx"), ("rebel", "Rebel", "plain"),
           ("underworld", "Underworld", "f0_fx"))
 SKIP_LOCAL = "964037908"
+# The layer configuration files the repository owns: their path in the layer and
+# their template under tools/. The installer writes them; a kit or a release takes
+# them from its own commit (tools/release/finish_kit.py, cut_kit.py), so a layer
+# folder only has to carry the private part. Each must equal its row in
+# tools/release/revised-layer-manifest.json (tests/ci/test_package_release.py).
+REPO_LAYER_FILES = {
+    "Data/XML/SelectionControls.xml": "revised_gift_sfx/SelectionControls.xml",
+    "Data/XML/SFXEventFilesAdditions.xml": "revised_gift_sfx/SFXEventFilesAdditions.xml",
+    "Data/XML/RevisedGiftSFX.xml": "revised_gift_sfx/RevisedGiftSFX.xml",
+    "Data/XML/RevisedPlanetSearch.xml": "revised_planet_search/RevisedPlanetSearch.xml",
+    "Data/XML/RevisedBuildTray.xml": "revised_build_tray/RevisedBuildTray.xml",
+    "Data/XML/RevisedBuildTrayGroups.xml": "revised_build_tray/RevisedBuildTrayGroups.xml",
+}
 # sha256 of every earlier shipped version of the layer configuration files. A
 # destination file equal to one of these (or to the current template) was never
 # hand-edited, so the installer may update it; anything else is the owner's.
 KNOWN_TEMPLATES = {
-    "RevisedPlanetSearch.xml": frozenset(),
+    "RevisedPlanetSearch.xml": frozenset({
+        "809ffab5a9d901a7cc31ae4a3a946a239d9efe940c00627253d264905316becb"}),
+    "RevisedBuildTray.xml": frozenset(),
+    "RevisedBuildTrayGroups.xml": frozenset(),
     "SelectionControls.xml": frozenset({
-        "1fea04d62f745b14dd6b6687184f0322805c46246d4e481e8856d4129fa98c17"}),
+        "1fea04d62f745b14dd6b6687184f0322805c46246d4e481e8856d4129fa98c17",
+        "ce653c486d245cc3168c5ce112b88b4c7632655377a63c6b1653335c92b2385d"}),
     "SFXEventFilesAdditions.xml": frozenset({
         "3f418c91cd83797506ef992676014df4c852e842976768fb11c84d7801f51eef"}),
     "RevisedGiftSFX.xml": frozenset({
@@ -37,10 +54,8 @@ def install(source: Path, destination: Path, force: bool = False,
         destination = destination / "Revised"
     events = ET.Element("SFXEvents")
     # Keep the recoverable configuration byte-identical on every platform.
-    templates = Path(__file__).with_name("revised_gift_sfx")
-    config_bytes = {name: (templates / name).read_bytes() for name in
-                    ("SelectionControls.xml", "SFXEventFilesAdditions.xml", "RevisedGiftSFX.xml")}
-    config_bytes["RevisedPlanetSearch.xml"] = (templates.parent / "revised_planet_search" / "RevisedPlanetSearch.xml").read_bytes()
+    tools = Path(__file__).parent
+    config_bytes = {Path(name).name: (tools / template).read_bytes() for name, template in REPO_LAYER_FILES.items()}
     copies = []
     counts = {}
     # Validate the complete selection before changing the destination.

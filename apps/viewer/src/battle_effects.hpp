@@ -32,6 +32,7 @@
 #include <optional>
 #include <ostream>
 #include <set>
+#include <tuple>
 #include <span>
 #include <string>
 #include <string_view>
@@ -242,7 +243,9 @@ private:
     ProjectileObserver projectile_observer_;
     struct TypeLooks final {
         std::vector<sim::tactical::SpecialAbilityProfile> healing;
+        std::vector<std::uint32_t> healing_owner_bones;
         std::map<std::string, std::uint32_t> named_bones;
+        std::uint32_t root_bone{};
         std::array<space::Vec3d, 3> beam_origins{};
         std::array<std::optional<std::uint32_t>, 3> beam_bones{};
         std::string leech_effect;
@@ -290,6 +293,7 @@ private:
     };
     struct ParticleType final {
         std::string model_path;   // logical ALO path, empty when unresolved
+        float minimum_detail{};  // PS-45: global detail must exceed this at object creation.
         std::uint32_t lifetime_frames{};
         bool attached_to_collision{};  // Particle_Attach_To_Collision (BP-18)
         bool decoration{};            // WPJ-40: only decorations use terminal culls.
@@ -328,6 +332,8 @@ private:
         std::string key;
         std::optional<std::uint32_t> first_age;
         std::optional<particles::EmitterFrame> frame;
+        sim::EntityId owner{};
+        std::uint32_t bone{};
     };
     struct Batch final {
         std::uint64_t resource{};
@@ -500,6 +506,9 @@ private:
     std::vector<ContactSample> contact_samples_;
     // The last frame of every unit seen, for the explosions of units that left the session.
     std::map<sim::EntityId, UnitFrame> last_seen_;
+    // The target bone a healer's handler resolves on a recipient model: fixed by the authored list and the loaded
+    // models, so it is chosen once per (healer type, handler, recipient type) and not per heal pulse.
+    std::map<std::tuple<sim::tactical::TypeId, std::uint32_t, sim::tactical::TypeId>, std::uint32_t> heal_target_bones_;
     // WSD-11: the tick each unit the local player saw die was destroyed. A self-destructing unit has left the
     // world when its blast detonates, so its blast shows when the unit was seen at its death.
     std::map<sim::EntityId, std::uint64_t> seen_deaths_;
@@ -572,6 +581,7 @@ private:
     std::map<std::string, std::uint64_t> not_drawn_;     // projectile type -> frames it was in flight undrawn
     std::map<std::string, std::uint64_t> terminal_culls_; // WPJ-40 admission reason -> terminal events
     std::map<std::string, std::uint64_t> spawned_;       // reason:particle -> count
+    std::map<std::string, std::uint64_t> detail_suppressed_; // PS-45 creation gate, not resource failure.
     std::map<std::string, std::uint64_t> spawn_failed_;  // reason:particle -> count
     std::map<std::string, std::uint64_t> expired_;       // reason:particle -> skipped, lifetime over
     std::map<std::uint64_t, std::uint64_t> hit_events_;   // tick -> projectile hits the local player saw

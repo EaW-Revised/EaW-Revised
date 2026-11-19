@@ -54,11 +54,31 @@ void test_cancel_flash() {
     expect(le::apply(le::self_destruct_cancel(running, 1040.0, 0U), 1040.0, base) == std::nullopt, "a zero share never runs");
 }
 
+void test_two_way_pulse() {
+    for (const auto pulses : {1U, 3U, 65535U}) {
+        const le::State state{le::Kind::two_way_pulse, {4.0F, 0.0F, 0.0F}, 100.0, 60.0, pulses,
+            {0.0F, 0.0F, 4.0F}};
+        const double period = 60.0 / static_cast<double>(pulses);
+        const auto at = [&](const double phase) { return le::apply(state, 100.0 + period * phase, base); };
+        const auto first = at(0.25), middle = at(0.5), second = at(0.75);
+        expect(first && near((*first)[0], 4.0F) && near((*first)[2], 0.0F), "ABG-13: first quarter reaches color one");
+        expect(middle && near((*middle)[0], 1.0F) && near((*middle)[2], 1.0F), "ABG-13: half period returns to base");
+        expect(second && near((*second)[0], 0.0F) && near((*second)[2], 4.0F), "ABG-13: third quarter reaches color two");
+        if (pulses > 1U) {
+            const auto repeated = at(1.25);
+            expect(repeated && near((*repeated)[0], 4.0F), "ABG-13: authored count repeats equal periods");
+        }
+        expect(le::apply(state, 99.0, base) == std::nullopt && le::apply(state, 160.0, base) == std::nullopt,
+            "ABG-13: finite pulse respects start and duration");
+    }
+}
+
 } // namespace
 
 int main() {
     test_pulse();
     test_late_sight();
     test_cancel_flash();
+    test_two_way_pulse();
     return failures == 0 ? 0 : 1;
 }

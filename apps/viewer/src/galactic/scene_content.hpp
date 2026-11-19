@@ -7,6 +7,7 @@
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/presentation/lighting/lighting.hpp"
 #include "eawr/presentation/particles/particles.hpp"
+#include "eawr/presentation/ui/build_tray_model.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
 
 #include <array>
@@ -74,6 +75,9 @@ struct ProductionArt final {
     std::int32_t population{};
     // WGUI-89: authored rank, with the shared type default established by BA-20.
     std::int64_t hero_rank{25};
+    // GBT-04, GBT-05 (build tray): what groups a build choice. `category_names` are the authored CategoryMask names,
+    // `members` the squadron and company member type names, `behaviors` the Behavior values.
+    std::vector<std::string> category_names, members, behaviors;
 };
 // WGP-16: the model a galaxy-map fleet marker uses: the override model of the first member, in fleet order, whose type
 // authors one (`override_of(type)` returns it, empty for none), else the stock marker. Which member decides in a fleet
@@ -88,6 +92,8 @@ template <typename Members, typename Lookup>
 // text. GC ordering and authoritative prices remain caller-owned.
 [[nodiscard]] std::map<std::string, ProductionArt> load_production_art(
     const data::Catalog& catalog, const data::ui::TextDatabase* text = nullptr);
+// GBT-04, GBT-05: the facts the build tray groups choices by, one entry per production type.
+[[nodiscard]] presentation::ui::build_tray::TypeIndex build_tray_types(const std::map<std::string, ProductionArt>& art);
 
 [[nodiscard]] PlanetAbilityMetadata planet_ability_metadata(const data::galactic::Planet& planet,
     const data::ui::TextDatabase* text, std::vector<std::string>& diagnostics);

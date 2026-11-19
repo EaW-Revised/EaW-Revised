@@ -25,6 +25,21 @@ binary lookups and authoring extracts remain in ignored research output.
 | TCFA-14 | Preserve existing `foc-ignores` decisions for `Is_Bomber`, `Number_per_Squadron`, `Autoresolve_Health` and `AITechLevelProductionTimeWeight`. Their DB-NOTAG evidence is a whole-image parser/string/template scan, not an inference from this audit's missing consumers. | Registry DB-NOTAG evidence; effective XML contains these authored names. |
 | TCFA-15 | The loader accepts only `Goal_Category` under `Plans`; goal activation has no named-plan consumer. The effective stock skirmish faction players all select `Test_Space`, which authors no `Plans/Name`. Named switches are authored by galactic defaults and campaign intervention templates (survey below). Retain both rows as `deferred` with the GC AI owner for named-plan semantics and support; do not claim a whole-tag galactic boundary because `SandboxHuman` also lists intervention templates for Space and Land. | Static consumer audit: `ai_data.cpp#load_ai_data` and `categories`, `ai_goals.cpp` category activation; effective faction, player, template, campaign and intervention-goal XML survey. |
 
+## Registered space bodies and shared consumers
+
+| Rule | Finding and registry decision | Evidence |
+| --- | --- | --- |
+| TCFA-16 | A registered type that enters the ordinary space-body and production closure uses the shared combat-power metric and queue selector independently of its XML element spelling. This includes template-inherited fields and overrides on mod-authored body classes. Its `UNIT_AI`, locomotor and selection flags likewise feed the existing space AI inputs. Mark those scalar consumers applied and retain partial status for the qualified behavior tokens; this does not implement every behavior token. Squadron power keeps PL-13's member-derived rule, and a squadron-shaped custom class is not qualified by pretending it is an ordinary ship. Station script and research decisions are separate consumers. | Debug build TCAI-E01: common type combat-power metric and production-queue getters and callers; PG-08, PL-13, PU-14 and WPR-30. Current consumers: `skirmish::ai_setup`, AI object power queries, ordinary production offer construction and queue admission. The synthetic class contract checks inherited/overridden AI inputs and an actual purchase on the selected queue with equal hashes on 1, 2, 4 and 8 workers. |
+| TCFA-17 | `Sort_Order_Adjust` and `TacticalBehavior` have no parser or consumer under those authored names. Preserve their existing `foc-ignores` disposition for the remaining audited space classes; neither name aliases `SpaceBehavior` or a render-order setting. | Debug build TCAI-E02: no tag-table row or whole-image string match for either name; existing DB-NOTAG evidence and AVC-07. |
+
+The class fixture covers registered live-body spellings from the mod corpus,
+including `FlagshipTemplate`, `FlagshipUnit`, `SkirmishSpaceUnit` and
+`SurvivalSpaceUnit`. It checks a loaded purchase closure rather than inferring
+admission from an authored tag. This qualification does not extend to team
+containers, debris, particle/projectile actors, menu definitions or land-only
+objects. The existing `Squadron` consumer does not qualify `SkirmishSquadron`
+class dispatch.
+
 ## Static AI loader trace
 
 | Class/tag | Loader field in `src/script/foc/ai_data.cpp` | Application target |
@@ -214,3 +229,15 @@ remain unverified and belong with the GC AI owner's named-plan support work.
 Mod-authored space templates can still name plans; that unsupported case remains
 explicitly deferred. No AI loader or goal-activation behaviour changes follow
 from this survey.
+
+## Registered body retaliation restrictions
+
+| Rule | Finding and registry decision | Evidence |
+| --- | --- | --- |
+| TCFA-18 | A registered ordinary space body carries its effective `Attack_Category_Restrictions` into non-direct damage retaliation. A matching attacker category refuses the response before target suitability; overriding the inherited mask with a disjoint category admits the same otherwise suitable attacker. This qualification covers `SpaceUnit`, `Template`, `SpecialStructure` and `SecondaryStructure` bodies in the loaded space closure, without extending projectile, menu or land dispatch. | WTA-29; debug build TCAI-E03; common body mask loading, combat-profile binding and `retaliation_state`. The synthetic XML contract checks both inheritance and override through the actual retaliation consumer. |
+
+## Chase ranges and attacker extension on ships and containers
+
+| Rule | Finding and registry decision | Evidence |
+| --- | --- | --- |
+| TCFA-20 | `Autonomous_Move_Extension_Vs_Attacker` and the idle, guard and attack-move chase ranges have exactly two original readers, the formation divert test and the formation repath test. Both refuse an object with a space layer before reading any of those values unless its type sets the layer-disregard flag (OR-11); no inspected data authors that flag. In the stock data every ship that authors these tags has a layer, the other carriers are land heroes or fighter-locomotor craft. A ship-level reader would therefore change no stock behaviour, so none is added and the `SpaceUnit`, `UniqueUnit` and `HeroUnit` rows keep their `todo` status with this note. A team container resolves its values through its squadron purchase type, which main already reads; authored hero-team containers need hero-team support (TCFA-04), not a leash reader. | Debug build, the two formation tests and the object type resolution, researched on 2026-11-19; OR-11 in `space-orders.md`; the stock XML census of carriers by layer. |

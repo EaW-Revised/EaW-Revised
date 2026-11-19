@@ -378,6 +378,8 @@ struct CompletedBuild {
     EntityId object{}; // WPR-22: hidden upgrade object held by its station, stable ID
     std::vector<IncomeModifierState> income_modifiers{};
     std::optional<std::uint64_t> level_up_service_frame{}; // WSL-31: initialized at held-object creation
+    std::uint64_t script_identity{}; // SSU-03: direct creation, independent of a station holder
+    math::Vec3 script_position{};
     friend constexpr bool operator==(const CompletedBuild&, const CompletedBuild&) noexcept = default;
 };
 

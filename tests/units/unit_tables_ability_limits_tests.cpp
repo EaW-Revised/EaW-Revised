@@ -916,6 +916,91 @@ void jamming_parameters_load() {
     expect(identities[0] != identities[1], "WJM-01: durations beyond one hour retain their authored identity");
 }
 
+void healing_two_way_light_parameters() {
+    for (const auto two_way : {false, true}) {
+        TempTree tree;
+        const auto light = [&](const std::string& side) {
+            return "<" + side + "_Light_Effect_Type>" + (two_way ? "Two_Way_Pulse" : "Color_Flash")
+                + "</" + side + "_Light_Effect_Type><" + side + "_Light_Effect_Color>4, 0, 0</"
+                + side + "_Light_Effect_Color><" + side + "_Light_Effect_Color2>0, 2, 4</"
+                + side + "_Light_Effect_Color2><" + side + "_Light_Effect_Duration>2</"
+                + side + "_Light_Effect_Duration><" + side + "_Light_Effect_Pulse_Count>3</"
+                + side + "_Light_Effect_Pulse_Count>";
+        };
+        write_fixture(tree.root, with_second_frigate(with_abilities(layer_xml("15", "0.8"), "",
+            "<Abilities SubObjectList=\"Yes\"><Force_Healing_Ability Name=\"Second_Colors\">"
+            "<Activation_Style>Space_Automatic</Activation_Style>" + light("Owner") + light("Target")
+            + "</Force_Healing_Ability></Abilities>")));
+        const auto tables = load_layers({tree.root});
+        if (!tables) continue;
+        const auto bound = eawr::units::ability_table(*tables);
+        expect(static_cast<bool>(bound), "ABG-13: authored two-way lights bind");
+        if (!bound) continue;
+        const auto* profile = bound.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+        const auto* handler = profile && !profile->special.empty() ? &profile->special.front() : nullptr;
+        expect(handler != nullptr, "ABG-13: two-way handler reaches the ability table");
+        if (!handler) continue;
+        const auto kind = two_way ? t::HealingLightKind::two_way_pulse : t::HealingLightKind::color_flash;
+        expect(handler->heal_owner_light_kind == kind && handler->heal_target_light_kind == kind
+            && handler->heal_owner_light_pulses == 3U && handler->heal_target_light_pulses == 3U
+            && handler->heal_owner_colour2[2] == Fixed::from_raw((two_way ? 4 : 0) * Fixed::scale)
+            && handler->heal_target_colour2[1] == Fixed::from_raw((two_way ? 2 : 0) * Fixed::scale),
+            "ABG-13: only Two_Way_Pulse binds second colors on both sides");
+        auto changed = *tables;
+        for (auto& unit : changed.units) for (auto& special : unit.special_abilities)
+            if (special.kind == t::SpecialAbilityKind::force_healing)
+                special.heal_target_colour2[0] = Fixed::from_raw(Fixed::scale);
+        expect((eawr::units::content_identity(changed) != eawr::units::content_identity(*tables)) == two_way,
+            "ABG-13: only a consumed second color participates in content identity");
+    }
+}
+
+void healing_linear_light_parameters() {
+    for (const auto style : {"Color_Flash", "Linear_Pulse", "lInEaR_pUlSe", "Smooth_Pulse", ""}) {
+        for (const auto pulses : {1U, 3U}) {
+            TempTree tree;
+            const auto light = [&](const std::string& side) {
+                return "<" + side + "_Light_Effect_Type>" + style + "</" + side + "_Light_Effect_Type>"
+                    "<" + side + "_Light_Effect_Color>4, 2, 0</" + side + "_Light_Effect_Color>"
+                    "<" + side + "_Light_Effect_Duration>2</" + side + "_Light_Effect_Duration>"
+                    "<" + side + "_Light_Effect_Pulse_Count>" + std::to_string(pulses)
+                    + "</" + side + "_Light_Effect_Pulse_Count>";
+            };
+            write_fixture(tree.root, with_second_frigate(with_abilities(layer_xml("15", "0.8"), "",
+                "<Abilities SubObjectList=\"Yes\"><Force_Healing_Ability Name=\"Authored_Light\">"
+                "<Activation_Style>Space_Automatic</Activation_Style>" + light("Owner") + light("Target")
+                + "</Force_Healing_Ability></Abilities>")));
+            const auto tables = load_layers({tree.root});
+            if (!tables) continue;
+            const auto bound = eawr::units::ability_table(*tables);
+            expect(static_cast<bool>(bound), "ABG-12: authored healing light binds");
+            if (!bound) continue;
+            const auto* profile = bound.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+            const auto* handler = profile && !profile->special.empty() ? &profile->special.front() : nullptr;
+            expect(handler != nullptr, "ABG-12: healing light handler is retained");
+            if (!handler) continue;
+            const bool linear = std::string_view(style) == "Linear_Pulse" || std::string_view(style) == "lInEaR_pUlSe";
+            const bool supported = linear || std::string_view(style) == "Color_Flash";
+            const auto kind = linear ? t::HealingLightKind::linear_pulse : t::HealingLightKind::color_flash;
+            expect(handler->heal_owner_light_kind == kind && handler->heal_target_light_kind == kind
+                && handler->heal_owner_light_frames == (supported ? 60U : 0U)
+                && handler->heal_target_light_frames == (supported ? 60U : 0U)
+                && handler->heal_owner_light_pulses == (supported ? pulses : 1U)
+                && handler->heal_target_light_pulses == (supported ? pulses : 1U),
+                "ABG-12: kind, duration and pulse count reach both owner and target presentation profiles");
+            expect(handler->heal_owner_colour[0] == Fixed::from_raw((supported ? 4 : 0) * Fixed::scale)
+                && handler->heal_target_colour[1] == Fixed::from_raw((supported ? 2 : 0) * Fixed::scale),
+                "ABG-12: supported light colors survive; other styles remain unbound");
+            auto changed = *tables;
+            for (auto& unit : changed.units) for (auto& special : unit.special_abilities)
+                if (special.kind == t::SpecialAbilityKind::force_healing)
+                    special.heal_owner_light_kind = linear ? t::HealingLightKind::color_flash : t::HealingLightKind::linear_pulse;
+            expect(eawr::units::content_identity(changed) != eawr::units::content_identity(*tables),
+                "ABG-12: a non-default light selector is bound without changing default encoding");
+        }
+    }
+}
+
 // WSH-10: XML perturbations must reach health, not merely survive parsing.
 void healing_automatic_modes() {
     using eawr::units::Fixed;
@@ -928,6 +1013,7 @@ void healing_automatic_modes() {
             const auto flat = radius == 160 ? "7" : "3";
             const auto blob_colour = radius == 160 ? "90, 80, 70, 60" : "12, 34, 56, 78";
             const auto blob_material = radius == 160 ? "Other_Range" : "Custom_Range";
+            const std::string owner_particle = radius == 160 ? "Other_Owner_Pulse" : "Authored_Owner_Pulse";
             write_fixture(tree.root, with_second_frigate(with_abilities(layer_xml("15", "0.8"), "",
                 "<Abilities SubObjectList=\"Yes\"><Force_Healing_Ability Name=\"Authored_Repair\">"
                 "<Activation_Style>" + std::string(style) + "</Activation_Style><Heal_Range>" + std::to_string(radius)
@@ -935,6 +1021,8 @@ void healing_automatic_modes() {
                 + "</Heal_Range_Blob_Material><Heal_Percent>" + percent + "</Heal_Percent><Heal_Amount>" + flat
                 + "</Heal_Amount><Heal_Interval_In_Secs>" + (radius == 160 ? "0.4" : "0.2")
                 + "</Heal_Interval_In_Secs><Single_Target_Heal>No</Single_Target_Heal>"
+                "<Owner_Particle_Effect>" + owner_particle + "</Owner_Particle_Effect>"
+                "<Owner_Particle_Bone_Name>Repair_Socket</Owner_Particle_Bone_Name>"
                 "<Applicable_Unit_Types>Test_Frigate_Two</Applicable_Unit_Types>"
                 "</Force_Healing_Ability></Abilities>")));
             const auto tables = load_layers({tree.root});
@@ -965,6 +1053,18 @@ void healing_automatic_modes() {
             expect(found != profile->special.end(), "WSH-10: authored automatic healing handler is retained");
             if (found == profile->special.end()) continue;
             const auto& heal = *found;
+            expect(heal.heal_owner_particle == owner_particle && heal.heal_owner_bone == "Repair_Socket",
+                "WSH-12: authored owner particle and socket reach the bound handler");
+            auto changed_owner = *tables;
+            auto& changed_source = *std::find_if(changed_owner.units.begin(), changed_owner.units.end(), [](const auto& value) {
+                return value.id == "Test_Frigate";
+            });
+            const auto changed_heal = std::find_if(changed_source.special_abilities.begin(), changed_source.special_abilities.end(), [](const auto& h) {
+                return h.kind == t::SpecialAbilityKind::force_healing;
+            });
+            changed_heal->heal_owner_particle += "_Changed";
+            expect(eawr::units::content_identity(changed_owner) != eawr::units::content_identity(*tables),
+                "WSH-12: changing the owner particle changes content identity");
             expect(heal.style == t::special_activation_style(style) && heal.heal_range == whole(radius)
                 && heal.heal_percent == Fixed::from_decimal(percent).value() && heal.heal_amount == Fixed::from_decimal(flat).value()
                 && heal.heal_interval_frames == interval, "WSH-10: authored style, range, percent, amount and cadence survive");
@@ -1374,6 +1474,8 @@ void ability_limits() {
     unresolved_death_projectile_is_dropped();
     healing_negative_amount_with_percent();
     healing_automatic_modes();
+    healing_linear_light_parameters();
+    healing_two_way_light_parameters();
     jamming_parameters_load();
     all_death_projectiles_dropped();
     unresolved_retreat_explosion_is_dropped();

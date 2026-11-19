@@ -136,7 +136,7 @@ void EawrLanLobby::finish_pending_galactic() {
         const auto wait_line = model::galactic_content_gate_text(gate, progress.files_done, progress.files_total);
         if (wait_line != impl.pending_text) {
             impl.pending_text = wait_line;
-            impl.checkpoint_problem = wait_line;
+            impl.checkpoint_status = wait_line;
             impl.checkpoint_signature.clear();
         }
     }
@@ -147,7 +147,7 @@ void EawrLanLobby::finish_pending_galactic() {
     if (host) impl.host_pending = false;
     if (load) impl.load_pending = false;
     impl.pending_text.clear();
-    if (load) { impl.checkpoint_problem.clear(); impl.checkpoint_signature.clear(); }
+    if (load) { impl.checkpoint_problem.clear(); impl.checkpoint_status.clear(); impl.checkpoint_signature.clear(); }
     if (host && page_ == Page::host_options) {
         if (auto* button = EAWR_CONTROL(EawrUiButton, "IDC_INTERNET_CREATE_GAME_BUTTON")) {
             button->set_disabled(false);

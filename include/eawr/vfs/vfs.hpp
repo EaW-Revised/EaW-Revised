@@ -99,7 +99,8 @@ using LayerRoot = std::pair<std::string, std::filesystem::path>;
 
 inline constexpr std::string_view revised_layer_id = "builtin:revised";
 inline constexpr std::string_view revised_layer_folder = "Revised";
-inline constexpr std::array<std::string_view, 5> revised_presentation_xml{
+inline constexpr std::array<std::string_view, 7> revised_presentation_xml{
+    "data/xml/revisedbuildtray.xml", "data/xml/revisedbuildtraygroups.xml",
     "data/xml/revisedgiftsfx.xml", "data/xml/revisedplanetsearch.xml",
     "data/xml/revisedselectionsfx.xml", "data/xml/selectioncontrols.xml",
     "data/xml/sfxeventfilesadditions.xml"};

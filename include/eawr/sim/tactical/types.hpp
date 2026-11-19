@@ -152,6 +152,7 @@ enum class OrderKind : std::uint8_t {
     land_garrison = 29,
     land_unload = 30,
     tactical_superweapon = 31, // TSW-10: replay opcode 37, no unit order.
+    script_create_object = 33, // SSU-03: coordinator-reserved opcode 39, no unit order.
 };
 
 // The order a unit last accepted: a move or face keeps its point in `destination`, an attack its
@@ -546,17 +547,29 @@ struct TacticalSuperweaponPayload {
     friend constexpr bool operator==(const TacticalSuperweaponPayload&, const TacticalSuperweaponPayload&) noexcept = default;
 };
 
+// SSU-03: direct factory creation, with no purchase or queue transaction.
+// The high-bit identity is a Lua reference; the ordered commit allocates the ordinary object ID.
+inline constexpr std::uint64_t script_creation_namespace = std::uint64_t{1} << 63;
+struct ScriptCreateObjectPayload {
+    TypeId type{};
+    PlayerId owner{};
+    math::Vec3 position{};
+    std::uint64_t identity{};
+    friend constexpr bool operator==(const ScriptCreateObjectPayload&, const ScriptCreateObjectPayload&) noexcept = default;
+};
+
 using CommandPayload = std::variant<StopPayload, MovePayload, AttackPayload, DamagePayload, FacePayload,
     AttackMovePayload, GuardPayload, AbilityPayload, BuyPayload, CancelPayload, ReinforcePayload, PadBuildPayload,
     CreditGrantPayload, QuitPayload, PadSellPayload, AreaAbilityPayload, ManualTargetPayload, RevealAllPayload,
-    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload, LandGarrisonPayload, LandUnloadPayload, TacticalSuperweaponPayload>;
+    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload, LandGarrisonPayload, LandUnloadPayload, TacticalSuperweaponPayload, ScriptCreateObjectPayload>;
 
 // Whether a command acts on the issuer's economy (#530) rather than on units.
 [[nodiscard]] constexpr bool economy_command(const CommandPayload& payload) noexcept {
     return std::holds_alternative<BuyPayload>(payload) || std::holds_alternative<CancelPayload>(payload)
         || std::holds_alternative<ReinforcePayload>(payload) || std::holds_alternative<PadBuildPayload>(payload)
         || std::holds_alternative<CreditGrantPayload>(payload) || std::holds_alternative<PadSellPayload>(payload)
-        || std::holds_alternative<AiReservationDebitPayload>(payload) || std::holds_alternative<CampaignCreditReleasePayload>(payload);
+        || std::holds_alternative<AiReservationDebitPayload>(payload) || std::holds_alternative<CampaignCreditReleasePayload>(payload)
+        || std::holds_alternative<ScriptCreateObjectPayload>(payload);
 }
 
 // key.player_id is the issuer. Units are nonzero and strictly increasing; a buy lists exactly its
@@ -578,6 +591,7 @@ struct PlayerCommand {
 }
 
 [[nodiscard]] constexpr OrderKind order_kind(const CommandPayload& payload) noexcept {
+    if (std::holds_alternative<ScriptCreateObjectPayload>(payload)) return OrderKind::script_create_object;
     if (std::holds_alternative<TacticalSuperweaponPayload>(payload)) return OrderKind::tactical_superweapon;
     if (std::holds_alternative<LandGarrisonPayload>(payload)) return OrderKind::land_garrison;
     if (std::holds_alternative<LandUnloadPayload>(payload)) return OrderKind::land_unload;

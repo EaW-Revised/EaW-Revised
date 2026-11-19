@@ -211,6 +211,7 @@ private:
         const audio::SfxEvent* ambient_moving{};
         const audio::SfxEvent* engine_idle{};
         const audio::SfxEvent* engine_moving{};
+        const audio::SfxEvent* turret_loop{}; // SFXEvent_Turret_Rotating_Loop (BA-89)
         const audio::SfxEvent* cinematic_focus{};
         bool cinematic_focus_invalid{};
         const audio::SfxEvent* fleet_move{};
@@ -405,6 +406,17 @@ private:
     std::map<sim::tactical::TypeId, const audio::SfxEvent*> gain_control_, lose_control_;
     void engine_loops(const sim::tactical::TacticalSnapshot& snapshot, std::span<const sim::EntityId> visible);
     void stop_engine_loop(sim::EntityId source, const audio::SfxEvent* event);
+    // BA-89: an object turret's attached loop runs while its desired angle differs from its current angle.
+    void turret_loops(const sim::tactical::TacticalSnapshot& snapshot, std::span<const sim::EntityId> visible);
+    struct TurretLoopState final {
+        bool rotating{};
+        std::uint64_t seen{};
+        std::uint64_t retry_after{}; // a refused start is not asked again before this tick
+    };
+    static constexpr std::uint64_t turret_retry_ticks_ = 30;
+    std::map<sim::EntityId, TurretLoopState> turret_states_;
+    std::uint64_t turret_transitions_{};
+    bool has_turret_loops_{}; // set when any prepared type authors the cue; spares the per-frame instance scan
     struct EngineState final {
         bool online{};
         bool idle{};

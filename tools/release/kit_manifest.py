@@ -385,10 +385,12 @@ def _release_problems(manifest: dict, require_evidence: bool) -> list[str]:
     version = plan["version"]
     if release.get("signature") not in ("good", "unsigned"):
         problems.append("the release tag's signature was not verified (a signed tag must verify; an unsigned annotated tag is recorded as 'unsigned')")
-    if not version.get("release_version") or release.get("tag") != "v" + str(version.get("release_version")):
-        problems.append("the release tag is not v<release version> of config/release-version.json")
-    if version.get("label") != version.get("release_version"):
-        problems.append("a release carries the release version as its label, with no suffix")
+    # v<release version>, or v<release version>-rc<N> for a release candidate; the label is the tag without its v.
+    candidate = r"(-rc[1-9][0-9]{0,2})?"
+    if not version.get("release_version") or not re.fullmatch("v" + re.escape(str(version["release_version"])) + candidate, str(release.get("tag"))):
+        problems.append("the release tag is not v<release version> (or v<release version>-rc<N>) of config/release-version.json")
+    elif version.get("label") != release["tag"][1:]:
+        problems.append("a release carries the release version (or its -rc<N> candidate) as its label, with no suffix")
     if release.get("tag_commit") != plan["source"]["base_sha"]:
         problems.append("the release tag does not point at the commit the package was cut from")
     if not plan["orchestrator"].get("clean"):

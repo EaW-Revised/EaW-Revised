@@ -526,7 +526,7 @@ void payload_codec() {
     expect(!net::decode_galactic_setup(trailing), "trailing byte refused");
     auto wrong_magic = proposal.setup; wrong_magic[0] ^= 1;
     expect(!net::decode_galactic_setup(wrong_magic), "wrong magic refused");
-    auto wrong_version = proposal.setup; wrong_version[4] = 4;
+    auto wrong_version = proposal.setup; wrong_version[4] = 5;
     expect(!net::decode_galactic_setup(wrong_version), "unknown payload version refused");
     for (std::size_t index = 8; index < proposal.setup.size(); ++index) {
         auto flipped = proposal.setup; flipped[index] ^= 0x80;
@@ -537,6 +537,19 @@ void payload_codec() {
     resume.checkpoint_digest.fill(1); resume.state_digest.fill(2); resume.frontier_digest.fill(3); resume.terms_digest.fill(4);
     expect(require(net::decode_galactic_setup(require(net::encode_galactic_setup(resume)))) == resume,
         "resume start, nonzero tick and four agreement digests round-trip in wire v2");
+    {   // #7869: humans joining a loaded save ride the payload; a new campaign carries none.
+        auto joined = resume; joined.extra_seats = {{2, 1}, {3, 1}};
+        expect(require(net::decode_galactic_setup(require(net::encode_galactic_setup(joined)))) == joined, "extra seats round-trip");
+        expect(require(net::encode_galactic_setup(joined)) != require(net::encode_galactic_setup(resume)), "extra seats change the payload bytes");
+        auto fresh = payload; fresh.extra_seats = {{1, 1}};
+        expect(!net::encode_galactic_setup(fresh), "a new campaign cannot carry extra seats");
+        auto unordered = resume; unordered.extra_seats = {{3, 1}, {2, 1}};
+        expect(!net::encode_galactic_setup(unordered), "extra seats ascend by peer");
+        auto unlisted = resume; unlisted.extra_seats = {{2, 0}};
+        expect(!net::encode_galactic_setup(unlisted), "an extra seat names a faction");
+        auto many = resume; for (std::uint32_t peer = 0; peer <= gc::galactic_max_human_seats; ++peer) many.extra_seats.push_back({peer, 1});
+        expect(!net::encode_galactic_setup(many), "more extra seats than human seats are refused");
+    }
     auto incomplete_resume = resume; incomplete_resume.frontier_digest = {};
     expect(!net::encode_galactic_setup(incomplete_resume), "incomplete resume agreement is refused");
     auto mixed_start = resume; mixed_start.start = net::GalacticStart::new_campaign;

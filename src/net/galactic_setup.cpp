@@ -73,8 +73,15 @@ core::Result<Bytes> encode_galactic_setup(const GalacticSetupPayload& payload) {
         : (payload.initial_tick != 0 || nonzero(payload.checkpoint_digest) || nonzero(payload.state_digest)
             || nonzero(payload.frontier_digest) || nonzero(payload.terms_digest)))
         return refuse<Bytes>(SetupReason::options, "inconsistent campaign resume agreement");
+    if (!payload.extra_seats.empty() && !checkpoint)
+        return refuse<Bytes>(SetupReason::options, "extra seats join a loaded save only");
+    if (payload.extra_seats.size() > gc::galactic_max_human_seats)
+        return refuse<Bytes>(SetupReason::options, "too_many_human_seats");
+    for (std::size_t i = 0; i < payload.extra_seats.size(); ++i)
+        if (payload.extra_seats[i].player == 0 || (i > 0 && payload.extra_seats[i].peer <= payload.extra_seats[i - 1].peer))
+            return refuse<Bytes>(SetupReason::options, "extra seats are one per peer, ascending, on a listed faction");
     Bytes bytes(magic.begin(), magic.end());
-    word(bytes, 3, 4);
+    word(bytes, 4, 4);
     text(bytes, roster.campaign); text(bytes, roster.difficulty);
     word(bytes, roster.custom ? 1U : 0U, 1);
     word(bytes, static_cast<std::uint64_t>(roster.credits), 8);
@@ -100,6 +107,8 @@ core::Result<Bytes> encode_galactic_setup(const GalacticSetupPayload& payload) {
     for (const auto& team : roster.teams) {
         word(bytes, team.side, 4); word(bytes, team.lead.value, 4); word(bytes, team.observer_ai ? 1U : 0U, 1);
     }
+    word(bytes, payload.extra_seats.size(), 4);
+    for (const auto& extra : payload.extra_seats) { word(bytes, extra.peer, 4); word(bytes, extra.player, 4); word(bytes, extra.rejoin ? 1U : 0U, 1); }
     bytes.insert(bytes.end(), roster.tick_zero.begin(), roster.tick_zero.end());
     word(bytes, static_cast<std::uint8_t>(payload.start), 1); word(bytes, payload.initial_tick, 8);
     for (const auto* digest : {&payload.checkpoint_digest, &payload.state_digest, &payload.frontier_digest, &payload.terms_digest})
@@ -118,7 +127,7 @@ core::Result<GalacticSetupPayload> decode_galactic_setup(std::span<const std::ui
     GalacticSetupPayload payload;
     auto& roster = payload.roster;
     std::uint64_t version{}, credits{}, start{}, maximum{}, quota_commands{}, quota_bytes{}, count{}, vote_timeout{};
-    if (!reader.word(version, 4) || version != 3 || !reader.text(roster.campaign, gc::mp_roster_max_text)
+    if (!reader.word(version, 4) || version != 4 || !reader.text(roster.campaign, gc::mp_roster_max_text)
         || !reader.text(roster.difficulty, gc::mp_roster_max_text) || !reader.flag(roster.custom)
         || !reader.word(credits, 8) || !reader.word(start, 8) || !reader.word(maximum, 8)
         || !reader.flag(roster.allow_heroes) || !reader.word(vote_timeout, 4) || !reader.word(quota_commands, 4) || !reader.word(quota_bytes, 4)
@@ -159,6 +168,13 @@ core::Result<GalacticSetupPayload> decode_galactic_setup(std::span<const std::ui
         if (!reader.word(side, 4) || !reader.word(lead, 4) || !reader.flag(team.observer_ai)) return malformed();
         team.side = static_cast<gc::HumanSideId>(side); team.lead = sim::SeatId{static_cast<std::uint32_t>(lead)};
         roster.teams.push_back(team);
+    }
+    if (!reader.word(count, 4) || count > gc::galactic_max_human_seats) return malformed();
+    for (std::uint64_t i = 0; i < count; ++i) {
+        std::uint64_t peer{}, player{};
+        bool rejoin{};
+        if (!reader.word(peer, 4) || !reader.word(player, 4) || !reader.flag(rejoin)) return malformed();
+        payload.extra_seats.push_back({static_cast<PeerIndex>(peer), static_cast<gc::PlayerId>(player), rejoin});
     }
     if (reader.bytes.size() != roster.tick_zero.size() + 1 + 8 + 128) return malformed();
     std::copy_n(reader.bytes.begin(), roster.tick_zero.size(), roster.tick_zero.begin());
@@ -204,6 +220,15 @@ core::Result<void> validate_galactic_offer(const SetupOffer& offer) {
     for (std::size_t index = 0; index < offer.seats.size(); ++index) {
         const auto& seat = offer.seats[index];
         if (seat.peer != index) return refuse<void>(SetupReason::options, "peer indices are not canonical");
+        // A human joining a loaded save has no saved seat: its seat id is derived by the resume code (#7869) and checked
+        // against the saved seat table there; here it only has to be the faction the payload names.
+        const auto extra = std::find_if(payload.value().extra_seats.begin(), payload.value().extra_seats.end(),
+            [&](const auto& row) { return row.peer == seat.peer; });
+        if (extra != payload.value().extra_seats.end()) {
+            if (extra->player != seat.player || !offered.insert(seat.seat).second || seat.seat.value == 0)
+                return refuse<void>(SetupReason::options, "extra seat is not on the faction the campaign setup names");
+            continue;
+        }
         const auto found = std::find_if(roster.seats.begin(), roster.seats.end(), [&](const auto& row) {
             return row.seat_id == seat.seat; });
         if (found == roster.seats.end() || found->kind != sim::SeatKind::human || !found->active
@@ -212,6 +237,8 @@ core::Result<void> validate_galactic_offer(const SetupOffer& offer) {
     }
     const auto humans = static_cast<std::size_t>(std::count_if(roster.seats.begin(), roster.seats.end(),
         [](const auto& seat) { return seat.kind == sim::SeatKind::human && seat.active; }));
+    for (const auto& extra : payload.value().extra_seats)
+        if (extra.peer >= offer.seats.size()) return refuse<void>(SetupReason::options, "extra seat names a peer that is not in the offer");
     if (payload.value().start == GalacticStart::new_campaign && humans != offer.seats.size())
         return refuse<void>(SetupReason::options, "every human seat of the campaign roster needs one peer");
     const auto zero = std::find_if(offer.identity.content.domains.begin(), offer.identity.content.domains.end(),

@@ -20,6 +20,17 @@ inline constexpr std::string_view galactic_setup_domain = "galactic-campaign-v2"
 inline constexpr std::string_view galactic_tick_zero_domain = "gc-tick-zero";
 
 enum class GalacticStart : std::uint8_t { new_campaign, checkpoint };
+// #7869: a human joining a loaded save. `peer` is the room peer that plays it, `player` the faction it joins. The seat id is
+// not here: it is derived from the saved seat table and this ordered list (sim::galactic::plan_seat_admissions), and the offer's
+// seat binding for the peer must name exactly that id.
+// With `rejoin` the peer takes back a departed saved seat (#7876) instead: the offer's seat binding names that saved seat and
+// `player` is its faction.
+struct GalacticExtraSeat {
+    PeerIndex peer{};
+    sim::galactic::PlayerId player{};
+    bool rejoin{};
+    friend bool operator==(const GalacticExtraSeat&, const GalacticExtraSeat&) = default;
+};
 struct GalacticSetupPayload {
     sim::galactic::MpRoster roster;
     // Batch quotas every peer applies; they must equal the local session limits, so a peer built with other limits refuses.
@@ -29,14 +40,16 @@ struct GalacticSetupPayload {
     std::uint64_t initial_tick{};
     // Frozen resume agreement seam; PR2 supplies distribution and owner activation.
     std::array<std::uint8_t, 32> checkpoint_digest{}, state_digest{}, frontier_digest{}, terms_digest{};
+    // Extra humans seated into the loaded save, ascending by peer; empty for a new campaign (#7869).
+    std::vector<GalacticExtraSeat> extra_seats;
     friend bool operator==(const GalacticSetupPayload&, const GalacticSetupPayload&) = default;
 };
 
-// Canonical payload (little-endian): "GCSU", version:u32 = 3, campaign:text, difficulty:text, custom:u8,
+// Canonical payload (little-endian): "GCSU", version:u32 = 4, campaign:text, difficulty:text, custom:u8,
 // credits/start tech/max tech:u64, allow heroes:u8, vote timeout seconds:u32 (0: the campaign's own constant; a lobby
 // always agrees a value, #6156), command quota:u32, byte quota:u32, factions (count:u32; player,
 // faction id, flags:u32, name:text, active:u8, dropout:u8, AI configuration:blob), seats (count:u32; seat, player:u32,
-// kind:u8, lobby slot:u32, active:u8, side:u32), leads (count:u32; side, lead:u32, observer AI:u8), tick-zero claim:32.
+// kind:u8, lobby slot:u32, active:u8, side:u32), leads (count:u32; side, lead:u32, observer AI:u8), extra seats (count:u32; peer, player:u32, rejoin:u8), tick-zero claim:32.
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> encode_galactic_setup(const GalacticSetupPayload& payload);
 [[nodiscard]] core::Result<GalacticSetupPayload> decode_galactic_setup(std::span<const std::uint8_t> bytes);
 

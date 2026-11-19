@@ -1740,7 +1740,8 @@ void invasion_accept_command() {
     for (const auto& invalid : {short_accept, long_accept, std::vector<std::uint8_t>(8)})
         expect(!galactic::decode_payload(galactic::CommandLayer::session, galactic::session_opcodes::invasion_accept, invalid),
             "invasion accept rejects truncated, trailing and zero-conflict payloads");
-    expect(galactic::session_opcodes::invasion_accept == 16 && galactic::session_opcodes::gui_click == 17 && galactic::session_opcodes::first_reserved == 18,
+    expect(galactic::session_opcodes::invasion_accept == 16 && galactic::session_opcodes::gui_click == 17 && galactic::session_opcodes::corruption_dialog_opened == 18
+            && galactic::session_opcodes::seat_admit == 19 && galactic::session_opcodes::first_reserved == 20,
         "the coordinator-assigned session opcode leaves the reserved walk range after it");
 
     auto started = LiveGameSession::start(setup(), {.pacing = LiveGameSession::Pacing::driven});

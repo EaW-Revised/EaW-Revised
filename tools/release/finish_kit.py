@@ -7,9 +7,10 @@ Checks (any failure = exit 4, nothing delivered; the report is printed and writt
   identity    every embedded '<ver>+<40 hex>' build identity in the exes/dlls equals the kit commit
   pdb         every own exe/dll (not godot/, launcher/) has a CodeView PDB link (was linked with symbols)
   pin         launcher-pin.json == the pin the kit commit carries; launcher artifact sha256 == pin
-  layout      file list against each --reference player folder; only --allow-diff patterns (and the built-in version files) may differ
-  layer       Revised layer present and equal to the reviewed layer manifest of the kit commit; SHA256SUMS rewritten by
-              the layer step is verified file by file
+  layout      file list against each --reference player folder (the files its SHA256SUMS lists; files written into the folder
+              after delivery are a note); only --allow-diff patterns (and the built-in version files) may differ
+  layer       --layer with the repository's own layer files taken from the kit commit, equal to the reviewed layer manifest
+              of the kit commit; SHA256SUMS rewritten by the layer step is verified file by file
 
 Everything is judged by the kit commit, not by this checkout: the cut's kit-manifest.json is verified first (the plan
 hash, the player archive against the host record, the git objects the plan names), and the engine pins, the README
@@ -95,6 +96,48 @@ def tree(root):
     return {p.relative_to(root).as_posix() for p in Path(root).rglob("*") if p.is_file()}
 
 
+def reference_names(ref):
+    """The files a reference player folder was delivered with, and the files in it that were not: the names its SHA256SUMS
+    lists (with SHA256SUMS itself), and the files the folder holds besides, written after delivery (a run's report in
+    project/, #7944). A folder without SHA256SUMS is taken as it is."""
+    present = tree(ref)
+    sums = Path(ref) / "SHA256SUMS"
+    if not sums.is_file():
+        return present, []
+    listed = {"SHA256SUMS"}
+    for line in sums.read_text(encoding="utf-8").splitlines():
+        _, sep, name = line.partition("  ")
+        if sep:
+            listed.add(name)
+    return listed, sorted(present - listed)
+
+
+def repo_layer_table(installer):
+    """The layer files the repository owns (layer path -> template path under tools/), from the installer at `installer`:
+    tools/install_selection_advisor.py of the commit being finished or cut."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("eawr_layer_installer", installer)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return dict(module.REPO_LAYER_FILES)
+
+
+def stage_layer(layer, repo_files, destination):
+    """A copy of the layer folder at `destination` with the layer files the repository owns taken from the commit
+    (`repo_files`: layer path -> bytes), so the layer folder only has to carry the private part and a template change
+    reaches the next kit without a hand copy (#7944). Returns the names whose bytes came from the commit (added or replaced)."""
+    destination = Path(destination)
+    shutil.copytree(layer, destination)
+    taken = []
+    for name, data in sorted(repo_files.items()):
+        target = destination / name
+        if not target.is_file() or target.read_bytes() != data:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            taken.append(name)
+    return taken
+
+
 def extract_player(archive, destination):
     with zipfile.ZipFile(archive) as z:
         for member in z.infolist():
@@ -133,7 +176,9 @@ def pinned_binary(name):
 def compare_layout(top, ref, allow, binary_allow=()):
     """Names and bytes of a finished kit against one reference player folder."""
     top, ref = Path(top), Path(ref)
-    mine, theirs = tree(top), tree(ref)
+    mine = tree(top)
+    theirs, unlisted = reference_names(ref)
+    missing = sorted(f for f in theirs if not (ref / f).is_file())
     patterns = list(allow) + list(binary_allow)
 
     def allowed(name):
@@ -142,11 +187,12 @@ def compare_layout(top, ref, allow, binary_allow=()):
     added = sorted(f for f in mine - theirs if not allowed(f))
     removed = sorted(f for f in theirs - mine if not allowed(f))
     hidden = sorted(f for f in mine ^ theirs if allowed(f))
-    changed = sorted(f for f in mine & theirs if sha256_file(top / f) != sha256_file(ref / f))
+    changed = sorted(f for f in mine & theirs if f not in missing and sha256_file(top / f) != sha256_file(ref / f))
     pinned = sorted(f for f in changed if pinned_binary(f) and not any(fnmatch.fnmatchcase(f, g) for g in binary_allow))
     return {"reference": ref.name, "reference_files": len(theirs),
             "reference_list_sha256": kit_manifest.sha256_bytes("\n".join(sorted(theirs)).encode("utf-8")),
             "added": added, "removed": removed, "allowed_differences": hidden, "changed_content": changed,
+            "reference_unlisted": unlisted, "reference_missing": missing,
             "changed_binaries": [f for f in changed if f.lower().endswith((".exe", ".dll"))],
             "pinned_binaries_changed": pinned}
 
@@ -298,6 +344,8 @@ def main():
                 fail(f"release: {flag} is not accepted for a release package (the package holds its reviewed layer and is judged without waivers)")
     elif a.layer is None:
         fail("--layer is required for a kit")
+    elif not a.layer.is_dir():
+        fail(f"--layer {a.layer} is not a folder")
     # This checkout's finish and verifier must be the kit commit's own bytes, or nothing below can be trusted.
     committed = {e["path"].rsplit("/", 1)[-1]: e["git_blob"] for e in plan.get("payload", [])}
     finish_tool = {}
@@ -445,12 +493,20 @@ def main():
         with zipfile.ZipFile(pre, "w", zipfile.ZIP_DEFLATED) as z:
             for p in files:
                 z.write(p, f"{top.name}/{p.relative_to(top).as_posix()}")
-        layer_state = check_layer(a.layer, payload / "tools/release/revised-layer-manifest.json", plan, a.allow_unreviewed_layer)
+        # The layer files the repository owns come from the kit commit; --layer supplies the private part (#7944).
+        layer = x / "layer"
+        table = repo_layer_table(payload / "tools/install_selection_advisor.py")
+        taken = stage_layer(a.layer, {name: (payload / "tools" / template).read_bytes() for name, template in table.items()},
+                            layer)
+        if taken:
+            say(f"note: took {len(taken)} repo-owned layer file(s) from the kit commit: {taken}")
+        layer_state = check_layer(layer, payload / "tools/release/revised-layer-manifest.json", plan, a.allow_unreviewed_layer)
+        layer_state["from_kit_commit"] = taken
         for problem in layer_state.pop("problems"):
             fail("layer: " + problem)
         if layer_state["mode"] == "unreviewed" and not problems:
             say("note: the layer differs from the reviewed manifest and --allow-unreviewed-layer was given")
-        arl.add_layer(top, a.layer, pre)
+        arl.add_layer(top, layer, pre)
         if not (top / "Revised").is_dir():
             fail("layer: Revised folder missing after add_layer")
         else:
@@ -482,6 +538,11 @@ def main():
             f"unexpected removed {layout['removed']}; {len(layout['allowed_differences'])} name difference(s) hidden by allow "
             f"patterns, {len(layout['changed_content'])} file(s) with other bytes "
             f"({len(layout['changed_binaries'])} exe/dll, rebuilt for every kit)")
+        if layout["reference_unlisted"]:
+            say(f"note: {ref.name} holds {len(layout['reference_unlisted'])} file(s) its SHA256SUMS does not list (written "
+                f"after delivery), not compared: {layout['reference_unlisted'][:5]}")
+        if layout["reference_missing"]:
+            fail(f"layout: reference {ref.name} lacks files its SHA256SUMS lists: {layout['reference_missing'][:5]}")
         if layout["added"] or layout["removed"]:
             fail(f"layout vs {ref.name}: added {layout['added']}, removed {layout['removed']}")
         # A rebuilt exe or dll must be one this kit built: it carries the kit commit's identity or is a known identity-less helper.

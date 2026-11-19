@@ -447,6 +447,104 @@ void test_multipliers() {
     expect(tactical::scaled_interval(90, decimal("0.1")) == 9, "90 x 0.1 = 9 frames");
     expect(tactical::scaled_interval(150, decimal("0.1")) == 15, "150 x 0.1 = 15 frames");
     expect(tactical::scaled_interval(3, decimal("0.1")) == 1, "at least one frame");
+
+    // AB-26: recognized target modifiers are inert, including on a live targeted
+    // ability. Keep real speed/damage modes and the beam's lifetime in the control.
+    for (const bool release : {false, true}) {
+        std::vector<std::string> reference;
+        for (const unsigned variant : {0U, 1U, 2U, 3U}) {
+            for (const auto workers : {1U, 2U, 4U, 8U}) {
+                auto initial = setup();
+                initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+                    {2, frigate_type, 2, at(100, 0), math::identity_quat(), {}}};
+                auto health = durability();
+                for (auto& row : health.profiles) { row.max_shields = units(30); row.shield_refresh = {}; }
+                tactical::AbilityProfile beam;
+                beam.kind = tactical::AbilityKind::energy_weapon;
+                beam.gui_activated_ability_name = "target-modifier-control";
+                beam.expiration_frames = 8;
+                beam.recharge_frames = 20;
+                beam.modifiers.speed = decimal("0.8");
+                beam.modifiers.cause_damage = decimal("1.5");
+                auto secondary = spoiler_lock();
+                auto recipient_mode = tartan_power();
+                recipient_mode.expiration_frames = 10;
+                recipient_mode.modifiers.speed = decimal("1.25");
+                recipient_mode.modifiers.take_damage = decimal("0.5");
+                recipient_mode.modifiers.shield_regen = units(1);
+                if (variant == 1 || variant == 3) {
+                    beam.modifiers.target_speed = decimal("0.1");
+                    secondary.modifiers.target_speed = units(3);
+                    recipient_mode.modifiers.target_speed = {};
+                }
+                if (variant == 2 || variant == 3) {
+                    beam.modifiers.target_take_damage = units(3);
+                    secondary.modifiers.target_take_damage = {};
+                    recipient_mode.modifiers.target_take_damage = units(7);
+                }
+                auto holder = unit_of(corvette_type, beam);
+                holder.abilities.push_back(secondary);
+                tactical::SpecialAbilityProfile handler;
+                handler.name = beam.gui_activated_ability_name;
+                handler.kind = tactical::SpecialAbilityKind::energy_weapon;
+                handler.style = tactical::SpecialActivationStyle::user_input;
+                handler.service_interval = 1;
+                handler.beam_max_range = units(10000);
+                handler.filter.applicable_categories = 2;
+                handler.damage_per_frame = units(50);
+                holder.special = {handler};
+                tactical::AbilityTable table;
+                table.profiles = {holder, unit_of(frigate_type, recipient_mode)};
+                table.humans = {1, 2};
+                table.beam_damage_type = 0;
+                tactical::CombatProfile source;
+                source.type_id = corvette_type; source.category_bits = 1;
+                tactical::CombatProfile target;
+                target.type_id = frigate_type; target.category_bits = 2;
+                tactical::CombatTable combat;
+                combat.profiles = {source, target};
+                auto created = tactical::TacticalSession::create(initial, {}, health, motion(),
+                    std::nullopt, combat, {}, table);
+                expect(static_cast<bool>(created), "AB-26: ignored-target-modifier session creates");
+                if (!created) continue;
+                auto world = std::move(created).value();
+                for (const auto& entry : {
+                        command(0, 1, 0, 1, tactical::AbilityPayload{beam.kind, tactical::AbilityAction::activate, 2}),
+                        command(1, 1, 1, 1, tactical::AbilityPayload{secondary.kind, tactical::AbilityAction::activate}),
+                        // Start along its heading: a quarter-turn keeps this slow-turning
+                        // fixture stationary for longer than the beam's short lifetime.
+                        command(0, 2, 0, 2, tactical::MovePayload{at(600, 0)}),
+                        command(0, 2, 1, 2, tactical::AbilityPayload{recipient_mode.kind, tactical::AbilityAction::activate})})
+                    expect(static_cast<bool>(world.submit(entry)), "AB-26: target-modifier control command submits");
+                if (release) expect(static_cast<bool>(world.submit(command(5, 1, 2, 1,
+                    tactical::AbilityPayload{beam.kind, tactical::AbilityAction::deactivate}))),
+                    "AB-26: early target-modifier control release submits");
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                std::vector<std::string> hashes;
+                bool moving_during_beam{};
+                for (unsigned tick = 0; tick < 20; ++tick) {
+                    const auto stepped = world.step(executor);
+                    expect(static_cast<bool>(stepped), "AB-26: target-modifier control steps");
+                    if (!stepped) break;
+                    hashes.push_back(stepped.value().state_sha256);
+                    if (tick == 0) expect(world.ability_state(1)->slots.front().active
+                        && world.ability_state(1)->slots.front().target == 2,
+                        "AB-26: inert target modifiers are tested with an active locked target");
+                    moving_during_beam = moving_during_beam || (world.units()[1].position.x > units(100)
+                        && world.ability_state(1)->slots.front().active);
+                }
+                const auto final = world.durability_state(2);
+                expect(final && final->shields == Fixed{} && final->hull < units(3600),
+                    "AB-26: target-modifier control exercises shield and hull damage");
+                expect(moving_during_beam, "AB-26: target moves while the targeted ability is active");
+                expect(!world.ability_state(1)->slots.front().active,
+                    "AB-26: targeted ability releases or expires");
+                if (reference.empty()) reference = hashes;
+                else expect(hashes == reference,
+                    "AB-26: each target modifier preserves every gameplay hash at 1/2/4/8 workers");
+            }
+        }
+    }
 }
 
 

@@ -96,6 +96,7 @@ struct BattleUnit {
     bool controlled{true}; // ADR-020: separate from faction ownership and colour.
     bool hero{}; // SH-01: authored unit/team hero identity.
     std::optional<std::array<float, 4>> selection_bounds{}; // projected footprint: left, top, right, bottom
+    bool selection_denied{}; // SEL-MOD-01: independent of selectable behavior and mouse/reticle admission.
 };
 
 struct ScreenRect {

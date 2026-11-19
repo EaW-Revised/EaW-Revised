@@ -385,6 +385,7 @@ private:
         float sphere_radius{};
         bool movable{};
         bool selectable{};
+        bool selection_denied{};
         bool mouse_sensitive{};
         bool locomotion{};
         bool decoration{};

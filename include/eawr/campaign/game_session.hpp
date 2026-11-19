@@ -522,6 +522,14 @@ public:
     // admissions, prologues and native effects after that boundary that it does not already hold).
     [[nodiscard]] core::Result<void> append_recording_window(const GameRecording& window);
     [[nodiscard]] core::Result<void> apply_load_fixup(const sim::galactic::GameCommand& command);
+    // #7869: seat extra humans in a just-restored multiplayer save, one on each listed faction, in order, at the
+    // current frontier (a faction may repeat; the session refuses a third human side or a ninth human). A pure
+    // function of the restored seat table and `extra_players`: the same list gives every peer the same seats and
+    // the same state hash. Recorded as load-prologue commands, so a later save and a replay reproduce it.
+    [[nodiscard]] core::Result<void> admit_human_seats(std::span<const sim::galactic::PlayerId> extra_players);
+    // #7876: re-seat departed human seats of a just-restored save, in order, as recorded SeatRejoin load-prologue commands
+    // (a returning or new player takes the seat a dropped player left). Each seat must be an inactive human seat.
+    [[nodiscard]] core::Result<void> reseat_human_seats(std::span<const sim::SeatId> seats);
     [[nodiscard]] core::Result<void> apply_restore_prologue();
     [[nodiscard]] const ConflictRecord* conflict() const noexcept;
     [[nodiscard]] const sim::tactical::TacticalSession* battle() const noexcept;

@@ -154,9 +154,20 @@ class ReleaseVersionTests(unittest.TestCase):
 
     def test_tag_must_equal_v_plus_version(self):
         rv.check_tag("v0.3.3", "0.3.3")
-        for bad in ("0.3.3", "v0.3.2", "v0.3.3-rc1", "V0.3.3"):
+        for bad in ("0.3.3", "v0.3.2", "V0.3.3", "v0.3.3-rc", "v0.3.3-rc0", "v0.3.3-rc01", "v0.3.3-rc1000", "v0.3.3-beta1",
+                    "v0.3.3rc1", "v0.3.3-rc1-x", "v0.3.30-rc1", "v0.3.3-rc1\n", "v0.3.2-rc1"):
             with self.subTest(tag=bad), self.assertRaises(ValueError):
                 rv.check_tag(bad, "0.3.3")
+
+    def test_a_release_candidate_tag_is_the_version_plus_rc_n(self):
+        for tag in ("v0.3.3-rc1", "v0.3.3-rc12", "v0.3.3-rc999"):
+            with self.subTest(tag=tag):
+                rv.check_tag(tag, "0.3.3")
+                self.assertEqual(rv.tag_label(tag, "0.3.3"), tag[1:])
+                self.assertEqual(rv.check_label(tag[1:], "0.3.3"), tag[len("v0.3.3"):])
+                update_manifest.split_version(tag)
+        self.assertEqual(rv.tag_label("v0.3.3", "0.3.3"), "0.3.3")
+        self.assertEqual(update_manifest.split_version("v0.3.3-rc1"), ("v0.3.3-rc1", "0.3.3-rc1", True))
 
     def test_command_line(self):
         run = lambda *args: subprocess.run([sys.executable, str(ROOT / "tools/release/release_version.py"), *args],
@@ -164,6 +175,8 @@ class ReleaseVersionTests(unittest.TestCase):
         self.assertEqual(run().stdout.strip(), rv.read())
         self.assertEqual(run("check-tag", "v" + rv.read()).returncode, 0)
         self.assertEqual(run("check-tag", "v0.0.1").returncode, 1)
+        self.assertEqual(run("check-tag", "v" + rv.read() + "-rc1").returncode, 0)
+        self.assertEqual(run("check-tag", "v" + rv.read() + "-rc0").returncode, 1)
         self.assertEqual(run("label", "c").stdout.strip(), rv.read() + "c")
         self.assertEqual(run("bogus").returncode, 2)
 

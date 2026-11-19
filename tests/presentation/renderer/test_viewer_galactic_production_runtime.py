@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -421,7 +422,7 @@ func _process(delta):
     def test_build_rows_follow_authored_rows_on_both_tabs(self):
         # GHUD-S90..92: visible geometry and native tab input, plus a mod
         # moving a station onto the unit row and removing its build category.
-        space = self.native_run([])["command_bar"]
+        space = self.native_run(["b_space_tab"])["command_bar"]
         ground = self.native_run(["b_planet_tab"])["command_bar"]
         for bar, zero, other in ((space, {1001, 1002}, {1000}), (ground, {1004}, {1003})):
             choices = {choice["type_id"]: choice for choice in bar["production_choices"]}
@@ -447,14 +448,14 @@ func _process(delta):
         station = next(node for node in tree if node.get("Name") == "Empire_Star_Base_2")
         station.find("GUI_Row").text = "7"
         (xml / "starbases.xml").write_bytes(ET.tostring(tree, encoding="utf-8"))
-        changed = self.native_run([], mod_root=directory)["command_bar"]["production_choices"]
+        changed = self.native_run(["b_space_tab"], mod_root=directory)["command_bar"]["production_choices"]
         station_card = next(choice for choice in changed if choice["type_id"] == 1001)
         unit_card = next(choice for choice in changed if choice["type_id"] == 1000)
         self.assertEqual(station_card["row"], 7)
         self.assertAlmostEqual(station_card["button_rect"][1], unit_card["button_rect"][1], delta=1)
         station.find("Build_Tab_Space_Station").text = "No"
         (xml / "starbases.xml").write_bytes(ET.tostring(tree, encoding="utf-8"))
-        hidden = self.native_run([], mod_root=directory)["command_bar"]["production_choices"]
+        hidden = self.native_run(["b_space_tab"], mod_root=directory)["command_bar"]["production_choices"]
         self.assertEqual({choice["type_id"] for choice in hidden}, {1000, 1002})
 
     def test_sparse_authored_build_slots_keep_numbered_positions(self):
@@ -468,15 +469,125 @@ func _process(delta):
         (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
         source = Corpus(pathlib.Path(GAME_ROOT)).read_effective("foc", "data/xml/commandbarcomponents.xml")
         tree = ET.fromstring(source.data)
-        for node in tree:
-            group = node.find("Group")
-            if group is not None and (group.text or "").strip() == "Structure Buttons":
-                if node.get("Name") not in {"b_Create_00", "b_Create_03"}:
-                    group.text = "Other"
+        # Every numbered slot binds whatever its group (GHUD-S91), so a sparse layer authors only the slots it keeps.
+        for node in list(tree):
+            if node.get("Name", "").startswith("b_Create_") and node.get("Name") not in {"b_Create_00", "b_Create_03"}:
+                tree.remove(node)
         (xml / "commandbarcomponents.xml").write_bytes(ET.tostring(tree, encoding="utf-8"))
-        cards = self.native_run([], mod_root=directory)["command_bar"]["production_choices"]
+        # The panel opens on the ground tab since #6937, so pick the space tab first.
+        cards = self.native_run(["b_space_tab"], mod_root=directory)["command_bar"]["production_choices"]
         self.assertEqual({card["button"]: card["type_id"] for card in cards},
                          {"b_Create_00": 1000, "b_Create_03": 1001})
+
+    def remake_stack_chain(self):
+        # The Remake stack under test (leaf first): French Fried Taters > Clone Wars Holdouts > Remake 4.0.
+        remake = os.environ.get("EAWR_REMAKE_MOD_ROOT")
+        if not remake:
+            self.skipTest("requires the Remake mod root")
+        chain = [pathlib.Path(remake).parent / "3229239424", pathlib.Path(remake).parent / "2794270450", pathlib.Path(remake)]
+        if not all(path.is_dir() for path in chain):
+            self.skipTest("requires Remake 4.0, Holdouts and French Fried Taters")
+        return ";".join(str(path) for path in chain)
+
+    def remake_stack_run(self, actions, chain, hits=None, planet=87, campaign="GC_Final_Destination_Rebel", seat=1):
+        # A live Final Destination start on the Remake stack with the Rebel seat's planet selected and the Revised layer's build
+        # tray mounted; `actions` are control names pressed one every 60 frames after the start has settled (at the centre of the
+        # hit area in `hits` where one is given). Returns the report; native.png is kept beside it.
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-remake-stack-"))
+        self.last_native_directory = directory
+        layer_xml = directory / "revised" / "Data" / "XML"
+        layer_xml.mkdir(parents=True)
+        for name in ("RevisedBuildTray.xml", "RevisedBuildTrayGroups.xml"):
+            shutil.copyfile(ROOT / "tools/revised_build_tray" / name, layer_xml / name)
+        settings = directory / "settings.cfg"
+        settings.write_text("eawr-settings 1\nrevised_layer_enabled=1\nrevised_layer_path="
+                            + (directory / "revised").as_posix() + "\n", encoding="utf-8")
+        report = directory / "report.json"
+        driver = directory / "input.gd"
+        driver.write_text('''extends SceneTree
+var frame = 0
+var actions = JSON.parse_string(''' + repr(json.dumps(actions)) + ''')
+var hits = JSON.parse_string(''' + repr(json.dumps(hits or {})) + ''')
+var capture_path = ''' + json.dumps((directory / "native.png").as_posix()) + '''
+var finish_frame = 600 + actions.size() * 60 + 90
+func _initialize(): call_deferred("_start")
+func _start():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func press(name):
+    var target = root.find_child(name, true, false)
+    assert(target != null and target.is_visible_in_tree())
+    var position = target.get_global_rect().get_center()
+    if hits.has(name): position = Vector2(hits[name][0], hits[name][1])
+    var motion = InputEventMouseMotion.new()
+    motion.position = position
+    motion.global_position = position
+    Input.parse_input_event(motion)
+    for down in [true, false]:
+        var event = InputEventMouseButton.new()
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.pressed = down
+        event.position = position
+        event.global_position = position
+        Input.parse_input_event(event)
+func _process(delta):
+    frame += 1
+    for index in range(actions.size()):
+        if frame == 600 + index * 60: press(actions[index])
+    if frame == finish_frame:
+        root.get_texture().get_image().save_png(capture_path)
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''', encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1920x1080",
+            "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver),
+            *(["--render-thread", self.render_thread] if getattr(self, "render_thread", None) else []), "--",
+            "--eawr-galactic", campaign, "--eawr-galactic-seat", str(seat), "--eawr-galactic-focus", str(planet),
+            "--eawr-galactic-dismiss-story", "yes", "--eawr-galactic-paused", "yes", "--eawr-game-root", GAME_ROOT,
+            "--eawr-mod-root", chain, "--eawr-settings-file", str(settings), "--eawr-report", str(report),
+            "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on"],
+            cwd=ROOT, capture_output=True, text=True, timeout=900, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertTrue(report.is_file(), result.stdout + result.stderr)
+        data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
+        return data
+
+    def test_remake_stack_calamari_bar_holds_forty_and_the_tray_lists_every_offer(self):
+        # The Remake stack at Calamari (the Rebel seat's space tab, about 70 offers): the bar draws its 40 numbered slots, 20 per
+        # row, like the original, with no scroll control; the offers beyond them are the build tray's (the +N handle), which lists
+        # every offer, grouped.
+        self.render_thread = "separate"
+        chain = self.remake_stack_chain()
+        opening = self.remake_stack_run([], chain)["command_bar"]["controls"]
+        tab = next(control for control in opening if control["name"] == "b_space_tab")["hit_rect"]
+        hits = {"b_space_tab": [tab[0] + tab[2] / 2, tab[1] + tab[3] / 2]}
+        closed = self.remake_stack_run(["b_space_tab"], chain, hits)
+        shutil.copyfile(self.last_native_directory / "native.png", self.last_native_directory / "calamari-bar-and-handle.png")
+        cards, tray = closed["command_bar"]["production_choices"], closed["build_tray"]
+        controls = {control["name"]: control for control in closed["command_bar"]["controls"]}
+        print("CALAMARI BAR", len(cards), "TRAY", {key: tray[key] for key in ("enabled", "handle", "omitted", "entries", "lost")}, flush=True)
+        self.assertEqual(len(cards), 40, "the bar draws all forty numbered slots")
+        rows = {}
+        for card in cards:
+            rows.setdefault(round(card["button_rect"][1]), []).append(card)
+        self.assertEqual(sorted(len(row) for row in rows.values()), [20, 20])
+        self.assertFalse(controls["b_scroll_left"]["visible"] or controls["b_scroll_right"]["visible"], "the bar has no scroll control")
+        self.assertTrue(tray["enabled"] and tray["handle"], tray)
+        self.assertGreater(tray["omitted"], 0, "the bar cut offers, so the tray's handle shows")
+        opened = self.remake_stack_run(["b_space_tab", "GalacticBuildTrayHandle"], chain, hits)
+        shutil.copyfile(self.last_native_directory / "native.png", self.last_native_directory / "calamari-tray-open.png")
+        tray = opened["build_tray"]
+        shown = {entry["type"] for entry in tray["shown_entries"]}
+        print("CALAMARI TRAY OPEN", tray["omitted"], tray["entries"], tray["lost"], len(shown), flush=True)
+        self.assertTrue(tray["open"], tray)
+        self.assertEqual(len(opened["command_bar"]["production_choices"]), 40)
+        self.assertEqual(tray["lost"], 0, "no offer is lost to the tray's layout")
+        self.assertEqual(len(shown), len(cards) + tray["omitted"], "the tray lists every offer: the bar's 40 and the rest")
+        self.assertTrue({card["type"] for card in cards} <= shown, "the tray lists the offers the bar shows too")
+        self.assertIn("MC-50_Frigate", shown)
 
     def test_space_station_and_research_native_purchase(self):
         initial, _ = self.capture(3, "production")

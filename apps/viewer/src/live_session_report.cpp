@@ -420,6 +420,7 @@ void LiveSessionView::write_report_carrier_riders(std::ostream& output) const {
 void LiveSessionView::write_report_results(std::ostream& output) const {
     output << ", \"results\": {\"elapsed_milliseconds\": " << results_.elapsed_milliseconds
            << ", \"time\": " << json(ui::battle_time_text(results_.elapsed_milliseconds))
+           << ", \"picture\": " << json(results_.picture)
            << ", \"scoring_pumps\": " << (scoring_ ? scoring_->pumps() : 0U)
            << ", \"scoring_diagnostic\": " << json(results_.scoring_diagnostic)
            << ", \"sides\": [" << [&] {
@@ -703,8 +704,8 @@ void LiveSessionView::write_report_battle_start(std::ostream& output) const {
                       const auto found = owner_of_entity_.find(ship.live_entity);
                       const auto owner = found == owner_of_entity_.end() ? 0U : found->second;
                       const auto& rgb = *ship.team_colour;
-                      // #3076 (WGT-120): lobby colour in a skirmish, else the type's or the faction's no-colorization colour.
-                      const char* source = colorization_enabled_ ? "lobby"
+                      // WGT-120: neutral owners use type/faction colour even in skirmish.
+                      const char* source = model_uses_player_colour(owner) ? "lobby"
                           : type_no_colorization_.contains(ship.object_id) ? "type" : "faction";
                       rows += (rows.empty() ? "" : ", ") + std::string("{\"entity\": ")
                           + std::to_string(ship.live_entity) + ", \"player\": " + std::to_string(owner)
@@ -755,6 +756,16 @@ void LiveSessionView::write_report_time_controls(std::ostream& output) const {
 }
 
 void LiveSessionView::write_report_light_effects(std::ostream& output) const {
+    output << ", \"healing_light_samples\": [";
+    bool first_healing_light = true;
+    for (const auto& row : healing_light_samples_) {
+        output << (first_healing_light ? "" : ",") << "{\"entity\":" << row.entity << ",\"frame\":" << row.frame
+            << ",\"birth\":" << row.birth << ",\"linear\":" << (row.kind == light_effect::Kind::linear_pulse ? "true" : "false")
+            << ",\"two_way\":" << (row.kind == light_effect::Kind::two_way_pulse ? "true" : "false")
+            << ",\"pulses\":" << row.pulses << ",\"scale\":[" << row.scale[0] << ',' << row.scale[1] << ',' << row.scale[2] << "]}";
+        first_healing_light = false;
+    }
+    output << ']';
     output << ", \"defend\": " << (options_.defend ? "true" : "false")
            << ", \"shield_flash\": " << (options_.shield_flash ? "true" : "false")
            << ", \"shield_flashes\": " << shield_flashes_

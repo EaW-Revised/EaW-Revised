@@ -1197,6 +1197,36 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertFalse(abandoned["load_game_disabled"], "Load Game is usable again after the abandon")
         self.assertTrue(retried["load_game_disabled"], "a second press starts a new listing")
 
+    def test_a_slow_restore_is_a_busy_state_with_a_cancel_after_the_slow_mark(self):
+        # #7858: while the host restores a saved campaign the lobby says it is restoring (with the elapsed time), never "Refused".
+        # --eawr-lan-do restore_fixture:N starts a restore that has run N seconds and never ends. Past 5 minutes the line says it is
+        # still waiting and the bottom button becomes Cancel restore; pressing it returns to a lobby that can apply the seats again.
+        name = "restore-progress"
+        saves = self.pictures / (name + "-saves")
+        shutil.rmtree(saves, ignore_errors=True)
+        saves.mkdir(parents=True)
+        steps = (*self.HOST_CAMPAIGN, "restore_fixture:125", "sleep:40", "snapshot", "shot:" + name + "-restoring")
+        report = self.run_clicks(name, steps, saves, "separate")
+        restoring = report["snapshots"][-1]["pointer"]
+        self.assertTrue(restoring["restoring"], restoring)
+        self.assertRegex(restoring["summary_first"], r"^Restoring saved game\.\.\. please wait \(2:\d\d\)$")
+        self.assertEqual(restoring["problem"], "", "a restore in progress is not a refusal")
+        self.assertEqual(restoring["panel_button"], "Apply saved seats / Retry")
+        self.assertTrue(restoring["panel_button_disabled"], "Apply waits while the restore runs")
+        name = "restore-progress-slow"
+        steps = (*self.HOST_CAMPAIGN, "restore_fixture:299", "sleep:90", "snapshot", "shot:" + name + "-slow",
+                 "restore_cancel", "sleep:30", "snapshot", "shot:" + name + "-cancelled")
+        report = self.run_clicks(name, steps, saves, "separate")
+        slow, cancelled = (shot["pointer"] for shot in report["snapshots"][-2:])
+        self.assertRegex(slow["summary_first"], r"^Still waiting for the saved game to restore \(5:0\d so far\)")
+        self.assertNotIn("Refused", slow["summary_first"])
+        self.assertEqual(slow["panel_button"], "Cancel restore")
+        self.assertFalse(slow["panel_button_disabled"])
+        self.assertFalse(cancelled["restoring"], "Cancel restore ends the wait")
+        self.assertEqual(cancelled["summary_first"], "Restore cancelled. Apply the saved seats to try again.")
+        self.assertEqual(cancelled["panel_button"], "Apply saved seats / Retry")
+        self.assertFalse(cancelled["panel_button_disabled"], "the lobby can apply the seats again without leaving")
+
     def test_load_game_list_and_lobby_buttons_take_real_clicks(self):
         # The owner's host pressed Load Game and nothing answered again: the list's modal layer sat over the lobby and the
         # chat edit kept focus. (a) the list is up, its row and Cancel take a click, (b) after Cancel the lobby buttons
@@ -1467,13 +1497,13 @@ class LanLobbyGraphical(unittest.TestCase):
         host_script = ["name:" + host_name, "colour:2", "host:" + game, "ai:2:hard", "wait:room_player:" + join_name + "@120", "snapshot",
                        "shot:two-host-staging", "ready", "wait:ready:all@180", "snapshot", "shot:two-host-ready",
                        "chat:ready from host", "wait:chat:ready from joiner@120", "name:Alice Prime", "sleep:10",
-                       "snapshot", "chat:name-only", "wait:unready@120", "snapshot", "shot:two-host-reset",
+                       "snapshot", "chat:name-only", "wait:notall@120", "snapshot", "shot:two-host-reset",
                        "chat:choices reset", "ready", "wait:ready:all@180", "snapshot", "shot:two-host-reready",
                        "kick:1", "sleep:30", "snapshot"]
         join_script = ["name:" + join_name, "colour:4", "wait:game:" + game + "@120", "snapshot", "shot:two-join-lobby",
                        "join:" + game, "wait:room_player:" + join_name + "@120", "snapshot", "shot:two-join-staging",
                        "accept", "wait:ready:all@180", "wait:chat:ready from host@120", "chat:ready from joiner",
-                       "wait:chat:name-only@120", "colour:5", "wait:unready@120", "snapshot", "shot:two-join-reset",
+                       "wait:chat:name-only@120", "colour:5", "wait:notall@120", "snapshot", "shot:two-join-reset",
                        "wait:chat:choices reset@120", "ready", "wait:ready:all@180", "snapshot", "shot:two-join-ready",
                        "wait:box@120", "snapshot", "shot:two-join-kicked"]
         arguments = []
@@ -1541,10 +1571,10 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertEqual(renamed["rows"][0]["name"], "Alice Prime")
         self.assertEqual(renamed["ready_seats"], 2, "a name-only edit keeps readiness")
         self.assertFalse(reset["start"]["enabled"])
-        self.assertEqual(reset["ready_seats"], 0)
+        self.assertEqual(reset["ready_seats"], 1, "only the joiner's own colour change unreadies the joiner; the host stays ready")
         self.assertEqual(reset["rows"][1]["colour"], join["snapshots"][2]["rows"][1]["colour"])
         self.assertTrue(reready["start"]["enabled"])
-        self.assertEqual(kicked["ready_seats"], 0)
+        self.assertEqual(kicked["ready_seats"], 1, "kicking the joiner keeps the host ready")
         self.assertTrue(join["snapshots"][-1]["box_open"])
         # Each viewer received the other's staging chat line, once.
         self.assertTrue(any(line.endswith("ready from joiner") for line in host["final"]["chat"]))

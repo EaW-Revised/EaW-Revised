@@ -6,7 +6,7 @@ default build identity follow it. A kit label is the release version plus an ope
 first eight characters of the kit commit; a release tag is `v` plus the version.
 
   python tools/release/release_version.py                # print the version
-  python tools/release/release_version.py check-tag v0.3.3
+  python tools/release/release_version.py check-tag v0.3.3      # also accepts a release candidate, v0.3.3-rc1
   python tools/release/release_version.py label c-clang   # print the kit label for a suffix
 """
 from __future__ import annotations
@@ -21,6 +21,8 @@ VERSION_FILE = ROOT / "config" / "release-version.json"
 VERSION = re.compile(r"\d+\.\d+\.\d+")
 # The rule CMake (EAWR_KIT_LABEL) and package_release.py apply to a kit label.
 LABEL = re.compile(r"[A-Za-z0-9._-]{1,32}")
+# A release candidate is the release version plus -rc<N>: the tag v0.3.6-rc1 of release version 0.3.6, labelled 0.3.6-rc1.
+CANDIDATE = re.compile(r"-rc[1-9][0-9]{0,2}")
 SUFFIX = re.compile(r"[A-Za-z0-9._-]{0,24}")
 
 
@@ -63,9 +65,16 @@ def kit_version(label: str, commit: str, version: str | None = None) -> str:
 
 
 def check_tag(tag: str, version: str | None = None) -> None:
+    """A release tag is v<release version>, or v<release version>-rc<N> for a release candidate."""
     version = read() if version is None else version
-    if tag != "v" + version:
-        raise ValueError(f"release tag {tag!r} does not match config/release-version.json ({version}); expected v{version}")
+    if tag != "v" + version and not (tag.startswith("v" + version) and CANDIDATE.fullmatch(tag[len(version) + 1:])):
+        raise ValueError(f"release tag {tag!r} does not match config/release-version.json ({version}); expected v{version} or v{version}-rc<N>")
+
+
+def tag_label(tag: str, version: str | None = None) -> str:
+    """The label a release cut from this tag carries: the tag without its v (0.3.6 for v0.3.6, 0.3.6-rc1 for v0.3.6-rc1)."""
+    check_tag(tag, version)
+    return tag[1:]
 
 
 def main(argv: list[str]) -> int:

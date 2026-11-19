@@ -23,7 +23,7 @@ bool admitted(const sim::galactic::ObservedCorruptionChoice& row) {
 }
 bool same_menu(const sim::galactic::CorruptionMenu& a, const sim::galactic::CorruptionMenu& b) {
     if (a.player != b.player || a.actor != b.actor || a.planet != b.planet || a.ability != b.ability
-        || a.choices.size() != b.choices.size()) return false;
+        || a.information_only != b.information_only || a.choices.size() != b.choices.size()) return false;
     return std::equal(a.choices.begin(),a.choices.end(),b.choices.begin(),[](const auto& x,const auto& y) {
         const auto& p = x.prepared.choice; const auto& q = y.prepared.choice;
         const auto& r = p.requirements; const auto& s = q.requirements;
@@ -144,7 +144,7 @@ bool GalacticMode::State::build_corruption_hud() {
         label->add_theme_color_override("font_color",Color(tint.r/255.0F,tint.g/255.0F,tint.b/255.0F,tint.a/255.0F));
         label->set_horizontal_alignment(component->flag(data::ui::Field::left_justified)
             ? HORIZONTAL_ALIGNMENT_LEFT : HORIZONTAL_ALIGNMENT_CENTER);
-        if (anchor.name.starts_with("corrupt_text")) label->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+        if (anchor.name.starts_with("corrupt_text") || anchor.name.starts_with("corrupt_planet_defiler")) label->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
         corruption_menu.panel->add_child(label); corruption_menu.labels.emplace(anchor.name,label);
     }
     return true;
@@ -152,13 +152,18 @@ bool GalacticMode::State::build_corruption_hud() {
 void GalacticMode::State::close_corruption() {
     if (!corruption_menu.blocker || !corruption_menu.blocker->is_visible_in_tree()) return;
     static_cast<void>(map_input.hud_event()); corruption_menu.closed = true;
+    if (corruption_menu.facts && corruption_menu.facts->preparation)
+        corruption_menu.dismissed_preparation = corruption_menu.facts->preparation;
     if (!corruption_menu.fixture && game && corruption_menu.facts && corruption_menu.facts->preparation)
         game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat},
             sim::galactic::CancelGalacticAbility{corruption_menu.facts->actor, corruption_menu.facts->preparation}, {}});
+    if (!corruption_menu.fixture && corruption_menu.facts && corruption_menu.facts->information_only) {
+        corruption_menu.information_planet.reset(); corruption_menu.facts.reset(); corruption_menu.publication.reset();
+    }
     ++corruption_menu.closes; corruption_menu.blocker->hide();
 }
 void GalacticMode::State::choose_corruption(unsigned slot) {
-    if (!corruption_menu.facts || !corruption_menu.enabled || corruption_menu.closed) return;
+    if (!corruption_menu.facts || corruption_menu.facts->information_only || !corruption_menu.enabled || corruption_menu.closed) return;
     const auto& rows = corruption_menu.facts->choices;
     const auto row = std::find_if(rows.begin(),rows.end(),[slot](const auto& value) { return value.slot == slot; });
     if (row == rows.end() || !admitted(*row)) return;
@@ -167,14 +172,37 @@ void GalacticMode::State::choose_corruption(unsigned slot) {
         game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, sim::galactic::ExecutePreparedAbility{*row->live_prepared}, {}});
     }
     static_cast<void>(map_input.hud_event()); corruption_menu.accepted_slot = slot;
+    if (corruption_menu.facts->preparation) corruption_menu.dismissed_preparation = corruption_menu.facts->preparation;
     ++corruption_menu.choices_accepted; corruption_menu.closed = true; corruption_menu.blocker->hide();
+}
+void GalacticMode::State::open_corruption_information(const sim::galactic::PlanetId planet) {
+    if (!displayed_snapshot || !game || galaxy_modal_open() || !map_input.gates.hud_enabled
+        || map_input.gates.tutorial_locked) return;
+    const auto icon = corruption_info_icons.find(planet);
+    if (icon == corruption_info_icons.end() || !icon->second->is_visible_in_tree()
+        || !static_cast<bool>(icon->second->get_meta("information_only", false))
+        || !displayed_snapshot->corruption_information(planet)) return;
+    static_cast<void>(map_input.hud_event());
+    corruption_menu.information_planet = planet;
+    corruption_menu.publication.reset(); corruption_menu.closed = false; corruption_menu.notified = false;
+    update_corruption_hud();
 }
 void GalacticMode::State::update_corruption_hud() {
     auto& state = corruption_menu;
     if (!state.blocker || !displayed_snapshot) return;
     const auto publication = state.fixture ? state.fixture : displayed_snapshot;
-    const auto* next = publication->corruption_menu();
-    const auto* last = state.publication ? state.publication->corruption_menu() : nullptr;
+    const auto* actor_menu = publication->corruption_menu();
+    if (!actor_menu || actor_menu->preparation != state.dismissed_preparation)
+        state.dismissed_preparation.reset();
+    if (state.information_planet && !publication->corruption_information(*state.information_planet)) {
+        state.information_planet.reset(); state.facts.reset(); state.publication.reset();
+        state.closed = false; state.notified = false;
+    }
+    const auto menu = [&](const auto& snapshot) {
+        return state.information_planet ? snapshot->corruption_information(*state.information_planet) : snapshot->corruption_menu();
+    };
+    const auto* next = menu(publication);
+    const auto* last = state.publication ? menu(state.publication) : nullptr;
     const bool fresh = !state.publication || next != last;
     // #7357: a republished menu with the same facts keeps the dialog as it is and only refreshes the facts a choice sends.
     // Laying the dialog out again used to hide and disable every button for a moment, and a click whose press and release
@@ -182,18 +210,32 @@ void GalacticMode::State::update_corruption_hud() {
     const bool changed = fresh && (!next || !last || next->preparation != last->preparation || !same_menu(*next, *last));
     if (fresh && !changed && next && state.facts && next->player == galaxy->local.player) state.facts = *next;
     state.publication = publication;
-    const bool enabled = map_input.gates.hud_enabled && !map_input.gates.tutorial_locked;
+    const bool enabled = map_input.gates.hud_enabled && !map_input.gates.tutorial_locked
+        && (state.blocker->is_visible_in_tree() || !galaxy_modal_open());
     if (!changed && state.width == camera.width && state.height == camera.height && enabled == state.enabled) return;
     state.width = camera.width; state.height = camera.height; state.enabled = enabled;
     if (changed) {
         state.publication = publication; ++state.rebuilds;
-        const auto* facts = publication->corruption_menu();
+        const auto* facts = next;
         if (facts && facts->player == galaxy->local.player) {
-            if (!state.facts || (facts->preparation ? state.facts->preparation != facts->preparation : !same_menu(*state.facts,*facts))) state.closed = false;
+            if (!state.facts || facts->preparation != state.facts->preparation || facts->player != state.facts->player
+                || facts->planet != state.facts->planet || facts->information_only != state.facts->information_only) {
+                state.closed = facts->preparation && state.dismissed_preparation == facts->preparation;
+                state.notified = false;
+            }
             state.facts = *facts;
         } else { state.facts.reset(); state.closed = false; }
     }
-    const bool available = state.facts && !state.facts->choices.empty();
+    const bool available = state.facts && (state.facts->information_only || !state.facts->choices.empty());
+    const bool opening = available && enabled && !state.closed && !state.blocker->is_visible();
+    // WGCH-121: opening either dialog emits once, never on a requirement refresh or resize.
+    if (opening && !state.notified && !state.fixture && game) {
+        state.notified = true;
+        game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat},
+            sim::galactic::CorruptionDialogOpened{state.facts->planet}, {}});
+        ++state.open_notices_submitted;
+        state.blocker->set_meta("open_notices_submitted", static_cast<int64_t>(state.open_notices_submitted));
+    }
     state.blocker->set_visible(available && enabled && !state.closed);
     const auto placement = state.panel->placement();
     const auto position = [&](Control* control, std::string_view name) {
@@ -205,7 +247,10 @@ void GalacticMode::State::update_corruption_hud() {
     for (const auto& [name,label] : state.labels) {
         position(label,name); label->set_text({}); label->hide(); label->set_modulate(Color(1.0F,1.0F,1.0F));
         const auto* component = command_catalog.find(name);
-        if (name.starts_with("corrupt_text")) {
+        const auto tint = component->color(data::ui::Field::text_color)
+            .value_or(component->color(data::ui::Field::color).value_or(data::ui::Rgba8{255,255,255,255}));
+        label->add_theme_color_override("font_color", Color(tint.r/255.0F,tint.g/255.0F,tint.b/255.0F,tint.a/255.0F));
+        if (name.starts_with("corrupt_text") || name.starts_with("corrupt_planet_defiler")) {
             // Text components author the wrap width in the second Size field;
             // Godot derives the height from the localized paragraph and font.
             const auto size = component->vec2(data::ui::Field::size).value_or(data::ui::Vec2{});
@@ -238,10 +283,11 @@ void GalacticMode::State::update_corruption_hud() {
     };
     if (state.close) {
         state.close->show(); shown.insert(state.close);
-        state.close->set_disabled(!enabled); text("corrupt_close",battle_text("TEXT_BUTTON_CLOSE"));
+        state.close->set_disabled(!enabled); text("corrupt_close",battle_text(state.facts && state.facts->information_only ? "TEXT_BUTTON_CANCEL" : "TEXT_BUTTON_CLOSE"));
     }
     if (!available) return;
-    text("corrupt_planet_title00",battle_text("TEXT_CORRUPTION_TITLE"));
+    text("corrupt_planet_title00",battle_text(state.facts->information_only ? "TEXT_PLANETARY_CORRUPTION_INFO" : "TEXT_CORRUPTION_TITLE"));
+    text("corrupt_planet_defiler_00", state.facts->information_only ? battle_text("TEXT_CORRUPTION_REQUIRED") : std::string{});
     if (const auto planet = hud_facts.find(state.facts->planet); planet != hud_facts.end())
         text("corrupt_planet_title01",planet->second.display_name);
     const auto display = [&](std::size_t list, sim::galactic::corruption_actions::Type type) {
@@ -258,12 +304,12 @@ void GalacticMode::State::update_corruption_hud() {
         auto* button = state.choices[row.slot-1]; if (!button) continue;
         button->show(); shown.insert(button); button->set_icon_texture(command_texture(display(0,choice.type)));
         button->set_tooltip_text(String::utf8(battle_text(display(4,choice.type)).c_str()));
-        button->set_disabled(!enabled || !admitted(row) || (!state.fixture && !row.live_prepared));
+        button->set_disabled(state.facts->information_only || !enabled || !admitted(row) || (!state.fixture && !row.live_prepared));
         text("corrupt_title_"+tail,battle_text(display(1,choice.type)));
         text("corrupt_cost_"+tail,"$ "+galactic_view::credit_balance(choice.credits));
         // WGCH-122/188 (#7357): a row the player cannot choose shows grey (its button and icon, title and price), as the
         // hero action dialog greys a row it will not accept; the paragraphs keep their colour so the reason stays readable.
-        if (!admitted(row)) {
+        if (state.facts->information_only || !admitted(row)) {
             button->set_modulate(Color(0.5F,0.5F,0.5F));
             for (const auto& name : {"corrupt_title_"+tail, "corrupt_cost_"+tail})
                 if (const auto found = state.labels.find(name); found != state.labels.end()) found->second->set_modulate(Color(0.5F,0.5F,0.5F));
@@ -274,6 +320,16 @@ void GalacticMode::State::update_corruption_hud() {
         if (row.live_choice) text("corrupt_text01"+tail,battle_text(row.live_choice->briefing));
         else if (const auto key = state.briefing_keys.find(choice.briefing); key != state.briefing_keys.end())
             text("corrupt_text01"+tail,battle_text(key->second));
+        if (state.facts->information_only) {
+            const auto& requirements = choice.requirements;
+            const bool has_requirements = row.live_choice
+                ? (row.live_choice->unit_count && !row.live_choice->unit_types.empty()) || row.live_choice->mission_count || !row.live_choice->planet_types.empty()
+                : (requirements.unit_count && !requirements.unit_types.empty()) || requirements.mission_count || !requirements.planet_types.empty();
+            text("corrupt_text01"+tail, has_requirements ? battle_text("TEXT_CORRUPTION_REQUIREMENT") : std::string{});
+            if (has_requirements && (!row.units_satisfied || !row.missions_satisfied || !row.planets_satisfied))
+                if (const auto label = state.labels.find("corrupt_text01"+tail); label != state.labels.end())
+                    label->second->add_theme_color_override("font_color", Color(1.0F, 0.0F, 0.0F));
+        }
         // GHUD-C08 text-flow seam: controlled paragraphs retain authored
         // points unless their wrapped heights overlap. Retail clipping,
         // scrolling and font reduction remain unqualified by a capture.
@@ -339,7 +395,8 @@ void GalacticMode::State::write_corruption_report(std::ostream& output) const {
         << ", \"text_flow_seam\": \"GHUD-C08 retail text overflow; controlled minimal non-overlap fallback\""
         << ", \"active\": " << (state.blocker && state.blocker->is_visible_in_tree() ? "true" : "false")
         << ", \"rebuilds\": " << state.rebuilds << ", \"choices_accepted\": " << state.choices_accepted
-        << ", \"closes\": " << state.closes << ", \"accepted_slot\": " << (state.accepted_slot ? std::to_string(*state.accepted_slot) : "null")
+        << ", \"closes\": " << state.closes << ", \"open_notices_submitted\": " << state.open_notices_submitted
+        << ", \"accepted_slot\": " << (state.accepted_slot ? std::to_string(*state.accepted_slot) : "null")
         << ", \"controls\": [";
     bool comma{};
     for (const auto& [name,button] : state.icons) {
