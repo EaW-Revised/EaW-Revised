@@ -383,7 +383,8 @@ core::Result<void> session_detail::Tick::prepare_capture_jobs(std::vector<Captur
                 });
                 scratch.candidates.erase(unique, scratch.candidates.end());
                 job.owner = service_capture(*job.profile, job.next, job.before, impl_->economy.pads.neutral,
-                    impl_->setup.players, scratch.candidates, impl_->economy.pads, job.id, position);
+                    impl_->setup.players, scratch.candidates, impl_->economy.pads, job.id, position,
+                    impl_->command_ledger.capture_adjustments);
             }
         };
         const auto captured = executor.execute_phase("capture-service", tick_partition_count,

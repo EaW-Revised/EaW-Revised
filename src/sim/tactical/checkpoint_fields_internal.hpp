@@ -22,6 +22,7 @@ template <> struct Fields<AbilitySpawnState> {
 template <> struct Fields<AbilityState> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.slots, v.replan_due, v.special, v.concentrate_recruits, v.stealth_on, v.stealth_detected, v.stealth_end, v.self_destruct_script, v.pending_buzz_position, v.charged_blast, v.mc30_script);
+        if (a.deploy_poses) a(v.deploy_pose);
     }
 };
 
@@ -230,6 +231,7 @@ template <> struct Fields<session_detail::LiveUnit> {
         if (a.fire_range_bonuses) a(v.upgrade_bonuses[6]);
         a(v.upgraded_durability, v.asteroid_contact, v.nebula, v.corrupt, v.waypoints, v.garrison_unit, v.sighting, v.position_history);
         if (a.script_invulnerable) a(v.script_invulnerable);
+        if (a.hold_fire) a(v.hold_fire);
     }
 };
 
@@ -539,6 +541,10 @@ template <> struct Fields<WeaponState> {
 
 template <> struct Fields<ChargedBlastState> {
     template <class A, class T> static void apply(A& a, T& v) { a(v.charge_remaining, v.shots_remaining, v.charged_presentation); }
+};
+
+template <> struct Fields<DeployPoseState> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.on, v.since, v.start_frame); }
 };
 
 template <> struct Fields<Mc30Script> {

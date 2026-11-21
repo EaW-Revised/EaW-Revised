@@ -89,6 +89,11 @@ struct CategoryEnum final {
 // capital", "Warlord_Choices" -> "Warlord choices").
 [[nodiscard]] std::string derived_caption(std::string_view name);
 
+// GBT-02 (owner, 2026-11-19): the handle's text. The handle is always shown for a planet that has build choices; its
+// caption is followed by the number of choices the bar omits ("+3"), and by nothing when the bar omits none (the
+// caption alone, without the spaces a caption may end in to stand apart from its count).
+[[nodiscard]] std::string handle_label(std::string_view caption, std::size_t omitted);
+
 // ---- Groups ---------------------------------------------------------------------------------------
 
 enum class GroupKind : std::uint8_t { category, extra, misc, buildings };

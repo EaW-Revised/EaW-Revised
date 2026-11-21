@@ -84,13 +84,13 @@ std::vector<st::SubPlotDef> plots() {
         click("CLICK_FA1", "fa1", "Fa1"), click("CLICK_FA2", "fa2", "Fa2"),
         click("CLICK_FB1", "fb1", "Fb1"), click("CLICK_FB2", "fb2", "Fb2"),
         click("CLICK_TAB_A", "tab_a", "TabA"), click("CLICK_TAB_B", "tab_b", "TabB"),
-        click("CLICK_PAUSE", "pausebtn", {}, true),
+        click("CLICK_PAUSE", "b_play_pause", {}, true),
         card_click("CLICK_CARD", "b_Create_26"),
         force_after("FORCE_TAB_A", {{"CLICK_FA1"}, {"CLICK_FA2"}}, "tab_a"),
         force_after("FORCE_TAB_B", {{"CLICK_FB1"}, {"CLICK_FB2"}}, "tab_b"),
         note("FORCE_FA1", "Force_Fa1", "FORCE_CLICK_GUI", {"fa1"}), note("FORCE_FA2", "Force_Fa2", "FORCE_CLICK_GUI", {"fa2"}),
         note("FORCE_FB1", "Force_Fb1", "FORCE_CLICK_GUI", {"fb1"}), note("FORCE_FB2", "Force_Fb2", "FORCE_CLICK_GUI", {"fb2"}),
-        note("PAUSE_NOTE", "Pause_Note", "FORCE_CLICK_GUI", {"pausebtn"}),
+        note("PAUSE_NOTE", "Pause_Note", "FORCE_CLICK_GUI", {"b_play_pause"}),
         note("MISSING_NOTE", "Force_Missing", "FORCE_CLICK_GUI", {"no_such_control"}),
         note("LOCK_UNIT", "Lock_Note", "LOCK_UNIT"), note("UNLOCK_UNIT", "Unlock_Note", "BUILDABLE_UNIT"),
     };
@@ -219,7 +219,7 @@ struct Hud final : vg::CommandPresses::Surface, vg::CommandPresses::Effects {
         add("fa1", {"Pane_A"}, true, true); add("fa2", {"Pane_A"}, true, true);
         add("fb1", {"Pane_B"}, true, true); add("fb2", {"Pane_B"}, true, true);
         add("tab_a", {"Build_Tab"}, false, true); add("tab_b", {"Build_Tab"}, false, true);
-        add("pausebtn", {}, false, false);
+        add("b_play_pause", {}, false, false);
         listeners = game.story_engine()->click_listeners();
     }
     [[nodiscard]] bool story_listens(const std::string& name) const override {
@@ -231,7 +231,7 @@ struct Hud final : vg::CommandPresses::Surface, vg::CommandPresses::Effects {
     void action(const std::string& name) override {
         if (name == "tab_a") view = "a";
         else if (name == "tab_b") view = "b";
-        else if (name == "pausebtn") {
+        else if (name == "b_play_pause") {
             const bool is_paused = game.galaxy().clock().pause_depth != 0;
             if (is_paused) take(game.submit(gc::GameCommand{{game.completed_tick(), {1}, ++sequence}, gc::ResumeGalaxy{}}));
             else take(game.submit(gc::GameCommand{{game.completed_tick(), {1}, ++sequence}, gc::PauseGalaxy{}}));
@@ -378,7 +378,7 @@ Outcome flow(std::size_t workers, const std::filesystem::path& root) {
     // E. the pause dance: a filter pressed while the game is paused. The script's main thread is pumped while the galaxy is
     // paused (the synchronizer clock), the polling thread sleeps on frozen game time; so the script unpauses through the
     // pause button, lets the thread apply the filter, and pauses again. Forced presses raise no pause click.
-    hud.human("pausebtn");
+    hud.human("b_play_pause");
     hud.settle(executor, 4);
     expect(hud.paused() && hud.count("CLICK_PAUSE") == 1, "the human pause is heard by the script");
     const auto applied = global(game, instance, "Applied");
@@ -387,7 +387,10 @@ Outcome flow(std::size_t workers, const std::filesystem::path& root) {
     expect(global(game, instance, "Applied") == applied + 1, "the filter pressed while paused was applied");
     expect(hud.paused(), "and the game is paused again afterwards");
     expect(hud.count("CLICK_PAUSE") == 1, "the script's own pause button presses raised no pause click");
-    expect(std::count(hud.log.begin(), hud.log.end(), "forced:pausebtn") == 2, "the dance is one unpause and one pause");
+    // #7826: the script's pause presses are the session's own clock changes (no HUD press, no seat command): the dance is
+    // one unpause and one pause, and the HUD was handed neither.
+    expect(hud.count("PAUSE_NOTE") == 2 && std::count(hud.log.begin(), hud.log.end(), "forced:b_play_pause") == 0,
+        "the dance is one unpause and one pause, applied by the session");
 
     // F. a forced press of a control the HUD does not have is dropped, once, and the match goes on.
     const auto dropped_before = hud.drops.size();

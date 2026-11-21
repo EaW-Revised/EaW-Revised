@@ -285,7 +285,7 @@ func _process(delta):
         self.assertTrue(capture.is_file())
         print("commander GC lit capture:", capture)
 
-    def cycle(self, mode, resize=None, arrival=None):
+    def cycle(self, mode, resize=None, arrival=None, minimap_enemies=False):
         directory = Path(tempfile.mkdtemp(prefix="eawr-gc-space-cycle-"))
         report, capture = directory / "report.json", directory / "returned.png"
         began = time.monotonic()
@@ -297,6 +297,7 @@ func _process(delta):
             "--eawr-lighting", "sh", "--eawr-shadows", "on", "--eawr-environment", "map",
             *(["--eawr-resize-in-loading", resize] if resize else []),
             *(["--eawr-galactic-arrival-proof", arrival] if arrival else []),
+            *(["--eawr-live-reveal", "on"] if minimap_enemies else []),
             "--eawr-report", str(report), "--eawr-capture", str(capture)],
             cwd=support.ROOT, capture_output=True, text=True, timeout=1200, check=False)
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
@@ -368,6 +369,15 @@ func _process(delta):
             self.assertLess(flight["min_opacity"], 0.01, flight)
             self.assertGreaterEqual(flight["jumps"], 1, flight)
             self.assertGreaterEqual(flight["brightened"], 1, flight)
+        if minimap_enemies:
+            # WRAD-06: a campaign battle has no radar permission list, so enemies the local player can see are drawn on
+            # the minimap (the draw-only reveal makes the defender visible). Skirmish radar rules never reach it.
+            live_rows = tactical["live_session"]
+            hostile = {row["entity"] for row in live_rows["hostile_units"]}
+            drawn = {row["id"] for row in tactical["hud"]["minimap"]["drawn"]}
+            self.assertTrue(hostile, live_rows)
+            self.assertTrue(hostile & drawn, f"campaign minimap draws no enemy: hostile={sorted(hostile)} drawn={sorted(drawn)}")
+            print(f"campaign minimap enemies drawn: {sorted(hostile & drawn)}")
         loading = tactical["loading_screen"]
         if resize:
             # #3270/#3272: the window resized while the loading screen was up; the loading screen's layout
@@ -441,6 +451,9 @@ func _process(delta):
 
     def test_viewer_gc_space_loss(self):
         self.cycle("loss")
+
+    def test_viewer_gc_space_minimap_draws_enemies(self):
+        self.cycle("loss", minimap_enemies=True)
 
     def test_viewer_gc_space_resize_in_loading(self):
         self.cycle("loss", resize="1600x900")

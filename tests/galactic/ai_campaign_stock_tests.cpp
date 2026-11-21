@@ -1114,6 +1114,97 @@ int remake_save_probe(std::uint64_t ticks) {
     }
     return failed || failures ? 1 : 0;
 }
+// #7886: the installed Remake's space entry at one planet. The mod's object scripts keep one orbital-behaviour stand-in unit
+// per planet structure in the orbit; those are fleet members, not ships. Prints every orbital-behaviour force with its role and
+// fails when one is deployed or held for reinforcement.
+int space_entry_stand_in_probe(std::uint64_t ticks, const std::string& campaign_name, const std::string& planet_type) {
+    const auto leaf = environment_or("EAWR_REMAKE_MOD_ROOT", "");
+    if (leaf.empty()) { std::cout << "SKIPPED: Remake mod host required\n"; return 77; }
+    InstalledLive fixture(leaf, campaign_name);
+    auto prepared = fixture.prepare(false);
+    auto& game = eawr::platform::AgreedCampaignAccess::session(*prepared);
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    for (std::uint64_t tick = 0; tick < ticks; ++tick) must(game.step(executor));
+    std::map<galactic::TypeId, std::string> names;
+    for (const auto& row : fixture.setup.types) names.emplace(row.id, row.original_type);
+    const auto stand_in = [&](galactic::TypeId id) {
+        const auto found = names.find(id);
+        return found != names.end() && found->second.find("ORBITAL_DUMMY") != std::string::npos; // diagnostics only
+    };
+    const auto snapshot = game.galaxy().snapshot();
+    galactic::PlanetId target{};
+    std::string map_identity;
+    for (const auto& location : prepared->plan().locations()) if (location.planet && location.original_type == planet_type) {
+        target = location.planet->id;
+        map_identity = fixture.data.planet(location.original_type)->space_tactical_map;
+    }
+    expect(target != 0, "the entry planet exists in the campaign");
+    galactic::PlayerId defender{};
+    for (const auto& planet : snapshot->planets()) if (planet.id == target) defender = planet.owner;
+    galactic::PlayerId invader{};
+    for (const auto& player : prepared->plan().player_bindings()) {
+        const auto id = player.player.player_id;
+        if (id != defender && invader == 0 && player.faction != "Neutral") invader = id;
+    }
+    expect(defender != 0 && invader != 0, "the entry planet has an owner and an opponent");
+    cp::ConflictRecord record; record.id = 1; record.planet = target; record.invader = invader; record.defender = defender;
+    record.map_identity = map_identity;
+    for (const auto& seat : prepared->plan().galaxy().seats) if (seat.player == invader || seat.player == defender)
+        record.seats.push_back({seat.seat_id, static_cast<eawr::sim::tactical::PlayerId>(seat.player)});
+    std::sort(record.seats.begin(), record.seats.end(), [](const auto& a, const auto& b) { return a.seat.value < b.seat.value; });
+    std::size_t members = 0, stand_ins = 0;
+    for (const auto& fleet : snapshot->fleets()) if (fleet.orbit == target && fleet.owner == defender)
+        for (const auto& member : fleet.members) {
+            record.forces.push_back({member.id, member.type, fleet.owner, fleet.id});
+            ++members; stand_ins += stand_in(member.type);
+        }
+    std::sort(record.forces.begin(), record.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    std::cout << "SPACE-ENTRY planet=" << planet_type << " defender=" << defender << " members=" << members << " stand_ins=" << stand_ins << std::endl;
+    expect(stand_ins > 0, "the orbit holds stand-in units at this tick");
+    const auto provider = must(cp::prepare_stock_space_entry(*fixture.files, fixture.loaded.catalog, fixture.data, fixture.types, prepared->plan()));
+    eawr::sim::EntityId first_free = 1000;
+    for (const auto& force : record.forces) first_free = std::max<eawr::sim::EntityId>(first_free, force.id + 100);
+    const auto resolved = must(provider->resolve(record, *snapshot, first_free));
+    std::size_t structures = 0;
+    for (const auto& force : resolved.conflict.forces) {
+        if (force.role == cp::ForceRole::orbital) { ++structures; continue; }
+        const auto name = names.find(force.type);
+        std::cout << "  force " << force.id << " " << (name == names.end() ? std::string("?") : name->second)
+                  << " role=" << static_cast<int>(force.role) << (stand_in(force.type) ? " STAND-IN" : "") << std::endl;
+    }
+    std::cout << "SPACE-ENTRY-RESULT structures_at_markers=" << structures << std::endl;
+    // The battle itself, with the mod's object scripts: the stand-ins are created as units and the mod's own script removes
+    // them (Orbital_Unit.lua despawns the unit in a space battle). Count the stand-in units alive after N steps.
+    std::set<eawr::sim::tactical::TypeId> stand_in_types;
+    for (const auto& [id, name] : names) if (stand_in(id)) {
+        const auto* type = fixture.types.find(name);
+        (void)type;
+        stand_in_types.insert(eawr::assets::object_type_crc(name));
+    }
+    auto prepared_ai = must(provider->prepare_ai(resolved.conflict));
+    auto world = must(eawr::sim::tactical::TacticalSession::create(resolved.conflict.tactical, resolved.content));
+    auto child = must(auth::ScriptedTacticalSession::create(std::move(world), std::move(prepared_ai.scripts)));
+    must(prepared_ai.bind(child));
+    const auto count_stand_ins = [&]() {
+        std::size_t alive = 0;
+        for (const auto& unit : child.world().units()) alive += stand_in_types.contains(unit.type_id);
+        return alive;
+    };
+    const std::size_t at_start = count_stand_ins();
+    std::size_t diagnostics = 0;
+    std::vector<std::size_t> series;
+    for (unsigned tick = 1; tick <= 40; ++tick) {
+        const auto stepped = must(child.step(executor));
+        diagnostics += stepped.scripts.diagnostics.size();
+        for (const auto& diagnostic : stepped.scripts.diagnostics) if (diagnostics <= 5) std::cout << "  script diagnostic: " << diagnostic.message << std::endl;
+        if (tick == 1 || tick == 5 || tick == 20 || tick == 40) series.push_back(count_stand_ins());
+    }
+    std::cout << "SPACE-ENTRY-BATTLE stand_in_units_at_start=" << at_start << " after_1=" << series[0] << " after_5=" << series[1]
+              << " after_20=" << series[2] << " after_40=" << series[3] << " script_diagnostics=" << diagnostics << std::endl;
+    expect(at_start > 0, "the entry creates the stand-in units");
+    expect(series[3] == 0, "the mod's own script removes every stand-in unit from the space battle");
+    return failures ? 1 : 0;
+}
 // #6345: what stands in orbit of one planet at start and after some ticks, by original type name, for the installed
 // Remake campaign. Census only (prints); the covering assertions live in the synthetic orbit-structure tests.
 int orbit_census_probe(std::uint64_t ticks, const std::string& campaign_name, const std::string& planet_type) {
@@ -1571,6 +1662,9 @@ int main(int argc, char** argv) {
             return object_script_census_probe(argc > 2 ? std::stoull(argv[2]) : 600, argc > 3 ? argv[3] : "Sandbox_Equal_Footing_Underworld");
         if (argc > 1 && std::string_view(argv[1]) == "--orbit-workers")
             return orbit_workers_probe(argc > 2 ? std::stoull(argv[2]) : 600, argc > 3 ? argv[3] : "GC_Standard_Web_Way_Imperial",
+                argc > 4 ? argv[4] : "Coruscant_WW");
+        if (argc > 1 && std::string_view(argv[1]) == "--space-entry-stand-ins")
+            return space_entry_stand_in_probe(argc > 2 ? std::stoull(argv[2]) : 300, argc > 3 ? argv[3] : "GC_Standard_Web_Way_Imperial",
                 argc > 4 ? argv[4] : "Coruscant_WW");
         if (argc > 1 && std::string_view(argv[1]) == "--orbit-census")
             return orbit_census_probe(argc > 2 ? std::stoull(argv[2]) : 600, argc > 3 ? argv[3] : "GC_Standard_Web_Way_Imperial",

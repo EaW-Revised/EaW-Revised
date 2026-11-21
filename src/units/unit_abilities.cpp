@@ -97,6 +97,21 @@ void keep_last_of_each_kind(std::vector<tactical::AbilityProfile>& abilities, co
     notes->push_back(std::move(note));
 }
 
+// #7940: each authored row's position in the type's unit-ability list. The debug build appends every child of
+// Unit_Abilities_Data to the list in authored order (DatabaseMap case 0x39: a push_back per loaded object, no
+// de-duplication), so a position is the authored index and rows the remake does not model, or drops, still take one.
+// A type authored twice keeps the later row's data (#4992) but counts at its first, earliest position: the mode
+// reads the ability by type, and the earliest copy is the one that can sit at entry 0 or 1.
+std::vector<std::uint32_t> list_entries(const std::span<const Ability> rows) {
+    std::vector<std::uint32_t> entries(rows.size(), tactical::unlisted_entry);
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        std::size_t first = 0;
+        while (rows[first].type != rows[index].type) ++first;
+        entries[index] = static_cast<std::uint32_t>(first);
+    }
+    return entries;
+}
+
 // AB-26: an ability's Mod_Multiplier and Mod_Flag rows onto its profile.
 void apply_modifiers(tactical::AbilityProfile& entry, const Ability& ability) {
     for (const auto& modifier : ability.modifiers) {
@@ -232,7 +247,9 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
             if (unit.hardpoints[index].type == HardpointType::gravity_well)
                 profile.gravity_well_hardpoints.push_back(static_cast<std::uint32_t>(index));
         }
-        for (const auto& ability : unit.abilities) {
+        const auto listed = list_entries(unit.abilities);
+        for (std::size_t row = 0; row < unit.abilities.size(); ++row) {
+            const auto& ability = unit.abilities[row];
             if (tables.domain == tactical::BattleDomain::land) continue; // WLAB-01: land rows go through land_ability_table()
             if (allowed != nullptr && !allowed(unit.id, ability.type)) continue;
             if (unit.ability_team_dispatch && ability.active_by_default
@@ -263,6 +280,7 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
             if (kind == tactical::AbilityKind::buzz_droids && (!unit.buzz_droids || listed_member)) continue;
             tactical::AbilityProfile entry;
             entry.kind = kind;
+            entry.list_entry = listed[row];
             entry.solo_only = kind == tactical::AbilityKind::buzz_droids && unit.kind == UnitKind::craft;
             entry.market_purchase_required = ability.market_purchase_required;
             entry.gui_activated_ability_name = ability.gui_activated_ability_name;
@@ -434,13 +452,8 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 entry.expiration_frames = 0;
                 entry.recharge_at_activation = true; // WHE-35: independent from charge/shot completion
             }
-            if (kind == tactical::AbilityKind::sensor_jamming) {
-                // WAB-36: the ordinary row activates its named nested handler.
-                const auto handler = std::find_if(unit.special_abilities.begin(), unit.special_abilities.end(),
-                    [&](const auto& special) { return special.kind == tactical::SpecialAbilityKind::sensor_jamming
-                        && special.name == entry.gui_activated_ability_name; });
-                if (entry.gui_activated_ability_name.empty() || handler == unit.special_abilities.end()) continue;
-            }
+            // WJM-05: the row stays whether or not a nested handler carries its authored name; a
+            // row without a matching handler is lit, runs its timers and jams nothing.
             if (kind == tactical::AbilityKind::stealth) {
                 // WST-02: the nested handler named by the ability does the work; without one, or
                 // without a time limit (WST-05), the ability stays out of the table (AB-26).
@@ -519,6 +532,9 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
         // FS-29: attach the visible MC30 consumer only to its authored object script.
         profile.mc30_script = iequals(unit.lua_script, "ObjectScript_MC30")
             && tactical::ability_slot(profile, tactical::AbilityKind::cluster_bomb).has_value();
+        // WDP-02: only a type whose SPOILER_LOCK clips move a weapon bone follows the switch.
+        profile.deploy_poses = unit.deploy_poses.has_value()
+            && tactical::ability_slot(profile, tactical::AbilityKind::spoiler_lock).has_value();
         // WSH-09 (#5696): strict keeps refusing damage (a negative amount) together with a percent heal; only a
         // lenient load takes the retail combination (WSH-04: percent x maximum + amount).
         if (policy == ContentErrors::strict) for (const auto& special : profile.special)
@@ -617,7 +633,9 @@ core::Result<tactical::AbilityTable> land_ability_table(const UnitTables& tables
     const auto build = [&](const std::string& owner, const std::span<const Ability> rows) -> std::optional<tactical::UnitAbilityProfile> {
         tactical::UnitAbilityProfile profile;
         profile.type_id = assets::object_type_crc(owner);
-        for (const auto& ability : rows) {
+        const auto listed = list_entries(rows);
+        for (std::size_t row = 0; row < rows.size(); ++row) {
+            const auto& ability = rows[row];
             const auto kind = tactical::land_ability_kind(ability.type);
             if (kind == tactical::AbilityKind::none) {
                 note("unit '" + owner + "' authors Unit_Ability '" + ability.authored_type
@@ -627,6 +645,7 @@ core::Result<tactical::AbilityTable> land_ability_table(const UnitTables& tables
             const auto& flags = tactical::ability_kind_flags(kind);
             tactical::AbilityProfile entry;
             entry.kind = kind;
+            entry.list_entry = listed[row];
             entry.team = flags.team;
             entry.gui_activated_ability_name = ability.gui_activated_ability_name;
             entry.supports_autofire = ability.supports_autofire;

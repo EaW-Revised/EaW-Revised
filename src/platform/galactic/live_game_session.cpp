@@ -5,6 +5,7 @@
 #include "eawr/diagnostics/gc_memory_watch.hpp"
 #include "eawr/core/gc_load_trace.hpp"
 #include "eawr/platform/live_game_lockstep.hpp"
+#include "eawr/net/galactic_clock_policy.hpp"
 #include "eawr/platform/agreed_campaign.hpp"
 #include "eawr/platform/tactical_feed.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
@@ -292,7 +293,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
     std::shared_ptr<const vfs::Vfs> filesystem_owner, const data::Catalog& catalog, const data::galactic::GalacticData& data,
     const units::GalacticTypeTable& types, campaign::CampaignSetupPlan plan, std::string_view difficulty,
     bool install_native_ai, std::array<std::uint64_t, 6> ai_service_periods, bool observe_native_ai, std::span<const std::uint8_t> exact_checkpoint, std::array<std::uint8_t, 32> checkpoint_mod_list,
-    CampaignPrepareObserver* observer) {
+    CampaignPrepareObserver* observer, checkpoint::RecoveredCheckpoint* recovered) {
     using Result = core::Result<std::unique_ptr<PreparedLiveCampaign>>;
     if (!filesystem_owner) return Result::failure(diagnostic("EAWR-SAVE-0104", "Missing campaign filesystem owner."));
     const auto& filesystem = *filesystem_owner;
@@ -582,7 +583,14 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
         options.player_load = false;
         const sim::InlineExecutor executor;
         auto identities = checkpoint::game_identities(plan.galaxy()); identities.mod_list = checkpoint_mod_list;
-        auto restored = checkpoint::load_game_checkpoint(exact_checkpoint, identities, options, executor);
+        std::span<const std::uint8_t> restore_bytes = exact_checkpoint;
+        if (recovered) {
+            auto converted = checkpoint::recover_checkpoint_history(exact_checkpoint, identities, options, executor);
+            if (!converted) return core::Result<campaign::CampaignRoot>::failure(converted.error());
+            *recovered = std::move(converted).value();
+            restore_bytes = recovered->bytes; // the converted file loads through the strict path, as it will on every peer
+        }
+        auto restored = checkpoint::load_game_checkpoint(restore_bytes, identities, options, executor);
         if (!restored) return core::Result<campaign::CampaignRoot>::failure(restored.error());
         return core::Result<campaign::CampaignRoot>::success(campaign::CampaignRoot::from_restored(
             campaign::CampaignSetupPlan(plan), std::move(restored).value().session));
@@ -751,6 +759,7 @@ public:
         if (const auto* conflict = session_->conflict()) {
             active_conflict_ = std::make_shared<const campaign::ConflictRecord>(*conflict);
             frame_.conflict = active_conflict_;
+            publish_battle_spectators();
             frame_.battle = session_->battle()->snapshot();
             frame_.battle_lifetime = session_->battle_lifetime();
             battle_frame_ = {frame_.battle, frame_.battle, Clock::now()};
@@ -785,6 +794,23 @@ public:
         });
         publish_view_frames();
         if (!recovering) publish_preparation();
+    }
+
+    // Seats whose whole human side took the spectate role of the active battle: they have no battle player and watch
+    // through the agreed observer perspective. Owner thread, beside the publication of the active conflict.
+    void publish_battle_spectators() {
+        frame_.battle_spectators.clear();
+        if (!frame_.conflict) return;
+        const auto& state = session_->galaxy().seat_control();
+        if (!state || !state->battle || state->battle->conflict != frame_.conflict->id
+            || state->battle->role != galactic::BattleTeamRole::spectate || state->battle->observer_player == 0) return;
+        for (const auto& seat : session_->galaxy().seats()) {
+            if (!seat.active || seat.kind != galactic::SeatKind::human || seat.human_side_id != state->battle->choosing_side) continue;
+            const auto binding = std::find_if(frame_.conflict->seats.begin(), frame_.conflict->seats.end(),
+                [&](const auto& row) { return row.seat == seat.seat_id; });
+            if (binding != frame_.conflict->seats.end() && binding->player == 0)
+                frame_.battle_spectators.push_back({seat.seat_id, state->battle->observer_player});
+        }
     }
 
     void publish_view_frames() {
@@ -1137,9 +1163,16 @@ public:
                 battle_base_types_.clear();
             }
             frame_.conflict = active_conflict_;
+            publish_battle_spectators();
             if (options_.step_driver) {
                 battle_paused_ = session_->child_paused();
-                std::erase_if(battle_pause_requests_, [&](const auto& row) { return row.second == battle_paused_; });
+                // A request ends when the agreed state equals it, a refusal of its seat is published (below), or one
+                // answer window of session ticks has passed: a refused or dropped request must never leave the seat's
+                // press ignored until another seat flips the agreed state (#7973).
+                const auto answered_by = stepped.value().completed_tick;
+                std::erase_if(battle_pause_requests_, [&](const auto& row) {
+                    return row.second.paused == battle_paused_ || answered_by >= row.second.since + pause_request_release_ticks;
+                });
                 const auto raw_rate = session_->galaxy().clock().tactical_speed.raw() * sim::tactical::logical_frames_per_second;
                 battle_rate_ = std::max(1U, static_cast<std::uint32_t>(
                     (raw_rate + sim::math::Fixed::scale / 2) / sim::math::Fixed::scale));
@@ -1987,7 +2020,9 @@ public:
     std::deque<LiveTickCost> costs_;
     std::function<std::vector<sim::tactical::PlayerCommand>(std::uint64_t)> battle_source_;
     std::map<galactic::SeatId, TacticalFeed::ExecutionObserver> battle_execution_observers_; // observation only
-    std::map<galactic::SeatId, bool> battle_pause_requests_; // local requested state while agreed input is in flight
+    struct PauseRequest { bool paused{}; std::uint64_t since{}; };
+    static constexpr std::uint64_t pause_request_release_ticks = 2 * eawr::net::ClockThrottle::pause_debounce_ticks;
+    std::map<galactic::SeatId, PauseRequest> battle_pause_requests_; // local requested state while agreed input is in flight
     std::vector<LiveGameOrder> order_inbox_;
     std::vector<galactic::GameCommand> command_inbox_;
     std::map<galactic::SeatId, std::uint64_t> sequences_;
@@ -2035,9 +2070,11 @@ public:
 
 class LiveGameSession::Impl::Feed final : public TacticalFeed {
 public:
+    // `player` is the battle player the seat commands (0 for a seat that only watches); `view_player` is the perspective
+    // its fog and snapshot follow: the same player, or the agreed observer perspective of a spectating seat.
     Feed(std::shared_ptr<Impl> owner, std::shared_ptr<const campaign::ConflictRecord> conflict,
-        galactic::SeatId seat, sim::tactical::PlayerId player)
-        : owner_(std::move(owner)), conflict_(std::move(conflict)), seat_(seat), player_(player) {}
+        galactic::SeatId seat, sim::tactical::PlayerId player, sim::tactical::PlayerId view_player)
+        : owner_(std::move(owner)), conflict_(std::move(conflict)), seat_(seat), player_(player), view_player_(view_player) {}
     bool current() const { return owner_->active_conflict_ && owner_->active_conflict_->id == conflict_->id; }
     bool running() const { return !owner_->stopping_ && current() && owner_->frame_.conflict && owner_->frame_.conflict->id == conflict_->id; }
     std::optional<AgreedPacing> agreed_pacing() const override {
@@ -2083,12 +2120,12 @@ public:
         if (owner_->options_.step_driver) {
             const std::lock_guard lock(owner_->mutex_);
             const auto pending = owner_->battle_pause_requests_.find(seat_);
-            const auto requested = pending == owner_->battle_pause_requests_.end() ? owner_->battle_paused_ : pending->second;
+            const auto requested = pending == owner_->battle_pause_requests_.end() ? owner_->battle_paused_ : pending->second.paused;
             if (running() && paused != requested) {
                 galactic::CommandPayload control = paused ? galactic::CommandPayload{galactic::PauseGalaxy{}}
                                                          : galactic::CommandPayload{galactic::ResumeGalaxy{}};
                 owner_->order_inbox_.push_back({seat_, std::move(control), {}});
-                owner_->battle_pause_requests_[seat_] = paused;
+                owner_->battle_pause_requests_[seat_] = {paused, owner_->frame_.session_tick};
                 owner_->wake_.notify_all();
             }
             return;
@@ -2144,7 +2181,7 @@ public:
     }
     std::shared_ptr<const LiveFog> fog_at(std::uint64_t tick) const override {
         const std::lock_guard lock(owner_->mutex_);
-        if (current()) if (const auto found = owner_->battle_fog_.find(player_); found != owner_->battle_fog_.end())
+        if (current()) if (const auto found = owner_->battle_fog_.find(view_player_); found != owner_->battle_fog_.end())
             for (const auto& fog : found->second) if (fog->tick == tick) return fog;
         return {};
     }
@@ -2211,7 +2248,7 @@ private:
     std::shared_ptr<Impl> owner_;
     std::shared_ptr<const campaign::ConflictRecord> conflict_;
     galactic::SeatId seat_{};
-    sim::tactical::PlayerId player_{};
+    sim::tactical::PlayerId player_{}, view_player_{};
 };
 
 std::shared_ptr<TacticalFeed> LiveGameSession::battle_feed(sim::EntityId conflict, galactic::SeatId seat) {
@@ -2220,7 +2257,15 @@ std::shared_ptr<TacticalFeed> LiveGameSession::battle_feed(sim::EntityId conflic
     if (!record || record->id != conflict) return {};
     const auto binding = std::find_if(record->seats.begin(), record->seats.end(), [seat](const auto& row) { return row.seat == seat; });
     if (binding == record->seats.end()) return {};
-    return std::make_shared<Impl::Feed>(impl_, record, seat, binding->player);
+    // A spectating seat commands nothing (player 0: every submit, source and observer hook of the feed stays inert) but
+    // reads the agreed observer perspective's fog, like the observer view of the simulation (seat_battle_view).
+    auto view = binding->player;
+    if (view == 0) {
+        const auto& watching = impl_->frame_.battle_spectators;
+        const auto found = std::find_if(watching.begin(), watching.end(), [seat](const auto& row) { return row.seat == seat; });
+        if (found != watching.end()) view = found->observer;
+    }
+    return std::make_shared<Impl::Feed>(impl_, record, seat, binding->player, view);
 }
 void LiveGameSession::battle_ready(sim::EntityId conflict) {
     { const std::lock_guard lock(impl_->mutex_);
@@ -2605,7 +2650,10 @@ std::shared_ptr<const CampaignLoadingView> LiveGameSession::loading(sim::galacti
     if (local == seats.end() || !local->active || local->kind != galactic::SeatKind::human) return {};
     const auto binding = std::find_if(frame.conflict->seats.begin(), frame.conflict->seats.end(),
         [seat](const auto& row) { return row.seat == seat; });
-    if (binding == frame.conflict->seats.end() || !binding->player || binding->player != local->player) return {};
+    // A spectating seat (its side took the spectate role) loads the same battle, so it gets the same loading view.
+    const bool watching = std::any_of(frame.battle_spectators.begin(), frame.battle_spectators.end(),
+        [seat](const auto& row) { return row.seat == seat; });
+    if (binding == frame.conflict->seats.end() || (!watching && (!binding->player || binding->player != local->player))) return {};
     return impl_->loading_.view();
 }
 LiveSaveMenuFacts LiveGameSession::save_menu_facts() const {

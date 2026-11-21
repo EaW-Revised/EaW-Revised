@@ -448,6 +448,31 @@ void foc_fleet(const bool formation_only, const bool fire_bones_only) {
     const auto* frigate = unit("Nebulon_B_Frigate");
     expect(fighter_set != nullptr && x_wing != nullptr && y_wing != nullptr && corellian != nullptr && frigate != nullptr,
            "the Fighter set and the ranked fleet types load");
+    // WDP-01/06: the folding-wing fighter's four muzzle bones hang under its wing bones, so its DEPLOY clip moves them a
+    // few units; a type with no SPOILER_LOCK clip keeps no table.
+    if (x_wing != nullptr && y_wing != nullptr) {
+        expect(x_wing->deploy_poses.has_value() && !y_wing->deploy_poses.has_value(),
+               "WDP-01: the folding-wing fighter has a deploy pose table, the other fighter none");
+        if (x_wing->deploy_poses) {
+            const auto& poses = *x_wing->deploy_poses;
+            expect(poses.bones.size() == 4 && poses.deploy.frames == 30 && poses.undeploy.frames == 30
+                       && poses.deploy.frames_per_tick.raw() == raw(1) && !poses.deploy.segments.empty()
+                       && poses.deploy.segments.front().from_frame == 0 && poses.deploy.segments.size() > 2,
+                   "WDP-01: four muzzle bones, 30-frame clips at one clip frame per logical frame, a segment per moving frame");
+            const auto distance = [](const eawr::sim::math::Vec3& left, const eawr::sim::math::Vec3& right) {
+                const double dx = double(left.x.raw() - right.x.raw()), dy = double(left.y.raw() - right.y.raw()),
+                    dz = double(left.z.raw() - right.z.raw());
+                return std::sqrt(dx * dx + dy * dy + dz * dz) / double(eawr::sim::math::Fixed::scale);
+            };
+            const auto& first = poses.deploy.segments.front().points;
+            const auto& last = poses.deploy.segments.back().points;
+            double moved = 0.0;
+            for (std::size_t index = 0; index < first.size() && index < last.size(); ++index) moved = std::max(moved, distance(first[index], last[index]));
+            expect(moved > 1.5 && moved < 6.0, "WDP-06: the deployed wings move a muzzle bone a few units (about 3), not tens");
+            expect(distance(poses.undeploy.segments.back().points.front(), first.front()) < 0.5,
+                   "WDP-01: UNDEPLOY ends within half a unit of where DEPLOY starts (the bind pose)");
+        }
+    }
     if (fighter_set != nullptr && x_wing != nullptr && y_wing != nullptr && corellian != nullptr && frigate != nullptr) {
         const auto& entries = fighter_set->attack_priorities;
         expect(entries.size() == 3 && entries[0].name == "Transport" && entries[0].weight.raw() == raw(1) &&

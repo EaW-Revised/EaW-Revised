@@ -130,6 +130,23 @@ inline constexpr std::array<std::string_view, 7> revised_presentation_xml{
     std::string source_id
 );
 
+// Positional reads inside one mounted asset's bytes (a loose file or an archive entry), for a caller that needs a few
+// header words of a large asset and not the whole of it. Offsets are relative to the asset's first byte.
+class RangeReader final {
+public:
+    RangeReader(RangeReader&&) noexcept;
+    RangeReader& operator=(RangeReader&&) noexcept;
+    ~RangeReader();
+    // Fills `out` with the bytes at `offset`; false when the range lies outside the asset or cannot be read.
+    [[nodiscard]] bool read(std::uint64_t offset, std::span<std::byte> out);
+
+private:
+    friend class Vfs;
+    struct State;
+    explicit RangeReader(std::unique_ptr<State> state) noexcept;
+    std::unique_ptr<State> state_;
+};
+
 class Vfs final {
 public:
     Vfs();
@@ -175,6 +192,9 @@ public:
     // Empty assets succeed without callbacks; failures may follow partial delivery.
     [[nodiscard]] core::Result<void> read_chunks(const AssetRecord& candidate, std::span<std::byte> buffer,
         const std::function<void(std::span<const std::byte>)>& consume) const;
+    // A positional reader over one exact mounted candidate; nullopt where read_location is (no native bytes to seek in,
+    // or the candidate is not in the mounted view). The caller then reads the asset through open().
+    [[nodiscard]] std::optional<RangeReader> open_range(const AssetRecord& candidate) const;
     // The disk location of one exact mounted candidate; nullopt when it is not in the mounted view.
     [[nodiscard]] std::optional<ReadLocation> read_location(const AssetRecord& candidate) const;
     // The stamp of one exact mounted candidate's source (one stat per container, remembered for the life of the mount);

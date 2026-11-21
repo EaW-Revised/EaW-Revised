@@ -122,6 +122,35 @@ std::string galactic_content_gate_text(const GalacticContentGate gate, const std
     return {};
 }
 
+std::string wait_names(const std::vector<std::string>& names) {
+    const auto shown = [](const std::string& name) { return name.empty() ? std::string("a player") : name; };
+    if (names.empty()) return {};
+    if (names.size() == 1) return shown(names[0]);
+    if (names.size() == 2) return shown(names[0]) + " and " + shown(names[1]);
+    return shown(names[0]) + ", " + shown(names[1]) + " and " + std::to_string(names.size() - 2U) + " more";
+}
+
+std::string mod_check_tag(const bool known, const bool done) {
+    if (!known) return {};
+    return done ? " - mods ready" : " - checking mods...";
+}
+
+std::array<std::string, 3> mod_check_tag_tiers(const bool known, const bool done) {
+    if (!known) return {};
+    if (done) return {" - mods ready", " - ready", " - ok"};
+    return {" - checking mods...", " - checking...", " - ..."};
+}
+
+std::string lobby_wait_line(const LobbyWaitInput& input) {
+    if (!input.own_mod_check.empty()) return input.own_mod_check;
+    if (!input.preparing.empty()) return input.preparing;
+    if (!input.restoring.empty()) return input.restoring;
+    if (!input.content_loading.empty()) return input.content_loading;
+    if (!input.checking_mods.empty()) return "Waiting for " + wait_names(input.checking_mods) + " to finish checking mods...";
+    if (!input.loading_saved_game.empty()) return "Waiting for " + wait_names(input.loading_saved_game) + " to load the saved game...";
+    return input.start_off;
+}
+
 std::string_view private_online_empty_notice() noexcept {
     return "Online games are private. Ask the host for an invitation code.";
 }

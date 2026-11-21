@@ -38,6 +38,7 @@ void reserve_order_contract();
 void ground_passenger_contracts();
 void admitted_cycle();
 void preparation_contracts();
+void station_addon_slot_contract();
 void scene_contracts();
 void orbital_owner_admission();
 void formation_contracts();

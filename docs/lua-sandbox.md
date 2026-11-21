@@ -250,6 +250,8 @@ player's seat is human-controlled in the campaign setup (`story_player_human`, t
 player is a named script fault. The flag is fixed for the session: `SWITCH_CONTROL` never changes it (WGS-136), and a multiplayer seat
 that later drops to AI keeps its setup value (not modelled in the story host; SWITCH_SIDES likewise).
 
+**Galactic object-script host: human seat and messages (legacy EAWR-7964).** `Player.Is_Human()` answers the same setup rule as the story host (one shared binding): a registered player's seat is human-controlled, an unregistered player is a named script fault. `Game_Message(key)` takes exactly one string (anything else is a named script fault). The advisor/text presentation consumer is not hosted yet, so the call reports `EAWR-SCRIPT-0216` and the script continues. The planet-upgrade structure scripts (company, agricultural, trade hub, mining) message only a human owner, then despawn their spawner.
+
 **Galactic story-script host random calls.** The story scheduler of a scripted campaign
 (`create_galactic_story_scheduler`) binds the following random APIs separately from tactical AI:
 

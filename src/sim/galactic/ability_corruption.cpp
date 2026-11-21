@@ -66,7 +66,10 @@ std::size_t GalacticSession::Impl::corruption_unit_count(std::span<const TypeId>
 GalacticSession::Impl::CorruptionDisplayRequirements GalacticSession::Impl::corruption_display_requirements(const PlayerId local) const {
     CorruptionDisplayRequirements result;
     // One actor and one planet pass for the whole publication, never one per planet/slot.
-    for (const auto& [id, live] : actor_records) if (live.owner == local) {
+    for (const auto& [id, live] : actor_records) {
+        // WGCH-124 / WGCI-3: representative art looks at every owner's live actors; the counts stay owner-scoped.
+        if (!live.dead && !live.delete_pending) result.present_types.insert(live.original_type);
+        if (live.owner != local) continue;
         if (const auto counted = corruption_counted_unit(id, live)) result.units[live.original_type].push_back(*counted);
     }
     for (const auto& planet : setup.ability_host->corruption_planets) {
@@ -114,13 +117,17 @@ CorruptionMenu GalacticSession::Impl::corruption_display_menu(const PlayerId loc
         row.prepared.choice.type = choice.type;
         row.prepared.choice.credits = row.live_prepared ? row.live_prepared->price : choice.price;
         row.affordable = account->credits >= row.prepared.choice.credits;
-        row.missions_satisfied = choice.required_mission_type == CorruptionType::none || usage->uses[static_cast<std::size_t>(choice.required_mission_type)] >= choice.mission_count;
+        row.completed_missions = usage->uses[static_cast<std::size_t>(choice.required_mission_type)];
+        row.missions_satisfied = choice.required_mission_type == CorruptionType::none || row.completed_missions >= choice.mission_count;
         auto& live_choice = *row.live_choice;
         std::erase_if(live_choice.planet_types, [&](const auto type) { return !requirements.planet_types.contains(type); });
         row.planets_satisfied = live_choice.planet_types.empty() || std::any_of(live_choice.planet_types.begin(), live_choice.planet_types.end(),
             [&](const auto type) { return requirements.owned_planet_types.contains(type); });
         row.units_satisfied = !choice.unit_count || choice.unit_types.empty();
-        if (!row.units_satisfied) {
+        if (!choice.unit_types.empty()) {
+            // Representative art: first authored alternative that exists anywhere (independent of the pooled count).
+            row.required_unit_type = choice.unit_types.front();
+            for (const auto type : choice.unit_types) if (requirements.present_types.contains(type)) { row.required_unit_type = type; break; }
             auto alternatives = choice.unit_types;
             std::sort(alternatives.begin(), alternatives.end());
             alternatives.erase(std::unique(alternatives.begin(), alternatives.end()), alternatives.end());
@@ -131,7 +138,8 @@ CorruptionMenu GalacticSession::Impl::corruption_display_menu(const PlayerId loc
                     identities.insert(units->second.begin(), units->second.end());
                 at->second = identities.size();
             }
-            row.units_satisfied = at->second >= choice.unit_count;
+            row.available_units = at->second;
+            row.units_satisfied = !choice.unit_count || row.available_units >= choice.unit_count;
         }
         // WGCH-199: a mission whose battle can't be built takes the direct route, so every row has a route. The field
         // stays for presentation fixtures; a live host now always offers the row.
@@ -168,6 +176,8 @@ std::shared_ptr<const std::vector<CorruptionMenu>> GalacticSession::Impl::publis
         if (find(setup.ability_host->corruption_planets, observation.planet, [](const auto& row) { return row.planet; }))
             menus.push_back(corruption_display_menu(local, observation.planet, nullptr, requirements));
     }
+    // Sorted by planet: GalacticSnapshot::corruption_information binary-searches it once per frame per hovered planet.
+    std::stable_sort(menus.begin(), menus.end(), [](const auto& a, const auto& b) { return a.planet < b.planet; });
     return std::make_shared<const std::vector<CorruptionMenu>>(std::move(menus));
 }
 bool GalacticSession::Impl::corruption_choice_tactical(const CorruptionChoice& choice, const PlayerId owner) const {
@@ -207,7 +217,8 @@ void GalacticSession::Impl::execute_removal(const GameCommand& command, const Ce
     const auto* surface = control ? find(control->planets, target, [](const auto& row) { return row.planet; }) : nullptr;
     const auto* content = setup.ability_host ? find(setup.ability_host->corruption_planets, target, [](const auto& row) { return row.planet; }) : nullptr;
     auto* account = economy ? find(economy->players, actor.owner, [](const auto& row) { return row.player; }) : nullptr;
-    if (!service || !surface || !content || !account || !profile.removal
+    const auto* policy = ability_host ? find(ability_host->transitions, target, [](const auto& row) { return row.planet; }) : nullptr;
+    if (!policy || policy->restricted || !service || !surface || !content || !account || !profile.removal
         || !ground_ability_enabled(profile, *service, AbilityKind::remove_corruption)) return reject();
     const auto index = static_cast<std::size_t>(surface - control->planets.data());
     if (control->state[index].target_player != actor.owner) return reject();
@@ -564,7 +575,7 @@ void GalacticSession::Impl::prepare_corruption(const GameCommand& command, const
     const auto* economic = find(economy_corruption->planets, request.planet, [](const auto& r) { return r.planet; });
     const auto* state = find(ability_host->transitions, request.planet, [](const auto& r) { return r.planet; });
     const auto* profile = find(setup.ability_host->profiles, actor.current_type, [](const auto& r) { return r.type; });
-    if (!target || !economic || !state || !profile || !profile->corruption || !control || !setup.ability_host->tutorial_corruption_allowed
+    if (!target || !economic || !state || !profile || !profile->corruption || !control || state->restricted
         || economic->destroyed || economic->corruption != CorruptionType::none || state->transition.active()
         || !target->retains_influence || std::find(setup.ability_host->activated_corruption_abilities.begin(),
             setup.ability_host->activated_corruption_abilities.end(), profile->corruption->name) == setup.ability_host->activated_corruption_abilities.end()) return reject();
@@ -681,7 +692,7 @@ void GalacticSession::Impl::execute_corruption(const GameCommand& command, const
     const auto* target = find(setup.ability_host->corruption_planets, prepared.planet, [](const auto& r) { return r.planet; });
     const auto* economic = find(economy_corruption->planets, prepared.planet, [](const auto& r) { return r.planet; });
     const auto* transition = find(ability_host->transitions, prepared.planet, [](const auto& r) { return r.planet; });
-    if (!account || !usage || !target || !economic || !transition || economic->destroyed || transition->transition.active()
+    if (!account || !usage || !target || !economic || !transition || transition->restricted || economic->destroyed || transition->transition.active()
         || economic->corruption != CorruptionType::none || prepared.corruption.slot >= 3 || account->credits < prepared.price
         || !ability_consumption_handler) return reject();
     auto defeat = prepare_ability_defeat(actor, Fixed{}, true);
@@ -802,15 +813,33 @@ void GalacticSession::set_corruption_mission_handler(CorruptionMissionHandler ha
 void GalacticSession::set_corruption_mission_probe(CorruptionMissionProbe probe) { impl_->corruption_mission_probe = std::move(probe); }
 void GalacticSession::set_corruption_completion_handler(CorruptionCompletionHandler handler) { impl_->corruption_completion_handler = std::move(handler); }
 void GalacticSession::set_corruption_result_handler(CorruptionResultHandler handler) { impl_->corruption_result_handler = std::move(handler); }
+core::Result<bool> GalacticSession::set_corruption_flag(const PlanetId planet, const CorruptionPlanetFlag flag, const bool enabled) {
+    using Result = core::Result<bool>;
+    if (!planet || flag > CorruptionPlanetFlag::hologram)
+        return Result::failure(detail::diagnostic(diagnostic_codes::invalid_command, "invalid corruption policy input"));
+    auto* row = impl_->ability_host ? find(impl_->ability_host->transitions, planet, [](const auto& r) { return r.planet; }) : nullptr;
+    if (!row) return Result::success(false);
+    auto& value = flag == CorruptionPlanetFlag::restricted ? row->restricted : row->hologram_enabled;
+    if (value == enabled) return Result::success(true);
+    if (!impl_->native_replaying) {
+        std::vector<std::uint8_t> payload;
+        detail::put_u8(payload, flag == CorruptionPlanetFlag::restricted ? 2 : 3);
+        detail::put_u64(payload, planet); detail::put_u8(payload, enabled ? 1 : 0);
+        auto recorded = append_native_effect(NativeEffectKind::corruption_lifecycle, std::move(payload));
+        if (!recorded) return Result::failure(recorded.error());
+    }
+    value = enabled; impl_->touch_abilities();
+    return Result::success(true);
+}
 core::Result<bool> GalacticSession::begin_corruption(PlanetId planet, CorruptionType type, Fixed seconds) {
     if (!planet || type > CorruptionType::bonded_citizens || seconds < Fixed{}) return core::Result<bool>::failure(detail::diagnostic(diagnostic_codes::invalid_command, "invalid corruption transition input"));
-    if (const auto* row = impl_->ability_host ? find(impl_->ability_host->transitions, planet, [](const auto& r) { return r.planet; }) : nullptr) {
-        auto probe = row->transition;
-        if (const auto* economic = impl_->economy_corruption ? find(impl_->economy_corruption->planets, planet, [](const auto& r) { return r.planet; }) : nullptr)
-            probe.current = economic->corruption;
-        auto admission = corruption_fixture::begin(probe, type, seconds, galactic_frames_per_second, impl_->clock.galactic_frame);
-        if (!admission) return admission; // malformed arithmetic never enters the native journal
-    }
+    const auto* row = impl_->ability_host ? find(impl_->ability_host->transitions, planet, [](const auto& r) { return r.planet; }) : nullptr;
+    const auto* economic = impl_->economy_corruption ? find(impl_->economy_corruption->planets, planet, [](const auto& r) { return r.planet; }) : nullptr;
+    if (!row || !economic || economic->destroyed) return core::Result<bool>::success(false);
+    auto probe = row->transition;
+    probe.current = economic->corruption;
+    auto admission = corruption_fixture::begin(probe, type, seconds, galactic_frames_per_second, impl_->clock.galactic_frame);
+    if (!admission || !admission.value()) return admission; // a refused transition writes no native journal
     if (!impl_->native_replaying) {
         std::vector<std::uint8_t> payload; detail::put_u8(payload, 0); detail::put_u64(payload, planet);
         detail::put_u8(payload, static_cast<std::uint8_t>(type)); detail::put_i64(payload, seconds.raw());

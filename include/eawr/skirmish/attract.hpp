@@ -135,6 +135,14 @@ public:
     void pointer_moved(std::uint64_t now_ms, bool main_menu_active) noexcept;
     void window_activated(std::uint64_t now_ms) noexcept { idle_ms_ = now_ms; }
 
+    // MAT-22: an opaque screen covers the battle. While held, service() asks for nothing and the
+    // clocks do not run: release() moves the idle and map clocks forward by the held time, so the
+    // battle continues where it was instead of expiring or timing out on return. Both are
+    // no-ops when not initialised, hold() twice keeps the first time, release() unheld does nothing.
+    void hold(std::uint64_t now_ms) noexcept;
+    void release(std::uint64_t now_ms) noexcept;
+    [[nodiscard]] bool held() const noexcept { return held_; }
+
     // MAT-13: stops everything; the next init() starts over (the map index is kept).
     void shutdown() noexcept;
 
@@ -149,6 +157,8 @@ private:
     std::uint64_t idle_ms_{};
     std::uint64_t map_ms_{};
     bool paused_{};
+    bool held_{};
+    std::uint64_t held_since_ms_{};
 };
 
 // Bounds one sequence of load attempts, including asynchronous failures.

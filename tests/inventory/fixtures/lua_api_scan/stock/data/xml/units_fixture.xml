@@ -1,0 +1,5 @@
+<Units>
+	<SpaceUnit Name="Fixture_Ship">
+		<Lua_Script>Fixture_Object</Lua_Script>
+	</SpaceUnit>
+</Units>

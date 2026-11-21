@@ -258,6 +258,30 @@ void hero_deployment() {
     }
 }
 
+void test_script_change_owner_population() {
+    // Lua Change_Owner: a brought-in ship's population share counts for the new owner and no longer for the old one.
+    hero_deployment();
+    auto world = session();
+    if (!world) return;
+    expect(static_cast<bool>(world->submit(buy(0, human, 0, human_station, ship_type))), "Change_Owner population: buy a ship");
+    step_to(*world, 451);
+    const auto id = world->next_entity_id();
+    expect(static_cast<bool>(world->submit(reinforce(451, human, 1, ship_type, at(-2000, 1000)))), "Change_Owner population: bring it in");
+    step_to(*world, 452);
+    const auto population_of = [&](const tactical::PlayerId player) -> std::optional<std::uint32_t> {
+        for (const auto& view : world->snapshot()->economy()) if (view.player == player) return view.population;
+        return std::nullopt;
+    };
+    expect(population_of(human) == 2U && population_of(ai) == 0U, "Change_Owner population: the ship counts for its first owner");
+    expect(static_cast<bool>(world->submit(tactical::PlayerCommand{{452, human, 2}, {id}, tactical::ScriptChangeOwnerPayload{ai}})),
+        "Change_Owner population: the change submits");
+    step_to(*world, 454);
+    const auto moved = world->unit_state(id);
+    expect(moved && moved->owner == ai, "Change_Owner population: the ship changed owner");
+    expect(population_of(human) == 0U && population_of(ai) == 2U,
+        "Change_Owner population: the share counts for the new owner and no longer for the old one");
+}
+
 void test_reinforce_ship() {
     hero_deployment();
     auto world = session();

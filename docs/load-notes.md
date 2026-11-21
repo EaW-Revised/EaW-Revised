@@ -149,6 +149,7 @@ Ranges are centrally assigned; never derive a code from diagnostic text.
 | 0550–0599 | Tactical AI |
 | 0600–0649 | Tactical runtime arithmetic |
 | 1000–1999 | Galactic lane, subdivided by its coordinator |
+| 2000–2049 | Materials and shader routes; 2000 = a visible model layer names a shader program that no renderer route handles (no adapter, alias, planet, environment or built-in route, no native translation): the layer is not drawn. One note per layer and shader name, found by a header-only scan of every winning `data/art/models` file in the load check (`scene::audit_model_shaders`); class C, action skipped_object, the example model in `file` |
 
 The worked example preserves XML R-10: an unavailable initial include remains
 omitted and its existing diagnostic/health count stays intact. Its additional

@@ -48,10 +48,13 @@ bool erase_control_actor(PoliticalControlSetup&, EntityId);
 // the space queue (the one in progress), none while a queue is idle. Planets are paired by identity. Returns whether any row changed.
 [[nodiscard]] bool derive_production_controllers(PoliticalControlSetup&, const ProductionSetup&);
 // WGM-65..74: one planet from immutable copied live presence and previous control.
+// WGM-70: a supplied production row replaces retained special contributions
+// with its current ground/space structures; absent rows retain explicit inputs.
 [[nodiscard]] core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& inputs,
     const ControlPlanet& planet, const PlanetControl& previous, std::span<const Fleet> orbit,
     const MovementSetup* movement, std::span<const Route> routes, std::uint64_t frame,
     std::span<const CensusObject> actors = {},
-    const std::map<FleetId, core::Result<bool>>* live_skip = nullptr);
+    const std::map<FleetId, core::Result<bool>>* live_skip = nullptr,
+    const PlanetProduction* live_production = nullptr);
 
 } // namespace eawr::sim::galactic

@@ -72,7 +72,7 @@ def write_fixture_root(root: pathlib.Path, *, missing_texture: bool = False,
         models.joinpath(EFFECT_NAMES[1]).write_bytes(particle_bytes(
             "eawr-map-cyan", (0.1, 0.8, 1.0),
             texture="eawr_missing_glow.tga" if missing_texture else "p_synthetic_glow.tga",
-            blend=10 if heat else 5 if unsupported else blends[1],
+            blend=10 if heat else 7 if unsupported else blends[1],
             heat=heat, rate=0 if inactive else 40))
     (data / "Textures" / "P_Synthetic_Glow.TGA").write_bytes(effects.build_glow())
     return root

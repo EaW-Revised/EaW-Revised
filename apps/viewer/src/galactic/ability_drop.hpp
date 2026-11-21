@@ -72,6 +72,8 @@ inline bool enabled(const sim::galactic::GalacticAbilityProfile& p,
         && routed(host.activated_spy_abilities, p.spy->name);
     case AbilityKind::remove_corruption: return p.removal && ground_ability_enabled(p, s, kind)
         && routed(host.activated_removal_abilities, p.removal->name);
+    case AbilityKind::credit_siphon: return p.siphon && ground_ability_enabled(p, s, kind)
+        && routed(host.activated_siphon_abilities, p.siphon->name);
     case AbilityKind::black_market: return p.has_market && s.enabled && !s.cancelled;
     case AbilityKind::structure_sabotage: return p.sabotage && s.sabotage_enabled && !s.sabotage_cancelled
         && routed(host.activated_sabotage_abilities, p.sabotage->name);
@@ -123,23 +125,25 @@ inline bool target_admitted(const sim::galactic::GalacticSnapshot& snapshot,
     if (!economic || economic->destroyed) return false;
     if (kind == AbilityKind::remove_corruption) {
         const auto* transition = find(snapshot.corruption_transitions(), target, [](const auto& row) { return row.planet; });
-        return actor.owner == allegiance.target_player && economic->corruption != corruption_fixture::Type::none
+        return (!transition || !transition->restricted) && actor.owner == allegiance.target_player && economic->corruption != corruption_fixture::Type::none
             && (!transition || !transition->transition.active());
     }
     if (kind == AbilityKind::corruption) {
         const auto* owner = find(control->players, planet->owner, [](const auto& row) { return row.player; });
         const auto* content = find(host.corruption_planets, target, [](const auto& row) { return row.planet; });
         const auto* transition = find(snapshot.corruption_transitions(), target, [](const auto& row) { return row.planet; });
-        return host.tutorial_corruption_allowed && owner && !owner->neutral && !allied(planet->owner)
+        return (!transition || !transition->restricted) && owner && !owner->neutral && !allied(planet->owner)
             && content && content->retains_influence && economic->corruption == corruption_fixture::Type::none
             && (!transition || !transition->transition.active())
             && std::any_of(content->slots.begin(), content->slots.end(), [](const auto& row) {
                 return row.type != corruption_fixture::Type::none; });
     }
     if (allied(allegiance.target_player)) return false;
-    if (kind == AbilityKind::black_market || kind == AbilityKind::technology_theft) {
+    if (kind == AbilityKind::black_market || kind == AbilityKind::technology_theft || kind == AbilityKind::credit_siphon) {
         const auto* current = find(economy->players, allegiance.current_player, [](const auto& row) { return row.player; });
         if (!current || !current->playable) return false;
+        // WGCH-55/103: appropriateness is the opposing, playable planet; an existing siphon refuses on arrival, not here.
+        if (kind == AbilityKind::credit_siphon) return true;
         if (kind == AbilityKind::black_market) return economic->corruption == corruption_fixture::Type::black_market;
         if (!find(host.theft_planets, target, [](const auto& row) { return row.planet; })) return false;
         if (!snapshot.production() || !snapshot.player_economy()) return false;
@@ -223,10 +227,11 @@ inline bool target_admitted(const sim::galactic::GalacticSnapshot& snapshot,
         if (!selected || rank < best) { selected = actor; best = rank; }
     }
     if (!selected || (policy.space_override && policy.space_override(selected->id, target))) return std::nullopt;
-    // Siphon remains a separate unsupported route; removal keeps its own authored kind.
+    // Removal and credit siphon keep their own authored kinds. The debug build tests siphon after neutralization and before
+    // corruption (WGCH-208).
     constexpr std::array kinds{AbilityKind::planet_destruction, AbilityKind::technology_theft, AbilityKind::black_market,
-        AbilityKind::structure_sabotage, AbilityKind::system_spy, AbilityKind::hero_neutralization, AbilityKind::corruption,
-        AbilityKind::remove_corruption, AbilityKind::superweapon_hack};
+        AbilityKind::structure_sabotage, AbilityKind::system_spy, AbilityKind::hero_neutralization, AbilityKind::credit_siphon,
+        AbilityKind::corruption, AbilityKind::remove_corruption, AbilityKind::superweapon_hack};
     for (const auto kind : kinds) {
         if (policy.kind_restricted && policy.kind_restricted(target, kind)) continue;
         std::vector<ObjectId> pending{selected->id};

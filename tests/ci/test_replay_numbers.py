@@ -74,8 +74,8 @@ class ReplayNumbersTests(unittest.TestCase):
         text = doc.read_text(encoding="utf-8")
         marker = "| 26 | Reinforce with explicit facing"
         self.assertIn(marker, text)
-        doc.write_text(text.replace(marker, "| 40 | Probe | none | 32 |\n" + marker), encoding="utf-8")
-        self.assertIn("opcode 40 is in the doc's command table but not in the registry", checker.check(self.root))
+        doc.write_text(text.replace(marker, "| 99 | Probe | none | 32 |\n" + marker), encoding="utf-8")
+        self.assertIn("opcode 99 is in the doc's command table but not in the registry", checker.check(self.root))
 
     def test_doc_only_extension_tag_is_reported(self):
         doc = self.root / checker.DOC
@@ -89,10 +89,10 @@ class ReplayNumbersTests(unittest.TestCase):
     def test_literal_max_opcode_is_still_checked(self):
         header = self.root / checker.OPCODE_HEADER
         text = header.read_text(encoding="utf-8")
-        changed, count = re.subn(r"max_command_opcode\s*=\s*\w+", "max_command_opcode = 40", text, count=1)
+        changed, count = re.subn(r"max_command_opcode\s*=\s*\w+", "max_command_opcode = 99", text, count=1)
         self.assertEqual(count, 1)
         header.write_text(changed, encoding="utf-8")
-        self.assertTrue(any("max_command_opcode is 40" in problem for problem in checker.check(self.root)))
+        self.assertTrue(any("max_command_opcode is 99" in problem for problem in checker.check(self.root)))
 
 
 if __name__ == "__main__":

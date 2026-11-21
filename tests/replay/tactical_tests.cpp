@@ -1193,7 +1193,7 @@ void test_human_seat_admission() {
             std::variant_alternative_t<Index, tactical::CommandPayload>{}}) == tactical::PayloadAuthority::engine_only), ...);
         return engine_count;
     };
-    expect(classify(std::make_index_sequence<std::variant_size_v<tactical::CommandPayload>>{}) == 8U,
+    expect(classify(std::make_index_sequence<std::variant_size_v<tactical::CommandPayload>>{}) == 11U,
         "CP-1: every payload is classified, including script invulnerability as engine-only");
     tactical::SeatBinding binding{{1}, 2};
     tactical::SeatCommand intent{{0, {1}, 0}, 2, {10}, tactical::StopPayload{}};
@@ -1221,6 +1221,8 @@ void test_human_seat_admission() {
     for (const auto& payload : {tactical::CommandPayload{tactical::DamagePayload{}},
         tactical::CommandPayload{tactical::CreditGrantPayload{}}, tactical::CommandPayload{tactical::RevealAllPayload{}},
         tactical::CommandPayload{tactical::AiReservationDebitPayload{}}, tactical::CommandPayload{tactical::ScriptInvulnerablePayload{}},
+        tactical::CommandPayload{tactical::ScriptTeleportPayload{}}, tactical::CommandPayload{tactical::ScriptHoldFirePayload{}},
+        tactical::CommandPayload{tactical::ScriptChangeOwnerPayload{}},
         tactical::CommandPayload{tactical::BuyPayload{1, true}},
         tactical::CommandPayload{tactical::ReinforcePayload{1, {}, 99}},
         tactical::CommandPayload{tactical::SpecialFirePayload{10, tactical::SpecialFireAdmission::ai_object}},

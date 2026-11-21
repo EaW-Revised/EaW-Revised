@@ -1,5 +1,6 @@
 #include "galactic_ai_perception_state.hpp"
 #include "eawr/core/gc_profile.hpp"
+#include "eawr/script/numeric/binary64.hpp"
 #include "eawr/script/foc/galactic_ai_state.hpp"
 
 #include <bit>
@@ -57,6 +58,12 @@ struct Reader {
     Real number() { Real value; value.repr = word(); return value; }
 };
 bool finite(Real value) { return (value.repr & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL; }
+// WGA-192a: a cached getter answer may be an IEEE infinity or the canonical NaN (a zero movement range); any other
+// non-finite pattern is not a value the binary64 backend produces.
+bool cache_value(Real value) {
+    return finite(value) || value.repr == numeric::binary64::canonical_nan
+        || value.repr == numeric::binary64::positive_infinity || value.repr == numeric::binary64::negative_infinity;
+}
 template<class Rows, class Less> auto canonical_rows(const Rows& rows, Less less) {
     std::vector<const typename Rows::value_type*> ordered;
     ordered.reserve(rows.size());
@@ -144,7 +151,7 @@ core::Result<Decoded> decode(std::span<const std::uint8_t> bytes) {
             row.key.bindings.push_back(std::move(binding));
         }
         row.value = in.number(); row.interval = in.number(); row.frame = in.word();
-        if (!finite(row.value) || !finite(row.interval)) in.bad = true;
+        if (!cache_value(row.value) || !finite(row.interval)) in.bad = true;
         state.cache.push_back(std::move(row));
     }
     const auto visibility = in.count(25);

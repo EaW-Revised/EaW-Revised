@@ -92,15 +92,12 @@ public:
 
     std::optional<double> number(const pugi::xml_node node) {
         const auto value = text(node);
-        double parsed{};
-        const auto* begin = value.data();
-        const auto* end = begin + value.size();
-        const auto result = std::from_chars(begin, end, parsed);
-        if (value.empty() || result.ec != std::errc{} || result.ptr != end || !std::isfinite(parsed)) {
+        const auto parsed = core::parse_decimal_double(value);
+        if (!parsed) {
             warn(node, std::string(node.name()) + " '" + value + "' is not a number");
             return std::nullopt;
         }
-        return parsed;
+        return *parsed;
     }
 
     std::optional<Rgba> color(const pugi::xml_node node) {

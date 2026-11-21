@@ -192,6 +192,10 @@ core::Result<void> validate_combat(const CombatTable& table) {
                 || !point_in_bounds(weapon.fire_b) || !axes_ok(weapon.fire_axes, false)
                 || weapon.manual_cooldown_frames > 108000
                 || weapon.full_salvo_delay.raw() < 0 || weapon.full_salvo_delay.raw() > max_ability_multiplier * one_raw
+                || weapon.defend_delay.raw() < 0 || weapon.defend_delay.raw() > max_ability_multiplier * one_raw
+                || weapon.turbo_delay.raw() < 0 || weapon.turbo_delay.raw() > max_ability_multiplier * one_raw
+                || weapon.power_to_weapons_delay.raw() < 0
+                || weapon.power_to_weapons_delay.raw() > max_ability_multiplier * one_raw
                 || weapon.ai_combat_power.raw() < 0 || weapon.ai_combat_power.raw() > max_weapon_combat_power * one_raw) {
                 return invalid(name + "invalid weapon " + std::to_string(weapon.hardpoint));
             }
@@ -451,6 +455,36 @@ std::string_view to_string(const CombatEventKind kind) noexcept {
     case CombatEventKind::heal_pulse: return "heal_pulse";
     }
     return "unknown";
+}
+
+std::uint32_t deploy_pose_frame(const DeployPoseClip& clip, const DeployPoseState& state, const std::uint64_t tick) noexcept {
+    // The clip holds its last playable frame, so a later tick changes nothing: cap the elapsed frames first.
+    constexpr std::uint64_t elapsed_cap = 1'000'000;
+    const std::uint64_t elapsed = std::min(tick > state.since ? tick - state.since : std::uint64_t{0}, elapsed_cap);
+    const auto per_tick = static_cast<std::uint64_t>(std::max<std::int64_t>(clip.frames_per_tick.raw(), 0));
+    const std::uint64_t frame = state.start_frame + elapsed * per_tick / static_cast<std::uint64_t>(math::Fixed::scale);
+    const std::uint64_t last = clip.frames > 0 ? clip.frames - 1 : 0;
+    return static_cast<std::uint32_t>(std::min(frame, last));
+}
+
+const DeployPoseSegment* deploy_pose_segment(const DeployPoseTable& table, const DeployPoseState& state, const std::uint64_t tick) noexcept {
+    const auto& clip = state.on ? table.deploy : table.undeploy;
+    if (clip.segments.empty()) return nullptr;
+    const auto frame = deploy_pose_frame(clip, state, tick);
+    const auto after = std::upper_bound(clip.segments.begin(), clip.segments.end(), frame,
+        [](const std::uint32_t value, const DeployPoseSegment& segment) { return value < segment.from_frame; });
+    return after == clip.segments.begin() ? &clip.segments.front() : &*(after - 1);
+}
+
+DeployPoseState deploy_pose_switch(const DeployPoseTable& table, const std::optional<DeployPoseState>& current, const bool on,
+    const std::uint64_t tick) noexcept {
+    std::uint32_t start = 0;
+    if (current) {
+        const auto& running = current->on ? table.deploy : table.undeploy;
+        const auto frame = deploy_pose_frame(running, *current, tick);
+        start = running.frames > frame + 1U ? running.frames - frame - 1U : 0U;
+    }
+    return DeployPoseState{on, tick, start};
 }
 
 namespace detail {

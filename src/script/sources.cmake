@@ -86,6 +86,7 @@ set(EAWR_SCRIPT_FOC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/foc/galactic_ai_funding.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/tactical_ai.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/tactical_ai_bindings.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/tactical_object_bindings.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/tactical_ai_orders.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/tactical_ai_loading.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/ai_equations.cpp"

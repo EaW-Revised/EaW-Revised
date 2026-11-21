@@ -77,6 +77,10 @@ std::string_view to_string(const FrontEndScreen screen) noexcept {
     return "main_menu";
 }
 
+bool covers_backdrop(const FrontEndScreen screen) noexcept {
+    return screen == S::lan_setup || screen == S::online_setup;
+}
+
 std::string_view dialog_name(const FrontEndScreen screen) noexcept {
     switch (screen) {
     case S::main_menu: return "IDD_MAIN_MENU_DIALOG";

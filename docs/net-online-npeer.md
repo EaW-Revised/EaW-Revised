@@ -200,7 +200,7 @@ and the same comparison runs before freeze. Effective XML/Lua bytes and availabl
 profile names, paths, timestamps and whole-folder checksums do not supply agreement data. Content is read on a worker and
 reread before Start. A mismatch uses the existing named layer refusal, with host and local checksum prefixes and a Workshop
 update hint when an item ID is known. Equal bytes remain equal across different install paths and diagnostic labels.
-A build on another version refuses the frame with a message naming version 5.
+**Version 6** adds the display-only host report of which players have finished checking the host's mods (frame kind 103: a count, then peer and done byte pairs), sent to guests of a campaign room. A build on another version refuses the frame with a message naming version 6.
 The introduction server does not parse this format: GNS carries room frames, and the service forwards signalling blobs
 opaquely. No relay-server deployment is required for this room-frame change. Build identity admission precedes room decoding.
 The guest reports a content refusal back to the host before closing; the host keeps the named reason and releases only that

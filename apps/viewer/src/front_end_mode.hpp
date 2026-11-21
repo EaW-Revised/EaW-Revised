@@ -49,6 +49,8 @@ public:
         // `--eawr-front-end-test-campaign start`: with `test`, walk the single-player menu to the campaign
         // staging screen, pick the first campaign and start it.
         std::string campaign_test;
+        // With `test`: open the LAN setup, dwell this many frames and report frame time and CPU (#7870 A/B).
+        std::uint32_t lan_soak_frames{};
         std::filesystem::path save_directory;
         std::function<std::string(const presentation::ui::SavedGameRequest&)> saved_game_launcher;
         // Starts the campaign the staging screen chose (MNU-34). An empty answer accepts it; anything

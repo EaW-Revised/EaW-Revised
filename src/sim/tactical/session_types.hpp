@@ -154,6 +154,8 @@ struct LiveUnit {
     std::optional<PositionHistory> position_history{};
     // TL-03: Lua Make_Invulnerable(true): blocks combat and environment damage; checkpointed and hashed.
     bool script_invulnerable{};
+    // Lua Prevent_All_Fire(true): none of the unit's weapons fire; checkpointed and hashed (SHFR).
+    bool hold_fire{};
 };
 
 // WNO-23/42: one boundary for capture and conversion. Notifications run with the new

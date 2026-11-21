@@ -437,6 +437,20 @@ void control_groups() {
     const auto focus_survivor = selection.recall_group(1, false, 915.0, units);
     expect(selection.units() == std::vector<sim::EntityId>{2} && focus_survivor && close_to((*focus_survivor)[0], 40.0F),
            "only standing members are selected and focused");
+
+    // An owner change (Lua Change_Owner, event 30) takes the unit out of the previous local owner's selection and control
+    // groups; another observer's view and a same-owner event change nothing.
+    auto changing = fleet();
+    ui::Selection owned;
+    owned.box({0.0F, 0.0F, 250.0F, 150.0F}, false, changing);  // 1, 2
+    owned.assign_group(1);
+    owned.owner_changed(1, 1, 3, 2);
+    owned.owner_changed(1, 1, 1, 1);
+    expect(owned.group(1) == std::vector<sim::EntityId>({1, 2}) && owned.units() == std::vector<sim::EntityId>({1, 2}),
+           "an owner change seen by another observer, or to the same owner, keeps the unit");
+    owned.owner_changed(1, 1, 3, 1);
+    expect(owned.group(1) == std::vector<sim::EntityId>{2} && owned.units() == std::vector<sim::EntityId>{2},
+           "the previous owner's selection and control group lose the unit");
 }
 
 void overview() {

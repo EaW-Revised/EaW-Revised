@@ -205,7 +205,7 @@ core::Result<void> session_detail::Tick::land_capture(std::vector<LiveUnit>& sur
             if (within_range(point->state.position, candidate.body.position, profile->radius, RangeMetric::spatial)) near.push_back(candidate);
         auto next = state;
         const auto owner = service_capture(*profile, next, point->state.owner, neutral, impl_->setup.players, near,
-            impl_->economy.pads, id, point->state.position);
+            impl_->economy.pads, id, point->state.position, impl_->command_ledger.capture_adjustments);
         if (next != state) { impl_->pad_stage.touch(id); state = next; }
         if (owner == point->state.owner) continue;
         const auto before = point->state;

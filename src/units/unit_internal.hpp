@@ -27,7 +27,10 @@ namespace eawr::units::detail {
 // bounds here, in the units converter file.
 [[nodiscard]] std::optional<std::pair<Fixed, Fixed>> collision_half_extents(
     const assets::Model& model, const std::vector<sim::math::Mat3x4>& frames);
-[[nodiscard]] Fixed clip_frames_per_second(const assets::Animation& clip);
+[[nodiscard]] std::optional<Fixed> clip_frames_per_second(const assets::Animation& clip);
+// WDP-01: where the wanted bones stand at each shown frame of a clip (model space); converts the clip's binary32 here.
+[[nodiscard]] std::optional<std::vector<std::vector<Vec3>>> clip_pose_points(const assets::Model& model,
+    const assets::Animation& clip, const std::vector<std::uint32_t>& wanted);
 [[nodiscard]] std::string lower(std::string_view value);
 [[nodiscard]] std::string upper(std::string_view value);
 [[nodiscard]] bool iequals(std::string_view left, std::string_view right) noexcept;

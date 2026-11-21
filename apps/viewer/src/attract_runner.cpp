@@ -182,6 +182,7 @@ struct AttractRunner::State final {
     std::uint64_t host_id{};
     std::unique_ptr<MapMode> map;
     bool loading{};
+    bool held{};
     skirmish::AttractCandidates candidates;
     std::vector<core::LoadNote> pending_notes;
     std::vector<std::pair<std::string, std::string>> pending_failure_keys;
@@ -428,6 +429,8 @@ AttractRunner::Options AttractRunner::from_command_line() {
             // An optional on|off follows.
             if (has_value && (value == "on" || value == "off")) options.forced_off = value == "off";
             else consumed = false;
+        } else if (argument == "--eawr-attract-hold") {
+            options.hold_disabled = value == "off";
         } else if (!has_value) {
             consumed = false;
         } else if (argument == "--eawr-game-root") options.game_root = ViewerPath{value}.native();
@@ -495,6 +498,7 @@ void AttractRunner::stop() {
         state.manager.reset();
         ++state.stops;
     }
+    state.held = false; // a restart under a covering screen is held again by the next set_held()
     state.free_battle();
     state.flush_notes();
     state.parent = nullptr;
@@ -516,10 +520,38 @@ const std::string& AttractRunner::failure() const noexcept {
     return state_->failure;
 }
 
+bool AttractRunner::held() const noexcept {
+    return state_->held;
+}
+
+void AttractRunner::set_held(const bool held) {
+    State& state = *state_;
+    if (state.options.hold_disabled) return;
+    if (state.held == held) return;
+    state.held = held;
+    const std::uint64_t now = now_ms();
+    if (held) {
+        if (state.manager) state.manager->hold(now);
+        if (state.map) state.map->set_attract_paused(true);
+        if (state.host != nullptr) {
+            state.host->hide();
+            state.host->set_process_mode(Node::PROCESS_MODE_DISABLED);
+        }
+        return;
+    }
+    if (state.manager) state.manager->release(now);
+    if (state.host != nullptr) {
+        state.host->set_process_mode(Node::PROCESS_MODE_INHERIT);
+        if (!state.loading) state.host->show();
+    }
+    // The next process() lifts the battle's pause from the manager's own flag.
+}
+
 void AttractRunner::process(const double delta, const bool dialog_active, const bool main_menu_active,
                             const bool foreground) {
     State& state = *state_;
     if (!state.manager || !state.manager->initialized()) return;
+    if (state.held) return; // MAT-22: covered, nothing runs
     if (state.loading && state.map) {
         const std::uint64_t now = now_ms();
         const bool input_pending = state.last_input_ms && now - *state.last_input_ms < State::input_quiet_ms;
@@ -610,7 +642,7 @@ void AttractRunner::input(const Ref<InputEvent>& event) {
     }
     // MAT-10, WGUI-76: the world rejects what reaches it.
     ++state.world_events;
-    if (state.map) state.map->input(event);
+    if (state.map && !state.held) state.map->input(event);
 }
 
 MapMode::AttractStatus AttractRunner::status() {

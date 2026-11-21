@@ -2010,6 +2010,9 @@ void mod_ai_calls() {
     for (const auto& player : world.host->setup.players) world.host->players.emplace(player.player, &player);
     world.host->setup.content.types.front().combat_power = ai::real(16777216);
     world.host->setup.content.types.front().property_bits = 2;
+    world.host->setup.content.types.front().hardpoint_ids = {"MAIN_TURRET", "SIDE_MOUNT"};
+    world.host->setup.content.types.front().hardpoint_meshes = {"MESH_A", "MESH_B"};
+    world.host->setup.content.types.front().hardpoint_destroyable = {true, false};
     world.host->setup.content.types.front().base_level = 37;
     world.host->setup.content.types.front().tactical_cost = eawr::sim::math::Fixed::from_integer(1234).value();
     world.host->setup.content.properties = {{"FIRST", 1}, {"SECOND", 2}};
@@ -2092,6 +2095,49 @@ void mod_ai_calls() {
         function InvulnNumber(object) object.Make_Invulnerable(1) end
         function InvulnString(object) object.Make_Invulnerable('true') end
         function InvulnNil(object) object.Make_Invulnerable(nil) end
+        function DespawnOk(object, dead)
+            despawn_live = object.Despawn() == nil
+            despawn_dead = dead.Despawn() == nil
+            despawn_done = true
+        end
+        function DespawnOneArg(object) object.Despawn(true) end
+        function DamageOk(object, dead)
+            damage_hull = object.Take_Damage(50) == nil
+            damage_part = object.Take_Damage(25, 'Main_Turret') == nil
+            damage_fixed_part = object.Take_Damage(5, 'Side_Mount') == nil
+            damage_negative = object.Take_Damage(-3) == nil
+            damage_dead = dead.Take_Damage(9) == nil
+            damage_done = true
+        end
+        function HoldOk(object, dead)
+            hold_on = object.Prevent_All_Fire(true) == nil
+            hold_off = object.Prevent_All_Fire(false) == nil
+            hold_dead = dead.Prevent_All_Fire(true) == nil
+            hold_done = true
+        end
+        function HoldNoArgs(object) object.Prevent_All_Fire() end
+        function HoldNumber(object) object.Prevent_All_Fire(1) end
+        function HoldTwoArgs(object) object.Prevent_All_Fire(true, true) end
+        function TeleportNoArgs(object) object.Teleport_And_Face() end
+        function TeleportNumber(object) object.Teleport_And_Face(5) end
+        function TeleportTwoArgs(object, other) object.Teleport_And_Face(other, other) end
+        function TeleportDead(object, dead) object.Teleport_And_Face(dead) end
+        function OwnerOk(object, dead, player)
+            owner_ok = object.Change_Owner(player) == nil
+            owner_dead = dead.Change_Owner(player) == nil
+            owner_done = true
+        end
+        function OwnerNoArgs(object) object.Change_Owner() end
+        function OwnerTwoArgs(object, player) object.Change_Owner(player, player) end
+        function OwnerNumber(object) object.Change_Owner(5) end
+        function OwnerObject(object) object.Change_Owner(object) end
+        function DamageSquadron(container) container.Take_Damage(7, 'Main_Turret') end
+        function DamageHuge(object) object.Take_Damage(1e30) end
+        function DamageNoArgs(object) object.Take_Damage() end
+        function DamageThreeArgs(object) object.Take_Damage(1, 'Main_Turret', 2) end
+        function DamageString(object) object.Take_Damage('1') end
+        function DamageBadName(object) object.Take_Damage(1, 5) end
+        function DamageUnknownPart(object) object.Take_Damage(1, 'No_Such_Part') end
         function Query(tf, object)
             threat = tf.Get_Self_Threat_Sum()
             online = object.Are_Engines_Online()
@@ -2356,6 +2402,191 @@ void mod_ai_calls() {
                 && bad_report.value().diagnostics.front().message.find("Make_Invulnerable") != std::string::npos,
                 "TL-03: a wrong argument count or type is a script error naming Make_Invulnerable and queues no command");
         }
+    }
+    // HD-30: Take_Damage(amount[, hardpoint name]) queues one scripted-damage command per valid call: the
+    // hull without a name, a destroyable hardpoint by its mesh, and the hull for a known name the unit cannot
+    // damage; a negative amount and a dead object queue nothing; every other shape is a script error.
+    {
+        expect(scripts.value().create_instance(300, "CALLS.LUA").has_value(), "HD-30: valid-call instance");
+        auth::ScriptEvent event;
+        event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 300, sequence++};
+        event.target = 300; event.kind = auth::ScriptEvent::Kind::call; event.name = "DamageOk";
+        event.arguments = {object_handle, auth::Value{auth::Handle{foc::handle_game_object, 9999}}};
+        expect(scripts.value().submit_event(std::move(event)).has_value(), "HD-30: valid call queues");
+        const auto report = scripts.value().service(executor);
+        expect(report && report.value().diagnostics.empty() && report.value().commands.size() == 3,
+            "HD-30: three damaging calls queue three commands; the negative amount and the dead object queue none");
+        if (report && report.value().commands.size() == 3) {
+            const bool names_part[] = {false, true, false};
+            for (std::size_t i = 0; i < 3; ++i) {
+                const auto& command = report.value().commands[i];
+                expect(command.verb == foc::verb_take_damage && command.arguments.size() == (names_part[i] ? 4U : 3U),
+                    "HD-30: the command carries issuer, object, amount and the hardpoint index only for a destroyable one");
+                if (names_part[i] && command.arguments.size() == 4)
+                    expect(std::get<Real>(command.arguments[3].data) == ai::real(0), "HD-30: the hardpoint is the one owning the named mesh");
+            }
+        }
+        const auto done = scripts.value().read_global(300, "damage_done");
+        expect(done && done.value() && std::get_if<bool>(&done.value()->data) && std::get<bool>(done.value()->data),
+            "HD-30: valid calls answer nothing and let the script continue");
+        // A squadron container: the command goes to each craft with the index from the craft's own type (1, not the container's 0).
+        {
+            // A squadron container (type 1, hardpoint MAIN_TURRET at index 0) with one craft of its own type 9000, whose list names
+            // the same mesh at index 1: the retail team loop resolves the hardpoint per member. Added here and removed after.
+            foc::AiType craft_type;
+            craft_type.type_id = 9000; craft_type.name = "SQUAD_CRAFT"; // an id no earlier fixture uses
+            craft_type.hardpoint_ids = {"SIDE_MOUNT", "MAIN_TURRET"};
+            craft_type.hardpoint_meshes = {"MESH_B", "MESH_A"};
+            craft_type.hardpoint_destroyable = {true, true};
+            world.host->types.emplace(9000, &craft_type);
+            ai::ViewUnit container; container.id = 20; container.type = 1; container.owner = 2; container.visible_to = 3;
+            container.container = true; container.members = {21};
+            ai::ViewUnit member; member.id = 21; member.type = 9000; member.owner = 2; member.visible_to = 3;
+            member.craft = true; member.squadron = 20;
+            world.view->units.push_back(container); world.view->units.push_back(member);
+            expect(scripts.value().create_instance(305, "CALLS.LUA").has_value(), "HD-30: squadron instance");
+            auth::ScriptEvent squad;
+            squad.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 305, sequence++};
+            squad.target = 305; squad.kind = auth::ScriptEvent::Kind::call; squad.name = "DamageSquadron";
+            squad.arguments = {auth::Value{auth::Handle{foc::handle_game_object, 20}}};
+            expect(scripts.value().submit_event(std::move(squad)).has_value(), "HD-30: squadron call queues");
+            const auto squad_report = scripts.value().service(executor);
+            expect(squad_report && squad_report.value().diagnostics.empty() && squad_report.value().commands.size() == 1,
+                "HD-30: a squadron container queues one command per craft");
+            if (squad_report && squad_report.value().commands.size() == 1) {
+                const auto& command = squad_report.value().commands.front();
+                const auto* craft = command.arguments.size() > 1 ? std::get_if<auth::Handle>(&command.arguments[1].data) : nullptr;
+                expect(command.verb == foc::verb_take_damage && command.arguments.size() == 4 && craft != nullptr && craft->id == 21
+                    && std::get<Real>(command.arguments[3].data) == ai::real(1),
+                    "HD-30: each craft resolves the named hardpoint from its own type");
+            }
+            world.view->units.pop_back(); world.view->units.pop_back();
+            world.host->types.erase(9000);
+        }
+        std::uint64_t bad_instance = 310;
+        for (const char* bad : {"DamageNoArgs", "DamageThreeArgs", "DamageString", "DamageBadName", "DamageUnknownPart", "DamageHuge"}) {
+            expect(scripts.value().create_instance(bad_instance, "CALLS.LUA").has_value(), "HD-30: each failing call has an instance");
+            auth::ScriptEvent failing;
+            failing.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, bad_instance, sequence++};
+            failing.target = bad_instance++; failing.kind = auth::ScriptEvent::Kind::call; failing.name = bad;
+            failing.arguments = {object_handle};
+            expect(scripts.value().submit_event(std::move(failing)).has_value(), "HD-30: bad call queues");
+            const auto bad_report = scripts.value().service(executor);
+            expect(bad_report && bad_report.value().diagnostics.size() == 1 && bad_report.value().commands.empty()
+                && bad_report.value().diagnostics.front().message.find("Take_Damage") != std::string::npos,
+                "HD-30: a wrong argument count, type or hardpoint name is a script error naming Take_Damage and queues no command");
+        }
+    }
+    // Prevent_All_Fire(bool) queues one replay command per valid call (a dead object queues none); Teleport_And_Face
+    // takes one live game object. Every other shape is a script error naming the call and queues nothing.
+    {
+        expect(scripts.value().create_instance(400, "CALLS.LUA").has_value(), "TL-11: valid-call instance");
+        auth::ScriptEvent event;
+        event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 400, sequence++};
+        event.target = 400; event.kind = auth::ScriptEvent::Kind::call; event.name = "HoldOk";
+        event.arguments = {object_handle, auth::Value{auth::Handle{foc::handle_game_object, 9999}}};
+        expect(scripts.value().submit_event(std::move(event)).has_value(), "TL-11: valid call queues");
+        const auto report = scripts.value().service(executor);
+        if (report) {
+            std::size_t holds = 0;
+            for (const auto& command : report.value().commands)
+                if (command.verb == foc::verb_prevent_all_fire) ++holds;
+            expect(holds == 2, "TL-11: two valid calls queue two hold-fire commands and the dead object queues none");
+        }
+        std::uint64_t bad_instance = 410;
+        const std::pair<const char*, const char*> failing[] = {{"HoldNoArgs", "Prevent_All_Fire"}, {"HoldNumber", "Prevent_All_Fire"},
+            {"HoldTwoArgs", "Prevent_All_Fire"}, {"TeleportNoArgs", "Teleport_And_Face"}, {"TeleportNumber", "Teleport_And_Face"}};
+        for (const auto& [bad, call] : failing) {
+            expect(scripts.value().create_instance(bad_instance, "CALLS.LUA").has_value(), "TL-11: each failing call has an instance");
+            auth::ScriptEvent failing_event;
+            failing_event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, bad_instance, sequence++};
+            failing_event.target = bad_instance++; failing_event.kind = auth::ScriptEvent::Kind::call; failing_event.name = bad;
+            failing_event.arguments = {object_handle};
+            expect(scripts.value().submit_event(std::move(failing_event)).has_value(), "TL-11: bad call queues");
+            const auto bad_report = scripts.value().service(executor);
+            expect(bad_report && bad_report.value().diagnostics.size() == 1 && bad_report.value().commands.empty()
+                && bad_report.value().diagnostics.front().message.find(call) != std::string::npos,
+                "TL-11: a wrong argument count or type is a script error naming the call and queues no command");
+        }
+        // A dead teleport target is a script error; a live one queues one command.
+        for (const bool live_target : {false, true}) {
+            const std::uint64_t instance = bad_instance++;
+            expect(scripts.value().create_instance(instance, "CALLS.LUA").has_value(), "TL-10: teleport instance");
+            auth::ScriptEvent teleport_event;
+            teleport_event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, instance, sequence++};
+            teleport_event.target = instance; teleport_event.kind = auth::ScriptEvent::Kind::call;
+            teleport_event.name = live_target ? "TeleportTwoArgs" : "TeleportDead";
+            teleport_event.arguments = {object_handle, live_target ? object_handle : auth::Value{auth::Handle{foc::handle_game_object, 9999}}};
+            expect(scripts.value().submit_event(std::move(teleport_event)).has_value(), "TL-10: teleport call queues");
+            const auto teleport_report = scripts.value().service(executor);
+            if (live_target)
+                expect(teleport_report && teleport_report.value().diagnostics.size() == 1,
+                    "TL-10: two arguments are a script error");
+            else
+                expect(teleport_report && teleport_report.value().diagnostics.size() == 1 && teleport_report.value().commands.empty(),
+                    "TL-10: a dead teleport target is a script error and queues nothing");
+        }
+        // Change_Owner(player): one valid call queues one command, a dead object queues none; a wrong count or a
+        // non-player argument is a script error naming the call and queues nothing.
+        {
+            const auto player_handle = auth::Value{auth::Handle{foc::handle_player, 2}};
+            const std::uint64_t instance = bad_instance++;
+            expect(scripts.value().create_instance(instance, "CALLS.LUA").has_value(), "TL-07: owner instance");
+            auth::ScriptEvent owner_event;
+            owner_event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, instance, sequence++};
+            owner_event.target = instance; owner_event.kind = auth::ScriptEvent::Kind::call; owner_event.name = "OwnerOk";
+            owner_event.arguments = {object_handle, auth::Value{auth::Handle{foc::handle_game_object, 9999}}, player_handle};
+            expect(scripts.value().submit_event(std::move(owner_event)).has_value(), "TL-07: valid owner call queues");
+            const auto owner_report = scripts.value().service(executor);
+            std::size_t changes = 0;
+            if (owner_report) for (const auto& command : owner_report.value().commands)
+                if (command.verb == foc::verb_change_owner) ++changes;
+            expect(owner_report && changes == 1 && owner_report.value().diagnostics.empty(),
+                "TL-07: a valid Change_Owner queues one command and the dead object queues none");
+            const std::pair<const char*, bool> failing_owner[] = {{"OwnerNoArgs", false}, {"OwnerTwoArgs", true},
+                {"OwnerNumber", false}, {"OwnerObject", false}};
+            for (const auto& [bad, with_player] : failing_owner) {
+                const std::uint64_t bad_id = bad_instance++;
+                expect(scripts.value().create_instance(bad_id, "CALLS.LUA").has_value(), "TL-07: each failing owner call has an instance");
+                auth::ScriptEvent failing_event;
+                failing_event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, bad_id, sequence++};
+                failing_event.target = bad_id; failing_event.kind = auth::ScriptEvent::Kind::call; failing_event.name = bad;
+                failing_event.arguments = with_player ? std::vector<auth::Value>{object_handle, player_handle}
+                                                       : std::vector<auth::Value>{object_handle};
+                expect(scripts.value().submit_event(std::move(failing_event)).has_value(), "TL-07: bad owner call queues");
+                const auto bad_report = scripts.value().service(executor);
+                expect(bad_report && bad_report.value().diagnostics.size() == 1 && bad_report.value().commands.empty()
+                    && bad_report.value().diagnostics.front().message.find("Change_Owner") != std::string::npos,
+                    "TL-07: a wrong count or a non-player argument is a script error naming Change_Owner and queues nothing");
+            }
+        }
+    }
+    // #7886: Object.Despawn() takes no argument; a valid call on a live object queues one command (issuer, object) and
+    // answers nothing, a dead object queues none, and an argument is a script error naming Despawn.
+    {
+        expect(scripts.value().create_instance(390, "CALLS.LUA").has_value(), "#7886: valid-call instance");
+        auth::ScriptEvent event;
+        event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 390, sequence++};
+        event.target = 390; event.kind = auth::ScriptEvent::Kind::call; event.name = "DespawnOk";
+        event.arguments = {object_handle, auth::Value{auth::Handle{foc::handle_game_object, 9999}}};
+        expect(scripts.value().submit_event(std::move(event)).has_value(), "#7886: valid call queues");
+        const auto report = scripts.value().service(executor);
+        expect(report && report.value().diagnostics.empty() && report.value().commands.size() == 1
+            && report.value().commands.front().verb == foc::verb_despawn && report.value().commands.front().arguments.size() == 2,
+            "#7886: one valid call on a live object queues one despawn command and the dead object queues none");
+        const auto done = scripts.value().read_global(390, "despawn_done");
+        expect(done && done.value() && std::get_if<bool>(&done.value()->data) && std::get<bool>(done.value()->data),
+            "#7886: a valid call answers nothing and lets the script continue");
+        expect(scripts.value().create_instance(391, "CALLS.LUA").has_value(), "#7886: failing-call instance");
+        auth::ScriptEvent failing;
+        failing.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 391, sequence++};
+        failing.target = 391; failing.kind = auth::ScriptEvent::Kind::call; failing.name = "DespawnOneArg";
+        failing.arguments = {object_handle};
+        expect(scripts.value().submit_event(std::move(failing)).has_value(), "#7886: bad call queues");
+        const auto bad_report = scripts.value().service(executor);
+        expect(bad_report && bad_report.value().diagnostics.size() == 1 && bad_report.value().commands.empty()
+            && bad_report.value().diagnostics.front().message.find("Despawn") != std::string::npos,
+            "#7886: an argument is a script error naming Despawn and queues no command");
     }
 }
 
@@ -3382,6 +3613,139 @@ void ai_difficulty_levels() {
     const auto unknown = table.value().resolve("NoSuchType", Level::easy);
     expect(is(unknown.health, 1) && is(unknown.credit, 1),
         "WTA-46: a player type without data gets the dummy adjustment");
+}
+
+// TL-04..TL-08: the battle-only object methods validate like the original; the effects the battle has no state for are
+// accepted with an unsupported_api note, and a galactic scheduler gets none of them.
+void battle_object_bindings() {
+    World world;
+    foc::AiType capture; capture.type_id = 2; capture.name = "CAPTURE"; capture.capture_point = true;
+    foc::AiType spawner; spawner.type_id = 3; spawner.name = "SPAWNER"; spawner.spawns_squadrons = true;
+    world.host->setup.content.types.push_back(capture);
+    world.host->setup.content.types.push_back(spawner);
+    world.host->types.clear(); world.host->types_by_name.clear();
+    for (const auto& type : world.host->setup.content.types) {
+        world.host->types.emplace(type.type_id, &type); world.host->types_by_name.emplace(type.name, &type);
+    }
+    auto extra = world.view->units.front(); extra.id = 11; extra.type = 2; world.view->units.push_back(extra);
+    extra.id = 12; extra.type = 3; world.view->units.push_back(extra);
+    auth::ModuleManifest manifest;
+    expect(manifest.add("BATTLE.LUA", R"LUA(
+        function Valid(ship, cap, spawn)
+            sfx_one = ship.Play_SFX_Event('Some_Event') == nil
+            sfx_two = ship.Play_SFX_Event('Some_Event', 2.5) == nil
+            done = true
+        end
+        function Dead(dead)
+            dead_all = dead.Get_Planet_Location() == nil and dead.Play_SFX_Event('X') == nil
+                and dead.Disable_Capture(true) == nil and dead.Set_Garrison_Spawn(true) == nil
+                and dead.Prevent_AI_Usage(true) == nil
+            done = true
+        end
+        function Planet(ship) ship.Get_Planet_Location() end
+        function SfxNone(ship) ship.Play_SFX_Event() end
+        function SfxThree(ship) ship.Play_SFX_Event('A', 1, 2) end
+        function SfxName(ship) ship.Play_SFX_Event(7) end
+        function SfxTime(ship) ship.Play_SFX_Event('A', 'x') end
+        function CaptureOk(cap) disable_nil = cap.Disable_Capture(true) == nil end
+        function CaptureNone(ship) ship.Disable_Capture(true) end
+        function CaptureCount(cap) cap.Disable_Capture() end
+        function CaptureType(cap) cap.Disable_Capture(1) end
+        function GarrisonOk(spawn) garrison_nil = spawn.Set_Garrison_Spawn(false) == nil end
+        function GarrisonNone(ship) ship.Set_Garrison_Spawn(true) end
+        function GarrisonCount(spawn) spawn.Set_Garrison_Spawn(true, true) end
+        function GarrisonType(spawn) spawn.Set_Garrison_Spawn('yes') end
+        function PreventOk(ship) prevent_nil = ship.Prevent_AI_Usage(true) == nil end
+        function PreventNone(ship) ship.Prevent_AI_Usage() end
+        function PreventType(ship) ship.Prevent_AI_Usage(1) end
+    )LUA").has_value(), "TL-04: battle fixture loads");
+    auth::SessionConfig config;
+    config.tick_duration = {1, 30};
+    auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+    if (!scripts) { expect(false, "TL-04: scheduler starts"); return; }
+    std::vector<eawr::core::Diagnostic> errors;
+    foc::tactical_ai_detail::register_methods(scripts.value(), world.host, errors);
+    foc::tactical_ai_detail::register_battle_object_bindings(scripts.value(), world.host, errors);
+    expect(errors.empty(), "TL-04: the battle bindings register next to the shared ones");
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    std::uint64_t next_instance = 1, sequence = 0;
+    const auto ship = auth::Value{auth::Handle{foc::handle_game_object, 10}};
+    const auto cap = auth::Value{auth::Handle{foc::handle_game_object, 11}};
+    const auto spawn = auth::Value{auth::Handle{foc::handle_game_object, 12}};
+    const auto dead = auth::Value{auth::Handle{foc::handle_game_object, 9999}};
+    struct Outcome { std::uint64_t instance{}; std::vector<auth::ScriptDiagnostic> diagnostics; };
+    const auto call = [&](const char* name, auth::ValueList arguments) {
+        Outcome outcome; outcome.instance = next_instance++;
+        expect(scripts.value().create_instance(outcome.instance, "BATTLE.LUA").has_value(), "TL-04: call instance");
+        auth::ScriptEvent event;
+        event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, outcome.instance, sequence++};
+        event.target = outcome.instance; event.kind = auth::ScriptEvent::Kind::call; event.name = name;
+        event.arguments = std::move(arguments);
+        expect(scripts.value().submit_event(std::move(event)).has_value(), "TL-04: call queues");
+        if (auto report = scripts.value().service(executor)) outcome.diagnostics = report.value().diagnostics;
+        else expect(false, "TL-04: the call is serviced");
+        return outcome;
+    };
+    const auto flag = [&](const Outcome& outcome, std::string_view name) {
+        const auto value = scripts.value().read_global(outcome.instance, name);
+        return value && value.value() && std::get_if<bool>(&value.value()->data) && std::get<bool>(value.value()->data);
+    };
+    const auto names = [](const Outcome& outcome, std::string_view method, std::string_view code) {
+        return outcome.diagnostics.size() == 1 && outcome.diagnostics.front().code == code
+            && outcome.diagnostics.front().message.find(method) != std::string::npos;
+    };
+    const auto bad = [&](const char* function, const auth::Value& receiver, std::string_view method, const char* what) {
+        const auto outcome = call(function, {receiver});
+        expect(outcome.diagnostics.size() == 1 && outcome.diagnostics.front().message.find(method) != std::string::npos, what);
+    };
+    const auto valid = call("Valid", {ship, cap, spawn});
+    expect(valid.diagnostics.empty() && flag(valid, "sfx_one") && flag(valid, "sfx_two") && flag(valid, "done"),
+        "TL-05: Play_SFX_Event takes a name and an optional number, answers nothing and notes nothing");
+    const auto dead_call = call("Dead", {dead});
+    expect(flag(dead_call, "dead_all") && flag(dead_call, "done"),
+        "TL-04..08: a dead object answers nothing for every battle method");
+    bad("Planet", ship, "Get_Planet_Location", "TL-04: Get_Planet_Location is a script error in a battle");
+    bad("SfxNone", ship, "Play_SFX_Event", "TL-05: no argument is a script error");
+    bad("SfxThree", ship, "Play_SFX_Event", "TL-05: three arguments are a script error");
+    bad("SfxName", ship, "Play_SFX_Event", "TL-05: a non-string name is a script error");
+    bad("SfxTime", ship, "Play_SFX_Event", "TL-05: a non-number second argument is a script error");
+    const auto capture_ok = call("CaptureOk", {cap});
+    expect(names(capture_ok, "Disable_Capture", auth::codes::unsupported_api) && flag(capture_ok, "disable_nil"),
+        "TL-06: a capture point accepts Disable_Capture with an unsupported_api note");
+    bad("CaptureNone", ship, "Disable_Capture", "TL-06: a type without the capture-point behaviour is a script error");
+    bad("CaptureCount", cap, "Disable_Capture", "TL-06: a missing flag is a script error");
+    bad("CaptureType", cap, "Disable_Capture", "TL-06: a non-Boolean flag is a script error");
+    const auto garrison_ok = call("GarrisonOk", {spawn});
+    expect(names(garrison_ok, "Set_Garrison_Spawn", auth::codes::unsupported_api) && flag(garrison_ok, "garrison_nil"),
+        "TL-07: a squadron spawner accepts Set_Garrison_Spawn with an unsupported_api note");
+    bad("GarrisonNone", ship, "Set_Garrison_Spawn", "TL-07: a type without the spawner behaviour is a script error");
+    bad("GarrisonCount", spawn, "Set_Garrison_Spawn", "TL-07: two arguments are a script error");
+    bad("GarrisonType", spawn, "Set_Garrison_Spawn", "TL-07: a non-Boolean flag is a script error");
+    const auto prevent_ok = call("PreventOk", {ship});
+    expect(names(prevent_ok, "Prevent_AI_Usage", auth::codes::script_warning) && flag(prevent_ok, "prevent_nil"),
+        "TL-08: an owner without an AI player gets the original's warning and the call continues");
+    bad("PreventNone", ship, "Prevent_AI_Usage", "TL-08: a missing flag is a script error");
+    bad("PreventType", ship, "Prevent_AI_Usage", "TL-08: a non-Boolean flag is a script error");
+    ai::Engine engine(world.host, {}, {});
+    ai::EngineContractAccess::proposal_fixture(engine);
+    world.host->engine = &engine;
+    if (engine.runs_player(world.view->units.front().owner)) {
+        expect(names(call("PreventOk", {ship}), "Prevent_AI_Usage", auth::codes::unsupported_api),
+            "TL-08: an owner with an AI player is accepted with an unsupported_api note");
+    }
+    // A galactic scheduler gets none of them: registering twice stays quiet only because nothing registers.
+    World galactic;
+    galactic.host->ai_world = std::make_shared<ModeWorld>();
+    auto galactic_scripts = auth::ScriptScheduler::create(config, auth::ModuleManifest{});
+    if (!galactic_scripts) { expect(false, "TL-04: galactic scheduler starts"); return; }
+    std::vector<eawr::core::Diagnostic> galactic_errors;
+    foc::tactical_ai_detail::register_battle_object_bindings(galactic_scripts.value(), galactic.host, galactic_errors);
+    foc::tactical_ai_detail::register_battle_object_bindings(galactic_scripts.value(), galactic.host, galactic_errors);
+    expect(galactic_errors.empty(), "TL-04: a galactic-mode host registers no battle object methods");
+    std::vector<eawr::core::Diagnostic> twice;
+    foc::tactical_ai_detail::register_battle_object_bindings(galactic_scripts.value(), world.host, twice);
+    foc::tactical_ai_detail::register_battle_object_bindings(galactic_scripts.value(), world.host, twice);
+    expect(!twice.empty(), "TL-04: a battle host does register them (a second registration is refused)");
 }
 
 } // namespace foc_contract

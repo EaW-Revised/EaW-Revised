@@ -211,7 +211,8 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
     for (const auto& tick : live.battle_frame().reached) {
         if (tick.tick <= replacement_tick_) continue;
         for (const auto& event : tick.events) {
-            if (event.kind == sim::tactical::EventKind::pad_captured) {
+            if (event.kind == sim::tactical::EventKind::pad_captured
+                || event.kind == sim::tactical::EventKind::object_owner_changed) {
                 selection_.owner_changed(event.unit, static_cast<sim::tactical::PlayerId>(event.sequence),
                     event.player, live.local_player());
             }

@@ -188,6 +188,7 @@ struct UnitType final {
     // Muzzle_Bone_Name prefix (default MUZZLEA) with _00 and consecutive two-digit suffixes while
     // the model has them. Empty without an object weapon or without a _00 bone.
     std::vector<BonePoint> muzzle_bones;
+    std::optional<DeployPoseData> deploy_poses{}; // WDP-01: the weapon bones' places while SPOILER_LOCK's clips play
     std::optional<ObjectTurret> object_turret{};
     std::vector<Ability> abilities;
     std::vector<sim::tactical::SpecialAbilityProfile> special_abilities;

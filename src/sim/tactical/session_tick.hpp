@@ -325,6 +325,7 @@ private:
     std::map<EntityId, std::pair<std::size_t, PlayerId>> loss_killers_;
     std::set<EntityId> loss_ids_;
     std::set<EntityId> victory_removed_;
+    std::set<EntityId> despawned_; // #7886: units a script removed this frame; a pad child among them is detached, never a child death
     std::array<std::uint64_t, max_players> victory_counts_{};
     std::vector<PlayerQuit> pending_quits_; // notification order; processed after this frame
     std::vector<BeaconState> beacons_; // transactional, bounded by max_players.

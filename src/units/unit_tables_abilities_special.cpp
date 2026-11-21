@@ -162,7 +162,8 @@ void Loader::load_special_super_laser(UnitType& unit, sim::tactical::SpecialAbil
     if (const auto path = attack_clip_path(unit.model_path, sub_index); input_.filesystem && !path.empty()) {
         if (const auto clip = assets::load_animation(*input_.filesystem, path)) {
             special.attack_clip_frames = clip.value().stored_frame_count;
-            special.attack_clip_fps = clip_frames_per_second(clip.value());
+            const auto clip_fps = clip_frames_per_second(clip.value());
+            special.attack_clip_fps = clip_fps.value_or(Fixed{});
             if (special.attack_clip_fps.raw() <= 0) {
                 // A clip that never advances would hold the fire stage for ever: treat it as a model without the clip.
                 report_.note(unit.id, "Attack_Anim_Sub_Index", child_text("Attack_Anim_Sub_Index"),

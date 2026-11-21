@@ -49,6 +49,9 @@ struct LanView {
     // refreshes arrived. Display only; never part of the match.
     std::vector<std::uint8_t> host_mod_refresh;
     std::uint64_t host_mod_refreshes{};
+    // Guest: the peers the host reported as finished checking its mods (display only; unknown until the host has said).
+    std::vector<net::PeerIndex> mod_review_done_peers;
+    bool mod_review_state_known{};
     std::optional<std::uint64_t> desync_tick;
     std::optional<std::uint64_t> peer_confirmed_tick;
     std::optional<bool> victory;
@@ -303,6 +306,11 @@ struct LanLobbyState {
     // a guest preparing its own copy. Empty when nothing is being prepared. It changes once per minute.
     bool start_preparing{};
     std::string prepare_status;
+    // Campaign rooms: each player's check of the host's mods, in seat order (the host is always done). `known` is false on a guest
+    // until the host has reported, so nothing is claimed that is not known.
+    struct ModCheck { net::PeerIndex peer{}; bool done{}; };
+    std::vector<ModCheck> mod_checks;
+    bool mod_checks_known{};
 };
 // Setup calls belong to the Godot main thread. driver() transfers transport ownership
 // between polls to the simulation thread; thereafter only view() is read by the UI.

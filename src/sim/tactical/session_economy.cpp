@@ -228,7 +228,9 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
     for (auto& part : born) result.sources.insert(result.sources.end(),
         std::make_move_iterator(part.begin()), std::make_move_iterator(part.end()));
     // GC player effects share the existing partitioned notification phase.
-    using PlayerContribution = std::tuple<EntityId, std::size_t, PlayerId, std::uint32_t, Fixed, Fixed>;
+    // Source, profile, player, category, then the defence, reveal, stealth-duration and capture-time deltas and the
+    // special-weapon flag: the total order starts with the source, so ties below are partition independent.
+    using PlayerContribution = std::tuple<EntityId, std::size_t, PlayerId, std::uint32_t, Fixed, Fixed, Fixed, Fixed, bool>;
     std::array<std::vector<PlayerContribution>, tick_partition_count> player_parts;
     const auto notified = executor.execute_phase("command-recipient-events", tick_partition_count, [&](const std::size_t partition) {
         const auto range = partition_range(partition, result.sources.size());
@@ -241,7 +243,8 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
                 for (const auto& player : setup.players) {
                     if (profile.all_allies ? !allied(host->state.owner, player.player_id) : host->state.owner != player.player_id) continue;
                     player_parts[partition].emplace_back(source.id, source.profile, player.player_id,
-                        profile.bonus.stacking_category, profile.bonus.percentages[4], profile.reveal_delta);
+                        profile.bonus.stacking_category, profile.bonus.percentages[4], profile.reveal_delta,
+                        profile.stealth_delta, profile.capture_delta, profile.special_weapons);
                 }
                 continue; // player ledger: no recipient type, distance or visibility discovery
             }
@@ -280,17 +283,21 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
     // source ID whatever partition produced each entry.
     std::sort(contributions.begin(), contributions.end());
     contributions.erase(std::unique(contributions.begin(), contributions.end()), contributions.end());
-    std::map<std::pair<PlayerId, std::uint32_t>, std::array<std::optional<Fixed>, 2>> reduced;
-    for (const auto& [actor, profile, player, category, defence, reveal] : contributions) {
+    // Defence, reveal, stealth duration and capture time, per player and stacking category.
+    std::map<std::pair<PlayerId, std::uint32_t>, std::array<std::optional<Fixed>, 4>> reduced;
+    std::set<PlayerId> special_players;
+    for (const auto& [actor, profile, player, category, defence, reveal, stealth, capture, special] : contributions) {
         (void)actor; (void)profile;
-        auto& values = reduced[{player, category}]; const std::array incoming{defence, reveal};
+        if (special) special_players.insert(player);
+        auto& values = reduced[{player, category}]; const std::array incoming{defence, reveal, stealth, capture};
         for (std::size_t i = 0; i < values.size(); ++i) {
             if (incoming[i] == Fixed{}) continue;
             if (!values[i]) values[i] = incoming[i];
             // WGT-50 / WBR-01: defence keeps the signed maximum; player reveal
             // keeps the greatest magnitude. Strict comparison retains stable source
             // order for ties; zero is an ordinary category and categories add.
-            else if (i == 0) values[i] = std::max(*values[i], incoming[i]);
+            // WBR-02: stealth duration and capture time keep the signed maximum of their category.
+            else if (i != 1) values[i] = std::max(*values[i], incoming[i]);
             else {
                 const auto magnitude = [](Fixed value) {
                     const auto raw = static_cast<std::uint64_t>(value.raw());
@@ -300,16 +307,30 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
             }
         }
     }
+    // WBR-02: the ledgers' common floor: a summed delta never goes below -0.99.
+    const auto delta_floor = Fixed::from_raw(-(Fixed::scale / 100) * 99);
+    std::map<PlayerId, Fixed> capture_sums;
     for (const auto& [key, values] : reduced) {
         if (values[0]) result.battlefield_defence[key.first].emplace_back(key.second, *values[0]);
+        if (values[2]) result.stealth_categories[key.first].emplace_back(key.second, *values[2]);
+        if (values[3]) {
+            auto sum = math::add(capture_sums[key.first], *values[3]); if (!sum) return Result::failure(sum.error());
+            capture_sums[key.first] = sum.value();
+        }
         if (values[1]) {
             auto at = std::lower_bound(result.reveal_multipliers.begin(), result.reveal_multipliers.end(), key.first,
                 [](const auto& value, PlayerId player) { return value.first < player; });
             if (at == result.reveal_multipliers.end() || at->first != key.first)
                 at = result.reveal_multipliers.insert(at, {key.first, Fixed::from_raw(Fixed::scale)});
-            auto sum = math::add(at->second, *values[1]); if (!sum) return Result::failure(sum.error()); at->second = sum.value();
+            auto sum = math::add(at->second, *values[1]); if (!sum) return Result::failure(sum.error());
+            at->second = sum.value();
         }
     }
+    // The reveal multiplier is one plus the summed deltas, floored like every other float ledger.
+    for (auto& row : result.reveal_multipliers)
+        row.second = std::max(row.second, Fixed::from_raw(Fixed::scale + delta_floor.raw()));
+    for (const auto& [player, sum] : capture_sums) result.capture_adjustments.emplace_back(player, std::max(sum, delta_floor));
+    result.special_weapon_players.assign(special_players.begin(), special_players.end());
     if (!result.reveal_multipliers.empty()) if (auto valid=validate_sensors(sensors,result.reveal_multipliers); !valid) return Result::failure(valid.error());
     return Result::success(std::move(result));
 }
@@ -672,7 +693,8 @@ bool TacticalSession::Impl::special_weapons_enabled(const PlayerId player,
         for (const auto& unlock : profile->special_unlocks)
             if (!unlock.reverse && (account.player == player || (unlock.all_allies && allied(account.player, player)))) return true;
     }
-    return false;
+    // WBR-03: a live source's unlock reaches its owner, and its allies with Apply_To_All_Allies (already resolved).
+    return std::binary_search(command_ledger.special_weapon_players.begin(), command_ledger.special_weapon_players.end(), player);
 }
 
 const Player* TacticalSession::Impl::player_of(const PlayerId id) const noexcept {

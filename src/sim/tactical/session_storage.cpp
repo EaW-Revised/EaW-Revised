@@ -94,6 +94,7 @@ LiveUnit TacticalSession::Impl::live_at(const EntityId id, const entt::entity ha
         result.sighting = sighted != nullptr ? std::optional(sighted->value) : std::nullopt;
         result.garrison_unit = registry.all_of<GarrisonUnit>(handle);
         result.script_invulnerable = registry.all_of<ScriptInvulnerable>(handle);
+        result.hold_fire = registry.all_of<HoldFire>(handle);
         if (const auto* route = registry.try_get<Waypoints>(handle)) result.waypoints = route->value;
         if (const auto* history = registry.try_get<PositionHistoryComponent>(handle)) result.position_history = history->value;
         return result;
@@ -135,6 +136,7 @@ void TacticalSession::Impl::rebuild(const std::vector<LiveUnit>& units, const bo
             emplace_component<StableId>(handle, state.entity_id);
             if (unit.garrison_unit) emplace_component<GarrisonUnit>(handle);
             if (unit.script_invulnerable) emplace_component<ScriptInvulnerable>(handle);
+            if (unit.hold_fire) emplace_component<HoldFire>(handle);
             emplace_component<Identity>(handle, state.type_id, state.owner, state.purchase_type,
                 state.purchase_token, state.barrage_source, state.garrison_enabled, state.controller_seat, state.control);
             emplace_component<Placement>(handle, state.position, state.rotation);
@@ -223,8 +225,9 @@ enum CommitBit : std::uint32_t {
     commit_abilities = 1U << 8, commit_approaching = 1U << 9, commit_sighted = 1U << 10, commit_ion = 1U << 11,
     commit_corrupt = 1U << 12, commit_waypoints = 1U << 13, commit_history = 1U << 14,
     commit_vulnerable = 1U << 15, commit_upgraded = 1U << 16, commit_script_invulnerable = 1U << 17,
-    commit_every_component = (1U << 18) - 1U,
-    commit_new_entity = 1U << 18,
+    commit_hold_fire = 1U << 18,
+    commit_every_component = (1U << 19) - 1U,
+    commit_new_entity = 1U << 19,
 };
 
 // One optional component in the phase: assign a changed value in place (the pool is not restructured), or flag
@@ -273,6 +276,7 @@ core::Result<void> TacticalSession::Impl::commit_units(std::vector<LiveUnit>& un
         auto& order_storage = registry.storage<CurrentOrder>();
         auto& garrison_storage = registry.storage<GarrisonUnit>();
         auto& script_invulnerable_storage = registry.storage<ScriptInvulnerable>();
+        auto& hold_fire_storage = registry.storage<HoldFire>();
         auto& carried_storage = registry.storage<CarriedHeroes>();
         auto& health_storage = registry.storage<Health>();
         auto& asteroid_storage = registry.storage<AsteroidContact>();
@@ -331,6 +335,7 @@ core::Result<void> TacticalSession::Impl::commit_units(std::vector<LiveUnit>& un
                 std::uint32_t mask = 0;
                 if (unit.garrison_unit != garrison_storage.contains(handle)) mask |= commit_garrison;
                 if (unit.script_invulnerable != script_invulnerable_storage.contains(handle)) mask |= commit_script_invulnerable;
+                if (unit.hold_fire != hold_fire_storage.contains(handle)) mask |= commit_hold_fire;
                 if (carried_storage.contains(handle)) {
                     if (state.contained.empty()) mask |= commit_carried;
                     else if (auto& current = carried_storage.get(handle); current.value != state.contained) {
@@ -439,6 +444,13 @@ core::Result<void> TacticalSession::Impl::commit_units(std::vector<LiveUnit>& un
                     if (unit.script_invulnerable != registry.all_of<ScriptInvulnerable>(handle)) {
                         if (unit.script_invulnerable) emplace_component<ScriptInvulnerable>(handle);
                         else registry.remove<ScriptInvulnerable>(handle);
+                        ++writes;
+                    }
+                }
+                if ((op.mask & commit_hold_fire) != 0U) {
+                    if (unit.hold_fire != registry.all_of<HoldFire>(handle)) {
+                        if (unit.hold_fire) emplace_component<HoldFire>(handle);
+                        else registry.remove<HoldFire>(handle);
                         ++writes;
                     }
                 }

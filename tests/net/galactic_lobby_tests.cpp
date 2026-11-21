@@ -3417,6 +3417,12 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
     expect(!host->lobby_galactic_checkpoint(options, pending_bindings)
         && host->lobby_state()->snapshot == before_review,
         "host cannot start checkpoint selection while a guest is reviewing mods");
+    {
+        // Owner 2026-11-19: the room says who is still checking the host's mods. The host knows the guest's acknowledgement is missing.
+        const auto pending = host->lobby_state();
+        expect(pending && pending->mod_checks_known && pending->mod_checks.size() == 2 && pending->mod_checks[0].done && !pending->mod_checks[1].done,
+            "the host sees the reviewing guest as still checking mods and itself as done");
+    }
     if (host_leaves) {
         milestone = "host leaves during review";
         host->cancel();
@@ -3435,6 +3441,15 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
     }
     guest->accept_mod_review();
     wait(synchronized);
+    {
+        // Both lobbies show every player's mod check as done: the host from the acknowledgements, the guest from the host's report.
+        const auto all_done = [](const std::optional<viewer::LanLobbyState>& state) {
+            return state && state->mod_checks_known && state->mod_checks.size() == 2
+                && std::all_of(state->mod_checks.begin(), state->mod_checks.end(), [](const auto& row) { return row.done; });
+        };
+        wait([&] { return all_done(host->lobby_state()) && all_done(guest->lobby_state()); });
+        expect(all_done(host->lobby_state()) && all_done(guest->lobby_state()), "after the review every player's mod check shows as done in both lobbies");
+    }
     expect(guest->galactic_room() && net::lobby_game_mode(guest->lobby_state()->snapshot.game) == net::LobbyGameMode::galactic,
         "the guest reads the same mode from the same revision");
     {
@@ -4205,6 +4220,48 @@ int mod_versus_start(const std::string& mod_id) {
 
 } // namespace
 
+
+// The host's "load without old battle history" reaches the conversion only after the saved game's own setup checks, with the
+// plan of the saved game, and hands back exactly what the conversion produced.
+void old_battle_history_recovery_plumbing() {
+    auto locals = locals_of(2);
+    GcRoom room(locals, coop_options(*locals[0]), 1);
+    room.admit(1, 1, "guest");
+    auto roster = require(net::galactic_roster_draft(room.host().snapshot(), locals[0]->catalog()));
+    cp::MpSessionTerms terms; terms.seed = match_seed;
+    terms.command_quota = static_cast<std::uint32_t>(net::max_batch_commands);
+    terms.byte_quota = static_cast<std::uint32_t>(net::max_batch_bytes);
+    auto agreed = require(cp::seal_mp_agreement(locals[0]->content, roster, terms));
+    const auto saved = require(eawr::checkpoint::save_game_checkpoint(*agreed.session,
+        eawr::checkpoint::game_identities(agreed.plan->galaxy())));
+
+    auto& content = locals[0]->content;
+    expect(!cp::recover_mp_history(content, roster, terms, saved), "without a recovery service the conversion is refused");
+    unsigned calls = 0; std::string seen_difficulty; std::uint64_t seen_seed = 0;
+    content.recover_history = [&](const cp::CampaignSetupPlan& plan, std::string_view difficulty,
+        std::span<const std::uint8_t> bytes) -> eawr::core::Result<eawr::checkpoint::RecoveredCheckpoint> {
+        ++calls; seen_difficulty = std::string(difficulty); seen_seed = plan.galaxy().seed;
+        eawr::checkpoint::RecoveredCheckpoint converted;
+        converted.bytes.assign(bytes.begin(), bytes.end()); converted.bytes.push_back(0x5a);
+        converted.battles = {7, 9}; converted.latest_summary_dropped = true;
+        return eawr::core::Result<eawr::checkpoint::RecoveredCheckpoint>::success(std::move(converted));
+    };
+    const auto converted = require(cp::recover_mp_history(content, roster, terms, saved));
+    expect(calls == 1 && seen_seed == terms.seed && seen_difficulty == roster.difficulty,
+        "the conversion runs once, with the saved game's plan and difficulty");
+    expect(converted.bytes.size() == saved.size() + 1 && converted.bytes.back() == 0x5a
+        && converted.battles == std::vector<eawr::sim::EntityId>({7, 9}) && converted.latest_summary_dropped,
+        "the conversion's bytes, dropped battles and summary flag come back unchanged");
+    // A save of another campaign or seed never reaches the conversion.
+    auto other = terms; other.seed = match_seed + 1;
+    const auto wrong_seed = cp::recover_mp_history(content, roster, other, saved);
+    expect(!wrong_seed && calls == 1, "a save whose setup differs from the room's is refused before the conversion");
+    expect(!cp::recover_mp_history(content, roster, terms, std::span<const std::uint8_t>{}) && calls == 1,
+        "an empty file is refused before the conversion");
+    std::vector<std::uint8_t> damaged(saved.begin(), saved.begin() + static_cast<std::ptrdiff_t>(saved.size() / 2));
+    expect(!cp::recover_mp_history(content, roster, terms, damaged) && calls == 1,
+        "a damaged file is refused before the conversion");
+}
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--stock-ai") {
@@ -4221,6 +4278,7 @@ int main(int argc, char** argv) {
         if (argc != 1) throw std::runtime_error("usage: net_galactic_lobby_tests [--stock-ai | --mod-versus <workshop id>]");
         checkpoint_buffered_departure();
         checkpoint_failure_stays_visible();
+        old_battle_history_recovery_plumbing();
         for (const auto workers : {1U, 2U, 4U, 8U})
             for (const bool sp : {false, true}) production_file_resume(workers, sp);
         for (const auto workers : {1U, 2U, 4U, 8U}) production_file_resume(workers, false, true);

@@ -153,6 +153,10 @@ enum class OrderKind : std::uint8_t {
     land_unload = 30,
     tactical_superweapon = 31, // TSW-10: replay opcode 37, no unit order.
     script_create_object = 33, // SSU-03: coordinator-reserved opcode 39, no unit order.
+    script_despawn = 32, // #7886: Lua Object.Despawn(), replay opcode 40, no unit order.
+    script_teleport = 34, // Lua Teleport_And_Face: replay opcode 41, no unit order.
+    script_hold_fire = 35, // Lua Prevent_All_Fire: replay opcode 42, no unit order.
+    script_change_owner = 36, // Lua Change_Owner: replay opcode 43, no unit order.
 };
 
 // The order a unit last accepted: a move or face keeps its point in `destination`, an attack its
@@ -259,6 +263,12 @@ struct DamagePayload {
 struct ScriptInvulnerablePayload {
     bool enabled{};
     friend constexpr bool operator==(const ScriptInvulnerablePayload&, const ScriptInvulnerablePayload&) noexcept = default;
+};
+
+// Lua `Object.Despawn()` (#7886): removes each listed unit from the battle silently (no death effects, no destruction
+// event, no kill credit); only the script host issues it.
+struct ScriptDespawnPayload {
+    friend constexpr bool operator==(const ScriptDespawnPayload&, const ScriptDespawnPayload&) noexcept = default;
 };
 
 // Turn in place towards `target` (#70, docs/behaviour/space-movement.md MV-20).
@@ -558,10 +568,31 @@ struct ScriptCreateObjectPayload {
     friend constexpr bool operator==(const ScriptCreateObjectPayload&, const ScriptCreateObjectPayload&) noexcept = default;
 };
 
+// Lua `Teleport_And_Face(target)`: each listed unit moves to the target's position and takes its facing (the retail
+// wrapper reads both from the target object); the unit stops where it lands. Only the script host issues it.
+struct ScriptTeleportPayload {
+    EntityId target{};
+    friend constexpr bool operator==(const ScriptTeleportPayload&, const ScriptTeleportPayload&) noexcept = default;
+};
+
+// Lua `Prevent_All_Fire(enabled)`: sets or clears the per-unit hold-fire flag on each listed unit; while set, none
+// of the unit's weapons fire. Idempotent, no expiry; only the script host issues it.
+struct ScriptHoldFirePayload {
+    bool enabled{};
+    friend constexpr bool operator==(const ScriptHoldFirePayload&, const ScriptHoldFirePayload&) noexcept = default;
+};
+
+// Lua `Change_Owner(player)`: each listed unit (and the rest of its squadron) changes to the named player, keeping its
+// hull and shield percentages; only the script host issues it.
+struct ScriptChangeOwnerPayload {
+    PlayerId owner{};
+    friend constexpr bool operator==(const ScriptChangeOwnerPayload&, const ScriptChangeOwnerPayload&) noexcept = default;
+};
+
 using CommandPayload = std::variant<StopPayload, MovePayload, AttackPayload, DamagePayload, FacePayload,
     AttackMovePayload, GuardPayload, AbilityPayload, BuyPayload, CancelPayload, ReinforcePayload, PadBuildPayload,
     CreditGrantPayload, QuitPayload, PadSellPayload, AreaAbilityPayload, ManualTargetPayload, RevealAllPayload,
-    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload, LandGarrisonPayload, LandUnloadPayload, TacticalSuperweaponPayload, ScriptCreateObjectPayload>;
+    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload, LandGarrisonPayload, LandUnloadPayload, TacticalSuperweaponPayload, ScriptCreateObjectPayload, ScriptTeleportPayload, ScriptHoldFirePayload, ScriptChangeOwnerPayload, ScriptDespawnPayload>;
 
 // Whether a command acts on the issuer's economy (#530) rather than on units.
 [[nodiscard]] constexpr bool economy_command(const CommandPayload& payload) noexcept {
@@ -592,10 +623,14 @@ struct PlayerCommand {
 
 [[nodiscard]] constexpr OrderKind order_kind(const CommandPayload& payload) noexcept {
     if (std::holds_alternative<ScriptCreateObjectPayload>(payload)) return OrderKind::script_create_object;
+    if (std::holds_alternative<ScriptTeleportPayload>(payload)) return OrderKind::script_teleport;
+    if (std::holds_alternative<ScriptHoldFirePayload>(payload)) return OrderKind::script_hold_fire;
+    if (std::holds_alternative<ScriptChangeOwnerPayload>(payload)) return OrderKind::script_change_owner;
     if (std::holds_alternative<TacticalSuperweaponPayload>(payload)) return OrderKind::tactical_superweapon;
     if (std::holds_alternative<LandGarrisonPayload>(payload)) return OrderKind::land_garrison;
     if (std::holds_alternative<LandUnloadPayload>(payload)) return OrderKind::land_unload;
     if (std::holds_alternative<ScriptInvulnerablePayload>(payload)) return OrderKind::script_invulnerable;
+    if (std::holds_alternative<ScriptDespawnPayload>(payload)) return OrderKind::script_despawn;
     if (std::holds_alternative<GiftPayload>(payload)) return OrderKind::gift;
     if (std::holds_alternative<BattleControlPayload>(payload)) return OrderKind::battle_control;
     if (std::holds_alternative<RetreatPayload>(payload) || std::holds_alternative<RetreatCinematicPayload>(payload)) return OrderKind::retreat;
@@ -652,6 +687,9 @@ enum class EventKind : std::uint8_t {
     planet_obliterated = 27,
     tsw_debris_created = 28,
     tsw_sequence_complete = 29,
+    // Lua Change_Owner: `unit` changed owner; player is the new owner and sequence the previous one (like pad_captured, but
+    // without the pad capture sounds). The viewer drops the previous owner's selection and control groups on it.
+    object_owner_changed = 30,
 };
 
 enum class RejectReason : std::uint8_t {
@@ -725,6 +763,9 @@ inline constexpr std::string_view worker_failure = "EAWR-SIM-0310";
 inline constexpr std::string_view land_provider_unavailable = "EAWR-SIM-0311";
 inline constexpr std::string_view invalid_land_terrain = "EAWR-SIM-0312";
 inline constexpr std::string_view invalid_land_path = "EAWR-SIM-0313";
+// A campaign setup record of payload version 5 or 6, written before the location flag existed (not read; see
+// docs/replay-format.md). No other failure uses this code.
+inline constexpr std::string_view older_campaign_setup = "EAWR-SIM-0314";
 } // namespace diagnostic_codes
 
 } // namespace eawr::sim::tactical

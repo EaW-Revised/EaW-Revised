@@ -1170,6 +1170,74 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
         }
         return one(Value{std::move(out)});
     });
+    // BHR-01..03. The original keeps one list of hint objects per battle (HINT-behavior objects: map markers and
+    // props, script-spawned teams) in creation order. Find_Hint(type or type name [, hint]) answers the first object of
+    // that original type, and with a non-empty hint string the first whose hint matches without case; nil when none.
+    // Find_All_Objects_With_Hint(hint) answers every object whose hint matches, as a table (empty when none).
+    // Debug build: a missing or mistyped argument, and a type name that does not resolve, are script errors.
+    // Hint strings on map markers are not decoded yet (fidelity list): until the host sets hint_objects_hosted every call notes it.
+    add("Find_Hint", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.empty()) return fail("Find_Hint -- Invalid number of parameters.");
+        std::optional<sim::tactical::TypeId> type;
+        if (const auto* wrapped = as_handle(arguments[0], handle_type)) {
+            if (const auto* info = host->type(wrapped->id)) type = info->type_id;
+        } else if (const auto* name = as_text(arguments[0])) {
+            const auto key = upper(*name);
+            if (const auto found = host->types_by_name.find(key); found != host->types_by_name.end()) type = found->second->type_id;
+            else if (const auto& names = host->setup.content.catalog_types) {
+                const auto registered = std::lower_bound(names->begin(), names->end(), key,
+                    [](const auto& entry, const std::string& value) { return entry.first < value; });
+                if (registered != names->end() && registered->first == key) type = registered->second;
+            }
+        } else {
+            return fail("Find_Hint -- Expected type or name for parameter 1");
+        }
+        if (!type) return fail("Find_Hint -- Unable to resolve type name");
+        const std::string* hint = arguments.size() > 1 ? as_text(arguments[1]) : nullptr;
+        if (!host->setup.hint_objects_hosted)
+            context.report(authoritative::codes::unsupported_api, "Find_Hint: map hint objects are not hosted; the answer covers only objects listed by the host");
+        context.charge_host_work(host->setup.hint_objects.size());
+        for (const AiHintObject& object : host->setup.hint_objects) {
+            if (object.type != *type || host->view->find(object.entity) == nullptr) continue;
+            if (hint != nullptr && !hint->empty() && upper(*hint) != upper(object.hint)) continue;
+            return one(handle(handle_game_object, object.entity));
+        }
+        return none();
+    });
+    add("Find_All_Objects_With_Hint", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() != 1) return fail("Find_All_Objects_With_Hint -- invalid number of parameters.  Expected 1, got "
+            + std::to_string(arguments.size()) + ".");
+        const std::string* hint = as_text(arguments[0]);
+        if (hint == nullptr) return fail("Find_All_Objects_With_Hint -- invalid type for parameter 1.  Expected string.");
+        if (!host->setup.hint_objects_hosted)
+            context.report(authoritative::codes::unsupported_api, "Find_All_Objects_With_Hint: map hint objects are not hosted; the answer covers only objects listed by the host");
+        context.charge_host_work(host->setup.hint_objects.size());
+        const std::string wanted = upper(*hint);
+        std::vector<Value> out;
+        for (const AiHintObject& object : host->setup.hint_objects) {
+            if (host->view->find(object.entity) != nullptr && upper(object.hint) == wanted)
+                out.push_back(handle(handle_game_object, object.entity));
+        }
+        return one(Value{std::move(out)});
+    });
+    // BHR-04/05 radar blips (tactical form). The original puts a permanent blip at a position (or on an object) under the
+    // CRC of the name, and removes it by that name. The blip layer of the battle radar is not hosted: the calls check
+    // their arguments like the original and note once per call that nothing is drawn.
+    add("Add_Radar_Blip", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() != 2) return fail("Add_Radar_Blip -- invalid number of parameters.  Expected 2, got "
+            + std::to_string(arguments.size()) + ".");
+        if (!extract_position(*host, arguments[0])) return fail("Add_Radar_Blip -- could not deduce a position from parameter 1.");
+        if (as_text(arguments[1]) == nullptr) return fail("Add_Radar_Blip -- invalid type for parameter 2.  Expected string.");
+        context.report(authoritative::codes::unsupported_api, "Add_Radar_Blip: the battle radar blip layer is not hosted; no blip is drawn");
+        return none();
+    });
+    add("Remove_Radar_Blip", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() != 1) return fail("Remove_Radar_Blip -- invalid number of parameters.  Expected 1, got "
+            + std::to_string(arguments.size()) + ".");
+        if (as_text(arguments[0]) == nullptr) return fail("Remove_Radar_Blip -- invalid type for parameter 1.  Expected string.");
+        context.report(authoritative::codes::unsupported_api, "Remove_Radar_Blip: the battle radar blip layer is not hosted; nothing to remove");
+        return none();
+    });
     add("Find_Player", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         if (arguments.size() != 1) return fail("Find_Player expects exactly one string");
         const std::string* name = as_text(arguments[0]);

@@ -22,6 +22,8 @@
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
 #include <godot_cpp/classes/canvas_item_material.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
+#include <godot_cpp/variant/packed_vector4_array.hpp>
+#include <godot_cpp/variant/vector4.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/polygon2d.hpp>
 #include <godot_cpp/classes/time.hpp>
@@ -128,6 +130,11 @@ bool GalacticMode::State::build_hud() {
     world_overlays->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
     hud->add_child(world_overlays);
     world_overlays->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+    // #7809: the planets' control groups, stacked by camera depth (see stack_planet_ui).
+    planet_ui_layer = memnew(Control);
+    planet_ui_layer->set_name("GalacticPlanetUi");
+    planet_ui_layer->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+    world_overlays->add_child(planet_ui_layer);
     departure_hint = memnew(Label);
     departure_hint->set_name("GalacticDepartureHint");
     departure_hint->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
@@ -300,6 +307,142 @@ galactic_view::HudBounds GalacticMode::State::planet_control_bounds(const galact
     return bounds;
 }
 
+Control* GalacticMode::State::planet_ui_group(const galactic_view::ObjectId planet) {
+    auto [entry, inserted] = planet_ui_groups.try_emplace(planet, nullptr);
+    if (inserted) {
+        auto* group = memnew(Control);
+        group->set_name(String::utf8(("planet_ui_" + std::to_string(planet)).c_str()));
+        group->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        (planet_ui_layer ? planet_ui_layer : world_overlays)->add_child(group);
+        entry->second = group;
+        planet_ui_order.clear(); // a new group sits last: stack again
+    }
+    return entry->second;
+}
+
+void GalacticMode::State::add_planet_overlay(const galactic_view::ObjectId planet, Control* control) {
+    // The group's material (the occluder discs of nearer planet bodies) reaches the control and its children.
+    control->set_use_parent_material(true);
+    planet_ui_group(planet)->add_child(control);
+}
+
+namespace {
+// Clears the picture where a nearer planet's body covers it. Positions are canvas pixels, like the planet anchors.
+constexpr const char* planet_ui_occluder_source = R"(shader_type canvas_item;
+uniform vec4 discs[6];
+uniform int disc_count = 0;
+varying vec2 canvas_position;
+void vertex() { canvas_position = (MODEL_MATRIX * vec4(VERTEX, 0.0, 1.0)).xy; }
+void fragment() {
+    for (int i = 0; i < 6; ++i) {
+        if (i >= disc_count) break;
+        float edge = length(canvas_position - discs[i].xy) - discs[i].z;
+        COLOR.a *= smoothstep(-0.5, 0.5, edge);
+    }
+}
+)";
+
+void use_parent_material_below(Node* node) {
+    for (int index = 0; index < node->get_child_count(); ++index) {
+        auto* child = Object::cast_to<CanvasItem>(node->get_child(index));
+        if (!child) continue;
+        if (child->get_material().is_null()) child->set_use_parent_material(true);
+        use_parent_material_below(child);
+    }
+}
+
+// A control a nearer planet body covers must not take the click meant for that body: the occluder only clears the picture,
+// the hit rectangle stays. While a disc touches the control it ignores the mouse; the filter it had is kept in a meta
+// entry and put back once nothing covers it (or the group is no longer occluded).
+constexpr const char* planet_ui_filter_meta = "planet_ui_filter";
+
+bool disc_touches(const Rect2& rect, const galactic_view::PlanetUiOccluder& disc) {
+    const float nearest_x = std::clamp(disc.x, rect.position.x, rect.position.x + rect.size.x);
+    const float nearest_y = std::clamp(disc.y, rect.position.y, rect.position.y + rect.size.y);
+    const float dx = disc.x - nearest_x, dy = disc.y - nearest_y;
+    return dx * dx + dy * dy < disc.radius * disc.radius;
+}
+
+void restore_input_below(Node* node) {
+    for (int index = 0; index < node->get_child_count(); ++index) {
+        auto* child = node->get_child(index);
+        if (auto* control = Object::cast_to<Control>(child); control && control->has_meta(planet_ui_filter_meta)) {
+            control->set_mouse_filter(static_cast<Control::MouseFilter>(static_cast<int>(control->get_meta(planet_ui_filter_meta))));
+            control->remove_meta(planet_ui_filter_meta);
+        }
+        restore_input_below(child);
+    }
+}
+
+void cover_input_below(Node* node, const galactic_view::PlanetUiDepthPlan::Hidden& hidden) {
+    for (int index = 0; index < node->get_child_count(); ++index) {
+        auto* child = node->get_child(index);
+        if (auto* control = Object::cast_to<Control>(child)) {
+            bool covered = false;
+            if (control->is_visible_in_tree()) {
+                const auto rect = control->get_global_rect();
+                for (std::size_t slot = 0; slot < hidden.count && !covered; ++slot) covered = disc_touches(rect, hidden.discs[slot]);
+            }
+            const bool held = control->has_meta(planet_ui_filter_meta);
+            if (covered && !held) {
+                control->set_meta(planet_ui_filter_meta, static_cast<int>(control->get_mouse_filter()));
+                control->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            } else if (covered && control->get_mouse_filter() != Control::MOUSE_FILTER_IGNORE) {
+                control->set_meta(planet_ui_filter_meta, static_cast<int>(control->get_mouse_filter())); // set again elsewhere
+                control->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            } else if (!covered && held) {
+                control->set_mouse_filter(static_cast<Control::MouseFilter>(static_cast<int>(control->get_meta(planet_ui_filter_meta))));
+                control->remove_meta(planet_ui_filter_meta);
+            }
+        }
+        cover_input_below(child, hidden);
+    }
+}
+}
+
+void GalacticMode::State::stack_planet_ui(const galactic_view::PlanetUiDepthPlan& plan) {
+    for (const auto id : plan.order) (void)planet_ui_group(id);
+    if (planet_ui_order != plan.order && planet_ui_layer) {
+        int index = 0;
+        for (const auto id : plan.order) {
+            auto* group = planet_ui_groups.at(id);
+            if (planet_ui_layer->get_child(index) != group) planet_ui_layer->move_child(group, index);
+            ++index;
+        }
+        planet_ui_order = plan.order;
+    }
+    std::vector<galactic_view::ObjectId> occluded;
+    occluded.reserve(plan.hidden.size());
+    for (const auto& hidden : plan.hidden) {
+        auto* group = planet_ui_groups.at(hidden.id);
+        Ref<ShaderMaterial> material = group->get_material();
+        if (material.is_null()) {
+            if (planet_ui_occluder_shader.is_null()) {
+                planet_ui_occluder_shader.instantiate();
+                planet_ui_occluder_shader->set_code(planet_ui_occluder_source);
+            }
+            material.instantiate();
+            material->set_shader(planet_ui_occluder_shader);
+            group->set_material(material);
+        }
+        PackedVector4Array discs;
+        discs.resize(static_cast<std::int64_t>(galactic_view::max_planet_ui_occluders));
+        for (std::size_t slot = 0; slot < hidden.count; ++slot)
+            discs.set(static_cast<std::int64_t>(slot), Vector4(hidden.discs[slot].x, hidden.discs[slot].y, hidden.discs[slot].radius, 0.0F));
+        material->set_shader_parameter("discs", discs);
+        material->set_shader_parameter("disc_count", static_cast<std::int32_t>(hidden.count));
+        use_parent_material_below(group); // badges create their ship picture after they are added
+        cover_input_below(group, hidden);
+        occluded.push_back(hidden.id);
+    }
+    // A group that no body covers any more goes back to the plain material.
+    for (const auto id : planet_ui_occluded)
+        if (std::find(occluded.begin(), occluded.end(), id) == occluded.end())
+            if (const auto found = planet_ui_groups.find(id); found != planet_ui_groups.end())
+            { found->second->set_material(Ref<Material>()); restore_input_below(found->second); }
+    planet_ui_occluded = std::move(occluded);
+}
+
 void GalacticMode::State::update_planet_labels() {
     if (!hud || !planet_name_style) return;
     const auto& label_flight = seat_flight();
@@ -398,11 +541,13 @@ void GalacticMode::State::update_planet_labels() {
         static_cast<void>(planet); slot.projected = false;
         if (slot.button) slot.button->hide();
     }
+    // The farthest a planet's controls reach from its centre: the stacking and occlusion only look at planets near the screen.
+    const float planet_ui_reach = 360.0F * ui_scale;
+    std::vector<galactic_view::PlanetUiDepthEntry> depth_entries;
+    depth_entries.reserve(hud_planet_indices.size());
     for (const auto planet_index : hud_planet_indices) {
         const auto planet = galaxy->planets.begin() + static_cast<std::ptrdiff_t>(planet_index);
         const auto observation = hud_facts.find(planet->id);
-        // WGUI-38: an undiscovered planet keeps its name, in the neutral colour.
-        if (observation == hud_facts.end() && options.campaign != galactic_view::synthetic_campaign) continue;
         const galactic_view::PlanetArt* art = nullptr;
         if (content) {
             const auto found = content->art.find(planet->id);
@@ -411,6 +556,24 @@ void GalacticMode::State::update_planet_labels() {
         const auto point = galactic_view::render_point(planet->position);
         const auto offset = Vector3(point[0], point[1], point[2]) - eye;
         const float depth = offset.dot(forward);
+        if (depth > camera.near_plane && depth < camera.far_plane) {
+            // #7809: every planet in front of the camera takes part in the depth stacking, with or without controls:
+            // its body hides the controls of the planets behind it.
+            const float body_scale = static_cast<float>(camera.height) / (2.0F * depth * tangent);
+            const float x = static_cast<float>(camera.width) * 0.5F + offset.dot(right) * body_scale;
+            const float y = static_cast<float>(camera.height) * 0.5F - offset.dot(up) * body_scale;
+            const float world_radius = art && art->pick_radius > 0.0F ? art->pick_radius
+                : galactic_view::skeleton_planet_radius * planet->scale;
+            const float body_radius = planet_layer(planet->id) == 0 ? world_radius * body_scale : 0.0F;
+            // A body bigger than its controls' reach (close zoom) covers rear controls from off the screen edge.
+            const float margin = planet_ui_reach + body_radius;
+            if (x > -margin && y > -margin && x < static_cast<float>(camera.width) + margin
+                && y < static_cast<float>(camera.height) + margin) {
+                depth_entries.push_back({planet->id, depth, x, y, body_radius});
+            }
+        }
+        // WGUI-38: an undiscovered planet keeps its name, in the neutral colour.
+        if (observation == hud_facts.end() && options.campaign != galactic_view::synthetic_campaign) continue;
         if (depth <= camera.near_plane || depth >= camera.far_plane) {
             // Hidden, but its text keeps following the facts until it returns.
             if (income_changed && observation != hud_facts.end() && observation->second.visible_income)
@@ -458,7 +621,7 @@ void GalacticMode::State::update_planet_labels() {
                 if (created) {
                     income = memnew(Label); income->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
                     income->set_name(String::utf8(("planet_income_" + std::to_string(planet->id)).c_str()));
-                    world_overlays->add_child(income);
+                    add_planet_overlay(planet->id, income);
                     const auto face = hud_fonts->resolve({std::string(component->text(data::ui::Field::font_name)),
                         component->integer(data::ui::Field::font_point_size).value_or(0)}, "english");
                     income->add_theme_font_override("font", hud_fonts->font(face));
@@ -496,7 +659,7 @@ void GalacticMode::State::update_planet_labels() {
             auto [entry, inserted] = planet_labels.try_emplace(planet->id, nullptr);
             if (inserted) {
                 entry->second = memnew(Label);
-                world_overlays->add_child(entry->second);
+                add_planet_overlay(planet->id, entry->second);
                 entry->second->set_mouse_filter(Control::MOUSE_FILTER_PASS);
                 entry->second->set_name(String::utf8(("planet_name_" + std::to_string(planet->id)).c_str()));
             }
@@ -606,6 +769,9 @@ void GalacticMode::State::update_planet_labels() {
     for (const auto& [id, icon] : planet_weather_icons) { static_cast<void>(icon); retire(id); }
     for (const auto& [id, label] : planet_corruption_labels) { static_cast<void>(label); retire(id); }
     for (auto& [id, record] : planet_label_records) if (record.pass != planet_label_pass) { static_cast<void>(id); record.placed = false; }
+    // The GPU contract reads the camera the stacking used, to check the group order against depth on its own.
+    if (planet_ui_layer) { planet_ui_layer->set_meta("camera_eye", eye); planet_ui_layer->set_meta("camera_forward", forward); }
+    stack_planet_ui(galactic_view::plan_planet_ui_depth(std::move(depth_entries), planet_ui_reach));
     std::sort(visible_labels.begin(), visible_labels.end());
     hide_unused_labels();
     income_labels_snapshot = displayed_snapshot;
@@ -960,7 +1126,7 @@ void GalacticMode::State::update_planet_levels(const galactic_view::ObjectId id,
             auto* image = memnew(TextureRect);
             image->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
             image->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-            world_overlays->add_child(image);
+            add_planet_overlay(id, image);
             return image;
         };
         for (auto& image : entry->second.ground) image = make();
@@ -1035,12 +1201,12 @@ void GalacticMode::State::update_planet_bonus_icon(const galactic_view::ObjectId
         slot = memnew(TextureRect);
         slot->set_mouse_filter(Control::MOUSE_FILTER_PASS);
         slot->set_name(String::utf8(("planet_bonus_" + std::to_string(id)).c_str()));
-        slot->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE); world_overlays->add_child(slot);
+        slot->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE); add_planet_overlay(id, slot);
     }
     const auto offset = component->vec2(data::ui::Field::offset).value_or(data::ui::Vec2{});
     const auto size = texture->get_size();
     const auto rect = galactic_view::planet_bonus_icon_rect(anchor.x, anchor.y, offset.x, offset.y,
-        galactic_view::command_bar_component_scale(*component, scale), size.x, size.y);
+        scale, size.x, size.y, component->number(data::ui::Field::scale).value_or(1.0F));
     slot->set_texture(texture);
     slot->set_size({static_cast<float>(rect.width), static_cast<float>(rect.height)});
     slot->set_position({static_cast<float>(rect.x), static_cast<float>(rect.y)});
@@ -1066,12 +1232,12 @@ void GalacticMode::State::update_planet_weather_icon(const galactic_view::Object
         slot = memnew(TextureRect);
         slot->set_mouse_filter(Control::MOUSE_FILTER_PASS);
         slot->set_name(String::utf8(("planet_weather_" + std::to_string(id)).c_str()));
-        slot->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE); world_overlays->add_child(slot);
+        slot->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE); add_planet_overlay(id, slot);
     }
     const auto offset = component->vec2(data::ui::Field::offset).value_or(data::ui::Vec2{});
     const auto size = texture->get_size();
     const auto rect = galactic_view::planet_bonus_icon_rect(anchor.x, anchor.y, offset.x, offset.y,
-        galactic_view::command_bar_component_scale(*component, scale), size.x, size.y);
+        scale, size.x, size.y, component->number(data::ui::Field::scale).value_or(1.0F));
     slot->set_texture(texture);
     slot->set_size({static_cast<float>(rect.width), static_cast<float>(rect.height)});
     slot->set_position({static_cast<float>(rect.x), static_cast<float>(rect.y)});
@@ -1094,7 +1260,7 @@ void GalacticMode::State::update_planet_corruption_text(const galactic_view::Obj
     if (!label) {
         label = memnew(Label); label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
         label->set_name(String::utf8(("planet_corruption_" + std::to_string(id)).c_str()));
-        world_overlays->add_child(label);
+        add_planet_overlay(id, label);
         const auto face = hud_fonts->resolve({std::string(component->text(data::ui::Field::font_name)),
             component->integer(data::ui::Field::font_point_size).value_or(0)}, "english");
         label->add_theme_font_override("font", hud_fonts->font(face));
@@ -1187,7 +1353,7 @@ void GalacticMode::State::update_planet_status_icons(const galactic_view::Object
                         reinterpret_cast<State*>(self)->open_corruption_information(static_cast<sim::galactic::PlanetId>(planet));
                 }).bind(reinterpret_cast<int64_t>(this), static_cast<int64_t>(id)));
             }
-            slot->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE); world_overlays->add_child(slot);
+            slot->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE); add_planet_overlay(id, slot);
         }
         if (!build && !effect) {
             // WGCI-1/2: both corruption icons answer the pointer; the information icon carries the authored plain tooltip
@@ -1195,7 +1361,7 @@ void GalacticMode::State::update_planet_status_icons(const galactic_view::Object
             slot->set_mouse_filter(Control::MOUSE_FILTER_STOP);
             slot->set_meta("information_only", kind == galactic_view::PlanetStatusIcon::corruption_info);
             String text;
-            if (kind == galactic_view::PlanetStatusIcon::corruption_info && battle_text)
+            if (kind == galactic_view::PlanetStatusIcon::corruption_info && battle_text && corruption_hovercard.suppressed_planet != id)
                 text = String::utf8(battle_text(galactic_view::corruption_information_tooltip_key).c_str());
             if (slot->get_tooltip_text() != text) slot->set_tooltip_text(text);
         }
@@ -1305,6 +1471,7 @@ bool GalacticMode::State::configure_command_bar_constants(const pugi::xml_docume
         read_list("Corruption_Mission_Requirement_Icon_Name", corruption_requirement_icons);
         read_list("Corruption_Planet_Icon_Encyclopedia_Name", corruption_icon_names);
         read_list("Corruption_Planet_Icon_Encyclopedia_Desc", corruption_icon_descriptions);
+        configure_corruption_hovercard(document);
     }
     return true;
 }
@@ -1531,6 +1698,9 @@ bool GalacticMode::State::build_command_bar_shell() {
     EawrTacticalHud::Setup setup;
     setup.view = presentation::ui::hud_view_model(command_anchors, command_catalog,
         presentation::ui::alt_variant(command_faction), presentation::ui::vfs_shell_masks(*filesystem));
+    // The galactic build bar always keeps a small gap to the screen's right edge: a wide bar moves left and then shrinks
+    // with the whole shell, never clips there (GHUD-S99).
+    setup.view.right_margin = galactic_view::command_bar_right_margin_units;
     const auto look = presentation::ui::hud_shell(command_anchors, command_catalog, command_faction);
     // Report construction-time omissions once; frame refresh never repeats these warnings.
     std::set<std::string> reported;
@@ -1778,7 +1948,7 @@ void GalacticMode::State::command_control_action(const std::string& name) {
         fleet_layout_dirty = true;
     }
     else if (name == "b_planet_tab" && selected_hud.ground_enabled) { space_tab_choice = false; selected_hud.space_tab = false; authored_controls.domain_changed(); }
-    else if (name == "b_play_pause" && clock_controls_enabled) request_pause(!paused);
+    else if (sim::galactic::is_pause_control(name) && clock_controls_enabled) toggle_pause();
     else if (name == "b_fast_forward" && galactic_view::fast_forward_available(fast_forward_controls_enabled, paused, fast_forward_factor.has_value()) && game) {
         // A press acts on what the button shows: the speed request in flight, else the current speed (owner 2026-11-17).
         const auto shown = sim::math::Fixed::from_raw(speed_guard.shown(strategic_speed_now().raw()));
@@ -2137,6 +2307,7 @@ bool GalacticMode::State::encyclopedia_admitted() const {
 }
 
 void GalacticMode::State::service_encyclopedia() {
+    if (corruption_hovercard.panel) corruption_hovercard.panel->hide();
     if (!encyclopedia_panel || !displayed_snapshot) return;
     const auto now = Time::get_singleton()->get_ticks_msec();
     const double elapsed = encyclopedia_wall_time ? static_cast<double>(now - encyclopedia_wall_time) / 1000.0 : 0.0;
@@ -2160,17 +2331,39 @@ void GalacticMode::State::service_encyclopedia() {
     if (!bonus_hover && pointer) for (const auto& [id, icon] : planet_weather_icons)
         if (pointer == icon && icon->is_visible_in_tree()) { weather_planet = id; break; }
     const bool weather_hover = weather_planet != 0;
-    // WGCI-1: the per-type corruption icon of a planet (the information icon has no popup here); its popup keeps its own identity
-    // bit so a planet change restarts the timer.
+    // WGCI-1/3: a separate identity for each planet and card kind restarts the timer on a planet change.
     constexpr std::uint64_t planet_corruption_flag = std::uint64_t{1} << 61;
+    constexpr std::uint64_t corruption_information_flag = std::uint64_t{1} << 60;
     galactic_view::ObjectId corruption_planet{};
+    galactic_view::ObjectId information_planet{};
     if (!bonus_hover && !weather_hover && pointer) for (const auto& [id, icon] : corruption_info_icons) {
         if (pointer != icon || !icon->is_visible_in_tree()) continue;
         const auto facts = hud_facts.find(id);
         if (facts != hud_facts.end() && facts->second.corrupted && facts->second.corruption_type != 0) { corruption_planet = id; break; }
+        if (facts != hud_facts.end() && !facts->second.corrupted) {
+            const auto* menu = corruption_hovercard.fixture ? corruption_hovercard.fixture->corruption_menu()
+                : displayed_snapshot->corruption_information(id);
+            if (menu && menu->planet == id && !menu->choices.empty()) information_planet = id;
+            break;
+        }
+    }
+    // WGCI-3: while the pointer is on an information icon that has a hover card, the card replaces the plain tooltip
+    // line, which would otherwise sit over the card header; the line comes back when the pointer leaves.
+    // Set only on a transition, so the hover path allocates nothing per frame.
+    if (information_planet != corruption_hovercard.suppressed_planet) {
+        const auto icon_of = [&](const galactic_view::ObjectId id) -> TextureRect* {
+            const auto found = corruption_info_icons.find(id);
+            return found != corruption_info_icons.end() && found->second->has_meta("information_only")
+                && static_cast<bool>(found->second->get_meta("information_only")) ? found->second : nullptr;
+        };
+        if (auto* previous = icon_of(corruption_hovercard.suppressed_planet); previous && battle_text)
+            previous->set_tooltip_text(String::utf8(battle_text(galactic_view::corruption_information_tooltip_key).c_str()));
+        if (auto* current = icon_of(information_planet)) current->set_tooltip_text(String());
+        corruption_hovercard.suppressed_planet = information_planet;
     }
     const bool corruption_hover = corruption_planet != 0;
-    const auto special_planet = bonus_hover ? bonus_planet : weather_hover ? weather_planet : corruption_planet;
+    const auto special_planet = bonus_hover ? bonus_planet : weather_hover ? weather_planet
+        : corruption_hover ? corruption_planet : information_planet;
     for (const auto& [name, choice] : displayed_choices) {
         if (pointer != command_buttons.at(name)) continue;
         hovered = choice.type_id; hovered_choice = &choice; break;
@@ -2223,9 +2416,16 @@ void GalacticMode::State::service_encyclopedia() {
         encyclopedia_timing.remaining = 0;
     }
     encyclopedia_timing.service(bonus_hover ? planet_bonus_identity : weather_hover ? planet_weather_identity
-        : corruption_hover ? (planet_corruption_flag | corruption_planet) : hovered, elapsed, admitted);
+        : corruption_hover ? (planet_corruption_flag | corruption_planet)
+        : information_planet ? (corruption_information_flag | information_planet) : hovered, elapsed, admitted);
     if (!admitted) { encyclopedia_panel->hide(); return; }
     if (!encyclopedia_timing.shown) { encyclopedia_panel->hide(); encyclopedia_type = 0; return; }
+    if (encyclopedia_timing.shown & corruption_information_flag) {
+        encyclopedia_panel->hide();
+        encyclopedia_ability = false; encyclopedia_type = 0;
+        show_corruption_hovercard(static_cast<sim::galactic::PlanetId>(encyclopedia_timing.shown & ~corruption_information_flag));
+        return;
+    }
     if (encyclopedia_timing.shown == planet_bonus_identity) {
         // While the popup fades out after the pointer left, it keeps the planet it was built for.
         const auto shown_planet = bonus_hover ? bonus_planet : (encyclopedia_ability ? encyclopedia_planet : selected_planet);
@@ -2633,12 +2833,22 @@ void GalacticMode::State::update_command_bar_choices(const presentation::ui::She
         }
         const auto& choice = selected_hud.choices[*choice_index];
         displayed_choices.emplace(name, choice);
-        button->set_icon_texture(command_texture(choice.icon));
+        const auto* component = command_catalog.find(name);
+        const auto icon = command_texture(choice.icon);
+        button->set_icon_texture(icon);
+        // GHUD-S74 (#7956, owner decision A: the original's rule): the icon draws at its own texture size times the
+        // component Scale, centred on the card with its aspect kept, never stretched over the pad. Most icons are smaller
+        // than the pad (50 in a 56 pad in Remake); a 20 x 40 icon stays 1:2. The queue strip draws the same way (PU-63).
+        if (icon.is_valid()) {
+            const auto box = galactic_view::command_layer_rect(button->get_size().x, button->get_size().y,
+                static_cast<float>(icon->get_width()), static_cast<float>(icon->get_height()),
+                galactic_view::command_bar_component_scale(*component, static_cast<float>(placement.scale)));
+            button->set_cell_portrait_box(Rect2(box.x, box.y, box.width, box.height));
+        }
         button->set_disabled(!choice.enabled); button->show();
         button->set_tooltip_text(String{}); // Shared timed encyclopedia owns object hover.
         // #2890: whole credits, centred in the strip from Text_Offset2 (negative is up from the pad's bottom edge) to that edge. The face
         // and outline are the card's own; the colour is the price state's (#2985).
-        const auto* component = command_catalog.find(name);
         set_command_bar_text(*price, choice.price ? String::num_int64(choice.price->trunc_to_integer()) : String{});
         const auto offset = component->vec2(data::ui::Field::text_offset2).value_or(data::ui::Vec2{});
         configure_command_bar_text(placement, *price, *component, *command_anchors.find(name));

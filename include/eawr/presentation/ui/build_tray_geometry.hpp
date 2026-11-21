@@ -57,6 +57,20 @@ struct TrayGeometry final {
 // space kept between the strip and what it clears. A strip that meets neither stays where it is. A strip the open tray
 // would cover moves above the tray's top; a strip that would cover the handle moves above the handle's top. The strip
 // never moves past the top of the view (`view_top`).
+// GBT-06 (#7952): the widest the open tray may be when its left edge is `left` (pixels): `share` of the view's width
+// `view`, never past the view's right edge, and never into the planet info card, whose left edge is `clear_from` (none
+// when the mod has no card; a card that starts left of the tray does not limit it). Never negative.
+[[nodiscard]] float widest_panel(float view, float left, float share, std::optional<float> clear_from) noexcept;
+
+// GBT-10 (#7952): the pieces a backdrop band is drawn in: `target` (left x, width) cut into pieces of at most `span` (the
+// sampled span's width), left to right; each piece shows the sampled span from its start, so the art repeats and never
+// reaches past what was sampled. A span under one pixel is not repeated: the band is one piece, the sample stretched.
+// Empty when either width is not positive.
+struct BandPiece final {
+    float x{}, width{};
+};
+[[nodiscard]] std::vector<BandPiece> band_pieces(float target_x, float target_width, float span);
+
 [[nodiscard]] float queue_strip_lift(const Box& strip, const std::optional<Box>& panel, const std::optional<Box>& handle,
     float gap, float view_top = 0.0F) noexcept;
 
@@ -67,6 +81,10 @@ struct UvMap final {
     double x0{}, y0{};          // the sampled point, shell units (y up)
     double u0{}, v0{};          // its texture coordinates
     double du_dx{}, du_dy{}, dv_dx{}, dv_dy{};
+    // The extent of the triangle the map is from (shell units, y up). The map holds only there: past it the same texture
+    // coordinates run into other art of the sheet (#7952), so a caller samples inside it. The box of the one triangle
+    // stands for the quad it is half of, which holds when its sibling triangle shares the same map (a flat-mapped quad).
+    double x_min{}, x_max{}, y_min{}, y_max{};
     [[nodiscard]] std::pair<double, double> at(double x, double y) const noexcept {
         return {u0 + du_dx * (x - x0) + du_dy * (y - y0), v0 + dv_dx * (x - x0) + dv_dy * (y - y0)};
     }

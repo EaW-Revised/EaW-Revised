@@ -1,6 +1,9 @@
 #include "galactic/planet_hud.hpp"
+#include "galactic/clock_input.hpp"
 #include "galactic/hud_retained.hpp"
+#include "galactic/planet_ui_depth.hpp"
 #include "galactic/command_control_state.hpp"
+#include "galactic/planet_label_scale.hpp"
 #include "eawr/assets/assets.hpp"
 #include "eawr/presentation/ui/encyclopedia_timing.hpp"
 
@@ -226,6 +229,20 @@ int case_galactic_planet_hud_tests() {
                      closed([](ClockGates& c) { c.lan_battle = true; }), closed([](ClockGates& c) { c.lan_gameplay = false; })}) {
                 assert(!clock_controls_open(g) && !pause_press_admitted(false, false, g)); // bar-less Space keeps the LAN gates
                 assert(!pause_press_admitted(true, false, g)); // the bar's own flag decides when a bar exists
+            }
+            // #7798: a resume is refused under a pending battle prompt; a pause and any request without a prompt are not.
+            assert(pause_request_admitted(true, true) && pause_request_admitted(true, false));
+            assert(!pause_request_admitted(false, true) && pause_request_admitted(false, false));
+            // LAN match, prompt up: the refused resume never reaches the guard, so a later pause and resume still work.
+            {
+                PauseToggleGuard guard;
+                bool paused = true;
+                assert(!pause_request_admitted(false, true)); // Space/clock button/banner: refused before begin()
+                // prompt decided: the galaxy is still paused, the guard is free
+                assert(pause_request_admitted(false, false) && guard.begin(paused, false));
+                guard.observe(false, eawr::sim::SeatId{1}, {});
+                paused = false;
+                assert(pause_request_admitted(true, false) && guard.begin(paused, true));
             }
             ClockGates solo;
             solo.world_allowed = true; solo.active_humans = 1;
@@ -761,6 +778,25 @@ int case_galactic_planet_hud_tests() {
         assert(rect.x == 80 && rect.y == 219 && rect.width == 40 && rect.height == 30);
         const auto scaled = planet_bonus_icon_rect(100, 200, 0, -34, 2.0, 40, 30);
         assert(scaled.x == 60 && scaled.y == 238 && scaled.width == 80 && scaled.height == 60);
+        // RaW's name sits 15 reference units down; half-size artwork must not
+        // pull the -31/-34 environment offsets up onto that text row.
+        eawr::data::ui::CommandBarComponent name;
+        name.fields.push_back({eawr::data::ui::Field::scale, 0.8F, 0});
+        name.fields.push_back({eawr::data::ui::Field::text_offset, eawr::data::ui::Vec2{0, -15}, 0});
+        for (const float viewport_scale : {0.75F, 1.0F, 1.5F, 2.0F}) {
+            const auto label = planet_label_placement(name, 200, 100, viewport_scale,
+                60 * viewport_scale, 10 * viewport_scale, 60 * viewport_scale, 10 * viewport_scale);
+            for (const auto offset_y : {-31.0, -34.0}) {
+                const auto icon = planet_bonus_icon_rect(200, 100, offset_y == -31 ? -20 : 0,
+                    offset_y, viewport_scale, 40, 30, 0.5);
+                assert(icon.y + icon.height / 2 == 100 - offset_y * viewport_scale);
+                assert(icon.width == 20 * viewport_scale && icon.height == 15 * viewport_scale);
+                assert(label.bounds.y + label.bounds.height < icon.y);
+                const auto wrong = planet_bonus_icon_rect(200, 100, 0, offset_y,
+                    viewport_scale * 0.5, 40, 30);
+                assert(wrong.y < label.bounds.y + label.bounds.height && wrong.y + wrong.height > label.bounds.y);
+            }
+        }
     }
     facts.local_allegiance = false;
     assert(!production_activity(facts));
@@ -1194,6 +1230,25 @@ int case_galactic_planet_hud_tests() {
         // The per-frame forced-press budget is a plain counter.
         ForcedClickBudget budget{2};
         assert(budget.take() && budget.take() && !budget.take());
+    }
+    {
+        // #7809: planet controls stack back to front by depth; a nearer body hides the controls of a planet behind it.
+        const auto plan = plan_planet_ui_depth({
+            {10, 100.0F, 300.0F, 200.0F, 60.0F},  // rear planet
+            {11, 40.0F, 330.0F, 230.0F, 70.0F},   // front planet, overlapping the rear one
+            {12, 70.0F, 900.0F, 600.0F, 50.0F},   // middle planet, far away on screen
+            {13, 20.0F, 320.0F, 210.0F, 0.0F}},   // nearest, draws no body
+            200.0F);
+        assert((plan.order == std::vector<std::uint64_t>{10, 12, 11, 13}));
+        // Only the rear planet has a nearer body over it: the far-away planet is out of reach, the body-less one hides nothing.
+        assert(plan.hidden.size() == 1);
+        assert(plan.hidden[0].id == 10 && plan.hidden[0].count == 1);
+        assert(plan.hidden[0].discs[0].radius == 70.0F);
+        const auto equal_depth = plan_planet_ui_depth({{2, 50.0F, 0.0F, 0.0F, 10.0F}, {1, 50.0F, 0.0F, 0.0F, 10.0F}}, 100.0F);
+        assert((equal_depth.order == std::vector<std::uint64_t>{1, 2}) && equal_depth.hidden.empty());
+        std::vector<PlanetUiDepthEntry> crowd;
+        for (std::uint64_t i = 0; i < 10; ++i) crowd.push_back({i, 100.0F - static_cast<float>(i), 0.0F, 0.0F, 80.0F});
+        assert(plan_planet_ui_depth(crowd, 50.0F).hidden.front().count == max_planet_ui_occluders);
     }
     return 0;
 }

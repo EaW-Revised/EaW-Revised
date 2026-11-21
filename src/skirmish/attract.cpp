@@ -149,6 +149,7 @@ std::optional<AttractCamera> attract_camera(const assets::Map& map) {
 
 void AttractManager::init(const std::uint64_t now_ms) noexcept {
     initialized_ = true;
+    held_ = false;
     idle_ms_ = now_ms;
     map_ms_ = now_ms;
 }
@@ -176,6 +177,10 @@ bool AttractManager::map_expired(const std::uint64_t now_ms) const noexcept {
 AttractManager::Service AttractManager::service(const AttractFrame& frame) noexcept {
     Service result;
     if (!initialized_) return result;
+    if (held_) {
+        result.paused = true;
+        return result;
+    }
     paused_ = delay_ms(settings_.start_timeout_seconds) < elapsed(frame.now_ms, idle_ms_);
     result.paused = paused_;
     if (!active_ || paused_) return result;
@@ -227,7 +232,25 @@ void AttractManager::pointer_moved(const std::uint64_t now_ms, const bool main_m
     if ((initialized_ && !active_ && main_menu_active) || active_) idle_ms_ = now_ms;
 }
 
+void AttractManager::hold(const std::uint64_t now_ms) noexcept {
+    if (!initialized_ || held_) return;
+    held_ = true;
+    held_since_ms_ = now_ms;
+}
+
+void AttractManager::release(const std::uint64_t now_ms) noexcept {
+    if (!held_) return;
+    held_ = false;
+    if (now_ms <= held_since_ms_) return;
+    const std::uint64_t span = now_ms - held_since_ms_;
+    // An input during the hold (the click that leaves the covering screen) already set the idle clock
+    // to a time inside the hold: that one is kept, never moved past `now_ms`.
+    idle_ms_ = idle_ms_ <= held_since_ms_ ? idle_ms_ + span : std::min(idle_ms_, now_ms);
+    map_ms_ = std::min(map_ms_ + span, now_ms);
+}
+
 void AttractManager::shutdown() noexcept {
+    held_ = false;
     if (!initialized_) return;
     initialized_ = false;
     active_ = false;

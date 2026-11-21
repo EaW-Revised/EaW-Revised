@@ -361,6 +361,12 @@ class MapModeGraphicalCases:
                 ])
                 self.assertEqual(populate["unsupported_surfaces_on_drawn_placements"],
                                  {"MeshShadowVolume.fx": 1})
+                # The same surfaces, grouped by shader and route: a stencil shadow volume is a skip on purpose, not a gap.
+                self.assertEqual(populate["dropped_layers"], {
+                    "surfaces": 1, "unhandled_surfaces": 0,
+                    "by_shader": [{"shader": "MeshShadowVolume.fx", "route": "intentional_skip", "surfaces": 1,
+                                   "placements": 1, "object_type": "EAWR_SCENE_BEACON",
+                                   "model_path": "data/art/models/eawr_scene_beacon.alo"}]})
                 self._check_unit_evidence(populate)
                 # Every drawn synthetic unit is large and unoccluded, so every
                 # one must add coverage inside its own projected bounds.

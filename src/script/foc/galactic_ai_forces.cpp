@@ -433,9 +433,12 @@ std::optional<Real> GalacticWorld::force_token(const GalacticQueryKey& key, Read
         }
     }
     if (!nearby) return normalized(*numerator, denominator);
-    if (!setup_.maximum_fleet_distance || *setup_.maximum_fleet_distance <= Real{}) return {};
+    if (!setup_.maximum_fleet_distance) return {};
     Real total{};
     const auto attenuation = number(key.bindings, "PARAMETER_ATTENUATOR").value_or(real(1));
+    // WGA-192a: no guard for the authored range. A zero range (a mod that moves fleets along trade routes only, WGM-16)
+    // divides by zero in binary64: the weight is NaN or infinite and that value is returned as a success; only a zero
+    // denominator with a nonzero (or NaN) total is unavailable.
     nested = copy_key(key); nested.tokens.back() = raw_token;
     for (const auto& other : at->nearby) {
         nested.planet = other.planet; const auto value = read(nested, mode); if (!value) return {};

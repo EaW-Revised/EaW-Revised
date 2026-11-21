@@ -17,12 +17,15 @@ most of the roster and looks out of place.
 
 ## Goals
 
-- When everything fits, the bar looks and behaves exactly like the original game.
+- The bar's cards look and behave exactly like the original game, also when everything fits: the tray only adds a
+  handle above them. The one visible change on a planet where everything fits: a production queue strip that would
+  sit under the always-shown handle moves up to clear it (GBT-14).
 - When it doesn't, every choice is reachable in one click, without scrolling or paging.
 - Works with existing mods unchanged. It only uses game data every mod already has; a mod
   needs no new tag in its object XML.
-- Never moves, resizes, hides or restyles an existing UI element. Mods put a lot of work into
-  their HUDs; the tray only draws on top, and only while open.
+- Never resizes, hides or restyles an existing UI element, and moves none but the production queue strips (GBT-14),
+  and only to clear the handle or the open tray. Mods put a lot of work into their HUDs; the handle and the tray
+  draw on top of them.
 - Mod UI agnostic: the tray is built from UI parts the mod already has (GBT-10), so it takes on
   the mod's look without the mod doing anything.
 - All layout lives in Revised layer XML (GBT-11), like the planet search and the project HUD
@@ -58,8 +61,11 @@ The tray never repurposes a bar slot.
 
 ## GBT-02 Handle
 
-- The handle is shown only when the bar omits at least one choice. It reads `+N`, where N is the
-  number of omitted choices.
+- The handle is always shown for a planet the local player owns whose selected tab has build choices
+  (owner decision of 2026-11-19: the tray is always available, and the handle is the way in for a
+  player who does not use the hotkey). It does not depend on whether the bar omits anything.
+- It reads `+N`, where N is the number of choices the bar omits. When the bar omits none it keeps its
+  art and its caption but shows no count: the caption alone (`+`).
 - It is a project control, not one of the mod's slots: the `Handle` control in
   `RevisedBuildTray.xml` (GBT-11). It is placed with ordered `Candidate` positions, using the
   same anchor, side and offset rules as the project HUD layer's Gift control
@@ -184,11 +190,13 @@ The tray never repurposes a bar slot.
 - Sizes, gaps and the row budget come from the layout file (GBT-11). Entries per line =
   the floor of (panel width minus twice the padding (one per side) plus one gap) over (entry width plus one gap). Panel width
   is set by `Width_Mode` (GBT-11): the bar's width, a fixed width, or (the shipped default, owner request of 2026-11-19)
-  **Auto**: the narrowest width, from the bar's width up in steps of one entry plus one gap, at which the groups fit
-  the row budget and the free height without misc, never wider than `Max_Width_Share` of the view nor past its right
-  edge. The rows fill first: the panel keeps the bar's width while the budget holds every group, and widens only when
-  it does not (owner decision of 2026-11-19), so a longer choice list or a shorter view gives a wider panel. Misc
-  appears only when even the widest allowed panel cannot hold every group.
+  **Auto**: the whole span from the tray's left edge to the left edge of the planet info card (GPI-04: the card's
+  frame as the mod's `planet_info` anchor and `zoomed_back` offsets place it, whether or not the card is shown), never
+  wider than `Max_Width_Share` of the view nor past its right edge (owner decisions of 2026-11-19) (legacy EAWR-7952). The
+  width never follows the bar's own width, which depends on how many slots the bar shows; the rows and groups fold
+  inside the span within the row budget, and misc appears only when the span cannot hold every group. In every width
+  mode the panel ends at or before the card's left edge, so the tray never covers the planet information nor the
+  bar's right-end widgets.
 - An entry is the bar's card at the bar's size, scaled whole by `Entry_Scale`: the icon, the price text, the badges
   and the hit area shrink together (owner request of 2026-11-19: entries at 75 percent; the price text stays in
   proportion to the icon).
@@ -221,16 +229,18 @@ The tray never repurposes a bar slot.
   it the same way. It stays open while selecting other planets, while buying, and when
   entering or leaving the planet view. The only automatic close is a unit drag in the planet
   view (GBT-08).
-- With the tray open, a planet whose choices all fit in the bar shows no tray and no handle; the
-  open state is kept and the tray returns on the next planet that overflows.
+- A planet whose choices all fit in the bar has the handle and the tray like any other: opened, the
+  tray lists the same choices grouped (owner decision of 2026-11-19).
 - The tray only appears for a planet the local player owns. No planet selected, or an enemy or
   neutral planet: no handle and no tray, since there are no production choices (WGUI-91). The
-  open state is kept and the tray returns on the next owned planet that overflows.
+  open state is kept and the tray returns on the next owned planet. A tab with no choices has no
+  handle and no tray either.
 - The open state lasts for the session and is not saved in settings.
 - **Tab** opens and closes the tray, exactly like clicking the handle (owner decision). It is a
   local key binding, default Tab, rebindable in Options > Controls like the selection hotkeys
   (SH-01). It does nothing while a text field holds keyboard focus (planet search, chat), while
-  no handle is shown, or while the HUD is hidden.
+  no handle is shown (no owned planet selected, or a tab with no choices), or while the HUD is hidden.
+  Whether the bar omits choices does not matter: Tab opens the tray on any planet that has the handle.
 - As built (slice 6): the binding is **one key without modifiers**, saved as
   `key.GALACTIC_BUILD_TRAY` (no entry while it is Tab). Options > Controls binds it by press;
   Esc cancels the capture. The galaxy view's own keys (Escape, Space, F3, Home, Page Up, Page Down,
@@ -302,7 +312,10 @@ UI parts every mod already has, so a mod's restyle carries over automatically:
   colour**, read from the same shell data the bar is drawn from. The back shows the bar's shell art behind its
   slots, and the frame shows the band of the bar just above its slots. Both are drawn from the bar's shell meshes with
   the texture coordinates each mesh gives that area, so a mod that recolours its bar (red in RaW, blue in Remake)
-  recolours the tray with it and no colour is named anywhere. `Back_Source` (GBT-11) keeps this moddable: `Component`
+  recolours the tray with it and no colour is named anywhere. The sample is only the box of the shell triangle under
+  the bar's centre (a span under one pixel is stretched instead), repeated across the panel and stretched vertically: past that triangle the same coordinates reach other art of the bar's
+  texture sheet (the minimap frame and the right-end buttons showed inside the open tray in kit5) (legacy EAWR-7952).
+  `Back_Source` (GBT-11) keeps this moddable: `Component`
   draws a named command bar component's blank and alternate art instead (the art slice 5b used, the tooltip
   family, is `tooltip_back`), and with `Bar` a named `Back_Component` is used only when the bar has no shell art
   behind its slots. The GUIDialogs named overrides above are not wired; the header font is the `Header_Template`
@@ -356,7 +369,7 @@ stock bar, which replace these starting values; the file below names every eleme
 | `Divider_Texture` | Divider texture, resolved in the mounted command atlas (GBT-10). | texture name | none drawn |
 | `Max_Rows` | Row budget including the buildings row (GBT-06); with `Auto` the rows fill to it before the panel widens. | integer 2 to 10 | 7 |
 | `Fold_Single_Choice_Groups` | Whether a one-choice group goes to misc once misc exists (GBT-06). | Yes or No | Yes |
-| `Width_Mode` | `Bar`: the panel is as wide as the bar. `Fixed`: the panel uses `Width`. `Auto`: it grows from the bar's width with the screen and the choice list (GBT-06). | Bar, Fixed or Auto | Auto |
+| `Width_Mode` | `Bar`: the panel is as wide as the bar. `Fixed`: the panel uses `Width`. `Auto`: the whole span to the planet info card, at most `Max_Width_Share` of the view (GBT-06). | Bar, Fixed or Auto | Auto |
 | `Width` | The fixed panel width. | greater than 0 | none; `Fixed` needs it |
 | `Max_Width_Share` | `Auto` only: the widest panel as a share of the view's width. | 0.1 to 1 | 0.6 |
 | `Back_Source` | `Bar`: the panel's back and frame are the bar's own shell art behind and just above its slots. `Component`: `Back_Component`'s art (GBT-10). | Bar or Component | Bar |
@@ -410,8 +423,8 @@ the selection hotkeys (GBT-07).
 ```
 
 The numbers and names above show the shape; the shipped file carries the tuned values. The
-handle's `Caption` is the text shown before the omitted count N, so the default key's text is
-`+`. The planet view's cap component names and the galaxy view's top limit are read from the
+handle's `Caption` is the text shown before the omitted count N (and alone when N is 0, without
+its trailing spaces), so the default key's text is `+`. The planet view's cap component names and the galaxy view's top limit are read from the
 stock command bar when the layer file is authored, and a mod whose components differ names its
 own in a higher layer.
 

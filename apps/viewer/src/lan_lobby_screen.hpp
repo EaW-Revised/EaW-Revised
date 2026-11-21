@@ -105,6 +105,13 @@ public:
         bool visible{};
         float name_width{};          // drawn width of the name/Open combo
         float name_authored_width{}; // width the dialog authors for it
+        // #8020: a slot held by 2+ humans lists them one per cell, one below the other.
+        std::vector<std::string> lines; // one per human (name and mods state); empty for a slot with fewer than two
+        std::vector<std::string> cell_texts; // what each cell shows (the name and the longest mods note that fits the box)
+        std::vector<int> line_fits;     // 1 when that cell shows the whole name
+        std::vector<std::string> items; // the name combo's list of a stacked slot: the humans, then one Kick entry per non-host human
+        std::size_t cells{1};           // name cells drawn on this row
+        float top{};                    // y of the row's first name cell in the dialog frame
     };
     struct Snapshot final {
         std::string page;
@@ -266,8 +273,14 @@ private:
     void select_checkpoint_seat(int64_t index, int64_t peer);
     void apply_checkpoint_selection();
     void cancel_checkpoint_restore();
+    // The host's choice when the restore was refused only for finished-battle records of another build: convert the save
+    // without them (off the UI thread), then apply the saved seats with the converted file.
+    void load_without_old_battle_history();
+    void finish_old_battle_history_recovery();
     bool restore_fixture(int seconds);
+    bool recover_fixture(unsigned battles);
     bool press_cancel_restore();
+    bool press_load_without_old_battle_history();
     void new_campaign();
     void refresh_galactic_preview(Impl& impl, PageState& state, Resources& resources,
                                   const sim::galactic::MpLobbyCampaign* campaign);

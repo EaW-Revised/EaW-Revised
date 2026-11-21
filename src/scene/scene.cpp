@@ -162,6 +162,11 @@ const LegacySelector* find_legacy_selector(const std::string_view program) noexc
     if (ieq(program, "MeshGloss.fxo")) canonical = "MeshGloss.fx";
     else if (ieq(program, "MeshAdditive.fxo")) canonical = "MeshAdditive.fx";
     else if (ieq(program, "MeshAdditive2x.fxo")) canonical = "MeshAdditive2x.fx";
+    else if (ieq(program, "MeshAlpha.fxo")) canonical = "MeshAlpha.fx";
+    // A model names the shield program by its source name. The placed-surface route draws it with the same
+    // additive t0 pass as the compiled name: a static prop (a sea plane of stacked shield layers) is a visible
+    // surface, not an ability shell, which keeps its own viewer route and its hidden-mesh gate.
+    else if (ieq(program, "MeshShield.fx")) canonical = "MeshShield.fxo";
     for (const LegacySelector& selector : selector_table) {
         if (ieq(selector.program, canonical)) return &selector;
     }

@@ -443,6 +443,10 @@ core::Result<void> GameSession::process_session_commands(StepContext& tick_conte
                 controls_applied = true;
                 if (!controlled) return controlled;
             }
+        } else if (impl.conflict_pause && !impl.child && std::holds_alternative<galactic::ResumeGalaxy>(command.payload)
+            && impl.world().clock().pause_depth <= 1) {
+            // #7798: the pending battle owns the last pause level until the player decides; a resume would unfreeze the galaxy.
+            out.diagnostics.push_back(fail<void>("a pending battle keeps the galaxy paused until it is decided").error());
         } else if (const auto* order = std::get_if<galactic::TacticalLayerCommand>(&command.payload)) {
             if (tick_context.agreed_child_pacing && child_paused()
                 && (!impl.child || !impl.child->conflict.tactical.controllers)) {

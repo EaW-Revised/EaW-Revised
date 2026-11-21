@@ -68,6 +68,9 @@ struct CommandBonusProfile {
     std::vector<PlayerId> enabled_players; // WGT-49: explicit locks override authored default
     bool apply_to_self{}; // WHE-53: the debug build's creation flag defaults off
     bool retreat_prevention{}; // WRP-02: bearer player's retreat gate
+    // Last, so positional initializers of the earlier fields stay valid.
+    math::Fixed stealth_delta{}, capture_delta{}; // WBR-02: (multiplier - 1) player ledger entries
+    bool special_weapons{}; // WBR-03: an Enable_Special_Weapons source
     friend bool operator==(const CommandBonusProfile&, const CommandBonusProfile&) = default;
 };
 struct IncomeModifier {

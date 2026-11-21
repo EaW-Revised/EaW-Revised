@@ -4,6 +4,7 @@
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/json_text.hpp"
 #include "eawr/core/result.hpp"
+#include "eawr/core/text.hpp"
 
 #include <iostream>
 #include <sstream>
@@ -43,6 +44,23 @@ int main() {
     using eawr::core::Diagnostic;
     using eawr::core::Result;
     using eawr::core::Severity;
+
+    using eawr::core::parse_decimal_double;
+    expect(parse_decimal_double("12") == 12.0, "decimal parse reads an integer");
+    expect(parse_decimal_double("-0.5") == -0.5, "decimal parse reads a negative fraction");
+    expect(parse_decimal_double("1.5e2") == 150.0, "decimal parse reads an exponent");
+    expect(parse_decimal_double(".25") == 0.25, "decimal parse reads a leading-dot fraction");
+    expect(!parse_decimal_double(""), "decimal parse rejects empty");
+    expect(!parse_decimal_double("+1"), "decimal parse rejects a leading plus");
+    expect(!parse_decimal_double(" 1"), "decimal parse rejects leading whitespace");
+    expect(!parse_decimal_double("1 "), "decimal parse rejects trailing whitespace");
+    expect(!parse_decimal_double("1x"), "decimal parse rejects trailing text");
+    expect(!parse_decimal_double("1e"), "decimal parse rejects a dangling exponent");
+    expect(!parse_decimal_double("."), "decimal parse rejects a lone dot");
+    expect(!parse_decimal_double("inf"), "decimal parse rejects inf");
+    expect(!parse_decimal_double("nan"), "decimal parse rejects nan");
+    expect(!parse_decimal_double("0x10"), "decimal parse rejects hex");
+    expect(!parse_decimal_double("1e999"), "decimal parse rejects out-of-range");
 
     using eawr::core::json_quote;
     expect(json_quote("") == "\"\"", "JSON quotes an empty string");

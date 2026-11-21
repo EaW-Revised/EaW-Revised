@@ -106,6 +106,9 @@ set_tests_properties(galactic_remake_save_probe PROPERTIES LABELS "game-data" TI
 # #6345: the orbit census of the installed Remake Web Way Imperial campaign at Coruscant (dummy orbital units).
 eawr_add_game_data_test(NAME galactic_orbit_census_remake COMMAND galactic_ai_campaign_tests --orbit-census 900 GC_Standard_Web_Way_Imperial Coruscant_WW)
 set_tests_properties(galactic_orbit_census_remake PROPERTIES LABELS "game-data;mod-data" TIMEOUT 3600 RUN_SERIAL TRUE SKIP_RETURN_CODE 77 ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
+# #7886: the Remake's orbital stand-in units in orbit are fleet members of the planet's owner, never ships in its space entry.
+eawr_add_game_data_test(NAME galactic_space_entry_stand_ins_remake COMMAND galactic_ai_campaign_tests --space-entry-stand-ins 900 GC_Standard_Web_Way_Imperial Coruscant_WW)
+set_tests_properties(galactic_space_entry_stand_ins_remake PROPERTIES LABELS "game-data;mod-data" TIMEOUT 3600 RUN_SERIAL TRUE SKIP_RETURN_CODE 77 ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
 # #6473: the Remake's live object scripts leave the same world on 1, 2, 4 and 8 workers (batch only: four runs of the layered campaign).
 eawr_add_game_data_test(NAME galactic_orbit_workers_remake COMMAND galactic_ai_campaign_tests --orbit-workers 600 GC_Standard_Web_Way_Imperial Coruscant_WW)
 set_tests_properties(galactic_orbit_workers_remake PROPERTIES LABELS "game-data;mod-data;batch-only" TIMEOUT 7200 RUN_SERIAL TRUE SKIP_RETURN_CODE 77 ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")

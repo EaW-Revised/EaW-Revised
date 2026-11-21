@@ -1016,14 +1016,19 @@ core::Result<GalacticSession> GalacticSession::create(const GalacticSetup& setup
         }
         std::uint8_t enabled{}, cancelled{}, kind{};
         if (!in.read_u8(enabled) || enabled > 1 || !in.read_u8(cancelled) || cancelled > 1
-            || !in.read_u8(kind) || kind < 1 || kind > 9 || in.remaining())
+            || !in.read_u8(kind) || kind < 1 || kind > 10 || in.remaining())
             return fail<void>(diagnostic_codes::invalid_setup, "invalid ability service journal");
         return world.set_ability_lifecycle(actor, enabled != 0, cancelled != 0, static_cast<AbilityKind>(kind));
     });
     impl->native_replayers.emplace(NativeEffectKind::corruption_lifecycle, [](GalacticSession& world, const NativeEffect& effect, const PartitionExecutor&) {
         sim::detail::Reader in(effect.payload); std::uint8_t operation{}, type{}; std::uint64_t id{};
-        if (!in.read_u8(operation) || operation > 1 || !in.read_u64(id) || !id || !in.read_u8(type))
+        if (!in.read_u8(operation) || operation > 3 || !in.read_u64(id) || !id || !in.read_u8(type))
             return fail<void>(diagnostic_codes::invalid_setup, "invalid corruption lifecycle journal");
+        if (operation >= 2) {
+            if (type > 1 || in.remaining()) return fail<void>(diagnostic_codes::invalid_setup, "invalid corruption policy journal");
+            auto applied = world.set_corruption_flag(id, operation == 2 ? CorruptionPlanetFlag::restricted : CorruptionPlanetFlag::hologram, type != 0);
+            return applied ? core::Result<void>::success() : core::Result<void>::failure(applied.error());
+        }
         if (operation == 1) {
             if (type < 1 || type > 3 || in.remaining()) return fail<void>(diagnostic_codes::invalid_setup, "invalid corruption mission result journal");
             return world.finish_corruption_mission(id, static_cast<CorruptionMissionState>(type));

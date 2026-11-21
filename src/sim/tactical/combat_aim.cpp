@@ -360,7 +360,7 @@ core::Result<bool> UnitCombat::admit_manual(const CombatUnit& target, const std:
         [&](const WeaponProfile& weapon) { return weapon.hardpoint == hardpoint; });
     if (slot == profile_.weapons.end()) return core::Result<bool>::success(false);
     const auto index = static_cast<std::size_t>(slot - profile_.weapons.begin());
-    if (!slot->fires_in_mode(unit_.rocket_attack)) return core::Result<bool>::success(false);
+    if (!slot->fires_in_mode(unit_.rocket_attack) || !unit_.mode_allows(*slot)) return core::Result<bool>::success(false);
     if (!slot->requires_manual_target || slot->hardpoint == object_weapon || slot->pulse_count != 1 || !weapon_up(*slot)
         || !slot->shot || index >= state_.weapons.size() || !state_.weapons[index].manual
         || state_.weapons[index].manual->target != invalid_entity_id

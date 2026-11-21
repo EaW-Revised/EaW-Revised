@@ -566,8 +566,19 @@ std::string GalacticMode::State::perf_report_json() const {
     return std::string("{\"key\": \"") + EawrPerfOverlay::key_name + "\", \"shown\": false}";
 }
 
+void GalacticMode::State::toggle_pause() { request_pause(!pause_guard.shown(paused)); }
+
 void GalacticMode::State::request_pause(const bool value) {
-    if (!game || !pause_guard.begin(paused, value)) return;
+    // #7798: a pending battle prompt keeps the galaxy frozen until the player decides; no key, button or banner resumes it.
+    // A LAN match takes the same gate: a refused resume must not reserve the pause guard, which only a published state or a rejection event clears.
+    if (!galactic_view::pause_request_admitted(value, battle_dialog && battle_dialog->visible())) return;
+    if (!game) return;
+    // The latch is released by the agreed state, a refusal of this seat or one answer window of session ticks (#7973).
+    const auto press_tick = game->frame(sim::SeatId{galaxy->local.seat}).session_tick;
+    const bool sent = pause_guard.begin(paused, value, press_tick);
+    if (options.lan_match) UtilityFunctions::print("EAWR net event=pause-press tick=", static_cast<std::int64_t>(press_tick),
+        " agreed=", paused ? "paused" : "running", " target=", value ? "pause" : "resume", " outcome=", sent ? "sent" : "in-flight");
+    if (!sent) return;
     // WGM-05/06: input enters the session as a seat-issued nested pause/resume command.
     // TM-05: pausing from fast forward ends it first, so play resumes at the normal speed.
     // The displayed snapshot can lag a press in the same frame, so submit 1x whenever the factor exists (a no-op at 1x).
@@ -658,7 +669,7 @@ bool GalacticMode::State::refresh_game() {
     snapshot_events.assign(shown->events().begin(), shown->events().end());
     // Pause commands nest. Admit one toggle until its accepted state is
     // published or the local seat receives a rejection; display stays factual.
-    pause_guard.observe(paused, sim::SeatId{galaxy->local.seat}, snapshot_events);
+    pause_guard.observe(paused, sim::SeatId{galaxy->local.seat}, snapshot_events, frame.session_tick);
     if (content && options.campaign != galactic_view::synthetic_campaign) {
         for (auto& planet : galaxy->planets) {
             galactic_view::update_affiliation(affiliations[planet.id], galactic_view::affiliation_for_owner(*content, planet.owner));
@@ -1379,6 +1390,7 @@ galactic_view::GalaxyModals GalacticMode::State::galaxy_modals() const {
     modals.save_menu = save_controls && save_controls->visible();
     modals.campaign_score = campaign_score && campaign_score->visible();
     modals.battle_prompt = battle_dialog && battle_dialog->visible();
+    modals.battle_choice = modals.battle_prompt && battle_dialog->view().phase == galactic_view::BattleDialogPhase::choice;
     modals.story_summary = story_summary && story_summary->visible();
     modals.reference_pages = reference_pages && reference_pages->visible();
     modals.hero_menu = shown(hero_menu.blocker);
@@ -1396,7 +1408,7 @@ static bool pointer_confine_allowed(const GalacticMode::State& state, const bool
         && state.tactical->pointer_confine_allowed(allow_movie);
     if (state.loading) return false;
     if (!state.galaxy || !state.map_input.gates.world_allowed() || state.map_input.gates.tutorial_locked
-        || state.galaxy_modal_open()) return false;
+        || state.camera_modal_open()) return false;
     return true;
 }
 
@@ -1933,7 +1945,7 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
     if (const auto* key = Object::cast_to<InputEventKey>(event.ptr());
         key && key->is_pressed() && !key->is_echo() && key->is_ctrl_pressed()
         && !key->is_shift_pressed() && !key->is_alt_pressed() && !key->is_meta_pressed()
-        && key->get_keycode() == KEY_F && !state.tour && !state.galaxy_modal_open()) {
+        && key->get_keycode() == KEY_F && !state.tour && !state.camera_modal_open()) {
         cancel_input();
         if (!state.planet_search) state.planet_search = std::make_unique<PlanetSearchWidget>();
         // PS-08: the live row pictures exist from the first open only; a never-opened search costs nothing.
@@ -1992,7 +2004,7 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
             else if (code == KEY_PAGEDOWN && !key->is_echo()) navigate(galactic_view::Navigation::next);
             else if (code == KEY_SPACE && space_key().pauses && !key->is_echo()
                 && galactic_view::pause_press_admitted(bool(state.command_bar), state.clock_controls_enabled, state.clock_gates()))
-                state.request_pause(!state.paused);
+                state.toggle_pause();
             else if ((code != KEY_W && code != KEY_A && code != KEY_S && code != KEY_D)
                 || (!key->is_ctrl_pressed() && !key->is_shift_pressed()
                     && !key->is_alt_pressed() && !key->is_meta_pressed())) state.held.insert(code);

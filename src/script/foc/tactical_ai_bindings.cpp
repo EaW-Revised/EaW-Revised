@@ -248,6 +248,52 @@ void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector
     // legacy #6634 (HCB-75): the cinematic bands of the battle HUD; presentation only, see verb_letter_box.
     add("Letter_Box_In", authoritative::letter_box_binding("Letter_Box_In", "in", std::string(verb_letter_box)));
     add("Letter_Box_Out", authoritative::letter_box_binding("Letter_Box_Out", "out", std::string(verb_letter_box)));
+    // #7977 family 5 (story flags and events), battle hosts. A battle hosts no story plot, no flag store, no advisor text and
+    // no objective list (the galactic session owns them), so each call validates its arguments like the galactic bindings
+    // (galactic_story_scripts.cpp) where the original agrees; the effect a battle has no state for reports unsupported_api.
+    // TL-S1/S2: the original sends the event to the active mode's own story mode, which hands it to that battle plot's active
+    // sub-plots. This host has no battle plot, so the event reaches no sub-plot; the call is validated and noted, never quiet.
+    add("Story_Event", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.empty() || arguments.size() > 2 || as_text(arguments[0]) == nullptr)
+            return fail("Story_Event expects a name and an optional object");
+        if (arguments.size() == 2 && !std::holds_alternative<std::monostate>(arguments[1].data) && as_handle(arguments[1], handle_game_object) == nullptr)
+            return fail("Story_Event: the second argument must be a game object");
+        context.report(authoritative::codes::unsupported_api, "Story_Event(" + *as_text(arguments[0]) + ") reaches no sub-plot: this battle hosts no story plot");
+        return none();
+    });
+    // TL-S3: the original takes exactly (player, flag, object or nil, reset Boolean) and reads the battle's own AI flag store,
+    // never the galactic story state. No battle plot sets a flag here, so the answer is false, reported with a note.
+    add("Check_Story_Flag", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() != 4) return fail("Check_AI_Story_Flag -- invalid number of parameters.  Expected between 4, got " + std::to_string(arguments.size()) + ".");
+        if (as_handle(arguments[0], handle_player) == nullptr) return fail("Check_AI_Story_Flag -- invalid type for parameter 1.  Expected player");
+        if (as_text(arguments[1]) == nullptr) return fail("Check_AI_Story_Flag -- invalid type for parameter 2.  Expected string");
+        if (!std::holds_alternative<std::monostate>(arguments[2].data) && as_handle(arguments[2], handle_game_object) == nullptr)
+            return fail("Check_AI_Story_Flag -- target is not a game object; unable to check story flag.");
+        if (!std::holds_alternative<bool>(arguments[3].data)) return fail("Check_AI_Story_Flag -- invalid type for parameter 4; expected boolean.");
+        context.report(authoritative::codes::unsupported_api, "Check_Story_Flag(" + *as_text(arguments[1]) + ") answers false: this battle hosts no story plot to set it");
+        return one(boolean(false));
+    });
+    add("Game_Message", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() != 1 || as_text(arguments[0]) == nullptr) return fail("Game_Message requires exactly one text key");
+        context.report(authoritative::codes::unsupported_api, "Game_Message presentation is unavailable; script continues");
+        return none();
+    });
+    add("Add_Objective", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.empty() || as_text(arguments[0]) == nullptr) return fail("Add_Objective expects a text key");
+        context.report(authoritative::codes::unsupported_api, "Add_Objective is unavailable: a battle hosts no objective list");
+        return none();
+    });
+    for (const std::string_view name : {"Add_Planet_Highlight", "Remove_Planet_Highlight"})
+        add(name, [name = std::string(name)](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+            if (arguments.size() != 1 || as_handle(arguments[0], handle_game_object) == nullptr) return fail(name + " expects a planet");
+            context.report(authoritative::codes::unsupported_api, name + " is unavailable: a battle has no galactic map");
+            return none();
+        });
+    add("Remove_All_Text", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (!arguments.empty()) return fail("Remove_All_Text takes no arguments");
+        context.report(authoritative::codes::unsupported_api, "Remove_All_Text: no script text is hosted; script continues");
+        return none();
+    });
     add("Get_Game_Mode", [host](BindingContext&, const ValueList&) {
         const auto domain = host->world != nullptr ? host->world->domain() : tactical::BattleDomain::space;
         return one(Value::text(domain == tactical::BattleDomain::land ? "Land" : "Space"));
@@ -508,6 +554,17 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
             return one(boolean((bits & requested) != 0));
         };
     };
+    // #7977 family 5: Highlight(on[, ...]) / Highlight_Small(on[, ...]) mark an object for the story's tutorial pointer; no
+    // pointer is hosted, so a valid call reports and continues. The first argument is the Boolean switch (stock scripts also
+    // pass a trailing colour or size number or string, accepted untouched).
+    for (const std::string_view name : {"Highlight", "Highlight_Small"})
+        object(name, [host, name = std::string(name)](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+            if (live_object(*host, arguments[0]) == nullptr) return none();
+            if (arguments.size() < 2 || arguments.size() > 4 || !std::holds_alternative<bool>(arguments[1].data))
+                return fail(name + " expects a Boolean and optional options");
+            context.report(authoritative::codes::unsupported_api, name + " is unavailable: no tutorial pointer is hosted");
+            return none();
+        });
     object("Is_Category", has_bits(true));
     object("Has_Property", has_bits(false));
     object("Get_Attack_Target", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
@@ -540,6 +597,130 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         const ViewUnit* unit = live_object(*host, arguments[0]);
         context.issue_command(std::string(verb_make_invulnerable),
             {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], arguments[1]});
+        return none();
+    });
+    // HD-30 (debug build): Take_Damage(amount[, hardpoint name]) takes 1 or 2 arguments (a number, then a string).
+    // The name must be a hardpoint some type defines (a script error otherwise); the retail call then passes the
+    // hardpoint's collision mesh, and the object damages the hardpoint that owns that mesh when it has one and it
+    // can be destroyed, else its hull. The damage is the debug-cheat kind: scripted damage that the sim applies
+    // through the replay command queue (DamagePayload, shields first under the damage rules). A team applies it to
+    // each member, each resolving the hardpoint from its own type. A dead object warns in retail and answers nothing
+    // here. An amount outside the fixed-point range is a script error; a negative amount is not queued (the sim's
+    // scripted damage takes amounts >= 0; retail's float path for a negative amount is unverified).
+    object("Take_Damage", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const std::size_t count = arguments.size() - 1;
+        if (count != 1 && count != 2)
+            return fail("Take_Damage: invalid number of parameters.  Expected 1 or 2, got " + std::to_string(count) + ".");
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        if (!std::holds_alternative<LuaNumber>(arguments[1].data))
+            return fail("Take_Damage: invalid type for parameter 1.  Expected number.");
+        std::string mesh;
+        if (count == 2) {
+            const std::string* name = as_text(arguments[2]);
+            if (name == nullptr) return fail("Take_Damage: invalid type for parameter 2.  Expected string.");
+            const auto upper = [](std::string text) { for (char& c : text) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - ('a' - 'A')); return text; };
+            const std::string wanted = upper(*name);
+            bool known = false;
+            for (const auto& entry : host->types) {
+                const AiType& candidate = *entry.second;
+                for (std::size_t i = 0; i < candidate.hardpoint_ids.size() && !known; ++i)
+                    if (candidate.hardpoint_ids[i] == wanted) { known = true; mesh = candidate.hardpoint_meshes[i]; }
+                if (known) break;
+            }
+            if (!known) return fail("Take_Damage: unknown hard point " + *name + ".");
+        }
+        const auto fixed = numeric::to_fixed(std::get<LuaNumber>(arguments[1].data));
+        if (!fixed) return fail("Take_Damage: invalid value for parameter 1.  The amount is out of range.");
+        if (fixed.value().raw() < 0) return none();
+        // The retail team loop damages each member by the mesh name, so every member resolves the hardpoint from its own
+        // type: the first hardpoint with that collision mesh, and only when it can be destroyed (else the hull).
+        const auto send = [&](const ViewUnit& target) {
+            ValueList command{number(LuaNumber(static_cast<std::int64_t>(target.owner))),
+                handle(handle_game_object, target.id), arguments[1]};
+            if (const AiType* type = host->type(target.type); type != nullptr && !mesh.empty()) {
+                for (std::size_t i = 0; i < type->hardpoint_meshes.size(); ++i) {
+                    if (type->hardpoint_meshes[i] != mesh) continue;
+                    if (i < type->hardpoint_destroyable.size() && type->hardpoint_destroyable[i])
+                        command.push_back(number(LuaNumber(static_cast<std::int64_t>(i))));
+                    break;
+                }
+            }
+            context.issue_command(std::string(verb_take_damage), std::move(command));
+        };
+        if (unit->container) {
+            for (const sim::EntityId member : unit->members)
+                if (const ViewUnit* craft = host->view->find(member)) send(*craft);
+        } else {
+            send(*unit);
+        }
+        return none();
+    });
+    // Prevent_All_Fire(enabled) (debug build): exactly one boolean (a script error otherwise). True disables every
+    // weapon hardpoint, the targeting and fire behaviours of the object, and each member of a team; false enables them
+    // again. The flag is simulation state: a valid call queues a replay command for the next tick and answers nothing;
+    // a dead object answers nothing like its siblings.
+    object("Prevent_All_Fire", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        const std::size_t count = arguments.size() - 1;
+        if (count != 1)
+            return fail("Prevent_All_Fire: invalid number of parameters.  Expected 1, got " + std::to_string(count) + ".");
+        if (!std::holds_alternative<bool>(arguments[1].data))
+            return fail("Prevent_All_Fire: invalid type for parameter 1.  Expected boolean.");
+        context.issue_command(std::string(verb_prevent_all_fire),
+            {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], arguments[1]});
+        return none();
+    });
+    // Teleport_And_Face(object) (debug build): exactly one game object (a script error for a position, another type or
+    // a dead object). The caller leaves its garrison, moves to the object's position and takes its facing. The sim
+    // applies it through the replay command queue and stops the unit where it lands; a squadron or one of its craft
+    // is not moved (they fly by their squadron). A dead caller answers nothing.
+    object("Teleport_And_Face", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        const std::size_t count = arguments.size() - 1;
+        if (count != 1)
+            return fail("Teleport_And_Face: invalid number of parameters.  Expected 1, got " + std::to_string(count) + ".");
+        if (as_handle(arguments[1], handle_position) != nullptr)
+            return fail("Teleport_And_Face: Expected game object for parameter 1, got position instead.");
+        if (as_handle(arguments[1], handle_game_object) == nullptr)
+            return fail("Teleport_And_Face: Expected game object for parameter 1.");
+        const ViewUnit* target = live_object(*host, arguments[1]);
+        if (target == nullptr) return fail("Teleport_And_Face: Invalid game object given for parameter 1.");
+        context.issue_command(std::string(verb_teleport_and_face),
+            {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], arguments[1]});
+        return none();
+    });
+    // Change_Owner(player) (debug build): exactly one argument (a script error otherwise), then a dead object warns and
+    // answers nothing, then a non-player argument is a script error. A valid call queues one replay command for the next
+    // tick and answers nothing; the same owner is a no-op in the sim. Planets (a faction change on the planetary
+    // behaviour) are galactic and not hosted here.
+    object("Change_Owner", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const std::size_t count = arguments.size() - 1;
+        if (count != 1)
+            return fail("Change_Owner: invalid number of parameters.  Expected 1, got " + std::to_string(count) + ".");
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        const Handle* player = as_handle(arguments[1], handle_player);
+        if (player == nullptr || player->id > std::numeric_limits<tactical::PlayerId>::max())
+            return fail("Change_Owner: invalid type for parameter 1.  Expected player.");
+        context.issue_command(std::string(verb_change_owner),
+            {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], arguments[1]});
+        return none();
+    });
+    // #7886: Object.Despawn() takes no arguments (a script error otherwise) and removes the object from the battle without any
+    // death effect; the simulation state changes, so a valid call queues a replay command for the next tick and answers
+    // nothing. A dead object answers nothing like its siblings. The effect on a carried or squadron object and on objects
+    // that other scripts still hold is unverified (fidelity list).
+    object("Despawn", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (live_object(*host, arguments[0]) == nullptr) return none();
+        const std::size_t count = arguments.size() - 1;
+        if (count != 0)
+            return fail("Despawn: invalid number of parameters.  Expected 0, got " + std::to_string(count) + ".");
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        context.issue_command(std::string(verb_despawn),
+            {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0]});
         return none();
     });
     // WSU-21: stock object scripts call Is_Selectable() with no arguments to ask whether the

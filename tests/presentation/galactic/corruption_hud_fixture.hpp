@@ -5,7 +5,8 @@
 namespace eawr::viewer::galactic {
 [[nodiscard]] inline bool corruption_fixture(std::string_view name) {
     return name == "corruption" || name == "corruption-gaps" || name == "corruption-locked" || name == "corruption-no-mission-service"
-        || name == "corruption-republish" || name == "corruption-info" || name == "corruption-info-empty";
+        || name == "corruption-republish" || name == "corruption-info" || name == "corruption-info-empty"
+        || name == "corruption-hover" || name == "corruption-hover-empty";
 }
 [[nodiscard]] inline std::shared_ptr<const sim::galactic::GalacticSnapshot> corruption_fixture_snapshot(
     sim::galactic::PlayerId local, std::string_view name) {
@@ -34,9 +35,15 @@ namespace eawr::viewer::galactic {
     g::ObservedPlanet row; row.player = local; row.planet = 101; row.discovered = true;
     const std::array<c::Id, 1> names{7};
     auto menu = g::observed_corruption_menu(world, local, row, 10, true, names);
-    if (menu && (name == "corruption-info" || name == "corruption-info-empty")) {
+    if (menu) for (auto& choice : menu->choices) {
+        choice.available_units = choice.slot == 1 ? 1 : 0;
+        choice.completed_missions = 1;
+        const auto& types = choice.prepared.choice.requirements.unit_types;
+        if (!types.empty()) choice.required_unit_type = types.front();
+    }
+    if (menu && (name == "corruption-info" || name == "corruption-info-empty" || name.starts_with("corruption-hover"))) {
         menu->information_only = true; menu->actor = 0; menu->preparation = 0;
-        if (name == "corruption-info-empty") menu->choices.clear();
+        if (name == "corruption-info-empty" || name == "corruption-hover-empty") menu->choices.clear();
     }
     // Slot 1 stands for a mission choice this host cannot start: every other requirement stays satisfied.
     if (name == "corruption-no-mission-service" && menu) menu->choices.at(0).mission_available = false;

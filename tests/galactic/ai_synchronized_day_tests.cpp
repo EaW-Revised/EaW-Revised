@@ -456,20 +456,35 @@ DayResult run_day(std::size_t workers, eawr::script::foc::galactic_ai::AsyncSche
             << " first_hostile_tick=" << count.first << " conflicts=" << progress.attacks << std::endl;
         if (async) observed_floors.emplace(names[player], std::array<std::uint64_t, 3>{count.hostile, count.first, progress.attacks});
     }
-    // W1 floors A (owner, 11-07) against the stored base: main after #6336 (head 050b1ef37), async, seed 1, 6000 ticks, the same on
-    // 1/2/4/8 workers. A step passes when hostile moves and conflicts stay within 2 and the first hostile tick within 300 ticks.
+    // W1 floors A (owner, 11-07) against the stored base: main a148776bf5ac, async, seed 1, 6000 ticks, the same on
+    // 1/2/4/8 workers; the floors still hold on main 77586a113 (the stock row passes there with game data).
+    // Each floor checks one strategic outcome of the async day against that base: hostile moves (the AI keeps sending forces
+    // out) and conflicts (what those moves lead to) stay within 2, the first hostile tick (how soon it starts) within 300 ticks.
+    // This base includes WGA-496 (#7415): starting forces stay put, so by tick 6000 only Rebel has moved (12 hostile moves,
+    // first at tick 571, no conflict yet) and Empire and Pirates are idle. The older base (Rebel 11, Empire 3) predates WGA-496.
+    // Both opponents must still move and fight by tick 12000 below.
     // A reviewed upstream change that moves the base updates these numbers.
     if (async) {
         struct FloorBase { const char* name; std::uint64_t hostile, first, conflicts; };
-        constexpr std::array<FloorBase, 3> floor_base{{{"Rebel", 11, 871, 4}, {"Empire", 3, 1801, 5}, {"Pirates", 0, 0, 0}}};
+        constexpr std::array<FloorBase, 3> floor_base{{{"Rebel", 12, 571, 0}, {"Empire", 0, 0, 0}, {"Pirates", 0, 0, 0}}};
         const auto within = [](std::uint64_t value, std::uint64_t base, std::uint64_t floor_value) {
             return (value > base ? value - base : base - value) <= floor_value;
         };
+        const auto holds = [&](const std::array<std::uint64_t, 3>& sample, const FloorBase& base) {
+            return within(sample[0], base.hostile, 2) && within(sample[2], base.conflicts, 2)
+                && (base.first ? within(sample[1], base.first, 300) : sample[1] == 0);
+        };
+        // Negative control: suppress all hostile movement in an otherwise matching Rebel observation. It must go red under
+        // the very same predicate used for the live day, even with the original first-move timestamp and conflict count retained.
+        const auto& rebel_base = floor_base.front();
+        const bool no_moves_held = holds({0, rebel_base.first, rebel_base.conflicts}, rebel_base);
+        std::cout << "GCAI-ASYNC-FLOORS workers=" << workers << " negative_control=zero_hostile_moves pass="
+            << (no_moves_held ? "true" : "false") << std::endl;
+        galactic_campaign_gate::check(!no_moves_held, "W1 strategic floor rejects a deliberately broken zero-hostile-movement observation");
         bool floors = true;
         for (const auto& base : floor_base) {
             const auto at = observed_floors.find(base.name);
-            const bool held = at != observed_floors.end() && within(at->second[0], base.hostile, 2) && within(at->second[2], base.conflicts, 2)
-                && (base.first ? within(at->second[1], base.first, 300) : at->second[1] == 0);
+            const bool held = at != observed_floors.end() && holds(at->second, base);
             std::cout << "GCAI-ASYNC-FLOORS workers=" << workers << " player=" << base.name << " pass=" << (held ? "true" : "false") << std::endl;
             floors = floors && held;
         }

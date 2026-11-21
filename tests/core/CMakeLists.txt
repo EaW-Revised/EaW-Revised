@@ -1,4 +1,5 @@
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
+find_package(Threads REQUIRED)
 
 add_executable(core_load_note_tests load_note_tests.cpp)
 target_link_libraries(core_load_note_tests PRIVATE eawr::core eawr::platform)
@@ -16,6 +17,12 @@ target_link_libraries(core_flat_id_map_tests PRIVATE eawr::core)
 target_compile_features(core_flat_id_map_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(core_flat_id_map_tests)
 add_test(NAME core_flat_id_map_contracts COMMAND core_flat_id_map_tests)
+
+add_executable(core_perf_diag_tests perf_diag_tests.cpp)
+target_link_libraries(core_perf_diag_tests PRIVATE eawr::core Threads::Threads)
+target_compile_features(core_perf_diag_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(core_perf_diag_tests)
+add_test(NAME core_perf_diag_contracts COMMAND core_perf_diag_tests)
 
 add_executable(tests main.cpp)
 target_link_libraries(tests PRIVATE eawr::core eawr::sim)

@@ -3,6 +3,7 @@
 #include "eawr/core/ascii.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -57,5 +58,10 @@ inline constexpr std::string_view line_whitespace = " \t\r";
     if (!iequals(element.substr(0, family.size()), family)) return false;
     return element.size() == family.size() || element[family.size()] == '_';
 }
+
+// Locale-independent decimal parse of a whole token (no std::from_chars(double): libc++ on macOS deletes it). Same
+// acceptance as the from_chars route it replaces: optional '-', digits, '.', exponent; a leading '+', whitespace, hex,
+// inf/nan and trailing text are rejected; a value outside double range or non-finite gives nullopt.
+[[nodiscard]] std::optional<double> parse_decimal_double(std::string_view token);
 
 } // namespace eawr::core

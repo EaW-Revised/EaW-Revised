@@ -155,6 +155,34 @@ Rules for the adapters of the missing names above; the wiki page "Lua Commands" 
 - **GA-05 Script throttle:** story sub-plot scripts use the same `ServiceRate`/`LastService` gate as
   every other engine-serviced script (L-29), already stated for story as WST-54.
 
+## Story host world reads (scripted starting forces)
+
+A story script that walks the galaxy (Remake's Web Way starting forces and neutral reinforcements; stock
+`story_campaign_underworld.lua` also lists every planet and asks a perception equation) needs these reads. They
+read the completed world through the story's snapshot reader and immutable campaign facts, as `Find_First_Object`
+does; nothing is staged, so a campaign whose scripts only read keeps the partitioned story service. Evidence:
+**data** = what the mounted scripts require (they compare, filter or do arithmetic on the answer); **assumed** = no
+capture or debug-build walk yet (fidelity list); a debug-build walk would settle each assumed row.
+
+- **GA-08 `FindPlanet.Get_All_Planets()`** answers a list of every planet of the galaxy, destroyed planets included
+  (scripts filter them with `Is_Planet_Destroyed`), in ascending planet identity. Inclusion: data. Order: assumed.
+- **GA-09 `Get_Owner()` on a planet** answers its owner player; on any other live object its owner; on a dead or
+  unknown object nothing. Data (scripts read the owner's faction); the planet case is assumed to be the political owner.
+- **GA-10 `Player.Get_Faction_Name()`** answers the faction identifier in upper case: the stock and mod scripts compare
+  it against `"EMPIRE"`, `"REBEL"`, `"PIRATES"` (data; RGC-126 keeps it separate from the display name).
+  `Player.Is_Neutral()` answers the faction's authored `Is_Neutral` flag (assumed). An unregistered player is a script error.
+- **GA-11 `Is_Planet_Destroyed()`** answers the control owner's ruin state of the planet (assumed); an object that is
+  not a planet of the galaxy is a script error.
+- **GA-12 `Type.Get_Combat_Rating()`** answers the type's combat power metric (the same value the galactic
+  AI's force estimate reads, WGA-182). A type without the metric is a script error.
+- **GA-13 `EvaluatePerception(name, player[, object])` from a story script** follows GOL-17 (target planet or the
+  object's planet, completed world, no fog, unanswered lookup = script error of the thread). Besides the GOL-17
+  lookups it answers `Variable_Target.IsSurfaceAccessible` (the planet's production surface access, the value the
+  AI reads) and `Variable_Target.BaseIncome` (the campaign's normalized authored planet income, the value the AI
+  reads, supplied as a campaign fact). The equations load only when a mounted story or library module names
+  `EvaluatePerception`. Data (the Web Way start asks `Is_Planet_Surface_Accessible`, `Is_Planet_Wealthy`,
+  `Is_Planet_Very_Wealthy`).
+
 ## State, replay and remaining adapters
 
 The GC clock save identity is separate from tactical saves; default tactical

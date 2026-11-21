@@ -912,6 +912,11 @@ void install_live_ability_services(CampaignSetupServices& services,
             data::tag_trace::used(&node);
             for (const auto& name : words(node.raw_text)) result.activated_removal_abilities.push_back(key(name));
         }
+        // WGCH-39: the activated credit-siphon names route the ability; no name is hard-coded here.
+        for (const auto& node : owned->constants.root.children) if (key(node.name) == "ACTIVATED_SIPHON_CREDITS_ABILITY_NAMES") {
+            data::tag_trace::used(&node);
+            for (const auto& name : words(node.raw_text)) result.activated_siphon_abilities.push_back(key(name));
+        }
         // WGCH-109/110/139: authored hack constants. An unresolved required type never matches (no fallback).
         const auto constant = [&](std::string_view name) -> const data::XmlNode* {
             const auto found = std::find_if(owned->constants.root.children.begin(), owned->constants.root.children.end(),
@@ -1008,7 +1013,7 @@ void install_live_ability_services(CampaignSetupServices& services,
             bool market = false; std::optional<bool> market_enabled{true}; // WGCH-170/WGS-88 common enabled default
             const data::XmlNode* slicer = nullptr;
             const data::XmlNode* market_ability = nullptr;
-            std::vector<const data::XmlNode*> corruptors, removers, hackers, destroyers, saboteurs, neutralizers;
+            std::vector<const data::XmlNode*> corruptors, removers, hackers, destroyers, saboteurs, neutralizers, siphoners;
             for (const auto* block : data::retail::list(original, "Abilities", data::retail::ListRule::replace_in_variant))
                 for (const auto& ability : block->children) {
                     if (key(ability.name) == "SLICER_ABILITY") slicer = &ability;
@@ -1020,6 +1025,7 @@ void install_live_ability_services(CampaignSetupServices& services,
                     if (key(ability.name) == "PLANET_DESTRUCTION_ABILITY") destroyers.push_back(&ability);
                     if (key(ability.name) == "GALACTIC_SABOTAGE_ABILITY") saboteurs.push_back(&ability);
                     if (key(ability.name) == "NEUTRALIZE_HERO_ABILITY") neutralizers.push_back(&ability);
+                    if (key(ability.name) == "SIPHON_CREDITS_ABILITY") siphoners.push_back(&ability);
                     if (key(ability.name) != "BLACK_MARKET_ABILITY") continue;
                     market = true; market_ability = &ability;
                     for (const auto& value : ability.children) if (key(value.name) == "INITIALLY_ENABLED") {
@@ -1068,6 +1074,12 @@ void install_live_ability_services(CampaignSetupServices& services,
                     if (key(attr.name) == "NAME" && key(attr.value) == name) { neutralizer = ability; neutralize_name = name; break; }
                 if (neutralizer) break;
             }
+            const data::XmlNode* siphoner = nullptr; std::string siphon_name;
+            for (const auto& name : result.activated_siphon_abilities) {
+                for (const auto* ability : siphoners) for (const auto& attr : ability->attributes)
+                    if (key(attr.name) == "NAME" && key(attr.value) == name) { siphoner = ability; siphon_name = name; break; }
+                if (siphoner) break;
+            }
             const auto* original_metadata = input.original_type(binding.id);
             const auto* original_type = owned->starting.types.find(binding.original_type);
             const auto economic = std::find_if(owned->economics.types.begin(), owned->economics.types.end(),
@@ -1090,7 +1102,7 @@ void install_live_ability_services(CampaignSetupServices& services,
             }
             // A neutralization victim needs its hero respawn facts even without any activated ability of its own.
             const bool victim = neutralization_types.contains(binding.id);
-            if (!market && !slicer && !corruptor && !remover && !hacker && !destroyer && !saboteur && !neutralizer && !spy && !victim && automatic.empty()
+            if (!market && !slicer && !corruptor && !remover && !hacker && !destroyer && !saboteur && !neutralizer && !siphoner && !spy && !victim && automatic.empty()
                 && !(original_metadata && original_metadata->named_hero.value_or(false))) continue;
             gc::GalacticAbilityProfile profile; profile.type = binding.id; profile.has_market = market;
             for (const auto& [ability, kind] : {
@@ -1098,7 +1110,7 @@ void install_live_ability_services(CampaignSetupServices& services,
                 std::pair{corruptor, gc::AbilityKind::corruption}, std::pair{remover, gc::AbilityKind::remove_corruption},
                 std::pair{hacker, gc::AbilityKind::superweapon_hack},
                 std::pair{destroyer, gc::AbilityKind::planet_destruction}, std::pair{saboteur, gc::AbilityKind::structure_sabotage},
-                std::pair{neutralizer, gc::AbilityKind::hero_neutralization}}) {
+                std::pair{neutralizer, gc::AbilityKind::hero_neutralization}, std::pair{siphoner, gc::AbilityKind::credit_siphon}}) {
                 if (!ability) continue;
                 // WGCH-187: theft is always ground-activated: an omitted style keeps its class default and any other
                 // authored style is forced back. Neutralization shares that default and an authored style stands, so it
@@ -1122,7 +1134,34 @@ void install_live_ability_services(CampaignSetupServices& services,
                 profile.ground_activated.push_back(gc::AbilityKind::system_spy);
             }
             profile.auto_spies = std::move(automatic);
-            profile.lifecycle_only = !market && !slicer && !corruptor && !remover && !hacker && !destroyer && !saboteur && !neutralizer && !spy;
+            profile.lifecycle_only = !market && !slicer && !corruptor && !remover && !hacker && !destroyer && !saboteur && !neutralizer && !siphoner && !spy;
+            if (siphoner) {
+                data::tag_trace::used_attribute(*siphoner, "Name");
+                auto& siphon = profile.siphon.emplace(); siphon.name = siphon_name; siphon.text_identity = binding.original_type;
+                siphon.hero = (original_metadata && original_metadata->named_hero.value_or(false))
+                    || (original_type && key(original_type->object_class) == "GENERICHEROUNIT");
+                for (const auto& value : siphoner->children) {
+                    const auto tag = key(value.name);
+                    if (data::retail::is_placeholder(value.raw_text)) continue;
+                    if (tag == "INITIALLY_ENABLED" || tag == "CAUSES_DESPAWN") {
+                        data::tag_trace::used(&value); const auto flag = data::retail::boolean(value.raw_text);
+                        if (!flag) return refuse<gc::GalacticAbilitySetup>("invalid siphon ability flag");
+                        if (tag == "INITIALLY_ENABLED") siphon.initially_enabled = *flag;
+                        else siphon.causes_despawn = *flag;
+                    } else if (tag == "MIN_SIPHON_PERCENTAGE" || tag == "MAX_SIPHON_PERCENTAGE" || tag == "SIPHON_DURATION_IN_CYCLES") {
+                        data::tag_trace::used(&value); const auto parsed = number(&value);
+                        if (!parsed) return refuse<gc::GalacticAbilitySetup>("invalid siphon ability number");
+                        if (tag == "SIPHON_DURATION_IN_CYCLES") {
+                            const auto cycles = parsed.value().trunc_to_integer();
+                            if (cycles < 0 || cycles > std::numeric_limits<std::uint32_t>::max()) return refuse<gc::GalacticAbilitySetup>("invalid siphon duration");
+                            siphon.cycles = static_cast<std::uint32_t>(cycles);
+                        } else if (parsed.value() < Fixed{} || parsed.value() > Fixed::from_integer(1).value()) {
+                            return refuse<gc::GalacticAbilitySetup>("siphon percentage outside 0..1"); // WGEP-12
+                        } else (tag == "MIN_SIPHON_PERCENTAGE" ? siphon.minimum : siphon.maximum) = parsed.value();
+                    } else if (tag == "ACTIVATION_STYLE" || tag == "SFXEVENT_ACTIVATE") data::tag_trace::used(&value); // style routes the group above; the cue is presentation
+                }
+                if (siphon.minimum > siphon.maximum) return refuse<gc::GalacticAbilitySetup>("siphon percentage range is inverted");
+            }
             if (remover) {
                 data::tag_trace::used_attribute(*remover, "Name");
                 auto& removal = profile.removal.emplace(); removal.name = removal_name;
@@ -1351,7 +1390,8 @@ void install_live_ability_services(CampaignSetupServices& services,
                 result.technologies.push_back({type_id, cost.value(), !ground});
             }
         }
-        if (has_theft || has_neutralize) {
+        const bool has_siphon = std::any_of(result.profiles.begin(), result.profiles.end(), [](const auto& p) { return p.siphon.has_value(); });
+        if (has_theft || has_neutralize || has_siphon) {
             // The planet table also carries the auto-capture flag that neutralization reads (WGCH-25).
             for (const auto& planet : setup.planets) {
                 const auto* source = planet_source(*owned, input, planet.id);

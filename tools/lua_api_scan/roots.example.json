@@ -1,0 +1,15 @@
+{
+  "_comment": "Copy to an ignored local file and fill in directories. Keys are layer ids from docs/tag-coverage/coverage-profiles.json; 'stock' is the unpacked stock view that contains data/scripts. Or pass --workshop-root (a folder with one directory per workshop id) and --stock-root.",
+  "stock": "",
+  "1770851727": "",
+  "2794270450": "",
+  "3229239424": "",
+  "2712013423": "",
+  "1129810972": "",
+  "2191440256": "",
+  "1125571106": "",
+  "1976399102": "",
+  "1145741406": "",
+  "3387971722": "",
+  "3689306867": ""
+}

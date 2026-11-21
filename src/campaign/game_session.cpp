@@ -227,6 +227,8 @@ core::Result<void> GameSession::Impl::apply_story_rewards() {
                 else if (is_objective_reward(record.reward_type)) declined = !story_objective_request(record); // WST-47/65/66: story state, applied in a replay too like the holocron goals
                 else if (record.reward_type == "STORY_GOAL_COMPLETED" || record.reward_type == "REMOVE_STORY_GOAL")
                     declined = !story_goal_request(record); // WST-47/58/68: holocron goal state, applied in a replay too
+                else if (record.reward_type == "FORCE_CLICK_GUI" && galactic::is_pause_control(record.reward_params[0].empty() ? std::string_view{} : std::string_view{record.reward_params[0].front()}))
+                    declined = !story_pause_request(record, replaying); // #7826: the session's own clock change, in a replay too
                 else if (replaying) record.outcome = "replayed from the native journal";
                 else if (record.reward_type == "LOAD_CAMPAIGN") declined = !campaign_switch_request(record); // WST-95: the host acts on it
                 else if (record.reward_type == "SCREEN_TEXT") declined = !story_text_request(record); // WST-48: the HUD shows the line
@@ -328,6 +330,26 @@ bool GameSession::Impl::force_click_request(galactic::story::Triggered& record) 
     }
     story_presentation.push_back({record.owner, st::ConsumerRequest{st::Consumer::gui, "FORCE_CLICK_GUI", {std::move(component)}}});
     record.outcome = "applied";
+    return true;
+}
+
+// #7826: FORCE_CLICK_GUI on the play/pause control. The story engine runs at the agreed tick on every peer, so the
+// clock change is applied here, by the session, instead of by a pause command from a seat: no seat debounce meets or
+// restarts, and no client can send the exemption. It is world state (the pause depth), so a replay applies it too; the HUD
+// gets no press for it and follows the agreed clock.
+bool GameSession::Impl::story_pause_request(galactic::story::Triggered& record, const bool replaying) {
+    // #7798: a pending battle owns the last pause level until the player decides (a seat's resume is refused the same way).
+    // A story toggle at that level is refused: under a prompt the toggle can only be a resume, so a script's unpause +
+    // re-pause dance is a no-op (nothing unpauses the galaxy and no pause level is left behind once the prompt is decided).
+    // The same holds for an open battle summary (a human resume is refused there too, single player included).
+    if (world().clock().pause_depth <= 1 && ((conflict_pause && !child) || summary_conflict != 0)) {
+        record.outcome = summary_conflict != 0 ? "refused: an open battle summary keeps the galaxy paused until it is acknowledged"
+                                                : "refused: a pending battle keeps the galaxy paused until it is decided";
+        return false;
+    }
+    const bool pending = admission.has_value() || summary_conflict != 0;
+    if (auto toggled = world().story_toggle_pause(pending); !toggled) { record.outcome = "refused: " + toggled.error().message; return false; }
+    record.outcome = replaying ? "applied (replay)" : "applied";
     return true;
 }
 

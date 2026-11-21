@@ -197,20 +197,107 @@ func _process(delta):
         x, y, w, h = self.control(baseline, "fight")["rect"]
         point = (x + w / 2, y + h / 2)
         target = baseline["camera"]["target"]
-        for key in ("KEY_D", "KEY_RIGHT"):
+        # WASD is an opt-in preset (camera_wasd off by default): the arrow keys are the always-bound pair.
+        for key in ("KEY_RIGHT", "KEY_LEFT"):
             with self.subTest(key=key):
                 moved = self.keyboard_camera("battle-choice", key, point)
                 self.assertGreater(sum((a - b) ** 2 for a, b in zip(moved["camera"]["target"], target)), 1)
-        reset = self.keyboard_camera("battle-choice", "KEY_D", point, home=True)
+        reset = self.keyboard_camera("battle-choice", "KEY_RIGHT", point, home=True)
         for actual, expected in zip(reset["camera"]["target"], target):
             self.assertAlmostEqual(actual, expected, places=4)
-        zoomed = self.keyboard_camera("battle-choice", "KEY_D", point, zoom=True)
+        zoomed = self.keyboard_camera("battle-choice", "KEY_RIGHT", point, zoom=True)
         self.assertEqual(zoomed["flights"][0]["state"], "focused",
                          "blocked prompt motion left a mouse-scroll hold that suppresses wheel zoom")
         self.assertEqual(zoomed["flights"][0]["planet"], 101)
-        modal = self.keyboard_camera("battle-progress", "KEY_D")
+        modal = self.keyboard_camera("battle-progress", "KEY_RIGHT")
         for actual, expected in zip(modal["camera"]["target"], target):
             self.assertAlmostEqual(actual, expected, places=4)
+
+    def pointer_camera(self, fixture, drag=True):
+        """#7798: a middle-mouse drag and Ctrl+F while the prompt is up; returns the report and whether the finder opened."""
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-pending-pointer-"))
+        report, capture, driver, facts = (directory / name for name in ("report.json", "capture.png", "driver.gd", "facts.json"))
+        driver.write_text('''extends SceneTree
+var elapsed = 0.0
+var stage = 0
+var finder_open = false
+func _initialize():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func button(pressed):
+    if not %s: return
+    var event = InputEventMouseButton.new()
+    event.position = Vector2(16, 350) # the left edge, clear of the prompt's strip
+    event.global_position = event.position
+    event.button_index = MOUSE_BUTTON_MIDDLE
+    event.pressed = pressed
+    Input.parse_input_event(event)
+func drag(step):
+    if not %s: return
+    var event = InputEventMouseMotion.new()
+    event.position = Vector2(16, 350 + 40 * step)
+    event.global_position = event.position
+    event.relative = Vector2(0, 40)
+    Input.parse_input_event(event)
+func _process(delta):
+    elapsed += min(delta, 0.1)
+    if elapsed > 0.6 and stage == 0:
+        stage = 1
+        button(true)
+    if elapsed > 0.8 and stage == 1:
+        stage = 2
+        drag(1)
+    if elapsed > 1.0 and stage == 2:
+        stage = 3
+        drag(2)
+    if elapsed > 1.2 and stage == 3:
+        stage = 4
+        button(false)
+    if elapsed > 1.5 and stage == 4:
+        stage = 5
+        var key = InputEventKey.new()
+        key.keycode = KEY_F
+        key.physical_keycode = KEY_F
+        key.ctrl_pressed = true
+        key.pressed = true
+        Input.parse_input_event(key)
+    if elapsed > 2.5 and stage == 5:
+        stage = 6
+        var edit = root.find_child("IDC_PLANET_SEARCH_TEXT", true, false)
+        finder_open = edit != null and edit.is_visible_in_tree()
+        var shell = root.find_child("PlanetSearch", true, false)
+        FileAccess.open(%s, FileAccess.WRITE).store_string(JSON.stringify({"finder": finder_open,
+            "shell": shell != null, "shell_visible": shell != null and shell.is_visible_in_tree(), "edit": edit != null}))
+        root.get_texture().get_image().save_png(%s)
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''' % (*(("true" if drag else "false"),) * 2, json.dumps(str(facts).replace("\\", "/")),
+       json.dumps(str(capture).replace("\\", "/"))), encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", fixture,
+            "--eawr-game-root", support.GAME_ROOT, "--eawr-galactic-paused", "yes",
+            "--eawr-lighting", "sh", "--eawr-report", str(report)],
+            cwd=support.ROOT, capture_output=True, text=True, timeout=300)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        print("pending pointer capture:", capture)
+        found = json.loads(facts.read_text(encoding="utf-8"))
+        print("pending pointer facts:", found)
+        return json.loads(report.read_text(encoding="utf-8")), found["finder"]
+
+    def test_pending_prompt_keeps_middle_mouse_drag_live(self):
+        # #7798: the pending CHOICE leaves the middle-mouse camera drag working; a result phase still blocks it. The finder
+        # needs a real campaign's dialog layer (the synthetic fixture has none): its gate is the unit-tested blocks_camera().
+        def travel(fixture):
+            still, _ = self.pointer_camera(fixture, drag=False)
+            dragged, _ = self.pointer_camera(fixture, drag=True)
+            return sum((a - b) ** 2 for a, b in zip(dragged["camera"]["target"], still["camera"]["target"]))
+        self.assertGreater(travel("accessible"), 1e-6, "control: the drag must pan without a prompt, or this probe proves nothing")
+        self.assertGreater(travel("battle-choice"), 1e-6, "middle-mouse drag must pan under the pending battle choice")
+        self.assertLess(travel("battle-progress"), 1e-6, "a result phase still takes the whole input")
 
     def test_summary_returned_salvage_bounty(self):
         summary, capture = self.capture("battle-summary-bounty")

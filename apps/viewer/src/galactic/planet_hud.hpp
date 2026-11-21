@@ -142,6 +142,9 @@ struct ClockGates final {
 // Whether a pause/resume press is admitted: the bar's own flag when a bar exists; a bar-less view keeps the plain key
 // outside a LAN match, and a LAN match keeps every gate above.
 [[nodiscard]] bool pause_press_admitted(bool has_command_bar, bool bar_clock_enabled, const ClockGates& gates) noexcept;
+// #7798: a pause request is always admitted; a resume request is refused while a battle prompt is pending (the original freezes
+// time under the prompt until the player decides). Every presentation route (Space, the bar's button, the pause banner) asks this.
+[[nodiscard]] bool pause_request_admitted(bool pause, bool battle_prompt_pending) noexcept;
 // The fast-forward button is admitted exactly when the clock controls are open (#5355). Its factor: a solo campaign
 // fast-forwards at 4x (TM-03); a multiplayer campaign (a LAN match or several humans) shares 2x through the agreed
 // speed command, the debug build's network maximum (MP-06), since the 4x button is refused there (TM-04).
@@ -404,6 +407,9 @@ enum class PlanetStatusIcon : std::uint8_t { build, corruption_info, corruption_
 // when the list is shorter than authored data requires (a mod may author
 // fewer entries); the row then draws nothing for that kind.
 inline constexpr std::size_t corruption_information_icon_index = 8;
+// GHUD-S99: reference units the galactic build bar keeps between its right edge and the screen's right edge (and its left
+// edge once the bar has to move).
+inline constexpr float command_bar_right_margin_units = 6.0F;
 // Effect icons (GHUD-S55 order: build, smuggler, bounty, smuggled, corruption).
 // Each draws the first icon of its own authored component (`g_smuggler`,
 // `g_bounty_hunter`, `g_smuggled`); empty when that component has no icon.
@@ -510,9 +516,10 @@ using CommandBarIconAtlasCache = std::map<std::string, bool, std::less<>>;
 
 // GHUDL-18: centre of a texture of the given size
 // placed at the authored offset (x right, y up) from the planet anchor, scaled by the UI scale.
+// Component scale sizes the artwork independently; it never scales the offset.
 struct BonusIconRect final { double x{}, y{}, width{}, height{}; };
 [[nodiscard]] BonusIconRect planet_bonus_icon_rect(double anchor_x, double anchor_y, double offset_x, double offset_y,
-    double ui_scale, double texture_width, double texture_height) noexcept;
+    double ui_scale, double texture_width, double texture_height, double component_scale = 1.0) noexcept;
 
 [[nodiscard]] std::string production_denial_text(sim::galactic::ProductionAdmission admission);
 

@@ -137,6 +137,8 @@ inline constexpr std::string_view section_invalid = "EAWR-CKP-0108";
 inline constexpr std::string_view inconsistent = "EAWR-CKP-0109";
 inline constexpr std::string_view restore_failed = "EAWR-CKP-0110";
 inline constexpr std::string_view invalid_save = "EAWR-CKP-0111";
+// A finished-battle record in the conflicts section was written by another build; recover_checkpoint_history can drop it.
+inline constexpr std::string_view other_build_battle_record = "EAWR-CKP-0112";
 } // namespace diagnostic_codes
 
 } // namespace eawr::checkpoint

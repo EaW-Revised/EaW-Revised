@@ -1,0 +1,922 @@
+{
+  "schema_version": 1,
+  "note": "Data for tools/lua_api_scan. A host is a table row: which scripts run in it (by logical path) and which C++ registration sites bind its Lua API. Add a host here, not in code. Names only: no retail source, no paths of any machine.",
+  "profiles": [
+    {
+      "id": "remake-chain",
+      "owner_stack": true,
+      "title": "Remake 4.0 + Holdouts + French Fried Taters"
+    },
+    {
+      "id": "bfc",
+      "title": "Battlefront Commander"
+    },
+    {
+      "id": "raw",
+      "title": "Republic at War"
+    },
+    {
+      "id": "aaw",
+      "title": "Alliance at War"
+    },
+    {
+      "id": "tr",
+      "title": "Thrawn's Revenge",
+      "layers_leaf_first": [
+        "1125571106"
+      ]
+    },
+    {
+      "id": "fotr",
+      "title": "Fall of the Republic"
+    },
+    {
+      "id": "stargate",
+      "title": "Stargate"
+    },
+    {
+      "id": "aotr",
+      "title": "Awakening of the Clone Wars"
+    },
+    {
+      "id": "remake5",
+      "title": "Remake 5.0"
+    },
+    {
+      "id": "stock",
+      "title": "Stock FoC/EaW scripts"
+    }
+  ],
+  "profiles_source": "docs/tag-coverage/coverage-profiles.json",
+  "wrapper_variables": [
+    "Object",
+    "Target",
+    "Budget",
+    "FreeStore",
+    "PlayerObject",
+    "Player",
+    "Planet",
+    "Type",
+    "Unit"
+  ],
+  "ground_api_names": [
+    "Can_Garrison",
+    "Can_Garrison_Fire",
+    "Disable_Capture",
+    "Eject_Garrison",
+    "Garrison",
+    "GetNextGroundbaseType",
+    "Get_Garrisoned_Units",
+    "Has_Garrison",
+    "Is_In_Garrison",
+    "Leave_Garrison",
+    "Release_Reinforcements",
+    "Set_Garrison_Spawn",
+    "Spawn_From_Reinforcement_Pool",
+    "WaitForGroundbase"
+  ],
+  "timing": {
+    "note": "load = top level of a script in the closure; start = a function reachable from load or from a start function through direct calls and Create_Thread literals; everything else is event or per-tick work (recurring) unless a rule below says otherwise.",
+    "top_level": "load",
+    "rules": [
+      {
+        "function": "^(Evaluate|Execute|Service|Update|Tick|On_|Story_Handle|Handle)",
+        "timing": "recurring"
+      }
+    ],
+    "default": "recurring",
+    "start_functions": [
+      "Definitions",
+      "Base_Definitions",
+      "Story_Mode_Definitions",
+      "Begin",
+      "Init",
+      "Initialize"
+    ]
+  },
+  "severity": {
+    "note": "critical: runs at load/start in a script of a galactic host; high: recurring in one; medium: ground-battle-only or unresolved timing; low: standard-library partials.",
+    "load": "critical",
+    "start": "critical",
+    "recurring": "high",
+    "rare": "medium"
+  },
+  "object_modes": {
+    "note": "How a GameObject script is assigned to a host: by the XML elements that name it in Lua_Script. First matching rule wins; none = unclassified (reported under the galactic object host as 'uncertain').",
+    "galactic_tags": [
+      "Planet",
+      "SpecialStructure",
+      "TradeRoute",
+      "UpgradeObject",
+      "StarBase",
+      "Galactic_Fleet",
+      "GalacticFleet",
+      "Fleet"
+    ],
+    "space_tags": [
+      "SpaceUnit",
+      "SpaceProp",
+      "SpaceBuildable",
+      "SpaceStructure"
+    ],
+    "ground_tags": [
+      "GroundCompany",
+      "GroundInfantry",
+      "GroundVehicle",
+      "GroundStructure",
+      "GroundBase",
+      "HeroCompany",
+      "GroundBuildable"
+    ],
+    "galactic_child_tags": [
+      "Galactic_Model_Name",
+      "Galactic_Fleet_Override",
+      "Galactic_Fleet_Override_Name"
+    ]
+  },
+  "script_classes": [
+    {
+      "pattern": "^data/scripts/story/",
+      "host": "galactic_story",
+      "also": [
+        "tactical_story"
+      ],
+      "label": "story",
+      "needs": "gc_story"
+    },
+    {
+      "pattern": "^data/scripts/interventions/",
+      "host": "galactic_story",
+      "also": [
+        "tactical_story"
+      ],
+      "label": "intervention",
+      "needs": "gc_story"
+    },
+    {
+      "pattern": "^data/scripts/ai/landmode/",
+      "host": "tactical_plan_land",
+      "label": "tactical AI (ground)"
+    },
+    {
+      "pattern": "^data/scripts/ai/spacemode/",
+      "host": "tactical_plan_space",
+      "label": "tactical AI (space)"
+    },
+    {
+      "pattern": "^data/scripts/ai/galacticmode/",
+      "host": "galactic_ai",
+      "label": "galactic AI plan"
+    },
+    {
+      "pattern": "^data/scripts/ai/[^/]+\\.lua$",
+      "host": "galactic_ai",
+      "label": "galactic AI plan"
+    },
+    {
+      "pattern": "^data/scripts/freestore/.*galactic",
+      "host": "galactic_ai",
+      "label": "galactic freestore"
+    },
+    {
+      "pattern": "^data/scripts/freestore/",
+      "host": "tactical_plan_space",
+      "label": "tactical freestore"
+    },
+    {
+      "pattern": "^data/scripts/evaluators/",
+      "host": "galactic_evaluators",
+      "also": [
+        "tactical_evaluators"
+      ],
+      "label": "perception evaluator"
+    },
+    {
+      "pattern": "^data/scripts/gameobject/",
+      "host": "object",
+      "label": "object script"
+    },
+    {
+      "pattern": "^data/scripts/miscellaneous/",
+      "host": "scoring",
+      "label": "game scoring"
+    },
+    {
+      "pattern": "^data/scripts/library/",
+      "host": "library",
+      "label": "library"
+    }
+  ],
+  "hosts": [
+    {
+      "id": "galactic_story",
+      "lane": "gc",
+      "mode": "galactic",
+      "title": "Galactic story host",
+      "bindings": [
+        {
+          "file": "src/campaign/galactic_story_scripts.cpp",
+          "function": "build_story_scheduler",
+          "registrars": {
+            "register_binding": "global",
+            "register_method": "member"
+          },
+          "name_lists": [
+            {
+              "variable": "implemented",
+              "kind": "global"
+            }
+          ]
+        },
+        {
+          "file": "src/campaign/galactic_story_random.hpp",
+          "registrars": {
+            "register_binding": "global"
+          }
+        },
+        {
+          "file": "src/script/authoritative/bindings.cpp",
+          "function": "register_shared_global_values",
+          "registrars": {
+            "register_binding": "global"
+          }
+        },
+        {
+          "file": "src/script/authoritative/galactic_bridge.cpp",
+          "function": "register_galactic_first_object",
+          "registrars": {
+            "register_binding": "global"
+          }
+        },
+        {
+          "file": "src/script/foc/story_plot_bindings.cpp",
+          "registrars": {
+            "register_binding": "global",
+            "register_method": "member"
+          }
+        }
+      ],
+      "infrastructure": {
+        "file": "src/script/authoritative/bindings.cpp",
+        "function": "infrastructure_objects"
+      },
+      "stubs": {
+        "file": "src/script/authoritative/galactic_api_inventory.hpp",
+        "array": "missing_galactic_globals",
+        "implemented_variable": "implemented",
+        "implemented_file": "src/campaign/galactic_story_scripts.cpp",
+        "implemented_function": "build_story_scheduler",
+        "note": "names the host registers as a fault-by-name stub: calling one raises 'is unbound'"
+      }
+    },
+    {
+      "id": "galactic_object",
+      "lane": "gc",
+      "mode": "galactic",
+      "title": "Galactic object-script host",
+      "bindings": [
+        {
+          "file": "src/campaign/galactic_story_scripts.cpp",
+          "function": "register_galactic_object_bindings",
+          "registrars": {
+            "register_binding": "global",
+            "register_method": "member"
+          },
+          "name_lists": [
+            {
+              "variable": "implemented",
+              "kind": "global"
+            }
+          ]
+        },
+        {
+          "file": "src/script/foc/story_plot_bindings.cpp",
+          "registrars": {
+            "register_binding": "global",
+            "register_method": "member"
+          }
+        }
+      ],
+      "infrastructure": {
+        "file": "src/script/authoritative/bindings.cpp",
+        "function": "infrastructure_objects"
+      },
+      "stubs": {
+        "file": "src/script/authoritative/galactic_api_inventory.hpp",
+        "array": "missing_galactic_globals",
+        "implemented_variable": "implemented",
+        "implemented_file": "src/campaign/galactic_story_scripts.cpp",
+        "implemented_function": "register_galactic_object_bindings"
+      }
+    },
+    {
+      "id": "galactic_ai",
+      "lane": "gc",
+      "mode": "galactic",
+      "title": "Galactic AI host (plans, freestore and perception scripts)",
+      "note": "Union of the plan-definition loader and the AI runtime scheduler: both run the same plan and freestore modules.",
+      "bindings": [
+        {
+          "file": "src/script/foc/galactic_ai_plans.cpp",
+          "registrars": {
+            "register_binding": "global",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/tactical_ai_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/galactic_ai_freestore.cpp",
+          "registrars": {
+            "register_binding": "global",
+            "register_method": "member",
+            "bind": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/galactic_ai_markup_bindings.cpp",
+          "registrars": {
+            "register_binding": "global",
+            "register_method": "member"
+          }
+        }
+      ],
+      "infrastructure": {
+        "file": "src/script/authoritative/bindings.cpp",
+        "function": "infrastructure_objects"
+      }
+    },
+    {
+      "id": "tactical_object",
+      "lane": "sk",
+      "mode": "tactical",
+      "bindings": [
+        {
+          "file": "src/script/foc/tactical_ai_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/tactical_object_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/plan_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/story_plot_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/tactical_ai_loading.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        }
+      ],
+      "title": "Tactical object-script host",
+      "infrastructure": {
+        "file": "src/script/authoritative/bindings.cpp",
+        "function": "infrastructure_objects"
+      },
+      "note": "One tactical scheduler serves object scripts, tactical AI plans, freestore and evaluators: the four tactical rows read the same registration sites."
+    },
+    {
+      "id": "galactic_evaluators",
+      "lane": "gc",
+      "mode": "galactic",
+      "title": "Galactic AI evaluator host",
+      "bindings": [
+        {
+          "file": "src/script/foc/tactical_ai_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        }
+      ],
+      "infrastructure": {
+        "file": "src/script/authoritative/bindings.cpp",
+        "function": "infrastructure_objects"
+      }
+    },
+    {
+      "id": "scoring",
+      "lane": "gc",
+      "mode": "galactic",
+      "title": "Campaign scoring host",
+      "bindings": [
+        {
+          "file": "src/platform/galactic/campaign_scoring.cpp",
+          "registrars": {
+            "bind": "global",
+            "register_binding": "global",
+            "method": "member@2",
+            "register_method": "member"
+          }
+        }
+      ],
+      "infrastructure": {
+        "file": "src/script/authoritative/bindings.cpp",
+        "function": "infrastructure_objects"
+      }
+    },
+    {
+      "id": "tactical_story",
+      "lane": "sk",
+      "mode": "tactical",
+      "bindings": [
+        {
+          "file": "src/script/foc/tactical_ai_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/tactical_object_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/plan_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/story_plot_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/tactical_ai_loading.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        }
+      ],
+      "title": "Tactical story host",
+      "infrastructure": {
+        "file": "src/script/authoritative/bindings.cpp",
+        "function": "infrastructure_objects"
+      },
+      "note": "One tactical scheduler serves object scripts, tactical AI plans, freestore and evaluators: the four tactical rows read the same registration sites."
+    },
+    {
+      "id": "tactical_plan_space",
+      "lane": "sk",
+      "mode": "tactical",
+      "bindings": [
+        {
+          "file": "src/script/foc/tactical_ai_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/tactical_object_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/plan_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/story_plot_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/tactical_ai_loading.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        }
+      ],
+      "title": "Tactical space AI host",
+      "infrastructure": {
+        "file": "src/script/authoritative/bindings.cpp",
+        "function": "infrastructure_objects"
+      },
+      "note": "One tactical scheduler serves object scripts, tactical AI plans, freestore and evaluators: the four tactical rows read the same registration sites."
+    },
+    {
+      "id": "tactical_plan_land",
+      "lane": "sk",
+      "mode": "ground",
+      "bindings": [],
+      "title": "Tactical ground AI host (parked)",
+      "reader": "parked"
+    },
+    {
+      "id": "tactical_evaluators",
+      "lane": "sk",
+      "mode": "tactical",
+      "bindings": [
+        {
+          "file": "src/script/foc/tactical_ai_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/tactical_object_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/plan_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/story_plot_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/tactical_ai_loading.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        }
+      ],
+      "title": "Tactical evaluator host",
+      "infrastructure": {
+        "file": "src/script/authoritative/bindings.cpp",
+        "function": "infrastructure_objects"
+      },
+      "note": "One tactical scheduler serves object scripts, tactical AI plans, freestore and evaluators: the four tactical rows read the same registration sites."
+    }
+  ],
+  "runtime_unbound": {
+    "source": "owner game log triage 2026-11-19 (Remake stack)",
+    "entries": [
+      {
+        "name": "WeightedTypeList.Create",
+        "kind": "global",
+        "note": "Base_Definitions of an object or story script"
+      },
+      {
+        "name": "FindPlanet.Get_All_Planets",
+        "kind": "global",
+        "host_hint": "galactic_story",
+        "note": "starting-forces and reinforcement story scripts",
+        "explain": "bound in the story host since GA-08 (#7981); the log line predates it"
+      },
+      {
+        "name": "Find_All_Objects_Of_Type",
+        "kind": "global",
+        "host_hint": "galactic_object",
+        "explain": "bound in the object host; the runtime message is an argument-filter refusal, not an unbound name"
+      },
+      {
+        "name": "Is_Human",
+        "kind": "member",
+        "host_hint": "galactic_object",
+        "explain": "bound in the object host since #7964 (Player.Is_Human from the setup seats); the owner log predates the binding"
+      }
+    ]
+  },
+  "follow": [
+    {
+      "function": "register_shared_global_values",
+      "file": "src/script/authoritative/bindings.cpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_player_is_human",
+      "file": "src/campaign/galactic_story_scripts.cpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_story_plot_bindings",
+      "file": "src/script/foc/story_plot_bindings.cpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_galactic_first_object",
+      "file": "src/script/authoritative/galactic_bridge.cpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_story_random",
+      "file": "src/campaign/galactic_story_random.hpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_story_world_reads",
+      "file": "src/campaign/galactic_story_scripts.cpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_freestore_object_methods",
+      "file": "src/script/foc/galactic_ai_freestore.cpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member",
+        "bind": "member"
+      }
+    },
+    {
+      "function": "register_planet_usability_method",
+      "file": "src/script/foc/galactic_ai_freestore.cpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_planet_corruption_method",
+      "file": "src/script/foc/galactic_ai_freestore.cpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_galactic_orbit_recheck_method",
+      "file": "src/script/authoritative/galactic_bridge.cpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_galactic_markup_bindings",
+      "file": "src/script/foc/galactic_ai_markup_bindings.cpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_freestore_bindings",
+      "file": "src/script/foc/galactic_ai_freestore.cpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member",
+        "bind": "member"
+      }
+    },
+    {
+      "function": "register_qualified_freestore_bindings",
+      "file": "src/script/foc/galactic_ai_freestore.cpp",
+      "registrars": {
+        "register_binding": "global",
+        "register_method": "member",
+        "bind": "member"
+      }
+    },
+    {
+      "function": "register_plan_bindings",
+      "file": "src/script/foc/plan_bindings.cpp",
+      "whole_file": true,
+      "registrars": {
+        "add": "global",
+        "method": "member",
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_taskforce",
+      "file": "src/script/foc/plan_bindings.cpp",
+      "whole_file": true,
+      "registrars": {
+        "add": "global",
+        "method": "member",
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_blocks",
+      "file": "src/script/foc/plan_bindings.cpp",
+      "whole_file": true,
+      "registrars": {
+        "add": "global",
+        "method": "member",
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_targets",
+      "file": "src/script/foc/plan_bindings.cpp",
+      "whole_file": true,
+      "registrars": {
+        "add": "global",
+        "method": "member",
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    },
+    {
+      "function": "register_functions",
+      "file": "src/script/foc/plan_bindings.cpp",
+      "whole_file": true,
+      "registrars": {
+        "add": "global",
+        "method": "member",
+        "register_binding": "global",
+        "register_method": "member"
+      }
+    }
+  ],
+  "intentionally_unbound": [
+    "Free_Random",
+    "GameRandom.Free_Random"
+  ]
+}

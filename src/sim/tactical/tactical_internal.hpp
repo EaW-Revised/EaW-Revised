@@ -60,9 +60,13 @@ inline constexpr std::uint8_t opcode_script_invulnerable = 34; // TL-03: Lua Mak
 inline constexpr std::uint8_t opcode_land_garrison = 35;
 inline constexpr std::uint8_t opcode_land_unload = 36;
 inline constexpr std::uint8_t opcode_tactical_superweapon = 37; // TSW-10: the Death Star switch, one listed unit
+inline constexpr std::uint8_t opcode_script_despawn = 40; // #7886: Lua Object.Despawn, engine only.
 inline constexpr std::uint8_t opcode_move_facing = 38; // MV-40: a move that carries a final facing, flags in the payload
 inline constexpr std::uint8_t opcode_script_create_object = 39; // SSU-03, coordinator-reserved
-inline constexpr std::uint8_t max_command_opcode = opcode_script_create_object;
+inline constexpr std::uint8_t opcode_script_teleport = 41; // Lua Teleport_And_Face: target unit
+inline constexpr std::uint8_t opcode_script_hold_fire = 42; // Lua Prevent_All_Fire: enabled flag and zero reserved word
+inline constexpr std::uint8_t opcode_script_change_owner = 43; // Lua Change_Owner: new owner and zero reserved word
+inline constexpr std::uint8_t max_command_opcode = opcode_script_change_owner;
 
 [[nodiscard]] core::Diagnostic diagnostic(
     std::string_view code,

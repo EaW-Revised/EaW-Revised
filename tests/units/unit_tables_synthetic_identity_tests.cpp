@@ -490,6 +490,16 @@ void content_identity() {
             if (field == 4) row.name = "Other_Reveal";
             expect(eawr::units::content_identity(changed) != extended, "WBR-01: each admitted reveal field is identity-bound");
         }
+        // WBR-02..04: the other ledger fields are identity-bound through their own extension, and a closure that
+        // authors none of them keeps the reveal-only encoding.
+        for (unsigned field = 0; field != 4; ++field) {
+            auto changed = reveal; auto& row = changed.units.front().production.battlefield_bonuses.front();
+            if (field == 0) row.stealth_delta = Fixed::from_raw(raw(1) / 2);
+            if (field == 1) row.capture_delta = Fixed::from_raw(-raw(1) / 2);
+            if (field == 2) row.special_weapons = true;
+            if (field == 3) row.reverse = true;
+            expect(eawr::units::content_identity(changed) != extended, "WBR-02..04: each ledger field is identity-bound");
+        }
         reveal.units.front().production.battlefield_bonuses.clear();
         expect(eawr::units::content_identity(reveal) == identity, "WBR-01: clearing the only contribution removes its marker");
     }

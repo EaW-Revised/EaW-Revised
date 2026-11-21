@@ -11,7 +11,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <string>
 #include <mutex>
 #include <optional>
 #include <system_error>
@@ -28,6 +30,7 @@ struct State {
     mods::Profile profile; // immutable mounted layers, read without Godot on service threads
     std::thread worker;
     std::vector<mods::ModRecord> records;
+    std::map<std::string, std::string> installed_names; // every installed mod's title by key, for the Load Game rows
     std::shared_ptr<mods::ContentDigests> digests;
     std::optional<mods::ModDescription> final_description; // set once every digest is settled
 };
@@ -58,7 +61,8 @@ inline void discover_mounted(const std::filesystem::path& game_root, const mods:
                              mods::ContentDigestOptions digest_opts) {
     std::vector<mods::ModRecord> found;
     std::shared_ptr<mods::ContentDigests> digests;
-    if (!profile.layers.empty()) {
+    std::map<std::string, std::string> names;
+    {
         mods::DiscoveryInput input;
         if (!game_root.empty()) {
             input.mods_folder = game_root / "corruption" / "Mods";
@@ -71,10 +75,12 @@ inline void discover_mounted(const std::filesystem::path& game_root, const mods:
         for (const auto& layer : profile.layers) input.manual_folders.push_back(mods::steam::path_from_utf8(layer.root));
         auto catalog = mods::discover(input);
         mods::read_mod_metadata(catalog);
-        digests = std::make_shared<mods::ContentDigests>(std::move(digest_opts));
+        if (!profile.layers.empty()) digests = std::make_shared<mods::ContentDigests>(std::move(digest_opts));
+        for (const auto& record : catalog.records)
+            if (!record.key.empty() && !record.name.empty() && record.name.rfind("Workshop item ", 0) != 0) names.emplace(record.key, record.name);
         for (const auto& layer : profile.layers) {
             // Only the mounted layers are hashed; apply(request=true) queues the background job and returns at once.
-            if (const auto* record = mods::find_chain_record(catalog.records, layer.key)) {
+            if (digests) if (const auto* record = mods::find_chain_record(catalog.records, layer.key)) {
                 auto copy = *record;
                 digests->apply(copy, true);
                 found.push_back(std::move(copy));
@@ -84,6 +90,7 @@ inline void discover_mounted(const std::filesystem::path& game_root, const mods:
     auto& s = state();
     std::lock_guard lock(s.mutex);
     s.records = std::move(found);
+    s.installed_names = std::move(names);
     s.digests = std::move(digests);
     s.discovered = true; // also after a failed or empty discovery: the description is then explicitly incomplete
 }
@@ -120,6 +127,14 @@ inline void shutdown_mounted_mods() {
         digests = std::move(s.digests);
     }
     digests.reset(); // ~ContentDigests cancels the running job and joins its thread
+}
+
+// Title of an installed mod by key; empty when it is not installed, its title is unknown or discovery has not finished.
+[[nodiscard]] inline std::string installed_mod_name(const std::string& key) {
+    auto& s = mounted_mods_detail::state();
+    std::lock_guard lock(s.mutex);
+    const auto found = s.installed_names.find(key);
+    return found == s.installed_names.end() ? std::string{} : found->second;
 }
 
 // One function for every GalacticMode::Options construction site. Cheap: re-reads digest state without touching files,

@@ -131,6 +131,29 @@ core::Result<void> parse_commands(
                 return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-invulnerable payload" + at, logical_path);
             invulnerable.enabled = enabled != 0;
             command.payload = invulnerable;
+        } else if (opcode == detail::opcode_script_despawn) {
+            std::uint32_t despawn_first{}, despawn_second{};
+            if (!reader.read_u32(despawn_first) || !reader.read_u32(despawn_second) || despawn_first != 0 || despawn_second != 0)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-despawn payload" + at, logical_path);
+            command.payload = ScriptDespawnPayload{};
+        } else if (opcode == detail::opcode_script_teleport) {
+            ScriptTeleportPayload teleport;
+            if (!reader.read_u64(teleport.target) || teleport.target == invalid_entity_id)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-teleport payload" + at, logical_path);
+            command.payload = teleport;
+        } else if (opcode == detail::opcode_script_change_owner) {
+            ScriptChangeOwnerPayload change;
+            std::uint32_t change_reserved{};
+            if (!reader.read_u32(change.owner) || !reader.read_u32(change_reserved) || change_reserved != 0)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-change-owner payload" + at, logical_path);
+            command.payload = change;
+        } else if (opcode == detail::opcode_script_hold_fire) {
+            ScriptHoldFirePayload hold;
+            std::uint32_t enabled{}, hold_reserved{};
+            if (!reader.read_u32(enabled) || !reader.read_u32(hold_reserved) || enabled > 1 || hold_reserved != 0)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-hold-fire payload" + at, logical_path);
+            hold.enabled = enabled != 0;
+            command.payload = hold;
         } else if (opcode == detail::opcode_gift) {
             GiftPayload gift;
             std::uint32_t gift_reserved{};

@@ -89,6 +89,95 @@ void GalacticSession::Impl::execute_spy(const GameCommand& command, const Census
     touch_abilities(); ++ability_work.executions;
     event.kind = GalacticEventKind::ability_settled; events.push_back(event);
 }
+// WGCH-39/103..107: ground-activated credit siphon. Admission repeats the opposing-planet predicate, an existing siphon
+// refuses before any draw, and consumption is success-only. The siphon record itself is the planetary economy owner's
+// (WGEP-12/115): this installs its recipient, sampled fraction and deadline and leaves income and expiry to that service.
+void GalacticSession::Impl::execute_siphon(const GameCommand& command, const CensusObject& live,
+    const GalacticAbilityProfile& profile, PlanetId target, std::uint64_t tick, std::vector<GalacticEvent>& events) {
+    const auto actor = live; // successful consumption can erase the canonical actor record
+    GalacticEvent event{tick, GalacticEventKind::command_rejected, command.key.seat, actor.id, command.key.sequence};
+    const auto reject = [&] { event.reason = GalacticRejectReason::unknown_value; events.push_back(event); };
+    if (!profile.siphon || !control || !ability_host || !economy_corruption || !setup.ability_host) return reject();
+    const auto* service = find(ability_host->actors, actor.id, [](const auto& row) { return row.actor; });
+    if (!service || !ground_ability_enabled(profile, *service, AbilityKind::credit_siphon)) return reject();
+    const auto* surface = find(control->planets, target, [](const auto& row) { return row.planet; });
+    auto* economic = find(economy_corruption->planets, target, [](const auto& row) { return row.planet; });
+    if (!surface || !economic || economic->destroyed) return reject();
+    const auto index = static_cast<std::size_t>(surface - control->planets.data());
+    if (index >= control->state.size()) return reject();
+    const auto& allegiance = control->state[index];
+    // WGCH-55/103: not an ally of the planet's target allegiance, and its current allegiance has a playable faction.
+    if (allegiance.target_player == actor.owner || std::any_of(control->relations.begin(), control->relations.end(), [&](const auto& row) {
+        return row.player == actor.owner && row.other == allegiance.target_player && row.allied;
+    })) return reject();
+    const auto* current = find(economy_corruption->players, allegiance.current_player, [](const auto& row) { return row.player; });
+    if (!current || !current->playable) return reject();
+    // WGCH-103: any new siphon is refused while the planet already carries one; this precedes the percentage draw.
+    if (economic->siphon.active) return reject();
+    if (ability_host->next_request == std::numeric_limits<std::uint64_t>::max()
+        || (ability_host->results.size() >= galactic_max_objects
+            && !find(ability_host->results, actor.id, [](const auto& row) { return row.actor; }))) return reject();
+    // WGCH-104: the creation helper needs a source with an immediate parent transport; without one nothing is installed
+    // and the hero is not consumed.
+    const auto parent = actor.container ? actor_records.find(actor.container) : actor_records.end();
+    if (parent == actor_records.end() || parent->second.combat_role != ActorCombatRole::transport) return reject();
+    const auto& ability = *profile.siphon;
+    const auto* original = find(setup.ability_host->profiles, actor.original_type, [](const auto& row) { return row.type; });
+    if (!original) return reject();
+    std::optional<HeroDefeat> defeat;
+    if (ability.causes_despawn) {
+        if (!ability_consumption_handler) return reject();
+        defeat = prepare_ability_defeat(actor, {}, false);
+        if (!defeat) return reject();
+        // A consumed last passenger leaves no transport or fleet to fight. Include its empty carrier in the ordinary
+        // loss commit; retain non-empty carriers.
+        if (movement_inputs) {
+            const auto* contents = find(movement_inputs->contents, actor.container, [](const auto& row) { return row.container; });
+            if (contents && contents->children.size() == 1 && contents->children.front().id == actor.id)
+                defeat->removed_objects.push_back(actor.container);
+        }
+    }
+    // WGCH-39: a generic actor on a planet that auto-captures minor heroes is captured instead: scheduled and removed,
+    // no siphon, deployment false. A planet with no authored flag does not capture (unverified omission default).
+    const auto* content = find(setup.ability_host->theft_planets, target, [](const auto& row) { return row.planet; });
+    if (!original->named && content && content->auto_capture_minor.value_or(false)) {
+        auto captured = prepare_ability_defeat(actor, {}, true);
+        if (!captured || !ability_consumption_handler) return reject();
+        if (!ability_consumption_handler(*captured)) { failed = true; return; }
+        AbilityResult result{ability_host->next_request++, 0, actor.id, target, actor.owner, 0, AbilityOutcome::refused};
+        result.kind = AbilityKind::credit_siphon;
+        put(ability_host->results, std::move(result), [](const auto& row) { return row.actor; });
+        touch_abilities(); ++ability_work.executions;
+        event.kind = GalacticEventKind::ability_settled; events.push_back(event);
+        return;
+    }
+    // WGCH-105: current galactic frame + authored cycles x the fiscal cycle length in frames.
+    const std::uint64_t cycle = setup.rules.fiscal_cycle_frames;
+    if (ability.cycles && cycle > (std::numeric_limits<std::uint64_t>::max() - clock.galactic_frame) / ability.cycles) return reject();
+    // WGCH-39: sample Min..Max (a synchronized draw, taken even for a fixed percentage as the stock smuggler authors).
+    auto draw = economy_draw(*economy_corruption, setup.seed);
+    if (!draw) { failed = true; return; }
+    dirty[static_cast<std::size_t>(StateSection::economy_corruption)] = true;
+    auto width = math::subtract(ability.maximum, ability.minimum);
+    if (!width) { failed = true; return; }
+    auto scaled = math::multiply(width.value(), draw.value());
+    if (!scaled) { failed = true; return; }
+    auto fraction = math::add(ability.minimum, scaled.value());
+    if (!fraction) { failed = true; return; }
+    if (ground_ability_story_handler) {
+        const auto told = ground_ability_story_handler(actor.owner, target, ability.text_identity, ability.hero);
+        if (!told) { failed = true; return; }
+    }
+    economic->siphon.active = true; economic->siphon.recipient = actor.owner; economic->siphon.fraction = fraction.value();
+    economic->siphon.end = clock.galactic_frame + cycle * ability.cycles;
+    // The deployment is the committed fact: an income service or a later status icon reads the planetary record.
+    if (defeat && !ability_consumption_handler(*defeat)) { failed = true; return; }
+    AbilityResult result{ability_host->next_request++, 0, actor.id, target, actor.owner, 0, AbilityOutcome::purchased};
+    result.kind = AbilityKind::credit_siphon;
+    put(ability_host->results, std::move(result), [](const auto& row) { return row.actor; });
+    touch_abilities(); ++ability_work.executions;
+    event.kind = GalacticEventKind::ability_settled; events.push_back(event);
+}
 std::vector<const TheftTechnology*> theft_offer_candidates(const GalacticAbilitySetup& host,
     const ProductionSetup& production, const ProductionPlayer& player, PlayerId actor, std::int64_t current_tech) {
     std::vector<const TheftTechnology*> result;

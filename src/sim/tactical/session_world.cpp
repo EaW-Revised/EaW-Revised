@@ -171,6 +171,7 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                 entry.type_id = state.type_id;
                 entry.owner = state.owner;
                 entry.weapons_enabled = !retreat_holds(state.entity_id) && retreat_state.phase < RetreatPhase::escaping;
+                if (unit.abilities && unit.abilities->deploy_pose) entry.deploy_pose = unit.abilities->deploy_pose;
                 const auto lobby = std::lower_bound(economy.players.begin(), economy.players.end(), state.owner,
                     [](const EconomyPlayer& candidate, const PlayerId id) { return candidate.player < id; });
                 entry.ai_owned = lobby != economy.players.end() && lobby->player == state.owner && lobby->ai;
@@ -226,6 +227,7 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                 }
                 entry.weapon_delay = ability_factor(unit, AbilityModifier::weapon_delay);
                 entry.fire_rate = ion_fire_rate(unit.ion_stun, world.frame); // IS-06
+                entry.hold_fire = unit.hold_fire;
                 // WFR-01: a hardpoint weapon's fire range grows by the summed category winners.
                 if (unit.upgrade_bonuses[6].raw() != 0)
                     entry.fire_range = math::Fixed::from_raw(math::Fixed::scale + unit.upgrade_bonuses[6].raw());
@@ -253,8 +255,13 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                         defence.active_jamming = defence.active_jamming || jammer.jammer_active;
                         defence.jammer_registered = defence.jammer_registered || jammer.jammer_registered;
                     }
-                    if (const auto salvo = ability_slot(profile, AbilityKind::full_salvo)) {
-                        entry.full_salvo = unit.abilities->slots[*salvo].active;
+                    // #7940: only the unit-ability list's entries 0 and 1 are modes: each, while on, picks the
+                    // hardpoint multiplier and gate, and a WEAPONS_ENABLED flag of false silences the unit.
+                    for (std::uint32_t listed = 0; listed < mode_entry_count; ++listed) {
+                        const auto mode = mode_slot(profile, listed);
+                        if (!mode || !unit.abilities->slots[*mode].active) continue;
+                        entry.mode_ability[listed] = profile.abilities[*mode].kind;
+                        if (profile.abilities[*mode].modifiers.weapons_enabled == false) entry.weapons_enabled = false;
                     }
                     if (const auto rocket = ability_slot(profile, AbilityKind::rocket_attack))
                         entry.rocket_attack = unit.abilities->slots[*rocket].active;

@@ -91,6 +91,8 @@ The same release has `windows-x64-debug.zip` (debug symbols and consistency chec
 
 ## Try the space battle with your own Godot (testers and developers)
 
+> **Which Godot?** The supported engine is our patched fork (see [which Godot to use](docs/build.md#which-godot-to-use-our-patched-engine)); the player zip bundles it. The standard Godot below is a tester shortcut: it runs the Safe render thread only, shows `UNPATCHED ENGINE`, and the tests and benchmarks refuse it.
+
 You need your own FoC installation, Python 3.8 or newer, the standard **Godot 4.7.2**
 binary, and a GPU with Vulkan support (Forward+). You do not need a source checkout,
 CMake or a compiler. On Linux the game data can come from an existing Steam/Proton

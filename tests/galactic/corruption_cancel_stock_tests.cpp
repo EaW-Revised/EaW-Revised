@@ -212,7 +212,7 @@ void run(const std::vector<eawr::vfs::MountSpec>& mounts, eawr::data::Profile pr
             << " service_cancelled=" << (service != services.end() && service->corruption_cancelled)
             << " preview_enabled=" << (have && view::ability_preview::enabled(*profile, *service, host, gc::AbilityKind::corruption))
             << " ground_enabled=" << (have && gc::ground_ability_enabled(*profile, *service, gc::AbilityKind::corruption))
-            << " tutorial_allowed=" << host.tutorial_corruption_allowed << " content_planets=" << host.corruption_planets.size()
+            << " content_planets=" << host.corruption_planets.size()
             << " routing:" << routing << '\n';
         const auto* economy = snapshot->economy_corruption();
         int shown = 0;

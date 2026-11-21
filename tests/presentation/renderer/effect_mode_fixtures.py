@@ -122,7 +122,7 @@ def build_effect() -> bytes:
         _emitter("heat", blend=10, texture=glow, heat=True,
                  position=_group(0, point=(0.0, 0.0, 3.0)),
                  velocity=_group(3, sphere=1.0), rgb=(1.0, 1.0, 1.0), rate=8),
-        _emitter("depth-sprite", blend=5, texture=glow,
+        _emitter("depth-sprite", blend=7, texture=glow,
                  position=_group(0, point=(0.0, 0.0, 0.0)),
                  velocity=_group(3, sphere=1.0), rgb=(1.0, 1.0, 1.0), rate=8),
     ])

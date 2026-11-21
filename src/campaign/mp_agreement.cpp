@@ -79,7 +79,7 @@ struct Derived {
 
 // Controller kind a faction has at tick zero: the roster's human sides hold their factions, everyone else is AI.
 core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRoster& roster, const MpSessionTerms& terms,
-    std::span<const std::uint8_t> checkpoint_bytes = {}) {
+    std::span<const std::uint8_t> checkpoint_bytes = {}, checkpoint::RecoveredCheckpoint* recovered = nullptr) {
     using Result = core::Result<Derived>;
     const core::gc_load::Scope derive_scope("mp.derive_local");
     if (!local.data || !local.types) return refuse<Derived>("local content is not loaded");
@@ -169,6 +169,14 @@ core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRost
             return refuse<Derived>("saved_setup_identity_mismatch");
         if (auto valid = checkpoint::check_identities(saved.value().header, identities); !valid)
             return Result::failure(valid.error());
+        if (recovered) {
+            // Only the converted bytes are wanted: no session is restored here.
+            if (!local.recover_history) return refuse<Derived>("history_recovery_unavailable");
+            auto converted = local.recover_history(*out.plan, roster.difficulty, checkpoint_bytes);
+            if (!converted) return Result::failure(converted.error());
+            *recovered = std::move(converted).value();
+            return Result::success(std::move(out));
+        }
         if (local.restore_session) {
             auto prepared = local.restore_session(*out.plan, roster.difficulty, checkpoint_bytes);
             if (!prepared) return Result::failure(prepared.error());
@@ -441,5 +449,26 @@ core::Result<MpAgreement> restore_mp_agreement(const MpLocalContent& local, cons
     auto agreement = agreement_from_derived(local, claims, std::move(derived).value());
     agreement.resume = metadata;
     return Result::success(std::move(agreement));
+}
+
+core::Result<checkpoint::RecoveredCheckpoint> recover_mp_history(const MpLocalContent& local, const gc::MpRoster& roster,
+    const MpSessionTerms& terms, std::span<const std::uint8_t> bytes) {
+    using Result = core::Result<checkpoint::RecoveredCheckpoint>;
+    if (auto valid = gc::validate_mp_roster(roster); !valid) return Result::failure(valid.error());
+    if (bytes.empty()) return refuse<checkpoint::RecoveredCheckpoint>("no saved game to convert");
+    checkpoint::RecoveredCheckpoint recovered;
+    auto derived = derive_local(local, roster, terms, bytes, &recovered);
+    if (!derived && !terms.rules_flavour) {
+        // The same other-flavour retry as restore_mp_agreement: the saved setup names the entry's rules flavour.
+        const auto* entry = local.data ? local.data->campaign(roster.campaign) : nullptr;
+        if (entry && entry->is_multiplayer.value_or(false)) {
+            auto alternate = terms;
+            alternate.rules_flavour = CampaignRulesFlavour::single_player;
+            derived = derive_local(local, roster, alternate, bytes, &recovered);
+        }
+    }
+    if (!derived) return Result::failure(derived.error());
+    if (recovered.bytes.empty()) return refuse<checkpoint::RecoveredCheckpoint>("history_recovery_unavailable");
+    return Result::success(std::move(recovered));
 }
 } // namespace eawr::campaign

@@ -3,6 +3,7 @@
 #include "eawr/core/result.hpp"
 #include "eawr/sim/math/fixed.hpp"
 #include "eawr/sim/tactical/types.hpp"
+#include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/damage.hpp"
 
 #include <cstdint>
@@ -316,6 +317,12 @@ struct CorruptSystemsState {
     friend bool operator==(const CorruptSystemsState&, const CorruptSystemsState&) = default;
 };
 
+// #7940: only entries 0 and 1 of a type's unit-ability list (its primary and secondary ability) count for the
+// mode multipliers, mode flags and hardpoint mode gates. `unlisted` marks a profile built without a source list:
+// its rows then count by their position in the profile.
+inline constexpr std::uint32_t unlisted_entry = ~std::uint32_t{0};
+inline constexpr std::uint32_t mode_entry_count = 2;
+
 // One Unit_Ability of a type (content, neither replay data nor state).
 struct AbilityProfile {
     AbilityKind kind{AbilityKind::none};
@@ -358,6 +365,9 @@ struct AbilityProfile {
     bool market_purchase_required{}; // WGEP-145
     bool nested_market_purchase_required{};
     std::string nested_market_name{};
+    // #7940: this row's position in the type's authored unit-ability list (a type authored twice counts at its
+    // first position), counting rows the remake does not model; `unlisted_entry` when the profile was not built from a list.
+    std::uint32_t list_entry{unlisted_entry};
     friend bool operator==(const AbilityProfile&, const AbilityProfile&) = default;
 };
 
@@ -374,6 +384,7 @@ struct UnitAbilityProfile {
     // in the ability service (as the DEFEND stand-in of AB-41).
     bool self_destruct_script{};
     bool mc30_script{}; // FS-29: visible CLUSTER_BOMB object-script consumer only.
+    bool deploy_poses{}; // WDP-02: the type's combat profile holds a deploy pose table; set by the loader.
     std::vector<std::uint32_t> gravity_well_hardpoints{}; // WIN-02: authored hardpoint indices
     std::uint32_t stealth_detection_frames{30}; // WST-09: trunc(GameConstants seconds x 30), default 1 s.
     // PU-08: income names participate in WHD-05 without allocating timed-handler slots.
@@ -389,6 +400,8 @@ struct UnitAbilityProfile {
 using NamedAbilityLocks = std::map<std::tuple<PlayerId, TypeId, std::string>, bool, std::less<>>;
 [[nodiscard]] bool set_named_ability_lock(NamedAbilityLocks&, PlayerId, const UnitAbilityProfile&,
     std::string_view name, bool locked);
+// WRAD-06: whether a retained lock row exists for the owner, exact type and name (case-insensitive).
+[[nodiscard]] bool has_named_ability_lock(const NamedAbilityLocks&, PlayerId, TypeId, std::string_view name);
 [[nodiscard]] bool named_ability_enabled(const NamedAbilityLocks&, PlayerId, TypeId,
     const SpecialAbilityProfile&);
 [[nodiscard]] bool named_ability_enabled(const NamedAbilityLocks&, PlayerId, TypeId,
@@ -512,6 +525,8 @@ struct AbilityState {
     std::optional<SelfDestructScript> self_destruct_script{};
     std::optional<ChargedBlastState> charged_blast{}; // optional canonical BLST block
     std::optional<Mc30Script> mc30_script{};
+    // WDP-02: the deploy clip running on a unit whose type has a pose table; hashed only while present (DEPP block).
+    std::optional<DeployPoseState> deploy_pose{};
     SeatId pending_buzz_controller{}; // ADR-020: initiating seat survives an admitted delayed request.
     friend bool operator==(const AbilityState&, const AbilityState&) = default;
 };
@@ -551,6 +566,10 @@ void service_charged_blast(std::optional<ChargedBlastState>&, std::uint32_t elig
 
 // The slot of `kind` in the profile, if the type has it.
 [[nodiscard]] std::optional<std::size_t> ability_slot(const UnitAbilityProfile& profile, AbilityKind kind) noexcept;
+// #7940: whether the profile's row `index` is entry 0 or 1 of the type's unit-ability list.
+[[nodiscard]] bool counts_for_mode(const UnitAbilityProfile& profile, std::size_t index) noexcept;
+// #7940: the profile row that is entry `entry` (0 or 1) of the type's unit-ability list, if it has one.
+[[nodiscard]] std::optional<std::size_t> mode_slot(const UnitAbilityProfile& profile, std::uint32_t entry) noexcept;
 // WIN-02, WMS-02: simultaneous deployments retain their own movement locks.
 [[nodiscard]] bool ability_movement_disabled(const UnitAbilityProfile& profile, const AbilityState& state) noexcept;
 

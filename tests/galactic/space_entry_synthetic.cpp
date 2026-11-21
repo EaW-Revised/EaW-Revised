@@ -758,6 +758,61 @@ void admitted_cycle() {
     admitted_station_cycle(true);
 }
 
+// SK #7886: a mod's station add-on slots. Each add-on type has its own marker (a "Marker_For_Specific_Object_Type" list),
+// every one authored at the station marker's own pose, and the add-on's model carries its offset (a rotated bone), so an
+// add-on is attached by sharing the station pose. The map has no generic orbital marker.
+void station_addon_slot_contract() {
+    auto tables = tables_for_entry();
+    const auto pad = *std::find_if(tables.units.begin(), tables.units.end(), [](const auto& t) { return t.id == "Pad"; });
+    for (const auto* name : {"Yard1", "Yard2", "Yard3"}) {
+        auto yard = pad; yard.id = name; yard.movement.layer_z_adjust = whole(-50);
+        tables.units.push_back(yard);
+    }
+    auto input = entry_inputs(tables);
+    const Vec3 station_position{whole(-2268), whole(1013), whole(-39)};
+    const Vec3 station_facing{whole(2), {}, {}};
+    auto slot = [&](std::uint32_t record, const char* name) {
+        auto p = marker(record, name, 0); p.position = station_position; p.orientation_degrees = station_facing; return p;
+    };
+    input.map.placements = {marker(1, "Attacker Entry Position", -1000), marker(2, "Defending Forces Position", 1000),
+        slot(3, "Space Station Position"), slot(4, "Yard 3 Marker"), slot(5, "Yard 2 Marker"), slot(6, "Yard 1 Marker")};
+    for (std::uint32_t i = 4; i <= 6; ++i) {
+        const auto number = 7 - i; // markers are listed 3, 2, 1 in the map, like the mod's own map
+        input.map.placements[i - 1].marker_for.push_back({"Yard" + std::to_string(number), {}});
+    }
+    input.types.erase(std::remove_if(input.types.begin(), input.types.end(), [](const auto& t) { return t.galactic == 7; }), input.types.end());
+    input.structures.clear();
+    for (gc::TypeId i = 1; i <= 3; ++i) {
+        campaign::SpaceEntryType type; type.galactic = 20 + i; type.tactical = "Yard" + std::to_string(i);
+        type.orbital = true; type.base_position = "Orbital";
+        input.types.push_back(type);
+        input.structures.push_back({40 + i, 20 + i, 2, {}});
+    }
+    campaign::ConflictRecord record; record.id = 90; record.invader = 1; record.defender = 2;
+    record.station_level = 2; record.map_identity = input.map.map;
+    record.forces = {{20, 1, 1, 10}, {21, 2, 1, 10}, {22, 1, 1, 10}, {23, 3, 1, 10}, {30, 1, 2, 12}};
+    const auto plan = take(campaign::prepare_space_entry(record, input, 100, 17));
+    expect(plan.structure_markers == std::vector<std::pair<sim::EntityId, std::uint32_t>>{{41, 6}, {42, 5}, {43, 4}},
+        "station add-ons: every slot takes the marker that names its own type");
+    const auto entry = take(campaign::build_space_entry(record, input, 100, 17));
+    const auto station = std::find_if(entry.start.units.begin(), entry.start.units.end(), [&](const auto& u) {
+        return u.state.entity_id == entry.conflict.station; });
+    expect(station != entry.start.units.end(), "station add-ons: the station is in the scene");
+    for (const sim::EntityId parent : {41U, 42U, 43U}) {
+        const auto force = std::find_if(entry.conflict.forces.begin(), entry.conflict.forces.end(), [&](const auto& f) { return f.parent == parent; });
+        expect(force != entry.conflict.forces.end(), "station add-ons: each slot is created");
+        if (force == entry.conflict.forces.end() || station == entry.start.units.end()) continue;
+        const auto unit = std::find_if(entry.start.units.begin(), entry.start.units.end(), [&](const auto& u) { return u.state.entity_id == force->id; });
+        expect(unit != entry.start.units.end(), "station add-ons: each slot enters the scene");
+        if (unit == entry.start.units.end()) continue;
+        expect(unit->state.position.x == station->state.position.x && unit->state.position.y == station->state.position.y
+            && unit->state.position.x == station_position.x && unit->state.position.y == station_position.y,
+            "station add-ons: every add-on sits on the station's own marker position");
+        expect(unit->state.rotation == station->state.rotation,
+            "station add-ons: every add-on keeps the station's facing, so a model's own offset attaches it");
+    }
+}
+
 void preparation_contracts() {
     {   // CGS-22: only a missing variant base or an undefined name is skippable; other resolve failures still refuse prepare.
         core::Diagnostic missing_base; missing_base.code = std::string(data::diagnostic_codes::variant_missing_base);

@@ -1159,6 +1159,54 @@ void test_neutral_reveal_content_resumes_like_uninterrupted() {
     }
 }
 
+void test_battlefield_special_weapon_sources() {
+    // WBR-03: a live source that enables special weapons reaches its owner, and its allies with Apply_To_All_Allies;
+    // removing the source removes the permission.
+    for (const auto scenario : {0U, 1U}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup initial;
+            initial.players = {{1, 0, 1, 1}, {2, 1, 2, 1}, {3, 0, 1, 1}};
+            initial.units = {{1, 10, 1, at(5000, 0)}, {10, 20, 1, at(0, 0)}, {11, 20, 3, at(1000, 0)}, {12, 20, 2, at(2000, 0)}};
+            tactical::TacticalContent content;
+            content.sensors = {{20, units(100)}};
+            content.economy.players = {{1, units(100), 20}, {2, units(100), 20}, {3, units(100), 20}};
+            tactical::CommandBonusProfile row;
+            row.type = 10; row.bonus.applicable = {10}; row.battlefield = true; row.apply_to_self = true;
+            row.all_allies = scenario == 1; row.enabled_players = {1, 2, 3}; row.special_weapons = true;
+            content.economy.command_bonuses = {row};
+            auto made = tactical::TacticalSession::create(initial, content);
+            expect(static_cast<bool>(made), "WBR-03: special-weapon source session creates");
+            if (!made) continue;
+            auto world = std::move(made).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            const auto permission = [&](const std::size_t index) { return world.snapshot()->economy()[index].special_weapons_enabled; };
+            expect(permission(0) && !permission(1) && permission(2) == (scenario == 1),
+                "WBR-03: owner, and allies only with Apply_To_All_Allies; never an enemy");
+            std::vector<std::string> hashes{world.state_sha256(), world.snapshot()->sha256()};
+            {
+                const auto saved = world.save_checkpoint_state();
+                auto fresh = tactical::TacticalSession::create(initial, content);
+                expect(saved && fresh, "WBR-03: checkpoint saves and the factory creates");
+                if (saved && fresh) {
+                    auto restored = std::move(fresh).value();
+                    expect(static_cast<bool>(restored.load_checkpoint_state(saved.value())), "WBR-03: checkpoint loads");
+                    expect(restored.state_sha256() == world.state_sha256() && restored.snapshot()->sha256() == world.snapshot()->sha256(),
+                        "WBR-03: the restored ledger equals the live one");
+                    expect(static_cast<bool>(world.stage_remove(1)) && static_cast<bool>(restored.stage_remove(1))
+                        && static_cast<bool>(world.step(executor)) && static_cast<bool>(restored.step(executor)),
+                        "WBR-03: source retirement commits on both");
+                    expect(restored.state_sha256() == world.state_sha256(), "WBR-03: retirement leaves resumed and live state equal");
+                }
+                expect(!permission(0) && !permission(1) && !permission(2), "WBR-03: removing the source removes the permission");
+                hashes.push_back(world.state_sha256());
+            }
+            if (reference.empty()) reference = hashes;
+            expect(hashes == reference, "WBR-03: the source lifecycle is equal on 1/2/4/8 workers");
+        }
+    }
+}
+
 } // namespace
 
 using namespace economy_test_support;
@@ -1178,6 +1226,7 @@ int main(const int argc, char** argv) {
     expect(tactical::reinforcement_inside_bounds(bounds, at(-10, 20)), "WR-23: playable bounds include equality");
     expect(!tactical::reinforcement_inside_bounds(bounds, at(11, 0)), "WR-23: outside playable bounds is refused");
     test_battlefield_reveal_sources();
+    test_battlefield_special_weapon_sources();
     test_neutral_reveal_content_resumes_like_uninterrupted();
     test_controller_respawn_attribution();
     test_controller_output_attribution();
@@ -1195,6 +1244,7 @@ int main(const int argc, char** argv) {
     test_cancel_entry();
     test_station_lost();
     test_reinforce_ship();
+    test_script_change_owner_population();
     test_reinforced_carrier();
     test_arrival_hits();
     test_arrival_services();

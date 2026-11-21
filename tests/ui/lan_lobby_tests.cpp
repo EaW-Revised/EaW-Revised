@@ -659,6 +659,52 @@ void galactic_content_gate_checks() {
         "the count never runs past the total");
 }
 
+// Owner 2026-11-19: no button stays greyed without a plain reason. The wait line names the first thing the room waits for.
+// Owner 2026-11-19: each player's mod check shows next to the name in the room list, and is silent until someone reported it.
+void mod_check_tag_shows_each_players_state() {
+    expect(ui::mod_check_tag(false, false).empty() && ui::mod_check_tag(false, true).empty(), "an unreported state shows nothing");
+    expect(ui::mod_check_tag(true, false) == " - checking mods...", "a player still checking");
+    expect(ui::mod_check_tag(true, true) == " - mods ready", "a player done");
+    // #8020: the shorter forms of the same note, for a cell too small for the first.
+    const auto done = ui::mod_check_tag_tiers(true, true);
+    const auto checking = ui::mod_check_tag_tiers(true, false);
+    expect(done[0] == ui::mod_check_tag(true, true) && checking[0] == ui::mod_check_tag(true, false), "the first form is the room list's");
+    expect(done[1].size() < done[0].size() && done[2].size() < done[1].size(), "each form is shorter than the one before");
+    expect(checking[1].size() < checking[0].size() && checking[2].size() < checking[1].size(), "the checking forms shrink too");
+    expect(ui::mod_check_tag_tiers(false, true)[0].empty() && ui::mod_check_tag_tiers(false, false)[2].empty(), "an unreported state shows nothing in any form");
+}
+
+void wait_line_names_what_the_lobby_waits_for() {
+    ui::LobbyWaitInput none;
+    expect(ui::lobby_wait_line(none).empty(), "nothing waits: no line");
+    ui::LobbyWaitInput room;
+    room.checking_mods = {"Fordo #2"};
+    expect(ui::lobby_wait_line(room) == "Waiting for Fordo #2 to finish checking mods...", "one player still checking mods");
+    room.checking_mods = {"Ann", "Bob"};
+    expect(ui::lobby_wait_line(room) == "Waiting for Ann and Bob to finish checking mods...", "two players");
+    room.checking_mods = {"Ann", "Bob", "Cy", "Di"};
+    expect(ui::lobby_wait_line(room) == "Waiting for Ann, Bob and 2 more to finish checking mods...", "more than two are counted");
+    room.checking_mods = {""};
+    expect(ui::lobby_wait_line(room) == "Waiting for a player to finish checking mods...", "a nameless seat is still named");
+    room.loading_saved_game = {"Fordo #2"};
+    expect(ui::lobby_wait_line(room).find("checking mods") != std::string::npos, "the mod check comes before the saved game load");
+    room.checking_mods.clear();
+    expect(ui::lobby_wait_line(room) == "Waiting for Fordo #2 to load the saved game...", "a guest still loading the saved game");
+    room.start_off = "Waiting for every player to accept the current setup.";
+    expect(ui::lobby_wait_line(room) == "Waiting for Fordo #2 to load the saved game...", "the Start reason never hides a waiting player");
+    room.loading_saved_game.clear();
+    expect(ui::lobby_wait_line(room) == "Waiting for every player to accept the current setup.", "the Start reason shows when nothing else waits");
+    room.loading_saved_game = {"Fordo #2"}; room.start_off.clear();
+    room.content_loading = "Loading campaign content...";
+    expect(ui::lobby_wait_line(room) == "Loading campaign content...", "content loading comes before other players");
+    room.restoring = "Restoring saved game... please wait (2:10)";
+    expect(ui::lobby_wait_line(room) == "Restoring saved game... please wait (2:10)", "the host's own restore comes before it");
+    room.preparing = "Preparing the campaign (0:20)";
+    expect(ui::lobby_wait_line(room) == "Preparing the campaign (0:20)", "the preparation comes before the restore");
+    room.own_mod_check = "Checking mod files (10 of 20)";
+    expect(ui::lobby_wait_line(room) == "Checking mod files (10 of 20)", "a player's own mod check comes first");
+}
+
 // Owner (net-3): the online campaign preparation posted a chat line every second. A status that only counts on reaches
 // chat once when it starts (at most once per 30 s while it is not shown in place); a different line still posts at once.
 std::size_t chat_lines_with(const ui::ChatLog& log, std::string_view text) {
@@ -751,6 +797,8 @@ int main() {
     }
     acceptance_lobby_retries();
     galactic_content_gate_checks();
+    wait_line_names_what_the_lobby_waits_for();
+    mod_check_tag_shows_each_players_state();
     list_and_sort();
     filtering();
     row_text();

@@ -504,8 +504,7 @@ core::Result<RejectReason> session_detail::Tick::apply_object_turn_use(const Obj
     const auto switched = activate_ability(ability, slot, impl_->ability_gate(*unit, tick), tick);
     if (!switched.changed) return Result::success(RejectReason::ability_unavailable);
     if (use.ability == AbilityKind::sensor_jamming) {
-        impl_->jammer_reactivated(*unit, ability);
-        register_jammer(unit->state.entity_id, true);
+        if (impl_->jammer_reactivated(*unit, ability)) register_jammer(unit->state.entity_id, true); // WJM-05
     }
     if (use.ability == AbilityKind::defend) impl_->defend_switched_on(*unit, tick);
     if (use.ability == AbilityKind::self_destruct) Impl::self_destruct_switched(*unit);

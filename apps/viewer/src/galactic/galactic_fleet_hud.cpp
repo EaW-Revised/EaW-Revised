@@ -660,7 +660,7 @@ void GalacticMode::State::rebuild_ground_badges() {
             auto* button = memnew(EawrHudButton);
             button->set_sounds(*style, [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
             button->set_name(String::utf8(("ground_presence_" + std::to_string(planet.id)).c_str()));
-            world_overlays->add_child(button); badge.button = button;
+            add_planet_overlay(planet.id, button); badge.button = button;
             badge.ship = memnew(TextureRect);
             badge.ship->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
             badge.ship->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
@@ -788,7 +788,7 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
             if (const auto* component = command_catalog.find("g_planet_fleet"))
                 button->set_sounds(*component, [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
             button->set_name(String::utf8(("fleet_presence_" + std::to_string(planet) + "_" + std::to_string(icon.icon)).c_str()));
-            world_overlays->add_child(button); badge.button = button;
+            add_planet_overlay(planet, button); badge.button = button;
             badge.ship = memnew(TextureRect);
             badge.ship->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
             badge.ship->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
@@ -1222,12 +1222,17 @@ void GalacticMode::State::update_fleet_badges(const galactic_view::ObjectId plan
                 button = memnew(EawrHudButton);
                 button->set_name(String::utf8(("fleet_empty_slot_" + std::to_string(icon)).c_str()));
                 button->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-                world_overlays->add_child(button);
                 button->set_texture_normal(command_texture(stacks.front()));
                 if (content) if (const auto owner = content->factions.find(galaxy->local.player);
                     owner != content->factions.end() && owner->second.present)
                     button->set_self_modulate(Color(owner->second.primary.r, owner->second.primary.g, owner->second.primary.b, 1.0F));
                 if (fleet_drag_receiver) hud->move_child(fleet_drag_receiver, hud->get_child_count() - 1);
+            }
+            // #7809: the drop slots belong to the drag target planet's group, so its depth and occluders apply.
+            if (auto* group = planet_ui_group(planet); button->get_parent() != group) {
+                if (button->get_parent()) button->get_parent()->remove_child(button);
+                button->set_use_parent_material(true);
+                group->add_child(button);
             }
             static_cast<void>(place(button, icon));
             button->set_modulate(Color(1, 1, 1, alpha));

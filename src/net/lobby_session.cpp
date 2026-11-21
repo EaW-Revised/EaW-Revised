@@ -404,7 +404,7 @@ core::Result<LobbyFrame> decode_lobby_frame(std::span<const std::uint8_t> bytes)
         if (bytes.size() > max_lobby_frame_bytes) throw std::runtime_error("oversized room frame");
         Reader in{bytes, 0};
         const auto kind = in.u8();
-        if (in.u32() != lobby_wire_version) throw std::runtime_error("unsupported room protocol version; this build needs version 5 (skirmish content admission)");
+        if (in.u32() != lobby_wire_version) throw std::runtime_error("unsupported room protocol version; this build needs version 6 (per-player mod review report)");
         auto room = in.text(64);
         if (!valid_room(room)) throw std::runtime_error("invalid room identifier");
         LobbyFrame result;
@@ -562,6 +562,9 @@ struct LobbyRuntime {
     std::uint64_t admission_refusal_since{};
     std::deque<LobbyChat> history;
     std::uint64_t chat_sequence{};
+    // Oldest room revision a guest's own-seat choice may still be applied against (#7891). Guest self-edits, joins and
+    // leaves keep it; every other change (game, host reassignment, Start cancel, application edits) raises it to the new revision.
+    std::uint64_t rebase_floor{};
     std::uint32_t next_seat{2};
     std::map<PeerIndex, std::string> identities;
     std::set<std::string> denied;
@@ -669,10 +672,11 @@ struct LobbyRuntime {
         return send(state.host, claim);
     }
     core::Result<void> fail_setup_creation(const core::Diagnostic& error);
-    core::Result<void> advance() {
+    core::Result<void> advance(bool keeps_floor = false) {
         if (state.revision == std::numeric_limits<std::uint64_t>::max())
             return failure<void>(LobbyReason::resource_limit, "room revision exhausted");
-        ++state.revision; return core::Result<void>::success();
+        ++state.revision; if (!keeps_floor) rebase_floor = state.revision;
+        return core::Result<void>::success();
     }
     void clear_ready() { for (auto& value : state.seats) value.ready = false; }
     // Ready rule (docs/net-online-lobby.md, Ready): a seat is unreadied only when its own match-affecting choice
@@ -724,7 +728,7 @@ struct LobbyRuntime {
     core::Result<void> reject(PeerIndex peer, const core::Diagnostic& error, LobbyReason reason) {
         return send(peer, LobbyRejected{{state.room, state.revision, reason, sanitize_lobby_text(error.message, 512)}});
     }
-    core::Result<void> edit(PeerIndex peer, LobbySelection selection, sim::tactical::PlayerId player) {
+    core::Result<void> edit(PeerIndex peer, LobbySelection selection, sim::tactical::PlayerId player, bool keeps_floor = false) {
         const auto* previous = seat(peer);
         if (!previous) return failure<void>(LobbyReason::authority, "peer has no admitted seat");
         auto candidate = state;
@@ -733,9 +737,13 @@ struct LobbyRuntime {
         updated.selection = clean_selection(std::move(selection)); updated.player = player;
         if (updated == *previous) return core::Result<void>::success();
         if (hooks.follow_choice) if (auto followed = hooks.follow_choice(state, candidate, peer); !followed) return followed;
+        // A choice that also moved another seat or the game is not a plain self-edit: later stale requests must not rebase over it.
+        bool own_only = candidate.game == state.game && candidate.seats.size() == state.seats.size();
+        for (std::size_t i = 0; own_only && i < state.seats.size(); ++i)
+            if (i != index && (candidate.seats[i].selection != state.seats[i].selection || candidate.seats[i].player != state.seats[i].player)) own_only = false;
         clear_changed_ready(state.seats, candidate.seats);
         if (auto valid = validate(candidate); !valid) return valid;
-        if (auto advanced = advance(); !advanced) return advanced;
+        if (auto advanced = advance(keeps_floor && own_only); !advanced) return advanced;
         candidate.revision = state.revision; state = std::move(candidate); return broadcast(state);
     }
     core::Result<void> drop(PeerIndex peer, LobbyReason reason, bool deny, std::string notice_text = "seat removed from room") {
@@ -759,7 +767,7 @@ struct LobbyRuntime {
             return terminal(LobbyReason::link_closed, "committed room peer lost before handoff");
         }
         if (state.phase == LobbyPhase::closed) return core::Result<void>::success();
-        if (auto advanced = advance(); !advanced) return advanced;
+        if (auto advanced = advance(true); !advanced) return advanced;
         return broadcast(state);
     }
     bool budget(std::map<PeerIndex, std::deque<std::uint64_t>>& windows, PeerIndex peer) {
@@ -773,9 +781,12 @@ struct LobbyRuntime {
         if (!local) return failure<void>(LobbyReason::authority, "peer has no admitted seat");
         if (!budget(request_times, peer)) return failure<void>(LobbyReason::resource_limit, "room request rate exceeded");
         if (value.action == LobbyAction::snapshot) return peer == transport->self() ? core::Result<void>::success() : send(peer, state);
-        if (auto valid = allowed(value.revision, false, value.action == LobbyAction::unready || value.action == LobbyAction::leave); !valid) return valid;
+        // A guest's own-seat choice made against an older revision is applied when only guest self-edits, joins and
+        // leaves happened since (#7891): the host validates the result against the current room, so a real conflict still refuses.
+        const bool rebased = value.action == LobbyAction::select && value.revision < state.revision && value.revision >= rebase_floor;
+        if (auto valid = allowed(rebased ? state.revision : value.revision, false, value.action == LobbyAction::unready || value.action == LobbyAction::leave); !valid) return valid;
         switch (value.action) {
-        case LobbyAction::select: return edit(peer, value.selection, local->player);
+        case LobbyAction::select: return edit(peer, value.selection, local->player, true);
         case LobbyAction::ready:
             if (auto valid = validate(state, true); !valid) return valid;
             if (local->ready) return core::Result<void>::success();
@@ -982,8 +993,10 @@ struct LobbyRuntime {
                 if (!applied) {
                     if (!seat(raw.from)) return core::Result<void>::success();
                     const bool budget_exhausted = applied.error().code == lobby_diagnostic(LobbyReason::resource_limit, "").code;
+                    const bool stale_and_unrebasable = request->revision != state.revision
+                        && !(request->action == LobbyAction::select && request->revision < state.revision && request->revision >= rebase_floor);
                     const auto reason = budget_exhausted ? LobbyReason::resource_limit
-                        : (request->revision != state.revision ? LobbyReason::stale_revision : LobbyReason::invalid_choice);
+                        : (stale_and_unrebasable ? LobbyReason::stale_revision : LobbyReason::invalid_choice);
                     if (auto rejected = reject(raw.from, applied.error(), reason); !rejected) return rejected;
                     if (reason == LobbyReason::stale_revision && seat(raw.from)) return send(raw.from, state);
                     return core::Result<void>::success();
@@ -1117,7 +1130,7 @@ core::Result<void> LobbySession::admit(PeerIndex peer, std::string identity, Lob
     auto candidate = value.state;
     candidate.seats.push_back({peer, sim::SeatId{value.next_seat}, player, clean_selection(std::move(selection)), false});
     if (auto valid = value.validate(candidate); !valid) return valid;
-    if (auto advanced = value.advance(); !advanced) return advanced;
+    if (auto advanced = value.advance(true); !advanced) return advanced;
     candidate.revision = value.state.revision; value.state = std::move(candidate); ++value.next_seat; value.identities.emplace(peer, std::move(identity));
     return value.broadcast(value.state);
 }

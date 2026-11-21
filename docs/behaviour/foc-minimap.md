@@ -73,7 +73,7 @@ Output: the minimap image inside the radar mesh; camera moves and move orders fr
   right click). A left double click also points the camera and ends a tethered camera.
 - MM-12 (MME-2, supplemented by WNO-41/44). A live unit requires radar type permission and
   local visibility or active interdiction; enemy radar permission, jamming, stealth and nebula
-  exclusions still apply. `Visible_On_Radar_When_Fogged` and replay bypass only hidden-model
+  exclusions still apply. The radar permission requirement applies to a player that has a radar permission list or, outside a campaign battle, is taken to have an empty one (WRAD-06); a single-player campaign battle has no such list, so enemies stay on the minimap under the ordinary gates. `Visible_On_Radar_When_Fogged` and replay bypass only hidden-model
   and radar-fade rejection. Previously revealed retained fog models use a separate remembered
   radar pass, never a live target. Asteroid fields, ion storms and nebulae never show as ordinary
   blips. Capture colours follow WNO-43, including raw-fog Neutral colour and capture progress,

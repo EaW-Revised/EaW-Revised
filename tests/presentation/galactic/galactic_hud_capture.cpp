@@ -471,6 +471,10 @@ bool CaptureHudFixture::corruption(GalacticMode::State& state) {
     auto& corruption_menu = state.corruption_menu;
     if (options.campaign == galactic_view::synthetic_campaign && galactic_view::corruption_fixture(options.hud_fixture)) {
         corruption_menu.fixture = galactic_view::corruption_fixture_snapshot(galaxy->local.player, options.hud_fixture);
+        if (options.hud_fixture.starts_with("corruption-hover")) {
+            state.corruption_hovercard.fixture = corruption_menu.fixture;
+            corruption_menu.fixture.reset();
+        }
         production_names.insert({{1000,"Rebel_Trooper_Team"},{1001,"Corellian_Corvette"},
             {2000,"Coruscant"},{2001,"Naboo"}});
         corruption_menu.briefing_keys = {{90,"TEXT_CORRUPTION_CORUSCANT_STORY_BRIBERY"},
@@ -727,6 +731,7 @@ bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
                 && options.hud_fixture != "corruption-gaps" && options.hud_fixture != "corruption-locked"
                 && options.hud_fixture != "corruption-no-mission-service" && options.hud_fixture != "corruption-republish"
                 && options.hud_fixture != "corruption-info" && options.hud_fixture != "corruption-info-empty"
+                && !options.hud_fixture.starts_with("corruption-hover")
                 && options.hud_fixture != "theft"&& options.hud_fixture != "theft-single" && options.hud_fixture != "theft-many"
                 && options.hud_fixture != "neutralization" && options.hud_fixture != "hack" && options.hud_fixture != "hack-poor"
                 && options.hud_fixture != "hack-fractional"
@@ -745,6 +750,7 @@ bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
         fact.planet = 101; fact.discovered = true; fact.display_name = "Synthetic Alpha";
         fact.name_colour = {185.0F / 255.0F, 40.0F / 255.0F, 39.0F / 255.0F};
         fact.surface_accessible = options.hud_fixture == "accessible";
+        if (options.hud_fixture.starts_with("corruption-hover")) fact.local_benefits_from_corruption = true;
         if (options.hud_fixture == "corruption-icons") {
             // WGCI-1: three corrupted planets that each publish a corruption type (sim types 6 bribery, 2 piracy, 5 corrupt militia).
             fact.corrupted = true; fact.corruption_type = 6;

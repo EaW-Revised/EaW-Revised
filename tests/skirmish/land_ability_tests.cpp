@@ -819,13 +819,16 @@ Scene make_movement_scene(const std::shared_ptr<const LandTerrain>& terrain, con
     scene.content.land.spread_out_spacing = Fixed::from_ratio(9, 5).value();
     for (auto& ability : scene.content.abilities.profiles[0].abilities) { // member A: the table is ascending by type
         if (ability.kind == AbilityKind::sprint) {
+            ability.list_entry = 0; // AB-20: only a type's first two listed abilities carry mode multipliers
             ability.modifiers.speed = Fixed::from_ratio(3, 2).value(); ability.modifiers.take_damage = Fixed::from_ratio(1, 2).value();
         } else if (ability.kind == AbilityKind::stim_pack) {
+            ability.list_entry = 1;
             ability.modifiers.speed = whole(2); ability.modifiers.weapon_delay = Fixed::from_ratio(1, 2).value();
             ability.activation_damage = stim_share;
         }
     }
     auto maximum = row(AbilityKind::maximum_firepower, 4, 30);
+    maximum.list_entry = 0;
     maximum.modifiers.weapon_delay = Fixed::from_ratio(3, 10).value(); maximum.modifiers.allow_target_diminishing_firepower = false;
     scene.content.abilities.profiles[2].abilities.push_back(maximum); // member B
     return scene;

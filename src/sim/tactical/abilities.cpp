@@ -237,6 +237,11 @@ bool set_named_ability_lock(NamedAbilityLocks& locks, const PlayerId owner, cons
     return true;
 }
 
+bool has_named_ability_lock(const NamedAbilityLocks& locks, const PlayerId owner, const TypeId type,
+    const std::string_view name) {
+    return locks.find(std::tuple{owner, type, lock_name(name)}) != locks.end();
+}
+
 bool named_ability_enabled(const NamedAbilityLocks& locks, const PlayerId owner, const TypeId type,
     const SpecialAbilityProfile& special) {
     return named_ability_enabled(locks, owner, type, lock_name(special.name), special.initially_enabled.value_or(true));
@@ -779,6 +784,13 @@ bool ability_ready(const AbilityProfile& profile, const AbilitySlot& slot, const
     return true;
 }
 
+// AB-20 (#7940): a speed change only moves the unit's speed when the ability sits at list entry 0 or 1. A profile not
+// built from a list (unlisted entry) keeps the earlier behaviour: the ability may count, so the replan stays on.
+static bool speed_switches(const AbilityProfile& profile) noexcept {
+    return profile.modifiers.speed.raw() != one_raw
+        && (profile.list_entry == unlisted_entry || profile.list_entry < mode_entry_count);
+}
+
 AbilitySwitch activate_ability(const AbilityProfile& profile, AbilitySlot& slot, const AbilityGate& gate,
     const std::uint64_t tick) noexcept {
     if (slot.active || !ability_ready(profile, slot, gate, tick)) return {};
@@ -787,7 +799,7 @@ AbilitySwitch activate_ability(const AbilityProfile& profile, AbilitySlot& slot,
     slot.expires_tick = profile.expiration_frames != 0 ? tick + profile.expiration_frames : 0;
     // WLD-06: LASER_DEFENSE starts its countdown to the next use now, whatever happens to the run.
     if (profile.recharge_at_activation) slot.ready_tick = tick + profile.recharge_frames;
-    return {true, profile.modifiers.speed.raw() != one_raw};
+    return {true, speed_switches(profile)};
 }
 
 AbilitySwitch deactivate_ability(const AbilityProfile& profile, AbilitySlot& slot, const std::uint64_t tick) noexcept {
@@ -795,7 +807,7 @@ AbilitySwitch deactivate_ability(const AbilityProfile& profile, AbilitySlot& slo
     slot.active = false;
     if (profile.recharge_at_activation) { // WLD-06: switching off early changes nothing about the countdown
         slot.expires_tick = 0;
-        return {true, profile.modifiers.speed.raw() != one_raw};
+        return {true, speed_switches(profile)};
     }
     // AB-12: an ability without a running time limit ends without a recharge; one ended early
     // recharges for the share of its duration that ran, rounded half up (none in its first tick).
@@ -806,7 +818,7 @@ AbilitySwitch deactivate_ability(const AbilityProfile& profile, AbilitySlot& slo
         slot.ready_tick = tick + frames;
     }
     slot.expires_tick = 0;
-    return {true, profile.modifiers.speed.raw() != one_raw};
+    return {true, speed_switches(profile)};
 }
 
 AbilitySwitch expire_abilities(const UnitAbilityProfile& profile, AbilityState& state, const std::uint64_t tick) noexcept {
@@ -821,14 +833,30 @@ AbilitySwitch expire_abilities(const UnitAbilityProfile& profile, AbilityState& 
         slot.expires_tick = 0;
         if (!ability.recharge_at_activation) slot.ready_tick = tick + ability.recharge_frames; // WLD-06
         result.changed = true;
-        result.speed = result.speed || ability.modifiers.speed.raw() != one_raw;
+        result.speed = result.speed || (counts_for_mode(profile, index) && ability.modifiers.speed.raw() != one_raw);
     }
     return result;
+}
+
+bool counts_for_mode(const UnitAbilityProfile& profile, const std::size_t index) noexcept {
+    if (index >= profile.abilities.size()) return false;
+    const auto entry = profile.abilities[index].list_entry;
+    return (entry == unlisted_entry ? index : entry) < mode_entry_count;
+}
+
+std::optional<std::size_t> mode_slot(const UnitAbilityProfile& profile, const std::uint32_t entry) noexcept {
+    for (std::size_t index = 0; index < profile.abilities.size(); ++index) {
+        const auto listed = profile.abilities[index].list_entry;
+        if ((listed == unlisted_entry ? index : listed) == entry) return index;
+    }
+    return std::nullopt;
 }
 
 Fixed ability_multiplier(const UnitAbilityProfile& profile, const AbilityState& state, const AbilityModifier modifier) noexcept {
     auto value = Fixed::from_raw(one_raw);
     for (std::size_t index = 0; index < state.slots.size() && index < profile.abilities.size(); ++index) {
+        // AB-20 (#7940): only the type's first two listed abilities (primary, secondary) carry mode multipliers.
+        if (!counts_for_mode(profile, index)) continue;
         // WLK-03: the Lucky multiplier belongs to its first matching impact only.
         if (!state.slots[index].active || profile.abilities[index].kind == AbilityKind::lucky_shot) continue;
         const auto factor = modifier_of(profile.abilities[index].modifiers, modifier);

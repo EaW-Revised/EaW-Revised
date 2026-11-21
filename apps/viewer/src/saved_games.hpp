@@ -91,8 +91,10 @@ private:
     const std::function<std::string(std::span<const std::uint8_t>)>& admission,
     const std::function<void(std::string_view, std::span<const std::uint8_t>)>& observe = {});
 
+// Installed-mod name by key ("workshop:<id>"), empty when the mod is not installed or its name is unknown.
+using InstalledModNames = std::function<std::string(const std::string& key)>;
 [[nodiscard]] std::string saved_game_mod_details(std::span<const std::uint8_t> bytes,
-    const mods::ModDescription& mounted);
+    const mods::ModDescription& mounted, const InstalledModNames& installed = {});
 // Read/compare on a worker. Empty text means no definite mod difference; structural
 // failures remain failures and cannot be accepted by a mod confirmation.
 [[nodiscard]] core::Result<std::string> saved_game_mod_prompt(
@@ -102,7 +104,7 @@ enum class SavedGameRestoreStage { checkpoint, owner_start, reconstruction };
     SavedGameRestoreStage stage = SavedGameRestoreStage::checkpoint);
 [[nodiscard]] std::optional<mods::ModDescription> saved_game_mod_description(std::span<const std::uint8_t> bytes);
 [[nodiscard]] std::string saved_game_mod_details(const std::optional<mods::ModDescription>& saved,
-    const mods::ModDescription& mounted);
+    const mods::ModDescription& mounted, const InstalledModNames& installed = {});
 
 // The staging picker refreshes an already checked snapshot. Reading the list never touches disk.
 class SnapshotSavedGameStore final : public presentation::ui::SavedGameStore {
@@ -113,9 +115,10 @@ public:
     [[nodiscard]] presentation::ui::SavedGameListing list() const override { return listing_; }
     [[nodiscard]] presentation::ui::DeleteResult erase(std::string_view name) override;
     [[nodiscard]] std::filesystem::path directory() const override { return source_->directory(); }
-    [[nodiscard]] std::string details(std::string_view name, const mods::ModDescription& mounted) const {
+    [[nodiscard]] std::string details(std::string_view name, const mods::ModDescription& mounted,
+        const InstalledModNames& installed = {}) const {
         const auto found = details_.find(std::string(name));
-        return found == details_.end() ? std::string("Mods: unavailable") : saved_game_mod_details(found->second, mounted);
+        return found == details_.end() ? std::string("Mods: unavailable") : saved_game_mod_details(found->second, mounted, installed);
     }
 private:
     std::shared_ptr<DirectorySavedGameStore> source_;

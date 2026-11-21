@@ -43,6 +43,20 @@ target_compile_features(space_population_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(space_population_tests)
 add_test(NAME space_population_contracts COMMAND space_population_tests)
 
+add_executable(shader_routes_tests shader_routes_tests.cpp)
+target_link_libraries(shader_routes_tests PRIVATE eawr::scene)
+target_compile_features(shader_routes_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(shader_routes_tests)
+add_test(NAME shader_routes_contracts COMMAND shader_routes_tests)
+
+# The standing shader-route gate for installed mods: the unhandled (mod, shader) pairs equal the baseline (skips off a mod host).
+add_executable(shader_route_corpus_tests shader_route_corpus_tests.cpp)
+target_link_libraries(shader_route_corpus_tests PRIVATE eawr::scene)
+target_compile_features(shader_route_corpus_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(shader_route_corpus_tests)
+eawr_add_game_data_test(NAME shader_route_corpus_game_data
+    COMMAND shader_route_corpus_tests "${CMAKE_CURRENT_SOURCE_DIR}/shader_route_baseline.txt")
+
 add_executable(idle_tags_tests idle_tags_tests.cpp)
 target_link_libraries(idle_tags_tests PRIVATE eawr::scene)
 target_compile_features(idle_tags_tests PRIVATE cxx_std_20)

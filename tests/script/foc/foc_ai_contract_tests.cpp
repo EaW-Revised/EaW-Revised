@@ -2328,10 +2328,12 @@ int main(int argc, char** argv) {
     freestore_unit_service();
     time_till_dead_bindings();
     type_range_and_hero_bindings();
+    battle_object_bindings();
     order_destinations();
     special_weapon_bindings();
     manual_special_weapon_binding();
     tactical_superweapon_bindings();
+    hint_radar_bindings();
     special_weapon_attachment();
     selection_team_starts();
     threat_grid();
@@ -2376,6 +2378,7 @@ int main(int argc, char** argv) {
     proximity_contracts();
     reveal_all_contracts();
     letter_box_contracts();
+    battle_story_contracts();
     economy_inputs();
     campaign_defender_fallback();
     campaign_retreat_inputs();

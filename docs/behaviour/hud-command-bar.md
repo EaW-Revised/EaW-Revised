@@ -74,6 +74,7 @@
   forced presses cannot feed each other; the session still executes at most `max_gui_clicks_per_tick` (8) `GuiClick`
   commands per seat per tick (a safety cap for human bursts and for a rule switched to raise) and reports the rest as a
   diagnostic, and the HUD hands at most the same number of forced presses to a drain. Nothing aborts the match.
+  **Forced press of the play/pause control (legacy EAWR-7826):** the session applies it itself at the agreed tick on every peer (paused to resume, running to pause, the same nested-counter rule as a human press) and hands the HUD no press for it. A mod's filter script presses that control twice (a brief unpause so its scripts run, then the re-pause); no seat command carries it, so the seats' human pause debounce neither meets nor restarts on it, and no client can send an exemption.
   **Deviations (named):** (1) a click reaches only the plots of the seat that made it, where retail's
   story click dispatches without a player and so reaches every sub-plot (a named departure from WST-14, kept for
   multiplayer); (2) a forced press goes to the plot owner's seat, where retail presses the local bar whoever owns the

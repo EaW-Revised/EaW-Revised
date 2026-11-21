@@ -17,6 +17,7 @@ const char* ability_slot_text(sim::galactic::AbilityKind kind) {
     case AbilityKind::corruption: return "TEXT_ABILITY_SLOT_CORRUPT_PLANET";
     case AbilityKind::superweapon_hack: return "TEXT_ABILITY_SLOT_HACK_SUPER_WEAPON";
     case AbilityKind::system_spy: return "TEXT_ABILITY_SLOT_SPY";
+    case AbilityKind::credit_siphon: return "TEXT_ABILITY_SLOT_SIPHON_CREDITS";
     case AbilityKind::remove_corruption: return "TEXT_ABILITY_SLOT_REMOVE_CORRUPTION";
     case AbilityKind::technology_theft: return "TEXT_ABILITY_SLOT_SLICE";
     case AbilityKind::structure_sabotage: return "TEXT_ABILITY_SLOT_SABOTAGE";
@@ -407,8 +408,8 @@ void GalacticMode::State::write_destruction_report(std::ostream& output) const {
         if (slot.button && slot.button->is_visible_in_tree()) { rect = slot.button->get_global_rect(); break; }
     }
     output << "{\"source\": " << galactic_detail::json(state.fixture ? "controlled-observer-snapshot" : "campaign-snapshot")
-        << ", \"preparation\": \"eight-kind ranked ground-ability producer WGCH-152\", \"execution_seam\": \"typed shared galactic ability host WGUI-172\""
-        << ", \"unsupported\": \"siphon #1143; raw restrictions/story #2042; remote slots/travel #4471\""
+        << ", \"preparation\": \"ranked ground-ability producer WGCH-152\", \"execution_seam\": \"typed shared galactic ability host WGUI-172\""
+        << ", \"unsupported\": \"raw restrictions/story #2042; remote slots/travel #4471\""
         << ", \"geometry_qualification\": \"WGCH-DB-U01\", \"second_visible\": " << (visible_abilities > 1 ? "true" : "false")
         << ", \"visible\": " << ((state.slot && state.slot->is_visible_in_tree()) || visible_abilities ? "true" : "false")
         << ", \"actor\": " << (facts ? facts->actor : 0) << ", \"source_id\": " << (facts ? facts->source : 0)

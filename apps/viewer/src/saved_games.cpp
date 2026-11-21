@@ -259,22 +259,50 @@ std::string saved_game_restore_refusal(const core::Diagnostic& diagnostic, const
     return content || restore || start_content ? std::string(message) + text : text;
 }
 
-std::string saved_game_mod_details(std::span<const std::uint8_t> bytes, const mods::ModDescription& mounted) {
-    return saved_game_mod_details(saved_game_mod_description(bytes), mounted);
+std::string saved_game_mod_details(std::span<const std::uint8_t> bytes, const mods::ModDescription& mounted,
+    const InstalledModNames& installed) {
+    return saved_game_mod_details(saved_game_mod_description(bytes), mounted, installed);
 }
 
-std::string saved_game_mod_details(const std::optional<mods::ModDescription>& description, const mods::ModDescription& mounted) {
+// One row per saved mod: its name (installed-mod data first, then the name the save carries, the id only as a last
+// resort) and whether it is installed, installed but not mounted, missing, or a different version.
+std::string saved_game_mod_details(const std::optional<mods::ModDescription>& description, const mods::ModDescription& mounted,
+    const InstalledModNames& installed) {
     if (!description) return "Mods: unavailable";
-    std::string text = "Mods: ";
-    if (description->entries.empty()) text += description->complete ? "None" : "Unknown";
-    for (const auto& entry : description->entries) {
-        if (&entry != &description->entries.front()) text += ", ";
-        text += !entry.name.empty() ? entry.name : !entry.key.empty() ? entry.key : "Unknown mod";
-    }
     const auto findings = mods::compare_descriptions(*description, mounted);
-    text += mods::description_needs_confirmation(*description, mounted) ? "\nDifferent from mounted mods"
-        : findings.empty() ? "\nMatches mounted mods" : "\nMatch could not be fully checked";
-    return text;
+    const auto generic = [](const std::string& name) { return name.empty() || name.rfind("Workshop item ", 0) == 0; };
+    const auto installed_name = [&](const mods::DescriptionEntry& entry) {
+        return installed && !entry.key.empty() ? installed(entry.key) : std::string{};
+    };
+    std::string text = "Mods:";
+    if (description->entries.empty()) text += description->complete ? " None" : " Unknown";
+    for (const auto& entry : description->entries) {
+        const auto known = installed_name(entry);
+        const bool missing = std::any_of(findings.begin(), findings.end(), [&](const auto& f) {
+            return f.kind == mods::FindingKind::missing && f.mod.key == entry.key && f.mod.name == entry.name; });
+        const bool different = std::any_of(findings.begin(), findings.end(), [&](const auto& f) {
+            return (f.kind == mods::FindingKind::version_changed || f.kind == mods::FindingKind::content_changed)
+                && f.mod.key == entry.key; });
+        // Mounted and identified is the only "installed" claim; with the mounted list still incomplete, an unmatched row is unchecked.
+        const bool mounted_here = !entry.key.empty() && std::any_of(mounted.entries.begin(), mounted.entries.end(), [&](const auto& m) {
+            return m.kind == entry.kind && m.key == entry.key; });
+        const bool unchecked_row = !missing && !different && !mounted_here;
+        const std::string bare_id = entry.key.rfind("workshop:", 0) == 0 ? entry.key.substr(9) : entry.key;
+        std::string name = !known.empty() ? known : !generic(entry.name) ? entry.name
+            : !bare_id.empty() ? bare_id : "Unknown mod";
+        if (known.empty() && missing && generic(entry.name)) name = "Mod not installed: " + name;
+        text += "\n- " + name + (missing ? (known.empty() ? " (missing)" : " (installed, not enabled)")
+            : different ? " (different version)" : unchecked_row ? " (not checked yet)" : " (installed)");
+    }
+    if (mods::description_needs_confirmation(*description, mounted)) return text + "\nDifferent from mounted mods";
+    if (findings.empty()) return text + "\nMatches mounted mods";
+    // Advisory findings only: say plainly what could not be compared.
+    std::string unchecked;
+    for (const auto& finding : findings) {
+        if (finding.kind == mods::FindingKind::reordered || finding.kind == mods::FindingKind::extra) continue;
+        unchecked += "\n" + mods::describe_finding(finding);
+    }
+    return text + (unchecked.empty() ? std::string("\nDifferent from mounted mods") : "\nNot fully checked:" + unchecked);
 }
 
 ui::DeleteResult SnapshotSavedGameStore::erase(const std::string_view name) {

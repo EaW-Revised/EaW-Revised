@@ -46,6 +46,8 @@ struct GalacticStoryPlayers {
         std::string difficulty{"Normal"};
         // #7102: Player.Is_Human. True when the player's seat is human-controlled; SWITCH_CONTROL never changes it (WGS-136).
         bool human{};
+        // GA-10: Player.Is_Neutral, the faction's authored Is_Neutral flag.
+        bool neutral{};
     };
     std::vector<std::string> factions;
     std::vector<Player> players;
@@ -58,6 +60,13 @@ struct GalacticStoryPlayers {
     std::optional<sim::galactic::PlayerId> shared_local_player{};
     // Authored galactic prices, keyed by the same original-type identities as `types`.
     std::map<sim::galactic::TypeId, sim::math::Fixed> type_build_costs{};
+    // GA-12: Type.Get_Combat_Rating, the type's combat power metric (the AI's force estimate reads the same value).
+    std::map<sim::galactic::TypeId, script::numeric::LuaNumber> type_combat_ratings{};
+    // GA-13: the story scripts' EvaluatePerception. The mounted equations and the campaign facts they read that the
+    // completed world does not hold (each planet's normalized authored base income); null equations refuse the call.
+    std::shared_ptr<const GalacticObjectPerception> perception{};
+    std::map<sim::galactic::PlanetId, script::numeric::LuaNumber> planet_base_income{};
+    std::uint64_t seed{};
 };
 
 struct GalacticObjectQueryType {
@@ -189,6 +198,8 @@ public:
     // it only errs toward true). Only such a campaign runs its story instances through the ordered native shadow;
     // every other campaign keeps the partitioned story service and its previous hashes.
     [[nodiscard]] bool uses_immediate_effects() const noexcept { return uses_immediate_effects_; }
+    // GA-13: a mounted story or library module names EvaluatePerception, so the story host needs the perception equations.
+    [[nodiscard]] bool uses_perception() const noexcept { return uses_perception_; }
     // The entry of the sub-plot with this file name, or null.
     [[nodiscard]] const Entry* find(std::string_view subplot) const noexcept;
     // The sub-plot file names of these script instances (ascending IDs in, document order out; unknown IDs are skipped).
@@ -209,6 +220,7 @@ private:
     mutable std::map<std::string, script::authoritative::Value> initial_globals_;
     mutable std::vector<std::string> scoring_notes_;
     bool uses_immediate_effects_{};
+    bool uses_perception_{};
 };
 
 // What the story scripts reach in the plot engine while a campaign runs (WST-37, WST-49, WST-55, WST-56): Get_Story_Plot

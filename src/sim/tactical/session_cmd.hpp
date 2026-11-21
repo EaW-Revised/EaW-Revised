@@ -156,6 +156,8 @@ struct Tick::PlanLanes final {
     core::Result<void> prepare_commands();
     core::Result<void> finish();
     core::Result<void> scripted_damage(const PlayerCommand& command, const DamagePayload* damage, const EntityId unit_id, const DurabilityProfile* profile);
+    core::Result<void> scripted_teleport(const ScriptTeleportPayload& teleport, const EntityId unit_id);
+    core::Result<void> scripted_change_owner(const ScriptChangeOwnerPayload& change, const std::vector<EntityId>& units);
     core::Result<void> apply_cinematic(const PlayerCommand& command, const RetreatCinematicPayload* cinematic, const PlayerId issuer);
     core::Result<void> apply_retreat(const PlayerCommand& command, const RetreatPayload* retreat, const PlayerId issuer);
     core::Result<void> apply_beacon(const PlayerCommand& command, const BeaconPayload* beacon, const PlayerId issuer);

@@ -612,8 +612,8 @@ void projectile_defence_tables() {
                 if (candidate.id == "Test_Frigate") candidate.abilities[0].gui_activated_ability_name = "missing";
             const auto unresolved = eawr::units::ability_table(changed);
             const auto* missing = unresolved ? unresolved.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
-            expect(missing && !eawr::sim::tactical::ability_slot(*missing, eawr::sim::tactical::AbilityKind::sensor_jamming),
-                "WAB-36: unresolved GUI name cannot activate the jammer");
+            expect(missing && eawr::sim::tactical::ability_slot(*missing, eawr::sim::tactical::AbilityKind::sensor_jamming),
+                "WJM-05: an unresolved GUI name keeps the jammer row (lit, jams nothing)");
         }
     }
 }

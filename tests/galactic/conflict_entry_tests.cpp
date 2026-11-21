@@ -592,6 +592,11 @@ void handoff_corpus(bool fiscal_enabled = false) {
         auto ai_choice = game.step(executor).value(); hashes.push_back(ai_choice.state_hash.get());
         expect(!ai_choice.diagnostics.empty() && game.pending_conflict() && !game.battle(),
             "AI-side input cannot select the human's pending battle");
+        // #7798: with only the conflict's own pause level up, a player resume must not unfreeze the galaxy under the prompt.
+        expect(bool(game.submit({{game.completed_tick(), {1}, 1}, gc::ResumeGalaxy{}})), "resume under a pending prompt is a valid shape");
+        auto refused_resume = game.step(executor).value(); hashes.push_back(refused_resume.state_hash.get());
+        expect(!refused_resume.diagnostics.empty() && game.pending_conflict() && game.galaxy().clock().pause_depth == 1
+            && game.galaxy().clock().galactic_frame == paused_frame, "a player resume cannot take the pending battle's pause level");
         expect(bool(game.submit({{game.completed_tick(), {1}, 2}, gc::PauseGalaxy{}})), "player adds its own pause");
         hashes.push_back(game.step(executor).value().state_hash.get());
         expect(game.galaxy().clock().galactic_frame == paused_frame && game.galaxy().clock().pause_depth == 2,
@@ -777,6 +782,53 @@ ChoiceRun feed_choice_stream(const Handoff& handoff, const std::vector<sim::gala
     run.battle = game.battle() != nullptr;
     return run;
 }
+// #7826 on #7798: a story's FORCE_CLICK_GUI on the pause control never unfreezes a galaxy held by a pending battle prompt.
+// At the conflict's own last pause level the toggle is refused (a script's unpause + re-pause dance is a no-op, nothing is
+// left behind once the prompt is decided); with a player pause on top the toggle takes that level only, never the prompt's.
+void story_toggle_under_pending_battle() {
+    namespace gc = sim::galactic;
+    namespace st = sim::galactic::story;
+    const auto handoff = make_handoff(false);
+    const platform::ThreadWorkerAdapter executor(1);
+    auto game = campaign::GameSession::create(handoff->galaxy).value();
+    game.set_conflict_service(handoff->service, handoff->content, {}, eawr::campaign::ScriptRequirement::none);
+    st::EventDef click;
+    click.name = "PAUSE_TOGGLE"; click.type = "STORY_CLICK_GUI"; click.params[0] = {"b_go"}; click.perpetual = true;
+    click.reward_type = "FORCE_CLICK_GUI"; click.reward_params[0] = {"b_play_pause"};
+    st::SubPlotDef plot; plot.name = "P.xml"; plot.owner = 1; plot.active = true; plot.events = {click};
+    expect(bool(game.install_story({}, {{1, "p.xml"}}, {plot})), "the pause-toggle plot installs");
+    expect(bool(game.submit({{0, {1}, 1}, gc::MoveFleet{10, {1, 2}, {}}})), "the movement is accepted");
+    while (!game.pending_conflict() && game.completed_tick() < 20) { if (!game.step(executor)) { expect(false, "the probe steps"); return; } }
+    expect(game.pending_conflict() != nullptr, "the probe reaches a pending conflict");
+    auto settle = game.step(executor);
+    expect(bool(settle) && game.pending_conflict() && game.galaxy().clock().pause_depth == 1, "the pending conflict owns one pause level");
+    if (!settle || !game.pending_conflict()) return;
+    const auto frame = game.galaxy().clock().galactic_frame;
+    std::uint64_t sequence = 10;
+    const auto press = [&] {
+        ++sequence;
+        expect(bool(game.submit({{game.completed_tick(), {1}, sequence}, gc::GuiClick{"b_go"}})), "the story click is accepted");
+        return game.step(executor).value();
+    };
+    for (int round = 0; round < 2; ++round) {
+        const auto tick = press();
+        expect(tick.story_triggers.size() == 1 && tick.story_triggers.front().outcome.rfind("refused: a pending battle", 0) == 0,
+            "a story toggle at the prompt's own pause level is refused");
+        expect(game.pending_conflict() && game.galaxy().clock().pause_depth == 1 && game.galaxy().clock().galactic_frame == frame,
+            "the prompt keeps the galaxy frozen, with no pause level added or removed");
+    }
+    expect(bool(game.submit({{game.completed_tick(), {1}, 50}, gc::PauseGalaxy{}})), "a player adds its own pause");
+    (void)game.step(executor);
+    expect(game.galaxy().clock().pause_depth == 2, "the player pause sits above the prompt's");
+    auto resumed = press();
+    expect(resumed.story_triggers.size() == 1 && resumed.story_triggers.front().outcome == "applied"
+        && game.galaxy().clock().pause_depth == 1 && game.pending_conflict() && game.galaxy().clock().galactic_frame == frame,
+        "with a player pause on top the story resume takes only that level; the prompt still freezes the galaxy");
+    auto repaused = press();
+    expect(repaused.story_triggers.size() == 1 && repaused.story_triggers.front().outcome == "refused: a pending battle keeps the galaxy paused until it is decided"
+        && game.galaxy().clock().pause_depth == 1, "the next toggle at the prompt's own level is refused: nothing unpauses the galaxy under the prompt");
+}
+
 void battle_choice_admission() {
     namespace gc = sim::galactic;
     const auto handoff = make_handoff(false);
@@ -1017,6 +1069,6 @@ int main(const int argc, char** argv) {
         return galactic_test::failures == 0 ? 0 : 1;
     }
     if (argc == 3 || argc == 4) return export_installed(argv[1], argv[2], argc == 4 ? argv[3] : "");
-    contracts(); queued_pending_alerts(); native_content_selection(); native_rocket_selection(); battle_choice_admission();
+    contracts(); queued_pending_alerts(); native_content_selection(); native_rocket_selection(); battle_choice_admission(); story_toggle_under_pending_battle();
     return galactic_test::failures == 0 ? 0 : 1;
 }

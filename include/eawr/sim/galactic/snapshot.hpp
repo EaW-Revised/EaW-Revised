@@ -9,6 +9,7 @@
 #include "eawr/sim/galactic/production.hpp"
 #include "eawr/sim/galactic/types.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -231,14 +232,15 @@ public:
         return production_offers_ ? std::span<const ObservedProductionOffer>(*production_offers_)
             : std::span<const ObservedProductionOffer>{};
     }
+    // The publication holds one menu per discovered planet of the local player, sorted by planet when it is built,
+    // so a lookup is a binary search instead of a scan of every menu and observation.
     [[nodiscard]] const CorruptionMenu* corruption_information(PlanetId planet) const noexcept {
         const auto* root = native_root();
-        if (root->corruption_information_) for (const auto& menu : *root->corruption_information_) {
-            if (menu.player != view_player() || menu.planet != planet) continue;
-            for (const auto& row : observations())
-                if (row.player == menu.player && row.planet == planet && row.discovered) return &menu;
-        }
-        return nullptr;
+        if (!root->corruption_information_) return nullptr;
+        const auto& menus = *root->corruption_information_;
+        const auto found = std::lower_bound(menus.begin(), menus.end(), planet,
+            [](const CorruptionMenu& menu, PlanetId id) { return menu.planet < id; });
+        return found != menus.end() && found->planet == planet && found->player == view_player() ? &*found : nullptr;
     }
     [[nodiscard]] const CorruptionMenu* corruption_menu() const noexcept {
         if (native_base_) return native_base_->corruption_menu();

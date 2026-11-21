@@ -140,6 +140,10 @@ struct Host {
             {"Num_Enemy_Space_Territories", "Variable_Human.SpaceDefendedPlanets * Variable_Human.PlanetsControlledUnnormalized"},
             {"Num_Enemy_Land_Territories", "Variable_Human.GroundDefendedPlanets * Variable_Human.PlanetsControlledUnnormalized"},
             {"MAXG", "Variable_Self.MaxedGroundbases"}, {"MAXS", "Variable_Self.MaxedStarbases"},
+            {"AVGG", "Variable_Self.AverageGroundbase"}, {"AVGS", "Variable_Self.AverageStarbase"},
+            {"MAXGRAW", "Variable_Target.MaxGroundbaseLevelUnnormalized"}, {"MAXSRAW", "Variable_Target.MaxStarbaseLevelUnnormalized"},
+            {"SELFMAXGRAW", "Variable_Self.MaxGroundbaseLevelUnnormalized"}, {"SELFMAXSRAW", "Variable_Self.MaxStarbaseLevelUnnormalized"},
+            {"SELFMAXG", "Variable_Self.MaxGroundbaseLevel"}, {"SELFMAXS", "Variable_Self.MaxStarbaseLevel"},
             {"NUMG", "Variable_Self.NumGroundbaseOfLevel {Parameter_Level=4.5,Parameter_Count=2}"},
             {"NUMS", "Variable_Self.NumStarbaseOfLevel {Parameter_Level=3}"},
             {"HASG", "Variable_Self.HasGroundbaseOfLevel {Parameter_Level=6}"},
@@ -549,6 +553,11 @@ std::string contracts(unsigned workers) {
     const auto check = [&](std::string_view name, ai::Real expected) { expect(host.query(name) == expected, std::string(name)); };
     check("CONTROL", real(2) / real(3)); check("CONTROLRAW", real(2)); check("ENEMYCONTROL", real(1) / real(3)); check("HUMANCONTROL", real(1));
     check("MAXG", ai::parse_real("0.5").value()); check("MAXS", ai::parse_real("0.5").value());
+    // WGA-504: owned planets 10 (ground 5, station 5) and 11 (ground 6, station 3), both levels normalized by 5.
+    check("AVGG", (real(1) + real(6) / real(5)) / real(2)); check("AVGS", (real(1) + real(3) / real(5)) / real(2));
+    check("MAXGRAW", real(5)); check("MAXSRAW", real(5));
+    // WGA-504: the self maxima are the highest current owned level, raw or normalized.
+    check("SELFMAXGRAW", real(6)); check("SELFMAXSRAW", real(5)); check("SELFMAXG", real(6) / real(5)); check("SELFMAXS", real(1));
     check("NUMG", real(1)); check("NUMS", real(2)); check("HASG", real(1)); check("HASS", real(0));
     check("COUNT", real(5)); check("COUNTQ", real(3)); check("COUNTDONE", real(1)); check("STRUCT", real(1));
     check("COUNTFLAG0", real(2)); check("COUNTFLAGHALF", real(2)); check("COUNTFLAG2", real(2)); check("UNITFRACTION", real(1));
@@ -611,6 +620,7 @@ std::string contracts(unsigned workers) {
     must(host.world->bind(snapshot(4, changed, false, false, false), {}, executor, 4, 200));
     check("CONTROL", real(0)); check("CONTROLRAW", real(0)); check("ENEMYCONTROL", real(1));
     check("MAXG", real(0)); check("MAXS", real(0)); check("GROSS", real(0)); check("MAINT", real(0));
+    check("AVGG", real(0)); check("AVGS", real(0)); check("SELFMAXGRAW", real(0)); check("SELFMAXS", real(0));
     ai::GalacticFunding funding; must(funding.initialize(1, {}, whole(100)));
     expect(funding.state().at(1).last_service_income == Fixed{} && funding.state().timeline == 0, "fresh native retained zeros");
     const auto revision = funding.state_revision(); must(funding.set_timeline(3));
@@ -933,7 +943,7 @@ void installed() {
             if (!value) throw std::runtime_error("stock token unavailable: " + expression);
             trace += expression + ":" + std::to_string(value->repr) + ";"; return *value;
         };
-        for (const auto token : {"PlanetsControlled", "PlanetsControlledUnnormalized", "SpaceDefendedPlanets", "GroundDefendedPlanets", "MaxedStarbases", "MaxedGroundbases", "NumStarbaseOfLevel", "NumGroundbaseOfLevel", "HasStarbaseOfLevel", "HasGroundbaseOfLevel",
+        for (const auto token : {"PlanetsControlled", "PlanetsControlledUnnormalized", "SpaceDefendedPlanets", "GroundDefendedPlanets", "MaxedStarbases", "MaxedGroundbases", "AverageStarbase", "AverageGroundbase", "NumStarbaseOfLevel", "NumGroundbaseOfLevel", "HasStarbaseOfLevel", "HasGroundbaseOfLevel",
             "Maintenance", "MaintenanceUnnormalized", "GrossIncomeUnnormalized", "NetIncomeUnnormalized", "CanAdvanceTech", "SpaceTotalUnnormalized", "GroundTotalUnnormalized"})
             static_cast<void>(probe("Variable_Self." + std::string(token)));
         for (const auto name : {"Num_Enemy_Space_Territories", "Num_Enemy_Land_Territories"}) {

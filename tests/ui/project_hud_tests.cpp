@@ -95,6 +95,16 @@ void project_hud_contracts() {
         const auto gap_blocked = ui::dock_project_hud(stock,{0,0,1000,800},1,{},{{12,578,10,2}},3);
         test::ui::expect(gap_blocked && gap_blocked->x == 804 && gap_blocked->y == 580,
             "stock list gap is part of the docking collision area");
+        // Ultrawide: the viewport anchor is the centred 16:9 safe area, so the gift icon stays inside the band.
+        for (const auto size : {ui::Viewport{2560,1080}, ui::Viewport{3440,1440}, ui::Viewport{5120,1440}, ui::Viewport{1920,1080}}) {
+            const auto space = ui::reference_space(size);
+            const auto band = ui::safe_area(space);
+            const auto placed = ui::dock_project_hud(stock,band,space.scale,{},{},0);
+            test::ui::expect(placed && placed->x >= band.x && placed->right() <= band.right(),
+                "gift icon docks inside the centred safe area on ultrawide");
+            if (size.width == 1920) test::ui::expect(placed && band.x == 0 && band.width == 1920,
+                "16:9 keeps the whole-screen band, gift unchanged");
+        }
         // Hide path: the button alone fits, the list above it does not, so no candidate is safe.
         const std::map<std::string,ui::PixelRect> attack{{"attack",{10,50,20,20}}};
         const auto button_only = ui::dock_project_hud(stock,{0,0,200,100},1,attack,{},0);

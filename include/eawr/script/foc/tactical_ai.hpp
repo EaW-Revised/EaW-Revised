@@ -68,6 +68,11 @@ inline constexpr std::string_view verb_reveal_all = "foc.reveal_all"; // issuer,
 inline constexpr std::string_view verb_special_fire = "foc.special_fire"; // issuer, source, target, admission (WSW-40/41)
 inline constexpr std::string_view verb_tactical_superweapon = "foc.tsw_request"; // issuer, unit, stage (TswStage as a number; TSW-07, legacy #1713)
 inline constexpr std::string_view verb_make_invulnerable = "foc.make_invulnerable"; // issuer, unit, enabled (TL-03)
+inline constexpr std::string_view verb_despawn = "foc.despawn"; // issuer, unit (#7886)
+inline constexpr std::string_view verb_teleport_and_face = "foc.teleport_and_face"; // issuer, unit, target unit
+inline constexpr std::string_view verb_prevent_all_fire = "foc.prevent_all_fire"; // issuer, unit, enabled
+inline constexpr std::string_view verb_change_owner = "foc.change_owner"; // issuer, unit, new owner player
+inline constexpr std::string_view verb_take_damage = "foc.take_damage"; // issuer, unit, amount[, HardPoints index] (HD-30)
 // legacy #6634 (HCB-75): Letter_Box_In / Letter_Box_Out from a tactical script, a presentation verb: "in" or "out", then the seconds as
 // text. It never reaches the world (ScriptedTacticalSession::register_presentation_verb); the viewer draws the battle bands.
 inline constexpr std::string_view verb_letter_box = authoritative::verb_tactical_letter_box;
@@ -100,6 +105,11 @@ struct AiType {
     // WTA-34: the projectile types the unit fires, for Get_All_Projectile_Types: each hardpoint's
     // Fire_Projectile_Type in HardPoints order (0: none), then the object weapon's.
     std::vector<sim::tactical::TypeId> hardpoint_projectiles;
+    // Take_Damage(amount, hardpoint name): each HardPoints entry's XML name, collision mesh (both upper case) and
+    // whether damage can destroy it, in HardPoints order.
+    std::vector<std::string> hardpoint_ids;
+    std::vector<std::string> hardpoint_meshes;
+    std::vector<bool> hardpoint_destroyable;
     sim::tactical::TypeId object_projectile{};
     // AI-32/WLD-10: the type's Lua_Script is ObjectScript_PointDefense, which the engine stands in for.
     bool point_defence_script{};
@@ -135,6 +145,7 @@ struct AiType {
     bool community_property{};              // PE-34: allied ownership counts
     sim::tactical::TypeId constructed_type{}; // PE-34: unfinished representation's completed type
     bool capture_point{};                    // CAPTURE_POINT ownership behavior
+    bool spawns_squadrons{};                 // SPAWN_SQUADRON behavior (Set_Garrison_Spawn); skirmish and battle tables only
     bool build_pad{};                        // GS-11: type identity, independent of enabled economy
     bool initial_state_visible_under_fow{};  // WNO-13: authored object-goal fog exception
     bool last_state_visible_under_fow{};
@@ -428,6 +439,15 @@ inline std::unique_ptr<AiJournal::PhaseSavepoint> AiJournal::begin_phase() {
     return std::unique_ptr<PhaseSavepoint>(new PhaseSavepoint(*this));
 }
 
+// One battle object that carries a hint string (an object of a HINT-behavior type: map markers and props, plus
+// script-spawned teams). Find_Hint and Find_All_Objects_With_Hint search this list in creation order. An entry only
+// answers a lookup while its object is live in the world view.
+struct AiHintObject {
+    sim::tactical::TypeId type{};   // the object's original type
+    std::string hint;               // compared without case
+    sim::EntityId entity{};
+};
+
 struct AiSetup {
     // #3780: selects the goal mode, plan directory, templates and freestore tag; space is the default.
     sim::tactical::BattleDomain domain{sim::tactical::BattleDomain::space};
@@ -462,6 +482,11 @@ struct AiSetup {
     std::map<sim::tactical::PlayerId, std::uint64_t> player_ai_start_ticks;
     // SSU-02: the host's selected local view, independent of script ownership or AI control.
     std::optional<sim::tactical::PlayerId> local_player;
+    // The battle's hint objects in creation order (BHR-01); empty when the map declares none.
+    std::vector<AiHintObject> hint_objects;
+    // True once the host fills hint_objects from the map data. While false the lookups still answer from the list but
+    // note per call that map hint objects are not hosted, so an empty answer is never silent.
+    bool hint_objects_hosted{false};
 };
 
 // The AI XML files the goal system reads (#449), as logical paths.

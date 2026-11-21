@@ -431,10 +431,10 @@ void test_multipliers() {
         std::int64_t expected = 1;
         for (unsigned index = 0; index < 3; ++index) {
             active.slots[index].active = (mask & (1U << index)) != 0;
-            if (active.slots[index].active) expected *= 100;
+            if (active.slots[index].active && index < tactical::mode_entry_count) expected *= 100;
         }
         expect(tactical::ability_multiplier(large, active, M::speed) == units(expected),
-            "WAB-24: every subset of three speed modes has its exact product");
+            "WAB-24: every subset of three speed modes has the exact product of the first two (AB-20)");
     }
 
     // AB-21: the weapon delay lengthens a burst's gap; the recharge after it only shortens.
@@ -1605,7 +1605,10 @@ void test_stealth_session() {
 // its plain countdown. Scenario 0 holds no upgrade; in scenario 1 the owner holds three: +0.25 and
 // +0.5 in category 3 (the larger counts) and +0.1 in category 1 (added), so m = 1.6. In scenario 2
 // an ally (player 3) holds an owner-only +0.5 and the enemy an all-allies +0.5: neither reaches the
-// owner. In scenario 3 the ally holds the all-allies +0.5, so m = 1.5.
+// owner. In scenario 3 the ally holds the all-allies +0.5, so m = 1.5. WBR-02 scenarios 4..8 put the +0.5 on a
+// live source instead (the station type's own player-ledger row): the owner's (m = 1.5), the owner's plus the
+// held +0.1 of category 1 (m = 1.6, one shared per-category ledger), an enemy's all-allies row and an ally's
+// owner-only row (neither reaches the owner, m = 1), and an ally's all-allies row (m = 1.5). Scenario 9 removes the owner's source before the switch-on (m = 1).
 void test_stealth_duration_modifiers() {
     using Kind = tactical::AbilityKind;
     const auto seconds = [](const std::int64_t whole) { return Fixed::from_raw(whole * Fixed::scale); };
@@ -1618,7 +1621,7 @@ void test_stealth_duration_modifiers() {
         "WST-03: the exact Q24 product truncates on the edge, no host float");
     expect(tactical::stealth_frames(seconds(3), Fixed{}) == 90 && tactical::stealth_frames(seconds(3), decimal("-0.5")) == 90,
         "WST-03: a factor of 0 or less counts as 1");
-    for (const unsigned scenario : {0U, 1U, 2U, 3U}) {
+    for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U}) {
         std::vector<std::string> reference;
         for (const auto workers : {1U, 2U, 4U, 8U}) {
             auto abilities = stealth_abilities(90);
@@ -1649,6 +1652,15 @@ void test_stealth_duration_modifiers() {
             };
             economy.upgrades = {upgrade(90, 3, "0.25", true), upgrade(91, 3, "0.5", true), upgrade(92, 1, "0.1", true),
                 upgrade(93, 3, "0.5", false)};
+            if (scenario >= 4) {
+                tactical::CommandBonusProfile source;
+                source.type = station; source.bonus.stacking_category = 3; source.bonus.applicable = {station};
+                source.battlefield = true; source.apply_to_self = true;
+                source.stealth_delta = decimal("0.5");
+                source.all_allies = scenario == 6 || scenario == 8;
+                source.enabled_players = {scenario == 6 ? 2U : scenario == 7 || scenario == 8 ? 3U : 1U};
+                economy.command_bonuses = {source};
+            }
             auto created = tactical::TacticalSession::create(initial, {}, durability(), {}, std::nullopt, {}, {}, abilities, economy);
             expect(static_cast<bool>(created), "WST-03: duration fixture creates");
             if (!created) { std::cerr << created.error().message << '\n'; continue; }
@@ -1666,10 +1678,13 @@ void test_stealth_duration_modifiers() {
                 submit(command(0, 2, 0, 3, tactical::BuyPayload{91}));
             }
             if (scenario == 3) submit(command(0, 3, 0, 4, tactical::BuyPayload{91}));
+            if (scenario == 5) submit(command(0, 1, 0, 2, tactical::BuyPayload{92}));
+            // WBR-02: removing the live source before the switch-on leaves the plain duration (scenario 4 without it).
+            if (scenario == 9) expect(static_cast<bool>(world.stage_remove(2)), "WST-03: the source stages for removal");
             submit(command(20, 1, 3, 1, tactical::AbilityPayload{Kind::stealth, tactical::AbilityAction::activate}));
             // m = 1.6: trunc(3 x 1.6 x 30) = 144 frames from the switch-on, m = 1.5: 135; the slot's 90 run out first.
-            const bool lengthened = scenario == 1 || scenario == 3;
-            const std::uint64_t end = scenario == 1 ? 20 + 144 : (scenario == 3 ? 20 + 135 : 20 + 90);
+            const bool lengthened = scenario == 1 || scenario == 3 || scenario == 4 || scenario == 5 || scenario == 8;
+            const std::uint64_t end = scenario == 1 || scenario == 5 ? 20 + 144 : (lengthened ? 20 + 135 : 20 + 90);
             const eawr::platform::ThreadWorkerAdapter executor(workers);
             std::vector<std::string> hashes;
             for (std::uint64_t frame = 0; frame < 200; ++frame) {

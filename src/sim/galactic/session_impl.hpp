@@ -126,7 +126,7 @@ public:
     struct CorruptionDisplayRequirements {
         std::map<TypeId, std::vector<EntityId>> units;
         std::map<std::vector<TypeId>, std::size_t> unit_counts;
-        std::set<TypeId> planet_types, owned_planet_types;
+        std::set<TypeId> planet_types, owned_planet_types, present_types;
     };
     CorruptionDisplayRequirements corruption_display_requirements(PlayerId) const;
     CorruptionMenu corruption_display_menu(PlayerId, PlanetId, const AbilityPreparation*, CorruptionDisplayRequirements&) const;
@@ -216,6 +216,7 @@ public:
     void prepare_theft(const GameCommand&, const CensusObject&, const GalacticAbilityProfile&, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_spy(const GameCommand&, const CensusObject&, const GalacticAbilityProfile&, PlanetId, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_removal(const GameCommand&, const CensusObject&, const GalacticAbilityProfile&, PlanetId, std::uint64_t, std::vector<GalacticEvent>&);
+    void execute_siphon(const GameCommand&, const CensusObject&, const GalacticAbilityProfile&, PlanetId, std::uint64_t, std::vector<GalacticEvent>&);
     void apply_observer(const GameCommand&, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_theft(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
     // Sparse expiry calendar; reconstructed from the saved ledger at creation.

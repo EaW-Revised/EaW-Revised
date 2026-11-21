@@ -2,6 +2,7 @@
 
 #include "eawr/sim/galactic/corruption_actions.hpp"
 #include "eawr/sim/galactic/observer.hpp"
+#include <cstddef>
 
 namespace eawr::sim::galactic {
 // WGCH-04/49: copied observer-local facts, not an execution capability.
@@ -14,6 +15,10 @@ struct ObservedCorruptionChoice {
     bool mission_available{true};
     std::optional<PreparedAbility> live_prepared{};
     std::optional<CorruptionChoice> live_choice{};
+    // WGCI-3: copied inspection values; no action capability or canonical state.
+    std::size_t available_units{};
+    unsigned completed_missions{};
+    TypeId required_unit_type{}; // WGCH-124 representative art, independent of the pooled count
 };
 struct CorruptionMenu {
     PlayerId player{};

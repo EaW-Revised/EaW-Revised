@@ -115,6 +115,7 @@ private:
     core::Result<Outcome> credits(gc::GalacticSession&, const st::Triggered&);
     core::Result<Outcome> switch_control(gc::GalacticSession&, const st::Triggered&);
     core::Result<Outcome> planet_faction(gc::GalacticSession&, const st::Triggered&);
+    core::Result<Outcome> corruption(gc::GalacticSession&, const st::Triggered&);
     core::Result<std::optional<gc::PlanetId>> destination(const gc::GalacticSnapshot&, gc::PlayerId,
         std::optional<gc::PlanetId> named, std::string& reason) const;
     core::Result<bool> spawn_one(gc::GalacticSession&, gc::PlayerId, gc::PlanetId, gc::TypeId, const sim::PartitionExecutor&);
@@ -130,6 +131,8 @@ core::Result<Outcome> Rewards::apply(gc::GalacticSession& world, const st::Trigg
     if (kind == "SET_MAX_TECH_LEVEL") return tech(world, record, true);
     if (kind == "CREDITS") return credits(world, record);
     if (kind == "SWITCH_CONTROL") return switch_control(world, record);
+    if (kind == "RESTRICT_CORRUPTION" || kind == "REMOVE_CORRUPTION" || kind == "ENABLE_GALACTIC_CORRUPTION_HOLOGRAM")
+        return corruption(world, record);
     if (kind == "PLANET_FACTION") return planet_faction(world, record);
     return declined("this reward type has no live owner yet");
 }
@@ -292,6 +295,25 @@ core::Result<Outcome> Rewards::credits(gc::GalacticSession& world, const st::Tri
         return core::Result<Outcome>::failure(recorded.error());
     if (auto added = credit(world, record.owner, value.value()); !added) return core::Result<Outcome>::failure(added.error());
     return applied();
+}
+
+// WGCH-200/201/203: all three rewards resolve the first object of the authored planet type.
+core::Result<Outcome> Rewards::corruption(gc::GalacticSession& world, const st::Triggered& record) {
+    const auto at = planets.find(upper(token(record, 0)));
+    if (at == planets.end()) return declined("corruption reward needs a planet in this galaxy");
+    core::Result<bool> changed = core::Result<bool>::success(false);
+    if (record.reward_type == "REMOVE_CORRUPTION") {
+        auto seconds = Fixed::from_decimal(token(record, 1).empty() ? std::string_view{"10"} : token(record, 1));
+        if (!seconds || seconds.value() < Fixed{}) return declined("corruption removal duration is not a nonnegative number");
+        changed = world.begin_corruption(at->second, gc::corruption_fixture::Type::none, seconds.value());
+    } else {
+        const auto flag = token(record, 1).empty() ? std::optional<std::int64_t>{1} : integer(token(record, 1));
+        if (!flag) return declined("corruption reward flag is not a whole number");
+        changed = world.set_corruption_flag(at->second, record.reward_type == "RESTRICT_CORRUPTION"
+            ? gc::CorruptionPlanetFlag::restricted : gc::CorruptionPlanetFlag::hologram, *flag != 0);
+    }
+    if (!changed) return core::Result<Outcome>::failure(changed.error());
+    return changed.value() ? applied() : declined("corruption reward has no admissible planet state");
 }
 
 // WST-42: PLANET_FACTION (1 planet, 2 faction; both required) gives the named planet to the named faction's player

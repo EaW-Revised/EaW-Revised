@@ -1312,6 +1312,8 @@ core::Result<void> session_detail::Tick::late_impacts() {
             const auto& profile = *impl_->abilities.find(source.state.type_id);
             const auto& state = source.abilities->slots[*ability_slot(profile, beam_kind)];
             if (!state.active) continue;
+            // Prevent_All_Fire: a held unit's beam deals no damage and is not released; it resumes when the hold clears.
+            if (source.hold_fire) continue;
             const auto& special = source.abilities->special.slots[static_cast<std::size_t>(nested - profile.special.data())];
             // WSPL-08: after the target left the world the beam only continues; there is nothing to damage or release here.
             if (beam_kind == AbilityKind::super_laser && special.laser_ending) continue;

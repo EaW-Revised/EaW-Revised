@@ -589,7 +589,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--no-symbols", action="store_true",
                         help="owner TEST kit only: skip private symbol retention and note 'symbols: none (test kit)' in "
                              "the README and update manifest; refused with --public")
-    parser.add_argument("--channel", choices=update_manifest.CHANNELS,
+    parser.add_argument("--channel", choices=update_manifest.PUBLIC_CHANNELS,
                         help="update channel written to update-manifest.json (default: preview for a -suffix version, else stable)")
     args = parser.parse_args(argv)
     sums = None

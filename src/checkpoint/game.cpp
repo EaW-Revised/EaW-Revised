@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <bit>
 #include <limits>
+#include <set>
 #include <utility>
 #include <stdexcept>
 #include <type_traits>
@@ -262,7 +263,40 @@ core::Result<Bytes> encode_conflict(const campaign::ConflictRecord& record) {
     if (out.bytes().size() > max_conflict_record_bytes) return fail<Bytes>("section conflicts: record exceeds limit", {}, diagnostic_codes::resource_limit);
     return core::Result<Bytes>::success(std::move(out.bytes()));
 }
-core::Result<campaign::ConflictRecord> decode_conflict(std::span<const std::uint8_t> bytes, std::string_view path) {
+// recover_checkpoint_history only: the finished battles whose tactical entry came from another build and was replaced by
+// an empty setup, so the galaxy part of the save can still load.
+struct HistoryRecovery {
+    std::set<sim::EntityId> battles;
+    bool result_dropped{};
+    // The conflicts section the recapture must produce once the setups of the replaced records are set aside: the saved
+    // records re-encoded, replaced ones with an empty setup. The loaded game builds a setup of its own for a replaced
+    // record from the galaxy state, so those setups cannot be predicted; everything else in the section is compared.
+    Bytes conflicts_section;
+};
+// The conflicts section of a recording: the history entries, then (conflict services only) the admissions.
+core::Result<Bytes> encode_conflicts_section(const campaign::GameRecording& recorded) {
+    detail::Writer conflicts; conflicts.u32(static_cast<std::uint32_t>(recorded.conflicts.size()));
+    for (const auto& entry : recorded.conflicts) {
+        auto encoded = encode_conflict(entry.conflict);
+        if (!encoded) return core::Result<Bytes>::failure(encoded.error());
+        conflicts.u64(entry.entry_tick); blob(conflicts, encoded.value());
+    }
+    // Opt-in tail preserves the existing FT-08 conflict section for older recordings.
+    if (recorded.conflict_services) {
+        conflicts.u32(static_cast<std::uint32_t>(recorded.admissions.size()));
+        for (const auto& entry : recorded.admissions) {
+            auto encoded = encode_conflict(entry.conflict);
+            if (!encoded) return core::Result<Bytes>::failure(encoded.error());
+            conflicts.u64(entry.entry_tick); blob(conflicts, encoded.value());
+            conflicts.u8(static_cast<std::uint8_t>(entry.arbitration.route));
+            conflicts.u8(entry.arbitration.forced_tactical ? 1 : 0);
+            conflicts.u8(entry.arbitration.overrun ? 1 : 0);
+        }
+    }
+    return core::Result<Bytes>::success(std::move(conflicts.bytes()));
+}
+core::Result<campaign::ConflictRecord> decode_conflict(std::span<const std::uint8_t> bytes, std::string_view path,
+    HistoryRecovery* recovery = nullptr) {
     using Record = campaign::ConflictRecord;
     if (bytes.size() > max_conflict_record_bytes) return fail<Record>("section conflicts: record exceeds limit", path, diagnostic_codes::resource_limit);
     detail::Reader in(bytes); Record record;
@@ -305,8 +339,17 @@ core::Result<campaign::ConflictRecord> decode_conflict(std::span<const std::uint
     const auto replay_bytes = blob(in);
     if (in.failed() || in.remaining() != 0) return fail<Record>("section conflicts: malformed record", path);
     auto replay = sim::tactical::parse_replay(replay_bytes, path);
-    if (!replay || !replay.value().commands.empty() || replay.value().final_tick_count != 0)
-        return fail<Record>("section conflicts: invalid tactical entry", path);
+    const std::string battle = "battle record " + std::to_string(record.id) + " on planet " + std::to_string(record.planet);
+    if (!replay && replay.error().code == sim::tactical::diagnostic_codes::older_campaign_setup) {
+        if (!recovery) return fail<Record>("section conflicts: " + battle + " was written by another build: " + replay.error().message,
+            path, diagnostic_codes::other_build_battle_record);
+        recovery->battles.insert(record.id);
+        record.tactical = {}; // an empty setup, like a queued entry; the canonical check below cannot hold for it
+        return core::Result<Record>::success(std::move(record));
+    }
+    if (!replay) return fail<Record>("section conflicts: " + battle + " has an invalid tactical entry: " + replay.error().message, path);
+    if (!replay.value().commands.empty() || replay.value().final_tick_count != 0)
+        return fail<Record>("section conflicts: " + battle + " has an invalid tactical entry: it holds commands or ticks", path);
     record.tactical = std::move(replay).value().setup;
     auto canonical = encode_conflict(record);
     if (!canonical || !std::equal(bytes.begin(), bytes.end(), canonical.value().begin(), canonical.value().end()))
@@ -569,25 +612,9 @@ core::Result<Checkpoint> capture(const campaign::GameSession& session, const Ide
         detail::Writer production; blob(production, state[8]); blob(production, state[11]);
         add(SectionId::production, std::move(production.bytes()));
     } else add(SectionId::production, session.galaxy().setup().production ? std::move(state[8]) : Bytes(4, 0));
-    detail::Writer conflicts; conflicts.u32(static_cast<std::uint32_t>(recorded.value().conflicts.size()));
-    for (const auto& entry : recorded.value().conflicts) {
-        auto encoded = encode_conflict(entry.conflict);
-        if (!encoded) return core::Result<Checkpoint>::failure(encoded.error());
-        conflicts.u64(entry.entry_tick); blob(conflicts, encoded.value());
-    }
-    // Opt-in tail preserves the existing FT-08 conflict section for older recordings.
-    if (recorded.value().conflict_services) {
-        conflicts.u32(static_cast<std::uint32_t>(recorded.value().admissions.size()));
-        for (const auto& entry : recorded.value().admissions) {
-            auto encoded = encode_conflict(entry.conflict);
-            if (!encoded) return core::Result<Checkpoint>::failure(encoded.error());
-            conflicts.u64(entry.entry_tick); blob(conflicts, encoded.value());
-            conflicts.u8(static_cast<std::uint8_t>(entry.arbitration.route));
-            conflicts.u8(entry.arbitration.forced_tactical ? 1 : 0);
-            conflicts.u8(entry.arbitration.overrun ? 1 : 0);
-        }
-    }
-    add(SectionId::conflicts, std::move(conflicts.bytes()));
+    auto conflicts = encode_conflicts_section(recorded.value());
+    if (!conflicts) return core::Result<Checkpoint>::failure(conflicts.error());
+    add(SectionId::conflicts, std::move(conflicts).value());
     add(SectionId::victory, session.galaxy().setup().victory ? std::move(state[16]) : Bytes(4, 0));
     auto script_save = session.save_galactic_scripts();
     if (!script_save) return core::Result<Checkpoint>::failure(script_save.error());
@@ -670,6 +697,8 @@ core::Result<gc::GalacticSetup> inspect_game_setup(const Checkpoint& saved) {
     if (!replay) return core::Result<gc::GalacticSetup>::failure(replay.error());
     return core::Result<gc::GalacticSetup>::success(std::move(replay).value().setup);
 }
+
+Digest game_capture_commitment(const Checkpoint& saved) { return capture_commitment(saved); }
 
 core::Result<GameResumeMetadata> inspect_game_resume(const Checkpoint& saved) {
     const auto* section = saved.find(SectionId::multiplayer_resume);
@@ -757,14 +786,18 @@ core::Result<void> validate_checkpoint_sections(const Checkpoint& saved, const I
 
 core::Result<void> decode_checkpoint_return_result(detail::Reader& returned, const auto& has_result,
     std::optional<campaign::ConflictRecord>& latest_context,
-    std::optional<campaign::BattleResult>& latest_result, std::string_view path) {
+    std::optional<campaign::BattleResult>& latest_result, std::string_view path, HistoryRecovery* recovery = nullptr) {
     if (has_result == 1) {
-        auto decoded_context = decode_conflict(blob(returned), path);
+        const auto replaced_before = recovery ? recovery->battles.size() : std::size_t{};
+        auto decoded_context = decode_conflict(blob(returned), path, recovery);
         if (!decoded_context) return core::Result<void>::failure(decoded_context.error());
         auto decoded_result = decode_result(blob(returned), path);
         if (!decoded_result) return core::Result<void>::failure(decoded_result.error());
-        latest_context = std::move(decoded_context).value(); latest_result = std::move(decoded_result).value();
-        if (latest_context->id != latest_result->conflict) return fail<void>("tactical result context differs", path);
+        if (recovery && recovery->battles.size() != replaced_before) recovery->result_dropped = true; // the summary is not carried
+        else {
+            latest_context = std::move(decoded_context).value(); latest_result = std::move(decoded_result).value();
+            if (latest_context->id != latest_result->conflict) return fail<void>("tactical result context differs", path);
+        }
     }
     if (has_result > 1 || returned.failed() || returned.remaining()) return fail<void>("malformed tactical return section", path);
     return core::Result<void>::success();
@@ -843,16 +876,14 @@ core::Result<void> decode_checkpoint_timelines(detail::Reader& context, campaign
     return core::Result<void>::success();
 }
 
-core::Result<void> validate_checkpoint_recording(const Checkpoint& saved, campaign::GameRecording& recording, auto& active_conflict,
-    const auto& completed, auto& child_log, const auto& replay_bytes, gc::OfferPool& pool,
-    const Identities& build, campaign::HistoryBoundary& boundary, std::string_view path) {
-    if (recording.base.at.tick > completed)
-        return fail<void>("section session: history base is after the saved tick", path, diagnostic_codes::inconsistent);
-    detail::Reader conflicts(saved.find(SectionId::conflicts)->bytes);
+// The history entries and the opt-in admission tail of a conflicts section, appended to the recording.
+core::Result<void> decode_conflicts_section(std::span<const std::uint8_t> bytes, campaign::GameRecording& recording,
+    std::string_view path, HistoryRecovery* recovery) {
+    detail::Reader conflicts(bytes);
     const auto count = conflicts.u32();
     if (count > gc::galactic_max_objects || count > conflicts.remaining() / 16) return fail<void>("section conflicts: invalid count", path);
     for (std::uint32_t i = 0; i < count; ++i) {
-        const auto tick = conflicts.u64(); auto conflict = decode_conflict(blob(conflicts), path);
+        const auto tick = conflicts.u64(); auto conflict = decode_conflict(blob(conflicts), path, recovery);
         if (!conflict) return core::Result<void>::failure(conflict.error());
         recording.conflicts.push_back({tick, std::move(conflict).value()});
     }
@@ -863,7 +894,7 @@ core::Result<void> validate_checkpoint_recording(const Checkpoint& saved, campai
             return fail<void>("section conflicts: invalid admission count", path);
         for (std::uint32_t i = 0; i < admissions; ++i) {
             campaign::RecordedAdmission entry; entry.entry_tick = conflicts.u64();
-            auto conflict = decode_conflict(blob(conflicts), path);
+            auto conflict = decode_conflict(blob(conflicts), path, recovery);
             if (!conflict) return core::Result<void>::failure(conflict.error());
             entry.conflict = std::move(conflict).value();
             const auto route = conflicts.u8(), forced = conflicts.u8(), overrun = conflicts.u8();
@@ -874,6 +905,21 @@ core::Result<void> validate_checkpoint_recording(const Checkpoint& saved, campai
         }
     }
     if (conflicts.failed() || conflicts.remaining() != 0) return fail<void>("section conflicts: malformed", path);
+    return core::Result<void>::success();
+}
+
+core::Result<void> validate_checkpoint_recording(const Checkpoint& saved, campaign::GameRecording& recording, auto& active_conflict,
+    const auto& completed, auto& child_log, const auto& replay_bytes, gc::OfferPool& pool,
+    const Identities& build, campaign::HistoryBoundary& boundary, std::string_view path, HistoryRecovery* recovery = nullptr) {
+    if (recording.base.at.tick > completed)
+        return fail<void>("section session: history base is after the saved tick", path, diagnostic_codes::inconsistent);
+    if (auto decoded = decode_conflicts_section(saved.find(SectionId::conflicts)->bytes, recording, path, recovery); !decoded)
+        return decoded;
+    if (recovery && !recovery->battles.empty()) {
+        auto expected = encode_conflicts_section(recording);
+        if (!expected) return core::Result<void>::failure(expected.error());
+        recovery->conflicts_section = std::move(expected).value();
+    }
     if (active_conflict && std::none_of(recording.conflicts.begin(), recording.conflicts.end(), [&](const auto& entry) {
         // WGS-P09: roles/departures evolve only the effective mapping; history keeps
         // the original entry for replay. Readiness and save-only barriers advance only the parent clock.
@@ -1067,7 +1113,7 @@ core::Result<void> restore_checkpoint_publication(campaign::GameSession& session
 
 core::Result<void> validate_checkpoint_reconstruction(campaign::GameSession& session, const auto& expected_hash, const auto& strategic,
     const auto& tactical, const Checkpoint& saved, const Identities& build,
-    const bool direct, std::string_view path) {
+    const bool direct, std::string_view path, const HistoryRecovery* recovery = nullptr) {
     Digest actual{}; (void)detail::from_hex(session.state_sha256(), actual);
     if (actual != expected_hash || session.galaxy().clock().strategic_speed.raw() != static_cast<std::int64_t>(strategic)
         || session.galaxy().clock().tactical_speed.raw() != static_cast<std::int64_t>(tactical)) {
@@ -1089,11 +1135,58 @@ core::Result<void> validate_checkpoint_reconstruction(campaign::GameSession& ses
     auto recaptured = capture(session, build, *mods::decode_description(saved.find(SectionId::mod_list)->bytes));
     if (!recaptured) return core::Result<void>::failure(recaptured.error());
     if (recaptured.value().header != saved.header) return fail<void>("reconstructed header differs", path, diagnostic_codes::inconsistent);
+    // A recovery replaced some battle records. Everything must still be exactly the saved bytes except: the replaced records
+    // in the conflicts section (compared against the saved records re-encoded with their empty setups), the latest battle
+    // summary when it was dropped (compared against the saved return state without it) and the capture commitment in the
+    // resume section (bytes 32..64, which covers the rewritten sections).
+    const bool replaced = recovery && !recovery->battles.empty();
+    // The recaptured conflicts section must read as an ordinary one (every setup valid, canonical) and equal the saved one
+    // once the replaced records' setups are set aside on both sides.
+    const auto recovered_conflicts_match = [&](const Bytes& actual) {
+        campaign::GameRecording got;
+        if (!decode_conflicts_section(actual, got, path, nullptr)) return false;
+        for (auto& entry : got.conflicts) if (recovery->battles.contains(entry.conflict.id)) entry.conflict.tactical = {};
+        for (auto& entry : got.admissions) if (recovery->battles.contains(entry.conflict.id)) entry.conflict.tactical = {};
+        got.conflict_services = got.conflict_services || !got.admissions.empty();
+        auto normalized = encode_conflicts_section(got);
+        return normalized && normalized.value() == recovery->conflicts_section;
+    };
+    const auto recovered_section_matches = [&](const Section& saved_section, const Section& actual) {
+        if (saved_section.id != actual.id || saved_section.version != actual.version || saved_section.required != actual.required) return false;
+        if (saved_section.id == static_cast<std::uint16_t>(SectionId::conflicts)) return recovered_conflicts_match(actual.bytes);
+        if (saved_section.id == static_cast<std::uint16_t>(SectionId::tactical_return) && recovery->result_dropped) {
+            detail::Reader state(saved_section.bytes);
+            const auto size = blob(state).size();
+            if (state.failed()) return false;
+            Bytes expected(saved_section.bytes.begin(), saved_section.bytes.begin() + static_cast<std::ptrdiff_t>(8 + size));
+            expected.push_back(0); // no latest summary
+            return actual.bytes == expected;
+        }
+        if (saved_section.id == static_cast<std::uint16_t>(SectionId::multiplayer_resume)) {
+            if (saved_section.bytes.size() != actual.bytes.size() || saved_section.bytes.size() < 64) return false;
+            return std::equal(saved_section.bytes.begin(), saved_section.bytes.begin() + 32, actual.bytes.begin())
+                && std::equal(saved_section.bytes.begin() + 64, saved_section.bytes.end(), actual.bytes.begin() + 64);
+        }
+        return actual == saved_section;
+    };
     for (const auto& section : saved.sections) {
         if (section.id >= 0x8000 || !known_section(section.id)) continue;
         if (!direct && (section.id == static_cast<std::uint16_t>(SectionId::galactic_owner)
             || section.id == static_cast<std::uint16_t>(SectionId::multiplayer_resume))) continue;
         const auto* expected = recaptured.value().find(static_cast<SectionId>(section.id));
+        if (replaced && (section.id == static_cast<std::uint16_t>(SectionId::conflicts)
+            || section.id == static_cast<std::uint16_t>(SectionId::tactical_return)
+            || section.id == static_cast<std::uint16_t>(SectionId::multiplayer_resume))) {
+            if (!expected || !recovered_section_matches(section, *expected)) {
+                std::size_t at{};
+                const Bytes& want = section.id == static_cast<std::uint16_t>(SectionId::conflicts) ? recovery->conflicts_section : section.bytes;
+                if (expected) while (at < expected->bytes.size() && at < want.size() && expected->bytes[at] == want[at]) ++at;
+                return fail<void>("reconstructed section differs: " + std::string(section_name(section.id)) + "@" + std::to_string(at)
+                    + " (" + std::to_string(want.size()) + "/" + std::to_string(expected ? expected->bytes.size() : 0) + ")",
+                    path, diagnostic_codes::inconsistent);
+            }
+            continue;
+        }
         if (!expected || *expected != section) {
             std::size_t at{};
             if (expected) while (at < expected->bytes.size() && at < section.bytes.size() && expected->bytes[at] == section.bytes[at]) ++at;
@@ -1185,10 +1278,13 @@ core::Result<std::optional<std::uint64_t>> inspect_game_vote_timeout(const Check
 
 static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::uint8_t> bytes, const Identities& build,
     const GameLoadOptions& options, const sim::PartitionExecutor& executor, std::string_view path, bool direct,
-    std::span<const std::uint8_t> oracle_base = {}) {
+    std::span<const std::uint8_t> oracle_base = {}, HistoryRecovery* recovery = nullptr) {
     auto parsed = parse_checkpoint(bytes, path);
     if (!parsed) return core::Result<GameRestore>::failure(parsed.error());
     const auto& saved = parsed.value();
+    // The active battle's record is part of the live child; it cannot be replaced by an empty setup.
+    if (recovery && (saved.header.flags & flag_child) != 0)
+        return fail<GameRestore>("this save was made during a battle; load a save from between battles", path, diagnostic_codes::invalid_save);
     if (auto phase = validate_checkpoint_sections(saved, build, options, path); !phase)
         return core::Result<GameRestore>::failure(phase.error());
     const auto& scripts_bytes = saved.find(SectionId::scripts)->bytes;
@@ -1209,7 +1305,7 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
     const auto has_result = returned.u8();
     std::optional<campaign::ConflictRecord> latest_context;
     std::optional<campaign::BattleResult> latest_result;
-    if (auto phase = decode_checkpoint_return_result(returned, has_result, latest_context, latest_result, path); !phase)
+    if (auto phase = decode_checkpoint_return_result(returned, has_result, latest_context, latest_result, path, recovery); !phase)
         return core::Result<GameRestore>::failure(phase.error());
     std::size_t script_length{};
     auto script_save = decode_scripts(scripts_bytes, path, script_length);
@@ -1246,7 +1342,7 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
     if (auto phase = decode_checkpoint_timelines(context, timelines, completed, saved, recording, strategic, tactical, path); !phase)
         return core::Result<GameRestore>::failure(phase.error());
     campaign::HistoryBoundary boundary;
-    if (auto phase = validate_checkpoint_recording(saved, recording, active_conflict, completed, child_log, replay_bytes, offer_pool.value(), build, boundary, path); !phase)
+    if (auto phase = validate_checkpoint_recording(saved, recording, active_conflict, completed, child_log, replay_bytes, offer_pool.value(), build, boundary, path, recovery); !phase)
         return core::Result<GameRestore>::failure(phase.error());
     const bool windowed_oracle = !direct && recording.base.at.tick != 0;
     if (windowed_oracle && (oracle_base.empty() || has_child))
@@ -1299,7 +1395,7 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
     }
     if (auto restored = session.restore_galactic_ai(ai_save.value()); !restored)
         return core::Result<GameRestore>::failure(restored.error());
-    if (auto phase = validate_checkpoint_reconstruction(session, expected_hash, strategic, tactical, saved, build, direct, path); !phase)
+    if (auto phase = validate_checkpoint_reconstruction(session, expected_hash, strategic, tactical, saved, build, direct, path, recovery); !phase)
         return core::Result<GameRestore>::failure(phase.error());
     // #4058: the loaded save is the new history boundary; the first step drops the window it was restored with.
     session.schedule_history_rebase(std::move(boundary));
@@ -1321,6 +1417,25 @@ core::Result<GameRestore> replay_game_checkpoint_for_testing(std::span<const std
     const Identities& build, const GameLoadOptions& options, const sim::PartitionExecutor& executor,
     std::span<const std::uint8_t> base) {
     return load_game_checkpoint_impl(bytes, build, options, executor, {}, false, base);
+}
+core::Result<RecoveredCheckpoint> recover_checkpoint_history(std::span<const std::uint8_t> bytes, const Identities& build,
+    const GameLoadOptions& options, const sim::PartitionExecutor& executor, std::string_view path) {
+    auto parsed = parse_checkpoint(bytes, path);
+    if (!parsed) return core::Result<RecoveredCheckpoint>::failure(parsed.error());
+    auto description = inspect_game_mods(parsed.value());
+    if (!description) return core::Result<RecoveredCheckpoint>::failure(description.error());
+    auto plain = options; plain.player_load = false; plain.reserved_autosave = false; // a conversion, not a player load
+    HistoryRecovery recovery;
+    auto loaded = load_game_checkpoint_impl(bytes, build, plain, executor, path, true, {}, &recovery);
+    if (!loaded) return core::Result<RecoveredCheckpoint>::failure(loaded.error());
+    if (recovery.battles.empty()) return fail<RecoveredCheckpoint>("this save has no battle record from another build", path, diagnostic_codes::invalid_save);
+    auto saved = save_game_checkpoint(loaded.value().session, build, loaded.value().presentation_hints, description.value());
+    if (!saved) return core::Result<RecoveredCheckpoint>::failure(saved.error());
+    RecoveredCheckpoint result;
+    result.bytes = std::move(saved).value();
+    result.battles.assign(recovery.battles.begin(), recovery.battles.end());
+    result.latest_summary_dropped = recovery.result_dropped;
+    return core::Result<RecoveredCheckpoint>::success(std::move(result));
 }
 core::Result<void> restore_game_checkpoint(GameRestore& running, std::span<const std::uint8_t> bytes,
     const Identities& build, const GameLoadOptions& options, const sim::PartitionExecutor& executor, std::string_view path) {

@@ -415,6 +415,9 @@ struct FrontEndMode::State final {
     bool escape_was_down{true};
     std::uint32_t frames{};
     std::uint32_t menu_test_frames{};
+    std::uint32_t soak_frames{};
+    std::uint64_t soak_start_usec{};
+    double soak_start_cpu_ms{};
     std::uint64_t fade_started_ms{};
     bool fading{};
     std::vector<std::string> notes;
@@ -447,9 +450,11 @@ struct FrontEndMode::State final {
     std::optional<int> step(model::Step result);
     void update_hint(Menu& menu, const Entry& entry);
     std::optional<int> run_test();
+    std::optional<int> run_lan_soak();
     std::optional<int> run_battle_test();
     [[nodiscard]] bool attract_wanted() const;
     void sync_attract();
+    [[nodiscard]] bool backdrop_covered() const;
     void stop_attract(const char* reason);
     void log_attract(const char* label);
     void log_behind(const char* label) const;
@@ -521,6 +526,14 @@ bool FrontEndMode::State::attract_wanted() const {
     return setup != nullptr && setup->visible() && !setup->start_pending();
 }
 
+// MAT-22: the lobby screens, and the staging screen while its LAN connection is selected, draw an opaque
+// backing over the battle.
+bool FrontEndMode::State::backdrop_covered() const {
+    const auto screen = nav.current();
+    if (model::covers_backdrop(screen)) return true;
+    return screen == model::FrontEndScreen::skirmish_setup && setup != nullptr && setup->visible() && setup->lan_selected();
+}
+
 void FrontEndMode::State::stop_attract(const char* reason) {
     const core::gc_load::Scope teardown("gc.attract_stop");
     if (attract && attract->running()) UtilityFunctions::print("EAWR front end attract stopped: ", reason);
@@ -562,6 +575,8 @@ void FrontEndMode::State::sync_attract() {
         MenuTimeline::mark("attract_start_end");
         MenuTimeline::report("attract_start_end");
     }
+    // MAT-22: a screen with an opaque backing hides the battle, so it is held (not run, not drawn).
+    attract->set_held(backdrop_covered());
     if (attract->running()) {
         const bool focused = DisplayServer::get_singleton()->window_is_focused();
         // The menu is always a dialog for the attract: its keys are not the attract's (MAT-07).
@@ -1112,6 +1127,37 @@ void FrontEndMode::State::capture(const char* label) const {
 }
 
 // The GPU contract: real pointer events on the controls, the same handlers a player reaches.
+// #7870 A/B: main menu -> Multiplayer -> LAN, then `lan_soak_frames` frames on the LAN setup, reporting the
+// wall time and the process CPU time per frame (all threads). Run with and without `--eawr-attract-hold off`.
+std::optional<int> FrontEndMode::State::run_lan_soak() {
+    using S = model::FrontEndScreen;
+    const auto press_gadget = [&](S screen, const char* id) {
+        Menu& menu = menus[menu_index(screen)];
+        if (Entry* entry = find_entry(menu, id); entry != nullptr && entry->button != nullptr)
+            click(entry->button->get_global_rect().get_center());
+    };
+    if (menu_test_frames == 8) press_gadget(S::main_menu, "IDC_MAIN_MENU_MULTIPLAYER");
+    if (menu_test_frames == 16) press_gadget(S::multiplayer, "IDC_MULTIPLAYER_LAN_BUTTON");
+    if (menu_test_frames < 40) return std::nullopt;
+    const std::uint64_t now = Time::get_singleton()->get_ticks_usec();
+    if (soak_frames == 0) {
+        soak_start_usec = now;
+        soak_start_cpu_ms = MenuTimeline::process_cpu_ms();
+        UtilityFunctions::print("EAWR front end lan soak begin: screen ", text(model::to_string(nav.current())),
+                                "; held ", attract != nullptr && attract->held());
+    }
+    if (++soak_frames < options.lan_soak_frames) return std::nullopt;
+    const double wall_ms = static_cast<double>(now - soak_start_usec) / 1000.0;
+    const double cpu_ms = MenuTimeline::process_cpu_ms() - soak_start_cpu_ms;
+    const int64_t camera_updates = attract && attract->running() ? static_cast<int64_t>(attract->status().camera_updates) : -1;
+    UtilityFunctions::print("EAWR front end lan soak: screen ", text(model::to_string(nav.current())), "; held ",
+                            attract != nullptr && attract->held(), "; frames ", static_cast<int64_t>(soak_frames), "; wall_ms ", wall_ms,
+                            "; avg_frame_ms ", wall_ms / soak_frames, "; cpu_ms ", cpu_ms, "; cpu_ms_per_frame ", cpu_ms / soak_frames,
+                            "; camera_updates ", camera_updates);
+    exit_reason = "test_complete";
+    return 0;
+}
+
 std::optional<int> FrontEndMode::State::run_test() {
     if (options.battle_round_trip) return run_battle_test();
     if (!options.campaign_test.empty()) return run_campaign_test();
@@ -1120,6 +1166,7 @@ std::optional<int> FrontEndMode::State::run_test() {
     if (attract && attract->running() && (!attract->visible() || attract->reveal_fraction() < 1.0F))
         return std::nullopt;
     ++menu_test_frames;
+    if (options.lan_soak_frames > 0) return run_lan_soak();
     const auto press_gadget = [&](model::FrontEndScreen screen, const char* id) {
         Menu& menu = menus[menu_index(screen)];
         if (Entry* entry = find_entry(menu, id); entry != nullptr && entry->button != nullptr)
@@ -1534,6 +1581,10 @@ FrontEndMode::Options FrontEndMode::from_command_line(const std::filesystem::pat
         if (argument == "--eawr-front-end-test-start") options.start_battle = true;
         if (argument == "--eawr-front-end-test-campaign" && i + 1 < arguments.size())
             options.campaign_test = utf8(arguments[i + 1]);
+        if (argument == "--eawr-front-end-test-lan-soak" && i + 1 < arguments.size()) {
+            options.test = true;
+            options.lan_soak_frames = static_cast<std::uint32_t>(std::max(0, std::atoi(utf8(arguments[i + 1]).c_str())));
+        }
         if (argument == "--eawr-attract" && i + 1 < arguments.size() && utf8(arguments[i + 1]) == "off") options.attract = false;
         if (argument == "--eawr-audio" && i + 1 < arguments.size() && utf8(arguments[i + 1]) == "off") options.audio = false;
     }

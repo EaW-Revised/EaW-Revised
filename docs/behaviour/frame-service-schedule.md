@@ -104,7 +104,7 @@ ignored `out/research/station-radar/`.
 
 | Rule | Observable order or cadence | Evidence |
 |---|---|---|
-| FS-43 | Space mode services battlefield permissions before its general game-mode/object service. Outside a cinematic, that service copies the local player's radar permission into enemy minimap admission. This consumer does not modify world fog. | debug build WRAD-E05/08; WRAD-02 |
+| FS-43 | Space mode services battlefield permissions before its general game-mode/object service. Outside a cinematic, that service copies the local player's radar permission into enemy minimap admission, but a single-player campaign battle has no radar permission list (WRAD-06), so its local player keeps enemies admitted; every other battle uses the list or its empty default. This consumer does not modify world fog. | debug build WRAD-E05/08; WRAD-02 |
 | FC-75 | The radar handler inherits a zero service interval: no recurring handler poll and no randomized first service. It applies on automatic initialization when enabled, or immediately on a disabled-to-enabled named-lock transition. A disable terminates its source contribution; re-enable applies again. `Skirmish_Automatic` admits multiplayer tactical mode. | debug build WRAD-E07..10; WRAD-04 |
 | FD-70 | Comm-array creation unlocks its exact nested name; destruction locks it and full repair unlocks it through WHD-05. The automatic state change updates source-owned player permission without waiting for a handler poll. Enemy minimap display reads the resulting permission on the next admitted battlefield service; a change after that service is not retroactively visible to its earlier read. Fog and ordinary contact visibility are separate inputs. | debug build WRAD-E05/07/10; WHD-05; WRAD-01..04 |
 

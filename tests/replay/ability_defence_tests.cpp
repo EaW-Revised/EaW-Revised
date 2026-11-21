@@ -869,6 +869,56 @@ void test_projectile_defence_transaction() {
         expect(std::find(order.begin(), order.end(), 2) == order.end(),
             "explicit jammer: unnamed ordinary row does not create nested holder");
     }
+    // WJM-05: a jammer row whose authored name matches no nested handler is lit and runs its timers
+    // but registers no holder and jams nothing; a matched row is unchanged.
+    for (const auto workers : {1U, 2U, 4U, 8U}) for (const int variant : {0, 1, 2}) {
+        // 0: no nested handler; 1: a nested handler under another name; 2: matched control.
+        tactical::AbilityProfile ordinary;
+        ordinary.kind = Kind::sensor_jamming; ordinary.gui_activated_ability_name = "Row_Name";
+        ordinary.expiration_frames = 30; ordinary.recharge_frames = 300; ordinary.effective_radius = units(200);
+        tactical::SpecialAbilityProfile handler;
+        handler.name = variant == 2 ? "Row_Name" : "Other_Name"; handler.kind = tactical::SpecialAbilityKind::sensor_jamming;
+        handler.style = tactical::SpecialActivationStyle::user_input; handler.initially_enabled = true;
+        handler.service_interval = 1;
+        tactical::AbilityTable table;
+        table.profiles = {{crusader_type, {ordinary}, false, variant == 0
+            ? std::vector<tactical::SpecialAbilityProfile>{} : std::vector<tactical::SpecialAbilityProfile>{handler}}};
+        tactical::MotionTable movement;
+        movement.rules = {units(15), units(300)};
+        movement.profiles = {{missile_shooter_type, units(1), decimal("0.2"), decimal("0.2"), units(3), units(1)},
+            {crusader_type, units(2), decimal("0.2"), decimal("0.2"), units(3), units(1)}};
+        auto made = tactical::TacticalSession::create(laser_defence_setup(800), laser_defence_sensors(),
+            laser_defence_durability(), movement, std::nullopt, laser_defence_combat(true), {}, table);
+        expect(static_cast<bool>(made), "unmatched jammer: session creates");
+        if (!made) continue;
+        auto session = std::move(made).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(static_cast<bool>(session.step(executor)), "unmatched jammer: first frame advances");
+        expect(static_cast<bool>(session.submit(command(session.completed_tick(), 2, 0, 2,
+            tactical::AbilityPayload{Kind::sensor_jamming, tactical::AbilityAction::activate}))),
+            "unmatched jammer: activation submits");
+        expect(static_cast<bool>(session.step(executor)), "unmatched jammer: activation frame advances");
+        auto state = session.ability_state(2);
+        expect(state && state->slots[0].active, "unmatched jammer: the click switches the row on");
+        const bool holder = state && !state->special.slots.empty() && state->special.slots[0].jammer_registered;
+        expect(holder == (variant == 2), "unmatched jammer: only a name match registers a holder");
+        const auto order = order_of(session);
+        expect((std::find(order.begin(), order.end(), 2) != order.end()) == (variant == 2),
+            "unmatched jammer: only a name match joins the projectile defence order");
+        // The ordinary recharge starts when the run ends, matched or not.
+        for (unsigned frame = 0; frame < 40; ++frame) if (!session.step(executor)) break;
+        state = session.ability_state(2);
+        expect(state && !state->slots[0].active, "unmatched jammer: the expiry ends the row");
+        expect(state && state->slots[0].ready_tick > session.completed_tick(), "unmatched jammer: the recharge runs after the expiry");
+        expect(static_cast<bool>(session.submit(command(session.completed_tick(), 2, 0, 2,
+            tactical::AbilityPayload{Kind::sensor_jamming, tactical::AbilityAction::activate}))),
+            "unmatched jammer: a second click submits");
+        expect(static_cast<bool>(session.step(executor)), "unmatched jammer: second frame advances");
+        state = session.ability_state(2);
+        expect(state && !state->slots[0].active, "unmatched jammer: the recharge refuses a second click");
+        const auto saved = session.save_checkpoint_state();
+        expect(static_cast<bool>(saved), "unmatched jammer: state checkpoints");
+    }
     class FailVisibility final : public eawr::sim::PartitionExecutor {
     public:
         std::size_t worker_count() const noexcept override { return 1; }
@@ -884,9 +934,17 @@ void test_projectile_defence_transaction() {
     };
     tactical::AbilityProfile jammer; jammer.kind = Kind::sensor_jamming;
     jammer.effective_radius = units(100); jammer.expiration_frames = 3;
+    jammer.gui_activated_ability_name = "Jam"; // WJM-05: only a name match registers a holder
+    tactical::SpecialAbilityProfile jam_handler;
+    jam_handler.name = "Jam"; jam_handler.kind = tactical::SpecialAbilityKind::sensor_jamming;
+    jam_handler.style = tactical::SpecialActivationStyle::user_input; jam_handler.initially_enabled = true;
+    jam_handler.service_interval = 1;
     tactical::AbilityProfile shield; shield.kind = Kind::missile_shield; shield.effective_radius = units(100);
-    tactical::AbilityTable abilities; abilities.profiles = {unit_of(corvette_type, jammer),
-        unit_of(frigate_type, shield), unit_of(plain_type, jammer)};
+    auto jammer_holder = [&](const tactical::TypeId type) {
+        auto holder = unit_of(type, jammer); holder.special.push_back(jam_handler); return holder;
+    };
+    tactical::AbilityTable abilities; abilities.profiles = {jammer_holder(corvette_type),
+        unit_of(frigate_type, shield), jammer_holder(plain_type)};
     tactical::CombatTable combat;
     for (const auto type : {corvette_type, frigate_type, plain_type}) {
         tactical::CombatProfile profile; profile.type_id = type; combat.profiles.push_back(profile);
@@ -914,7 +972,9 @@ void test_projectile_defence_transaction() {
             "PDEF failed frame rolls back registration and ability activation");
         const eawr::platform::ThreadWorkerAdapter executor(workers);
         std::vector<std::string> hashes;
-        const std::vector<std::vector<eawr::sim::EntityId>> orders{{2, 1}, {2, 1, 4}, {2, 4, 1}, {2, 4}, {}, {}};
+        // The matched nested handler keeps its registration until the frame after the row expires, so the pruning
+        // lands one frame later than for the unnamed row this fixture used before WJM-05.
+        const std::vector<std::vector<eawr::sim::EntityId>> orders{{2, 1}, {2, 1, 4}, {2, 4, 1}, {2, 4}, {2, 4}, {}};
         for (std::size_t frame = 0; frame < orders.size(); ++frame) {
             session.scramble_storage_for_testing();
             const auto step = session.step(executor);
@@ -1399,6 +1459,254 @@ void test_full_salvo() {
 }
 
 
+// WAB-81, AB-20 (#7940): only entries 0 and 1 of a type's unit-ability list are modes; the hardpoint delay factor is
+// entry 0's multiplier x the unit's x entry 1's; the pulse gap is always scaled, the recharge only below 1; an entry's
+// fire gate or a WEAPONS_ENABLED flag of false blocks the hardpoint.
+void test_mode_entries() {
+    using Kind = tactical::AbilityKind;
+    const auto mode_row = [](const Kind kind, const std::uint32_t entry) {
+        tactical::AbilityProfile row;
+        row.kind = kind;
+        row.list_entry = entry;
+        row.expiration_frames = 6000;
+        row.recharge_frames = 6000;
+        return row;
+    };
+    const auto unit_with = [](std::vector<tactical::AbilityProfile> rows) {
+        return tactical::UnitAbilityProfile{corvette_type, std::move(rows), false};
+    };
+
+    // AB-20: a multiplier of an ability beyond entry 1 is ignored; a profile without a list counts by position.
+    {
+        auto first = mode_row(Kind::power_to_weapons, 0);
+        first.modifiers.weapon_delay = decimal("0.5");
+        auto beyond = mode_row(Kind::full_salvo, 2);
+        beyond.modifiers.weapon_delay = units(3);
+        auto second = mode_row(Kind::turbo, 1);
+        second.modifiers.weapon_delay = units(2);
+        const auto listed = unit_with({first, second, beyond});
+        auto state = tactical::initial_abilities(listed);
+        for (auto& slot : state.slots) slot.active = true;
+        expect(tactical::ability_multiplier(listed, state, tactical::AbilityModifier::weapon_delay) == units(1),
+            "AB-20: entries 0 and 1 multiply (0.5 x 2) and entry 2 is ignored");
+        const auto skipped_entry = unit_with({first, beyond});
+        state = tactical::initial_abilities(skipped_entry);
+        for (auto& slot : state.slots) slot.active = true;
+        expect(tactical::ability_multiplier(skipped_entry, state, tactical::AbilityModifier::weapon_delay) == decimal("0.5"),
+            "AB-20: a row listed at entry 2 is ignored even when it is the second row of the profile");
+        auto unlisted_first = first, unlisted_second = second, unlisted_third = beyond;
+        unlisted_first.list_entry = unlisted_second.list_entry = unlisted_third.list_entry = tactical::unlisted_entry;
+        const auto positional = unit_with({unlisted_first, unlisted_second, unlisted_third});
+        state = tactical::initial_abilities(positional);
+        for (auto& slot : state.slots) slot.active = true;
+        expect(tactical::ability_multiplier(positional, state, tactical::AbilityModifier::weapon_delay) == units(1),
+            "AB-20: without a source list the first two rows count");
+    }
+
+    struct Fire {
+        std::vector<std::uint64_t> missile;
+        std::vector<std::string> hashes;
+    };
+    // One missile hardpoint (six pulses 20 frames apart, a 4 to 5 s recharge) that authors a delay multiplier for
+    // POWER_TO_WEAPONS (0.5) and FULL_SALVO (0.4) and, optionally, a fire gate for POWER_TO_WEAPONS.
+    const auto play_tweaked = [&](const std::function<void(tactical::WeaponProfile&)>& tweak,
+        const std::vector<tactical::AbilityProfile>& rows, const std::vector<Kind>& on,
+        const bool p2w_gate, const std::size_t workers) {
+        Fire result;
+        const tactical::AbilityTable ability_data{{unit_with(rows)}, {1}};
+        tactical::CombatTable combat;
+        tactical::CombatProfile ship;
+        ship.type_id = corvette_type; ship.category_bits = 1;
+        ship.hardpoints = {{0, at(5, 0), true}};
+        tactical::ShotProfile shot;
+        shot.damage = units(1); shot.damage_type = 0; shot.speed = units(40); shot.max_travel = units(1500);
+        tactical::WeaponProfile missile;
+        missile.hardpoint = 0; missile.range = units(1500);
+        missile.min_recharge_hundredths = 400; missile.max_recharge_hundredths = 500;
+        missile.pulse_count = 6; missile.pulse_delay_frames = 20;
+        missile.fire_a = at(5, 2); missile.fire_b = at(5, 2);
+        missile.power_to_weapons_delay = decimal("0.5");
+        missile.full_salvo_delay = decimal("0.4");
+        missile.fire_in_power_to_weapons_mode = p2w_gate;
+        missile.cone_width = units(90); missile.cone_height = units(90);
+        missile.opportunity_when_idle = true; missile.opportunity_when_targeting = true;
+        missile.shot = shot;
+        if (tweak) tweak(missile);
+        ship.weapons = {missile};
+        ship.max_attack_distance = units(1500);
+        tactical::CombatProfile target;
+        target.type_id = plain_type; target.category_bits = 1;
+        combat.profiles = {ship, target};
+        auto start = setup();
+        start.units[0].position = at(0, 0);
+        start.units[2].position = at(800, 0);
+        const std::vector<tactical::SensorProfile> sensors{{corvette_type, units(2000)}};
+        auto created = tactical::TacticalSession::create(start, sensors, durability(), motion(), std::nullopt,
+            combat, {}, ability_data);
+        expect(static_cast<bool>(created), "WAB-81: the session binds");
+        if (!created) return result;
+        auto session = std::move(created).value();
+        expect(static_cast<bool>(session.submit(command(0, 1, 1, 1, tactical::AttackPayload{3}))),
+            "WAB-81: the attack order submits");
+        std::uint32_t sequence = 2;
+        for (const auto kind : on) {
+            expect(static_cast<bool>(session.submit(command(0, 1, sequence++, 1,
+                tactical::AbilityPayload{kind, tactical::AbilityAction::activate}))), "WAB-81: the activation submits");
+        }
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        for (std::uint64_t tick = 0; tick < 400; ++tick) {
+            auto stepped = session.step(executor);
+            expect(static_cast<bool>(stepped), "WAB-81: a step succeeds");
+            if (!stepped) return result;
+            result.hashes.push_back(stepped.value().state_sha256);
+            for (const auto& event : stepped.value().snapshot->combat_events()) {
+                if (event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 1)
+                    result.missile.push_back(event.tick);
+            }
+        }
+        return result;
+    };
+    const auto play = [&](const std::vector<tactical::AbilityProfile>& rows, const std::vector<Kind>& on,
+        const bool p2w_gate, const std::size_t workers) { return play_tweaked({}, rows, on, p2w_gate, workers); };
+    const auto gaps = [](const Fire& fire) {
+        std::vector<std::uint64_t> result;
+        for (std::size_t index = 1; index < fire.missile.size(); ++index)
+            result.push_back(fire.missile[index] - fire.missile[index - 1]);
+        return result;
+    };
+    const auto p2w = [&](const std::uint32_t entry, const Fixed unit_delay, const bool silence) {
+        auto row = mode_row(Kind::power_to_weapons, entry);
+        row.modifiers.weapon_delay = unit_delay;
+        if (silence) row.modifiers.weapons_enabled = false;
+        return row;
+    };
+
+    // The product: 0.5 (entry 0's hardpoint multiplier) x 0.5 (the unit's) x 0.4 (entry 1's) = 0.1, so a 20-frame
+    // gap is 2 and the 120 to 150 frame recharge is 12 to 15.
+    const auto product = play({p2w(0, decimal("0.5"), false), mode_row(Kind::full_salvo, 1)},
+        {Kind::power_to_weapons, Kind::full_salvo}, true, 1);
+    const auto product_gaps = gaps(product);
+    expect(product.missile.size() >= 12 && std::count(product_gaps.begin(), product_gaps.end(), 2) >= 10
+        && std::all_of(product_gaps.begin(), product_gaps.end(), [](const std::uint64_t gap) {
+            return gap == 2 || (gap >= 12 && gap <= 15); }),
+        "WAB-81: the factor is entry 0's multiplier x the unit's x entry 1's (0.1)");
+    // FULL_SALVO listed at entry 2 is inert: the factor is 0.5 x 0.5 = 0.25 (gap 5, recharge 30 to 38).
+    const auto beyond = play({p2w(0, decimal("0.5"), false), mode_row(Kind::full_salvo, 2)},
+        {Kind::power_to_weapons, Kind::full_salvo}, true, 1);
+    const auto beyond_gaps = gaps(beyond);
+    expect(beyond.missile.size() >= 12 && std::count(beyond_gaps.begin(), beyond_gaps.end(), 5) >= 8
+        && std::all_of(beyond_gaps.begin(), beyond_gaps.end(), [](const std::uint64_t gap) {
+            return gap == 5 || (gap >= 30 && gap <= 38); }),
+        "WAB-81: a FULL_SALVO at entry 2 changes no delay and applies no full-salvo multiplier");
+    // Alone at entry 0, FULL_SALVO scales by its own multiplier: 0.4 (gap 8, recharge 48 to 60).
+    const auto solo = play({mode_row(Kind::full_salvo, 0)}, {Kind::full_salvo}, true, 1);
+    const auto solo_gaps = gaps(solo);
+    expect(std::count(solo_gaps.begin(), solo_gaps.end(), 8) >= 8 && std::all_of(solo_gaps.begin(), solo_gaps.end(),
+        [](const std::uint64_t gap) { return gap == 8 || (gap >= 48 && gap <= 60); }),
+        "WAB-81: FULL_SALVO at entry 0 applies its hardpoint multiplier");
+    // A factor above 1 (unit 3 x hardpoint 0.5 = 1.5): the pulse gap is scaled (30), the recharge is not lengthened.
+    const auto slow = play({p2w(0, units(3), false)}, {Kind::power_to_weapons}, true, 1);
+    const auto slow_gaps = gaps(slow);
+    expect(slow.missile.size() >= 6 && std::count(slow_gaps.begin(), slow_gaps.end(), 30) >= 5
+        && std::all_of(slow_gaps.begin(), slow_gaps.end(), [](const std::uint64_t gap) {
+            return gap == 30 || (gap >= 120 && gap <= 150); }),
+        "WAB-81: above 1 the pulse gap is scaled (x1.5 here) and the recharge is not");
+
+    // The fire block: entry 0 then entry 1, an authored gate of no, or a WEAPONS_ENABLED flag of false.
+    const auto silent = [&](const Fire& fire) { return fire.missile.empty(); };
+    expect(silent(play({p2w(0, units(1), false)}, {Kind::power_to_weapons}, false, 1)),
+        "WAB-81: an active entry 0 whose gate for it is no blocks the hardpoint");
+    expect(silent(play({mode_row(Kind::full_salvo, 0), p2w(1, units(1), false)},
+        {Kind::power_to_weapons}, false, 1)), "WAB-81: an active entry 1 whose gate for it is no blocks the hardpoint");
+    expect(!silent(play({mode_row(Kind::full_salvo, 0), p2w(2, units(1), false)},
+        {Kind::power_to_weapons}, false, 1)), "WAB-81: a gate of no at entry 2 blocks nothing");
+    expect(!silent(play({p2w(0, units(1), false)}, {}, false, 1)), "WAB-81: an inactive entry blocks nothing");
+    expect(silent(play({p2w(0, units(1), true)}, {Kind::power_to_weapons}, true, 1)),
+        "WAB-81: an active entry whose WEAPONS_ENABLED flag is false blocks the hardpoint");
+    expect(!silent(play({mode_row(Kind::full_salvo, 0), p2w(2, units(1), true)},
+        {Kind::power_to_weapons}, true, 1)), "WAB-81: a WEAPONS_ENABLED flag of false at entry 2 blocks nothing");
+
+    // TURBO (#7940): its hardpoint multiplier and its fire gate work like the others, at entry 0 or 1 only.
+    {
+        const auto turbo_delay = [](tactical::WeaponProfile& weapon) { weapon.turbo_delay = decimal("0.5"); };
+        const auto turbo_gate = [](tactical::WeaponProfile& weapon) { weapon.fire_in_turbo_mode = false; };
+        const auto turbo_row = [&](const std::uint32_t entry) { return mode_row(Kind::turbo, entry); };
+        const auto filler = [&](const std::uint32_t entry) { return mode_row(Kind::full_salvo, entry); };
+        const auto at_zero = play_tweaked(turbo_delay, {turbo_row(0)}, {Kind::turbo}, true, 1);
+        const auto zero_gaps = gaps(at_zero);
+        expect(at_zero.missile.size() >= 6 && std::count(zero_gaps.begin(), zero_gaps.end(), 10) >= 5,
+            "WAB-81: a TURBO hardpoint multiplier of 0.5 at entry 0 halves the pulse gap");
+        const auto at_one = play_tweaked(turbo_delay, {filler(0), turbo_row(1)}, {Kind::turbo}, true, 1);
+        expect(at_one.missile == at_zero.missile, "WAB-81: the same TURBO multiplier at entry 1 gives the same fire");
+        const auto at_two = play_tweaked(turbo_delay, {filler(0), mode_row(Kind::power_to_weapons, 1), turbo_row(2)}, {Kind::turbo}, true, 1);
+        const auto two_gaps = gaps(at_two);
+        expect(at_two.missile.size() >= 6 && std::count(two_gaps.begin(), two_gaps.end(), 20) >= 5,
+            "WAB-81: a TURBO multiplier at entry 2 changes nothing");
+        expect(play_tweaked(turbo_gate, {turbo_row(0)}, {Kind::turbo}, true, 1).missile.empty(),
+            "WAB-81: an active TURBO at entry 0 with the hardpoint's Fire_When_In_Turbo_Mode no blocks it");
+        expect(play_tweaked(turbo_gate, {filler(0), turbo_row(1)}, {Kind::turbo}, true, 1).missile.empty(),
+            "WAB-81: the same gate blocks at entry 1");
+        expect(!play_tweaked(turbo_gate, {filler(0), mode_row(Kind::power_to_weapons, 1), turbo_row(2)}, {Kind::turbo}, true, 1).missile.empty(),
+            "WAB-81: the TURBO gate at entry 2 blocks nothing");
+    }
+    // DEFEND needs a shield, which this unit lacks: its multiplier and gate are checked on the hardpoint itself.
+    {
+        tactical::WeaponProfile weapon;
+        expect(weapon.mode_delay(Kind::defend) == units(1) && weapon.fires_in_ability(Kind::defend),
+            "WAB-81: an unauthored hardpoint has DEFEND multiplier 1 and fires");
+        weapon.defend_delay = decimal("0.25");
+        weapon.fire_in_defend_mode = false;
+        weapon.turbo_delay = units(2);
+        expect(weapon.mode_delay(Kind::defend) == decimal("0.25") && !weapon.fires_in_ability(Kind::defend)
+            && weapon.mode_delay(Kind::turbo) == units(2) && weapon.fires_in_ability(Kind::turbo)
+            && weapon.mode_delay(Kind::lucky_shot) == units(1) && weapon.fires_in_ability(Kind::lucky_shot),
+            "WAB-81: DEFEND and TURBO read their own multiplier and gate; other kinds read none");
+    }
+    // A row counts for the mode exactly when its first listed position is 0 or 1 (a type authored twice keeps the
+    // earliest position, #7940).
+    {
+        const auto multiplier_at = [&](const std::uint32_t entry) {
+            auto row = mode_row(Kind::power_to_weapons, entry);
+            row.modifiers.weapon_delay = decimal("0.5");
+            const auto profile = unit_with({row});
+            auto state = tactical::initial_abilities(profile);
+            state.slots[0].active = true;
+            return tactical::ability_multiplier(profile, state, tactical::AbilityModifier::weapon_delay);
+        };
+        expect(multiplier_at(0) == decimal("0.5") && multiplier_at(1) == decimal("0.5") && multiplier_at(2) == units(1),
+            "AB-20: a row counts exactly when its first listed position is 0 or 1");
+    }
+    // A speed mode beyond entry 1 changes no speed, so it asks for no re-plan (#7940); at entry 0 or 1 it does.
+    {
+        const tactical::AbilityGate gate;
+        for (const std::uint32_t entry : {0U, 1U, 2U, 3U}) {
+            const bool counts = entry < 2;
+            auto profile = mode_row(Kind::turbo, entry);
+            profile.modifiers.speed = units(2);
+            tactical::AbilitySlot slot;
+            expect(tactical::activate_ability(profile, slot, gate, 0).speed == counts,
+                "AB-20: activating a speed mode asks for a re-plan only at entry 0 or 1");
+            expect(tactical::deactivate_ability(profile, slot, 10).speed == counts,
+                "AB-20: deactivating a speed mode asks for a re-plan only at entry 0 or 1");
+            const auto listed = unit_with({profile});
+            auto state = tactical::initial_abilities(listed);
+            state.slots[0].active = true;
+            state.slots[0].expires_tick = 5;
+            expect(tactical::expire_abilities(listed, state, 5).speed == counts,
+                "AB-20: an expiring speed mode asks for a re-plan only at entry 0 or 1");
+        }
+    }
+
+    // 1, 2, 4 and 8 workers agree.
+    for (const std::size_t workers : {2U, 4U, 8U}) {
+        const auto again = play({p2w(0, decimal("0.5"), false), mode_row(Kind::full_salvo, 1)},
+            {Kind::power_to_weapons, Kind::full_salvo}, true, workers);
+        expect(again.hashes == product.hashes && again.missile == product.missile,
+            "WAB-81: mode entries hash alike with " + std::to_string(workers) + " workers");
+    }
+}
+
+
 void test_laser_defence() {
     using Kind = tactical::AbilityKind;
     expect(tactical::ability_kind("LASER_DEFENSE") == Kind::laser_defense && static_cast<int>(Kind::laser_defense) == 18
@@ -1551,6 +1859,16 @@ void test_laser_defence() {
         expect(status.size() == 1900 && !status[1100].active && !status[1100].ready
             && status[1100].remaining_frames == started + 1800 - 1101, "WLD-06: after the run it still counts down from the switch-on");
         expect(status.size() == 1900 && status[1899].ready, "WLD-06: it is ready 60 s after the switch-on");
+        // WLD-10: while the run is on, the published countdown is the recharge from the switch-on (the button shows the recharge
+        // fill, empty at the switch-on); after the run and before it is on, no countdown rides on the on-state.
+        expect(status.size() == 1900 && status[0].active && status[0].countdown_total_frames == 1800
+            && status[0].countdown_remaining_frames > 1700 && status[0].countdown_remaining_frames <= 1800,
+            "WLD-10: the recharge countdown runs from the switch-on while the ability is on");
+        expect(status.size() == 1900 && status[500].active
+            && status[500].countdown_remaining_frames == started + 1800 - 501,
+            "WLD-10: the countdown keeps running during the run");
+        expect(status.size() == 1900 && !status[1100].active && status[1100].countdown_total_frames == 0
+            && status[1100].total_frames == 1800, "WLD-10: after the run the ordinary recharge dial carries the countdown");
         const auto state = active.session->ability_state(2);
         expect(state && state->slots[0].ready_tick == started + 1800, "WLD-06: ready tick is switch-on plus the recharge");
         // The same record replays to the same hashes and event stream.

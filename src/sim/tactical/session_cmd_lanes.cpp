@@ -1202,6 +1202,116 @@ core::Result<void> session_detail::Tick::PlanLanes::apply_beacon(const PlayerCom
     return core::Result<void>::success();
 }
 
+// Lua Teleport_And_Face: the unit lands on the target's position with the target's facing and stops there; a dead
+// unit or target, a squadron container or a craft (which fly by their squadron) is skipped.
+core::Result<void> session_detail::Tick::PlanLanes::scripted_teleport(const ScriptTeleportPayload& teleport, const EntityId unit_id) {
+    auto& staged = phase.tracked_.value().staged.value();
+    const auto& frame = phase.tracked_.value().frame.value();
+    const auto& table = phase.impl_->motion;
+    const auto found = staged.find(unit_id);
+    const auto target = staged.find(teleport.target);
+    if (found == staged.end() || target == staged.end() || unit_id == teleport.target) return core::Result<void>::success();
+    if (phase.impl_->squadrons.end() != std::find_if(phase.impl_->squadrons.begin(), phase.impl_->squadrons.end(),
+            [&](const auto& row) { return row.container == unit_id
+                || std::find(row.members.begin(), row.members.end(), unit_id) != row.members.end(); }))
+        return core::Result<void>::success();
+    auto& live = found->second;
+    live.state.position = target->second.state.position;
+    live.state.rotation = target->second.state.rotation;
+    live.state.order = order_for(StopPayload{}, phase.tick);
+    live.speed = math::Fixed{};
+    if (live.motion) {
+        if (auto stopped = phase.impl_->plan_order(live, StopPayload{}, frame); !stopped) return stopped;
+    }
+    // The unit's predicted path is gone: its avoidance layer rebuilds from this frame.
+    if (const auto* footprint = table.avoidance ? tracked_footprint(table, live.state.type_id) : nullptr) {
+        if (const auto layer = dynamic_layer_index(footprint->layer)) {
+            auto& rebuilt = phase.tracked_.value().rebuilt.value();
+            auto& tracking = phase.tracked_.value().tracking.value();
+            rebuilt[*layer] = true;
+            if (tracking) {
+                tracking->views[*layer].reset();
+                tracking->samples.erase(unit_id);
+            }
+        } else if (footprint->layer == SpaceLayer::static_object) {
+            auto& tracking = phase.tracked_.value().tracking.value();
+            if (tracking) tracking->statics.reset();
+        }
+    }
+    return core::Result<void>::success();
+}
+
+// Lua Change_Owner: each listed unit and the rest of its squadron (the retail call walks the team both ways) move to the
+// new owner through the shared ownership transfer: order, path and targets drop, hull and shield percentages are kept,
+// the ownership census, the victory and radar bookkeeping and the population share follow. A dead unit, a unit that
+// already belongs to the player, or a player that is not in this battle is skipped silently.
+core::Result<void> session_detail::Tick::PlanLanes::scripted_change_owner(const ScriptChangeOwnerPayload& change, const std::vector<EntityId>& units) {
+    auto& staged = phase.tracked_.value().staged.value();
+    auto& events = phase.impacts_.value().events.value();
+    const auto& setup_players = phase.impl_->setup.players;
+    const bool known = change.owner == phase.impl_->economy.pads.neutral || std::any_of(setup_players.begin(), setup_players.end(),
+        [&](const auto& player) { return player.player_id == change.owner; });
+    if (!known) return core::Result<void>::success();
+    // id -> controller root (the squadron container for the container and every member, whatever the listing order; the
+    // unit itself otherwise), ascending ID. Script commands are sparse, so the linear squadron scan per listed unit is fine.
+    std::map<EntityId, EntityId> roots;
+    const auto add_group = [&](const EntityId container, const std::vector<EntityId>& members) {
+        roots.insert_or_assign(container, container);
+        for (const auto member : members) roots.insert_or_assign(member, container);
+    };
+    const auto& born = phase.staging_->arrived_squadrons.value();
+    for (const auto id : units) {
+        bool grouped = false;
+        for (const auto& row : phase.impl_->squadrons)
+            if (row.container == id || std::find(row.members.begin(), row.members.end(), id) != row.members.end()) { add_group(row.container, row.members); grouped = true; }
+        for (const auto& row : born)
+            if (row.container == id || std::find(row.members.begin(), row.members.end(), id) != row.members.end()) { add_group(row.container, row.members); grouped = true; }
+        if (!grouped) roots.emplace(id, id);
+    }
+    std::map<EntityId, TypeId> containers;
+    auto& ledgers = phase.staging_->ledgers.value();
+    for (const auto& account : ledgers) for (const auto& held : account.completed) {
+        const auto host = staged.find(held.station);
+        if (host != staged.end()) containers.emplace(held.station, host->second.state.type_id);
+    }
+    std::vector<CombatBonuses> categories(phase.impl_->bonus_categories.size());
+    for (const auto& [id, root] : roots) {
+        const auto found = staged.find(id);
+        if (found == staged.end() || found->second.state.owner == change.owner) continue;
+        auto& live = found->second;
+        const auto before = live.state;
+        const auto bonuses = phase.impl_->command_bonuses_for(live, phase.impl_->command_ledger, ledgers, containers,
+            categories, nullptr, true, change.owner);
+        if (auto changed = phase.impl_->transfer_owner(live, change.owner, bonuses, root); !changed) return changed;
+        phase.impl_->adjust_owned(before, false);
+        phase.impl_->adjust_owned(live.state, true);
+        if (phase.staging_->shares) {
+            const auto share = phase.staging_->shares.value().find(id);
+            if (share != phase.staging_->shares.value().end()) share->second.owner = change.owner;
+        }
+        // A planetary weapon's burst and target were chosen for the previous owner: the burst ends here (unverified
+        // against the original, the least visible choice: nothing fires for the old owner's target). A targeted
+        // ability in progress is switched off with its target.
+        if (const auto special = phase.special_weapons_.find(id); special != phase.special_weapons_.end()) {
+            special->second.target = invalid_entity_id;
+            special->second.pulses_left = 0;
+        }
+        if (live.abilities) if (const auto* profile = phase.impl_->abilities.find(live.state.type_id))
+            for (std::size_t slot = 0; slot < live.abilities->slots.size() && slot < profile->abilities.size(); ++slot) {
+                auto& state = live.abilities->slots[slot];
+                if (state.target == invalid_entity_id) continue;
+                static_cast<void>(deactivate_ability(profile->abilities[slot], state, phase.tick));
+                state.target = invalid_entity_id;
+            }
+        // The named-ability locks and the special-weapon latch are per owner: publish this unit's hardpoint gates for the
+        // new owner, as the upgrade replacement does. The old owner keeps the latch it already had, as after a death.
+        phase.publish_special_hardpoints(live);
+        phase.track_victory_change(&before, &live.state, true);
+        events.push_back(Event{phase.tick, EventKind::object_owner_changed, change.owner, before.owner, id});
+    }
+    return core::Result<void>::success();
+}
+
 core::Result<void> session_detail::Tick::PlanLanes::apply_reveal(const PlayerCommand& command, const RevealAllPayload* reveal, const PlayerId issuer) {
     auto& events = phase.impacts_.value().events.value();
     phase.pending_reveals_.push_back(reveal->player);

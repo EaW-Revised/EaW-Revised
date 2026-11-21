@@ -75,6 +75,10 @@ struct MpLocalContent {
     // Every invocation owns fresh mounted services and directly imports the checkpoint.
     std::function<core::Result<MpPreparedSession>(const CampaignSetupPlan&, std::string_view,
         std::span<const std::uint8_t>)> restore_session;
+    // Host-side conversion of a save whose finished-battle records came from another build
+    // (checkpoint::recover_checkpoint_history), with the same fresh mounted services as restore_session.
+    std::function<core::Result<checkpoint::RecoveredCheckpoint>(const CampaignSetupPlan&, std::string_view,
+        std::span<const std::uint8_t>)> recover_history;
     // Production prepares the stock placement services so tick zero includes the starting forces; absent, tick
     // zero is the session built from the planned galaxy alone.
     std::function<core::Result<CampaignSetupServices>(const CampaignSetupPlan&)> services;
@@ -143,4 +147,9 @@ struct MpExtraSeat {
     const sim::galactic::MpRoster&, const MpSessionTerms&, std::span<const std::uint8_t>,
     const checkpoint::GameResumeMetadata&, const std::atomic<bool>* cancel = nullptr,
     std::span<const MpExtraSeat> extras = {});
+
+// The host's "load without old battle history": the saved game's setup checks of restore_mp_agreement, then
+// local.recover_history. The converted save is an ordinary checkpoint; select it like any other save.
+[[nodiscard]] core::Result<checkpoint::RecoveredCheckpoint> recover_mp_history(const MpLocalContent&,
+    const sim::galactic::MpRoster&, const MpSessionTerms&, std::span<const std::uint8_t>);
 } // namespace eawr::campaign

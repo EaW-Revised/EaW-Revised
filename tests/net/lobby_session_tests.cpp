@@ -37,7 +37,7 @@ struct Room {
     std::vector<net::LobbySession> sessions;
     std::vector<net::MessageTransport*> streams;
     std::vector<std::pair<net::PeerIndex, net::LobbyReason>> removed;
-    bool mismatch{}, perturb{}, invalid_start{}, fail_provider{}, team_rules{}, fail_credential_offer{};
+    bool mismatch{}, perturb{}, invalid_start{}, fail_provider{}, team_rules{}, fail_credential_offer{}, follow_other{};
     std::optional<sim::MatchAgreement> host_identity, client_identity;
     // Online room mesh hooks (N4): the Start gate and the Lock before the commitment. Off unless `gate` is set.
     bool gate{}, mesh_ok{true}, lock_ok{true};
@@ -113,6 +113,10 @@ struct Room {
             };
             value.discard_preparation = [this, peer] { ++discarded[peer]; };
         }
+        value.follow_choice = [this](const net::LobbySnapshot&, net::LobbySnapshot& candidate, net::PeerIndex who) {
+            if (follow_other) for (auto& seat : candidate.seats) if (seat.peer != who && seat.peer != 0) ++seat.selection.colour;
+            return Result<void>::success();
+        };
         value.validate = [this](const net::LobbySnapshot& snapshot, bool starting) {
             if (snapshot.game.map != "data/art/maps/test.ted" || snapshot.game.options.size() != 1
                 || snapshot.game.options[0] > 5 || (starting && invalid_start))
@@ -1005,6 +1009,71 @@ void ready_rules_per_change_type() {
         expect(ready(room) == std::vector<bool>({true, true, false}), "a rejoining guest arrives unready, others stay ready");
     }
 }
+void concurrent_guest_choices() {
+    { // two guests change faction against the same revision: both land, one revision each
+        Room room(3); const auto base = room.revision(); auto one = selection(1), two = selection(2);
+        one.faction = "mod-extra-one"; two.faction = "mod-extra-two";
+        require(room.sessions[1].request(net::LobbyAction::select, base, one));
+        require(room.sessions[2].request(net::LobbyAction::select, base, two)); room.rounds(4);
+        const auto seats = room.host().snapshot().seats;
+        expect(seats[1].selection.faction == "mod-extra-one" && seats[2].selection.faction == "mod-extra-two", "both concurrent guest choices land");
+        expect(room.revision() == base + 2, "each landed choice publishes its own revision");
+        for (auto& session : room.sessions) expect(session.snapshot() == room.host().snapshot(), "every peer sees the same outcome");
+    }
+    { // rebased choices unready only their own seat
+        Room room(3); room.all_ready(); const auto base = room.revision(); auto one = selection(1), two = selection(2);
+        one.faction = "mod-extra-one"; two.faction = "mod-extra-two";
+        require(room.sessions[1].request(net::LobbyAction::select, base, one));
+        require(room.sessions[2].request(net::LobbyAction::select, base, two)); room.rounds(4);
+        std::vector<bool> flags; for (const auto& seat : room.host().snapshot().seats) flags.push_back(seat.ready);
+        expect(flags == std::vector<bool>({true, false, false}), "rebased own-seat choices unready only the changed seats, the host stays ready");
+    }
+    { // a choice whose follow-up moves another seat is not rebased over by a later stale request
+        Room room(3); room.follow_other = true; const auto base = room.revision(); auto one = selection(1), two = selection(2);
+        one.faction = "mod-extra-one"; two.faction = "mod-extra-two";
+        require(room.sessions[1].request(net::LobbyAction::select, base, one));
+        require(room.sessions[2].request(net::LobbyAction::select, base, two)); room.rounds(4);
+        const auto notice = room.sessions[2].notice();
+        expect(room.host().snapshot().seats[1].selection.faction == "mod-extra-one" && room.host().snapshot().seats[2].selection.faction != "mod-extra-two"
+            && notice && notice->reason == net::LobbyReason::stale_revision, "a follow-up that moved another seat makes the older request stale");
+    }
+    { // a real conflict still refuses with its own reason, not a stale-revision notice
+        Room room(3); const auto base = room.revision(); auto one = selection(1), bad = selection(2);
+        one.faction = "mod-extra-one"; bad.faction = "unavailable";
+        require(room.sessions[1].request(net::LobbyAction::select, base, one));
+        require(room.sessions[2].request(net::LobbyAction::select, base, bad)); room.rounds(4);
+        expect(room.host().snapshot().seats[2].selection.faction != "unavailable" && room.host().snapshot().seats[1].selection.faction == "mod-extra-one",
+            "the invalid concurrent choice is refused, the valid one lands");
+        const auto notice = room.sessions[2].notice();
+        expect(notice && notice->reason == net::LobbyReason::invalid_choice, "the refusal names the choice, not the revision");
+    }
+    { // a stale choice that arrives after a leave and a join still lands on its own seat and leaves the newcomer's seat alone
+        Room room(3); room.all_ready(); const auto base = room.revision(); auto one = selection(1); one.faction = "mod-extra-one";
+        // The leave is sent first, so the host processes it before the older select; a leave sent after a landed choice would be stale and stays strict.
+        require(room.sessions[2].request(net::LobbyAction::leave, base));
+        require(room.sessions[1].request(net::LobbyAction::select, base, one)); room.rounds(1);
+        require(room.host().admit(2, "rejoined", selection(2), 3, room.revision())); room.rounds(4);
+        const auto seats = room.host().snapshot().seats;
+        expect(seats.size() == 3 && seats[1].selection.faction == "mod-extra-one", "the stale choice lands on its own seat after a leave and a join");
+        expect(seats[2].selection == selection(2) && !seats[2].ready,
+            "the seat the join filled keeps its own choice and stays unready");
+    }
+    { // a host game change in between makes the older choice stale
+        Room room(3); const auto base = room.revision(); auto one = selection(1); one.faction = "mod-extra-one";
+        require(room.sessions[1].request(net::LobbyAction::select, base, one));
+        require(room.host().set_game({"data/art/maps/test.ted", {1}}, base)); room.rounds(4);
+        const auto notice = room.sessions[1].notice();
+        expect(room.host().snapshot().seats[1].selection.faction != "mod-extra-one" && notice && notice->reason == net::LobbyReason::stale_revision,
+            "a choice made before a host game change is refused as stale");
+    }
+    { // a host reassignment of that seat in between also makes it stale
+        Room room(3); const auto base = room.revision(); auto one = selection(1); one.faction = "mod-extra-one";
+        auto seats = room.host().snapshot().seats; seats[1].selection.colour += 1;
+        require(room.host().configure_game(room.host().snapshot().game, seats, base));
+        require(room.sessions[1].request(net::LobbyAction::select, base, one)); room.rounds(4);
+        expect(room.host().snapshot().seats[1].selection.faction != "mod-extra-one", "a choice older than a host reassignment is refused");
+    }
+}
 void atomic_game_configuration() {
     Room room(3); room.all_ready();
     const auto before = room.host().snapshot(); auto changed = before.seats;
@@ -1496,7 +1565,7 @@ void preparation_codec() {
             expect(!net::decode_lobby_frame(std::span(bytes).first(size)), "truncated preparation frame is refused");
         auto old = bytes; old[1] = 2;
         const auto refused = net::decode_lobby_frame(old);
-        expect(!refused && refused.error().message.find("version 5") != std::string::npos, "mixed lobby protocol refuses explicitly");
+        expect(!refused && refused.error().message.find("version 6") != std::string::npos, "mixed lobby protocol refuses explicitly");
         auto trailing = bytes; trailing.push_back(0); expect(!net::decode_lobby_frame(trailing), "trailing preparation bytes are refused");
     }
     expect(frames.size() >= 2, "both preparation frame kinds were exercised");
@@ -1664,7 +1733,7 @@ int main() {
         host_mod_list_not_shared();
         concurrent_campaign_preparation(); concurrent_preparation_locks_once(); concurrent_preparation_cleanup(); preparation_codec();
         asynchronous_host_start(); asynchronous_guest_setup();
-        revised_layer_join(); early_freeze_cancellation(); cancellation_during_roster_confirmation(); asynchronous_roster_lock(); credential_delivery_retry(); atomic_game_configuration(); ready_rules_per_change_type(); codec(); authority_and_revisions(); chat_contracts(); recovery_and_budgets(); send_failures_and_envelopes();
+        revised_layer_join(); early_freeze_cancellation(); cancellation_during_roster_confirmation(); asynchronous_roster_lock(); credential_delivery_retry(); atomic_game_configuration(); ready_rules_per_change_type(); concurrent_guest_choices(); codec(); authority_and_revisions(); chat_contracts(); recovery_and_budgets(); send_failures_and_envelopes();
         admission_kick_close(); concurrent_staging_departures(); cancel_send_failure(); editable_team_rules(); start_races(); guest_waits_for_own_barrier(); committed_guest_barrier_failure_is_typed(); mesh_refusal_and_start_gate(); retained_transport_maps_room_peers();
         std::string baseline, nine_baseline, close_three_baseline, close_nine_baseline;
         for (const auto workers : {1U, 2U, 4U, 8U}) {

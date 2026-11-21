@@ -372,9 +372,11 @@ bool Loader::load_special_ability(UnitType& unit, const std::string& name, const
         load_special_corrupt(unit, special, child_text);
         load_special_laser_defense(unit, special, child_text);
         load_special_redirect(unit, special, child_text);
-        // WRB-01: only SpaceUnit carriers; the hero and structure objects that author it (Darth_Vader,
-        // IG-88, Urai_Fen, the ground structures) are land objects, out of scope.
-        if (special_kind != sim::tactical::SpecialAbilityKind::redirect_blaster || iequals(unit.xml_type, "SpaceUnit"))
+        // WRB-01: SpaceUnit and UniqueUnit carriers (debug build: the apply effect tests no object class; the
+        // hero and structure objects that author it in the stock data, Darth_Vader, IG-88, Urai_Fen and the
+        // ground structures, are land objects and stay out of the space content).
+        if (special_kind != sim::tactical::SpecialAbilityKind::redirect_blaster || iequals(unit.xml_type, "SpaceUnit")
+            || iequals(unit.xml_type, "UniqueUnit"))
             unit.special_abilities.push_back(std::move(special));
     }
     return true;
@@ -466,7 +468,7 @@ void Loader::load_nested_abilities(Object& object, UnitType& unit) {
                 && special.name == name; });
         if (name.empty() || handler == unit.special_abilities.end())
             report_.missing(unit.id, "GUI_Activated_Ability_Name", name,
-                "SENSOR_JAMMING requires a named matching nested handler");
+                "no nested Sensor_Jamming_Ability carries this name: the ability stays lit and jams nothing (WJM-05)");
     }
 }
 

@@ -208,6 +208,8 @@ void test_the_bar_art_map() {
             "the map's slope is the mesh's: u grows to the right, v grows downward");
         const auto [far_u, far_v] = map->at(150.0, -20.0);
         expect(std::fabs(far_u - 1.75) < 1e-6 && std::fabs(far_v - 1.2) < 1e-6, "the map extends past the triangle (repeating coordinates)");
+        expect(map->x_min == 0.0 && map->x_max == 100.0, "the map names its triangle's x span, where it holds (#7952)");
+        expect(map->y_min == 0.0 && map->y_max == 50.0, "and its y span");
     }
     expect(tray::uv_map_at(quad, 100.0, 50.0).has_value(), "a corner counts as inside");
     expect(!tray::uv_map_at(quad, 120.0, 10.0) && !tray::uv_map_at(quad, 50.0, -1.0), "a point outside every triangle has none");
@@ -216,9 +218,43 @@ void test_the_bar_art_map() {
     expect(!tray::uv_map_at({}, 0.0, 0.0), "no triangles, no map");
 }
 
+// #7952: the backdrop repeats the sampled span; it never stretches one sample over a wider band.
+void test_the_band_pieces() {
+    const auto pieces = tray::band_pieces(10.0F, 250.0F, 100.0F);
+    expect(pieces.size() == 3, "a 250 px band of a 100 px sample is three pieces");
+    if (pieces.size() == 3) {
+        expect(pieces[0].x == 10.0F && pieces[0].width == 100.0F && pieces[1].x == 110.0F && pieces[1].width == 100.0F,
+            "whole pieces side by side from the band's left");
+        expect(pieces[2].x == 210.0F && pieces[2].width == 50.0F, "the last piece is the remainder");
+    }
+    expect(tray::band_pieces(0.0F, 80.0F, 100.0F).size() == 1, "a band narrower than the sample is one piece");
+    expect(tray::band_pieces(0.0F, 200.0F, 100.0F).size() == 2, "an exact multiple leaves no sliver");
+    // A sliver triangle in mod data: never a quad per fraction of a pixel, and never a loop that cannot advance.
+    for (const float tiny : {0.5F, 1e-4F, 1e-9F}) {
+        const auto one = tray::band_pieces(1000.0F, 1500.0F, tiny);
+        expect(one.size() == 1 && one[0].x == 1000.0F && one[0].width == 1500.0F, "a sample under a pixel is stretched over the band");
+    }
+    const auto many = tray::band_pieces(1000.0F, 1500.0F, 1.0F);
+    expect(many.size() == 1500 && std::fabs(many.back().x - 2499.0F) < 0.01F, "one-pixel pieces step without drift");
+    expect(tray::band_pieces(0.0F, 0.0F, 100.0F).empty() && tray::band_pieces(0.0F, 50.0F, 0.0F).empty(), "nothing to draw");
+}
+
+// #7952 (owner, 2026-11-19): the tray ends at the planet info card, and the share and the view stay upper bounds.
+void test_the_widest_panel() {
+    // Remake at 2440 x 1372: the bar starts at 455, the card at about 1430.
+    expect(std::fabs(tray::widest_panel(2440.0F, 455.0F, 0.6F, 1430.0F) - 975.0F) < 0.01F, "the card's left edge ends the tray");
+    expect(std::fabs(tray::widest_panel(2440.0F, 455.0F, 0.3F, 1430.0F) - 732.0F) < 0.01F, "a smaller share still limits it");
+    expect(std::fabs(tray::widest_panel(2440.0F, 455.0F, 0.6F, std::nullopt) - 1464.0F) < 0.01F, "no card: the share");
+    expect(std::fabs(tray::widest_panel(1000.0F, 700.0F, 0.6F, std::nullopt) - 300.0F) < 0.01F, "never past the view's right edge");
+    expect(std::fabs(tray::widest_panel(2440.0F, 455.0F, 0.6F, 300.0F) - 1464.0F) < 0.01F, "a card left of the tray does not limit it");
+    expect(std::fabs(tray::widest_panel(1000.0F, 1200.0F, 0.6F, std::nullopt) - 0.0F) < 0.01F, "never negative");
+}
+
 } // namespace
 
 int main() {
+    test_the_band_pieces();
+    test_the_widest_panel();
     test_entries_sit_inside_the_panel_on_their_rows();
     test_a_wrapped_group_has_one_header();
     test_the_handle_count();

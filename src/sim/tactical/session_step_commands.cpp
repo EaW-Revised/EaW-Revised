@@ -852,6 +852,58 @@ core::Result<void> session_detail::Tick::commands() {
             }
             continue;
         }
+        if (const auto* hold = std::get_if<ScriptHoldFirePayload>(&command.payload)) {
+            // Prevent_All_Fire: boolean, idempotent, no expiry. A dead or unknown unit is skipped silently; a
+            // squadron applies the flag to each live member (the retail wrapper walks the team).
+            const auto apply = [&](const EntityId id) {
+                const auto found = staged.find(id);
+                if (found != staged.end()) found->second.hold_fire = hold->enabled;
+            };
+            const auto& born_squadrons = staging_->arrived_squadrons.value();
+            for (const auto id : command.units) {
+                apply(id);
+                const auto group = std::lower_bound(impl_->squadrons.begin(), impl_->squadrons.end(), id,
+                    [](const auto& row, const EntityId value) { return row.container < value; });
+                if (group != impl_->squadrons.end() && group->container == id)
+                    for (const auto member : group->members) apply(member);
+                for (const auto& arrival : born_squadrons)
+                    if (arrival.container == id) for (const auto member : arrival.members) apply(member);
+            }
+            continue;
+        }
+        if (const auto* change = std::get_if<ScriptChangeOwnerPayload>(&command.payload)) {
+            if (auto applied = lanes.scripted_change_owner(*change, command.units); !applied) return applied;
+            continue;
+        }
+        if (const auto* teleport = std::get_if<ScriptTeleportPayload>(&command.payload)) {
+            for (const auto id : command.units) {
+                if (auto moved = lanes.scripted_teleport(*teleport, id); !moved) return moved;
+            }
+            continue;
+        }
+        if (std::holds_alternative<ScriptDespawnPayload>(command.payload)) {
+            // #7886: Lua Object.Despawn(). The object leaves the battle in this frame's command phase, in ascending command
+            // order like every other engine command: no destruction event, no kill record, no death effect, no score. A dead or
+            // unknown unit is skipped silently. A squadron container, a craft of one and a unit that carries passengers are
+            // left alone: how the original treats those is unverified (docs/behaviour/walks/gc-tactical.md, WGT-12 row).
+            // Everything else leaves through the same survivor-keyed cleanup a destroyed unit gets later in this frame (hangar
+            // spawner, pad and construction links, population share, income source, targets), and the victory census and the
+            // star base list are updated here as a silent removal: it counts no loss and decides no battle.
+            for (const auto id : command.units) {
+                const auto found = staged.find(id);
+                if (found == staged.end() || !found->second.state.contained.empty()) continue;
+                const bool squadron_part = std::any_of(impl_->squadrons.begin(), impl_->squadrons.end(), [&](const auto& row) {
+                    return row.container == id || std::find(row.members.begin(), row.members.end(), id) != row.members.end();
+                });
+                if (squadron_part) continue;
+                const UnitState removed = found->second.state;
+                impl_->adjust_owned(removed, false);
+                track_victory_change(&removed, nullptr, false);
+                despawned_.insert(id);
+                staged.erase(found);
+            }
+            continue;
+        }
         const auto* damage = std::get_if<DamagePayload>(&command.payload);
         auto command_reason = RejectReason::none;
         bool attack_assignment_allowed = true;

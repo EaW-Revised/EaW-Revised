@@ -141,10 +141,25 @@ void layout_contracts() {
     bad_crc[1].crc = text_key_crc(bad_crc[1].key) ^ 1U;
     expect(fails_with(encode(bad_crc), diagnostic_codes::text_database_record), "CRC mismatch");
     expect(fails_with(encode({{"", u"x", 0U}}), diagnostic_codes::text_database_record), "empty key");
-    expect(fails_with(encode({{"TEXT_\x7f", u"x"}}), diagnostic_codes::text_database_record),
-           "control byte in key");
-    expect(fails_with(encode({{"TEXT_\xc3\xa9", u"x"}}), diagnostic_codes::text_database_record),
-           "non-ASCII key");
+    // Mods ship free-text keys with bytes outside printable ASCII (made-up samples here): kept, warned.
+    for (const char* odd : {"TEXT_\x7f", "TEXT_\xc3\xa9", "It\xb4s a free-text key"}) {
+        auto kept = load(encode({{odd, u"x"}, {"TEXT_PLAIN", u"y"}}));
+        expect(kept && kept.value().find(odd) != nullptr && kept.value().find("TEXT_PLAIN") != nullptr,
+               "key with bytes outside printable ASCII is kept, not fatal");
+        expect(kept && kept.value().diagnostics.size() == 1U &&
+                   kept.value().diagnostics.front().severity == eawr::core::Severity::warning &&
+                   kept.value().diagnostics.front().code == diagnostic_codes::text_database_record,
+               "non-ASCII key reports one warning");
+    }
+    auto odd_bad_crc = std::vector<Record>{{"It\xb4s a free-text key", u"x"}};
+    odd_bad_crc[0].crc = text_key_crc(odd_bad_crc[0].key) ^ 1U;
+    expect(fails_with(encode(odd_bad_crc), diagnostic_codes::text_database_record),
+           "non-ASCII key with a wrong CRC is still rejected");
+    std::vector<Record> many;
+    for (int n = 0; n < 40; ++n) many.push_back({"It\xb4s key " + std::to_string(n), u"x"});
+    auto capped = load(encode(many));
+    expect(capped && capped.value().entries.size() == 40U && capped.value().diagnostics.size() == 1U,
+           "many non-ASCII keys report one summary warning, not one each");
     auto mismatch = load_text_database(bytes, source("data/text/x.dat", bytes.size() + 1U));
     expect(!mismatch && mismatch.error().code == diagnostic_codes::text_database_layout,
            "provenance size mismatch");

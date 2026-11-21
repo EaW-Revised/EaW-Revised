@@ -13,6 +13,7 @@ using assets::Source;
 constexpr std::size_t record_bytes = 3U * sizeof(std::uint32_t);
 constexpr std::size_t max_language_length = 32U;
 constexpr std::size_t max_file_size = 512U * 1024U * 1024U;
+constexpr std::size_t max_reported_odd_keys = 5U;
 
 struct RecordHeader final {
     std::uint32_t crc{};
@@ -323,6 +324,8 @@ core::Result<TextDatabase> load_text_database(const std::span<const std::byte> b
             cursor += 2U;
         }
     }
+    std::vector<std::uint32_t> odd_key_records;
+    std::size_t odd_key_count = 0U;
     for (std::uint32_t index = 0U; index < count; ++index) {
         const auto raw = bytes.subspan(cursor, headers[index].key_bytes);
         const auto offset = cursor;
@@ -332,10 +335,12 @@ core::Result<TextDatabase> load_text_database(const std::span<const std::byte> b
                                       "text database record " + std::to_string(index) +
                                           " has an empty key", offset);
         }
+        // Mods ship keys that are free text (a description sentence used as its own key) with
+        // single-byte punctuation outside printable ASCII. The lookup is by CRC-32 over the
+        // raw bytes, so such a record is usable: keep it and only warn, never drop the file.
         if (!std::all_of(raw.begin(), raw.end(), printable_ascii)) {
-            return fail<TextDatabase>(result.source, diagnostic_codes::text_database_record,
-                                      "text database record " + std::to_string(index) +
-                                          " key is not printable ASCII", offset);
+            if (odd_key_records.size() < max_reported_odd_keys) odd_key_records.push_back(index);
+            ++odd_key_count;
         }
         auto& entry = result.entries[index];
         entry.key.assign(reinterpret_cast<const char*>(raw.data()), raw.size());
@@ -349,6 +354,15 @@ core::Result<TextDatabase> load_text_database(const std::span<const std::byte> b
         }
     }
 
+    if (odd_key_count != 0U) {
+        std::ostringstream message;
+        message << "text database has " << odd_key_count
+                << " record key(s) with bytes outside printable ASCII; the records are kept (first records:";
+        for (const auto record : odd_key_records) message << ' ' << record;
+        message << ')';
+        result.diagnostics.push_back(warning(
+            result.source, diagnostic_codes::text_database_record, message.str()));
+    }
     result.sorted_by_crc = std::is_sorted(
         result.entries.begin(), result.entries.end(),
         [](const TextEntry& left, const TextEntry& right) { return left.crc < right.crc; });

@@ -79,6 +79,9 @@ DriverResult TcpLanMatch::drive_session(const tactical::TacticalSetup& setup, pl
             const std::lock_guard lock(mutex_);
             view_.peer_confirmed_tick = io_->monitor->peer_confirmed_tick();
             if (view_.peer_confirmed_tick) view_.peer_confirmed_tick = adapter_->world_boundary(*view_.peer_confirmed_tick);
+            if (view_.clock_paused != adapter_->clock.paused && adapter_->clock.actor)
+                diagnostics_->emit("pause-applied", "agreed", diagnostics_->seat, std::string("state=") + (adapter_->clock.paused ? "paused" : "running")
+                    + " session_tick=" + std::to_string(adapter_->clock.changed_at) + " actor_seat=" + std::to_string(adapter_->clock.actor->value));
             view_.clock_paused = adapter_->clock.paused;
             view_.session_tick = adapter_->clock.completed; view_.world_tick = context.completed_tick();
             view_.pause_actor = adapter_->clock.actor; view_.pause_change_tick = adapter_->clock.changed_at;

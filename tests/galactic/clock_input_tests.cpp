@@ -15,33 +15,67 @@ int main() {
     rejected.kind = sim::galactic::GalacticEventKind::command_rejected;
     rejected.producer = sim::SeatId{1};
     // Two mouse/key toggles before publication reserve only one nested pause.
-    assert(guard.begin(false, true));
-    assert(!guard.begin(false, true));
+    assert(guard.begin(false, true, 10));
+    assert(!guard.begin(false, true, 11));
+    assert(guard.shown(false) && guard.target() == true);
     rejected.reason = Reason::unknown_subject; // invalid move from the same seat
-    guard.observe(false, sim::SeatId{1}, events);
-    assert(!guard.begin(false, true));
+    guard.observe(false, sim::SeatId{1}, events, 12);
+    assert(!guard.begin(false, true, 12));
     rejected.reason = Reason::not_paused; // belongs to resume, not pending pause
-    guard.observe(false, sim::SeatId{1}, events);
-    assert(!guard.begin(false, true));
+    guard.observe(false, sim::SeatId{1}, events, 12);
+    assert(!guard.begin(false, true, 12));
     rejected.reason = Reason::inactive_seat;
     rejected.producer = sim::SeatId{2};
-    guard.observe(false, sim::SeatId{1}, events);
-    assert(!guard.begin(false, true));
-    guard.observe(true, sim::SeatId{1}, {}); // accepted pause publication
-    assert(guard.begin(true, false));
-    assert(!guard.begin(true, false));
+    guard.observe(false, sim::SeatId{1}, events, 12);
+    assert(!guard.begin(false, true, 12));
+    guard.observe(true, sim::SeatId{1}, {}, 13); // accepted pause publication
+    assert(guard.begin(true, false, 14));
+    assert(!guard.begin(true, false, 15));
     rejected.producer = sim::SeatId{1};
     rejected.reason = Reason::production_admission;
-    guard.observe(true, sim::SeatId{1}, events);
-    assert(!guard.begin(true, false));
+    guard.observe(true, sim::SeatId{1}, events, 16);
+    assert(!guard.begin(true, false, 16));
     rejected.reason = Reason::not_paused;
-    guard.observe(true, sim::SeatId{1}, events);
-    assert(guard.begin(true, false)); // resume rejection releases its reservation
-    guard.observe(false, sim::SeatId{1}, {});
-    assert(guard.begin(false, true));
+    guard.observe(true, sim::SeatId{1}, events, 17);
+    assert(guard.begin(true, false, 17)); // resume rejection releases its reservation
+    guard.observe(false, sim::SeatId{1}, {}, 18);
+    assert(guard.begin(false, true, 19));
     rejected.reason = Reason::inactive_seat;
-    guard.observe(false, sim::SeatId{1}, events);
-    assert(guard.begin(false, true));
+    guard.observe(false, sim::SeatId{1}, events, 20);
+    assert(guard.begin(false, true, 21));
+
+    // #7973: a seat's own pause/resume latch never waits for another seat to flip the agreed state.
+    {
+        constexpr auto window = viewer::galactic::PauseToggleGuard::release_ticks;
+        const sim::SeatId local{1};
+        // The pause button acts on what it shows: a press while this seat's pause is in flight asks for the resume.
+        viewer::galactic::PauseToggleGuard seat;
+        assert(seat.begin(false, true, 100) && seat.shown(false));
+        assert(seat.begin(false, !seat.shown(false), 101) && seat.target() == false); // reverses the request in flight
+        assert(!seat.begin(false, false, 102)); // the same request is not sent twice
+        seat.observe(false, local, {}, 103);
+        assert(!seat.target()); // the agreed state equals the request
+        // A refused request (the debounce, a dropped order) releases at once: reset() is the adapter's refusal.
+        assert(seat.begin(false, true, 200) && !seat.begin(false, true, 201));
+        seat.reset();
+        assert(!seat.target() && seat.begin(false, true, 202));
+        // The old bug: a pause that never lands (refused or dropped) left the latch stuck until another seat paused.
+        seat.reset();
+        assert(seat.begin(false, true, 300));
+        seat.observe(false, local, {}, 300 + window - 1);
+        assert(seat.target() == true); // still inside the answer window
+        seat.observe(false, local, {}, 300 + window);
+        assert(!seat.target() && seat.begin(false, true, 300 + window + 1)); // released by itself, can pause again
+        // The same for a resume that never lands: the seat that paused can resume without the other seat's help.
+        seat.reset();
+        assert(seat.begin(true, false, 400));
+        seat.observe(true, local, {}, 400 + window - 1);
+        assert(!seat.begin(true, false, 400 + window - 1));
+        seat.observe(true, local, {}, 400 + window);
+        assert(!seat.target() && seat.begin(true, false, 400 + window)); // the press itself also finds it expired
+        seat.reset();
+        assert(seat.begin(true, false, 500) && seat.begin(true, false, 500 + window)); // expiry at press time, no observe needed
+    }
     sim::galactic::GalacticSetup fixture;
     sim::galactic::GalacticPlayer player;
     player.player_id = 7;

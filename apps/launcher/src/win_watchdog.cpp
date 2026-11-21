@@ -6,28 +6,48 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <system_error>
+#include <utility>
 
 namespace eawr::launcher {
 namespace {
-struct WindowProbe {
-    const std::vector<DWORD>& processes;
-    DWORD hung_pid = 0;
+struct WatchedWindow {
+    HWND handle = nullptr;
+    DWORD pid = 0;
 };
 
-BOOL CALLBACK probe_window(HWND window, LPARAM parameter) {
-    auto& probe = *reinterpret_cast<WindowProbe*>(parameter);
+struct WindowCollector {
+    const std::vector<DWORD>& processes;
+    std::vector<WatchedWindow> windows;
+};
+
+BOOL CALLBACK collect_window(HWND window, LPARAM parameter) {
+    auto& collector = *reinterpret_cast<WindowCollector*>(parameter);
     DWORD pid = 0;
     GetWindowThreadProcessId(window, &pid);
-    if (std::find(probe.processes.begin(), probe.processes.end(), pid) != probe.processes.end()
-        && IsWindowVisible(window) && IsHungAppWindow(window)) {
-        probe.hung_pid = pid;
-        return FALSE;
+    if (std::find(collector.processes.begin(), collector.processes.end(), pid) != collector.processes.end()
+        && IsWindowVisible(window)) {
+        collector.windows.push_back({window, pid});
     }
     return TRUE;
+}
+
+// A real answer: the window handles a no-op message within kProbeTimeoutMs. IsHungAppWindow is deliberately not
+// used (an idle Godot window answers in milliseconds yet is flagged by it within seconds). SMTO_NORMAL, never
+// SMTO_ABORTIFHUNG, which would give up at once on a window Windows already flags.
+ProbeResult probe_window(const WatchedWindow& window) {
+    DWORD_PTR ignored = 0;
+    SetLastError(0);
+    if (SendMessageTimeoutW(window.handle, WM_NULL, 0, 0, SMTO_NORMAL, static_cast<UINT>(kProbeTimeoutMs), &ignored)) {
+        return ProbeResult::answered;
+    }
+    return GetLastError() == ERROR_TIMEOUT ? ProbeResult::timeout : ProbeResult::window_gone;
 }
 } // namespace
 
 WindowsWatchdog::~WindowsWatchdog() {
+    stop_probe_ = true;
+    if (probe_thread_.joinable()) probe_thread_.join();
     if (window_) DestroyWindow(window_);
     if (!directory_.empty()) {
         std::error_code error;
@@ -78,19 +98,52 @@ bool WindowsWatchdog::tick(const std::vector<DWORD>& processes) {
     }
     if (GetTickCount64() - last_poll_ < 1000) return false;
     last_poll_ = GetTickCount64();
-    WindowProbe probe{processes, 0};
-    EnumWindows(probe_window, reinterpret_cast<LPARAM>(&probe));
-    // IsHungAppWindow uses Windows' message-pump timeout (about five seconds); the prompt waits for a longer hang.
-    const HangVerdict verdict = observe_hang(hang_, probe.hung_pid != 0, GetTickCount64(), prompt_after_ms_);
+    const DWORD hung_pid = sample_probe(processes);
+    // A probe that timed out is one failed sample; the prompt waits for consecutive ones (kHungPromptAfterMs).
+    const HangVerdict verdict = observe_hang(hang_, hung_pid != 0, GetTickCount64(), prompt_after_ms_);
     const fs::path temporary = directory_ / "watchdog.json.tmp";
     std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     output << "{\"version\":1,\"token\":" << json_quote(token_) << ",\"hung\":" << (verdict.hung ? "true" : "false")
            << ",\"hung_ms\":" << verdict.hung_ms << ",\"prompt\":" << (verdict.prompt ? "true" : "false")
-           << ",\"pid\":" << probe.hung_pid << "}\n";
+           << ",\"pid\":" << hung_pid << ",\"probe_ms\":" << timing_.last_probe_ms
+           << ",\"since_answer_ms\":" << since_answer_ms(timing_, GetTickCount64()) << "}\n";
     output.close();
     if (output) MoveFileExW(temporary.c_str(), (directory_ / "watchdog.json").c_str(), MOVEFILE_REPLACE_EXISTING);
     show(verdict.prompt);
     return force_close_;
+}
+
+DWORD WindowsWatchdog::sample_probe(const std::vector<DWORD>& processes) {
+    if (probe_running_.load(std::memory_order_acquire)) return hung_pid_; // The previous probe is still waiting.
+    if (probe_thread_.joinable()) {
+        probe_thread_.join();
+        hung_pid_ = probe_hung_pid_.load();
+        note_probe(timing_, probe_answered_.load(), probe_latency_ms_.load(), probe_finished_at_ms_.load());
+    }
+    WindowCollector collector{processes, {}};
+    EnumWindows(collect_window, reinterpret_cast<LPARAM>(&collector));
+    if (collector.windows.empty()) {
+        hung_pid_ = 0;
+        return 0;
+    }
+    probe_running_.store(true, std::memory_order_release);
+    try {
+        probe_thread_ = std::thread([this, windows = std::move(collector.windows)] {
+            const ULONGLONG started = GetTickCount64();
+            const auto summary = first_unanswered(windows, [this](const WatchedWindow& window) {
+                return stop_probe_.load() ? ProbeResult::answered : probe_window(window);
+            });
+            const ULONGLONG finished = GetTickCount64();
+            probe_latency_ms_.store(finished - started);
+            probe_finished_at_ms_.store(finished);
+            probe_answered_.store(summary.answered);
+            probe_hung_pid_.store(summary.hung ? windows[summary.hung_index].pid : 0);
+            probe_running_.store(false, std::memory_order_release);
+        });
+    } catch (const std::system_error&) {
+        probe_running_.store(false, std::memory_order_release); // No thread now: keep the last outcome, retry next tick.
+    }
+    return hung_pid_;
 }
 
 void WindowsWatchdog::show(bool prompt) {

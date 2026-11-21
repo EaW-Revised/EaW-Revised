@@ -210,7 +210,7 @@ void TacticalHud::set_gift(const bool policy, const bool enabled, const std::vec
         for (int i = 0; i < node->get_child_count(); ++i) self(self, node->get_child(i));
     };
     collect(collect,state.hud);
-    const auto placed = model::dock_project_hud(look, {0,0,state.gift_viewport.x,state.gift_viewport.y}, scale,
+    const auto placed = model::dock_project_hud(look, model::safe_area(state.hud->space()), scale,
         anchors, occupied, state.gift_recipients.size());
     if (!placed) {
         if (!state.gift_dock_warning) state.warn("EAWR-UI-0790", "gift control has no safe docking candidate");

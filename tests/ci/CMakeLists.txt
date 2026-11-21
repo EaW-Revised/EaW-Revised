@@ -96,6 +96,10 @@ add_test(
 )
 
 add_test(
+    NAME ci_publish_kit
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_publish_kit.py"
+)
+add_test(
     NAME ci_release_version
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_release_version.py"
 )

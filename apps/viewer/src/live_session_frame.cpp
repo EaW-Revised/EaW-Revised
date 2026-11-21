@@ -90,13 +90,23 @@ void LiveSessionView::begin() {
 
 void LiveSessionView::press_pause() {
     if (options_.lan) {
-        if (phase_ == Phase::running) (void)options_.lan->request_pause(!options_.lan->view().clock_paused);
+        if (phase_ != Phase::running) return;
+        // The agreed shared pause is the only state a press acts on; any seat may pause or resume (#7973).
+        const auto view = options_.lan->view();
+        const bool sent = options_.lan->request_pause(!view.clock_paused);
+        godot::UtilityFunctions::print("EAWR net event=pause-press tick=", static_cast<std::int64_t>(view.session_tick),
+            " agreed=", view.clock_paused ? "paused" : "running", " target=", view.clock_paused ? "resume" : "pause",
+            " outcome=", sent ? "sent" : "refused");
         return;
     }
     if (phase_ == Phase::ready) { begin(); return; }
     if (phase_ != Phase::running) return;
     if (session_ && session_->agreed_pacing()) {
-        if (time_.press_pause(session_->completed_tick())) session_->set_paused(time_.paused());
+        if (time_.press_pause(session_->completed_tick())) {
+            godot::UtilityFunctions::print("EAWR net event=pause-press tick=", static_cast<std::int64_t>(session_->completed_tick()),
+                " target=", time_.paused() ? "pause" : "resume", " outcome=sent");
+            session_->set_paused(time_.paused());
+        }
         return;
     }
     if (session_ && time_.press_pause(session_->completed_tick())) apply_time();

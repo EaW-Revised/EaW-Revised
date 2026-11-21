@@ -14,6 +14,7 @@ set(EAWR_CORE_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/load_profile_io.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/json_text.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/sha256.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/text.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/text_bounds.cpp"
 )
 

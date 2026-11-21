@@ -308,7 +308,7 @@ different host in its own tree, holding one of the host's build slot locks. Both
 
 ## Owner test kits (not releases)
 
-An owner test kit is built like a release but is local, unsigned and never published. Two rules (owner, 2026-11-03/04):
+An owner test kit is built like a release but is local and unsigned, and published only to invited testers through the [private channel](#private-test-kits). Two rules (owner, 2026-11-03/04):
 
 - **Engine:** the kit takes its engine only through `tools/release/kit_engine.py` (`stage_engine`: the pinned patched player and console exe from `tools/engine_pins.json`, fail closed on anything else). Run `python tools/release/kit_engine.py verify <kit folder or zip>` before handing the kit over. Never copy `godot/*` from an older kit.
 - **Layout:** the kit is the player layout, the same file list as a release player folder: `EAWR.exe`, `EAWR Mods.exe`, `eawr_loadcheck.exe`, `eawr_mods_service.exe`, `godot/`, `launcher/`, `launcher-pin.json`, `project/`, `Revised/`, `runtime.json`, `SHA256SUMS`, `README.md` (plus `LICENSE`, `THIRD_PARTY_NOTICES.md`, `licenses/`). It is built by `tools/release/package_release.py --with-mods-manager` through `tools/release/pool_host/Package-OnHost.ps1`, from a root-tools build of the same commit (EAWR, EAWR Mods, the mods service, the load check and the tools). The old dev layout (`start_test.py`, `demo.py`, `start-*.cmd`) is not an owner kit. Compare the finished folder's file list with the last accepted kit before reporting it ready.
@@ -384,6 +384,39 @@ The build fails if a required library is missing and records the library hashes 
 the Debug symbols. Verify the Debug archive with the Windows fresh-user gate before a release that includes it.
 
 When the job cannot link with symbols (no `--require-symbols`, or a viewer reused from a job without them), add `"symbols": false` to `cfg.json` (`-NoSymbols` on Package-OnHost, `--no-symbols` on `package_release.py`). The kit then keeps no private symbol archive and its `README.md` and `update-manifest.json` notes say `symbols: none (test kit)`. `"allow_missing_revised_layer": true` (`-AllowMissingRevisedLayer`) packages without the private Revised layer, which is not on the pool hosts; the owner-kit finish step adds it locally. `--public` refuses `--no-symbols`. Without it the packager checks every retained binary for a PDB identity first and lists all that lack one ("rebuild with `--require-symbols` (and `--viewer`)"). `Package-OnHost.ps1 -BuildDir` defaults to `out\build\windows-clang-ninja-relay` and fails at once when that directory or an expected binary is missing.
+
+## Private test kits
+
+A finished owner kit can be handed to invited testers through the launcher's opt-in **Private** channel. Kits are releases of
+the private game repository, never of the public one, and one command publishes them:
+
+```
+python tools/release/publish_kit.py --kit <kit>.zip [--notes changelog.md] [--dry-run] [--repo owner/name]
+```
+
+- **Input.** The delivered `<kit>.zip` (or the kit folder beside it) with the `<kit>.zip.sha256` and `<kit>.zip.manifest.json`
+  files `finish_kit.py` writes. A zip whose SHA-256 differs from either, a sidecar that does not describe the zip, or a
+  release-mode sidecar is refused before anything is read from GitHub. `--notes` is the changelog: it becomes the release body
+  and the manifest's `notes`, which the launcher shows to the tester.
+- **Repository.** `--repo`, else the `EAWR_KIT_REPO` environment variable, else this checkout's `origin`. The command asks
+  `gh` whether the repository is private and refuses a public one. Nothing in the source names a repository.
+- **Tag.** `kit-<release version>-kit.<n>` (for example `kit-0.3.6-kit.1`): the release version is the kit commit's
+  `config/release-version.json`, and `n` is the next free number for that version among the repository's releases (drafts
+  included) and tags. The launcher lists only non-draft `kit-*` tags, so a kit never shows up in Stable or Preview, and a public
+  tag in the same repository is never offered as a kit. An existing tag is refused, never reused.
+- **Manifest.** `update-manifest.json` is built by the generator the public release uses (`update_manifest.py`) with channel
+  `private`, tag `kit-<version>`, the kit commit as the build id, and every file's SHA-256, then validated with the launcher's
+  own rules. `SHA256SUMS` lists the zip and the manifest.
+- **Release.** `gh release create` with the zip, `update-manifest.json` and `SHA256SUMS`; target = the kit commit (the kit's base
+  commit when the repository only has that, which the command says); `--latest=false`; not a draft and not a pre-release (a
+  pre-release would make it look like a public one and a draft is invisible to testers). It prints the release URL and then
+  re-reads the release to confirm it is published, not pre-release, not the latest and holds all three assets (exit 5 if not).
+- **Dry run.** `--dry-run` runs every read-only check, writes the manifest, sums and notes into `--work` (a temporary folder is
+  kept and named when it is not given) and prints the exact `gh release create` line. It creates no release and no tag.
+- **Access.** Each tester gets a fine-grained read-only token (Contents: read, that repository only, expiry within a year,
+  revocable per tester), created and handed out by the owner privately; tokens never go into chat, tickets or files.
+
+Exit codes: 0 done, 2 usage, 3 a check refused, 4 a `gh` call failed, 5 created but the final check disagrees.
 
 ## What a release does not contain
 

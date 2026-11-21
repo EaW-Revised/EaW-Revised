@@ -792,6 +792,26 @@ void jamming_parameters_load() {
         expect(registered == expected, "WJM-01: authored style and duration change holder registration");
     }
     }
+    {
+        // WJM-05: an authored name that matches no nested handler keeps the row (lit, inert).
+        TempTree tree;
+        const auto ordinary = std::string("<Unit_Ability><Type>SENSOR_JAMMING</Type><GUI_Activated_Ability_Name>Row_Name"
+            "</GUI_Activated_Ability_Name><Effective_Radius>150</Effective_Radius>"
+            "<Expiration_Seconds>5</Expiration_Seconds></Unit_Ability>");
+        write_fixture(tree.root, with_second_frigate(with_abilities(layer_xml("15", "0.8"), ordinary,
+            "<Abilities SubObjectList=\"Yes\"><Sensor_Jamming_Ability Name=\"Other_Name\">"
+            "<Activation_Style>User_Input</Activation_Style></Sensor_Jamming_Ability></Abilities>")));
+        const auto tables = load_layers({tree.root});
+        expect(static_cast<bool>(tables), "WJM-05: unmatched jammer fixture loads");
+        if (tables) {
+            const auto loaded = eawr::units::ability_table(*tables, {});
+            const auto* profile = loaded ? loaded.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+            const auto slot = profile ? t::ability_slot(*profile, t::AbilityKind::sensor_jamming) : std::nullopt;
+            expect(slot.has_value(), "WJM-05: the unmatched row stays in the ability table");
+            expect(profile && slot && profile->abilities[*slot].gui_activated_ability_name == "Row_Name",
+                "WJM-05: the row keeps its authored name");
+        }
+    }
     std::array<std::vector<eawr::sim::math::Vec3>, 2> missile_paths;
     std::size_t radius_index = 0;
     for (const int radius : {50, 150}) {

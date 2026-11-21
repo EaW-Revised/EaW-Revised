@@ -38,11 +38,16 @@ struct HudViewModel {
     std::optional<data::ui::ReferenceRect> visible_extent;
     std::vector<core::Diagnostic> diagnostics;
     CommandBarPlacement shell_placement;
+    // Reference units kept free between the shell's right edge and the screen's right edge (0: none, as retail: a wide
+    // shell flushes or clips). Only a shell that sets it is moved left and then scaled down to leave the gap.
+    float right_margin{};
 
     // Contiguous two-digit indices starting at 00, present in catalogue AND shell.
     // Includes temporarily hidden slots, so animation cannot change capacity.
     [[nodiscard]] std::size_t family_size(std::string_view stem) const;
     [[nodiscard]] ShellPlacement placement(const ReferenceSpace& space) const noexcept;
+    void keep_right_margin(ShellPlacement& placed, const data::ui::ReferenceRect& extent,
+        const ReferenceSpace& space) const noexcept;
     [[nodiscard]] bool hit_test(ReferencePoint point) const noexcept;
     [[nodiscard]] bool hit_test_screen(ReferencePoint point, const ReferenceSpace& space) const noexcept;
 };

@@ -14,8 +14,12 @@ namespace eawr::sim::tactical {
 std::string_view to_string(const OrderKind kind) noexcept {
     switch (kind) {
     case OrderKind::script_create_object: return "script_create_object";
+    case OrderKind::script_teleport: return "script_teleport";
+    case OrderKind::script_hold_fire: return "script_hold_fire";
+    case OrderKind::script_change_owner: return "script_change_owner";
     case OrderKind::battle_control: return "battle_control";
     case OrderKind::script_invulnerable: return "script_invulnerable";
+    case OrderKind::script_despawn: return "script_despawn";
     case OrderKind::land_garrison: return "land_garrison";
     case OrderKind::land_unload: return "land_unload";
     case OrderKind::tactical_superweapon: return "tactical_superweapon";
@@ -107,6 +111,7 @@ std::string_view to_string(const EventKind kind) noexcept {
     case EventKind::planet_obliterated: return "planet_obliterated";
     case EventKind::tsw_debris_created: return "tsw_debris_created";
     case EventKind::tsw_sequence_complete: return "tsw_sequence_complete";
+    case EventKind::object_owner_changed: return "object_owner_changed";
     }
     return "unknown";
 }
@@ -211,6 +216,10 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     case opcode_gift: // ADR-020: recipient seat and reserved word
     case opcode_tactical_superweapon: // TSW-10: stage and admission
     case opcode_script_invulnerable: // TL-03: enabled flag and zero reserved word
+    case opcode_script_despawn: // #7886: two zero reserved words
+    case opcode_script_hold_fire: // enabled flag and zero reserved word
+    case opcode_script_teleport: // target unit
+    case opcode_script_change_owner: // new owner and zero reserved word
     case 9:  // #530 buy: type
     case opcode_retreat: // action and reserved word
     case opcode_retreat_cinematic:
@@ -241,11 +250,15 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
 
 std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
     if (std::holds_alternative<ScriptCreateObjectPayload>(command.payload)) return opcode_script_create_object;
+    if (std::holds_alternative<ScriptTeleportPayload>(command.payload)) return opcode_script_teleport;
+    if (std::holds_alternative<ScriptHoldFirePayload>(command.payload)) return opcode_script_hold_fire;
+    if (std::holds_alternative<ScriptChangeOwnerPayload>(command.payload)) return opcode_script_change_owner;
     if (std::holds_alternative<TacticalSuperweaponPayload>(command.payload)) return opcode_tactical_superweapon;
     if (std::holds_alternative<LandGarrisonPayload>(command.payload)) return opcode_land_garrison;
     if (std::holds_alternative<LandUnloadPayload>(command.payload)) return opcode_land_unload;
     if (std::holds_alternative<BattleControlPayload>(command.payload)) return opcode_battle_control;
     if (std::holds_alternative<ScriptInvulnerablePayload>(command.payload)) return opcode_script_invulnerable;
+    if (std::holds_alternative<ScriptDespawnPayload>(command.payload)) return opcode_script_despawn;
     if (std::holds_alternative<GiftPayload>(command.payload)) return opcode_gift;
     if (std::holds_alternative<RetreatPayload>(command.payload)) return opcode_retreat;
     if (std::holds_alternative<RetreatCinematicPayload>(command.payload)) return opcode_retreat_cinematic;
@@ -375,6 +388,17 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
         append_controller_policy(bytes, control->policy, 4);
     } else if (const auto* invulnerable = std::get_if<ScriptInvulnerablePayload>(&command.payload)) {
         sim::detail::append_u32(bytes, invulnerable->enabled ? 1U : 0U);
+        sim::detail::append_u32(bytes, 0);
+    } else if (std::holds_alternative<ScriptDespawnPayload>(command.payload)) {
+        sim::detail::append_u32(bytes, 0);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* teleport = std::get_if<ScriptTeleportPayload>(&command.payload)) {
+        sim::detail::append_u64(bytes, teleport->target);
+    } else if (const auto* change = std::get_if<ScriptChangeOwnerPayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, change->owner);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* hold = std::get_if<ScriptHoldFirePayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, hold->enabled ? 1U : 0U);
         sim::detail::append_u32(bytes, 0);
     } else if (const auto* gift = std::get_if<GiftPayload>(&command.payload)) {
         sim::detail::append_u32(bytes, gift->recipient.value);

@@ -156,9 +156,25 @@ struct PlanetThumbnails::Impl final {
     struct SpinSample final {
         double clock{};
         std::array<float, 12> row{}, map{};
+        double wall{};                // real seconds since the first sample of this bone (steady clock)
+        double row_degrees{}, map_degrees{}; // turned so far, summed per frame (real rate = degrees / wall)
     };
     // Opt-in renderer evidence, like the map's zoom timing/palette probe. Two samples per shown bone.
     std::map<std::pair<std::uint64_t, std::int32_t>, std::pair<SpinSample, SpinSample>> spin_samples;
+    std::map<std::pair<std::uint64_t, std::int32_t>, double> spin_wall_origin;
+    // Angle between two bone bases (column-major 3x3 in the first nine values), scale removed.
+    [[nodiscard]] static double turned_degrees(const std::array<float, 12>& a, const std::array<float, 12>& b) {
+        const auto unit = [](const std::array<float, 12>& m, const int c) {
+            const double x = m[c * 3], y = m[c * 3 + 1], z = m[c * 3 + 2], n = std::sqrt(x * x + y * y + z * z);
+            return n > 0.0 ? std::array<double, 3>{x / n, y / n, z / n} : std::array<double, 3>{};
+        };
+        double trace = 0.0;
+        for (int c = 0; c < 3; ++c) {
+            const auto u = unit(a, c), v = unit(b, c);
+            trace += u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+        }
+        return std::acos(std::clamp((trace - 1.0) * 0.5, -1.0, 1.0)) * 180.0 / std::numbers::pi;
+    }
     // Off-thread model prepares in flight (bounded); each still uploads on the main thread, one per frame.
     struct Load final {
         std::string key, model;
@@ -641,9 +657,17 @@ struct PlanetThumbnails::Impl final {
                             if (entity == state.piece_entities.end()) continue;
                             const auto map = state.planet_renderer(member.id).bone_evidence(entity->second, surface.bone);
                             if (!map) continue;
-                            const SpinSample sample{clock, *row, *map};
+                            const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                            SpinSample sample{clock, *row, *map, 0.0, 0.0, 0.0};
                             auto [entry, inserted] = spin_samples.try_emplace(std::pair{member.id, surface.bone}, sample, sample);
-                            if (!inserted) entry->second.second = sample;
+                            if (inserted) { spin_wall_origin[entry->first] = wall; }
+                            else {
+                                const auto& last = entry->second.second;
+                                sample.wall = wall - spin_wall_origin[entry->first];
+                                sample.row_degrees = last.row_degrees + turned_degrees(last.row, sample.row);
+                                sample.map_degrees = last.map_degrees + turned_degrees(last.map, sample.map);
+                                entry->second.second = sample;
+                            }
                             break;
                         }
                     }
@@ -691,7 +715,8 @@ std::string PlanetThumbnails::report_json() const {
         out << (first ? "" : ",") << "{\"planet\":" << key.first << ",\"bone\":" << key.second << ",\"samples\":[";
         bool next = false;
         for (const auto& sample : {samples.first, samples.second}) {
-            out << (next ? "," : "") << "{\"clock\":" << sample.clock;
+            out << (next ? "," : "") << "{\"clock\":" << sample.clock << ",\"wall\":" << sample.wall
+                << ",\"row_degrees\":" << sample.row_degrees << ",\"map_degrees\":" << sample.map_degrees;
             for (const auto& [name, matrix] : {std::pair{"row", sample.row}, std::pair{"map", sample.map}}) {
                 out << ",\"" << name << "\":[";
                 for (std::size_t i = 0; i < matrix.size(); ++i) out << (i ? "," : "") << matrix[i];

@@ -55,12 +55,20 @@ struct TourPose final {
 struct GalaxyModals final {
     bool retreat_dialog{}, save_menu{}, campaign_score{}, battle_prompt{}, story_summary{}, reference_pages{};
     bool hero_menu{}, black_market{}, weapon_menu{}, corruption_menu{}, action_menu{};
+    // The prompt is the pending choice (not a result/summary phase): the galaxy stays frozen but the camera and the finder stay free.
+    bool battle_choice{};
     [[nodiscard]] constexpr bool any() const noexcept {
         return retreat_dialog || save_menu || campaign_score || battle_prompt || story_summary || reference_pages || hero_menu
             || black_market || weapon_menu || corruption_menu || action_menu;
     }
+    // #7798: what takes the camera (middle-mouse drag, edge scroll) and the finder away. A pending battle choice does not: the
+    // original freezes time under it and leaves the camera free. Every other modal still blocks.
+    [[nodiscard]] constexpr bool blocks_camera() const noexcept {
+        return retreat_dialog || save_menu || campaign_score || (battle_prompt && !battle_choice) || story_summary || reference_pages
+            || hero_menu || black_market || weapon_menu || corruption_menu || action_menu;
+    }
 };
-static_assert(sizeof(GalaxyModals) == 11U, "a modal was added to GalaxyModals: update any() and the contract case");
+static_assert(sizeof(GalaxyModals) == 12U, "a modal was added to GalaxyModals: update any() and the contract case");
 
 // GCT-01: when the tour may play. The original's start refuses while a battle is being resolved (a pending battle prompt);
 // the remake also refuses while the game is paused, because the bands hide the GUI and with it the pause banner and its

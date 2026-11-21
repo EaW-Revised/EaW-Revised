@@ -739,7 +739,7 @@ void test_planetary_purchase_and_burst() {
         if (reference.empty()) reference = hashes;
         else expect(hashes == reference, "WSW: purchase/source/burst clocks match at workers 1/2/4/8");
     }
-    for (const int scenario : {0, 1, 2, 3, 4, 5, 6}) {
+    for (const int scenario : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}) {
         auto content = combat;
         auto money = economy;
         auto script = replay;
@@ -759,6 +759,23 @@ void test_planetary_purchase_and_burst() {
         } else if (scenario == 5 || scenario == 6) {
             script.setup.players[1].team_id = script.setup.players[0].team_id;
             if (scenario == 5) content.pad_neutral_factions = {script.setup.players[1].faction_id};
+        } else if (scenario == 7) {
+            // Change_Owner mid-burst: the unit moves to the other player at tick 3, after its first pulse; the burst ends
+            // there, so no later pulse fires at the target the previous owner chose.
+            script.commands.push_back({{3, 1, 3}, {3}, tactical::ScriptChangeOwnerPayload{2}});
+        } else if (scenario == 8 || scenario == 9) {
+            // Change_Owner republishes the unit's special hardpoint gate for the new owner: a station of player 2 loses its
+            // special hardpoint at tick 3; player 1 (with a held, non-consuming unlock) keeps its permission until the
+            // station changes to player 1 at tick 5 (scenario 8), which disables it; without the change (scenario 9) it stays.
+            tactical::DurabilityProfile station;
+            station.type_id = shooter_type; station.max_hull = units(1000);
+            tactical::HardpointProfile point;
+            point.destroyable = true; point.max_health = units(50); point.allows_special_weapon_use = true;
+            station.hardpoints = {point}; health.profiles = {station};
+            money.upgrades.front().consume_after_special_fire = false;
+            script.setup.units.push_back(unit(4, shooter_type, 2, at(9000, 9000)));
+            script.commands.push_back({{3, 2, 1}, {4}, tactical::DamagePayload{units(50), 0}});
+            if (scenario == 8) script.commands.push_back({{5, 2, 2}, {4}, tactical::ScriptChangeOwnerPayload{1}});
         } else {
             // WSW-48: a designated station hardpoint gates new dispatches, not
             // the continuation of an already-started planetary burst.
@@ -811,6 +828,10 @@ void test_planetary_purchase_and_burst() {
         if (scenario == 3 || scenario == 4) expect(cues == (scenario == 3 ? 0U : 3U)
             && world.ledgers().front().completed.size() == 1 && !world.snapshot()->economy().front().special_weapons_enabled,
             "WSW-48: destroyed required hardpoint blocks admission and ready cues while an active burst keeps its pulses");
+        if (scenario == 7) expect(cues == 1,
+            "Change_Owner: a planetary burst in progress ends when its source changes owner");
+        if (scenario == 8 || scenario == 9) expect(world.snapshot()->economy().front().special_weapons_enabled == (scenario == 9),
+            "Change_Owner: a unit with a destroyed special hardpoint disables the new owner's special weapons, and only then");
         if (scenario == 5 || scenario == 6) expect(cues == (scenario == 5 ? 3U : 0U),
             "WSW-13/16: authoritative planetary command agrees with the frozen gate for neutral and allied targets");
     }
@@ -1630,6 +1651,8 @@ int main(int argc, char** argv) {
     test_fire_bone_pole();
     test_object_weapon_cone();
     test_unit_weapon_targeting_and_muzzles();
+    test_deploy_pose_weapon_bones();
+    test_deploy_pose_checkpoint();
     test_rocket_launch_axis();
     test_lead();
     test_history_checkpoint();

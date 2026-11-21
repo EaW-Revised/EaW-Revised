@@ -184,6 +184,14 @@ void test_derived_captions() {
         "a single word stays and each further word is lower case");
 }
 
+void test_handle_label() {
+    expect(tray::handle_label("+", 3) == "+3", "the caption is followed by the omitted count");
+    expect(tray::handle_label("More: ", 12) == "More: 12", "a caption keeps its own spacing before a count");
+    expect(tray::handle_label("+", 0) == "+", "a bar that omits nothing: the caption alone, no count");
+    expect(tray::handle_label("More: ", 0) == "More:", "no count: the spaces that stood the caption apart from it go");
+    expect(tray::handle_label("", 0).empty() && tray::handle_label("", 2) == "2", "an empty caption shows the count or nothing");
+}
+
 // ---- GBT-06: row packing ------------------------------------------------------------------------------
 
 tray::Metrics metrics() {
@@ -429,6 +437,7 @@ int main() {
     test_member_union();
     test_classification();
     test_derived_captions();
+    test_handle_label();
     test_entries_per_line();
     test_groups_share_rows_without_backfilling();
     test_a_wide_group_wraps_and_the_next_one_uses_the_rest();

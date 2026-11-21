@@ -516,11 +516,18 @@ void test_plan_policy() {
     expect(plan.drawable && plan.blend == particles::Blend::opaque && plan.depth_write && plan.phase == particles::DrawPhase::opaque, "opaque selector writes depth");
     emitter.blend_mode = 3; plan = particles::plan_emitter(emitter, 0);
     expect(plan.drawable && plan.blend == particles::Blend::modulate, "modulate selector");
+    for (const auto& [selector, blend] : {std::pair{4U, particles::Blend::additive}, std::pair{5U, particles::Blend::alpha},
+                                          std::pair{6U, particles::Blend::modulate}}) {
+        emitter.blend_mode = selector; plan = particles::plan_emitter(emitter, 0);
+        expect(plan.drawable && plan.blend == blend && !plan.depth_write && plan.phase == particles::DrawPhase::transparent
+            && plan.blend_selector == selector && plan.program.find("DepthSprite") != std::string::npos,
+            "depth sprite selectors draw with their ordinary sibling blend and keep the authored selector");
+    }
     emitter.blend_mode = 11; emitter.normal_texture = "bump.tga"; plan = particles::plan_emitter(emitter, 0);
     expect(plan.drawable && plan.blend == particles::Blend::bump_alpha && plan.normal_texture == "bump.tga"
         && plan.phase == particles::DrawPhase::transparent && !plan.depth_write, "bump alpha selector keeps its normal map");
     emitter.normal_texture.clear();
-    for (const std::uint32_t selector : {4U, 5U, 6U, 7U, 8U, 9U, 12U, 13U}) {
+    for (const std::uint32_t selector : {7U, 8U, 9U, 12U, 13U}) {
         emitter.blend_mode = selector; plan = particles::plan_emitter(emitter, 0);
         expect(!plan.drawable && !plan.cause.empty(), "unsupported selector fails closed with a cause");
     }
@@ -755,7 +762,7 @@ void test_release_and_replacement_lifecycle() {
         expect(bool(first), "first instance spawns");
         const auto* plans = registry.plans(first.value());
         const auto drawable = static_cast<std::size_t>(std::count_if(plans->begin(), plans->end(), [](const auto& plan) { return plan.drawable; }));
-        expect(drawable == 3 && !(*plans)[3].drawable, "depth sprite emitter is listed, three emitters drawn");
+        expect(drawable == 3 && !(*plans)[3].drawable, "lit diffuse emitter is listed, three emitters drawn");
         expect(registry.live_backend_resources() == 3 && backend.live.size() == 3, "one backend resource per drawable emitter");
         std::vector<std::uint64_t> original;
         for (int frame = 0; frame < 20; ++frame) original.push_back(registry.advance(first.value(), 1.0F / 30.0F, test_camera()).value().hash);

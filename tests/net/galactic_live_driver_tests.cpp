@@ -1674,6 +1674,28 @@ void child_and_strategic_clock_share_one_limit(const std::array<std::size_t, 2> 
         at += 40;
         expect(pair.run_to(at) && !feeds[0]->paused() && !feeds[1]->paused(), "another human may always resume");
     }
+    // #7973: a pause refused by the per-seat 1 s debounce is not left in flight. The seat that was refused can pause again
+    // once the debounce has passed without another seat having to flip the agreed state first.
+    feeds[0]->set_paused(true);
+    at += 12;
+    expect(pair.run_to(at) && feeds[0]->paused() && feeds[1]->paused(), "the seat's own pause applies");
+    feeds[0]->set_paused(false);
+    at += 12;
+    expect(pair.run_to(at) && !feeds[0]->paused() && !feeds[1]->paused(), "the seat resumes its own pause at once");
+    feeds[0]->set_paused(true);
+    at += 12;
+    expect(pair.run_to(at) && !feeds[0]->paused() && !feeds[1]->paused(), "a pause repeated within the debounce is refused on both peers");
+    at += 40;
+    expect(pair.run_to(at), "the debounce passes");
+    feeds[0]->set_paused(true);
+    at += 12;
+    expect(pair.run_to(at) && feeds[0]->paused() && feeds[1]->paused(),
+        "the refused seat pauses again without the other seat flipping the agreed state first");
+    feeds[1]->set_paused(false);
+    at += 12;
+    expect(pair.run_to(at) && !feeds[0]->paused() && !feeds[1]->paused(), "either seat resumes");
+    at += 40;
+    expect(pair.run_to(at), "the debounce of the resume passes");
     // The pause rounds above outlast one speed window, so the strategic slot has expired; the tactical rate changes
     // spend a fresh per-seat budget (#5355: 2 per 10 session seconds), ending at 60 ticks a second.
     static_assert(net::ClockThrottle::speed_changes_per_window == 2 && net::ClockThrottle::window_ticks < 320);
@@ -3064,6 +3086,126 @@ void multiplayer_coop_battle() {
     expect(pair.lives[0]->tick_hashes() == pair.lives[1]->tick_hashes(), "co-op battle has equal digests every tick");
 }
 
+// Three live peers over one setup (the Pair fixture's shape, one more peer). Transports and matches are declared first: they
+// must outlive the live sessions.
+struct Trio {
+    Trio(galactic::GalacticSetup initial, const std::array<std::size_t, 3> workers)
+        : setup(std::move(initial)), humans(human_seats(setup)), pipes(3), worker_counts(workers) {
+        if (humans.size() != 3) throw std::runtime_error("the fixture needs exactly three human seats");
+        viewer::GalacticLanOptions options;
+        options.clock_policy = net::GalacticClockPolicy::limited;
+        for (const auto human : humans) options.seats.push_back({human, true});
+        options.exchange_every = 10;
+        options.waiting_notice_ms = 3000;
+        options.final_tick_count = net::max_session_ticks;
+        for (net::PeerIndex peer = 0; peer < 3; ++peer) {
+            transports[peer] = std::make_unique<PipeTransport>(pipes, peer);
+            auto local_options = options;
+            matches[peer] = std::make_unique<viewer::GalacticLanMatch>(*transports[peer], std::move(local_options));
+        }
+    }
+    ~Trio() {
+        for (auto& live : lives) if (live) live->stop();
+    }
+    void start(const net::PeerIndex peer, const std::function<void(LiveGameSession::Options&)>& tweak = {}) {
+        LiveGameSession::Options options;
+        options.workers = worker_counts[peer];
+        options.pacing = LiveGameSession::Pacing::driven;
+        options.step_driver = matches[peer]->driver();
+        if (tweak) tweak(options);
+        lives[peer] = require(LiveGameSession::start(setup, std::move(options)));
+    }
+    void order(const net::PeerIndex peer, galactic::CommandPayload payload) {
+        lives[peer]->submit(LiveGameOrder{humans[peer], std::move(payload), {}});
+    }
+    bool run_to(const std::uint64_t tick) {
+        for (auto& live : lives) live->advance_to(tick);
+        bool reached = true;
+        for (auto& live : lives) reached = live->wait_for(tick, 30s) && reached;
+        return reached && !lives[0]->failure() && !lives[1]->failure() && !lives[2]->failure();
+    }
+    [[nodiscard]] std::uint64_t galaxy_frame(const net::PeerIndex peer) const {
+        return static_cast<std::uint64_t>(lives[peer]->frame().latest->clock().galactic_frame);
+    }
+    galactic::GalacticSetup setup;
+    std::vector<eawr::sim::SeatId> humans;
+    Pipes pipes;
+    std::array<std::size_t, 3> worker_counts;
+    std::array<std::unique_ptr<PipeTransport>, 3> transports;
+    std::array<std::unique_ptr<viewer::GalacticLanMatch>, 3> matches;
+    std::array<std::unique_ptr<LiveGameSession>, 3> lives;
+};
+
+// #8082: two teammates of one faction fight an AI faction while a third human, of another faction, is in neither fighting
+// faction. Its whole side takes the default spectate role: it has no battle player, stays a lockstep peer (seals, compares
+// every digest), and the live session now publishes it as a read-only spectator of the player team's perspective, with a
+// battle feed (it used to be left on the galaxy with no way into the battle).
+void multiplayer_battle_bystander_watches(const std::array<std::size_t, 3> workers) {
+    const std::string label = "workers " + std::to_string(workers[0]) + "/" + std::to_string(workers[1]) + "/"
+        + std::to_string(workers[2]) + ": ";
+    auto initial = multiplayer_child_setup(3);
+    for (auto& seat : initial.seats) {
+        if (seat.seat_id.value == 1 || seat.seat_id.value == 2) { seat.player = 1; seat.human_side_id = 1; }
+        else if (seat.seat_id.value == 3) seat.player = 2;
+    }
+    // The third human faction: its own side, in neither fighting faction (player 2 is the AI the team fights).
+    initial.seats.push_back({eawr::sim::SeatId{4}, 3, eawr::sim::SeatKind::human, 3, true, 2});
+    initial.observer->human_observers = {1, 3};
+    for (auto& player : initial.observer->players) player.ai = player.player == 2;
+    for (auto& player : initial.victory->context.players) { player.human = player.player != 2; player.ai = !player.human; }
+    initial.seat_control.emplace();
+    initial.seat_control->teams = {{1, {1}, false}, {2, {4}, false}};
+    for (const auto& player : initial.players)
+        initial.seat_control->controllers.push_back({player.player_id,
+            player.player_id != 2 ? galactic::FactionControl::human : galactic::FactionControl::ai, galactic::FactionControl::ai, {}, {}});
+    Trio trio(initial, workers);
+    const auto services = child_services(initial, false, true, 450, true);
+    const auto configure = [services](auto& options) { options.services = services; };
+    for (net::PeerIndex peer = 0; peer < 3; ++peer) trio.start(peer, configure);
+    expect(trio.run_to(10), label + "three peers reach the conflict boundary");
+    const auto pending = trio.lives[0]->frame().pending_conflict;
+    expect(pending && trio.lives[1]->frame().pending_conflict && trio.lives[2]->frame().pending_conflict,
+        label + "the team's conflict with the AI is pending on all three peers");
+    if (!pending) return;
+    const auto conflict = pending->conflict.id;
+    trio.order(0, galactic::BattleChoice{conflict, true});
+    expect(trio.run_to(30), label + "the team's Begin settles the vote");
+    for (net::PeerIndex peer = 0; peer < 3; ++peer) {
+        const auto frame = trio.lives[peer]->frame(trio.humans[peer]);
+        expect(frame.battle && frame.conflict && !frame.pending_conflict, label + "the tactical child runs on every peer, bystander included");
+        if (!frame.conflict) continue;
+        std::size_t team{}, idle{};
+        for (const auto& binding : frame.conflict->seats) {
+            team += binding.player == 1 ? 1 : 0;
+            idle += binding.seat == trio.humans[2] && binding.player == 0 ? 1 : 0;
+        }
+        expect(team == 2 && idle == 1, label + "the teammates are bound to the team's player, the bystander has no battle player");
+        expect(frame.battle_spectators.size() == 1 && frame.battle_spectators.front().seat == trio.humans[2]
+            && frame.battle_spectators.front().observer == 1,
+            label + "the bystander's seat is published as a spectator of the player team's perspective");
+    }
+    const auto watcher = trio.lives[2]->battle_feed(conflict, trio.humans[2]);
+    const auto player_feed = trio.lives[0]->battle_feed(conflict, trio.humans[0]);
+    expect(watcher && player_feed, label + "the spectating seat gets a battle feed like the playing seat");
+    expect(!trio.lives[2]->battle_feed(conflict + 1000, trio.humans[2]) && !trio.lives[0]->battle_feed(conflict, eawr::sim::SeatId{99}),
+        label + "a stale conflict or an unknown seat gets no feed");
+    for (std::uint64_t tick = 31; tick <= 100; ++tick) expect(trio.run_to(tick), label + "the battle advances through agreed ticks");
+    expect(watcher && watcher->completed_tick() > 0, label + "the spectator's feed follows the battle");
+    expect(!trio.lives[0]->frame().conflict && !trio.lives[1]->frame().conflict && !trio.lives[2]->frame().conflict,
+        label + "all three peers return from the battle");
+    expect(trio.run_to(120) && trio.galaxy_frame(0) == trio.galaxy_frame(1) && trio.galaxy_frame(1) == trio.galaxy_frame(2),
+        label + "the campaign resumes equally on all three peers");
+    for (auto& live : trio.lives) live->stop();
+    expect(!trio.lives[0]->failure() && !trio.lives[1]->failure() && !trio.lives[2]->failure(),
+        label + "a bystander in the battle never fails a peer");
+    expect(trio.lives[0]->tick_hashes() == trio.lives[1]->tick_hashes() && trio.lives[1]->tick_hashes() == trio.lives[2]->tick_hashes(),
+        label + "the bystander compares equal digests every tick");
+    const auto commands = trio.lives[2]->record().commands;
+    expect(std::none_of(commands.begin(), commands.end(), [&](const auto& command) {
+        return command.key.seat == trio.humans[2] && std::holds_alternative<galactic::TacticalLayerCommand>(command.payload);
+    }), label + "the spectator issued no battle command");
+}
+
 // The lone human of a human-versus-AI vote leaves before choosing: no human side remains, so the same live seat policy that
 // binds the vote turns the conflict into an instant auto-resolve for the survivor, without a prompt or a tactical child.
 void multiplayer_ai_vote_human_leaves() {
@@ -3682,6 +3824,60 @@ void live_recovery_protocol_contracts() {
     }
 }
 
+// #7826: the story's pause/resume pair (a mod's filter pressed while paused) is applied by the session, not sent by a seat.
+// So nothing on the wire carries a debounce exemption: a seat that spams resume/pause (a forged or modified client) is
+// still debounced on every peer, and both peers keep equal digests.
+void forged_pause_spam_stays_debounced(const std::array<std::size_t, 2> workers) {
+    const std::string label = "forged pause spam, workers " + std::to_string(workers[0]) + "/" + std::to_string(workers[1]) + ": ";
+    Pair pair(versus_setup(), workers);
+    expect(pair.run_to(20), label + "both peers reach tick 20");
+    pair.order(0, galactic::PauseGalaxy{});
+    expect(pair.run_to(60) && pair.pause(0) > 0 && pair.pause(1) > 0, label + "paused");
+    for (int round = 0; round < 6; ++round) {
+        pair.order(0, galactic::ResumeGalaxy{});
+        pair.order(0, galactic::PauseGalaxy{}); // the re-pause right after the resume is inside the debounce
+    }
+    expect(pair.run_to(120) && pair.pause(0) == 0 && pair.pause(1) == 0,
+        label + "the re-pauses inside the debounce are refused on both peers");
+    for (auto& live : pair.lives) live->stop();
+    expect(pair.lives[0]->tick_hashes() == pair.lives[1]->tick_hashes(), label + "equal digests");
+}
+
+// #7826: a story toggle (the session's own clock change) and the seats' pause debounce do not touch each other. After a human
+// resume the one-second window is open; the story's pause inside it is applied (the debounce never meets it), the human's own
+// re-pause inside the window is still refused, on both peers; once the window ends the human pause is taken as before.
+void story_toggle_leaves_the_pause_debounce_alone(const std::array<std::size_t, 2> workers) {
+    const std::string label = "story toggle and debounce, workers " + std::to_string(workers[0]) + "/" + std::to_string(workers[1]) + ": ";
+    Pair pair(versus_setup(), workers, LiveGameSession::Pacing::driven, 3000, 0);
+    const auto services = std::make_shared<eawr::platform::CampaignServiceConfiguration>();
+    services->configure = [](eawr::campaign::GameSession& game) {
+        namespace story = eawr::sim::galactic::story;
+        story::EventDef click;
+        click.name = "PAUSE_TOGGLE"; click.type = "STORY_CLICK_GUI"; click.params[0] = {"b_go"}; click.perpetual = true;
+        click.reward_type = "FORCE_CLICK_GUI"; click.reward_params[0] = {"b_play_pause"};
+        story::SubPlotDef plot; plot.name = "P.xml"; plot.owner = 1; plot.active = true; plot.events = {click};
+        return game.install_story({}, {{1, "p.xml"}}, {plot});
+    };
+    for (net::PeerIndex peer = 0; peer < 2; ++peer) pair.start(peer, [&](LiveGameSession::Options& options) { options.services = services; });
+    expect(pair.run_to(20), label + "both peers reach tick 20");
+    pair.order(0, galactic::PauseGalaxy{});
+    expect(pair.run_to(60) && pair.pause(0) == 1 && pair.pause(1) == 1, label + "the human pause is taken");
+    // The resume, the story's click and the human re-pause go out in one batch (orders take effect a few exchanges later, so
+    // separate submissions would not land at a known tick): the resume opens the debounce window, the story's pause is then
+    // applied (the debounce never meets it), and the human re-pause in the same window is refused, on both peers.
+    pair.order(0, galactic::ResumeGalaxy{});
+    pair.order(0, galactic::GuiClick{"b_go"});
+    pair.order(0, galactic::PauseGalaxy{});
+    expect(pair.run_to(100) && pair.pause(0) == 1 && pair.pause(1) == 1,
+        label + "the story's pause is applied and the human re-pause inside the window is refused: the story toggle neither met nor restarted the debounce");
+    pair.order(0, galactic::GuiClick{"b_go"});
+    expect(pair.run_to(140) && pair.pause(0) == 0 && pair.pause(1) == 0, label + "the story's resume is applied on both peers");
+    pair.order(0, galactic::PauseGalaxy{});
+    expect(pair.run_to(180) && pair.pause(0) == 1 && pair.pause(1) == 1, label + "after the window the human pause is taken as before");
+    for (auto& live : pair.lives) live->stop();
+    expect(pair.lives[0]->tick_hashes() == pair.lives[1]->tick_hashes(), label + "equal digests");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -3709,6 +3905,8 @@ int main(int argc, char** argv) {
             controller_wire_and_peer_gates();
             dormant_freestore_admission();
             multiplayer_coop_battle();
+            const std::array<std::array<std::size_t, 3>, 2> bystander_workers{{{1, 4, 2}, {8, 1, 4}}};
+            for (const auto& workers : bystander_workers) multiplayer_battle_bystander_watches(workers);
             multiplayer_ai_vote_human_leaves();
             return galactic_test::checker.finish();
         }
@@ -3735,6 +3933,8 @@ int main(int argc, char** argv) {
             agreed_commands_and_digests(workers);
             private_views_and_digests(workers);
             invasion_accept_is_agreed(workers);
+            forged_pause_spam_stays_debounced(workers);
+            story_toggle_leaves_the_pause_debounce_alone(workers);
         }
         real_time_follows_the_agreed_clock();
         refusals_never_stamp_locally();

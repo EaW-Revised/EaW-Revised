@@ -74,15 +74,23 @@ struct CombatUnit {
     const DurabilityProfile* durability_profile{};
     const DurabilityState* durability{};
     const CombatState* combat{};
+    bool hold_fire{};             // Lua Prevent_All_Fire: none of its weapons fire
     bool squadron_idle{};         // FT-07: a squadron craft whose squadron has no target
     bool can_turn{};              // it has a motion profile and is at rest: no plan, no group wait
     // WMV-20: a single ship's unit destination can turn it without a direct combat target.
     std::optional<math::Vec3> facing_destination{};
     // AB-21: the weapon delay multiplier of its active abilities (1 without).
     math::Fixed weapon_delay{math::Fixed::from_raw(math::Fixed::scale)};
-    // WAB-80: its FULL_SALVO is on, so each hardpoint also applies its own full-salvo delay multiplier.
-    bool full_salvo{};
+    // #7940, WAB-80/81: the kind of its unit-ability list entry 0 and entry 1 while that ability is on
+    // (`none` when off, absent or not modelled). A hardpoint applies its own delay multiplier and fire gate for each.
+    std::array<AbilityKind, 2> mode_ability{AbilityKind::none, AbilityKind::none};
+    // #7940: a hardpoint's fire gate for the on mode abilities (WAB-81); an object weapon has none.
+    [[nodiscard]] bool mode_allows(const WeaponProfile& weapon) const noexcept {
+        if (weapon.hardpoint == object_weapon) return true;
+        return weapon.fires_in_ability(mode_ability[0]) && weapon.fires_in_ability(mode_ability[1]);
+    }
     bool rocket_attack{}; // WRA-02: copied active modal flag
+    std::optional<DeployPoseState> deploy_pose{}; // WDP-02: the SPOILER_LOCK clip its weapon bones follow
     std::optional<math::Fixed> ability_attack_range{}; // WRA-03
     [[nodiscard]] std::optional<math::Fixed> attack_distance() const noexcept {
         return ability_attack_range ? ability_attack_range : profile ? profile->max_attack_distance : std::nullopt;

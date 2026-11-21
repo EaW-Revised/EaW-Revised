@@ -685,6 +685,541 @@ void test_script_invulnerable() {
 }
 
 
+void test_script_hold_fire() {
+    // Lua Prevent_All_Fire: while the flag is set none of the unit's weapons fire; clearing it lets them fire again;
+    // the flag is checkpointed (child-state domain 53 with no other optional layout) and hashed, the command round-trips
+    // through the replay as opcode 42, and every outcome agrees at 1/2/4/8 workers.
+    for (const unsigned scenario : {0U, 1U, 2U}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto health = durability();
+            for (auto& row : health.profiles) { row.max_shields = {}; row.shield_refresh = {}; row.hardpoints.clear(); }
+            tactical::CombatProfile shooter;
+            shooter.type_id = corvette_type; shooter.max_attack_distance = units(1200);
+            tactical::WeaponProfile weapon;
+            weapon.range = units(700); weapon.pulse_count = 1; weapon.hardpoint = 0;
+            weapon.cone_width = units(175); weapon.cone_height = units(160);
+            weapon.opportunity_when_idle = true; weapon.opportunity_when_targeting = true;
+            weapon.shot = tactical::ShotProfile{units(10), 0, units(25), units(1500), true, true, {}};
+            shooter.weapons = {weapon};
+            tactical::CombatProfile target;
+            target.type_id = frigate_type;
+            target.collision = tactical::CollisionBox{at(-10, -10, -10), at(10, 10, 10)};
+            tactical::CombatTable combat; combat.profiles = {shooter, target};
+            auto initial = setup();
+            initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+                {2, frigate_type, 2, at(500, 0), math::identity_quat(), {}}};
+            const std::vector<tactical::SensorProfile> sensors{{corvette_type, units(1500)}, {frigate_type, units(1500)}};
+            auto created = tactical::TacticalSession::create(initial, sensors, health, {}, std::nullopt, combat);
+            expect(static_cast<bool>(created), "Prevent_All_Fire: fixture creates");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            expect(static_cast<bool>(world.submit(command(0, 1, 0, 1, tactical::AttackPayload{2}))), "Prevent_All_Fire: attack order submits");
+            // 0: never held. 1: held from the first tick. 2: held, then released at tick 30.
+            if (scenario != 0) expect(static_cast<bool>(world.submit(command(0, 1, 1, 1, tactical::ScriptHoldFirePayload{true}))),
+                "Prevent_All_Fire: hold command submits");
+            if (scenario == 2) expect(static_cast<bool>(world.submit(command(30, 1, 2, 1, tactical::ScriptHoldFirePayload{false}))),
+                "Prevent_All_Fire: release command submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            unsigned shots_before = 0, shots_after = 0;
+            for (unsigned frame = 0; frame < 90; ++frame) {
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "Prevent_All_Fire: step succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                for (const auto& event : step.value().snapshot->combat_events())
+                    if (event.kind == tactical::CombatEventKind::weapon_fired) ++(frame < 30 ? shots_before : shots_after);
+                if (frame == 10 && scenario == 1) {
+                    const auto checkpoint = world.save_checkpoint_state();
+                    expect(checkpoint && checkpoint.value().size() >= 4 && checkpoint.value()[0] == 53
+                        && checkpoint.value()[1] == 0 && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
+                        "Prevent_All_Fire: a held unit selects child-state domain 53");
+                    auto fresh = tactical::TacticalSession::from_replay(world.record(), sensors, health, {}, std::nullopt, combat);
+                    expect(checkpoint && fresh, "Prevent_All_Fire: checkpoint factory succeeds");
+                    if (checkpoint && fresh) {
+                        const auto loaded = fresh.value().load_checkpoint_state(checkpoint.value());
+                        expect(static_cast<bool>(loaded), "Prevent_All_Fire: a held checkpoint loads");
+                        if (loaded) {
+                            const auto recaptured = fresh.value().save_checkpoint_state();
+                            expect(recaptured && recaptured.value() == checkpoint.value(),
+                                "Prevent_All_Fire: checkpoint round-trip preserves canonical bytes");
+                        }
+                    }
+                    const auto bytes = tactical::write_replay(world.record());
+                    expect(static_cast<bool>(bytes), "Prevent_All_Fire: the replay with opcode 42 writes");
+                    if (bytes) {
+                        const auto parsed = tactical::parse_replay(bytes.value());
+                        bool found = false;
+                        if (parsed) for (const auto& recorded : parsed.value().commands)
+                            if (const auto* payload = std::get_if<tactical::ScriptHoldFirePayload>(&recorded.payload))
+                                found = found || (payload->enabled && recorded.units == std::vector<eawr::sim::EntityId>{1});
+                        expect(found, "Prevent_All_Fire: opcode 42 round-trips through the replay writer and parser");
+                    }
+                }
+            }
+            if (scenario == 0) expect(shots_before + shots_after > 0, "Prevent_All_Fire: an unheld shooter fires");
+            if (scenario == 1) expect(shots_before + shots_after == 0, "Prevent_All_Fire: a held shooter never fires, hit or miss");
+            if (scenario == 2) expect(shots_before == 0 && shots_after > 0, "Prevent_All_Fire: releasing the hold lets the weapons fire again");
+            if (reference.empty()) reference = hashes;
+            else expect(reference == hashes, "Prevent_All_Fire: hashes agree at 1/2/4/8 workers");
+        }
+    }
+}
+
+void test_script_change_owner() {
+    // Lua Change_Owner: the unit moves to the named player through the shared ownership transfer: its order and targets
+    // drop, its hull is kept, the ownership census follows, it publishes one object_owner_changed event, and the fog masks
+    // flip for both sides. A same-owner call, a missing unit and a player that is not in the battle change nothing. The
+    // command is opcode 43 in the replay, the checkpoint round-trips, and every outcome agrees at 1/2/4/8 workers.
+    for (const unsigned scenario : {0U, 1U}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto health = durability();
+            for (auto& row : health.profiles) { row.max_shields = {}; row.shield_refresh = {}; row.hardpoints.clear(); }
+            tactical::CombatProfile shooter;
+            shooter.type_id = corvette_type; shooter.max_attack_distance = units(1200);
+            tactical::WeaponProfile weapon;
+            weapon.range = units(700); weapon.pulse_count = 1; weapon.hardpoint = 0;
+            weapon.cone_width = units(175); weapon.cone_height = units(160);
+            weapon.opportunity_when_idle = true; weapon.opportunity_when_targeting = true;
+            weapon.shot = tactical::ShotProfile{units(10), 0, units(25), units(1500), true, true, {}};
+            shooter.weapons = {weapon};
+            tactical::CombatProfile target;
+            target.type_id = frigate_type;
+            target.collision = tactical::CollisionBox{at(-10, -10, -10), at(10, 10, 10)};
+            tactical::CombatTable combat; combat.profiles = {shooter, target};
+            auto initial = setup();
+            initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+                {2, frigate_type, 2, at(500, 0), math::identity_quat(), {}}};
+            const std::vector<tactical::SensorProfile> sensors{{corvette_type, units(1500)}, {frigate_type, units(1500)}};
+            auto created = tactical::TacticalSession::create(initial, sensors, health, {}, std::nullopt, combat);
+            expect(static_cast<bool>(created), "Change_Owner: fixture creates");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            // The shooter attacks the frigate and takes 900 hull damage at tick 0; at tick 10 the script gives it to
+            // player 2 (scenario 1). Extra calls: the frigate to its own owner, a missing unit and an unknown player.
+            expect(static_cast<bool>(world.submit(command(0, 1, 0, 1, tactical::AttackPayload{2}))), "Change_Owner: attack order submits");
+            expect(static_cast<bool>(world.submit(command(0, 1, 1, 1, tactical::DamagePayload{units(900), tactical::hull_target}))),
+                "Change_Owner: damage submits");
+            if (scenario == 1) {
+                expect(static_cast<bool>(world.submit(command(10, 1, 2, 1, tactical::ScriptChangeOwnerPayload{2}))), "Change_Owner: change submits");
+                expect(static_cast<bool>(world.submit(command(11, 2, 3, 2, tactical::ScriptChangeOwnerPayload{2}))), "Change_Owner: same-owner call submits");
+                expect(static_cast<bool>(world.submit(command(12, 2, 4, 77, tactical::ScriptChangeOwnerPayload{1}))), "Change_Owner: missing unit submits");
+                expect(static_cast<bool>(world.submit(command(13, 2, 5, 1, tactical::ScriptChangeOwnerPayload{9}))), "Change_Owner: unknown player submits");
+            }
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            std::size_t owner_events = 0;
+            std::optional<math::Fixed> hull_before;
+            for (unsigned frame = 0; frame < 40; ++frame) {
+                if (frame == 10) if (const auto state = world.durability_state(1)) hull_before = state->hull;
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "Change_Owner: step succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                expect(world.ownership_census_matches_recount_for_testing(executor), "Change_Owner: the ownership census matches a recount every tick");
+                for (const auto& event : step.value().snapshot->events()) if (event.kind == tactical::EventKind::object_owner_changed) {
+                    ++owner_events;
+                    expect(event.tick == 10 && event.player == 2 && event.sequence == 1 && event.unit == 1,
+                        "Change_Owner: the event names the unit, the new owner and the previous owner");
+                }
+                if (frame == 20) {
+                    const auto state = world.unit_state(1);
+                    const auto combat_state = world.combat_state(1);
+                    const auto health_after = world.durability_state(1);
+                    expect(state && state->owner == (scenario == 1 ? 2U : 1U), "Change_Owner: the unit's owner follows the command");
+                    if (scenario == 1) {
+                        expect(combat_state && combat_state->attack_target == 0 && !combat_state->direct,
+                            "Change_Owner: the attack target and the direct flag are cleared");
+                        expect(state && state->order.kind == tactical::OrderKind::none, "Change_Owner: the order is dropped");
+                        expect(hull_before && health_after && health_after->hull == *hull_before && hull_before->raw() == units(2700).raw(),
+                            "Change_Owner: the damaged hull is kept (75 percent of 3600)");
+                        const auto other = world.unit_state(2);
+                        expect(other && other->owner == 2, "Change_Owner: the same-owner call left the frigate alone");
+                        const auto checkpoint = world.save_checkpoint_state();
+                        auto fresh = tactical::TacticalSession::from_replay(world.record(), sensors, health, {}, std::nullopt, combat);
+                        expect(checkpoint && fresh, "Change_Owner: checkpoint factory succeeds");
+                        if (checkpoint && fresh) {
+                            expect(checkpoint.value().size() >= 4 && checkpoint.value()[0] == 37,
+                                "Change_Owner: no new checkpoint state, the base child-state domain");
+                            const auto loaded = fresh.value().load_checkpoint_state(checkpoint.value());
+                            expect(static_cast<bool>(loaded), "Change_Owner: the checkpoint loads");
+                            if (loaded) {
+                                const auto recaptured = fresh.value().save_checkpoint_state();
+                                expect(recaptured && recaptured.value() == checkpoint.value(), "Change_Owner: checkpoint round-trip preserves canonical bytes");
+                                const auto resumed = fresh.value().step(executor);
+                                const auto original = world.step(executor);
+                                hashes.push_back(original ? original.value().state_sha256 : std::string{});
+                                expect(resumed && original && resumed.value().state_sha256 == original.value().state_sha256,
+                                    "Change_Owner: a restored session continues with the same hash");
+                                frame += 1;
+                            }
+                        }
+                        const auto bytes = tactical::write_replay(world.record());
+                        expect(static_cast<bool>(bytes), "Change_Owner: the replay with opcode 43 writes");
+                        if (bytes) {
+                            const auto parsed = tactical::parse_replay(bytes.value());
+                            bool found = false;
+                            if (parsed) for (const auto& recorded : parsed.value().commands)
+                                if (const auto* payload = std::get_if<tactical::ScriptChangeOwnerPayload>(&recorded.payload))
+                                    found = found || (payload->owner == 2 && recorded.units == std::vector<eawr::sim::EntityId>{1});
+                            expect(found, "Change_Owner: opcode 43 round-trips through the replay writer and parser");
+                        }
+                    }
+                }
+            }
+            expect(owner_events == (scenario == 1 ? 1U : 0U), "Change_Owner: exactly one owner event, none without the command");
+            if (reference.empty()) reference = hashes;
+            else expect(reference == hashes, "Change_Owner: hashes agree at 1/2/4/8 workers");
+        }
+    }
+    // Fog: a lone unit nobody else can see belongs to player 1; after the change player 2 sees it and player 1 does not.
+    {
+        auto initial = setup();
+        initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+            {2, frigate_type, 2, at(9000, 0), math::identity_quat(), {}}};
+        const std::vector<tactical::SensorProfile> sensors{{corvette_type, units(1500)}, {frigate_type, units(1500)}};
+        auto created = tactical::TacticalSession::create(initial, sensors);
+        expect(static_cast<bool>(created), "Change_Owner: fog fixture creates");
+        if (created) {
+            auto world = std::move(created).value();
+            expect(static_cast<bool>(world.submit(command(5, 1, 0, 1, tactical::ScriptChangeOwnerPayload{2}))), "Change_Owner: fog change submits");
+            const eawr::platform::ThreadWorkerAdapter executor(1);
+            std::uint64_t before_mask = 0, after_mask = 0;
+            for (unsigned frame = 0; frame < 12; ++frame) {
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "Change_Owner: fog step succeeds");
+                if (!step) break;
+                for (const auto& instance : step.value().snapshot->instances()) if (instance.entity_id == 1)
+                    (frame < 5 ? before_mask : after_mask) = instance.visible_to;
+            }
+            expect(before_mask == 1U, "Change_Owner: before the change only its owner sees the unit");
+            expect(after_mask == 2U, "Change_Owner: after the change the new owner sees it and the old owner does not");
+        }
+    }
+}
+
+void test_script_change_owner_edges() {
+    // A unit that is already dead earlier in the same command stage is skipped: no owner change, no event.
+    {
+        auto initial = setup();
+        initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+            {2, frigate_type, 2, at(9000, 0), math::identity_quat(), {}}};
+        auto created = tactical::TacticalSession::create(initial, {}, durability());
+        expect(static_cast<bool>(created), "Change_Owner: dead-unit fixture creates");
+        if (created) {
+            auto world = std::move(created).value();
+            expect(static_cast<bool>(world.submit(command(4, 1, 0, 1, tactical::DamagePayload{units(100000), tactical::hull_target}))),
+                "Change_Owner: lethal damage submits");
+            expect(static_cast<bool>(world.submit(command(4, 1, 1, 1, tactical::ScriptChangeOwnerPayload{2}))),
+                "Change_Owner: same-tick change submits");
+            const eawr::platform::ThreadWorkerAdapter executor(1);
+            std::size_t owner_events = 0;
+            for (unsigned frame = 0; frame < 8; ++frame) {
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "Change_Owner: dead-unit step succeeds");
+                if (!step) break;
+                for (const auto& event : step.value().snapshot->events())
+                    if (event.kind == tactical::EventKind::object_owner_changed) ++owner_events;
+            }
+            expect(owner_events == 0 && !world.unit_state(1),
+                "Change_Owner: a unit killed earlier in the same command stage is skipped without an event");
+        }
+    }
+    // Hull and shield percentages with different maxima: player 2 plays at half health and half shield, so the unit keeps
+    // its fractions of the new maxima.
+    {
+        auto health = durability();
+        health.difficulty = {tactical::DifficultyScale{2, decimal("0.5"), decimal("0.5"), decimal("1")}};
+        auto initial = setup();
+        initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+            {2, frigate_type, 2, at(9000, 0), math::identity_quat(), {}}};
+        auto created = tactical::TacticalSession::create(initial, {}, health);
+        expect(static_cast<bool>(created), "Change_Owner: scaled-maxima fixture creates");
+        if (created) {
+            auto world = std::move(created).value();
+            expect(static_cast<bool>(world.submit(command(0, 1, 0, 1, tactical::DamagePayload{units(1000), tactical::hull_target}))),
+                "Change_Owner: damage for the percentage case submits");
+            expect(static_cast<bool>(world.submit(command(400, 1, 1, 1, tactical::ScriptChangeOwnerPayload{2}))),
+                "Change_Owner: change for the percentage case submits");
+            const eawr::platform::ThreadWorkerAdapter executor(1);
+            std::optional<tactical::DurabilityState> before, after;
+            for (unsigned frame = 0; frame < 402; ++frame) {
+                if (frame == 400) before = world.durability_state(1);
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "Change_Owner: percentage step succeeds");
+                if (!step) break;
+            }
+            after = world.durability_state(1);
+            const auto close_to_half = [](const Fixed now, const Fixed was) {
+                const auto want = was.raw() / 2;
+                const auto delta = now.raw() > want ? now.raw() - want : want - now.raw();
+                return delta <= Fixed::scale / 1000;
+            };
+            expect(before && after && before->hull.raw() > 0 && before->hull < units(3600) && before->shields.raw() > 0,
+                "Change_Owner: the percentage fixture has a damaged hull and a recharged shield before the change");
+            expect(before && after && close_to_half(after->hull, before->hull) && close_to_half(after->shields, before->shields),
+                "Change_Owner: hull and shield fractions are kept against the new owner's smaller maxima");
+        }
+    }
+    // A squadron: listing one craft moves the container and every craft, in ascending ID order, on any listing.
+    for (const unsigned listed : {10U, 11U, 12U, 13U}) {
+        auto initial = setup();
+        initial.units = {{1, plain_type, 2, at(1000, 0), math::identity_quat(), {}},
+            {10, xwing_squadron, 1, at(0, 0), math::identity_quat(), {}},
+            {11, xwing_type, 1, at(0, 0), math::identity_quat(), {}},
+            {12, xwing_type, 1, at(10, 0), math::identity_quat(), {}},
+            {13, xwing_type, 1, at(20, 0), math::identity_quat(), {}}};
+        initial.squadrons = {{10, {11, 12, 13}}};
+        auto movement = hangar_motion();
+        movement.squadrons.spawners.clear();
+        movement.squadrons.squadrons.front().members = {xwing_type, xwing_type, xwing_type};
+        movement.squadrons.squadrons.front().offsets = {at(0, 0), at(10, 0), at(20, 0)};
+        auto health = durability();
+        health.profiles = {{plain_type, units(1000), {}, false, {}}, {xwing_type, units(1000), {}, false, {}}};
+        auto created = tactical::TacticalSession::create(initial, {}, health, movement);
+        expect(static_cast<bool>(created), "Change_Owner: squadron fixture creates");
+        if (!created) continue;
+        auto world = std::move(created).value();
+        expect(static_cast<bool>(world.submit(command(1, 1, 0, listed, tactical::ScriptChangeOwnerPayload{2}))),
+            "Change_Owner: squadron change submits");
+        const eawr::platform::ThreadWorkerAdapter executor(1);
+        std::vector<eawr::sim::EntityId> moved;
+        for (unsigned frame = 0; frame < 4; ++frame) {
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "Change_Owner: squadron step succeeds");
+            if (!step) break;
+            expect(world.ownership_census_matches_recount_for_testing(executor), "Change_Owner: squadron census matches a recount");
+            for (const auto& event : step.value().snapshot->events())
+                if (event.kind == tactical::EventKind::object_owner_changed) moved.push_back(event.unit);
+        }
+        expect(moved == std::vector<eawr::sim::EntityId>({10, 11, 12, 13}),
+            "Change_Owner: a squadron container or one craft moves the whole squadron, in ascending ID order");
+        for (const eawr::sim::EntityId id : {10U, 11U, 12U, 13U}) {
+            const auto state = world.unit_state(id);
+            expect(state && state->owner == 2, "Change_Owner: every squadron member belongs to the new owner");
+        }
+    }
+}
+
+void test_script_despawn_cleanup() {
+    // #7886: a despawn is a silent removal that still updates the victory census and the star base list. Scenario 0 removes
+    // the only enemy star base: the battle is not decided (no score), nothing is destroyed, and the checkpoint saves.
+    // Scenario 1 removes a unit that another unit was ordered to attack: the attacker survives and keeps running. Every
+    // outcome agrees at 1/2/4/8 workers.
+    for (const unsigned scenario : {0U, 1U}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            const tactical::VictoryRules victory{tactical::VictoryCondition::enemy_starbase_destroyed, {plain_type}, {1, 2}, {1}};
+            auto created = tactical::TacticalSession::create(
+                setup(), {}, durability(), motion(), std::nullopt, {}, victory, abilities({1}));
+            expect(static_cast<bool>(created), "#7886: cleanup fixture creates");
+            if (!created) continue;
+            auto session = std::move(created).value();
+            std::uint64_t sequence = 0;
+            if (scenario == 1) expect(static_cast<bool>(session.submit(command(0, 1, sequence++, 1, tactical::AttackPayload{3}))),
+                "#7886: attack on the doomed unit submits");
+            expect(static_cast<bool>(session.submit(command(2, 2, sequence++, 3, tactical::ScriptDespawnPayload{}))),
+                "#7886: the despawn command submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            bool destroyed = false;
+            for (unsigned frame = 0; frame < 40; ++frame) {
+                const auto step = session.step(executor);
+                expect(static_cast<bool>(step), "#7886: cleanup step succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                for (const auto& event : step.value().snapshot->events())
+                    destroyed = destroyed || event.kind == tactical::EventKind::unit_destroyed;
+            }
+            expect(!session.unit_state(3), "#7886: the despawned unit is gone");
+            expect(session.unit_state(1) && session.unit_state(2), "#7886: the other units stay");
+            expect(!destroyed, "#7886: a despawn raises no destruction event");
+            expect(!session.outcome().has_value(), "#7886: removing a star base or a target decides no battle");
+            const auto checkpoint = session.save_checkpoint_state();
+            expect(static_cast<bool>(checkpoint), "#7886: the checkpoint saves after a despawn");
+            if (reference.empty()) reference = hashes;
+            else expect(reference == hashes, "#7886: cleanup hashes agree at 1/2/4/8 workers");
+        }
+    }
+}
+
+void test_script_despawn() {
+    // #7886: the Lua Object.Despawn() command removes a unit silently: no destruction event, no loss, no effect on the other
+    // units, a dead or unknown unit is skipped, the removal is in the state hash and agrees at 1/2/4/8 workers, and opcode 40
+    // round-trips through the replay writer and parser.
+    std::vector<std::string> baseline;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const auto run = [&](const bool despawn, const bool ghost, std::vector<std::string>& hashes,
+            std::vector<tactical::Event>& events, std::vector<eawr::sim::EntityId>& alive,
+            std::optional<tactical::TacticalSession>& keep) -> bool {
+            auto created = tactical::TacticalSession::create(setup(), {}, durability());
+            expect(static_cast<bool>(created), "#7886: session creates");
+            if (!created) return false;
+            auto session = std::move(created).value();
+            std::uint64_t sequence = 0;
+            if (despawn) expect(static_cast<bool>(session.submit(command(2, 2, sequence++, 3, tactical::ScriptDespawnPayload{}))),
+                "#7886: the despawn command submits");
+            if (ghost) expect(static_cast<bool>(session.submit(command(3, 2, sequence++, 99, tactical::ScriptDespawnPayload{}))),
+                "#7886: a despawn naming no live unit still submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            for (unsigned frame = 0; frame < 10; ++frame) {
+                const auto step = session.step(executor);
+                expect(static_cast<bool>(step), "#7886: step succeeds");
+                if (!step) return false;
+                hashes.push_back(step.value().state_sha256);
+                for (const auto& event : step.value().snapshot->events()) events.push_back(event);
+            }
+            for (const auto& unit : session.units()) alive.push_back(unit.entity_id);
+            keep.emplace(std::move(session));
+            return true;
+        };
+        std::vector<std::string> plain, removed, with_ghost;
+        std::vector<tactical::Event> plain_events, removed_events, ghost_events;
+        std::vector<eawr::sim::EntityId> plain_alive, removed_alive, ghost_alive;
+        std::optional<tactical::TacticalSession> plain_session, removed_session, ghost_session;
+        if (!run(false, false, plain, plain_events, plain_alive, plain_session)
+            || !run(true, false, removed, removed_events, removed_alive, removed_session)
+            || !run(true, true, with_ghost, ghost_events, ghost_alive, ghost_session)) continue;
+        expect(plain_alive == std::vector<eawr::sim::EntityId>{1, 2, 3}, "#7886: without the command all three units stay");
+        expect(removed_alive == std::vector<eawr::sim::EntityId>{1, 2},
+            "#7886: the despawned unit leaves the battle and the other units stay");
+        expect(std::none_of(removed_events.begin(), removed_events.end(), [](const auto& event) {
+            return event.kind == tactical::EventKind::unit_destroyed; }),
+            "#7886: a despawn raises no destruction event");
+        expect(plain != removed, "#7886: the removal enters the state hash");
+        expect(ghost_alive == removed_alive && with_ghost.size() == removed.size(),
+            "#7886: a despawn naming no live unit changes nothing else");
+        if (baseline.empty()) baseline = removed;
+        else expect(baseline == removed, "#7886: despawn hashes agree at 1/2/4/8 workers");
+        if (removed_session) {
+            const auto bytes = tactical::write_replay(removed_session->record());
+            expect(static_cast<bool>(bytes), "#7886: the replay with opcode 40 writes");
+            if (bytes) {
+                const auto parsed = tactical::parse_replay(bytes.value());
+                bool found = false;
+                if (parsed) for (const auto& recorded : parsed.value().commands)
+                    if (std::holds_alternative<tactical::ScriptDespawnPayload>(recorded.payload))
+                        found = found || recorded.units == std::vector<eawr::sim::EntityId>{3};
+                expect(found, "#7886: opcode 40 round-trips through the replay writer and parser");
+            }
+        }
+    }
+}
+
+void test_script_hold_fire_beam() {
+    // Prevent_All_Fire also stops the beam weapon that deals damage (energy weapon): a held unit cannot start it, and a
+    // beam already running deals nothing while the hold lasts. Scenario 0: no hold, the beam damages the target.
+    // 1: held before activation, the activation is refused and the target is untouched. 2: held one tick after the
+    // activation, no damage lands after the hold takes effect.
+    using K = tactical::AbilityKind;
+    for (const unsigned scenario : {0U, 1U, 2U}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto initial = setup();
+            initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+                {2, frigate_type, 2, at(100, 0, 100), math::identity_quat(), {}}};
+            auto health = durability();
+            for (auto& row : health.profiles) { row.max_shields = {}; row.shield_refresh = {}; }
+            tactical::AbilityProfile ordinary;
+            ordinary.kind = K::energy_weapon; ordinary.recharge_frames = 20; ordinary.expiration_frames = 30;
+            ordinary.gui_activated_ability_name = "beam";
+            auto holder = unit_of(corvette_type, ordinary);
+            tactical::SpecialAbilityProfile nested;
+            nested.name = "beam"; nested.style = tactical::SpecialActivationStyle::user_input;
+            nested.kind = tactical::SpecialAbilityKind::energy_weapon;
+            nested.service_interval = 1; nested.beam_min_range = units(5); nested.beam_max_range = units(300);
+            nested.damage_per_frame = units(5);
+            nested.filter.applicable_categories = 2;
+            holder.special = {nested};
+            tactical::AbilityTable table; table.profiles = {holder}; table.beam_damage_type = 0;
+            tactical::CombatProfile source; source.type_id = corvette_type; source.category_bits = 1;
+            tactical::CombatProfile target; target.type_id = frigate_type; target.category_bits = 2;
+            tactical::CombatTable combat; combat.profiles = {source, target};
+            auto created = tactical::TacticalSession::create(initial, {}, health, motion(), std::nullopt, combat, {}, table);
+            expect(static_cast<bool>(created), "Prevent_All_Fire beam: fixture creates");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            std::uint64_t sequence = 0;
+            if (scenario == 1) expect(static_cast<bool>(world.submit(command(0, 1, sequence++, 1, tactical::ScriptHoldFirePayload{true}))),
+                "Prevent_All_Fire beam: hold submits");
+            expect(static_cast<bool>(world.submit(command(0, 1, sequence++, 1,
+                tactical::AbilityPayload{K::energy_weapon, tactical::AbilityAction::activate, 2}))), "Prevent_All_Fire beam: activation submits");
+            if (scenario == 2) expect(static_cast<bool>(world.submit(command(1, 1, sequence++, 1, tactical::ScriptHoldFirePayload{true}))),
+                "Prevent_All_Fire beam: late hold submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            std::optional<Fixed> hull_after_hold, hull_end;
+            for (unsigned frame = 0; frame < 12; ++frame) {
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "Prevent_All_Fire beam: step succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                const auto state = world.durability_state(2);
+                if (state && frame == 2) hull_after_hold = state->hull;
+                if (state && frame == 11) hull_end = state->hull;
+            }
+            const auto full = health.profiles[1].max_hull;
+            if (scenario == 0) expect(hull_end && *hull_end < full, "Prevent_All_Fire beam: an unheld beam damages the target");
+            if (scenario == 1) {
+                expect(hull_end && *hull_end == full, "Prevent_All_Fire beam: a held unit's beam deals no damage");
+                const auto slot = world.ability_state(1);
+                expect(slot && !slot->slots.front().active, "Prevent_All_Fire beam: a held unit cannot start the beam");
+            }
+            if (scenario == 2) expect(hull_after_hold && hull_end && *hull_after_hold == *hull_end,
+                "Prevent_All_Fire beam: a beam running when the hold starts deals no further damage");
+            if (reference.empty()) reference = hashes;
+            else expect(reference == hashes, "Prevent_All_Fire beam: hashes agree at 1/2/4/8 workers");
+        }
+    }
+}
+
+void test_script_teleport() {
+    // Lua Teleport_And_Face: the unit lands on the target's position with the target's facing and stops there; a missing
+    // target moves nothing; the command round-trips as opcode 41 and agrees at 1/2/4/8 workers.
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto initial = setup();
+        const auto turned = tactical::yaw_rotation(Fixed::from_integer(90).value());
+        initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+            {2, frigate_type, 2, at(2400, 1200), turned ? turned.value() : math::identity_quat(), {}}};
+        auto created = tactical::TacticalSession::create(initial);
+        expect(static_cast<bool>(created), "Teleport_And_Face: fixture creates");
+        if (!created) continue;
+        auto world = std::move(created).value();
+        // The unit first starts a move; the teleport at tick 4 must cancel it.
+        expect(static_cast<bool>(world.submit(command(0, 1, 0, 1, tactical::MovePayload{at(-3000, 0)}))), "Teleport_And_Face: move submits");
+        expect(static_cast<bool>(world.submit(command(4, 1, 1, 1, tactical::ScriptTeleportPayload{2}))), "Teleport_And_Face: teleport submits");
+        expect(static_cast<bool>(world.submit(command(5, 1, 2, 2, tactical::ScriptTeleportPayload{99}))), "Teleport_And_Face: a missing target submits");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (unsigned frame = 0; frame < 12; ++frame) {
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "Teleport_And_Face: step succeeds");
+            if (!step) break;
+            hashes.push_back(step.value().state_sha256);
+        }
+        const auto moved = world.unit_state(1);
+        const auto other = world.unit_state(2);
+        expect(moved && other && moved->position == other->position && moved->rotation == other->rotation,
+            "Teleport_And_Face: the unit takes the target's position and facing and stays there");
+        expect(other && other->position == at(2400, 1200), "Teleport_And_Face: a teleport onto a missing target moved nothing");
+        const auto bytes = tactical::write_replay(world.record());
+        expect(static_cast<bool>(bytes), "Teleport_And_Face: the replay with opcode 41 writes");
+        if (bytes) {
+            const auto parsed = tactical::parse_replay(bytes.value());
+            bool found = false;
+            if (parsed) for (const auto& recorded : parsed.value().commands)
+                if (const auto* payload = std::get_if<tactical::ScriptTeleportPayload>(&recorded.payload))
+                    found = found || (payload->target == 2 && recorded.units == std::vector<eawr::sim::EntityId>{1});
+            expect(found, "Teleport_And_Face: opcode 41 round-trips through the replay writer and parser");
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "Teleport_And_Face: hashes agree at 1/2/4/8 workers");
+    }
+}
+
 void test_concentrate_damage() {
     for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U}) {
         const bool speed_case = scenario >= 6;

@@ -60,7 +60,8 @@ math::Fixed pad_cooldown_progress(const PadState& state, const std::uint64_t fra
 PlayerId service_capture(const CaptureProfile& profile, PadState& state, const PlayerId owner,
     const PlayerId neutral, const std::span<const Player> players,
     const std::span<const CaptureCandidate> candidates, const PadRules& rules,
-    const EntityId point, const math::Vec3& position, const math::Fixed adjustment) {
+    const EntityId point, const math::Vec3& position,
+    const std::span<const std::pair<PlayerId, math::Fixed>> adjustments) {
     // A pad that is not a capture point keeps its owner (LE-LOADER).
     if (!profile.captures) return owner;
     if (state.under_construction != invalid_entity_id || state.constructed != invalid_entity_id) return owner;
@@ -90,7 +91,13 @@ PlayerId service_capture(const CaptureProfile& profile, PadState& state, const P
         return owner;
     }
     state.target = wanted;
-    const auto modifier = math::Fixed::from_raw(math::Fixed::scale + std::max<std::int64_t>(0, adjustment.raw()));
+    // WBR-02: the ledger of the player the point moves toward; one plus its total, and a result that is not
+    // positive falls back to one (the ledger's own -0.99 floor makes that unreachable).
+    const auto ledger = std::lower_bound(adjustments.begin(), adjustments.end(), wanted,
+        [](const auto& row, const PlayerId id) { return row.first < id; });
+    auto modifier = math::Fixed::from_raw(math::Fixed::scale
+        + (ledger != adjustments.end() && ledger->first == wanted ? ledger->second.raw() : 0));
+    if (modifier.raw() <= 0) modifier = math::Fixed::from_raw(math::Fixed::scale);
     const auto seconds = math::multiply(profile.transition_seconds, modifier).value();
     state.progress = math::Fixed::from_raw(std::min(math::Fixed::scale,
         state.progress.raw() + step_of(seconds).raw()));

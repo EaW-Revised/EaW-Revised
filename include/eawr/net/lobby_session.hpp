@@ -24,8 +24,11 @@ inline constexpr std::uint8_t lobby_closed_kind = 78, lobby_rejected_kind = 79;
 inline constexpr std::uint8_t lobby_mod_review_ack_kind = 99;
 inline constexpr std::uint8_t lobby_prepare_kind = 100, lobby_prepared_kind = 101;
 inline constexpr std::uint8_t lobby_mods_refresh_kind = 102;
-// Every lobby frame carries this version after its kind byte. 5 adds effective skirmish content at admission.
-inline constexpr std::uint32_t lobby_wire_version = 5;
+// Host to guests (campaign rooms): which players have finished checking the host's mods, so every lobby can say who is still
+// checking. Display only; nothing in the match or a save reads it. Frame: kind, count, then (peer, done) byte pairs.
+inline constexpr std::uint8_t lobby_mod_review_state_kind = 103;
+// Every lobby frame carries this version after its kind byte. 5 adds effective skirmish content at admission; 6 adds the host report of who finished checking mods (kind 103).
+inline constexpr std::uint32_t lobby_wire_version = 6;
 using LobbyDigest = std::array<std::uint8_t, 32>;
 
 enum class LobbyPhase : std::uint8_t { staging, starting, committed, closed };

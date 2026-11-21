@@ -1,0 +1,36 @@
+# Unhandled (layer, shader) pairs of the owner stack that the shader_route_corpus_game_data test accepts: visible model layers
+# whose shader nothing draws yet. One line per pair: layer (a workshop item id, or expansion / base for the installed game), a tab,
+# the shader name. Fix a family and delete its line; a new line needs the owner's decision. Regenerate: shader_route_corpus_tests
+# <this file> --print on a mod host.
+# 1770851727 = Remake 4.0, 2794270450 = Clone Wars Holdouts, 3229239424 = French Fried Taters.
+# RSkinShadowVolume: the renderer skips only MeshShadowVolume on purpose, so every other shadow volume program is reported.
+3229239424	MeshGlow.fx
+3229239424	MeshHeat.fx
+3229239424	RSkinShadowVolume.fxo
+2794270450	MeshAlphaScroll.fx
+2794270450	MeshBumpLight.fx
+2794270450	MeshGlow.fx
+2794270450	MeshHeat.fx
+2794270450	RSkinShadowVolume.fx
+1770851727	MeshAlphaScroll.fx
+1770851727	MeshBumpLight.fx
+1770851727	MeshBumpReflectColorize.fx
+1770851727	RSkinAlphaGloss.fx
+1770851727	RSkinBumpReflectColorize.fx
+1770851727	RSkinShadowVolume.fx
+1770851727	TerrainMeshBump.fx
+expansion	MeshAdditiveReflection.fx
+expansion	MeshAlphaScroll.fx
+expansion	MeshCollision.fx
+expansion	RSkinShadowVolume.fx
+expansion	TerrainMeshBump.fx
+expansion	TerrainMeshGloss.fx
+base	MeshAlphaScroll.fx
+base	MeshCollision.fx
+base	MeshHeat.fx
+base	MeshLightVisualize.fx
+base	MeshSolidColor.fx
+base	RSkinAlphaGloss.fx
+base	RSkinShadowVolume.fx
+base	TerrainMeshBump.fx
+base	TerrainMeshGloss.fx

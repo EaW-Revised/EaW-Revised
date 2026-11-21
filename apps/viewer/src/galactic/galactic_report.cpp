@@ -465,6 +465,14 @@ void GalacticMode::State::write_report_command_bar(std::ostringstream& output) c
         const auto* price = choice_price.at(name);
         const auto pad = choice_pad.find(name);
         const auto button_rect = command_buttons.at(name)->get_global_rect();
+        // GHUD-S74: where the icon draws (global pixels) and its texture's own size.
+        const auto* card = static_cast<EawrHudButton*>(command_buttons.at(name));
+        const auto icon_box = card->cell_portrait_box();
+        const auto icon_texture = card->icon_texture();
+        output << ", \"icon_rect\": [" << button_rect.position.x + icon_box.position.x << ", "
+            << button_rect.position.y + icon_box.position.y << ", " << icon_box.size.x << ", " << icon_box.size.y
+            << "], \"icon_texture_size\": [" << (icon_texture.is_valid() ? icon_texture->get_width() : 0) << ", "
+            << (icon_texture.is_valid() ? icon_texture->get_height() : 0) << "]";
         const auto price_rect = price->get_global_rect();
         const auto price_colour = price->colour();
         const auto& price_style = price->style().text;
@@ -512,6 +520,9 @@ void GalacticMode::State::write_report_command_bar(std::ostringstream& output) c
 }
 
 void GalacticMode::State::write_report_panels(std::ostringstream& output) const {
+    output << ",\n  \"corruption_hovercard\": {\"planet\": " << corruption_hovercard.planet
+        << ", \"visible\": " << (corruption_hovercard.panel && corruption_hovercard.panel->is_visible_in_tree() ? "true" : "false")
+        << ", \"left_edge\": " << corruption_hovercard.left_edge << ", \"spacing\": " << corruption_hovercard.spacing << "}";
     output << ",\n  \"queue_encyclopedia\": " << (queue_encyclopedia ? queue_encyclopedia->report_json() : "null")
         << ",\n  \"queue_hover_publications\": " << queue_hover.publications();
     const auto encyclopedia_rect = encyclopedia_panel ? encyclopedia_panel->get_global_rect() : Rect2{};

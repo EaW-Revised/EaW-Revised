@@ -212,6 +212,16 @@ core::Result<GalacticLobbyContent> load_galactic_lobby_content(const vfs::Vfs& f
             std::shared_ptr<campaign::GameSession>(prepared, &platform::AgreedCampaignAccess::session(*prepared)),
             prepared->services(), platform::AgreedCampaignAccess::load_notes(*prepared)});
     };
+    content.local.recover_history = [files, installed, data = content.data, types = content.types, checkpoint_mod_list](
+        const campaign::CampaignSetupPlan& plan, std::string_view difficulty, std::span<const std::uint8_t> bytes)
+        -> core::Result<checkpoint::RecoveredCheckpoint> {
+        checkpoint::RecoveredCheckpoint recovered;
+        auto built = platform::PreparedLiveCampaign::from_plan(files, *installed, *data, *types,
+            campaign::CampaignSetupPlan(plan), difficulty, true, {300, 1, 3, 3, 300, 1}, false, bytes, checkpoint_mod_list,
+            nullptr, &recovered);
+        if (!built) return core::Result<checkpoint::RecoveredCheckpoint>::failure(built.error());
+        return core::Result<checkpoint::RecoveredCheckpoint>::success(std::move(recovered));
+    };
     return Result::success(std::move(content));
 }
 
@@ -960,6 +970,13 @@ core::Result<GalacticLobbyBackend::PreparedCheckpoint> GalacticLobbyBackend::pre
     const auto hash = agreement->session->state_sha256();
     return core::Result<PreparedCheckpoint>::success(PreparedCheckpoint{
         std::move(manifest), snapshot, std::move(agreement), std::move(bytes), hash});
+}
+core::Result<checkpoint::RecoveredCheckpoint> GalacticLobbyBackend::recover_checkpoint_history(std::uint64_t seed,
+    sim::galactic::MpRoster roster, std::shared_ptr<const std::vector<std::uint8_t>> bytes) const {
+    if (!ensure()) return unavailable<checkpoint::RecoveredCheckpoint>(load_error());
+    if (!bytes || bytes->empty() || bytes->size() > net::save_transfer_limit)
+        return resume_refusal<checkpoint::RecoveredCheckpoint>("invalid_selection_or_stale_epoch");
+    return campaign::recover_mp_history(local_, roster, terms_for(seed, local_.command_quota, local_.byte_quota), *bytes);
 }
 core::Result<void> GalacticLobbyBackend::commit_checkpoint(PreparedCheckpoint prepared, const net::LobbySnapshot& current) {
     // #7878: only a real room change (players, seats, game settings) voids a prepared restore; the revision, readiness and

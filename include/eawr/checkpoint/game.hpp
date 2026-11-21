@@ -30,7 +30,8 @@ namespace eawr::checkpoint {
 // v56: the production offer tables are stored once, in the required offer-pool section; the session recording, the
 // production state and the owner barrier carry one table index per planet (docs/checkpoint-format.md, Offer pool).
 // v57: optional galactic object-script scheduler.
-inline constexpr std::uint16_t galaxy_section_version = 58;
+// v60: authored credit-siphon profiles and their live enabled/cancelled service state.
+inline constexpr std::uint16_t galaxy_section_version = 60;
 inline constexpr std::uint16_t mod_list_section_version = 1;
 
 // Transport starts a fresh epoch at completed_tick. Both cursors denote the first
@@ -45,6 +46,9 @@ struct GameResumeMetadata {
     std::map<sim::SeatId, std::uint64_t> producer_sequences;
 };
 [[nodiscard]] core::Result<GameResumeMetadata> inspect_game_resume(const Checkpoint&);
+// The commitment the resume section binds to every other section (and the header). A tool or test that rewrites a
+// section must store the new value in the resume section, bytes 32..64, or the load refuses the file.
+[[nodiscard]] Digest game_capture_commitment(const Checkpoint&);
 // Original recording setup for private mounted-service preparation, without a restore.
 [[nodiscard]] core::Result<sim::galactic::GalacticSetup> inspect_game_setup(const Checkpoint&);
 [[nodiscard]] core::Result<mods::ModDescription> inspect_game_mods(const Checkpoint&);
@@ -117,6 +121,21 @@ struct GameRestore {
 [[nodiscard]] core::Result<GameRestore> replay_game_checkpoint_for_testing(std::span<const std::uint8_t> bytes,
     const Identities& build, const GameLoadOptions& options, const sim::PartitionExecutor& executor,
     std::span<const std::uint8_t> base = {});
+// A save whose finished-battle records were written by another build is refused with
+// diagnostic_codes::other_build_battle_record (only a campaign setup of an older version; any other unreadable entry stays
+// a refusal). This is the host-side way out: the galaxy loads as saved (state hash and every byte of every other section
+// must match; only the replaced records, the dropped summary and the resume commitment may differ), each unreadable battle
+// setup becomes an empty one, the latest battle summary is dropped when its record is unreadable, and the result is written
+// as a new ordinary checkpoint that the strict loader accepts, so every peer that receives it reads the same bytes. Refused
+// when a battle is in progress or when no record needed replacing. `options.player_load` is ignored (a conversion).
+struct RecoveredCheckpoint {
+    std::vector<std::uint8_t> bytes;
+    std::vector<sim::EntityId> battles; // the replaced records, ascending
+    bool latest_summary_dropped{};
+};
+[[nodiscard]] core::Result<RecoveredCheckpoint> recover_checkpoint_history(std::span<const std::uint8_t> bytes,
+    const Identities& build, const GameLoadOptions& options, const sim::PartitionExecutor& executor,
+    std::string_view logical_path = {});
 // Any decode, identity, section, reconstruction or fixup failure leaves running untouched.
 [[nodiscard]] core::Result<void> restore_game_checkpoint(GameRestore& running,
     std::span<const std::uint8_t> bytes, const Identities& build, const GameLoadOptions& options,

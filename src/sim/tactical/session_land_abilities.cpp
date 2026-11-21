@@ -112,7 +112,8 @@ std::optional<TacticalSession::LandAbilityInputs> TacticalSession::land_ability_
         inputs.take_damage = ability_multiplier(*profile, *state, AbilityModifier::take_damage);
         inputs.weapon_delay = ability_multiplier(*profile, *state, AbilityModifier::weapon_delay);
         for (std::size_t index = 0; index < state->slots.size() && index < profile->abilities.size(); ++index)
-            if (state->slots[index].active && profile->abilities[index].modifiers.allow_target_diminishing_firepower)
+            if (state->slots[index].active && counts_for_mode(*profile, index) // AB-20: entries 0 and 1 only
+                && profile->abilities[index].modifiers.allow_target_diminishing_firepower)
                 inputs.allow_target_diminishing_firepower = profile->abilities[index].modifiers.allow_target_diminishing_firepower;
     }
     // The company container of a member is the squad object its movement member belongs to; a container is its own.

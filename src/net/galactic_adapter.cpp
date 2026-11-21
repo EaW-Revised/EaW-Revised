@@ -359,9 +359,11 @@ core::Result<void> GalacticSessionAdapter::install(const std::span<const SeatInp
         const bool speed_limited = live_issuer && speed_request && !clock_limiter_.admit_speed(command.key.seat, tick, to_normal);
         if (debounced || speed_limited) {
             std::string text = "Pause repeated too quickly; try again in a second.";
+            // Either refusal is reported to the issuing seat, so its in-flight pause or speed request is released at once
+            // instead of waiting for an agreed state that will never come (#7973). Presentation only.
+            if (std::find(clock_refusals_.begin(), clock_refusals_.end(), command.key.seat) == clock_refusals_.end())
+                clock_refusals_.push_back(command.key.seat);
             if (speed_limited) {
-                if (std::find(clock_refusals_.begin(), clock_refusals_.end(), command.key.seat) == clock_refusals_.end())
-                    clock_refusals_.push_back(command.key.seat);
                 text = "Shared clock limit: speed changes are limited to " + std::to_string(ClockThrottle::speed_changes_per_window)
                     + " per " + std::to_string(ClockThrottle::window_seconds) + " session seconds per seat; the next is allowed in "
                     + std::to_string(clock_limiter_.speed_wait_seconds(command.key.seat, tick)) + " s.";

@@ -470,7 +470,12 @@ one-seat case; the faction table has no fixed count and includes non-playable ow
   seats share the fighting side's units and reinforcement pool; no extra fleet is imported.
   Observers use the setup-approved filtered snapshot perspective and cannot issue tactical
   actions. All peers, including spectators, seal inputs and compare hashes; spectators seal
-  empty gameplay batches. Reconciliation applies casualties to original persistent owners
+  empty gameplay batches. A spectating seat has no battle player but still joins the battle
+  presentation: the live game publishes it as a spectator of the agreed observer perspective,
+  its battle feed follows that perspective's fog and ignores every order, and the viewer loads
+  the battle for it like for a playing seat (read-only; presentation only, no state or hash
+  change). The choice dialog (spectate, join the player team, or join the opponent) is not in
+  the viewer yet: online multiplayer applies the spectate default. Reconciliation applies casualties to original persistent owners
   and removes every temporary assignment on return. Checkpoint and child-log restore retain
   the assignment and pending choice so save/load cannot silently grant or lose control.
 - **Per-seat presentation.** Selection, control groups and camera are per seat and live in the
